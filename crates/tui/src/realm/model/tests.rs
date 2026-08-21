@@ -7051,6 +7051,7 @@ mod stale_input_tests {
                 | Id::MoveToSpace
                 | Id::NewProject
                 | Id::NewWorkspaceRepo
+                | Id::HopperProject
                 | Id::LinearTeamRepo
                 | Id::Editor
                 // Open-with launches an external app — an outward
@@ -7099,6 +7100,7 @@ mod stale_input_tests {
             Id::Reply,
             Id::Notes,
             Id::Hopper,
+            Id::HopperProject,
             Id::NewWorkspace,
             Id::RenameWorkspace,
             Id::RenameSpace,
@@ -9712,6 +9714,54 @@ mod merge_focus_follow_tests {
             m.spawn_follow_to.is_some(),
             "the spawn arms a follow target so focus lands on the new terminal",
         );
+    }
+
+    #[test]
+    fn repo_less_hopper_assigns_project_then_resumes_work() {
+        use lazybox_core::{HopperMeta, Project};
+        use lazybox_tui_core::action::Action;
+        use tokio::sync::mpsc;
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(lazybox_ipc::EVENT_CHANNEL_CAPACITY);
+        let client = lazybox_ipc::Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        let project_key = lazybox_core::ProjectKey::local("lazybox");
+        m.handle_daemon_event(IpcEvent::ProjectUpserted(Box::new(Project::new(
+            project_key.clone(),
+            "lazybox",
+            Utc::now(),
+        ))));
+        let mut hopper = Workspace::empty(WorkspaceKey::new("write-tests"), "main", Utc::now());
+        hopper.name = "Write tests".into();
+        hopper.hopper = Some(HopperMeta { position: 0 });
+        let session_key: SessionKey = (&hopper.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(
+            hopper.clone(),
+        )));
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+
+        assert!(m.dispatch_action(&Action::Work).is_empty());
+        assert_eq!(m.modal_stack.last(), Some(&Id::HopperProject));
+        let assign = m.handle_choice_picked(vec![ChoicePayload::Project(project_key.clone())]);
+        assert!(matches!(
+            assign.as_slice(),
+            [IpcCommand::AssignHopperProject { workspace_key, project_key: picked }]
+                if workspace_key == &hopper.key && picked == &project_key
+        ));
+
+        hopper.project_key = Some(project_key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(hopper)));
+        assert!(
+            std::iter::from_fn(|| cmd_rx.try_recv().ok())
+                .any(|command| matches!(command, IpcCommand::Spawn { session_key: key, .. } if key == session_key)),
+            "the original work action resumes after the persisted assignment echo",
+        );
+        assert!(m.pending_hopper_action.is_none());
     }
 
     /// Issue #224: default work (`w w`) whose only running agent is

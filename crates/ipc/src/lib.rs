@@ -1527,6 +1527,14 @@ pub enum Command {
     SaveHopper {
         entries: Vec<HopperEntryDraft>,
     },
+    /// Attach a captured Hopper workspace to a tracked project. This is
+    /// deliberately separate from spawning: the daemon persists and echoes
+    /// the assignment first, then the client resumes the action that required
+    /// a worktree against that authoritative `WorkspaceUpserted`.
+    AssignHopperProject {
+        workspace_key: lazybox_core::WorkspaceKey,
+        project_key: lazybox_core::ProjectKey,
+    },
 }
 
 impl Command {

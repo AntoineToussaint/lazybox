@@ -111,6 +111,9 @@ pub enum Id {
     /// Ordered personal Hopper editor. Existing lines retain stable
     /// workspace identities; submit dispatches one atomic SaveHopper.
     Hopper,
+    /// One-time tracked-project picker shown when a repo-less Hopper row
+    /// first needs a worktree-backed action.
+    HopperProject,
     /// Single-line input prompt for naming a brand-new pre-PR
     /// workspace. Submit → `Command::CreateWorkspace { name }`.
     NewWorkspace,
@@ -782,6 +785,13 @@ pub(crate) struct RemovalPrompt {
 /// (`deferred_focus_project`, `deferred_focus_terminal`).
 #[derive(Debug, Clone)]
 pub(crate) enum ModalFlow {
+    /// Project picker for a repo-less Hopper workspace. The selected project
+    /// is persisted first; `pending_hopper_action` resumes this action on the
+    /// daemon's authoritative workspace echo.
+    HopperProject {
+        workspace: lazybox_core::WorkspaceKey,
+        action: lazybox_tui_core::action::Action,
+    },
     /// Provider sign-in confirmation or a retry after login failed.
     AgentAuth {
         terminal_id: lazybox_ipc::TerminalId,
@@ -1727,6 +1737,9 @@ pub struct Model<T: TerminalAdapter> {
     /// modal does when it resolves. Replaces the old fan of `pending_*`
     /// Options; see [`ModalFlow`]. `None` when no flow modal is armed.
     modal_flow: Option<ModalFlow>,
+    /// Event-fed continuation after a Hopper project pick. It waits for the
+    /// daemon's durable `WorkspaceUpserted` acknowledgement before spawning.
+    pending_hopper_action: Option<(lazybox_core::WorkspaceKey, lazybox_tui_core::action::Action)>,
     /// Provider authentication prompts are daemon-driven and may
     /// arrive while another modal is open, so they wait here until the
     /// current interaction completes.
@@ -2369,6 +2382,7 @@ impl<T: TerminalAdapter> Model<T> {
             preselect: None,
             layout: LayoutCtx::new(),
             modal_flow: None,
+            pending_hopper_action: None,
             auth_prompt_queue: std::collections::VecDeque::new(),
             conversion: None,
             last_reply_body: None,

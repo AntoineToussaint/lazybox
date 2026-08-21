@@ -273,6 +273,41 @@ mod hopper_tests {
             1
         );
     }
+
+    #[tokio::test]
+    async fn project_assignment_is_one_time_and_hopper_only() {
+        let config = ServerConfig::in_memory();
+        let [key] = save_hopper(
+            &config,
+            vec![HopperEntryDraft {
+                workspace_key: None,
+                name: "Ship it".into(),
+            }],
+        )
+        .expect("create hopper")
+        .try_into()
+        .expect("one hopper row");
+        let first = lazybox_core::ProjectKey::local("first");
+        let second = lazybox_core::ProjectKey::local("second");
+        for project in [
+            lazybox_core::Project::new(first.clone(), "first", Utc::now()),
+            lazybox_core::Project::new(second.clone(), "second", Utc::now()),
+        ] {
+            config
+                .store
+                .save_project(&lazybox_store::ProjectRecord {
+                    key: project.key.as_str().to_string(),
+                    created_at: project.created_at,
+                    project_json: Some(serde_json::to_string(&project).expect("serialize project")),
+                })
+                .expect("save project");
+        }
+
+        assign_hopper_project(&config, &key, first.clone()).await;
+        assign_hopper_project(&config, &key, second).await;
+
+        assert_eq!(load(&config, &key).project_key, Some(first));
+    }
 }
 
 /// Create an empty workspace (no PR, no issues) named by the user.
@@ -569,6 +604,36 @@ pub async fn rename_workspace(config: &ServerConfig, key: &WorkspaceKey, name: S
     };
     workspace.name = trimmed.to_string();
     commit_upsert_offloaded_reported(config, key, workspace, "rename workspace").await;
+}
+
+/// Attach a repo-less Hopper workspace to a tracked project. Provider-backed
+/// workspaces cannot be retargeted through this local-only command, and an
+/// existing assignment is preserved so two clients cannot silently move the
+/// same workspace between repos. The normal upsert echo is the durability
+/// acknowledgement used by the TUI to resume the pending spawn/editor action.
+pub async fn assign_hopper_project(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    project_key: lazybox_core::ProjectKey,
+) {
+    if config
+        .store
+        .get_project(&project_key)
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return;
+    }
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return;
+    };
+    if workspace.hopper.is_none() || workspace.project_key.is_some() {
+        return;
+    }
+    workspace.project_key = Some(project_key);
+    commit_upsert_offloaded_reported(config, key, workspace, "assign hopper project").await;
 }
 
 /// Record a snippet key as sent to a workspace's agent (issue #463).

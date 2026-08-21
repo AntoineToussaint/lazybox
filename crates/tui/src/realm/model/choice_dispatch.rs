@@ -124,6 +124,13 @@ impl<T: TerminalAdapter> Model<T> {
             },
             Id::StartAgentProject => PickFlow::StartAgentProject,
             Id::NewWorkspaceRepo => PickFlow::NewWorkspaceRepo,
+            Id::HopperProject => match &self.modal_flow {
+                Some(ModalFlow::HopperProject { workspace, action }) => PickFlow::HopperProject {
+                    workspace: workspace.clone(),
+                    action: action.clone(),
+                },
+                _ => PickFlow::Plain,
+            },
             Id::LinearTeamRepo => match &self.modal_flow {
                 Some(ModalFlow::LinearTeamRepo { team }) => {
                     PickFlow::LinearTeamRepo { team: team.clone() }
@@ -250,6 +257,7 @@ impl<T: TerminalAdapter> Model<T> {
             | Id::AddAssignees
             | Id::ImportCheckoutList
             | Id::LinearTeamRepo
+            | Id::HopperProject
             | Id::MoveToSpacePicker
             | Id::InspectList => {
                 self.modal_flow = None;
@@ -434,6 +442,19 @@ impl<T: TerminalAdapter> Model<T> {
                 } else {
                     self.flash_info("workspace is gone — action dropped");
                 }
+                self.redraw = true;
+            }
+            PickOutcome::AssignHopperProject {
+                workspace,
+                project,
+                action,
+            } => {
+                self.pending_hopper_action = Some((workspace.clone(), action));
+                cmds.push(IpcCommand::AssignHopperProject {
+                    workspace_key: workspace,
+                    project_key: project,
+                });
+                self.flash_hint("assigning repo…");
                 self.redraw = true;
             }
             PickOutcome::DispatchCursorAction { action } => {

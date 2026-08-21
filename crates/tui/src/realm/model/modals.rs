@@ -445,6 +445,29 @@ impl<T: TerminalAdapter> Model<T> {
         );
     }
 
+    /// Ask which tracked project should own a repo-less Hopper workspace.
+    /// The action resumes only after the daemon echoes the persisted choice.
+    pub(super) fn mount_hopper_project_picker(
+        &mut self,
+        workspace: lazybox_core::WorkspaceKey,
+        action: lazybox_tui_core::action::Action,
+    ) {
+        use crate::realm::components::choice::Choice;
+
+        let projects = self.sidebar.projects_for_picker();
+        if projects.is_empty() {
+            self.flash_info("no projects yet — create one with x p");
+            return;
+        }
+        type ProjectRow = (lazybox_core::ProjectKey, String);
+        let modal = Choice::single("Use which repo for this Hopper item?", projects)
+            .title("Choose repo")
+            .label(|(_, name): &ProjectRow| name.clone())
+            .payload_for(|(key, _): &ProjectRow| ChoicePayload::Project(key.clone()));
+        self.set_modal_flow(ModalFlow::HopperProject { workspace, action });
+        self.mount_modal(Id::HopperProject, modal);
+    }
+
     /// Mount the "New workspace" name prompt under a specific
     /// Project. Submit → `Msg::InputSubmitted(name)` while
     /// `Id::NewWorkspace` is on top → `Command::CreateWorkspace

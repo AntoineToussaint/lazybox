@@ -241,13 +241,18 @@ pub struct ToolChoice {
     /// authenticated username / version. For Missing tools: the
     /// friendly install-hint label.
     pub detail: String,
+    /// Actionable setup hint for missing tools — e.g., "export LINEAR_API_KEY=..."
+    /// or "gh auth login". Empty for found tools.
+    pub action_hint: String,
 }
 
 impl ToolChoice {
     fn from_tool(t: &ToolStatus) -> Self {
-        let (found, detail) = match &t.state {
-            crate::setup::ToolState::Found { detail } => (true, detail.clone()),
-            crate::setup::ToolState::Missing { kind, .. } => (false, kind.label().to_string()),
+        let (found, detail, action_hint) = match &t.state {
+            crate::setup::ToolState::Found { detail } => (true, detail.clone(), String::new()),
+            crate::setup::ToolState::Missing { kind, hint } => {
+                (false, kind.label().to_string(), hint.clone())
+            }
         };
         Self {
             id: t.id.to_string(),
@@ -255,11 +260,13 @@ impl ToolChoice {
             category: t.category,
             found,
             detail,
+            action_hint,
         }
     }
 
-    /// Display string for a picker row — `name · detail`. Used by the
-    /// renderer (`crate::realm::setup_screen`).
+    /// Display string for a picker row — `name · detail`. Action hints for
+    /// missing tools are displayed separately in the setup wizard's description.
+    /// Used by the renderer (`crate::realm::setup_screen`).
     pub fn label(&self) -> String {
         if self.detail.is_empty() {
             self.display_name.clone()
@@ -1207,7 +1214,7 @@ fn empty_repos_screen(parent_label: &str) -> Screen {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::setup::ToolState;
+    use crate::setup::{MissingKind, ToolState};
 
     fn report() -> SetupReport {
         SetupReport {
@@ -2194,5 +2201,41 @@ mod tests {
             load_from_yaml(&path).is_some(),
             "an all-empty but COMPLETED setup must not re-trigger the first-run wizard"
         );
+    }
+
+    #[test]
+    fn tool_choice_captures_action_hints_for_missing_tools() {
+        // When a tool is missing with an action hint, ToolChoice should capture it
+        let github_missing = ToolStatus {
+            id: "github",
+            display_name: "GitHub",
+            category: Category::Provider,
+            state: crate::setup::ToolState::Missing {
+                kind: MissingKind::NotAuthenticated,
+                hint: "gh auth login".into(),
+            },
+            install_hint: "",
+        };
+
+        let choice = ToolChoice::from_tool(&github_missing);
+        assert!(!choice.found);
+        assert_eq!(choice.action_hint, "gh auth login");
+        assert_eq!(choice.detail, "CLI found, please authenticate");
+
+        // For found tools, action_hint should be empty
+        let github_found = ToolStatus {
+            id: "github",
+            display_name: "GitHub",
+            category: Category::Provider,
+            state: crate::setup::ToolState::Found {
+                detail: "@username".into(),
+            },
+            install_hint: "",
+        };
+
+        let choice_found = ToolChoice::from_tool(&github_found);
+        assert!(choice_found.found);
+        assert!(choice_found.action_hint.is_empty());
+        assert_eq!(choice_found.detail, "@username");
     }
 }

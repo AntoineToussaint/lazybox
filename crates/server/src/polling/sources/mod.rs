@@ -312,20 +312,25 @@ pub(super) fn rank_targeted_requests(
     hot_targets: &[lazybox_gh::NotificationTarget],
     notification_entries: &[lazybox_gh::NotificationEntry],
     cold_targets: &std::collections::BTreeSet<lazybox_gh::NotificationTarget>,
-) -> Vec<TargetedRequest> {
+) -> (Vec<TargetedRequest>, bool) {
+    // Track whether all notification entries were included in the ranked requests.
+    // If any entries are filtered out (cold_targets only), we return false so the
+    // caller can avoid advancing the cursor (#1255).
+    let notification_targets: Vec<lazybox_gh::NotificationTarget> = notification_entries
+        .iter()
+        .filter_map(lazybox_gh::NotificationEntry::target)
+        .collect();
+
     let mut targets: std::collections::BTreeMap<lazybox_gh::NotificationTarget, TargetedFlags> =
         std::collections::BTreeMap::new();
     for target in hot_targets {
         targets.entry(target.clone()).or_default().hot = true;
     }
-    for target in notification_entries
-        .iter()
-        .filter_map(lazybox_gh::NotificationEntry::target)
-    {
-        if cold_targets.contains(&target) && !targets.get(&target).is_some_and(|flags| flags.hot) {
+    for target in &notification_targets {
+        if cold_targets.contains(target) && !targets.get(target).is_some_and(|flags| flags.hot) {
             continue;
         }
-        targets.entry(target).or_default().notification = true;
+        targets.entry(target.clone()).or_default().notification = true;
     }
     let mut ranked: Vec<TargetedRequest> = targets
         .into_iter()
@@ -338,7 +343,15 @@ pub(super) fn rank_targeted_requests(
             .cmp(&left.flags.hot)
             .then_with(|| left.target.cmp(&right.target))
     });
-    ranked
+
+    // Check if all notification entries made it through the filter. If the number of
+    // targets with the notification flag equals the number of notification entries,
+    // all entries were dispatched. Otherwise, some were cold_targets-only and were
+    // filtered out.
+    let notification_count_in_targets = targets.values().filter(|flags| flags.notification).count();
+    let all_dispatched = notification_count_in_targets == notification_targets.len();
+
+    (ranked, all_dispatched)
 }
 
 fn merge_targeted_tasks(base: &mut Vec<Task>, targeted: Vec<Task>) {
@@ -971,7 +984,7 @@ impl GhSource {
 
     async fn fetch_hot_only(&self) -> Result<Vec<Task>, lazybox_core::ProviderError> {
         let hot_targets = self.hot_notification_targets();
-        let requests = rank_targeted_requests(&hot_targets, &[], &self.cold_targets);
+        let (requests, _) = rank_targeted_requests(&hot_targets, &[], &self.cold_targets);
         let targeted = self.fetch_targeted(requests).await?;
         Ok(apply_needs_reply_toggle(
             filter_github_tasks_with_watches(
@@ -1018,18 +1031,28 @@ impl GhSource {
         ));
 
         let hot_targets = self.hot_notification_targets();
-        let requests = rank_targeted_requests(&hot_targets, &entries, &self.cold_targets);
+        let (requests, all_entries_dispatched) =
+            rank_targeted_requests(&hot_targets, &entries, &self.cold_targets);
         let targeted = self.fetch_targeted(requests).await?;
 
-        // At-most-once cursor advance coupled to work completion (#512).
-        // Only commit the pending `Last-Modified` when every entry this
-        // tick resolved (success or definitive not-visible). On any
-        // transient failure we leave the old cursor in place so the next
-        // heartbeat re-lists the un-fetched entry (GitHub returns the
-        // full unread set on 200 — the successful entries re-fan-out too,
-        // but the single-node deep-fetch is idempotent and deduped).
-        if commit_cursor {
+        // At-most-once cursor advance coupled to work completion (#512, #1255).
+        // Only commit the pending `Last-Modified` when:
+        // 1. The notification response was Modified (not 304), AND
+        // 2. Every entry in the notification response was dispatched (not filtered).
+        // On a partial filter or transient failure we leave the old cursor in place so the
+        // next heartbeat re-lists the un-fetched entry. GitHub returns the full unread set
+        // on 200 — the successful entries re-fan-out too, but the single-node deep-fetch is
+        // idempotent and deduped. (#1255 fix: don't advance if snoozed entries were dropped)
+        let should_commit_cursor = commit_cursor && all_entries_dispatched;
+        if should_commit_cursor {
             self.client.commit_notifications_cursor(pending_cursor);
+        } else if commit_cursor && !all_entries_dispatched {
+            // Log when snoozed/merged entries were filtered so the user knows why a
+            // notification isn't advancing the cursor.
+            tracing::debug!(
+                "notifications cursor not advanced: {} entries were filtered (snoozed/merged workspaces)",
+                entries.len()
+            );
         }
 
         let kept = apply_needs_reply_toggle(
@@ -1471,7 +1494,7 @@ impl TaskSource for GhSource {
                             match stage {
                                 FullSweepStage::Focused => {
                                     let hot_targets = self.hot_notification_targets();
-                                    let requests = rank_targeted_requests(
+                                    let (requests, _) = rank_targeted_requests(
                                         &hot_targets,
                                         &[],
                                         &self.cold_targets,

@@ -2514,8 +2514,12 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         auto_merge_enabled: pr.auto_merge_request.is_some(),
         is_in_merge_queue: pr.is_in_merge_queue,
         mergeable: match pr.mergeable.as_deref() {
-            Some("CONFLICTING") => lazybox_core::Mergeable::Conflicting,
-            Some("MERGEABLE") => lazybox_core::Mergeable::Mergeable,
+            Some("CONFLICTING") => {
+                lazybox_core::Mergeable::new(lazybox_core::MergeableState::Conflicting, Utc::now())
+            }
+            Some("MERGEABLE") => {
+                lazybox_core::Mergeable::new(lazybox_core::MergeableState::Mergeable, Utc::now())
+            }
             // Merged / closed PRs: GitHub NEVER computes mergeability
             // for terminal PRs — their `mergeable` stays null (or
             // UNKNOWN) forever. Classifying that as `Unknown` put the
@@ -2527,12 +2531,12 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
             // reports `Mergeable` for issues, another kind that can
             // never conflict) and settle on a definitive value.
             _ if matches!(state, TaskState::Merged | TaskState::Closed) => {
-                lazybox_core::Mergeable::Mergeable
+                lazybox_core::Mergeable::new(lazybox_core::MergeableState::Mergeable, Utc::now())
             }
             // Open PR: GitHub returns "UNKNOWN" (or null) while it
             // lazily computes mergeability — surface as Unknown
             // rather than guess; a re-query nudges the computation.
-            _ => lazybox_core::Mergeable::Unknown,
+            _ => lazybox_core::Mergeable::unknown(),
         },
         is_behind_base: pr.merge_state_status.as_deref() == Some("BEHIND"),
         merge_blocked: pr.merge_state_status.as_deref() == Some("BLOCKED"),
@@ -3577,7 +3581,10 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
             .unwrap_or_default(),
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: lazybox_core::Mergeable::Mergeable,
+        mergeable: lazybox_core::Mergeable::new(
+            lazybox_core::MergeableState::Mergeable,
+            Utc::now(),
+        ),
         is_behind_base: false,
         merge_blocked: false,
         approval_policy: Default::default(),

@@ -3088,7 +3088,6 @@ async fn reclaim_non_live_managed_holder(
     holder: &Path,
     intended_path: &Path,
 ) -> BranchHolderReclaim {
-    let _ownership_guard = config.worktree_ownership_lock.lock().await;
     reclaim_non_live_managed_holder_locked(config, mgr, owner, repo, branch, holder, intended_path)
         .await
 }
@@ -3102,12 +3101,19 @@ async fn reclaim_non_live_managed_holder_locked(
     holder: &Path,
     intended_path: &Path,
 ) -> BranchHolderReclaim {
-    if managed_worktree_has_live_session_owner(config, holder)
-        || provisioning_worktree_is_claimed(config, holder)
-        || managed_worktree_has_live_main_owner(config, holder).await
+    // Hold lock only for the critical section: ownership checks. Release
+    // immediately before the expensive reclaim operation (which may involve
+    // filesystem I/O and git operations).
     {
-        return BranchHolderReclaim::Preserved;
+        let _ownership_guard = config.worktree_ownership_lock.lock().await;
+        if managed_worktree_has_live_session_owner(config, holder)
+            || provisioning_worktree_is_claimed(config, holder)
+            || managed_worktree_has_live_main_owner(config, holder).await
+        {
+            return BranchHolderReclaim::Preserved;
+        }
     }
+    // Lock released here; expensive reclaim operation follows.
 
     match mgr
         .reclaim_managed_worktree_if_safe(owner, repo, branch, holder)

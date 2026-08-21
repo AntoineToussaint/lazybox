@@ -1183,36 +1183,43 @@ fn spawn_worktree_removal(
             }
         }
         let _done = SignalOnDrop(Some(done_tx));
-        // Serialize with provisioning/adoption while taking the fresh
-        // inspector snapshot. The per-repo lock inside `delete_inspected_if`
-        // closes the final status-to-remove window.
-        let _ownership_guard = config.worktree_ownership_lock.lock().await;
-        let tracked = match collect_tracked_sessions(&config).await {
-            Ok(tracked) => tracked,
-            Err(error) => {
-                tracing::warn!(
-                    workspace = %key,
-                    %error,
-                    "delete_workspace: could not classify tracked worktrees — preserving them",
-                );
-                return;
-            }
-        };
-        let inspections = match mgr.inspect_worktrees(&tracked).await {
-            Ok(inspections) => inspections,
-            Err(error) => {
-                tracing::warn!(
-                    workspace = %key,
-                    %error,
-                    "delete_workspace: deferred safety inspection failed — preserving worktrees",
-                );
-                return;
-            }
-        };
-        let by_path: std::collections::HashMap<_, _> = inspections
-            .into_iter()
-            .map(|row| (canonical_or_self(&row.path), row))
-            .collect();
+        // Hold lock only for the critical section: taking the fresh inspector
+        // snapshot to serialize against provisioning/adoption. Release before
+        // expensive deletion operations. The per-repo lock inside
+        // `delete_inspected_if` re-runs safety probes while held, closing the
+        // final status-to-remove window.
+        let tracked;
+        let by_path: std::collections::HashMap<_, _>;
+        {
+            let _ownership_guard = config.worktree_ownership_lock.lock().await;
+            tracked = match collect_tracked_sessions(&config).await {
+                Ok(tracked) => tracked,
+                Err(error) => {
+                    tracing::warn!(
+                        workspace = %key,
+                        %error,
+                        "delete_workspace: could not classify tracked worktrees — preserving them",
+                    );
+                    return;
+                }
+            };
+            let inspections = match mgr.inspect_worktrees(&tracked).await {
+                Ok(inspections) => inspections,
+                Err(error) => {
+                    tracing::warn!(
+                        workspace = %key,
+                        %error,
+                        "delete_workspace: deferred safety inspection failed — preserving worktrees",
+                    );
+                    return;
+                }
+            };
+            by_path = inspections
+                .into_iter()
+                .map(|row| (canonical_or_self(&row.path), row))
+                .collect();
+        }
+        // Lock released here; expensive deletion operations follow.
 
         for path in paths {
             let Some(row) = by_path.get(&canonical_or_self(&path)) else {

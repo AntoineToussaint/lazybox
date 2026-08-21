@@ -1756,26 +1756,27 @@ pub(crate) async fn clean_worktrees_with(
         }
     };
 
-    // Serialize against new provisioning/adoption for the inspection through
-    // removal window. The delete helper additionally holds the per-repo lock
-    // while it re-runs every destructive safety probe.
-    let _ownership_guard = config.worktree_ownership_lock.lock().await;
-
     // Snapshot live session ids — anything in `terminal_sessions`
     // (the per-terminal owning-session map) is a session we must
-    // not touch. Lock dropped before any async fs work. Recovered
-    // (post-restart) terminals never land in `terminal_sessions`, so
-    // also honor `terminal_meta`'s workspace-key view — see
-    // `live_workspace_keys`.
-    let live_sessions: std::collections::HashSet<lazybox_core::SessionId> = {
-        config
+    // not touch. Recovered (post-restart) terminals never land in
+    // `terminal_sessions`, so also honor `terminal_meta`'s
+    // workspace-key view — see `live_workspace_keys`.
+    // Hold lock only for the snapshot. Release before expensive fs work.
+    // Serialize against new provisioning/adoption: the per-repo lock inside
+    // `delete_inspected` will re-run safety probes while it's held.
+    let live_sessions: std::collections::HashSet<lazybox_core::SessionId>;
+    let live_keys: std::collections::HashSet<String>;
+    {
+        let _ownership_guard = config.worktree_ownership_lock.lock().await;
+        live_sessions = config
             .terminal
             .session_bindings()
             .await
             .into_values()
-            .collect()
-    };
-    let live_keys = live_workspace_keys(config).await;
+            .collect();
+        live_keys = live_workspace_keys(config).await;
+    }
+    // Lock released here; expensive fs work follows.
 
     let tracked = match crate::workspace::collect_tracked_sessions(config).await {
         Ok(tracked) => tracked,
@@ -2152,7 +2153,6 @@ pub(crate) async fn delete_orphaned_worktree_with(
     path: std::path::PathBuf,
     force: bool,
 ) {
-    let _ownership_guard = config.worktree_ownership_lock.lock().await;
     let tracked = match crate::workspace::collect_tracked_sessions(config).await {
         Ok(tracked) => tracked,
         Err(error) => {
@@ -2188,16 +2188,24 @@ pub(crate) async fn delete_orphaned_worktree_with(
         });
         return;
     };
-    if !target.is_orphaned()
-        || crate::spawn_handler::managed_worktree_has_live_session_owner(config, &target.path)
+
+    // Hold lock only for the critical section: checking if the worktree
+    // is orphaned and has a live owner. Release immediately before
+    // the expensive deletion operation.
     {
-        let _ = config.bus.send(Event::OrphanedWorktreeDeleted {
-            path,
-            ok: false,
-            error: Some("worktree is no longer orphaned".into()),
-        });
-        return;
+        let _ownership_guard = config.worktree_ownership_lock.lock().await;
+        if !target.is_orphaned()
+            || crate::spawn_handler::managed_worktree_has_live_session_owner(config, &target.path)
+        {
+            let _ = config.bus.send(Event::OrphanedWorktreeDeleted {
+                path,
+                ok: false,
+                error: Some("worktree is no longer orphaned".into()),
+            });
+            return;
+        }
     }
+    // Lock released here; expensive deletion operation follows.
 
     match mgr.delete_inspected(&target, force).await {
         Ok(()) => {

@@ -14,6 +14,7 @@ use lazybox_ipc::{
     TerminalId, TerminalInputIntent, TerminalKind, TerminalSnapshot, UserPrompt, WorktreeStep,
     WorktreeStepStatus,
 };
+use std::sync::Arc;
 use tokio::io::duplex;
 
 fn sample_time() -> chrono::DateTime<chrono::Utc> {
@@ -739,7 +740,7 @@ fn all_events() -> Vec<Event> {
         },
         Event::TerminalOutput {
             terminal_id: TerminalId(2),
-            bytes: b"ANSI: \x1b[31mred\x1b[0m".to_vec(),
+            bytes: Arc::<[u8]>::from(b"ANSI: \x1b[31mred\x1b[0m".to_vec()),
             first_seq: 1,
             seq: 1,
         },
@@ -1569,7 +1570,7 @@ async fn socket_binary_terminal_output_round_trip() {
     let nasty: Vec<u8> = (0..=255).collect();
     let msg = Event::TerminalOutput {
         terminal_id: TerminalId(1),
-        bytes: nasty.clone(),
+        bytes: Arc::<[u8]>::from(nasty.clone()),
         first_seq: 99,
         seq: 99,
     };
@@ -1583,7 +1584,7 @@ async fn socket_binary_terminal_output_round_trip() {
         ..
     }) = got
     {
-        assert_eq!(bytes, nasty);
+        assert_eq!(bytes, Arc::<[u8]>::from(nasty.clone()));
         assert_eq!(first_seq, 99);
         assert_eq!(seq, 99);
     } else {

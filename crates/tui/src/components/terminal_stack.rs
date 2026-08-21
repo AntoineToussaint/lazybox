@@ -7483,7 +7483,7 @@ mod resync_tests {
         let mut clean = shell_stack(TerminalId(1), &sk);
         clean.on_event(&Event::TerminalOutput {
             terminal_id: TerminalId(1),
-            bytes: full.to_vec(),
+            bytes: full.to_vec().into(),
             first_seq: 1,
             seq: 9,
         });
@@ -7498,7 +7498,7 @@ mod resync_tests {
         let mut desynced = shell_stack(TerminalId(1), &sk);
         desynced.on_event(&Event::TerminalOutput {
             terminal_id: TerminalId(1),
-            bytes: b"line0\r\n\x1b[".to_vec(),
+            bytes: b"line0\r\n\x1b[".to_vec().into(),
             first_seq: 1,
             seq: 3,
         });
@@ -7538,7 +7538,7 @@ mod resync_tests {
         let mut stack = shell_stack(id, &sk);
         stack.on_event(&Event::TerminalOutput {
             terminal_id: id,
-            bytes: b"stable".to_vec(),
+            bytes: b"stable".to_vec().into(),
             first_seq: 1,
             seq: 1,
         });
@@ -7548,7 +7548,7 @@ mod resync_tests {
         // may mutate the coherent prefix.
         stack.on_event(&Event::TerminalOutput {
             terminal_id: id,
-            bytes: b"-torn".to_vec(),
+            bytes: b"-torn".to_vec().into(),
             first_seq: 3,
             seq: 3,
         });
@@ -7565,7 +7565,7 @@ mod resync_tests {
         // outstanding.
         stack.on_event(&Event::TerminalOutput {
             terminal_id: id,
-            bytes: b"-still-torn".to_vec(),
+            bytes: b"-still-torn".to_vec().into(),
             first_seq: 4,
             seq: 4,
         });
@@ -7605,7 +7605,7 @@ mod resync_tests {
 
         stack.on_event(&Event::TerminalOutput {
             terminal_id: id,
-            bytes: b"!".to_vec(),
+            bytes: b"!".to_vec().into(),
             first_seq: 5,
             seq: 5,
         });
@@ -7619,7 +7619,7 @@ mod resync_tests {
         let mut stack = shell_stack(id, &sk);
         stack.on_event(&Event::TerminalOutput {
             terminal_id: id,
-            bytes: b"known-good".to_vec(),
+            bytes: b"known-good".to_vec().into(),
             first_seq: 1,
             seq: 1,
         });
@@ -7659,7 +7659,7 @@ mod resync_tests {
 
         stack.on_event(&Event::TerminalOutput {
             terminal_id: id,
-            bytes: b"ignored".to_vec(),
+            bytes: b"ignored".to_vec().into(),
             first_seq: 2,
             seq: 2,
         });
@@ -7677,7 +7677,7 @@ mod resync_tests {
         let mut stack = shell_stack(id, &sk);
         stack.on_event(&Event::TerminalOutput {
             terminal_id: id,
-            bytes: b"stable".to_vec(),
+            bytes: b"stable".to_vec().into(),
             first_seq: 1,
             seq: 1,
         });
@@ -7714,7 +7714,7 @@ mod resync_tests {
         let mut stack = shell_stack(id, &sk);
         stack.on_event(&Event::TerminalOutput {
             terminal_id: id,
-            bytes: b"new".to_vec(),
+            bytes: b"new".to_vec().into(),
             first_seq: 1,
             seq: 1,
         });
@@ -7768,7 +7768,7 @@ mod deep_scrollback_tests {
     fn feed(stack: &mut TerminalStack, id: TerminalId, bytes: &[u8], first_seq: u64, seq: u64) {
         stack.on_event(&Event::TerminalOutput {
             terminal_id: id,
-            bytes: bytes.to_vec(),
+            bytes: bytes.to_vec().into(),
             first_seq,
             seq,
         });
@@ -8224,7 +8224,7 @@ mod hidden_feed_tests {
     fn feed(stack: &mut TerminalStack, id: TerminalId, bytes: &[u8], seq: u64) {
         stack.on_event(&Event::TerminalOutput {
             terminal_id: id,
-            bytes: bytes.to_vec(),
+            bytes: bytes.to_vec().into(),
             first_seq: seq,
             seq,
         });
@@ -9245,7 +9245,7 @@ mod rebadge_tests {
             );
             stack.on_event(&Event::TerminalOutput {
                 terminal_id: id,
-                bytes: rendered.into_bytes(),
+                bytes: rendered.into_bytes().into(),
                 first_seq: 1,
                 seq: 1,
             });
@@ -10504,7 +10504,7 @@ mod agent_crash_tests {
         let mut stack = active_stack(1, &sk, TerminalKind::Agent("codex".into()));
         stack.on_event(&Event::TerminalOutput {
             terminal_id: TerminalId(1),
-            bytes: b"blocked agent output".to_vec(),
+            bytes: b"blocked agent output".to_vec().into(),
             first_seq: 10,
             seq: 10,
         });
@@ -10807,7 +10807,7 @@ mod zoom_and_tile_header_tests {
     fn feed(stack: &mut TerminalStack, id: u64, text: &str) {
         stack.on_event(&Event::TerminalOutput {
             terminal_id: TerminalId(id),
-            bytes: format!("{text}\r\n").into_bytes(),
+            bytes: format!("{text}\r\n").into_bytes().into(),
             first_seq: 1,
             seq: 1,
         });

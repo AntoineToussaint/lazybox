@@ -556,7 +556,7 @@ impl Driver {
                 let seq = *seq;
                 self.send(Event::TerminalOutput {
                     terminal_id: tid,
-                    bytes,
+                    bytes: bytes.into(),
                     first_seq: seq,
                     seq,
                 });

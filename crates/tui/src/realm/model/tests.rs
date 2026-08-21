@@ -6404,6 +6404,7 @@ mod input_starvation_tests {
     use super::super::Model;
     use super::super::helpers::{MAX_EVENTS_PER_TICK, drain_daemon_events};
     use lazybox_ipc::{Client, EVENT_CHANNEL_CAPACITY, Event, TerminalId};
+    use std::sync::Arc;
     use tokio::sync::mpsc;
     use tuirealm::ratatui::layout::Size;
 
@@ -6433,7 +6434,7 @@ mod input_starvation_tests {
         for seq in 0..n {
             tx.try_send(Event::TerminalOutput {
                 terminal_id: TerminalId(1),
-                bytes: b"streaming output chunk\n".to_vec(),
+                bytes: Arc::<[u8]>::from(b"streaming output chunk\n".to_vec()),
                 first_seq: seq as u64,
                 seq: seq as u64,
             })
@@ -6715,6 +6716,7 @@ mod wake_tests {
     //! freeze that contract.
     use super::super::helpers::{LoopRuntime, TimedInput, Wake, wait_for_wake};
     use lazybox_ipc::{Event, TerminalId};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     fn rt() -> LoopRuntime {
@@ -6724,7 +6726,7 @@ mod wake_tests {
     fn daemon_event(seq: u64) -> Event {
         Event::TerminalOutput {
             terminal_id: TerminalId(1),
-            bytes: b"echo".to_vec(),
+            bytes: Arc::<[u8]>::from(b"echo".to_vec()),
             first_seq: seq,
             seq,
         }
@@ -7236,7 +7238,7 @@ mod coalesce_tests {
     fn out(id: u64, bytes: &[u8], seq: u64) -> Event {
         Event::TerminalOutput {
             terminal_id: TerminalId(id),
-            bytes: bytes.to_vec(),
+            bytes: bytes.to_vec().into(),
             first_seq: seq,
             seq,
         }
@@ -7257,7 +7259,7 @@ mod coalesce_tests {
                 seq,
             } => {
                 assert_eq!(*terminal_id, TerminalId(1));
-                assert_eq!(bytes, b"hello world");
+                assert_eq!(bytes.as_ref(), b"hello world");
                 assert_eq!(*first_seq, 10, "merged event keeps its first seq");
                 assert_eq!(*seq, 12, "merged event carries the last chunk's seq");
             }
@@ -13242,6 +13244,7 @@ mod daemon_event_fastpath_tests {
     use chrono::Utc;
     use lazybox_core::{Workspace, WorkspaceKey};
     use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId, channel};
+    use std::sync::Arc;
     use tuirealm::ratatui::layout::Size;
 
     fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
@@ -13269,7 +13272,7 @@ mod daemon_event_fastpath_tests {
         m.redraw = false;
         m.handle_daemon_event(IpcEvent::TerminalOutput {
             terminal_id: TerminalId(99),
-            bytes: b"background noise".to_vec(),
+            bytes: Arc::<[u8]>::from(b"background noise".to_vec()),
             first_seq: 1,
             seq: 1,
         });
@@ -13296,7 +13299,7 @@ mod daemon_event_fastpath_tests {
         m.redraw = false;
         m.handle_daemon_event(IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
-            bytes: b"$ ls\n".to_vec(),
+            bytes: Arc::<[u8]>::from(b"$ ls\n".to_vec()),
             first_seq: 1,
             seq: 1,
         });
@@ -13396,6 +13399,7 @@ mod wheel_routing_tests {
     //! ever written into the inner program.
     use super::super::*;
     use lazybox_ipc::{Event as IpcEvent, TerminalId, TerminalKind, channel};
+    use std::sync::Arc;
     use tuirealm::ratatui::layout::{Rect, Size};
 
     fn build_model_with_kind(
@@ -13500,7 +13504,7 @@ mod wheel_routing_tests {
 
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
-            bytes: b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec(),
+            bytes: Arc::<[u8]>::from(b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec()),
             first_seq: 1,
             seq: 1,
         });
@@ -13528,7 +13532,7 @@ mod wheel_routing_tests {
         }
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
-            bytes,
+            bytes: bytes.into(),
             first_seq: 1,
             seq: 1,
         });
@@ -13572,7 +13576,7 @@ mod wheel_routing_tests {
         }
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
-            bytes,
+            bytes: Arc::<[u8]>::from(bytes),
             first_seq: 1,
             seq: 1,
         });
@@ -13606,7 +13610,7 @@ mod wheel_routing_tests {
             if agent_id == "claude" {
                 m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
                     terminal_id: TerminalId(7),
-                    bytes: b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec(),
+                    bytes: Arc::<[u8]>::from(b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec()),
                     first_seq: 1,
                     seq: 1,
                 });
@@ -13620,7 +13624,7 @@ mod wheel_routing_tests {
                 bytes.extend_from_slice(&history);
                 m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
                     terminal_id: TerminalId(7),
-                    bytes,
+                    bytes: Arc::<[u8]>::from(bytes),
                     first_seq: 1,
                     seq: 1,
                 });
@@ -13655,7 +13659,7 @@ mod wheel_routing_tests {
 
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
-            bytes: b"\x1b[?1002h\x1b[?1006h".to_vec(),
+            bytes: Arc::<[u8]>::from(b"\x1b[?1002h\x1b[?1006h".to_vec()),
             first_seq: 1,
             seq: 1,
         });
@@ -13675,7 +13679,7 @@ mod wheel_routing_tests {
         }
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
-            bytes,
+            bytes: Arc::<[u8]>::from(bytes),
             first_seq: 2,
             seq: 2,
         });
@@ -14042,6 +14046,7 @@ mod leader_tile_tests {
     use lazybox_ipc::{
         Command as IpcCommand, Event as IpcEvent, TerminalId, TerminalKind, channel,
     };
+    use std::sync::Arc;
     use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
     use tuirealm::ratatui::layout::Size;
 
@@ -14310,7 +14315,7 @@ mod leader_tile_tests {
             }
             m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
                 terminal_id: TerminalId(id),
-                bytes,
+                bytes: Arc::<[u8]>::from(bytes),
                 first_seq: 1,
                 seq: 1,
             });
@@ -14390,7 +14395,7 @@ mod leader_tile_tests {
 
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(2),
-            bytes: b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec(),
+            bytes: Arc::<[u8]>::from(b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec()),
             first_seq: 1,
             seq: 1,
         });
@@ -14563,7 +14568,9 @@ mod leader_tile_tests {
         while server.rx.try_recv().is_ok() {}
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(1),
-            bytes: b"see https://a.example.com and https://b.example.com\r\n".to_vec(),
+            bytes: Arc::<[u8]>::from(
+                b"see https://a.example.com and https://b.example.com\r\n".to_vec(),
+            ),
             first_seq: 1,
             seq: 1,
         });
@@ -14585,7 +14592,7 @@ mod leader_tile_tests {
         while server.rx.try_recv().is_ok() {}
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(1),
-            bytes: b"no links here\r\n".to_vec(),
+            bytes: Arc::<[u8]>::from(b"no links here\r\n".to_vec()),
             first_seq: 1,
             seq: 1,
         });
@@ -14851,7 +14858,7 @@ mod terminal_url_mouse_tests {
     fn feed(model: &mut TestModel, terminal_id: u64, bytes: Vec<u8>) {
         model.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(terminal_id),
-            bytes,
+            bytes: Arc::<[u8]>::from(bytes),
             first_seq: 1,
             seq: 1,
         });
@@ -17183,6 +17190,7 @@ mod focus_mode_tests {
     use chrono::Utc;
     use lazybox_core::{SessionKey, Task, Workspace};
     use lazybox_ipc::{Event as IpcEvent, TerminalId, TerminalKind, channel};
+    use std::sync::Arc;
     use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
     use tuirealm::ratatui::layout::Size;
 
@@ -17421,7 +17429,7 @@ mod focus_mode_tests {
         for seq in 0..20 {
             m.handle_daemon_event(IpcEvent::TerminalOutput {
                 terminal_id: TerminalId(1),
-                bytes: b"codex spinner churn...\r\n".to_vec(),
+                bytes: Arc::<[u8]>::from(b"codex spinner churn...\r\n".to_vec()),
                 first_seq: seq,
                 seq,
             });

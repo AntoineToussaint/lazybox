@@ -447,7 +447,7 @@ async fn seq_gap_resyncs_from_replay_ring() {
         .expect("stream resumes after resync");
         match next {
             Event::TerminalOutput { bytes, seq, .. } => {
-                assert_eq!(bytes, b"D".to_vec());
+                assert_eq!(bytes.as_ref(), b"D");
                 assert_eq!(
                     seq, 4,
                     "no post-resync chunk may re-deliver bytes the resync covered"
@@ -535,7 +535,7 @@ async fn seq_gap_snapshot_failure_preserves_state_and_retries() {
         .expect("stream resumes only after successful recovery");
         assert!(matches!(
             next,
-            Event::TerminalOutput { bytes, first_seq: 5, seq: 5, .. } if bytes == b"E"
+            Event::TerminalOutput { bytes, first_seq: 5, seq: 5, .. } if bytes.as_ref() == b"E"
         ));
     })
     .await

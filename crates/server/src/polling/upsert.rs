@@ -870,9 +870,10 @@ fn prepare_terminal_rebadges(
 /// cross the transaction boundary with a half-registered terminal. In-memory
 /// routing and bus events change only after the store batch succeeds.
 ///
-/// The blocking owner performs the transaction, map update, and entire event
-/// tail. Dropping the async caller detaches that owner instead of cancelling it
-/// between a successful SQLite commit and its in-memory/client projections.
+/// Workspace locks are released before the blocking store operation to prevent
+/// holding locks during potentially long SQLite writes. The mutation data is
+/// fully prepared before lock release, so no state access is needed during
+/// persistence.
 pub(super) async fn commit_workspace_move(
     config: &ServerConfig,
     upserts: Vec<(WorkspaceKey, Workspace)>,
@@ -886,6 +887,13 @@ pub(super) async fn commit_workspace_move(
     } else {
         Some(config.terminal.entries.clone().lock_owned().await)
     };
+    // Release workspace locks before the blocking store operation.
+    // Mutation data is fully prepared; no workspace state access is needed
+    // during persistence. This allows other clients to access these workspaces
+    // while the SQLite write is in progress, preventing lock-induced
+    // serialization (issue #1256).
+    drop(workspace_guards);
+
     let config_owned = config.clone();
     tokio::task::spawn_blocking(move || {
         let mut terminal_guard = terminal_guard;
@@ -925,7 +933,6 @@ pub(super) async fn commit_workspace_move(
         for event in post_commit_events {
             let _ = config_owned.bus.send(event);
         }
-        drop(workspace_guards);
         Ok(outcome)
     })
     .await

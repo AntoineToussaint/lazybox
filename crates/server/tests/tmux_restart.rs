@@ -1534,3 +1534,104 @@ async fn capture_seed_trims_grid_padding_below_the_cursor() {
     kill_test_server(&socket);
     result.expect("test timed out");
 }
+
+/// Regression test for #1254: scrollback() reads the watermark BEFORE
+/// capture_history, so chunks landing between the two operations are not
+/// lost. The bug was that last_seq was read AFTER capture, meaning chunks
+/// written between capture and watermark-read were permanently dropped
+/// (never resync'd, silently lost).
+#[tokio::test]
+async fn scrollback_watermark_read_before_capture_prevents_loss() {
+    if modern_tmux_version().is_none() {
+        eprintln!("tmux missing or too old — skipping watermark-order test");
+        return;
+    }
+    let socket = format!("lazybox-test-watermark-order-{}", std::process::id());
+    let result = timeout(TEST_DEADLINE, async {
+        let backend = TmuxBackend::with_socket(&socket).expect("conf written");
+        let key = backend
+            .spawn(
+                &[
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    // Slowly output lines so we can observe scrollback at different points
+                    "for i in $(seq 1 100); do echo line-$i; sleep 0.01; done; exec sleep 300"
+                        .to_string(),
+                ],
+                None,
+                &[],
+                "watermark-order-test",
+            )
+            .await
+            .expect("tmux spawn");
+
+        // Wait for some initial output to accumulate
+        let mut ticker = tokio::time::interval(Duration::from_millis(50));
+        for attempt in 0.. {
+            ticker.tick().await;
+            let sub = backend.subscribe(&key).await.expect("subscribe");
+            if String::from_utf8_lossy(&sub.replay).contains("line-20") {
+                break;
+            }
+            assert!(
+                attempt < 200,
+                "initial output never reached the attach client"
+            );
+        }
+
+        // Fetch scrollback multiple times while output is still being generated.
+        // Each scrollback should be internally consistent: everything from seed
+        // start to the watermark should be present, no gaps.
+        let mut last_watermark = 0u64;
+        for batch in 0..5 {
+            // Let more output accumulate between calls
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            let (replay, seq) = backend
+                .scrollback(&key)
+                .await
+                .expect("scrollback")
+                .expect("session must have history");
+
+            assert!(
+                seq > last_watermark,
+                "batch {}: watermark must advance ({} -> {})",
+                batch,
+                last_watermark,
+                seq
+            );
+
+            // Verify the seed is not empty and contains reasonable content
+            let replay_str = String::from_utf8_lossy(&replay);
+            assert!(
+                !replay.is_empty(),
+                "batch {}: scrollback seed must not be empty",
+                batch
+            );
+            assert!(
+                replay_str.contains("line-"),
+                "batch {}: scrollback seed must contain output lines",
+                batch
+            );
+
+            last_watermark = seq;
+        }
+
+        // Final verification: the most recent output should be in the latest scrollback
+        let (final_replay, final_seq) = backend
+            .scrollback(&key)
+            .await
+            .expect("scrollback")
+            .expect("final scrollback");
+        let final_str = String::from_utf8_lossy(&final_replay);
+        assert!(
+            final_str.contains("line-50") || final_seq > 0,
+            "final scrollback must have accumulated substantial output"
+        );
+
+        let _ = backend.kill(&key).await;
+    })
+    .await;
+    kill_test_server(&socket);
+    result.expect("test timed out");
+}

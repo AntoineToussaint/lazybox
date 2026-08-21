@@ -1182,6 +1182,17 @@ impl SessionBackend for TmuxBackend {
                 }
                 _ => {}
             }
+            let pty = {
+                let map = self.sessions.lock().await;
+                map.get(key)
+                    .map(|s| s.client.clone())
+                    .ok_or_else(|| BackendError::NotFound(key.into()))?
+            };
+            // Read the high-water mark BEFORE capturing: the capture is
+            // guaranteed to be a complete snapshot up to this watermark,
+            // so nothing is dropped. A watermark read AFTER capture would
+            // miss any chunks landing between the two operations (#1254).
+            let last_seq = pty.snapshot_only().await.last_seq;
             // Same seed the restart/reattach path uses — tmux holds
             // `history-limit` lines for live sessions too, the client
             // just never read them before (#393).
@@ -1189,18 +1200,6 @@ impl SessionBackend for TmuxBackend {
             if seed.is_empty() {
                 return Ok(None);
             }
-            let pty = {
-                let map = self.sessions.lock().await;
-                map.get(key)
-                    .map(|s| s.client.clone())
-                    .ok_or_else(|| BackendError::NotFound(key.into()))?
-            };
-            // Read the high-water mark AFTER capturing: a chunk that
-            // lands in between is covered by neither the capture nor
-            // the resumed live stream and simply waits for the inner
-            // program's next repaint — dropping it beats double-feeding
-            // bytes the capture already rendered.
-            let last_seq = pty.snapshot_only().await.last_seq;
             Ok(Some((seed, last_seq)))
         })
     }

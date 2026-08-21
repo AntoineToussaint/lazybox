@@ -598,6 +598,7 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
   let maxTerminalWriteBytes = 128 * 1024;
   let terminalChannelHealthy = false;
   let terminalChannelEverOnline = false;
+  let terminalStreamConnected = false; // Separate state for terminal stream connection
   let terminalInputDroppedWhileOffline = false;
   let terminalIncidentMessage: string | null = null;
   const pendingTerminalFrames = new Map<number, TerminalBinaryFrame[]>();
@@ -610,6 +611,10 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
   const inboxConnection = new InboxConnection(
     () => invoke<WorkspacesResponse>("list_workspaces"),
     async () => {
+      // If already subscribed, unsubscribe the old channel first.
+      if (eventChannel !== null) {
+        eventChannel.onmessage = () => {};
+      }
       eventChannel = new Channel<DesktopStreamMessage>();
       eventChannel.onmessage = handleStreamMessage;
       await invoke("subscribe_events", { onEvent: eventChannel, controllerId });
@@ -1675,6 +1680,7 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
 
   function handleTerminalDisconnect(message: string): void {
     terminalChannelHealthy = false;
+    terminalStreamConnected = false; // Mark stream as disconnected
     terminalDecoder.reset();
     if (pendingInput.size > 0) {
       terminalInputDroppedWhileOffline = true;
@@ -1698,6 +1704,7 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
     // connect, not a recovery, so it must not surface a recovery notice.
     const recovered = terminalChannelEverOnline;
     terminalChannelHealthy = true;
+    terminalStreamConnected = true; // Mark stream as connected
     terminalChannelEverOnline = true;
     terminalDecoder.reset();
     terminalStreamHealth.textContent = recovered
@@ -5815,6 +5822,16 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
         closeFilterMenu();
         return;
       }
+      if (renameDialog.open) {
+        event.preventDefault();
+        renameDialog.close();
+        return;
+      }
+      if (diffDialog.open) {
+        event.preventDefault();
+        diffDialog.close();
+        return;
+      }
       if (document.activeElement === inboxSearch) {
         inboxSearch.blur();
         return;
@@ -5837,6 +5854,14 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
     }
     const keyboardOwned =
       editable || document.querySelector("dialog[open]") !== null;
+    // Guard single-letter keys with modifiers to prevent accidental actions
+    // (e.g., Cmd+A should not spawn an agent).
+    if ((event.metaKey || event.ctrlKey || event.altKey) && event.key.length === 1 && /^[a-z]$/i.test(event.key)) {
+      // Alt+digit is an explicitly-assigned shortcut, so allow it through.
+      if (!event.altKey || !/^[1-9]$/.test(event.key)) {
+        return;
+      }
+    }
     // Alt+digit jumps to the Nth live-agent workspace (#975). It's an
     // explicitly-assigned modifier shortcut, so it runs ahead of the general
     // resolver (which rejects unassigned Alt/Cmd/Ctrl combos), and only when

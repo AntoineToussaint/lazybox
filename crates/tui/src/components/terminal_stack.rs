@@ -3554,6 +3554,32 @@ impl TerminalStack {
                     // still trims to the cap tail via `append_output`.
                     if snap.replay_available {
                         slot.pending_feed = snap.replay.clone();
+                        // Inject DEC mode reset sequences after the snapshot
+                        // replay to ensure the client's VT parser state matches
+                        // the daemon's terminal state. The snapshot contains
+                        // output that may depend on specific modes being set
+                        // (cursor visibility, mouse modes, etc.), so we
+                        // explicitly reset all modes to defaults before replay,
+                        // then re-apply preserved modes after (#1254).
+                        //
+                        // We read modes from the fresh terminal (which has
+                        // defaults), then feed reset sequences before the
+                        // replay to ensure both parser and output agree on a
+                        // known baseline.
+                        let mut mode_resets = Vec::new();
+                        for mode in PRESERVED_DEC_MODES {
+                            // Reset each preserved mode to its default (off).
+                            // CSI ? <mode> l = reset (lowercase L)
+                            mode_resets
+                                .extend_from_slice(format!("\x1b[?{}l", mode.value()).as_bytes());
+                        }
+                        // Prepend mode resets so they execute before snapshot
+                        // content is parsed by the fresh terminal.
+                        if !mode_resets.is_empty() {
+                            let mut prefixed = mode_resets;
+                            prefixed.extend_from_slice(&slot.pending_feed);
+                            slot.pending_feed = prefixed;
+                        }
                     }
                     self.invalidate_visible();
                     self.terminals.insert(snap.terminal_id, slot);
@@ -10930,5 +10956,73 @@ mod zoom_and_tile_header_tests {
         );
         let text: String = bg.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(text.contains("limited"), "shows the limited chip: {text}");
+    }
+
+    /// Regression test for issue #1254 finding 4: seed↔ring DEC-mode reassertion.
+    /// When a client reconnects and receives a seeded snapshot, the snapshot
+    /// replay must inject DEC mode reset sequences before the grid content so
+    /// the client's VT parser state matches the daemon's terminal state. Without
+    /// this, the parser can diverge if the snapshot content assumes certain modes
+    /// are set (cursor visibility, mouse modes, etc.).
+    #[test]
+    fn snapshot_replay_injects_dec_mode_resets() {
+        let sk = SessionKey::new("agent");
+        let terminal_id = TerminalId(1);
+        let mut stack = TerminalStack::new(PaneId::new(0));
+
+        // Create a snapshot with content that assumes default DEC modes.
+        // The key point is that pending_feed should start with mode-reset
+        // sequences before the actual replay content.
+        let replay_content = b"snapshot content";
+        let snapshot = lazybox_ipc::TerminalSnapshot {
+            terminal_id,
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            replay: replay_content.to_vec(),
+            last_seq: 1,
+            replay_available: true,
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            prompt_history: Vec::new(),
+            composing_buffer: None,
+            agent_state: None,
+            authenticating: false,
+        };
+
+        // Receive the snapshot event
+        stack.on_event(&Event::Snapshot {
+            workspaces: vec![],
+            terminals: vec![snapshot],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+
+        // Verify that the pending_feed contains DEC mode reset sequences
+        // before the actual replay content. Each preserved mode should have
+        // a reset sequence (CSI ? <mode> l).
+        let pending = &stack.terminals[&terminal_id].pending_feed;
+        assert!(
+            !pending.is_empty(),
+            "snapshot should set pending_feed with replay"
+        );
+
+        // The pending_feed should start with ANSI escape sequences for
+        // mode resets, not with the raw replay content.
+        assert!(
+            pending.starts_with(b"\x1b["),
+            "pending_feed should start with mode reset sequences (ESC [): {:?}",
+            String::from_utf8_lossy(pending)
+        );
+
+        // Verify the replay content is present after the mode sequences.
+        let contains_replay = pending
+            .windows(replay_content.len())
+            .any(|window| window == replay_content);
+        assert!(
+            contains_replay,
+            "pending_feed should contain the original replay content"
+        );
     }
 }

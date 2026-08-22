@@ -2438,7 +2438,7 @@ async fn start_local_gateway(
 ) -> Result<LocalServices, String> {
     // In GUI mode, hook exe is optional. Skip if unavailable to prevent
     // infinite loop of second desktop app instance spawning as hook helper.
-    if !lazybox_server::spawn_handler::ensure_stable_hook_exe().unwrap_or(false) {
+    if lazybox_server::spawn_handler::ensure_stable_hook_exe().is_none() {
         tracing::warn!(
             "desktop executable cannot provide lifecycle hook helper; \
             some session lifecycle features will be unavailable"

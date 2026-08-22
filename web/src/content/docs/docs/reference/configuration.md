@@ -286,6 +286,13 @@ hand.
 | --- | --- | --- | --- |
 | `analytics_enabled` | bool | `false` | Record the desktop client's fixed, content-free event names and timestamps locally. Provider and terminal contents cannot enter this boundary. |
 
+## `server`
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `ring_buffer_bytes` | int | `2097152` | Per-terminal ring buffer capacity in bytes for scrollback history replay on reconnect. Range: 64 KiB – 100 MiB. Raise for sessions with very long outputs; lower to reduce per-terminal memory usage. |
+| `cred_cache_ttl_secs` | int | `300` | Credential cache TTL in seconds. Command-provider credentials (e.g., `gh auth token`) are cached for this duration before running the command again, reducing subprocess churn. Default is 5 minutes. |
+
 ## `agent`
 
 | Field | Type | Default | Description |

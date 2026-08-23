@@ -1879,16 +1879,11 @@ impl<T: TerminalAdapter> Model<T> {
             RemovalReason::Merged => terminal_removal_copy(&prompt, "merged"),
             RemovalReason::Closed => terminal_removal_copy(&prompt, "closed"),
         };
-        // Event path: this prompt popped unsolicited (a merged/closed
-        // task, or a scope change), so a stray Enter must not delete a
-        // worktree by reflex (issue #525). The
-        // `ui.confirm_default.event` knob (default No) drives it.
-        let modal = Confirm::new(copy);
-        let modal = if self.ui_defaults.confirm_default.event.is_yes() {
-            modal.default_yes()
-        } else {
-            modal.default_no()
-        };
+        // Removing a workspace deletes its worktree — always destructive.
+        // Every confirm defaults to Yes now (fast to accept), and this one
+        // wears the warning border + `⚠` title so an unsolicited
+        // merged/closed removal reads as dangerous before Enter.
+        let modal = Confirm::new(copy).destructive();
         self.set_modal_flow(ModalFlow::RemovalPrompt {
             workspace: prompt.workspace_key,
             reason: prompt.reason,
@@ -1953,23 +1948,17 @@ impl<T: TerminalAdapter> Model<T> {
                 .unwrap_or("Confirm action?")
                 .to_string()
         });
-        // Shortcut path: the user pressed a destructive chord, so the
-        // chord itself is the intent and Enter confirms (issue #525),
-        // governed by `ui.confirm_default.destructive_shortcut` (default
-        // Yes). A benign awareness gate (the on-main spawn) destroys
-        // nothing, so it always affirms regardless of that knob.
-        let default_yes = def.confirm_is_benign_gate()
-            || self
-                .ui_defaults
-                .confirm_default
-                .destructive_shortcut
-                .is_yes();
         self.set_modal_flow(ModalFlow::ActionConfirm { action, targets });
+        // Every confirm defaults to Yes now — the chord/event is itself
+        // the intent, so Enter completes it. A benign awareness gate (the
+        // on-main spawn) destroys nothing and stays neutral; a genuinely
+        // destructive action (archive / merge / delete / close / reset)
+        // wears the warning coloring so the danger shows before Enter.
         let modal = Confirm::new(&prompt);
-        let modal = if default_yes {
+        let modal = if def.confirm_is_benign_gate() {
             modal.default_yes()
         } else {
-            modal.default_no()
+            modal.destructive()
         };
         self.mount_modal(Id::ActionConfirm, modal);
     }

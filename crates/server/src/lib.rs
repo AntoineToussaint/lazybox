@@ -1579,11 +1579,14 @@ pub async fn dispatch_command(
                     terminal_ids: restart_required,
                 });
             }
-            // A fresh subscriber may have missed removal prompts emitted
-            // before it connected (broadcast is fire-and-forget) — reset
-            // the reprompt throttle so the tick kicked below re-offers
-            // any still-unresolved merged/closed workspace right away.
-            polling::mark_removal_prompts_for_replay(config).await;
+            // Note: A fresh subscriber may have missed removal prompts emitted
+            // before it connected (broadcast is fire-and-forget) — however,
+            // clearing the global throttle would affect OTHER connected clients
+            // who already dismissed or handled these modals (#1267 zombie modals).
+            // Instead, rely on the store-persisted cleanup_prompt state: workspaces
+            // with cleanup_prompt = Declined skip reprompting, and fresh clients
+            // will see unresolved removals within the next poll cycle (~15s for hot
+            // set) or 5-minute reprompt window. The wakeup below ensures timely refresh.
             // Kick a fresh poll so the freshly-opened TUI refreshes within
             // a few seconds instead of waiting out the current sleep.
             config.poll.wake(true);

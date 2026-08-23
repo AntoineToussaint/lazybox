@@ -13677,6 +13677,41 @@ mod terminal_url_mouse_tests {
             "the highlight never crosses into the right tile (rx={rx}): {hstart:?} {hend:?}",
         );
 
+        // Endpoint clamping alone is not enough: `paint_selection` fills the
+        // MIDDLE rows of a multi-row selection edge-to-edge, so a highlight
+        // clipped to the whole terminal pane bleeds those rows into the right
+        // tile even when both endpoints sit left of `rx`. Render the real
+        // overlay (`model.view()`) and compare reverse-video cells in the
+        // right tile WITH the drag vs a no-drag baseline: the selection must
+        // add none. (A bare count would false-positive on the focused tile's
+        // own chrome; the diff isolates the selection's contribution.)
+        let right_reversed = |model: &mut TestModel| -> usize {
+            model.view();
+            let buffer = model.terminal.raw().backend().buffer();
+            let mut count = 0;
+            for row in pane.y..pane.y.saturating_add(pane.height) {
+                for col in rx..pane.x.saturating_add(pane.width) {
+                    if buffer[(col, row)]
+                        .style()
+                        .add_modifier
+                        .contains(tuirealm::ratatui::style::Modifier::REVERSED)
+                    {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        };
+        let with_drag = right_reversed(&mut model);
+        let saved_drag = model.terminal_drag.take();
+        let baseline = right_reversed(&mut model);
+        model.terminal_drag = saved_drag;
+        assert_eq!(
+            with_drag, baseline,
+            "the selection highlight leaked reverse-video into the right tile \
+             (with_drag={with_drag}, baseline={baseline}, rx={rx})",
+        );
+
         // Focus divergence mid-gesture must not redirect the copy: if an
         // event refocuses the other tile before release, extraction still
         // reads the tile the drag started in (`drag.terminal`), not live

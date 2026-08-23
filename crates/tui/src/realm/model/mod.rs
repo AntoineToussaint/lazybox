@@ -6119,19 +6119,26 @@ impl<T: TerminalAdapter> Model<T> {
 
             // Selection highlight overlay. Painted AFTER the terminal
             // widget so the reverse-video pass lands on the just-
-            // rendered cells. Bounded to `right_bottom` so a drag
-            // that strayed into the sidebar / activity panes doesn't
-            // leak the highlight across lazybox's pane chrome —
-            // matches what the user expects from a per-pane
-            // selection (compare to the host terminal's native
-            // selection, which crosses panes).
+            // rendered cells. Clipped to the ANCHOR TILE's own grid
+            // rect — not the whole terminal pane: in a split layout
+            // `right_bottom` spans every tile, and paint_selection's
+            // full-row fill would bleed the reverse-video edge-to-edge
+            // into the neighbouring tile (#1101). The tile clip also
+            // keeps a drag that strayed into the sidebar / activity
+            // panes from leaking across lazybox's chrome; the pane rect
+            // is only the fallback for a terminal with no recorded hit
+            // geometry this frame.
             if let Some(drag) = self.terminal_drag.as_ref() {
                 let (terminal, anchor, focus) = (drag.terminal, drag.anchor, drag.focus);
-                if let Some((start, end)) =
-                    self.terminals
-                        .selection_screen_span(terminal, right_bottom, anchor, focus)
+                let clip = self
+                    .terminals
+                    .tile_grid_rect(terminal)
+                    .unwrap_or(right_bottom);
+                if let Some((start, end)) = self
+                    .terminals
+                    .selection_screen_span(terminal, clip, anchor, focus)
                 {
-                    paint_selection(f.buffer_mut(), right_bottom, start, end);
+                    paint_selection(f.buffer_mut(), clip, start, end);
                 }
             }
 

@@ -6748,7 +6748,14 @@ const PASTE_QUIET_WINDOW: Duration = Duration::from_millis(250);
 /// streaming ticker) may never go fully quiet; past this cap the
 /// submit is written anyway and the confirm loop's resends carry the
 /// recovery instead.
-const PASTE_SETTLE_CAP: Duration = Duration::from_secs(2);
+///
+/// 500ms is generous for responsive agents (most settle their repaints in
+/// <100ms) while bounding the worst case. Trading off responsiveness over
+/// robustness: if the agent is still painting at 500ms, the confirm loop's
+/// resends will recover; earlier caps risked interrupting legitimate output.
+/// Issue #725/#869: injections that stall here are highly visible since the
+/// user is watching the terminal and waiting.
+const PASTE_SETTLE_CAP: Duration = Duration::from_millis(500);
 
 /// Stage-specific failure from the shared PTY prompt writer. Callers keep
 /// their context-specific user message (initial work vs live injection), while

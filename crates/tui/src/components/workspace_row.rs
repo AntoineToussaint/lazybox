@@ -134,9 +134,10 @@ pub struct WorkspaceRowCtx<'a> {
     /// (`Workspace::has_notes` — issue #458). Renders a small ` ✎ ` pill
     /// so the user can see, at a glance, which rows have a scratchpad.
     pub has_notes: bool,
-    /// Count of recently distinct snippets sent to this workspace's agent
-    /// (`Workspace::sent_snippets` — issue #463), bounded by
-    /// `SENT_SNIPPETS_MAX`. Renders a dim ` ]N ` pill; `0` renders nothing.
+    /// Total snippets delivered to this workspace's agent
+    /// (`Workspace::sent_snippets.total()` — issue #463): a monotonic
+    /// count of every delivery, not the size of the capped MRU. Renders a
+    /// dim ` ]N ` pill; `0` renders nothing.
     pub sent_snippet_count: usize,
     /// Visible ticket-tree placement. `None` for rows outside a hierarchy;
     /// roots with children still carry metadata so they get a disclosure.
@@ -2836,15 +2837,19 @@ mod tests {
         let cell = cell_snippet(&ctx);
         assert_eq!(cell.spans[0].content.as_ref(), " ]3 ");
 
-        for index in 0..=lazybox_core::SENT_SNIPPETS_MAX {
-            ws.record_sent_snippet(format!("workflow-{index}"));
+        // Deliver more DISTINCT snippets than the MRU can hold: the MRU
+        // saturates at SENT_SNIPPETS_MAX but the honest count keeps
+        // climbing, so the badge shows every delivery — not the cap.
+        let deliveries = lazybox_core::SENT_SNIPPETS_MAX + 1;
+        for index in 0..deliveries {
+            ws.record_snippet_delivery(format!("workflow-{index}"));
         }
         let mut capped = ctx_for(&ws, &placeholder, &theme);
-        capped.sent_snippet_count = ws.sent_snippets.len();
+        capped.sent_snippet_count = ws.sent_snippets.total();
         assert_eq!(
             cell_snippet(&capped).spans[0].content.as_ref(),
-            " ]12 ",
-            "the rendered badge is the bounded recent-distinct count",
+            format!(" ]{deliveries} ").as_str(),
+            "the badge counts every delivery, past the MRU cap",
         );
     }
 

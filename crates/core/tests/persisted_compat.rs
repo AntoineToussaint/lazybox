@@ -178,7 +178,8 @@ fn maximal_workspace() -> Workspace {
     ws.policies
         .set(AutoFixKind::MergeConflict, PolicyArm::Disarm);
     ws.notes = "remember: bump the changelog".into();
-    ws.sent_snippets = vec!["rev".into(), "fix-ci".into()];
+    ws.sent_snippets =
+        lazybox_core::SnippetDeliveryLog::from_recent(["rev".into(), "fix-ci".into()]);
     ws.cleanup_prompt = CleanupPrompt::Declined;
     ws.remote = Some("obin".into());
     ws.last_viewed_at = Some(at(13, 0));

@@ -169,7 +169,10 @@ async fn client_kv_recorded_by_one_connection_replays_to_another() {
         .expect("workspace exists");
     let recorded_workspace: lazybox_core::Workspace =
         serde_json::from_str(record.workspace_json.as_deref().expect("workspace json")).unwrap();
-    assert_eq!(recorded_workspace.sent_snippets, vec!["rev"]);
+    assert_eq!(
+        recorded_workspace.sent_snippets.recent().to_vec(),
+        vec!["rev"]
+    );
     server_client
         .send(Command::SetUpdateDismissal {
             target: "release:v0.2.0".into(),

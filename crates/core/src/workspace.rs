@@ -105,10 +105,118 @@ impl std::fmt::Display for SessionId {
 /// items past this.
 pub const MAX_ACTIVITY_ITEMS: usize = 500;
 
-/// Cap on [`Workspace::sent_snippets`] — enough to re-orient on what
-/// you've told an agent without letting the MRU grow the workspace JSON
-/// blob unbounded.
+/// Cap on the distinct-recent MRU inside [`SnippetDeliveryLog`] — enough
+/// to re-orient on what you've told an agent without letting the MRU grow
+/// the workspace JSON blob unbounded. Only the MRU is capped; the
+/// delivery *count* is unbounded.
 pub const SENT_SNIPPETS_MAX: usize = 12;
+
+/// A workspace's record of snippets delivered to its agent(s) (#463).
+///
+/// One fact — "a snippet was sent to this workspace's agent" — projected
+/// two ways and *owned together* so they can never disagree:
+///
+/// - [`total`](Self::total): a **monotonic count of every delivery**,
+///   including re-sends of the same key and deliveries past the MRU cap.
+///   This is the honest `]N` sidebar badge — what "sent" actually means.
+/// - [`recent`](Self::recent): an MRU of distinct keys, most-recent
+///   first, de-duplicated and capped at [`SENT_SNIPPETS_MAX`] — "what
+///   I've already told this agent," for cheap re-orientation.
+///
+/// The fields are private and the sole mutator is [`record`](Self::record):
+/// there is no way to bump the count without touching the MRU or vice
+/// versa, so "the badge drifted from reality" is *unrepresentable*.
+/// Before this type existed the badge read `sent_snippets.len()` — a
+/// capped, de-duplicated set rendered as if it were a count, so a re-send
+/// never incremented and the 13th distinct snippet was invisible.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct SnippetDeliveryLog {
+    /// Monotonic count of deliveries — see the type docs.
+    #[serde(default)]
+    total: usize,
+    /// Distinct recent keys, most-recent first, capped at
+    /// [`SENT_SNIPPETS_MAX`].
+    #[serde(default)]
+    recent: Vec<String>,
+}
+
+impl SnippetDeliveryLog {
+    /// The sole transition: record that `key` was delivered to this
+    /// workspace's agent. Increments the monotonic [`total`](Self::total)
+    /// and moves `key` to the front of the [`recent`](Self::recent) MRU
+    /// (de-duplicated, capped). One call, both projections — they cannot
+    /// fall out of step.
+    pub fn record(&mut self, key: String) {
+        self.total = self.total.saturating_add(1);
+        self.recent.retain(|k| k != &key);
+        self.recent.insert(0, key);
+        self.recent.truncate(SENT_SNIPPETS_MAX);
+    }
+
+    /// Total snippets delivered here — the value behind the `]N` badge.
+    pub fn total(&self) -> usize {
+        self.total
+    }
+
+    /// Distinct recent keys, most-recent first.
+    pub fn recent(&self) -> &[String] {
+        &self.recent
+    }
+
+    /// Whether anything has ever been delivered here.
+    pub fn is_empty(&self) -> bool {
+        self.total == 0
+    }
+
+    /// Fold `other` in when two workspaces merge (an issue collapsing
+    /// into its PR): sum the counts, union the MRU with this workspace's
+    /// recency winning ties. A merge is still one delivery history.
+    pub fn absorb(&mut self, other: &SnippetDeliveryLog) {
+        self.total = self.total.saturating_add(other.total);
+        self.recent = merge_sent_snippets(&self.recent, &other.recent);
+    }
+
+    /// Seed a log from a bare, most-recent-first list of keys, counting
+    /// each once. For legacy migration and test fixtures only — real
+    /// deliveries go through [`record`](Self::record).
+    pub fn from_recent(recent: impl IntoIterator<Item = String>) -> Self {
+        let mut log = SnippetDeliveryLog::default();
+        for key in recent {
+            log.recent.retain(|k| k != &key);
+            log.recent.push(key);
+        }
+        log.recent.truncate(SENT_SNIPPETS_MAX);
+        log.total = log.recent.len();
+        log
+    }
+}
+
+/// Migrate a persisted workspace's legacy `sent_snippets` shape in place.
+///
+/// Pre-#463-followup records stored `sent_snippets` as a bare array of
+/// keys (the MRU, no count); the current shape is a `{ total, recent }`
+/// object. The derived `Deserialize` on [`SnippetDeliveryLog`] is
+/// deliberately plain — it must round-trip through **bincode** on the IPC
+/// wire, which rejects the `deserialize_any` a shape-sniffing
+/// (`#[serde(untagged)]`) impl needs. So the array→object migration lives
+/// HERE, in the JSON persistence decode path — the only place a legacy
+/// row is ever read; the wire only ever carries current-build objects.
+/// The count is seeded from the MRU length we know.
+fn migrate_legacy_sent_snippets(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    if let Some(arr) = obj.get("sent_snippets").and_then(|v| v.as_array())
+        && arr.iter().all(serde_json::Value::is_string)
+    {
+        let recent = arr.clone();
+        obj.insert(
+            "sent_snippets".to_string(),
+            serde_json::json!({ "total": recent.len(), "recent": recent }),
+        );
+    }
+}
 
 /// Stable identity of an activity item used to carry read/seen state
 /// across the re-sort a merge triggers.
@@ -182,7 +290,12 @@ pub enum CleanupPrompt {
 /// - 4: `Task::parent` (provider-native ticket hierarchy).
 /// - 5: `Workspace::hopper` (personal queue membership + order).
 /// - 6: `HopperMeta::completed_at` (reversible personal completion).
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 6;
+/// - 7: `Workspace::sent_snippets` becomes [`SnippetDeliveryLog`] — a
+///   `{ total, recent }` object (monotonic count + MRU) instead of a bare
+///   key array. Newer builds read the old array shape; older builds fail
+///   to parse the object and route the row into preserve-and-report,
+///   which is exactly the downgrade protection the stamp exists for.
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 7;
 
 /// Personal queue metadata for a workspace captured in the Hopper.
 ///
@@ -348,14 +461,14 @@ pub struct Workspace {
     /// upstream-derived state and leave this intact across polls.
     #[serde(default)]
     pub notes: String,
-    /// MRU of snippet shortcut keys sent to this workspace's agent(s)
-    /// (issue #463) — a per-session record of "what I've already told
-    /// this agent" so switching back is cheap. Most-recent first,
-    /// de-duplicated (a re-send moves the key to the front), capped at
-    /// [`SENT_SNIPPETS_MAX`]. Persisted in the workspace JSON blob
-    /// alongside [`Workspace::notes`]; never synced to any provider.
+    /// Record of snippets delivered to this workspace's agent(s) (issue
+    /// #463): the honest `]N` badge count plus an MRU of "what I've
+    /// already told this agent." A single owned value with one
+    /// transition — see [`SnippetDeliveryLog`]. Persisted in the
+    /// workspace JSON blob alongside [`Workspace::notes`]; never synced
+    /// to any provider.
     #[serde(default)]
-    pub sent_snippets: Vec<String>,
+    pub sent_snippets: SnippetDeliveryLog,
     /// Durable answer to the merged/closed cleanup prompt (issue #499).
     /// Serde-defaulted so pre-#499 records read back as `Unresolved`.
     #[serde(default)]
@@ -400,7 +513,7 @@ impl Workspace {
             track_main_behind: false,
             policies: crate::AutomationPolicies::default(),
             notes: String::new(),
-            sent_snippets: Vec::new(),
+            sent_snippets: SnippetDeliveryLog::default(),
             cleanup_prompt: CleanupPrompt::default(),
             remote: None,
             created_at: now,
@@ -425,7 +538,13 @@ impl Workspace {
     /// Every load that can lead to a save of the same row must go
     /// through this instead of a bare `serde_json::from_str`.
     pub fn decode_persisted(json: &str) -> Result<Self, WorkspaceDecodeError> {
-        let ws: Self = serde_json::from_str(json)?;
+        // Parse to a Value first so a legacy `sent_snippets` array can be
+        // migrated to the current object shape before typed decode — the
+        // derived `Deserialize` is bincode-safe and can't sniff the old
+        // shape itself (see `migrate_legacy_sent_snippets`).
+        let mut value: serde_json::Value = serde_json::from_str(json)?;
+        migrate_legacy_sent_snippets(&mut value);
+        let ws: Self = serde_json::from_value(value)?;
         if ws.schema > WORKSPACE_SCHEMA_VERSION {
             return Err(WorkspaceDecodeError::NewerSchema {
                 found: ws.schema,
@@ -458,15 +577,12 @@ impl Workspace {
             && workspace_project_key(self).is_some_and(|k| k.source_prefix() == "github")
     }
 
-    /// Record `key` as just-sent to this workspace's agent: move it to
-    /// the front of [`Workspace::sent_snippets`], de-duplicating and
-    /// capping at [`SENT_SNIPPETS_MAX`]. Mirrors the global picker MRU
-    /// but scoped per workspace, so the sidebar can show what you've
-    /// already told each agent (issue #463).
-    pub fn record_sent_snippet(&mut self, key: String) {
-        self.sent_snippets.retain(|k| k != &key);
-        self.sent_snippets.insert(0, key);
-        self.sent_snippets.truncate(SENT_SNIPPETS_MAX);
+    /// Record that a snippet `key` was delivered to this workspace's
+    /// agent — the single per-workspace delivery transition (issue #463).
+    /// Delegates to [`SnippetDeliveryLog::record`], which bumps the
+    /// honest count and the "what I've told this agent" MRU together.
+    pub fn record_snippet_delivery(&mut self, key: String) {
+        self.sent_snippets.record(key);
     }
 
     /// Append a fresh session and return its id. Sessions own a
@@ -923,8 +1039,9 @@ impl Workspace {
         self.policies.absorb_from(policies);
         // Notes: concatenate so neither scratchpad is lost.
         self.notes = merge_notes(&self.notes, notes);
-        // Snippet MRU: union, destination recency first, capped.
-        self.sent_snippets = merge_sent_snippets(&self.sent_snippets, sent_snippets);
+        // Snippet delivery: sum the counts, union the MRU with the
+        // destination's recency winning ties. A merge is one history.
+        self.sent_snippets.absorb(sent_snippets);
         // Last viewed: the more recent view of either row.
         self.last_viewed_at = later_opt(self.last_viewed_at, *last_viewed_at);
     }
@@ -3420,54 +3537,113 @@ mod tests {
         assert!(!legacy.has_notes());
     }
 
-    /// `sent_snippets` (#463) is an MRU: a re-send moves the key to the
-    /// front, distinct keys stack newest-first, and the list is capped
-    /// at [`SENT_SNIPPETS_MAX`], dropping the oldest.
+    /// The per-workspace delivery MRU (#463) moves a re-send to the
+    /// front, stacks distinct keys newest-first, and caps at
+    /// [`SENT_SNIPPETS_MAX`], dropping the oldest.
     #[test]
     fn sent_snippets_mru_dedups_and_caps() {
         let mut w = Workspace::from_task(pr("o/r#1"), now());
         assert!(w.sent_snippets.is_empty(), "nothing sent yet");
 
-        w.record_sent_snippet("rev".into());
-        w.record_sent_snippet("plan".into());
-        assert_eq!(w.sent_snippets, vec!["plan", "rev"], "most-recent first");
-
-        w.record_sent_snippet("rev".into());
+        w.record_snippet_delivery("rev".into());
+        w.record_snippet_delivery("plan".into());
         assert_eq!(
-            w.sent_snippets,
+            w.sent_snippets.recent().to_vec(),
+            vec!["plan", "rev"],
+            "most-recent first",
+        );
+
+        w.record_snippet_delivery("rev".into());
+        assert_eq!(
+            w.sent_snippets.recent().to_vec(),
             vec!["rev", "plan"],
             "a re-send moves the key to the front, no duplicate",
         );
 
         for i in 0..SENT_SNIPPETS_MAX {
-            w.record_sent_snippet(format!("k{i}"));
+            w.record_snippet_delivery(format!("k{i}"));
         }
-        assert_eq!(w.sent_snippets.len(), SENT_SNIPPETS_MAX, "capped");
         assert_eq!(
-            w.sent_snippets[0],
+            w.sent_snippets.recent().len(),
+            SENT_SNIPPETS_MAX,
+            "MRU capped",
+        );
+        assert_eq!(
+            w.sent_snippets.recent()[0],
             format!("k{}", SENT_SNIPPETS_MAX - 1),
             "newest at the front",
         );
         assert!(
-            !w.sent_snippets.iter().any(|k| k == "plan"),
+            !w.sent_snippets.recent().iter().any(|k| k == "plan"),
             "the oldest keys evicted past the cap",
         );
     }
 
-    /// `sent_snippets` round-trips through the workspace JSON blob, and a
-    /// pre-#463 record (no key) reads back as an empty list.
+    /// Regression: the `]N` badge counts *every* delivery, not the size
+    /// of the capped, de-duplicated MRU. A re-send increments; a delivery
+    /// past the MRU cap increments. The old badge read
+    /// `sent_snippets.len()` and silently lost both — the wrong count.
     #[test]
-    fn sent_snippets_default_when_absent_from_json() {
+    fn snippet_count_counts_every_delivery_not_the_mru_len() {
         let mut w = Workspace::from_task(pr("o/r#1"), now());
-        w.record_sent_snippet("rev".into());
+        assert_eq!(w.sent_snippets.total(), 0);
+
+        // Three deliveries of the SAME key: MRU stays 1, count is 3.
+        w.record_snippet_delivery("rev".into());
+        w.record_snippet_delivery("rev".into());
+        w.record_snippet_delivery("rev".into());
+        assert_eq!(w.sent_snippets.recent().len(), 1, "MRU de-dups");
+        assert_eq!(w.sent_snippets.total(), 3, "count includes re-sends");
+
+        // Deliver well past the MRU cap: MRU saturates, count keeps going.
+        for i in 0..(SENT_SNIPPETS_MAX * 2) {
+            w.record_snippet_delivery(format!("k{i}"));
+        }
+        assert_eq!(
+            w.sent_snippets.recent().len(),
+            SENT_SNIPPETS_MAX,
+            "MRU stays capped",
+        );
+        assert_eq!(
+            w.sent_snippets.total(),
+            3 + SENT_SNIPPETS_MAX * 2,
+            "count is unbounded — every delivery counted",
+        );
+    }
+
+    /// The delivery log round-trips through the workspace JSON blob, a
+    /// pre-#463 record (field absent) reads back empty, and a legacy
+    /// `sent_snippets` *array* (the pre-count shape) migrates into the
+    /// MRU with the count seeded from the keys we know.
+    #[test]
+    fn sent_snippets_round_trip_and_legacy_migration() {
+        let mut w = Workspace::from_task(pr("o/r#1"), now());
+        w.record_snippet_delivery("rev".into());
         let json = serde_json::to_string(&w).unwrap();
         let back: Workspace = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.sent_snippets, vec!["rev"]);
+        assert_eq!(back.sent_snippets.recent().to_vec(), vec!["rev"]);
+        assert_eq!(back.sent_snippets.total(), 1);
 
+        // Field absent (pre-#463): empty log.
         let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
         value.as_object_mut().unwrap().remove("sent_snippets");
         let legacy: Workspace = serde_json::from_value(value).unwrap();
         assert!(legacy.sent_snippets.is_empty());
+
+        // Legacy array shape migrates into the MRU, count seeded from len.
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("sent_snippets".into(), serde_json::json!(["plan", "rev"]));
+        // Legacy arrays migrate in the persistence decode path, not via a
+        // bare typed deserialize (which is bincode-safe and object-only).
+        let migrated = Workspace::decode_persisted(&value.to_string()).unwrap();
+        assert_eq!(
+            migrated.sent_snippets.recent().to_vec(),
+            vec!["plan", "rev"]
+        );
+        assert_eq!(migrated.sent_snippets.total(), 2, "count seeded from MRU");
     }
 
     /// Populate every user-owned field with a distinctive, non-default
@@ -3486,8 +3662,8 @@ mod tests {
         w.policies
             .set(crate::AutoFixKind::MergeConflict, crate::PolicyArm::Disarm);
         w.notes = "source note".into();
-        w.record_sent_snippet("rev".into());
-        w.record_sent_snippet("plan".into());
+        w.record_snippet_delivery("rev".into());
+        w.record_snippet_delivery("plan".into());
         w.cleanup_prompt = CleanupPrompt::Declined;
         w.last_viewed_at = Some(now() + chrono::Duration::hours(2));
         w
@@ -3508,7 +3684,7 @@ mod tests {
 
         assert_eq!(target.notes, "source note", "notes carried");
         assert_eq!(
-            target.sent_snippets,
+            target.sent_snippets.recent().to_vec(),
             vec!["plan", "rev"],
             "snippet MRU carried in order",
         );
@@ -3624,8 +3800,8 @@ mod tests {
         target.snoozed_until = Some(now() + chrono::Duration::hours(1));
         target.last_viewed_at = Some(now() + chrono::Duration::hours(1));
         target.notes = "target note".into();
-        target.record_sent_snippet("test".into()); // distinct key
-        target.record_sent_snippet("rev".into()); // shared with source
+        target.record_snippet_delivery("test".into()); // distinct key
+        target.record_snippet_delivery("rev".into()); // shared with source
         // Target disarms auto-fix-ci; source armed it — Disarm is stronger.
         target
             .policies
@@ -3647,8 +3823,13 @@ mod tests {
             target.notes, "target note\n\nsource note",
             "both notes kept, destination first",
         );
-        // Union, destination MRU first (rev de-duped, not doubled).
-        assert_eq!(target.sent_snippets, vec!["rev", "test", "plan"]);
+        // Union, destination MRU first (rev de-duped, not doubled); the
+        // count sums both sides' deliveries (2 + 2).
+        assert_eq!(
+            target.sent_snippets.recent().to_vec(),
+            vec!["rev", "test", "plan"]
+        );
+        assert_eq!(target.sent_snippets.total(), 4, "delivery counts sum");
         assert_eq!(
             target.policies.arm(crate::AutoFixKind::CiFailure),
             crate::PolicyArm::Disarm,
@@ -3676,7 +3857,7 @@ mod tests {
         target.absorb_user_state_from(&source);
         // Source retains its own state — re-absorbing must be idempotent.
         assert_eq!(source.notes, "source note");
-        assert_eq!(source.sent_snippets, vec!["plan", "rev"]);
+        assert_eq!(source.sent_snippets.recent().to_vec(), vec!["plan", "rev"]);
         assert_eq!(source.cleanup_prompt, CleanupPrompt::Declined);
     }
 }

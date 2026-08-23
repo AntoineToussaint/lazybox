@@ -5973,11 +5973,11 @@ mod rescope_collapse_tests {
         assert!(!cleared.has_notes());
     }
 
-    /// `record_sent_snippet` prepends onto the workspace's MRU and
-    /// reloads verbatim; a re-send moves the key to the front rather
-    /// than duplicating it (issue #463).
+    /// `record_snippet_delivery` prepends onto the workspace's MRU,
+    /// bumps the honest count, and reloads verbatim; a re-send moves the
+    /// key to the front (no duplicate) yet still counts (issue #463).
     #[tokio::test]
-    async fn record_sent_snippet_persists_as_mru() {
+    async fn record_snippet_delivery_persists_count_and_mru() {
         let store = Arc::new(lazybox_store::MemoryStore::new());
         let config = ServerConfig::with_store(store.clone());
 
@@ -5991,17 +5991,27 @@ mod rescope_collapse_tests {
         let key = ws.key.clone();
         seed(&store, &ws);
 
-        crate::workspace::record_sent_snippet(&config, &key, "rev".into()).await;
-        crate::workspace::record_sent_snippet(&config, &key, "plan".into()).await;
-        let reloaded = load_workspace(&config, &key).expect("workspace survives");
-        assert_eq!(reloaded.sent_snippets, vec!["plan", "rev"], "newest-first");
-
-        crate::workspace::record_sent_snippet(&config, &key, "rev".into()).await;
+        crate::workspace::record_snippet_delivery(&config, &key, "rev".into()).await;
+        crate::workspace::record_snippet_delivery(&config, &key, "plan".into()).await;
         let reloaded = load_workspace(&config, &key).expect("workspace survives");
         assert_eq!(
-            reloaded.sent_snippets,
+            reloaded.sent_snippets.recent().to_vec(),
+            vec!["plan", "rev"],
+            "newest-first",
+        );
+        assert_eq!(reloaded.sent_snippets.total(), 2, "count persists");
+
+        crate::workspace::record_snippet_delivery(&config, &key, "rev".into()).await;
+        let reloaded = load_workspace(&config, &key).expect("workspace survives");
+        assert_eq!(
+            reloaded.sent_snippets.recent().to_vec(),
             vec!["rev", "plan"],
             "a re-send moves the key to the front without duplicating",
+        );
+        assert_eq!(
+            reloaded.sent_snippets.total(),
+            3,
+            "but the re-send still counts",
         );
     }
 

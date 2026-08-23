@@ -101,7 +101,7 @@ function workspace(key: string, pr: Task | null): Workspace {
     track_main_behind: false,
     policies: { auto_fix_ci: "Default", auto_fix_conflict: "Default" },
     notes: "",
-    sent_snippets: [],
+    sent_snippets: { total: 0, recent: [] },
     cleanup_prompt: "unresolved",
     created_at: "2026-01-01T00:00:00Z",
     last_viewed_at: null,

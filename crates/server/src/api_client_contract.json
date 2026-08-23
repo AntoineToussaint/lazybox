@@ -234,9 +234,12 @@
           "project_key": "github-o-r",
           "read_indices": [],
           "remote": null,
-          "schema": 6,
+          "schema": 7,
           "seen_count": 0,
-          "sent_snippets": [],
+          "sent_snippets": {
+            "recent": [],
+            "total": 0
+          },
           "sessions": [],
           "snoozed_until": null,
           "track_main": false,

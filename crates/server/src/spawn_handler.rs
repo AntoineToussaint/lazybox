@@ -7922,12 +7922,22 @@ async fn record_confirmed_snippet(
     snippet_key: String,
     prompt: Option<UserPrompt>,
 ) {
+    // Authoritative first: apply and PERSIST the per-workspace delivery
+    // transition (honest count + MRU, one owner) BEFORE announcing
+    // anything, so the `SnippetDelivered` broadcast never claims a
+    // delivery the durable store didn't record. Previously this was four
+    // independent best-effort writes with an unconditional broadcast, so
+    // a failed persist could still light up "Recent" and then vanish on
+    // restart (#463 followup).
+    let workspace_key = WorkspaceKey::new(session_key.as_str().to_string());
+    crate::workspace::record_snippet_delivery(config, &workspace_key, snippet_key.clone()).await;
+
+    // Secondary projections (their own owners), now that the fact is durable.
     if let Some(prompt) = &prompt {
         handle_record_user_message(config, terminal_id, prompt).await;
     }
     client_kv::record_recent_snippet(config, snippet_key.clone()).await;
-    let workspace_key = WorkspaceKey::new(session_key.as_str().to_string());
-    crate::workspace::record_sent_snippet(config, &workspace_key, snippet_key.clone()).await;
+
     let _ = config.bus.send(Event::SnippetDelivered {
         terminal_id,
         session_key,

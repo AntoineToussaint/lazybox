@@ -4253,8 +4253,8 @@ async fn adopt_sessions_carries_user_state_and_activity() {
     )
     .unwrap();
     source_ws.notes = "carry me".into();
-    source_ws.record_sent_snippet("rev".into());
-    source_ws.record_sent_snippet("plan".into());
+    source_ws.record_snippet_delivery("rev".into());
+    source_ws.record_snippet_delivery("plan".into());
     source_ws.merge_activity(&[lazybox_core::Activity {
         author: "alice".into(),
         body: "please rebase".into(),
@@ -4292,9 +4292,9 @@ async fn adopt_sessions_carries_user_state_and_activity() {
     .unwrap();
     assert_eq!(target_ws.notes, "carry me", "notes must follow the adopt");
     assert_eq!(
-        target_ws.sent_snippets,
+        target_ws.sent_snippets.recent().to_vec(),
         vec!["plan", "rev"],
-        "the snippet MRU (the `]N` badge) must follow the adopt",
+        "the snippet MRU must follow the adopt",
     );
     assert!(
         target_ws.activity.iter().any(|a| a.body == "please rebase"),

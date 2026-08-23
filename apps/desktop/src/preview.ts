@@ -108,7 +108,7 @@ export function loadPreview(): PreviewState {
     track_main_behind: false,
     policies: { auto_fix_ci: "Default", auto_fix_conflict: "Default" },
     notes: "",
-    sent_snippets: [],
+    sent_snippets: { total: 0, recent: [] },
     cleanup_prompt: "unresolved",
     created_at: now.toISOString(),
     last_viewed_at: null,

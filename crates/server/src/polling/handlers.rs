@@ -2352,32 +2352,15 @@ pub(crate) async fn prompt_merged_pr_removal_with(
     {
         let mut prompts = config.poll.removal_prompts.lock().await;
         let now = std::time::Instant::now();
-        let default_principal = &config.default_principal_id;
-
-        // Check if ANY principal is due for this prompt. If all principals
-        // have seen it within the reprompt window, skip. If any principal
-        // needs it (never seen or throttle expired), emit to all.
-        let any_principal_due = prompts.prompted.iter().any(|(_, workspace_map)| {
-            workspace_map
-                .get(key.as_str())
-                .map(|prev| now.duration_since(*prev) >= super::REMOVAL_REPROMPT_AFTER)
-                .unwrap_or(true)
-        });
-
-        if !any_principal_due {
+        let stale = prompts
+            .prompted
+            .get(key.as_str())
+            .map(|prev| now.duration_since(*prev) >= super::REMOVAL_REPROMPT_AFTER)
+            .unwrap_or(true);
+        if !stale {
             return;
         }
-
-        // Update all principals' throttle times for this workspace
-        for principal_map in prompts.prompted.values_mut() {
-            principal_map.insert(key.as_str().to_string(), now);
-        }
-        // Ensure default principal has an entry (in case it's new)
-        prompts
-            .prompted
-            .entry(default_principal.clone())
-            .or_default()
-            .insert(key.as_str().to_string(), now);
+        prompts.prompted.insert(key.as_str().to_string(), now);
     }
 
     let session_paths = workspace_worktree_paths(&workspace);

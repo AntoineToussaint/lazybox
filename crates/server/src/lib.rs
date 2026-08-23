@@ -1581,10 +1581,9 @@ pub async fn dispatch_command(
             }
             // A fresh subscriber may have missed removal prompts emitted
             // before it connected (broadcast is fire-and-forget) — reset
-            // the reprompt throttle for this principal so the tick kicked
-            // below re-offers any still-unresolved merged/closed workspace
-            // right away. Other connected clients are unaffected (#1267).
-            polling::mark_removal_prompts_for_replay(config, &config.default_principal_id).await;
+            // the reprompt throttle so the tick kicked below re-offers
+            // any still-unresolved merged/closed workspace right away.
+            polling::mark_removal_prompts_for_replay(config).await;
             // Kick a fresh poll so the freshly-opened TUI refreshes within
             // a few seconds instead of waiting out the current sleep.
             config.poll.wake(true);

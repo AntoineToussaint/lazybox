@@ -26,6 +26,7 @@ which is the canonical source of truth for defaults and field names.
 | [`repos`](#repos) | Per-repo env, mounts, scripts, branch prefix |
 | [`agent`](#agent) | Permission prompts, LLM gateway, agent state-detection timers |
 | [`agents`](#agentsid) | Custom CLI definitions and per-agent model-tier overrides |
+| [`server`](#server) | Daemon-level tuning: ring buffer and credential cache |
 | [`worktree`](#worktree) | Global mounts, scripts, branch prefix, merged-cleanup |
 | [`scan`](#scan) | Roots and depth for read-only external-checkout discovery |
 | [`terminal`](#terminal) | Terminal escape chord + scrollback behavior |

@@ -1127,13 +1127,15 @@ async fn mark_auto_spawn_triggered(config: &ServerConfig, key: &str) {
 /// auto-spawn-on-mention path; future provider-driven actions plug
 /// in by adding a variant + an arm.
 ///
-/// Auto-spawn singleton enforcement happens inside `handle_spawn`
-/// (it checks `find_existing_singleton` per `(session_key, kind)`),
-/// so a `@lazybox` mention on an issue that already has a running
-/// claude session focuses the existing terminal instead of starting
-/// a second one. We rely on that rather than re-implementing the
-/// check here, so the auto-spawn path and the user-pressed `w` path
-/// have IDENTICAL semantics.
+/// Auto-spawn singleton suppression happens inside `handle_spawn`: for
+/// an `Autonomous` origin it checks `find_existing_singleton` per
+/// `(session_key, kind)`, so a `@lazybox` mention on an issue that
+/// already has a running claude focuses the existing terminal instead of
+/// starting a second one — a background trigger never piles a second
+/// agent onto work in progress. (Interactive spawns — user-pressed `a c`
+/// / `w` — intentionally do NOT suppress: the user can run multiple
+/// agents per workspace on demand.) We rely on that rather than
+/// re-implementing the check here.
 /// `gh` is the cached client for this tick (cloned from `TickState`),
 /// used by the auto-fix arm to post the "lazybox is fixing…" PR comment.
 /// `None` when no GitHub source ran this tick — the comment is then

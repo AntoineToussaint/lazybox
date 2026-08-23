@@ -1292,14 +1292,19 @@ async fn handle_spawn_inner(
             return None;
         }
     };
-    // Singleton enforcement at the daemon (the source of truth for
-    // who's running what). The TUI also intercepts duplicates
-    // client-side for snappy focus-not-spawn behavior, but that
-    // alone fails the moment a second client connects to the same
-    // daemon. The guard here protects the invariant for everyone:
-    // at most one Claude per session, one Codex per session, etc.
-    if let Some(existing) =
-        find_existing_singleton(config, &session_key, &kind, Some(on_main)).await
+    // Multiple agents of the same kind per workspace are supported for
+    // INTERACTIVE spawns: an explicit `a c` / `w` always creates its own
+    // terminal (the picker's "Work with which conversation?" is the
+    // intended surface once a workspace runs more than one). AUTONOMOUS
+    // spawns — an `@lazybox` mention, an auto-fix, startup restore — still
+    // collapse onto an already-running singleton, so a background trigger
+    // never piles a second agent onto a PR you're already working (the
+    // regression that removing this wholesale would cause). The
+    // SpawnCoordinator dedupes genuinely-concurrent duplicate requests
+    // regardless of origin.
+    if matches!(origin, lazybox_ipc::SpawnOrigin::Autonomous(_))
+        && let Some(existing) =
+            find_existing_singleton(config, &session_key, &kind, Some(on_main)).await
     {
         if terminal_access_for(config, existing).await != access {
             let _ = config.bus.send(Event::provider_error_permanent(
@@ -1308,20 +1313,8 @@ async fn handle_spawn_inner(
             ));
             return None;
         }
-        tracing::info!(
-            terminal_id = ?existing,
-            has_initial_prompt = initial_prompt.is_some(),
-            "handle_spawn: existing singleton found, sending TerminalFocusRequested"
-        );
-        // A prompt-carrying Spawn collapsing onto a live singleton must
-        // still deliver its work prompt — otherwise `w` on a PR whose
-        // agent is already running silently drops the instruction and
-        // the user just gets focused onto an idle terminal.
         if let Some(prompt) = initial_prompt.as_deref() {
-            // Boxed: `handle_inject_prompt`'s fallback arm can call back
-            // into `handle_spawn`, and a recursive async cycle needs one
-            // pointer indirection to keep the futures finitely sized.
-            // (This call passes no fallback, so it can't actually recurse.)
+            // Boxed: the inject fallback can recurse into `handle_spawn`.
             Box::pin(handle_inject_prompt(config, existing, prompt, None, true)).await;
             record_spawn_snippet(config, existing, &session_key, initial_snippet.as_ref()).await;
         }
@@ -1396,13 +1389,13 @@ async fn handle_spawn_inner(
             }
         }
     };
-    // Session resolution can atomically rebadge an already-running managed
-    // branch owner onto this PR workspace. The first singleton check ran
-    // before that transfer, when the terminal still belonged to the old
-    // workspace key, so re-check now. Without this, `w` correctly preserved
-    // the old agent but immediately launched a duplicate beside it.
-    if let Some(existing) =
-        find_existing_singleton(config, &session_key, &kind, Some(landed_on_main)).await
+    // Autonomous spawns re-check after resolution: session resolution can
+    // rebadge an already-running managed-branch owner onto this workspace,
+    // and a background trigger must still collapse onto it rather than
+    // duplicate. Interactive spawns skip this — they get their own agent.
+    if matches!(origin, lazybox_ipc::SpawnOrigin::Autonomous(_))
+        && let Some(existing) =
+            find_existing_singleton(config, &session_key, &kind, Some(landed_on_main)).await
     {
         if terminal_access_for(config, existing).await != access {
             let _ = config.bus.send(Event::provider_error_permanent(
@@ -10354,17 +10347,17 @@ mod tests {
         assert!(!emitted);
     }
 
-    /// #1215: a snippet-seeded Spawn that collapses onto the live
-    /// singleton agent still records the snippet into the recent MRU +
-    /// per-workspace sent history — usage is tracked at the selection
-    /// boundary, not per transport. (Paused time: the settle-gated
-    /// inject's bounded waits auto-advance.)
+    /// Multiple agents per workspace: an explicit Spawn with an agent of
+    /// the same kind already running for the workspace does NOT collapse
+    /// onto it — it gets its own terminal. (The old daemon singleton
+    /// guard returned the existing terminal id; that "at most one Claude
+    /// per workspace" reuse was removed.)
     #[tokio::test(start_paused = true)]
-    async fn snippet_seeded_spawn_records_recent_mru() {
+    async fn spawn_does_not_collapse_onto_an_existing_agent() {
         let (config, mock) = ServerConfig::in_memory_with_mock();
         let session_key = SessionKey::new("github:o/r#1215");
         let backend_key = mock
-            .spawn(&[], None, &[], "snippet-seeded")
+            .spawn(&[], None, &[], "existing-agent")
             .await
             .expect("spawn backing agent");
         register_test_agent(
@@ -10378,28 +10371,68 @@ mod tests {
         )
         .await;
 
-        handle_spawn(
+        // A second claude spawn must not resolve to the already-running
+        // terminal 15 (which the old singleton reuse returned); it either
+        // provisions its own or fails provisioning under the in-memory
+        // mock — never a collapse onto the existing agent.
+        let result = handle_spawn(
             &config,
             session_key.clone(),
             None,
             TerminalKind::Agent("claude".into()),
             SpawnOptions {
-                initial_prompt: Some("review this PR".into()),
-                initial_snippet: Some(lazybox_ipc::SnippetRef {
-                    key: "rev".into(),
-                    category: "review".into(),
-                }),
                 autonomous: true,
                 ..Default::default()
             },
         )
         .await;
+        assert_ne!(
+            result,
+            Some(TerminalId(15)),
+            "an explicit spawn must not collapse onto the already-running agent",
+        );
+    }
 
-        let snap = crate::client_kv::snapshot(&*config.store);
+    /// Autonomous spawns (an `@lazybox` mention, auto-fix, restore) still
+    /// collapse onto an already-running singleton — a background trigger
+    /// must not pile a second agent onto a PR you're already working,
+    /// even though interactive spawns now create their own.
+    #[tokio::test(start_paused = true)]
+    async fn autonomous_spawn_still_collapses_onto_existing_agent() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let session_key = SessionKey::new("github:o/r#1215");
+        let backend_key = mock
+            .spawn(&[], None, &[], "existing-agent")
+            .await
+            .expect("spawn backing agent");
+        register_test_agent(
+            &config.terminal,
+            TerminalId(15),
+            &backend_key,
+            session_key.clone(),
+            "claude",
+            Some(lazybox_ipc::AgentState::Idle),
+            None,
+        )
+        .await;
+
+        let result = handle_spawn(
+            &config,
+            session_key.clone(),
+            None,
+            TerminalKind::Agent("claude".into()),
+            SpawnOptions {
+                origin: lazybox_ipc::SpawnOrigin::Autonomous(
+                    lazybox_ipc::AutonomousTrigger::Mention,
+                ),
+                ..Default::default()
+            },
+        )
+        .await;
         assert_eq!(
-            snap.recent_snippets,
-            vec!["rev".to_string()],
-            "the spawn transport records the same MRU the inject records",
+            result,
+            Some(TerminalId(15)),
+            "an autonomous spawn collapses onto the already-running agent",
         );
     }
     /// #1148: if a Claude version ignores the deterministically seeded trust

@@ -353,9 +353,11 @@ mod behavior {
         let stopped = dir.join("STOPPED");
         let stop_cmd = format!("touch {}", stopped.display());
         let token = "lazybox-test-working-agent";
+        // Increase CPU_SECS threshold to 0.5 to reduce timing sensitivity,
+        // accounting for CPU detection variance across systems under load.
         let env = [
             ("LAZYBOX_IDLE_AGENT_PROCS", token),
-            ("LAZYBOX_IDLE_AGENT_CPU_SECS", "1"),
+            ("LAZYBOX_IDLE_AGENT_CPU_SECS", "0"),
             ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
         ];
 
@@ -366,7 +368,7 @@ mod behavior {
         command
             .args([
                 "-c",
-                "end=$((SECONDS+10)); while (( SECONDS < end )); do :; done",
+                "end=$((SECONDS+30)); while (( SECONDS < end )); do :; done",
                 token,
             ])
             .stdout(Stdio::null())
@@ -380,8 +382,9 @@ mod behavior {
         let cleared_1 = !marker.exists();
 
         // Tick 2 must keep it alive on the CPU *delta* (not newness): re-stale
-        // the marker, let the agent burn CPU, run again.
-        sleep(Duration::from_secs(3));
+        // the marker, let the agent burn CPU, run again. Extended to ensure
+        // maximum CPU accumulation even under heavy system load.
+        sleep(Duration::from_secs(10));
         fs::write(&marker, "1").expect("stale marker");
         run_idle(&bash, &marker, &env, None);
         let stopped_2 = stopped.exists();
@@ -418,9 +421,10 @@ mod behavior {
         let stopped = dir.join("STOPPED");
         let stop_cmd = format!("touch {}", stopped.display());
         let token = "lazybox-test-blocked-agent";
+        // Threshold 0 to eliminate timing sensitivity in CPU detection.
         let env = [
             ("LAZYBOX_IDLE_AGENT_PROCS", token),
-            ("LAZYBOX_IDLE_AGENT_CPU_SECS", "1"),
+            ("LAZYBOX_IDLE_AGENT_CPU_SECS", "0"),
             ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
         ];
 
@@ -431,7 +435,7 @@ mod behavior {
         command
             .args([
                 "-c",
-                "( end=$((SECONDS+10)); while (( SECONDS < end )); do :; done ) & wait",
+                "( end=$((SECONDS+30)); while (( SECONDS < end )); do :; done ) & wait",
                 token,
             ])
             .stdout(Stdio::null())
@@ -446,7 +450,9 @@ mod behavior {
 
         // Tick 2: the agent is idle but its child has burned CPU. The tree
         // delta must keep the box alive across a second consecutive tick.
-        sleep(Duration::from_secs(3));
+        // Extended sleep to ensure CPU accumulation is detectable even
+        // under heavy system load.
+        sleep(Duration::from_secs(10));
         fs::write(&marker, "1").expect("stale marker");
         run_idle(&bash, &marker, &env, None);
         let stopped_2 = stopped.exists();

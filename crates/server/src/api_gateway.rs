@@ -1065,7 +1065,7 @@ pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
         // its own `Box` so the JSON/TS contract is untouched. The clone
         // is per-desktop-client, only when this opt-in gateway runs.
         Event::WorkspaceUpserted(workspace) => Some(DesktopEvent::WorkspaceUpserted(Box::new(
-            std::sync::Arc::unwrap_or_clone(workspace),
+            std::sync::Arc::try_unwrap(workspace).unwrap_or_else(|arc| (*arc).clone()),
         ))),
         Event::WorkspaceRemoved(key) => Some(DesktopEvent::WorkspaceRemoved(key)),
         Event::TerminalSpawned {

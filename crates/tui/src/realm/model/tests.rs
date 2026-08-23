@@ -2021,12 +2021,12 @@ mod effects_tests {
         );
     }
 
-    /// Issue #525: the workspace-removal prompt is the *event* path — it
-    /// pops unsolicited (a merged/closed task), so its default comes from
-    /// `ui.confirm_default.event` (default No); a stray Enter must not
-    /// force-delete a worktree.
+    /// Every confirm now defaults to Yes for speed — including the
+    /// unsolicited workspace-removal prompt — with the danger conveyed by
+    /// the modal's warning coloring (a destructive confirm) rather than by
+    /// defaulting to No.
     #[test]
-    fn removal_prompt_defaults_to_no_from_event_source() {
+    fn removal_prompt_defaults_to_yes() {
         let mut m = build_model();
         m.removal_prompt_queue
             .push_back(super::super::RemovalPrompt {
@@ -2040,8 +2040,8 @@ mod effects_tests {
         m.maybe_mount_next_removal_prompt();
         assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
         assert!(
-            !mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
-            "event-driven removal prompt should default to No",
+            mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
+            "the removal prompt defaults to Yes (danger shown by coloring)",
         );
     }
 
@@ -2069,20 +2069,22 @@ mod effects_tests {
         );
     }
 
-    /// Issue #312: the clean-worktrees bulk-wipe confirm defaults No.
+    /// The clean-worktrees bulk-wipe confirm now defaults Yes for speed,
+    /// with the danger shown by the destructive warning coloring.
     #[test]
-    fn clean_worktrees_prompt_defaults_to_no() {
+    fn clean_worktrees_prompt_defaults_to_yes() {
         let mut m = build_model();
         m.mount_clean_worktrees_confirm();
         assert!(
-            !mounted_confirm_default_yes(&m, Id::CleanWorktreesConfirm),
-            "clean-worktrees prompt should default to No",
+            mounted_confirm_default_yes(&m, Id::CleanWorktreesConfirm),
+            "clean-worktrees prompt defaults to Yes (danger shown by coloring)",
         );
     }
 
-    /// Issue #312: the inspector's delete-worktree confirm defaults No.
+    /// The inspector's delete-worktree confirm now defaults Yes, with the
+    /// danger shown by the destructive warning coloring.
     #[test]
-    fn inspect_delete_prompt_defaults_to_no() {
+    fn inspect_delete_prompt_defaults_to_yes() {
         let mut m = build_model();
         m.mount_inspect_confirm(lazybox_ipc::WorktreeInspectionDto {
             path: std::path::PathBuf::from("/tmp/worktrees/o-r-feat"),
@@ -2097,8 +2099,8 @@ mod effects_tests {
             is_safe_to_delete: false,
         });
         assert!(
-            !mounted_confirm_default_yes(&m, Id::InspectConfirm),
-            "inspector delete prompt should default to No",
+            mounted_confirm_default_yes(&m, Id::InspectConfirm),
+            "inspector delete prompt defaults to Yes (danger shown by coloring)",
         );
     }
 
@@ -2124,15 +2126,14 @@ mod effects_tests {
         );
     }
 
-    /// Issue #525: a cautious user forcing `destructive_shortcut: no`
-    /// flips even a chord-initiated confirm back to No.
+    /// Every destructive confirm now defaults to Yes for speed — the old
+    /// `destructive_shortcut: no` opt-out no longer flips it to No; the
+    /// danger is conveyed by the modal's warning coloring instead.
     #[test]
-    fn action_confirm_respects_no_shortcut_override() {
-        use lazybox_config::ConfirmDefault;
+    fn destructive_action_confirm_defaults_yes() {
         use lazybox_tui_core::action::Action;
 
         let mut m = build_model();
-        m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::No;
         m.mount_action_confirm(
             Action::Archive,
             vec![super::super::ActionConfirmTarget::Workspace(
@@ -2141,8 +2142,8 @@ mod effects_tests {
             None,
         );
         assert!(
-            !mounted_confirm_default_yes(&m, Id::ActionConfirm),
-            "destructive_shortcut: no forces the confirm back to No",
+            mounted_confirm_default_yes(&m, Id::ActionConfirm),
+            "a destructive Archive confirm defaults to Yes (danger shown by coloring)",
         );
     }
 

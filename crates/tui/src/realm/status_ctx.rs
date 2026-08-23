@@ -3,7 +3,7 @@
 //! fields (and the tick / fade helpers that manage them) live in
 //! one place instead of being scattered across the orchestrator.
 
-use crate::realm::components::footer::{Notice, NoticeSeverity};
+use crate::realm::components::footer::{Notice, NoticeKey, NoticeSeverity};
 use crate::realm::components::polling::Polling;
 use crate::realm::model::Msg;
 use chrono::{DateTime, Utc};
@@ -529,11 +529,34 @@ impl StatusCtx {
     /// failed) records nothing, since those have their own recovery.
     pub fn remember_dismissed_action_error(&mut self) {
         if let Some(n) = self.notice.as_ref()
-            && n.is_action_toast()
-            && let Some(ws) = n.workspace.clone()
+            && let Some(ws) = n.workspace().map(str::to_string)
         {
             self.dismissed_action_errors.insert(ws, n.message.clone());
         }
+    }
+
+    /// Retract a live notice whose cause `key` names — the general
+    /// "this condition resolved" primitive. Replaces the workspace-only
+    /// `clear_action_error` special case: ANY keyed notice (a stale
+    /// daemon build, a dropped connection, a workspace action) is cleared
+    /// through here when its cause ends, instead of sitting in the footer
+    /// until dismissed. For a [`NoticeKey::WorkspaceAction`] it also
+    /// forgets the dismissal/ack so a genuinely new failure surfaces
+    /// afresh (#832/#1245) — this runs even when no notice is currently
+    /// visible. Returns whether a visible notice was cleared.
+    pub fn resolve_notice(&mut self, key: &NoticeKey) -> bool {
+        if let NoticeKey::WorkspaceAction(ws) = key {
+            self.forget_dismissed_action_error(ws);
+        }
+        if self
+            .notice
+            .as_ref()
+            .is_some_and(|n| n.key.as_ref() == Some(key))
+        {
+            self.notice = None;
+            return true;
+        }
+        false
     }
 
     /// Whether an action error for `workspace` carrying this exact
@@ -883,7 +906,7 @@ mod tests {
             message: "x".into(),
             severity,
             set_at: Instant::now() - age,
-            workspace: None,
+            key: None,
             repeats: 1,
         }
     }
@@ -947,7 +970,7 @@ mod tests {
     #[test]
     fn action_toast_fades_on_a_long_timeout() {
         let action_toast = |age| Notice {
-            workspace: Some("github:o/r#1".into()),
+            key: Some(NoticeKey::WorkspaceAction("github:o/r#1".into())),
             ..notice(NoticeSeverity::Permanent, age)
         };
 
@@ -980,6 +1003,53 @@ mod tests {
             "an untagged Permanent system banner must not auto-fade"
         );
         assert!(s.notice.is_some());
+    }
+
+    /// The general resolve primitive retracts a notice by its typed
+    /// cause and leaves a notice with a different (or no) key alone —
+    /// what lets a resolved system condition (matching daemon build,
+    /// reconnect) clear its banner instead of it sitting until dismissed.
+    #[test]
+    fn resolve_notice_clears_only_the_matching_key() {
+        let mut s = StatusCtx::new();
+
+        // A different key is untouched.
+        let mut n = notice(NoticeSeverity::Permanent, Duration::from_secs(0));
+        n.key = Some(NoticeKey::DaemonBuildMismatch);
+        s.notice = Some(n);
+        assert!(!s.resolve_notice(&NoticeKey::DaemonConnection));
+        assert!(s.notice.is_some(), "an unrelated cause must not clear it");
+
+        // The matching key clears it.
+        assert!(s.resolve_notice(&NoticeKey::DaemonBuildMismatch));
+        assert!(s.notice.is_none());
+
+        // Nothing to clear reports false.
+        assert!(!s.resolve_notice(&NoticeKey::DaemonBuildMismatch));
+    }
+
+    /// Resolving a workspace-action notice also forgets its dismissal, so
+    /// a genuinely new failure surfaces afresh after the user dismissed
+    /// the earlier one (#832) — and it runs even when no banner is up.
+    #[test]
+    fn resolve_notice_forgets_workspace_action_dismissal() {
+        let mut s = StatusCtx::new();
+        let ws = "github:o/r#1";
+        let mut n = notice(NoticeSeverity::Permanent, Duration::from_secs(0));
+        n.message = "merge failed".into();
+        n.key = Some(NoticeKey::WorkspaceAction(ws.into()));
+        s.notice = Some(n);
+        s.remember_dismissed_action_error();
+        assert!(s.action_error_dismissed(ws, "merge failed"));
+
+        // The condition resolved: forget the dismissal even though the
+        // banner already faded (notice cleared).
+        s.notice = None;
+        assert!(!s.resolve_notice(&NoticeKey::WorkspaceAction(ws.into())));
+        assert!(
+            !s.action_error_dismissed(ws, "merge failed"),
+            "a resolved action error re-arms so the next failure shows",
+        );
     }
 
     #[test]

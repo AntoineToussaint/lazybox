@@ -65,6 +65,31 @@ impl NoticeSeverity {
     }
 }
 
+/// Typed identity of a footer notice — the "what is this notice about"
+/// that lets a later event *resolve* it when its cause clears, rather
+/// than leaving it to sit until the user dismisses it.
+///
+/// Before this existed, only workspace-tagged action toasts carried an
+/// identity (an ad-hoc `Option<String>`), so the #588 self-clear and the
+/// #832 dismiss-suppression were special cases welded to that one shape;
+/// every *other* error (a stale daemon build, a lost connection) had no
+/// identity and so no way to be cleared when resolved — the
+/// never-disappearing footer. A typed key generalizes the identity: any
+/// notice can name its cause and be retracted by [`crate::realm::model::Model`]
+/// through one `resolve_notice` path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoticeKey {
+    /// A merge/close/update/delete GitHub rejected, tagged with the
+    /// workspace it was about. Self-clears on a superseding success and
+    /// carries the bounded action-toast fade (#588).
+    WorkspaceAction(String),
+    /// The connected daemon was built from a different commit than this
+    /// client. Resolves when a matching-build daemon connects.
+    DaemonBuildMismatch,
+    /// The daemon connection dropped. Resolves on reconnect.
+    DaemonConnection,
+}
+
 /// One footer notice — message + severity + when it was set
 /// (for auto-fade).
 #[derive(Debug, Clone)]
@@ -72,10 +97,10 @@ pub struct Notice {
     pub message: String,
     pub severity: NoticeSeverity,
     pub set_at: std::time::Instant,
-    /// Workspace this notice is about, when it names a specific
-    /// PR/issue action (merge/close/update failed). Lets a superseding
-    /// success for the same workspace self-clear a stale error (#588).
-    pub workspace: Option<String>,
+    /// What this notice is *about*, when it has a resolvable cause — so a
+    /// later event can retract it (see [`NoticeKey`]). `None` for a plain
+    /// transient flash with no lifecycle beyond its fade.
+    pub key: Option<NoticeKey>,
     /// How many times this exact notice has fired while on screen. An
     /// identical re-fire (a poll sweep re-emitting the same error)
     /// bumps this instead of resetting `set_at` — the fade clock runs
@@ -91,8 +116,17 @@ impl Notice {
             message: message.into(),
             severity,
             set_at: std::time::Instant::now(),
-            workspace: None,
+            key: None,
             repeats: 1,
+        }
+    }
+
+    /// The workspace this notice is about, if it is a workspace-action
+    /// toast. Convenience over matching [`NoticeKey::WorkspaceAction`].
+    pub fn workspace(&self) -> Option<&str> {
+        match &self.key {
+            Some(NoticeKey::WorkspaceAction(ws)) => Some(ws.as_str()),
+            _ => None,
         }
     }
 
@@ -104,7 +138,7 @@ impl Notice {
     /// stay until dismissed or resolved — so the fade keys off this, not
     /// off `Permanent` severity alone.
     pub fn is_action_toast(&self) -> bool {
-        self.severity == NoticeSeverity::Permanent && self.workspace.is_some()
+        matches!(self.key, Some(NoticeKey::WorkspaceAction(_)))
     }
 }
 

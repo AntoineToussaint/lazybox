@@ -4237,11 +4237,17 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     fn note_daemon_connection_failed(&mut self, message: String) {
+        use crate::realm::components::footer::NoticeKey;
         if self.daemon_disconnect_notified {
             return;
         }
         self.daemon_disconnect_notified = true;
-        self.flash_error(message);
+        self.flash_error(message.clone());
+        if let Some(n) = self.status.notice.as_mut()
+            && n.message == message
+        {
+            n.key = Some(NoticeKey::DaemonConnection);
+        }
     }
 
     /// Raise the one-shot "reconnecting…" banner while the transport
@@ -4257,6 +4263,11 @@ impl<T: TerminalAdapter> Model<T> {
             RECONNECTING_NOTICE,
             crate::realm::components::footer::NoticeSeverity::Auth,
         );
+        if let Some(n) = self.status.notice.as_mut()
+            && n.message == RECONNECTING_NOTICE
+        {
+            n.key = Some(crate::realm::components::footer::NoticeKey::DaemonConnection);
+        }
     }
 
     /// Retract the reconnecting banner once the link is back and refresh
@@ -4267,15 +4278,16 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         self.daemon_reconnecting_notified = false;
-        // Clear the banner only if it's still ours — a real error raised
-        // during the outage must survive.
+        // The link is back: allow a future outage to notify again.
+        self.daemon_disconnect_notified = false;
+        // Retract the connection banner by its typed cause — a real error
+        // raised during the outage carries a different key (or none) and
+        // survives. Covers both the "reconnecting…" banner and a prior
+        // hard connection-failed banner.
         if self
             .status
-            .notice
-            .as_ref()
-            .is_some_and(|n| n.message == RECONNECTING_NOTICE)
+            .resolve_notice(&crate::realm::components::footer::NoticeKey::DaemonConnection)
         {
-            self.status.notice = None;
             self.redraw = true;
         }
         if let Some(build) = self.client.daemon_build() {
@@ -4361,7 +4373,8 @@ impl<T: TerminalAdapter> Model<T> {
         self.status.forget_dismissed_action_error(ws);
         self.flash_error(msg);
         if let Some(n) = self.status.notice.as_mut() {
-            n.workspace = Some(ws.to_string());
+            n.key =
+                Some(crate::realm::components::footer::NoticeKey::WorkspaceAction(ws.to_string()));
         }
     }
 
@@ -4372,24 +4385,18 @@ impl<T: TerminalAdapter> Model<T> {
     /// notice tagged with this workspace; an unrelated error or another
     /// workspace's banner is left alone. Returns true if one cleared.
     pub fn clear_action_error(&mut self, workspace: &lazybox_core::WorkspaceKey) -> bool {
-        use crate::realm::components::footer::NoticeSeverity;
-        // The condition resolved, so drop any dismiss-suppression for
-        // this workspace — a genuinely new failure later must surface
-        // even if it repeats an earlier, already-dismissed message
-        // (#832). Runs even when the banner already faded / was
-        // dismissed (notice is `None`), which the visible-notice clear
-        // below can't reach.
-        self.status
-            .forget_dismissed_action_error(workspace.as_str());
-        if let Some(n) = self.status.notice.as_ref()
-            && n.severity == NoticeSeverity::Permanent
-            && n.workspace.as_deref() == Some(workspace.as_str())
-        {
-            self.status.notice = None;
+        use crate::realm::components::footer::NoticeKey;
+        // Resolve the workspace-action notice through the general
+        // primitive: it forgets the dismiss-suppression for this
+        // workspace (even when the banner already faded / notice is
+        // `None`, #832) and clears a live banner tagged with this key.
+        let cleared = self
+            .status
+            .resolve_notice(&NoticeKey::WorkspaceAction(workspace.as_str().to_string()));
+        if cleared {
             self.redraw = true;
-            return true;
         }
-        false
+        cleared
     }
 
     /// Surface a sticky banner when the daemon we connected to was built
@@ -4400,22 +4407,27 @@ impl<T: TerminalAdapter> Model<T> {
     /// the mismatch.
     /// A matching build is the common case and stays quiet.
     pub fn note_daemon_build(&mut self, daemon_build: &str) {
+        use crate::realm::components::footer::NoticeKey;
         if daemon_build != lazybox_ipc::BUILD_VERSION {
-            self.flash_error(format!(
+            let msg = format!(
                 "{BUILD_MISMATCH_PREFIX}{daemon_build}, client {} — restart the daemon \
                  (`lazybox server stop`) to pick up this build",
                 lazybox_ipc::BUILD_VERSION
-            ));
-        } else if self
-            .status
-            .notice
-            .as_ref()
-            .is_some_and(|n| n.message.starts_with(BUILD_MISMATCH_PREFIX))
-        {
+            );
+            self.flash_error(msg.clone());
+            // Tag the banner with its cause so a later matching-build
+            // connect can retract it by identity, not by matching the
+            // message prefix. Guarded on the message so a suppressed
+            // re-fire (#1245) doesn't mis-tag an unrelated notice.
+            if let Some(n) = self.status.notice.as_mut()
+                && n.message == msg
+            {
+                n.key = Some(NoticeKey::DaemonBuildMismatch);
+            }
+        } else if self.status.resolve_notice(&NoticeKey::DaemonBuildMismatch) {
             // Builds now match — e.g. the daemon was restarted to this
             // build and a reconnect re-checked it. Retract the stale
             // mismatch banner instead of leaving it up forever.
-            self.status.notice = None;
             self.redraw = true;
         }
     }

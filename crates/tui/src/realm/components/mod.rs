@@ -16,6 +16,7 @@ pub mod focus_header;
 pub mod footer;
 pub mod help;
 pub mod help_ask;
+pub mod hopper;
 pub mod input;
 pub mod jump_picker;
 pub mod loading;

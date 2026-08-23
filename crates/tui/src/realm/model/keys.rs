@@ -1019,6 +1019,7 @@ impl<T: TerminalAdapter> Model<T> {
             LeaderCmd::Skills => self.mount_skill_picker(String::new()),
             LeaderCmd::RecallPrompt => self.recall_prompt(cmds),
             LeaderCmd::PromptHistory => self.mount_prompt_history_picker(),
+            LeaderCmd::OpenHopper => self.mount_hopper(),
             LeaderCmd::OpenUrls => self.open_terminal_urls(),
             LeaderCmd::ToggleFocusMode => self.toggle_focus_mode(),
             LeaderCmd::ExitToSidebar => self.leave_terminal_to_sidebar(),
@@ -1055,6 +1056,7 @@ impl<T: TerminalAdapter> Model<T> {
             LeaderCmd::Skills => self.sidebar_send_skill(),
             LeaderCmd::RecallPrompt => self.sidebar_recall_prompt(cmds),
             LeaderCmd::PromptHistory => self.sidebar_prompt_history(),
+            LeaderCmd::OpenHopper => self.mount_hopper(),
             LeaderCmd::OpenUrls => self.sidebar_open_urls(),
             // Everything else is terminal-pane scoped and never offered in
             // the sidebar menu; a stray resolution is a no-op.
@@ -2601,6 +2603,7 @@ pub(super) fn action_from_kind(
         ActionKind::OpenSyncStatus => Action::OpenSyncStatus,
         ActionKind::OpenMessages => Action::OpenMessages,
         ActionKind::OpenErrorInbox => Action::OpenErrorInbox,
+        ActionKind::OpenHopper => Action::OpenHopper,
         // DismissNotice is deliberately absent: it's routed through the
         // explicit Esc branch in `handle_pane_key` (which yields to a
         // sidebar multi-select and to a live terminal), not the generic

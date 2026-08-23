@@ -729,6 +729,11 @@ h2 {
   box-shadow: inset 3px 0 var(--theme-accent, #79d1b7);
 }
 
+.workspace-row.multi-selected {
+  border-left: 3px solid var(--theme-accent, #79d1b7);
+  background: var(--color-accent-soft);
+}
+
 .workspace-mark {
   width: 1rem;
   height: 1rem;

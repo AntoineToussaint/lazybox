@@ -1005,6 +1005,13 @@ impl Server {
                         }
                         lazybox_ipc::Command::InjectPrompt { .. } => "InjectPrompt",
                         lazybox_ipc::Command::RecoverAgentCredit { .. } => "RecoverAgentCredit",
+                        lazybox_ipc::Command::SaveHopper { .. } => "SaveHopper",
+                        lazybox_ipc::Command::AssignHopperProject { .. } => {
+                            "AssignHopperProject"
+                        }
+                        lazybox_ipc::Command::SetHopperCompleted { .. } => {
+                            "SetHopperCompleted"
+                        }
                         lazybox_ipc::Command::MarkRead { .. } => "MarkRead",
                         lazybox_ipc::Command::FocusWorkspace { .. } => "FocusWorkspace",
                         lazybox_ipc::Command::ActivateWorkspace { .. } => "ActivateWorkspace",
@@ -1572,11 +1579,14 @@ pub async fn dispatch_command(
                     terminal_ids: restart_required,
                 });
             }
-            // A fresh subscriber may have missed removal prompts emitted
-            // before it connected (broadcast is fire-and-forget) — reset
-            // the reprompt throttle so the tick kicked below re-offers
-            // any still-unresolved merged/closed workspace right away.
-            polling::mark_removal_prompts_for_replay(config).await;
+            // Note: A fresh subscriber may have missed removal prompts emitted
+            // before it connected (broadcast is fire-and-forget) — however,
+            // clearing the global throttle would affect OTHER connected clients
+            // who already dismissed or handled these modals (#1267 zombie modals).
+            // Instead, rely on the store-persisted cleanup_prompt state: workspaces
+            // with cleanup_prompt = Declined skip reprompting, and fresh clients
+            // will see unresolved removals within the next poll cycle (~15s for hot
+            // set) or 5-minute reprompt window. The wakeup below ensures timely refresh.
             // Kick a fresh poll so the freshly-opened TUI refreshes within
             // a few seconds instead of waiting out the current sleep.
             config.poll.wake(true);
@@ -1921,6 +1931,29 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::CreateProject { name } => {
             workspace::create_local_project(config, &name);
+        }
+        lazybox_ipc::Command::SaveHopper { entries } => {
+            if let Err(error) = workspace::save_hopper(config, entries) {
+                tracing::error!(error = %error, "save hopper failed");
+                let _ = config
+                    .bus
+                    .send(lazybox_ipc::Event::provider_error_permanent(
+                        "hopper",
+                        format!("Hopper was not saved: {error}"),
+                    ));
+            }
+        }
+        lazybox_ipc::Command::AssignHopperProject {
+            workspace_key,
+            project_key,
+        } => {
+            workspace::assign_hopper_project(config, &workspace_key, project_key).await;
+        }
+        lazybox_ipc::Command::SetHopperCompleted {
+            workspace_key,
+            completed,
+        } => {
+            workspace::set_hopper_completed(config, &workspace_key, completed).await;
         }
         lazybox_ipc::Command::Snooze { session_key, until } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());

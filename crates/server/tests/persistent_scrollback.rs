@@ -67,9 +67,9 @@ fn scrollback_rows(stream: &[u8]) -> usize {
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct IsolatedHome {
-    _guard: std::sync::MutexGuard<'static, ()>,
-    _tmp: tempfile::TempDir,
     prev: Option<std::ffi::OsString>,
+    _tmp: tempfile::TempDir,
+    _guard: std::sync::MutexGuard<'static, ()>,
 }
 
 impl IsolatedHome {

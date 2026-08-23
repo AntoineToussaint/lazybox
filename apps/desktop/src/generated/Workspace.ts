@@ -2,6 +2,7 @@
 import type { Activity } from "./Activity";
 import type { AutomationPolicies } from "./AutomationPolicies";
 import type { CleanupPrompt } from "./CleanupPrompt";
+import type { HopperMeta } from "./HopperMeta";
 import type { ProjectKey } from "./ProjectKey";
 import type { Session } from "./Session";
 import type { Task } from "./Task";
@@ -38,6 +39,12 @@ project_key: ProjectKey | null,
  * derived workspaces leave this `false`.
  */
 local: boolean,
+/**
+ * Present when this is a user-captured personal Hopper workspace.
+ * Kept separate from local: imported checkouts and hand-created
+ * project workspaces are local too, but do not belong in the Hopper.
+ */
+hopper: HopperMeta | null,
 /**
  * When `Some`, this is a **linked (no-worktree) checkout**: the
  * workspace points directly at an existing clone on disk (a

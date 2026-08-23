@@ -10,6 +10,22 @@
 #[cfg(test)]
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Seed a bare workspace into the sidebar's workspace map so a removal
+/// prompt targeting `key` passes the mount-time liveness gate
+/// (`maybe_mount_next_removal_prompt` drops prompts for unknown
+/// workspaces, preventing an orphaned "remove <gone workspace>?" modal).
+/// File-level so every child test module reaches it as `super::seed_ws`.
+#[cfg(test)]
+fn seed_ws(m: &mut crate::realm::model::Model<tuirealm::terminal::TestTerminalAdapter>, key: &str) {
+    m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+        lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new(key),
+            "main",
+            chrono::Utc::now(),
+        ),
+    )));
+}
+
 #[cfg(test)]
 mod prompt_history_format_tests {
     //! Formatting helpers for the `]]h` prompt-history rows (#523).
@@ -1643,6 +1659,47 @@ mod effects_tests {
         }
     }
 
+    /// Regression: a removal prompt for a workspace the client doesn't
+    /// know about (never in the sidebar, or already gone) is DROPPED at
+    /// the mount-time liveness gate rather than shown as an orphaned
+    /// "remove <gone workspace>?" modal. Once the workspace is known, a
+    /// re-emit (the daemon's throttled sweep) mounts normally — so a
+    /// prompt dropped during a brief connect race self-heals.
+    #[test]
+    fn removal_prompt_for_unknown_workspace_is_dropped() {
+        use lazybox_ipc::Event as IpcEvent;
+        let removable = |key: &str| IpcEvent::MergedPrRemovable {
+            workspace_key: WorkspaceKey::new(key),
+            label: key.into(),
+            terminal_state: lazybox_ipc::RemovableTerminalState::Merged,
+            active_terminal_count: 0,
+            has_local_work: false,
+        };
+
+        // Unknown workspace (never seeded): the prompt is dropped, not
+        // mounted, and not left lingering in the queue.
+        let mut m = build_model();
+        m.handle_daemon_event(removable("github:o/r#404"));
+        assert_eq!(
+            m.top_modal(),
+            None,
+            "no orphaned modal for a workspace not in the sidebar",
+        );
+        assert!(
+            m.removal_prompt_queue.is_empty(),
+            "the orphaned prompt is dropped at the gate, not left queued",
+        );
+
+        // Same workspace, now known: a re-emit mounts normally.
+        super::seed_ws(&mut m, "github:o/r#404");
+        m.handle_daemon_event(removable("github:o/r#404"));
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::RemoveOutOfScope),
+            "a known workspace's removal prompt mounts",
+        );
+    }
+
     /// A `MergedPrRemovable` event mounts the removal confirm (reason
     /// `Merged`), and a re-emit for the same workspace doesn't stack a
     /// second prompt — the daemon's level-triggered re-emits (#292)
@@ -1652,6 +1709,8 @@ mod effects_tests {
     fn merged_pr_removable_mounts_confirm_and_dedupes() {
         use lazybox_ipc::Event as IpcEvent;
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         let ev = || IpcEvent::MergedPrRemovable {
             workspace_key: WorkspaceKey::new("github:o/r#1"),
             label: "o/r#1".into(),
@@ -1683,6 +1742,8 @@ mod effects_tests {
     fn removal_cancelled_dismisses_mounted_prompt() {
         use lazybox_ipc::Event as IpcEvent;
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         m.handle_daemon_event(IpcEvent::MergedPrRemovable {
             workspace_key: WorkspaceKey::new("github:o/r#1"),
             label: "o/r#1".into(),
@@ -1707,6 +1768,8 @@ mod effects_tests {
     fn removal_cancelled_neutralizes_buried_prompt() {
         use lazybox_ipc::Event as IpcEvent;
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         m.handle_daemon_event(IpcEvent::MergedPrRemovable {
             workspace_key: WorkspaceKey::new("github:o/r#1"),
             label: "o/r#1".into(),
@@ -1738,6 +1801,8 @@ mod effects_tests {
     fn removal_cancelled_ignores_other_workspace() {
         use lazybox_ipc::Event as IpcEvent;
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         m.handle_daemon_event(IpcEvent::MergedPrRemovable {
             workspace_key: WorkspaceKey::new("github:o/r#1"),
             label: "o/r#1".into(),
@@ -1765,6 +1830,8 @@ mod effects_tests {
     fn two_merged_pr_removable_events_serialize_into_two_modals() {
         use lazybox_ipc::Event as IpcEvent;
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         let ev = |n: u64| IpcEvent::MergedPrRemovable {
             workspace_key: WorkspaceKey::new(format!("github:o/r#{n}")),
             label: format!("o/r#{n}"),
@@ -1814,6 +1881,8 @@ mod effects_tests {
     fn workspace_removed_retracts_a_queued_removal_prompt() {
         use lazybox_ipc::Event as IpcEvent;
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         let ev = |n: u64| IpcEvent::MergedPrRemovable {
             workspace_key: WorkspaceKey::new(format!("github:o/r#{n}")),
             label: format!("o/r#{n}"),
@@ -1852,6 +1921,8 @@ mod effects_tests {
     fn workspace_removed_dismisses_the_mounted_removal_prompt() {
         use lazybox_ipc::Event as IpcEvent;
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         let ws = WorkspaceKey::new("github:o/r#1");
         m.handle_daemon_event(IpcEvent::MergedPrRemovable {
             workspace_key: ws.clone(),
@@ -2028,6 +2099,8 @@ mod effects_tests {
     #[test]
     fn removal_prompt_defaults_to_yes() {
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         m.removal_prompt_queue
             .push_back(super::super::RemovalPrompt {
                 workspace_key: WorkspaceKey::new("github:o/r#1"),
@@ -2052,6 +2125,8 @@ mod effects_tests {
         use lazybox_config::ConfirmDefault;
 
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         m.ui_defaults.confirm_default.event = ConfirmDefault::Yes;
         m.removal_prompt_queue
             .push_back(super::super::RemovalPrompt {
@@ -7700,6 +7775,8 @@ mod modal_input_responsiveness_tests {
     }
 
     fn mount_out_of_scope_confirm(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) {
+        // Known workspace so the prompt passes the mount-time liveness gate.
+        super::seed_ws(m, "github:o/r#1");
         m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
             workspace_key: WorkspaceKey::new("github:o/r#1"),
             label: "o/r#1".into(),
@@ -7941,6 +8018,7 @@ mod modal_input_responsiveness_tests {
     #[test]
     fn escaped_removal_prompt_does_not_nag_again() {
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#42");
         let key = WorkspaceKey::new("github:o/r#42");
         let emit = |m: &mut Model<tuirealm::terminal::TestTerminalAdapter>| {
             m.handle_daemon_event(IpcEvent::MergedPrRemovable {
@@ -14667,6 +14745,9 @@ mod queued_prompt_drain_tests {
     }
 
     fn queue_removal_prompt(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) {
+        // The workspace must be known for the prompt to pass the
+        // mount-time liveness gate (no orphaned "remove gone workspace?").
+        super::seed_ws(m, "github:o/r#9");
         m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
             workspace_key: WorkspaceKey::new("github:o/r#9"),
             label: "o/r#9".into(),
@@ -14678,6 +14759,8 @@ mod queued_prompt_drain_tests {
     #[test]
     fn removal_prompt_mounts_after_a_choice_picker_resolves() {
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         // A snooze picker is open when the daemon prompt arrives.
         m.modal_flow = Some(ModalFlow::Snooze {
             workspace: SessionKey::from("github:o/r#1"),
@@ -14710,6 +14793,8 @@ mod queued_prompt_drain_tests {
     #[test]
     fn removal_prompt_mounts_after_an_input_submit() {
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         // The new-project input is open when the prompt arrives.
         m.modal_stack.push(Id::NewProject);
         queue_removal_prompt(&mut m);
@@ -14726,6 +14811,8 @@ mod queued_prompt_drain_tests {
     #[test]
     fn removal_prompt_mounts_after_a_textarea_submit() {
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         m.modal_flow = Some(ModalFlow::Reply {
             target: SessionKey::from("github:o/r#1"),
         });

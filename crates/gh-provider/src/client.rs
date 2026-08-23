@@ -4643,6 +4643,24 @@ impl GhClient {
         Ok(())
     }
 
+    /// Best-effort: is `pr` already merged on GitHub right now? Used to
+    /// disambiguate an ambiguous merge rejection — GitHub returns a
+    /// generic "not mergeable" for an already-merged PR, indistinguishable
+    /// by message alone from a real conflict, so it slips past
+    /// [`ALREADY_MERGED_MARKERS`]. A targeted re-fetch settles it: a `g m`
+    /// on a PR that's actually merged is a no-op success, not a failure.
+    /// Fails CLOSED (returns `false`) on any parse or fetch error, so a
+    /// genuine merge failure is still reported rather than swallowed.
+    async fn pr_already_merged(&self, pr: &lazybox_core::Task) -> bool {
+        let Some((owner, name, number)) = parse_github_pr_key(&pr.id.key) else {
+            return false;
+        };
+        matches!(
+            self.fetch_single_pr_interactive(owner, name, number).await,
+            Ok(Some(task)) if task.state == lazybox_core::TaskState::Merged
+        )
+    }
+
     /// When a merge failed with GitHub's generic "Repository rule
     /// violations found" (issue #998), best-effort append the base
     /// branch's active rule names so the server's humanizer can name
@@ -4752,6 +4770,16 @@ fn octocrab_error_status(error: &octocrab::Error) -> Option<u16> {
     }
 }
 
+/// Parse a GitHub task key `"owner/repo#123"` into `(owner, repo, number)`.
+/// `None` when the shape doesn't match. Used by the merge already-merged
+/// re-check to target a single-PR fetch.
+fn parse_github_pr_key(key: &str) -> Option<(&str, &str, u64)> {
+    let (repo_path, number) = key.rsplit_once('#')?;
+    let (owner, name) = repo_path.split_once('/')?;
+    let number = number.parse::<u64>().ok()?;
+    Some((owner, name, number))
+}
+
 fn working_claim_target<'a>(
     task_id: &lazybox_core::TaskId,
     repo: &'a str,
@@ -4827,9 +4855,24 @@ impl lazybox_core::TaskProvider for GhClient {
         };
         match self.merge_pr(node_id, expected_head_oid).await {
             Ok(()) => Ok(()),
-            Err(err) => Err(mutation_provider_error(
-                self.name_rule_violation(err, pr).await,
-            )),
+            Err(err) => {
+                // GitHub rejects a merge of an ALREADY-merged PR with a
+                // generic "not mergeable" — indistinguishable by message
+                // from a real conflict. Re-check: if the PR is in fact
+                // merged, `g m` on a merged PR is a no-op success, and
+                // returning Ok lets the caller mark the row merged,
+                // correcting a poll that hadn't caught the merge yet.
+                if self.pr_already_merged(pr).await {
+                    tracing::info!(
+                        "merge {}: PR already merged on GitHub — treating as no-op success",
+                        pr.id.key
+                    );
+                    return Ok(());
+                }
+                Err(mutation_provider_error(
+                    self.name_rule_violation(err, pr).await,
+                ))
+            }
         }
     }
 
@@ -5747,6 +5790,21 @@ mod tests {
         let response: graphql::GqlMutationResponse =
             serde_json::from_str(payload).expect("payload parses");
         response.errors.unwrap_or_default()
+    }
+
+    /// The already-merged re-check targets a single-PR fetch, so it must
+    /// parse `owner/repo#number` out of the task key. A shape it can't
+    /// parse fails closed (`None`) so the original merge error is still
+    /// reported rather than swallowed.
+    #[test]
+    fn parse_github_pr_key_extracts_owner_repo_number() {
+        assert_eq!(
+            parse_github_pr_key("obin-ai/lazybox#1301"),
+            Some(("obin-ai", "lazybox", 1301)),
+        );
+        assert_eq!(parse_github_pr_key("owner/repo#notanumber"), None);
+        assert_eq!(parse_github_pr_key("no-hash-here"), None);
+        assert_eq!(parse_github_pr_key("owneronly#5"), None);
     }
 
     /// A `mergePullRequest` re-sent after a client-side timeout (first

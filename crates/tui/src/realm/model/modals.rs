@@ -1871,8 +1871,25 @@ impl<T: TerminalAdapter> Model<T> {
         if !self.modal_stack.is_empty() {
             return;
         }
-        let Some(prompt) = self.removal_prompt_queue.pop_front() else {
-            return;
+        // A removal prompt may only be shown for a workspace the client
+        // actually knows about. One can outlive its workspace — queued
+        // behind another modal while the row was archived/deleted, or
+        // arriving on a fresh connect before the Snapshot populated the
+        // workspace map. Drop any prompt whose workspace isn't known
+        // rather than mount an orphaned "remove <gone workspace>?" ask
+        // for a row not in the sidebar. Safe: the daemon re-emits removal
+        // prompts on its throttled sweep, so one dropped during a brief
+        // connect race re-fires once the workspace is known.
+        // (`workspace_by_key` reads the full workspace map, so a snoozed /
+        // inactive / filtered-out but still-known workspace is NOT dropped.)
+        let prompt = loop {
+            let Some(candidate) = self.removal_prompt_queue.pop_front() else {
+                return;
+            };
+            let session_key: lazybox_core::SessionKey = (&candidate.workspace_key).into();
+            if self.sidebar.workspace_by_key(&session_key).is_some() {
+                break candidate;
+            }
         };
         let copy = match prompt.reason {
             RemovalReason::OutOfScope => out_of_scope_copy(&prompt),

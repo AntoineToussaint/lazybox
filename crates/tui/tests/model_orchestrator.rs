@@ -24,6 +24,15 @@ fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
     Model::new_for_test(client, Size::new(120, 40)).expect("model init")
 }
 
+/// Seed a bare workspace so a removal / out-of-scope prompt for `key`
+/// passes the mount-time liveness gate (unknown workspaces are dropped
+/// to avoid orphaned "remove <gone workspace>?" modals).
+fn seed_ws(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, key: &str) {
+    m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(
+        Workspace::empty(WorkspaceKey::new(key), "main", Utc::now()),
+    )));
+}
+
 fn key(code: Key) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
@@ -756,6 +765,7 @@ fn out_of_scope_with_active_session_queues_a_prompt() {
     let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     let target = "github:owner/repo#42";
+    seed_ws(&mut m, target);
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
         workspace_key: lazybox_core::WorkspaceKey::new(target),
         label: "owner/repo#42".into(),
@@ -772,6 +782,8 @@ fn out_of_scope_prompts_queue_one_at_a_time() {
     // first is dismissed.
     let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    seed_ws(&mut m, "github:o/a#1");
+    seed_ws(&mut m, "github:o/b#2");
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
         workspace_key: lazybox_core::WorkspaceKey::new("github:o/a#1"),
         label: "o/a#1".into(),
@@ -803,6 +815,7 @@ fn confirm_modal_y_dismisses_through_channel_pipeline() {
     // the keypress through `dispatch_modal_key`, the same path the
     // run loop uses.
     let mut m = build_model();
+    seed_ws(&mut m, "github:o/r#1");
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
         workspace_key: WorkspaceKey::new("github:o/r#1"),
         label: "o/r#1".into(),
@@ -821,6 +834,7 @@ fn confirm_modal_y_dismisses_through_channel_pipeline() {
 #[test]
 fn confirm_modal_n_dismisses_through_channel_pipeline() {
     let mut m = build_model();
+    seed_ws(&mut m, "github:o/r#1");
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
         workspace_key: WorkspaceKey::new("github:o/r#1"),
         label: "o/r#1".into(),
@@ -842,6 +856,7 @@ fn confirm_modal_esc_dismisses_through_channel_pipeline() {
     // test alongside the Y / N tests so future regressions in *any*
     // of the three keypress paths are caught.
     let mut m = build_model();
+    seed_ws(&mut m, "github:o/r#1");
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
         workspace_key: WorkspaceKey::new("github:o/r#1"),
         label: "o/r#1".into(),
@@ -867,6 +882,7 @@ fn out_of_scope_queued_during_help_modal_drains_on_help_dismiss() {
     m.dispatch_key(key(Key::Char('?')));
     assert_eq!(m.top_modal(), Some(&Id::HelpAsk));
     // Daemon sends an out-of-scope event while Help is up.
+    seed_ws(&mut m, "github:o/r#1");
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
         workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
         label: "o/r#1".into(),

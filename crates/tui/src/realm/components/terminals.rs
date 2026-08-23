@@ -393,6 +393,13 @@ impl Terminals {
         self.inner.selection_screen_span(id, rect, anchor, focus)
     }
 
+    /// Forward `tile_grid_rect` — the on-screen cell rect terminal `id`
+    /// was drawn in this frame. The selection overlay clips to this so a
+    /// split-tile highlight can't bleed into a neighbouring tile (#1101).
+    pub fn tile_grid_rect(&self, id: TerminalId) -> Option<tuirealm::ratatui::layout::Rect> {
+        self.inner.tile_grid_rect(id)
+    }
+
     /// Forward `visible_text` — dump a terminal's whole visible grid
     /// as plain text. Seeds the agent-to-agent handoff compose step
     /// (`x s`) with the source agent's on-screen output.

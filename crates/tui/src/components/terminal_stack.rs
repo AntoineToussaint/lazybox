@@ -2140,6 +2140,16 @@ impl TerminalStack {
             .copied()
     }
 
+    /// The exact on-screen cell-grid rect the renderer drew for terminal
+    /// `id` in the last frame, or `None` if it wasn't rendered. Callers
+    /// that must confine per-terminal chrome to a single tile — e.g. the
+    /// selection-highlight overlay — clip to this instead of the whole
+    /// terminal pane, so in a split layout the effect can't bleed into a
+    /// neighbouring tile (#1101).
+    pub fn tile_grid_rect(&self, id: TerminalId) -> Option<tuirealm::ratatui::layout::Rect> {
+        self.hit_for(id).map(|hit| hit.grid)
+    }
+
     /// The viewport offset to compose a selection against for `id`: the
     /// offset of the frame the user clicked on (recorded in
     /// [`Self::hit_for`]), falling back to the live VT offset only before

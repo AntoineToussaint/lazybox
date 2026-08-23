@@ -101,6 +101,10 @@ pub struct Config {
     /// `codex`, …). See [`AgentEntry`].
     #[serde(default)]
     pub agents: std::collections::BTreeMap<String, AgentEntry>,
+    /// Daemon-level tuning parameters: ring buffer size, credential cache TTL,
+    /// polling backoff cap, and other performance knobs. See [`ServerSection`].
+    #[serde(default)]
+    pub server: ServerSection,
     pub shell: ShellSection,
     pub hooks: HooksConfig,
     pub worktree: WorktreeConfig,
@@ -1836,6 +1840,32 @@ pub const DEFAULT_MAX_LIVE_AGENTS: usize = 32;
 /// to stop the fleet ratchet (#1198).
 pub const DEFAULT_REAP_CLOSED_AFTER: Duration = Duration::from_secs(48 * 3600);
 
+/// Default per-terminal ring buffer size (bytes). 2 MiB provides adequate
+/// scrollback for normal sessions while keeping per-terminal daemon memory
+/// usage bounded. Tunable via `server.ring_buffer_bytes` (#1254-E).
+pub const DEFAULT_RING_BUFFER_BYTES: usize = 2 * 1024 * 1024;
+
+/// Maximum permitted ring buffer size. A hard cap prevents misconfiguration
+/// that could silently cause data loss or exhaust daemon memory. 100 MiB
+/// bounds per-terminal memory while still supporting deep scrollback on
+/// high-output sessions.
+pub const MAX_RING_BUFFER_BYTES: usize = 100 * 1024 * 1024;
+
+/// Minimum permitted ring buffer size. Zero or invalid sizes would silently
+/// cause data loss, so we enforce a minimum viable buffer.
+pub const MIN_RING_BUFFER_BYTES: usize = 64 * 1024; // 64 KiB minimum
+
+/// Default credential cache TTL, in seconds. Successfully resolved command
+/// credentials (e.g., `gh auth token`) are served from cache for this duration
+/// before the command runs again. Tunable via `server.cred_cache_ttl_secs`
+/// (#1254-G).
+pub const DEFAULT_CRED_CACHE_TTL_SECS: u64 = 300; // 5 minutes
+
+/// Default polling backoff cap, in seconds. The exponential backoff for
+/// transient errors is clamped to this duration to prevent indefinite delays.
+/// Tunable via `server.polling_backoff_cap_secs`.
+pub const DEFAULT_POLLING_BACKOFF_CAP_SECS: u64 = 120; // 2 minutes
+
 impl AgentSection {
     /// Effective live-agent ceiling: unset → [`DEFAULT_MAX_LIVE_AGENTS`],
     /// explicit `0` → `None` (uncapped).
@@ -1986,6 +2016,88 @@ fn login_shell_from_passwd_db() -> Option<String> {
     None
 }
 
+/// `server:` block — daemon-level tuning parameters. Per-terminal memory usage,
+/// polling cadence, credential caching, and other performance/reliability knobs
+/// that rarely need adjustment but are exposed for special cases (deep scrollback,
+/// slow networks, credential rotation). All fields are optional with sensible
+/// defaults.
+///
+/// ```yaml
+/// server:
+///   ring_buffer_bytes: 10485760        # 10 MiB (default 2 MiB)
+///   cred_cache_ttl_secs: 600           # 10 min (default 5 min)
+///   polling_backoff_cap_secs: 180      # 3 min (default 2 min)
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ServerSection {
+    /// Per-terminal ring buffer capacity in bytes. The daemon allocates one
+    /// buffer per terminal to hold scrollback history for replay on reconnect.
+    /// Raise this for sessions with very long outputs; lower it to reduce
+    /// per-terminal memory. Range: 64 KiB – 100 MiB.
+    /// Unset → [`DEFAULT_RING_BUFFER_BYTES`] (2 MiB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ring_buffer_bytes: Option<usize>,
+
+    /// Credential cache TTL, in seconds. Command-provider credentials
+    /// (e.g., `gh auth token`) are cached for this long before running the
+    /// command again, reducing subprocess churn on hot paths. On a slow or
+    /// loaded machine, spawning a `gh` subprocess takes seconds.
+    /// Unset → [`DEFAULT_CRED_CACHE_TTL_SECS`] (300 seconds = 5 minutes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cred_cache_ttl_secs: Option<u64>,
+
+    /// Polling backoff cap, in seconds. Provider polling uses exponential
+    /// backoff on transient errors (timeouts, rate limits, 5xx responses).
+    /// The backoff is clamped to this ceiling to prevent indefinite waits.
+    /// Unset → [`DEFAULT_POLLING_BACKOFF_CAP_SECS`] (120 seconds = 2 minutes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polling_backoff_cap_secs: Option<u64>,
+}
+
+impl ServerSection {
+    /// Effective ring buffer size: unset → [`DEFAULT_RING_BUFFER_BYTES`],
+    /// validated to be in [`MIN_RING_BUFFER_BYTES`]..=[`MAX_RING_BUFFER_BYTES`].
+    pub fn ring_buffer_bytes(&self) -> usize {
+        self.ring_buffer_bytes
+            .unwrap_or(DEFAULT_RING_BUFFER_BYTES)
+            .clamp(MIN_RING_BUFFER_BYTES, MAX_RING_BUFFER_BYTES)
+    }
+
+    /// Effective credential cache TTL: unset → [`DEFAULT_CRED_CACHE_TTL_SECS`].
+    pub fn cred_cache_ttl_secs(&self) -> u64 {
+        self.cred_cache_ttl_secs
+            .unwrap_or(DEFAULT_CRED_CACHE_TTL_SECS)
+    }
+
+    /// Effective polling backoff cap: unset → [`DEFAULT_POLLING_BACKOFF_CAP_SECS`].
+    pub fn polling_backoff_cap_secs(&self) -> u64 {
+        self.polling_backoff_cap_secs
+            .unwrap_or(DEFAULT_POLLING_BACKOFF_CAP_SECS)
+    }
+
+    /// Validate configuration ranges. Called at config load time to catch
+    /// invalid values early with a clear error message. Returns `Err` if
+    /// any range is violated.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(bytes) = self.ring_buffer_bytes {
+            if bytes < MIN_RING_BUFFER_BYTES {
+                return Err(format!(
+                    "server.ring_buffer_bytes {} is below minimum {} bytes",
+                    bytes, MIN_RING_BUFFER_BYTES
+                ));
+            }
+            if bytes > MAX_RING_BUFFER_BYTES {
+                return Err(format!(
+                    "server.ring_buffer_bytes {} exceeds maximum {} bytes",
+                    bytes, MAX_RING_BUFFER_BYTES
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// How the user opens lazybox's command menu from an embedded terminal.
 /// The default is `]]` — two closing brackets typed in quick succession.
 /// The menu then waits without a timeout (`q` exits to the inbox).
@@ -2059,10 +2171,18 @@ impl Config {
             .collect()
     }
 
-    /// Parse config YAML, including migrations from older serialized defaults.
+    /// Parse config YAML, including migrations and validation of new-format defaults.
     pub fn parse(contents: &str) -> Result<Self, ConfigError> {
         let mut config: Self = serde_yaml::from_str(contents)?;
         config.migrate_legacy_shell_default();
+        // Validate server-section ranges at parse time so an invalid config
+        // fails fast with a clear error message (not a silent fallback).
+        config.server.validate().map_err(|msg| {
+            ConfigError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("server section validation failed: {msg}"),
+            ))
+        })?;
         Ok(config)
     }
 
@@ -5028,5 +5148,97 @@ open_with:
             cfg.open_with[2].args.as_deref(),
             Some(&["{url}".to_string()][..])
         );
+    }
+
+    #[test]
+    fn server_section_defaults_are_sensible() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("empty config");
+        assert_eq!(cfg.server.ring_buffer_bytes(), DEFAULT_RING_BUFFER_BYTES);
+        assert_eq!(
+            cfg.server.cred_cache_ttl_secs(),
+            DEFAULT_CRED_CACHE_TTL_SECS
+        );
+        assert_eq!(
+            cfg.server.polling_backoff_cap_secs(),
+            DEFAULT_POLLING_BACKOFF_CAP_SECS
+        );
+    }
+
+    #[test]
+    fn server_section_parses_and_clamps_ring_buffer() {
+        let yaml = "server:\n  ring_buffer_bytes: 10485760"; // 10 MiB
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse server section");
+        assert_eq!(cfg.server.ring_buffer_bytes(), 10 * 1024 * 1024);
+
+        // Below minimum clamps up.
+        let yaml = "server:\n  ring_buffer_bytes: 32768"; // 32 KiB < 64 KiB min
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse with clamp");
+        assert_eq!(cfg.server.ring_buffer_bytes(), MIN_RING_BUFFER_BYTES);
+
+        // Above maximum clamps down.
+        let yaml = format!(
+            "server:\n  ring_buffer_bytes: {}",
+            MAX_RING_BUFFER_BYTES + 1
+        );
+        let cfg: Config = serde_yaml::from_str(&yaml).expect("parse with clamp");
+        assert_eq!(cfg.server.ring_buffer_bytes(), MAX_RING_BUFFER_BYTES);
+    }
+
+    #[test]
+    fn server_section_validates_range_errors() {
+        // Ring buffer below minimum should fail validation.
+        let mut cfg: Config = serde_yaml::from_str("{}").expect("empty");
+        cfg.server.ring_buffer_bytes = Some(1024); // 1 KiB < 64 KiB min
+        assert!(
+            cfg.server.validate().is_err(),
+            "should reject ring buffer below minimum"
+        );
+
+        // Ring buffer above maximum should fail validation.
+        let mut cfg: Config = serde_yaml::from_str("{}").expect("empty");
+        cfg.server.ring_buffer_bytes = Some(MAX_RING_BUFFER_BYTES + 1);
+        assert!(
+            cfg.server.validate().is_err(),
+            "should reject ring buffer above maximum"
+        );
+
+        // Valid range passes.
+        let mut cfg: Config = serde_yaml::from_str("{}").expect("empty");
+        cfg.server.ring_buffer_bytes = Some(5 * 1024 * 1024);
+        assert!(
+            cfg.server.validate().is_ok(),
+            "should accept ring buffer in valid range"
+        );
+    }
+
+    #[test]
+    fn server_section_config_load_validates() {
+        // parse() should call validate() and fail if invalid.
+        let yaml = format!("server:\n  ring_buffer_bytes: {}", 500); // Below min
+        assert!(
+            Config::parse(&yaml).is_err(),
+            "parse() should reject invalid server config"
+        );
+
+        // Valid config should parse.
+        let yaml = format!("server:\n  ring_buffer_bytes: {}", 10 * 1024 * 1024);
+        assert!(
+            Config::parse(&yaml).is_ok(),
+            "parse() should accept valid server config"
+        );
+    }
+
+    #[test]
+    fn server_section_credential_cache_ttl_is_tunable() {
+        let yaml = "server:\n  cred_cache_ttl_secs: 600"; // 10 min
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.server.cred_cache_ttl_secs(), 600);
+    }
+
+    #[test]
+    fn server_section_polling_backoff_cap_is_tunable() {
+        let yaml = "server:\n  polling_backoff_cap_secs: 180"; // 3 min
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.server.polling_backoff_cap_secs(), 180);
     }
 }

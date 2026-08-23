@@ -2676,6 +2676,10 @@ pub fn next_tick_delay_with_hot(
     // heartbeat, and the hot path for 55 minutes on one GitHub hint.
     // The clamp still slows empty ticks (the parked source builds
     // nothing), it just never stops the world.
+    //
+    // NOTE: Tunable via `server.polling_backoff_cap_secs` in config.
+    // This constant is the default; the daemon should read the config
+    // and use that value instead (tracked in #1254).
     const DRIVER_BACKOFF_CAP: Duration = Duration::from_secs(120);
     match retry_after_secs {
         Some(secs) => base.max(Duration::from_secs(secs).min(DRIVER_BACKOFF_CAP)),

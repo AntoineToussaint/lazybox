@@ -26,6 +26,7 @@ which is the canonical source of truth for defaults and field names.
 | [`repos`](#repos) | Per-repo env, mounts, scripts, branch prefix |
 | [`agent`](#agent) | Permission prompts, LLM gateway, agent state-detection timers |
 | [`agents`](#agentsid) | Custom CLI definitions and per-agent model-tier overrides |
+| [`server`](#server) | Daemon-level tuning: ring buffer and credential cache |
 | [`worktree`](#worktree) | Global mounts, scripts, branch prefix, merged-cleanup |
 | [`scan`](#scan) | Roots and depth for read-only external-checkout discovery |
 | [`terminal`](#terminal) | Terminal escape chord + scrollback behavior |
@@ -285,6 +286,13 @@ hand.
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `analytics_enabled` | bool | `false` | Record the desktop client's fixed, content-free event names and timestamps locally. Provider and terminal contents cannot enter this boundary. |
+
+## `server`
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `ring_buffer_bytes` | int | `2097152` | Per-terminal ring buffer capacity in bytes for scrollback history replay on reconnect. Range: 64 KiB – 100 MiB. Raise for sessions with very long outputs; lower to reduce per-terminal memory usage. |
+| `cred_cache_ttl_secs` | int | `300` | Credential cache TTL in seconds. Command-provider credentials (e.g., `gh auth token`) are cached for this duration before running the command again, reducing subprocess churn. Default is 5 minutes. |
 
 ## `agent`
 

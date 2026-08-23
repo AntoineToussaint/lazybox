@@ -7779,6 +7779,7 @@ async fn handle_inject_prompt_inner(
         let mut events = events;
         let mut blocked = blocked;
         let mut registered_tx = Some(registered_tx);
+        let mut last_progress_at = tokio::time::Instant::now();
         if blocked && let Some(tx) = registered_tx.take() {
             let _ = tx.send(());
         }
@@ -7788,6 +7789,16 @@ async fn handle_inject_prompt_inner(
                 remaining_ms = remaining.as_millis(),
                 "readiness poll: checking agent state"
             );
+            // Emit progress updates every ~1 second so user knows injection is waiting
+            if last_progress_at.elapsed() >= Duration::from_secs(1) {
+                let remaining_secs = remaining.as_secs() as u32;
+                let _ = bus.send(Event::TerminalInjectProgress {
+                    terminal_id: id,
+                    message: "waiting for agent permission prompt to clear…".into(),
+                    remaining_secs,
+                });
+                last_progress_at = tokio::time::Instant::now();
+            }
             if remaining.is_zero() {
                 tracing::warn!(
                     terminal_id = ?id,

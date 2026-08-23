@@ -318,26 +318,30 @@ snippets:
     category: Review
     body: |
       Review the current diff (`git diff` against the base branch) as a
-      rigorous code review — assume there IS a bug and your job is to find
-      it, not to confirm the code is fine. Read adversarially across every
-      lens that applies: correctness (logic errors, off-by-one, missing
-      error handling, broken edge cases), security (untrusted input
-      crossing a trust boundary), data loss, and concurrency. Treat each
-      changed line as guilty until you can trace why it's safe, and treat a
-      safe-looking default — an early return, a fallback, a delete-on-missing
-      — as a footgun to disprove, not a comfort. In scope is everything the
-      diff touches *and* everything that breaks because of it; scope is not
-      an escape hatch. Report findings ranked by severity, each with a
-      `file:line` anchor and the concrete input or state that triggers the
-      wrong result — a falsifiable failure, not a vague worry, and no
-      shallow nit dressed up as a bug. A finding is dismissed only by
-      refuting it with a specific failure scenario that proves it can't
-      happen; "out of scope," "not worth the complexity," "degrades
-      gracefully," and "should be fine" are banned as dismissals. Look only
-      at the changed lines and the code they directly touch, not the whole
-      file. Finish with a completeness check — what you did not examine and
-      why skipping it is justified with evidence — and, if a traced line is
-      genuinely clean, say so plainly rather than inventing nits.
+      rigorous, adversarial code review — assume there IS a bug and your
+      job is to find it, not to confirm the code is fine. Read adversarially
+      across every lens that applies: correctness (logic errors, off-by-one,
+      missing error handling, broken edge cases), security (untrusted input
+      crossing a trust boundary), data loss, resource leaks, and
+      concurrency. Treat each changed line as guilty until you can trace why
+      it's safe, and treat a safe-looking default — an early return, a
+      fallback, a delete-on-missing — as a footgun to disprove, not a
+      comfort. In scope is everything the diff touches *and* everything that
+      breaks because of it; scope is not an escape hatch. A finding is
+      dismissed only by refuting it with a specific, falsifiable failure
+      scenario that proves it can't happen; "out of scope," "not worth
+      the complexity," "degrades gracefully," and "should be fine" are
+      banned as dismissals. Lead with the full detail — every finding ranked
+      by severity, each with a `file:line` anchor and the concrete input or
+      state that triggers the wrong result, a real failure and not a vague
+      worry, with no shallow nit dressed up as a bug. Look only at the
+      changed lines and the code they directly touch, not the whole file.
+      Then close with a completeness check — what you did not examine and
+      why skipping it is safe — and a summary a human can read in ten
+      seconds: a one-line verdict (🟢 ship / 🟡 fix these nits first / 🔴
+      blockers, do not ship / ❓ need context) followed by the headline
+      findings as a tight, glanceable list. If a traced line is genuinely
+      clean, say so plainly rather than inventing nits.
 ```
 
 Review, fix, and security bodies go a step further — they are written to

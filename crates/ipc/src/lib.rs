@@ -3253,7 +3253,7 @@ use tokio::sync::{mpsc, watch};
 pub struct FlowControl;
 
 impl FlowControl {
-    pub const DRAIN_QUANTUM: usize = 256;
+    pub const DRAIN_QUANTUM: usize = 1024;
     pub const EVENT_CAPACITY: usize = Self::DRAIN_QUANTUM * 2;
     pub const RAW_EVENT_CAPACITY: usize = Self::EVENT_CAPACITY * 2;
     /// 8× the original 32 (#1237): capacity is a BATCHING knob, not an

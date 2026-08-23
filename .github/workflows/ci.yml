@@ -248,7 +248,11 @@ jobs:
   desktop-check:
     name: desktop shell compiles (macos-14)
     needs: changes
-    if: needs.changes.outputs.desktop == 'true'
+    # Desktop CI temporarily disabled (matches the `desktop` MVP job
+    # below): the desktop shell isn't a release blocker right now and we
+    # don't want the macOS compile gating unrelated PRs. Re-enable by
+    # dropping `false &&` once the desktop app is actively maintained.
+    if: false && needs.changes.outputs.desktop == 'true'
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v7

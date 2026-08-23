@@ -7619,6 +7619,7 @@ struct SnippetDelivery {
     body: String,
 }
 
+#[tracing::instrument(skip_all, fields(?terminal_id, prompt_len = prompt.len(), has_snippet = snippet.is_some(), submit))]
 async fn handle_inject_prompt_inner(
     config: &ServerConfig,
     terminal_id: TerminalId,
@@ -7627,15 +7628,6 @@ async fn handle_inject_prompt_inner(
     submit: bool,
     snippet: Option<SnippetDelivery>,
 ) {
-    let _span = tracing::info_span!(
-        "inject_prompt",
-        ?terminal_id,
-        prompt_len = prompt.len(),
-        has_snippet = snippet.is_some(),
-        submit,
-    )
-    .entered();
-
     tracing::info!(
         snippet_key = snippet.as_ref().map(|s| &s.snippet_key),
         "starting prompt injection"

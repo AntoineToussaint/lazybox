@@ -1614,7 +1614,7 @@ impl Sidebar {
                 track_main: workspace.is_some_and(|w| w.track_main),
                 track_main_behind: workspace.is_some_and(|w| w.track_main && w.track_main_behind),
                 has_notes: workspace.is_some_and(|w| w.has_notes()),
-                sent_snippet_count: workspace.map_or(0, |w| w.sent_snippets.len()),
+                sent_snippet_count: workspace.map_or(0, |w| w.sent_snippets.total()),
                 ticket_tree: self.ticket_tree.get(key).copied(),
                 stack: self.stacks.get(key),
                 model_shorts: &self.model_shorts,

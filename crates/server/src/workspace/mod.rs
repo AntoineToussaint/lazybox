@@ -693,18 +693,29 @@ pub async fn set_hopper_completed(config: &ServerConfig, key: &WorkspaceKey, com
     commit_upsert_offloaded_reported(config, key, workspace, "set hopper completion").await;
 }
 
-/// Record a snippet key as sent to a workspace's agent (issue #463).
-/// Mirrors [`set_notes`]: load, push onto the MRU, commit (which
-/// persists the JSON blob and broadcasts `WorkspaceUpserted` so every
-/// TUI sees the updated per-session snippet history and its sidebar
-/// indicator). Local-only — never synced to any provider.
-pub async fn record_sent_snippet(config: &ServerConfig, key: &WorkspaceKey, snippet_key: String) {
+/// Record a snippet delivery against a workspace (issue #463): the
+/// authoritative, persisted half of the delivery transition. Mirrors
+/// [`set_notes`] — load, apply the single [`Workspace::record_snippet_delivery`]
+/// transition (which bumps the honest count and the MRU together), commit
+/// (persist the JSON blob and broadcast `WorkspaceUpserted` so every TUI
+/// sees the new count + indicator). Local-only — never synced.
+///
+/// Returns whether the workspace existed and the transition was applied.
+/// A `false` means there was no workspace row to record into (e.g. a
+/// session-less broadcast spawn); the caller decides what that implies
+/// for the softer, non-authoritative projections.
+pub async fn record_snippet_delivery(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    snippet_key: String,
+) -> bool {
     let _ws_guard = config.lock_workspace(key.as_str()).await;
     let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
-        return;
+        return false;
     };
-    workspace.record_sent_snippet(snippet_key);
-    commit_upsert_offloaded_reported(config, key, workspace, "record sent snippet").await;
+    workspace.record_snippet_delivery(snippet_key);
+    commit_upsert_offloaded_reported(config, key, workspace, "record snippet delivery").await;
+    true
 }
 
 /// Persist the workspace's "auto-merge on green" arm. Mirrors

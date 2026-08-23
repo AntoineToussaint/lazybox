@@ -5,6 +5,7 @@ import type { CleanupPrompt } from "./CleanupPrompt";
 import type { HopperMeta } from "./HopperMeta";
 import type { ProjectKey } from "./ProjectKey";
 import type { Session } from "./Session";
+import type { SnippetDeliveryLog } from "./SnippetDeliveryLog";
 import type { Task } from "./Task";
 import type { WorkspaceKey } from "./WorkspaceKey";
 
@@ -141,14 +142,14 @@ policies: AutomationPolicies,
  */
 notes: string,
 /**
- * MRU of snippet shortcut keys sent to this workspace's agent(s)
- * (issue #463) — a per-session record of "what I've already told
- * this agent" so switching back is cheap. Most-recent first,
- * de-duplicated (a re-send moves the key to the front), capped at
- * [`SENT_SNIPPETS_MAX`]. Persisted in the workspace JSON blob
- * alongside [`Workspace::notes`]; never synced to any provider.
+ * Record of snippets delivered to this workspace's agent(s) (issue
+ * #463): the honest `]N` badge count plus an MRU of "what I've
+ * already told this agent." A single owned value with one
+ * transition — see [`SnippetDeliveryLog`]. Persisted in the
+ * workspace JSON blob alongside [`Workspace::notes`]; never synced
+ * to any provider.
  */
-sent_snippets: Array<string>,
+sent_snippets: SnippetDeliveryLog,
 /**
  * Durable answer to the merged/closed cleanup prompt (issue #499).
  * Serde-defaulted so pre-#499 records read back as `Unresolved`.

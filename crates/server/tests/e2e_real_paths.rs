@@ -1363,7 +1363,7 @@ async fn e2e_pr_spawn_transfers_its_live_managed_branch_owner() {
         );
         persisted_session.worktree_branch = Some(branch.into());
         issue.add_session(persisted_session);
-        issue.record_sent_snippet("review".into());
+        issue.record_snippet_delivery("review".into());
         save_workspace(&config, &issue);
 
         let (mut client, _daemon) = subscribed(config.clone()).await;
@@ -1473,7 +1473,7 @@ async fn e2e_pr_spawn_transfers_its_live_managed_branch_owner() {
         assert_eq!(pr_ws.sessions.len(), 1);
         assert_eq!(pr_ws.sessions[0].id, source_session.id);
         assert_eq!(
-            pr_ws.sent_snippets,
+            pr_ws.sent_snippets.recent().to_vec(),
             vec!["review"],
             "workspace snippet history moves with the live session"
         );

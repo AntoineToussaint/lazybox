@@ -1,5 +1,5 @@
 {
-  "schema": 6,
+  "schema": 7,
   "key": "github-acme-widget-7",
   "project_key": "github-acme-widget",
   "local": true,
@@ -376,10 +376,13 @@
     "auto_fix_conflict": "Disarm"
   },
   "notes": "remember: bump the changelog",
-  "sent_snippets": [
-    "rev",
-    "fix-ci"
-  ],
+  "sent_snippets": {
+    "total": 2,
+    "recent": [
+      "rev",
+      "fix-ci"
+    ]
+  },
   "cleanup_prompt": "declined",
   "remote": "obin",
   "created_at": "2026-03-14T08:15:00Z",

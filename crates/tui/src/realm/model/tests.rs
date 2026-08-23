@@ -1804,6 +1804,76 @@ mod effects_tests {
         }
     }
 
+    /// Regression: a removal prompt may only exist for a LIVE workspace.
+    /// A prompt can sit queued behind another modal while the user
+    /// archives/deletes the row; without retraction, dismissing that
+    /// modal later mounts "<PR> was merged — remove workspace?" for a
+    /// workspace that no longer exists. `WorkspaceRemoved` must retract
+    /// the queued prompt (the same cancel the reopen path #552 uses).
+    #[test]
+    fn workspace_removed_retracts_a_queued_removal_prompt() {
+        use lazybox_ipc::Event as IpcEvent;
+        let mut m = build_model();
+        let ev = |n: u64| IpcEvent::MergedPrRemovable {
+            workspace_key: WorkspaceKey::new(format!("github:o/r#{n}")),
+            label: format!("o/r#{n}"),
+            terminal_state: lazybox_ipc::RemovableTerminalState::Merged,
+            active_terminal_count: 0,
+            has_local_work: false,
+        };
+        // #1's prompt mounts; #2's queues behind it.
+        m.handle_daemon_event(ev(1));
+        m.handle_daemon_event(ev(2));
+        assert_eq!(m.removal_prompt_queue.len(), 1, "#2 queued behind #1");
+
+        // #2 is deleted while its prompt waits in the queue.
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(WorkspaceKey::new(
+            "github:o/r#2",
+        )));
+        assert!(
+            m.removal_prompt_queue.is_empty(),
+            "removal retracts the queued prompt for the gone workspace",
+        );
+        // #1's mounted prompt is untouched — only the gone one is dropped.
+        assert!(
+            matches!(
+                &m.modal_flow,
+                Some(super::super::ModalFlow::RemovalPrompt { workspace, .. })
+                    if workspace.as_str() == "github:o/r#1"
+            ),
+            "an unrelated mounted prompt survives",
+        );
+    }
+
+    /// Regression: `WorkspaceRemoved` also dismisses a removal prompt
+    /// that is already MOUNTED for the gone workspace, and clears its
+    /// flow so a stray `Msg::Confirmed` can't act on a re-added key.
+    #[test]
+    fn workspace_removed_dismisses_the_mounted_removal_prompt() {
+        use lazybox_ipc::Event as IpcEvent;
+        let mut m = build_model();
+        let ws = WorkspaceKey::new("github:o/r#1");
+        m.handle_daemon_event(IpcEvent::MergedPrRemovable {
+            workspace_key: ws.clone(),
+            label: "o/r#1".into(),
+            terminal_state: lazybox_ipc::RemovableTerminalState::Merged,
+            active_terminal_count: 0,
+            has_local_work: false,
+        });
+        assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope), "prompt mounted");
+
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(ws));
+        assert_eq!(
+            m.top_modal(),
+            None,
+            "removal dismisses the stale mounted prompt",
+        );
+        assert!(
+            m.modal_flow.is_none(),
+            "and clears its flow so a stray confirm can't fire",
+        );
+    }
+
     /// `n` on a merged/closed removal confirm tells the daemon to stop
     /// re-prompting (`KeepMergedWorkspace`) — unlike Esc, which stays
     /// silent so the daemon's level-triggered re-emit self-heals.

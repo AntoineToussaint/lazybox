@@ -1700,6 +1700,13 @@ impl<T: TerminalAdapter> Model<T> {
             // The daemon confirmed the removal — reconcile any optimistic
             // archive/delete of this row (#476).
             self.reconcile_optimistic(key.as_str());
+            // A removal prompt may only exist for a LIVE workspace. One
+            // can sit queued behind another modal while the user archives
+            // or deletes the row; without this, dismissing that modal
+            // later mounts "<PR> was merged — remove workspace?" for a
+            // workspace that no longer exists (#NNN). Deletion retracts
+            // the prompt — the same cancel the reopen path (#552) uses.
+            self.cancel_removal_prompt(key);
             self.pr_details_fetched.remove(key);
             // Drop the confirmed-merge latch — the row is gone, so a
             // stale entry could only leak or mis-patch a re-added key.

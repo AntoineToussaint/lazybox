@@ -6806,6 +6806,11 @@ async fn write_prompt_sequence(
     .map_err(PromptWriteError::Initial)?;
 
     if let (Some(submit_bytes), Some(mut output_events)) = (submit_write, output_events) {
+        tracing::info!(
+            ?terminal_id,
+            probes = echo_probes.len(),
+            "settling paste: waiting for echo or quiet"
+        );
         let settle_t0 = std::time::Instant::now();
         let settle = await_paste_settled(
             &mut output_events,
@@ -7102,11 +7107,18 @@ async fn await_paste_settled(
         match tokio::time::timeout_at(quiet_at.min(cap_at), events.recv()).await {
             // Quiet window or the cap elapsed — settled either way.
             Err(_) => {
-                return if tokio::time::Instant::now() >= cap_at {
+                let trigger = if tokio::time::Instant::now() >= cap_at {
+                    tracing::debug!(?terminal_id, "paste settle: cap reached");
                     PasteSettle::Cap
                 } else {
+                    tracing::debug!(
+                        ?terminal_id,
+                        quiet_ms = quiet.as_millis(),
+                        "paste settle: quiet window elapsed"
+                    );
                     PasteSettle::Quiet
                 };
+                return trigger;
             }
             Ok(Ok(Event::TerminalOutput {
                 terminal_id: tid,
@@ -7116,9 +7128,20 @@ async fn await_paste_settled(
                 if seen.len() < PASTE_ECHO_SCAN_CAP {
                     seen.extend_from_slice(&bytes);
                     if lazybox_agents::detect::paste_echo_observed(&seen, echo_probes) {
+                        tracing::debug!(
+                            ?terminal_id,
+                            scanned_bytes = seen.len(),
+                            "paste settle: echo detected"
+                        );
                         return PasteSettle::Echo;
                     }
                 }
+                tracing::debug!(
+                    ?terminal_id,
+                    received_bytes = bytes.len(),
+                    total_scanned = seen.len(),
+                    "paste settle: output event received, quiet window reset"
+                );
                 quiet_at = tokio::time::Instant::now() + quiet;
             }
             Ok(Ok(_)) => {}
@@ -7126,9 +7149,16 @@ async fn await_paste_settled(
             // conservatively restart the quiet window (the cap still
             // bounds the total wait).
             Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                tracing::debug!(
+                    ?terminal_id,
+                    "paste settle: channel lagged, restarting quiet window"
+                );
                 quiet_at = tokio::time::Instant::now() + quiet;
             }
-            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => return PasteSettle::Quiet,
+            Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                tracing::debug!(?terminal_id, "paste settle: channel closed");
+                return PasteSettle::Quiet;
+            }
         }
     }
 }
@@ -7597,6 +7627,20 @@ async fn handle_inject_prompt_inner(
     submit: bool,
     snippet: Option<SnippetDelivery>,
 ) {
+    let _span = tracing::info_span!(
+        "inject_prompt",
+        ?terminal_id,
+        prompt_len = prompt.len(),
+        has_snippet = snippet.is_some(),
+        submit,
+    )
+    .entered();
+
+    tracing::info!(
+        snippet_key = snippet.as_ref().map(|s| &s.snippet_key),
+        "starting prompt injection"
+    );
+
     // Look up — and drop the guard — before any further await so
     // a nested handle_spawn (in the fallback path) can re-acquire
     // the same lock without deadlocking. Without the explicit
@@ -7707,6 +7751,16 @@ async fn handle_inject_prompt_inner(
     // races between the read and the wait isn't missed.
     let events = config.bus.subscribe();
     let blocked = inject_must_defer(&config.terminal, terminal_id).await;
+    let shape = if blocked {
+        config.terminal.input_needed_shape_for(terminal_id).await
+    } else {
+        None
+    };
+    tracing::info!(
+        blocked,
+        ?shape,
+        "readiness gate check: defer injection if blocked"
+    );
     let terminals = config.terminal.clone();
     let bus = config.bus.clone();
     let id = terminal_id;
@@ -7730,6 +7784,10 @@ async fn handle_inject_prompt_inner(
         }
         while blocked {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            tracing::debug!(
+                remaining_ms = remaining.as_millis(),
+                "readiness poll: checking agent state"
+            );
             if remaining.is_zero() {
                 tracing::warn!(
                     terminal_id = ?id,
@@ -7755,20 +7813,30 @@ async fn handle_inject_prompt_inner(
             // never emits, so the injection sat until an inbound keystroke.
             config_for_confirm.terminal.request_reclassify(id).await;
             let step = INJECT_RECLASSIFY_POLL.min(remaining);
-            match poll_input_resolution(&mut events, id, &terminals, step).await {
+            let poll_result = poll_input_resolution(&mut events, id, &terminals, step).await;
+            match &poll_result {
                 // The terminal exited; fall through to `acquire_live`, which
                 // recognizes the gone terminal and returns quietly.
-                InputPoll::Exited => break,
+                InputPoll::Exited => {
+                    tracing::debug!("readiness poll: terminal exited");
+                    break;
+                }
                 // A transition arrived — possibly the optimistic
                 // InputNeeded → Working flip from a keystroke, or a just-
                 // answered gate re-rendering another chooser. Let that output
                 // settle before trusting the re-read.
-                InputPoll::Resolved => tokio::time::sleep(INJECT_RECLASSIFY_POLL).await,
+                InputPoll::Resolved => {
+                    tracing::debug!("readiness poll: state transition resolved");
+                    tokio::time::sleep(INJECT_RECLASSIFY_POLL).await;
+                }
                 // The step elapsed with no transition — the reclassify poke
                 // above may have refreshed the cache; re-read it directly.
-                InputPoll::Tick => {}
+                InputPoll::Tick => {
+                    tracing::debug!("readiness poll: tick (no transition)");
+                }
             }
             blocked = inject_must_defer(&terminals, id).await;
+            tracing::debug!(blocked, "readiness poll: state re-checked after poll");
         }
         let Some(interaction) =
             terminal_io::acquire_live(&config_for_confirm, id, &backend_key).await

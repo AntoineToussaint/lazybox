@@ -129,13 +129,15 @@ pub const SENT_SNIPPETS_MAX: usize = 12;
 /// Before this type existed the badge read `sent_snippets.len()` — a
 /// capped, de-duplicated set rendered as if it were a count, so a re-send
 /// never incremented and the 13th distinct snippet was invisible.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct SnippetDeliveryLog {
     /// Monotonic count of deliveries — see the type docs.
+    #[serde(default)]
     total: usize,
     /// Distinct recent keys, most-recent first, capped at
     /// [`SENT_SNIPPETS_MAX`].
+    #[serde(default)]
     recent: Vec<String>,
 }
 
@@ -190,30 +192,29 @@ impl SnippetDeliveryLog {
     }
 }
 
-impl<'de> Deserialize<'de> for SnippetDeliveryLog {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
+/// Migrate a persisted workspace's legacy `sent_snippets` shape in place.
+///
+/// Pre-#463-followup records stored `sent_snippets` as a bare array of
+/// keys (the MRU, no count); the current shape is a `{ total, recent }`
+/// object. The derived `Deserialize` on [`SnippetDeliveryLog`] is
+/// deliberately plain — it must round-trip through **bincode** on the IPC
+/// wire, which rejects the `deserialize_any` a shape-sniffing
+/// (`#[serde(untagged)]`) impl needs. So the array→object migration lives
+/// HERE, in the JSON persistence decode path — the only place a legacy
+/// row is ever read; the wire only ever carries current-build objects.
+/// The count is seeded from the MRU length we know.
+fn migrate_legacy_sent_snippets(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    if let Some(arr) = obj.get("sent_snippets").and_then(|v| v.as_array())
+        && arr.iter().all(serde_json::Value::is_string)
     {
-        // Back-compat: pre-#463-followup records persisted `sent_snippets`
-        // as a bare array of keys (the MRU, no count). Accept either that
-        // legacy array or the modern `{ total, recent }` object, so old
-        // rows load losslessly and start counting from the MRU we know.
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Repr {
-            Legacy(Vec<String>),
-            Modern {
-                #[serde(default)]
-                total: usize,
-                #[serde(default)]
-                recent: Vec<String>,
-            },
-        }
-        Ok(match Repr::deserialize(deserializer)? {
-            Repr::Legacy(recent) => SnippetDeliveryLog::from_recent(recent),
-            Repr::Modern { total, recent } => SnippetDeliveryLog { total, recent },
-        })
+        let recent = arr.clone();
+        obj.insert(
+            "sent_snippets".to_string(),
+            serde_json::json!({ "total": recent.len(), "recent": recent }),
+        );
     }
 }
 
@@ -537,7 +538,13 @@ impl Workspace {
     /// Every load that can lead to a save of the same row must go
     /// through this instead of a bare `serde_json::from_str`.
     pub fn decode_persisted(json: &str) -> Result<Self, WorkspaceDecodeError> {
-        let ws: Self = serde_json::from_str(json)?;
+        // Parse to a Value first so a legacy `sent_snippets` array can be
+        // migrated to the current object shape before typed decode — the
+        // derived `Deserialize` is bincode-safe and can't sniff the old
+        // shape itself (see `migrate_legacy_sent_snippets`).
+        let mut value: serde_json::Value = serde_json::from_str(json)?;
+        migrate_legacy_sent_snippets(&mut value);
+        let ws: Self = serde_json::from_value(value)?;
         if ws.schema > WORKSPACE_SCHEMA_VERSION {
             return Err(WorkspaceDecodeError::NewerSchema {
                 found: ws.schema,
@@ -3629,7 +3636,9 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .insert("sent_snippets".into(), serde_json::json!(["plan", "rev"]));
-        let migrated: Workspace = serde_json::from_value(value).unwrap();
+        // Legacy arrays migrate in the persistence decode path, not via a
+        // bare typed deserialize (which is bincode-safe and object-only).
+        let migrated = Workspace::decode_persisted(&value.to_string()).unwrap();
         assert_eq!(
             migrated.sent_snippets.recent().to_vec(),
             vec!["plan", "rev"]

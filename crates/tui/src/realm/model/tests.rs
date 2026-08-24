@@ -4814,6 +4814,72 @@ snippets:
         assert!(notice.message.contains("→ continue codex"));
     }
 
+    /// A Critic conversion escalates the reviewer to the large model tier
+    /// (`L`) — a stronger model checks the work — while a Continue keeps the
+    /// working tier (asserted `None` above). The reviewer stays read-only.
+    #[test]
+    fn critic_conversion_spawns_the_reviewer_at_the_large_tier() {
+        use lazybox_core::prompts::AgentHandoffRole;
+        use lazybox_ipc::{
+            AgentRunId, AgentRuntimeMode, Event as IpcEvent, TerminalId, TerminalKind,
+        };
+        use lazybox_tui_core::action::Action;
+
+        let (mut model, mut server, key) = model_with_conversion_source("claude", false);
+        while server.rx.try_recv().is_ok() {}
+
+        model.dispatch_action(&Action::ConvertSession);
+        let commands =
+            model.handle_choice_picked(vec![ChoicePayload::HandoffRole(AgentHandoffRole::Critic)]);
+        let request_id = match &commands[0] {
+            IpcCommand::StartAgentRun { request_id, .. } => request_id.clone(),
+            other => panic!("expected StartAgentRun, got {other:?}"),
+        };
+        let source_session_id = lazybox_core::SessionId::new();
+        model.handle_daemon_event(IpcEvent::AgentRunStarted {
+            request_id,
+            run_id: AgentRunId(21),
+            session_key: key.clone(),
+            session_id: Some(source_session_id),
+            agent: "claude".into(),
+            mode: AgentRuntimeMode::StreamJson,
+        });
+        model.handle_daemon_event(IpcEvent::AgentAssistantTextDelta {
+            run_id: AgentRunId(21),
+            delta: "## Goal\nReview the diff\n\n## Repository state\nsrc/x.rs modified".into(),
+        });
+        model.handle_daemon_event(IpcEvent::AgentTurnFinished {
+            run_id: AgentRunId(21),
+            result: None,
+            session_id: Some("thread-critic".into()),
+            error: None,
+        });
+        // The replacement waits for the singleton source to exit.
+        model.handle_daemon_event(IpcEvent::TerminalExited {
+            terminal_id: TerminalId(7),
+            exit_code: None,
+            last_output: None,
+        });
+
+        let spawn = std::iter::from_fn(|| server.rx.try_recv().ok())
+            .find_map(|command| match command {
+                IpcCommand::Spawn {
+                    kind: TerminalKind::Agent(_),
+                    model_alias,
+                    access,
+                    ..
+                } => Some((model_alias, access)),
+                _ => None,
+            })
+            .expect("fresh critic agent spawned after source exit");
+        assert_eq!(
+            spawn.0.as_deref(),
+            Some("L"),
+            "the critic reviews at the large model tier",
+        );
+        assert_eq!(spawn.1, lazybox_ipc::AgentRunAccess::ReadOnly);
+    }
+
     #[test]
     fn failed_authored_handoff_leaves_the_source_agent_running() {
         use lazybox_core::prompts::AgentHandoffRole;

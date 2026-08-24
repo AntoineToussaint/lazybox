@@ -1757,6 +1757,68 @@ mod effects_tests {
         );
     }
 
+    /// A per-workspace modal (here a reply) left open when its workspace is
+    /// removed is dismissed rather than orphaned, so it can't point at a
+    /// PR/issue that no longer exists.
+    #[test]
+    fn workspace_removed_dismisses_a_modal_bound_to_it() {
+        use lazybox_ipc::Event as IpcEvent;
+        let mut m = build_model();
+        let ws = WorkspaceKey::new("github:o/r#1");
+        m.mount_reply(lazybox_core::SessionKey::from(&ws));
+        assert_eq!(m.top_modal(), Some(&Id::Reply));
+
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(ws));
+        assert_eq!(
+            m.top_modal(),
+            None,
+            "a modal for the removed workspace must be dismissed"
+        );
+        assert!(m.modal_flow.is_none(), "and its armed continuation cleared");
+    }
+
+    /// Removing a *different* workspace leaves an open modal untouched — the
+    /// dismissal keys off the modal's own workspace, not any removal.
+    #[test]
+    fn workspace_removed_leaves_an_unrelated_modal() {
+        use lazybox_ipc::Event as IpcEvent;
+        let mut m = build_model();
+        m.mount_reply(lazybox_core::SessionKey::from(&WorkspaceKey::new(
+            "github:o/r#1",
+        )));
+        assert_eq!(m.top_modal(), Some(&Id::Reply));
+
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(WorkspaceKey::new(
+            "github:o/r#2",
+        )));
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::Reply),
+            "an unrelated removal must not dismiss this modal"
+        );
+        assert!(m.modal_flow.is_some());
+    }
+
+    /// The "Setting up workspace" checklist — which carries its own session
+    /// slot and never auto-dismisses on failure — is dropped when its
+    /// workspace is removed, closing the orphaned-checklist path.
+    #[test]
+    fn workspace_removed_dismisses_the_setup_checklist() {
+        use crate::realm::components::worktree_progress::WorktreeProgressState;
+        use lazybox_ipc::Event as IpcEvent;
+        let mut m = build_model();
+        let ws = WorkspaceKey::new("github:o/r#1");
+        m.worktree_progress = Some(WorktreeProgressState::new(lazybox_core::SessionKey::from(
+            &ws,
+        )));
+
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(ws));
+        assert!(
+            m.worktree_progress.is_none(),
+            "a checklist for the removed workspace is dropped"
+        );
+    }
+
     /// Regression for #292: two PRs merging in the same poll produce
     /// two `MergedPrRemovable` events → two modals, one after the
     /// other. The second queues behind the first and mounts as soon as

@@ -1915,6 +1915,73 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Dismiss a modal left open *for* a workspace that was just removed
+    /// (archived, deleted, merged-away, or polled out of scope), so it
+    /// can't linger as an orphan pointing at a PR/issue that no longer
+    /// exists. The modal stack is context-free (`Vec<Id>`); the per-modal
+    /// workspace/session lives in the single armed `modal_flow` (always the
+    /// top modal's continuation) and, for the setup checklist, its own
+    /// `worktree_progress` slot. So we key off those, and — mirroring
+    /// [`Self::cancel_removal_prompt`] — clear the flow and pop the modal
+    /// only when the top `Id` is the one that flow mounts. The
+    /// removal-*prompt* itself is retracted by `cancel_removal_prompt`;
+    /// this covers every other per-workspace modal.
+    pub(super) fn dismiss_modals_for_removed_workspace(
+        &mut self,
+        key: &lazybox_core::WorkspaceKey,
+    ) {
+        let session: lazybox_core::SessionKey = key.into();
+
+        // The "Setting up workspace" checklist carries its own session
+        // slot, independent of the modal stack. A checklist for a removed
+        // workspace — failed (which never auto-dismisses) or still in
+        // flight — has nothing left to provision, so drop it.
+        if self
+            .worktree_progress
+            .as_ref()
+            .is_some_and(|s| s.session_key == session)
+        {
+            self.force_dismiss_worktree_progress();
+        }
+
+        // The `Id` the active flow mounts, *if* that flow targets the
+        // removed workspace. `SessionKey`-keyed variants compare against
+        // the session form; `WorkspaceKey`-keyed ones against the key.
+        let bound_id = match &self.modal_flow {
+            Some(ModalFlow::Reply { target }) if *target == session => Some(Id::Reply),
+            Some(ModalFlow::Notes { target }) if *target == session => Some(Id::Notes),
+            Some(ModalFlow::Snooze { workspace }) if *workspace == session => {
+                Some(Id::SnoozeDuration)
+            }
+            Some(ModalFlow::ConflictResolve { workspace }) if *workspace == session => {
+                Some(Id::ConflictResolve)
+            }
+            Some(ModalFlow::SidebarContext { session_key, .. }) if *session_key == session => {
+                Some(Id::SidebarContext)
+            }
+            Some(ModalFlow::ReviewRequest { workspace }) if workspace == key => {
+                Some(Id::RequestReviewers)
+            }
+            Some(ModalFlow::AssigneesRequest { workspace }) if workspace == key => {
+                Some(Id::AddAssignees)
+            }
+            Some(ModalFlow::PolicyWorkspace { workspace }) if workspace == key => {
+                Some(Id::PolicyPicker)
+            }
+            Some(ModalFlow::AdoptSource { source }) if source == key => Some(Id::AdoptTarget),
+            Some(ModalFlow::HopperProject { workspace, .. }) if workspace == key => {
+                Some(Id::HopperProject)
+            }
+            _ => None,
+        };
+        if let Some(id) = bound_id {
+            self.modal_flow = None;
+            if self.modal_stack.last() == Some(&id) {
+                self.pop_modal();
+            }
+        }
+    }
+
     /// Mount the `x a` adopt-target picker. Lists every other
     /// workspace the user could move sessions into. No-op when there
     /// are no other workspaces — show a hint instead since there's

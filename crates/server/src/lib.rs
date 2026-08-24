@@ -1362,14 +1362,16 @@ async fn build_and_send_lag_recovery_snapshot(
                     "lag-recovery snapshot could not enter reserved lane"
                 );
             }
-            // Re-sync snippet keep-mine acknowledgements alongside the
-            // recovery snapshot (#1312), mirroring the fresh-subscribe path.
-            let _ = tx.send(Event::SnippetKeepMine {
-                targets: snippet_keepmine,
-            });
             if load_errors > 0 {
                 let _ = tx.send(storage_recovery_event(load_errors));
             }
+            // Re-sync snippet keep-mine acknowledgements after the snapshot
+            // and its recovery notice (#1312), mirroring the fresh-subscribe
+            // ordering so a consumer expecting the storage warning to follow
+            // the snapshot isn't disturbed.
+            let _ = tx.send(Event::SnippetKeepMine {
+                targets: snippet_keepmine,
+            });
             config.event_metrics.record_bus_lag_recovery();
         }
         Err(e) => {
@@ -1579,12 +1581,6 @@ pub async fn dispatch_command(
                 recent_snippets: client_kv.recent_snippets,
                 dismissed_updates: client_kv.dismissed_updates,
             });
-            // Snippet keep-mine acknowledgements ride their own event right
-            // after the snapshot (like ViewerIdentities), so the picker can
-            // silence the "built-in changed" nudge for kept overrides (#1312).
-            let _ = tx.send(Event::SnippetKeepMine {
-                targets: snippet_keepmine,
-            });
             if load_errors > 0 {
                 let _ = tx.send(storage_recovery_event(load_errors));
             }
@@ -1648,6 +1644,14 @@ pub async fn dispatch_command(
                     lazybox_core::AutoFixSettings::default()
                 }
             };
+            // Snippet keep-mine acknowledgements are post-snapshot
+            // scaffolding like ViewerIdentities — sent after the snapshot and
+            // its recovery/restart notices so consumers that expect those to
+            // immediately follow the snapshot aren't disturbed, but BEFORE
+            // AutoFixPolicyConfig so that stays the end-of-replay marker (#1312).
+            let _ = tx.send(Event::SnippetKeepMine {
+                targets: snippet_keepmine,
+            });
             // Keep the auto-fix policy as the last post-subscribe push so
             // existing consumers can use it as the end-of-replay marker.
             let _ = tx.send(Event::AutoFixPolicyConfig {

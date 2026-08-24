@@ -74,6 +74,12 @@ resolve at their single owner rather than through divergent paths.
   over it.
 - An outdated-build guard opens a dismissable update modal when a newer
   dev/release build exists, without ever self-updating.
+- A `working` filter (`f` → working) narrows the sidebar to workspaces whose
+  agent is *live-working*, keyed off the runtime agent state rather than the
+  recorded-session `with-agent` predicate (which read 0 while agents ran).
+- Sync robustness: watched-repo issues surface, `g s` discovers a Linear
+  workspace's tickets, and a truncated GraphQL body is retried with a capped
+  log line instead of failing the whole sweep.
 
 ## [0.1.11] - 2026-08-17
 

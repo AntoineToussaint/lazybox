@@ -157,7 +157,13 @@ fn make_task(key: &str) -> Task {
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: lazybox_core::Mergeable::mergeable(),
+        // Fixed timestamp so the desktop/web contract fixtures stay
+        // byte-stable (Mergeable::mergeable() stamps Utc::now(), which is
+        // non-deterministic across regenerations).
+        mergeable: lazybox_core::Mergeable::new(
+            lazybox_core::MergeableState::Mergeable,
+            chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+        ),
         is_behind_base: false,
         merge_blocked: false,
         approval_policy: Default::default(),

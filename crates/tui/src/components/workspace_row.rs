@@ -1406,7 +1406,7 @@ mod tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: lazybox_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::mergeable(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),
@@ -3474,7 +3474,7 @@ mod tests {
     #[test]
     fn narrow_width_sheds_labels_before_status() {
         let mut task = make_task("owner/repo#42", "Fix bug");
-        task.mergeable = lazybox_core::Mergeable::Conflicting; // `⚠`
+        task.mergeable = lazybox_core::Mergeable::conflicting(); // `⚠`
         task.labels = vec![
             lazybox_core::Label::new("bug"),
             lazybox_core::Label::new("ci"),

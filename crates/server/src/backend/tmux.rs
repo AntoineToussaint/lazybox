@@ -1040,17 +1040,25 @@ impl SessionBackend for TmuxBackend {
             let cached_or_finished_ring = {
                 let mut map = self.sessions.lock().await;
                 if map.get(key).is_some_and(|slot| !slot.client.is_finished()) {
-                    (Some(map.get(key).map(|slot| slot.client.clone())), None)
+                    (map.get(key).map(|slot| slot.client.clone()), None)
                 } else {
                     // Drop a finished conduit BEFORE allocating its
                     // replacement. One relay owns three PTY descriptors and
                     // a socketpair; retaining those while `openpty()` tries
                     // to reserve the next set makes recovery impossible when
                     // the process is already close to RLIMIT_NOFILE.
-                    let finished_ring = map
-                        .get(key)
-                        .and_then(|slot| slot.client.snapshot_for_dedup().ok());
+                    // `snapshot_for_dedup` is async (it locks the client's
+                    // ring), so clone the finished client, drop it from the
+                    // map to free its FDs, release the sessions lock, then
+                    // snapshot off the surviving clone. Best-effort: a
+                    // snapshot error just skips dedup.
+                    let finished_client = map.get(key).map(|slot| slot.client.clone());
                     map.remove(key);
+                    drop(map);
+                    let finished_ring = match finished_client {
+                        Some(client) => client.snapshot_for_dedup().await.ok(),
+                        None => None,
+                    };
                     (None, finished_ring)
                 }
             };
@@ -1582,8 +1590,8 @@ mod tests {
 
         // Case 3: Empty seed — returned unchanged.
         let ring = b"existing".to_vec();
-        let result = backend.dedup_reattach_seed(Some(ring), vec![]);
-        assert_eq!(result, vec![], "empty seed → returned unchanged");
+        let result = backend.dedup_reattach_seed(Some(ring), Vec::<u8>::new());
+        assert_eq!(result, Vec::<u8>::new(), "empty seed → returned unchanged");
 
         // Case 4: No overlap — seed returned unchanged.
         let ring = b"foo".to_vec();

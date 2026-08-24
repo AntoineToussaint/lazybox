@@ -688,7 +688,7 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
             && let Some(mut pr) = ws.pr.clone()
             && !pr.mergeable.is_conflicting()
         {
-            pr.mergeable = lazybox_core::Mergeable::Conflicting;
+            pr.mergeable = lazybox_core::Mergeable::conflicting();
             super::upsert(config, pr).await;
         }
         let _ = config.bus.send(Event::PrMergeFailed {
@@ -1669,7 +1669,7 @@ mod merge_pr_details_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: lazybox_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::mergeable(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),
@@ -2982,7 +2982,7 @@ mod github_target_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: Mergeable::Mergeable,
+            mergeable: Mergeable::mergeable(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),
@@ -3060,7 +3060,7 @@ mod prefetch_score_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: Mergeable::Mergeable,
+            mergeable: Mergeable::mergeable(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),
@@ -3349,7 +3349,7 @@ mod inspect_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: lazybox_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::mergeable(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),
@@ -3836,7 +3836,7 @@ mod inspect_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: lazybox_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::mergeable(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),
@@ -3903,7 +3903,7 @@ mod inspect_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: lazybox_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::mergeable(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),
@@ -3965,7 +3965,7 @@ mod inspect_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: lazybox_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::mergeable(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),
@@ -4879,7 +4879,7 @@ mod inspect_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: lazybox_core::Mergeable::Unknown,
+            mergeable: lazybox_core::Mergeable::unknown(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),

@@ -67,7 +67,7 @@ fn synthetic_issue(i: usize) -> Task {
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: lazybox_core::Mergeable::Unknown,
+        mergeable: lazybox_core::Mergeable::unknown(),
         is_behind_base: false,
         merge_blocked: false,
         approval_policy: Default::default(),

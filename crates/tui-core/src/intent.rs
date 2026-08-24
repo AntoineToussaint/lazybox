@@ -938,7 +938,7 @@ mod tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: lazybox_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::mergeable(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),
@@ -1120,7 +1120,7 @@ mod tests {
         // fire — without this, the user sits on a CONFLICT-pill row
         // and the hint bar shows nothing under `w`.
         let mut ws = pr("o/r#7", CiStatus::None, ReviewStatus::None);
-        ws.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::Conflicting;
+        ws.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::conflicting();
         let intent = resolve_work(
             Some(&ws),
             &[],
@@ -1149,7 +1149,7 @@ mod tests {
         // conflict first. Pin the priority so a future refactor
         // doesn't accidentally swap the order.
         let mut ws = pr("o/r#7", CiStatus::Failure, ReviewStatus::None);
-        ws.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::Conflicting;
+        ws.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::conflicting();
         let intent = resolve_work(
             Some(&ws),
             &[],
@@ -1182,9 +1182,10 @@ mod tests {
             let healthy_pr = pr("o/r#1", CiStatus::Success, ReviewStatus::Pending);
             let ci_fail = pr("o/r#1", CiStatus::Failure, ReviewStatus::Pending);
             let mut conflict_pr = pr("o/r#7", CiStatus::None, ReviewStatus::None);
-            conflict_pr.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::Conflicting;
+            conflict_pr.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::conflicting();
             let mut conflict_plus_ci = pr("o/r#8", CiStatus::Failure, ReviewStatus::None);
-            conflict_plus_ci.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::Conflicting;
+            conflict_plus_ci.pr.as_mut().unwrap().mergeable =
+                lazybox_core::Mergeable::conflicting();
             let issue = issue("o/r#42");
             let mut commented = pr("o/r#9", CiStatus::Success, ReviewStatus::Pending);
             commented.activity.push(lazybox_core::Activity {
@@ -1294,7 +1295,7 @@ mod tests {
         // The comments path is most-explicit user intent: they
         // selected what to address. Conflict / CI fall behind.
         let mut ws = pr("o/r#7", CiStatus::None, ReviewStatus::None);
-        ws.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::Conflicting;
+        ws.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::conflicting();
         ws.activity.push(lazybox_core::Activity {
             author: "alice".into(),
             body: "fix the lint please".into(),
@@ -1667,7 +1668,7 @@ mod tests {
     #[test]
     fn merge_with_cached_conflict_sends_with_advisory() {
         let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::None);
-        ws.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::Conflicting;
+        ws.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::conflicting();
         assert!(matches!(resolve_merge(Some(&ws)), Intent::MergePr { .. }));
         assert_eq!(
             merge_send_advisory(Some(&ws)),
@@ -1681,7 +1682,7 @@ mod tests {
     #[test]
     fn merge_with_unknown_mergeability_sends_and_closed_pr_noops() {
         let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
-        ws.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::Unknown;
+        ws.pr.as_mut().unwrap().mergeable = lazybox_core::Mergeable::unknown();
         assert!(matches!(resolve_merge(Some(&ws)), Intent::MergePr { .. }));
 
         let mut merged = pr("o/r#2", CiStatus::Success, ReviewStatus::Approved);

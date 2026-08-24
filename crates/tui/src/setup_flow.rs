@@ -2211,7 +2211,7 @@ mod tests {
             display_name: "GitHub",
             category: Category::Provider,
             state: crate::setup::ToolState::Missing {
-                kind: MissingKind::NotAuthenticated,
+                kind: crate::setup::MissingKind::NotAuthenticated,
                 hint: "gh auth login".into(),
             },
             install_hint: "",

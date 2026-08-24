@@ -2880,7 +2880,7 @@ mod set_auto_merge_on_green_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: Mergeable::Mergeable,
+            mergeable: Mergeable::mergeable(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),

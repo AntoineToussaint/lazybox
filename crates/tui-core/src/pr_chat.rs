@@ -10,7 +10,7 @@
 //! selection reuses [`crate::help::select_help_agent`] /
 //! [`crate::help::HELP_AGENT_PREFERENCE`].
 
-use lazybox_core::{Activity, ActivityKind, CiStatus, Mergeable, ReviewStatus, Task};
+use lazybox_core::{Activity, ActivityKind, CiStatus, MergeableState, ReviewStatus, Task};
 use lazybox_ipc::{DiffLineKindDto, WorkspaceDiffDto};
 
 /// Sentinel session key for the PR-chat agent run. Like
@@ -94,7 +94,7 @@ cannot see here, say so plainly rather than guessing.\n\
             "CI: {}   Review: {}   Mergeable: {}\n",
             ci_label(task.ci),
             review_label(task.review),
-            merge_label(task.mergeable),
+            merge_label(task.mergeable.state),
         ));
         out.push_str(&format!(
             "Diffstat: +{} -{}\n",
@@ -312,11 +312,11 @@ fn review_label(review: ReviewStatus) -> &'static str {
     }
 }
 
-fn merge_label(mergeable: Mergeable) -> &'static str {
+fn merge_label(mergeable: MergeableState) -> &'static str {
     match mergeable {
-        Mergeable::Unknown => "unknown",
-        Mergeable::Mergeable => "clean",
-        Mergeable::Conflicting => "conflicting",
+        MergeableState::Unknown => "unknown",
+        MergeableState::Mergeable => "clean",
+        MergeableState::Conflicting => "conflicting",
     }
 }
 
@@ -355,7 +355,7 @@ mod tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: Mergeable::Conflicting,
+            mergeable: lazybox_core::Mergeable::conflicting(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),

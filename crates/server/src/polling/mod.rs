@@ -494,7 +494,7 @@ mod engagement_tier_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: Mergeable::Mergeable,
+            mergeable: Mergeable::mergeable(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),
@@ -1036,7 +1036,7 @@ pub struct TickState {
     /// struct.
     pub round_robin: RoundRobinState,
     /// Consecutive polls in which each task (keyed by task id) has
-    /// reported `Mergeable::Unknown`. Drives the fast-repoll cap:
+    /// reported `Mergeable::unknown()`. Drives the fast-repoll cap:
     /// only the first [`UNKNOWN_MERGEABLE_MAX_FAST_PROBES`] Unknown
     /// sightings arm the 5s re-poll; after that the task waits out
     /// the normal cadence. Entries clear the moment the task reports
@@ -1230,7 +1230,7 @@ impl TickState {
     }
 }
 
-/// How many consecutive `Mergeable::Unknown` sightings of one task may
+/// How many consecutive `Mergeable::unknown()` sightings of one task may
 /// arm the 5s fast re-poll before that task falls back to the normal
 /// poll cadence. GitHub computes mergeability within a few seconds in
 /// the happy case; a PR still Unknown after three fast probes isn't
@@ -1871,7 +1871,7 @@ pub async fn tick_with_state(
                     //      to the normal cadence for that task instead
                     //      of 5s-polling indefinitely. The counter
                     //      resets the moment a definitive value lands.
-                    if task.mergeable == lazybox_core::Mergeable::Unknown
+                    if task.mergeable == lazybox_core::Mergeable::unknown()
                         && !matches!(
                             task.state,
                             lazybox_core::TaskState::Merged | lazybox_core::TaskState::Closed
@@ -2081,7 +2081,7 @@ pub struct TickOutcome {
     /// burning the same rate-limit error each time.
     pub retry_after_secs: Option<u64>,
     /// True when at least one polled task carried
-    /// `Mergeable::Unknown` — GitHub returns that while it lazily
+    /// `Mergeable::unknown()` — GitHub returns that while it lazily
     /// computes mergeability after a new commit. The loop schedules
     /// one extra wake at +5s so the next poll picks up the real
     /// value instead of waiting out the full interval.
@@ -4403,7 +4403,7 @@ fn issue_id_to_workspace_key(issue_id: &lazybox_core::TaskId) -> WorkspaceKey {
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: lazybox_core::Mergeable::Mergeable,
+        mergeable: lazybox_core::Mergeable::mergeable(),
         is_behind_base: false,
         merge_blocked: false,
         approval_policy: Default::default(),
@@ -4623,7 +4623,7 @@ mod workspace_lock_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: lazybox_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::mergeable(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),
@@ -4854,7 +4854,7 @@ mod merge_detection_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: lazybox_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::mergeable(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),
@@ -5170,7 +5170,7 @@ mod rescope_collapse_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: lazybox_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::mergeable(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),
@@ -6244,7 +6244,7 @@ mod unreadable_row_preservation_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: lazybox_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::mergeable(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),
@@ -6561,7 +6561,7 @@ mod tick_noop_skip_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: lazybox_core::Mergeable::Unknown,
+            mergeable: lazybox_core::Mergeable::unknown(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),

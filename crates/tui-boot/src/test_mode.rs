@@ -135,7 +135,7 @@ fn seed_one_session(store: &dyn Store, worktree: &Path) -> anyhow::Result<()> {
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: lazybox_core::Mergeable::Mergeable,
+        mergeable: lazybox_core::Mergeable::mergeable(),
         is_behind_base: false,
         merge_blocked: false,
         approval_policy: Default::default(),

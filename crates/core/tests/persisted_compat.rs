@@ -102,7 +102,7 @@ fn maximal_pr_task() -> Task {
         assignees: vec!["alice".into()],
         auto_merge_enabled: true,
         is_in_merge_queue: true,
-        mergeable: Mergeable::Conflicting,
+        mergeable: Mergeable::conflicting(),
         is_behind_base: true,
         merge_blocked: false,
         approval_policy: Default::default(),

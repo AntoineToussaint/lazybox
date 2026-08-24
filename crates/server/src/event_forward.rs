@@ -757,7 +757,7 @@ mod tests {
             raw_tx
                 .send(Event::TerminalOutput {
                     terminal_id: tid,
-                    bytes: Arc::<[u8]>::from(format!("chunk{seq}").into_bytes()),
+                    bytes: std::sync::Arc::<[u8]>::from(format!("chunk{seq}").into_bytes()),
                     first_seq: seq,
                     seq,
                 })
@@ -850,7 +850,7 @@ mod tests {
             &tx,
             Event::TerminalOutput {
                 terminal_id: tid,
-                bytes: Arc::<[u8]>::from(vec![b'x']),
+                bytes: std::sync::Arc::<[u8]>::from(vec![b'x']),
                 first_seq: 1,
                 seq: 1,
             },
@@ -861,7 +861,7 @@ mod tests {
             &tx,
             Event::TerminalOutput {
                 terminal_id: tid,
-                bytes: Arc::<[u8]>::from(vec![b'y']),
+                bytes: std::sync::Arc::<[u8]>::from(vec![b'y']),
                 first_seq: 2,
                 seq: 2,
             },
@@ -950,7 +950,7 @@ mod tests {
             &tx,
             Event::TerminalOutput {
                 terminal_id: tid,
-                bytes: Arc::<[u8]>::from(b"B".to_vec()),
+                bytes: std::sync::Arc::<[u8]>::from(b"B".to_vec()),
                 first_seq: 2,
                 seq: 2,
             },
@@ -1007,7 +1007,7 @@ mod tests {
                 &tx,
                 Event::TerminalOutput {
                     terminal_id: tid,
-                    bytes: Arc::<[u8]>::from(vec![b'z']),
+                    bytes: std::sync::Arc::<[u8]>::from(vec![b'z']),
                     first_seq: seq,
                     seq,
                 },
@@ -1059,7 +1059,7 @@ mod tests {
                 &tx,
                 Event::TerminalOutput {
                     terminal_id: TerminalId(t),
-                    bytes: vec![b'x'],
+                    bytes: vec![b'x'].into(),
                     first_seq: 1,
                     seq: 1,
                 },
@@ -1144,7 +1144,7 @@ mod tests {
             raw_tx
                 .send(Event::TerminalOutput {
                     terminal_id: TerminalId(1),
-                    bytes: Arc::<[u8]>::from(vec![b'x']),
+                    bytes: std::sync::Arc::<[u8]>::from(vec![b'x']),
                     first_seq: seq,
                     seq,
                 })
@@ -1195,19 +1195,8 @@ mod tests {
         // - client_slow has a tiny channel (2 slots)
         let (client_fast_tx, mut client_fast_rx) = mpsc::channel(10);
         let (client_slow_tx, mut client_slow_rx) = mpsc::channel(2);
-        let (raw_tx, forward_fast) = lazybox_ipc::event_forward_channel(client_fast_tx);
-        let (raw_tx2, forward_slow) = {
-            // Both clients read from the same raw stream, so we need to split
-            // the send side. For simplicity, we'll send to one forwarder and
-            // manually feed the other.
-            (
-                raw_tx.clone(),
-                lazybox_ipc::event_forward_channel(client_slow_tx),
-            )
-        };
-
-        // Actually, simpler approach: create two separate forwarders reading
-        // from independent raw streams, and send the same events to both.
+        // Two independent forwarders reading from independent raw streams,
+        // sending the same events to both clients.
         let (raw_tx_fast, forward_fast) = lazybox_ipc::event_forward_channel(client_fast_tx);
         let (raw_tx_slow, forward_slow) = lazybox_ipc::event_forward_channel(client_slow_tx);
 
@@ -1243,7 +1232,7 @@ mod tests {
             raw_tx_fast
                 .send(Event::TerminalOutput {
                     terminal_id: tid,
-                    bytes: format!("chunk{seq}").into_bytes(),
+                    bytes: format!("chunk{seq}").into_bytes().into(),
                     first_seq: seq,
                     seq,
                 })
@@ -1254,7 +1243,7 @@ mod tests {
         for seq in 1..=20 {
             let _ = raw_tx_slow.send(Event::TerminalOutput {
                 terminal_id: tid,
-                bytes: format!("chunk{seq}").into_bytes(),
+                bytes: format!("chunk{seq}").into_bytes().into(),
                 first_seq: seq,
                 seq,
             });

@@ -14,7 +14,6 @@ use lazybox_ipc::{
     TerminalId, TerminalInputIntent, TerminalKind, TerminalSnapshot, UserPrompt, WorktreeStep,
     WorktreeStepStatus,
 };
-use std::sync::Arc;
 use tokio::io::duplex;
 
 fn sample_time() -> chrono::DateTime<chrono::Utc> {
@@ -55,7 +54,7 @@ fn sample_workspace() -> lazybox_core::Workspace {
         author: String::new(),
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: lazybox_core::Mergeable::Mergeable,
+        mergeable: lazybox_core::Mergeable::mergeable(),
         is_behind_base: false,
         merge_blocked: false,
         approval_policy: Default::default(),
@@ -683,7 +682,7 @@ fn all_events() -> Vec<Event> {
         },
         Event::TerminalOutput {
             terminal_id: TerminalId(2),
-            bytes: Arc::<[u8]>::from(b"ANSI: \x1b[31mred\x1b[0m".to_vec()),
+            bytes: std::sync::Arc::<[u8]>::from(b"ANSI: \x1b[31mred\x1b[0m".to_vec()),
             first_seq: 1,
             seq: 1,
         },
@@ -1220,6 +1219,8 @@ fn command_tag(command: &Command) -> &'static str {
 fn event_tag(event: &Event) -> &'static str {
     match event {
         Event::Snapshot { .. } => "Snapshot",
+        Event::ResizeTerminal { .. } => "ResizeTerminal",
+        Event::TerminalInjectProgress { .. } => "TerminalInjectProgress",
         Event::ViewerIdentities { .. } => "ViewerIdentities",
         Event::AutoFixPolicyConfig { .. } => "AutoFixPolicyConfig",
         Event::ShellCommandConfig { .. } => "ShellCommandConfig",
@@ -1475,7 +1476,7 @@ async fn socket_binary_terminal_output_round_trip() {
     let nasty: Vec<u8> = (0..=255).collect();
     let msg = Event::TerminalOutput {
         terminal_id: TerminalId(1),
-        bytes: Arc::<[u8]>::from(nasty.clone()),
+        bytes: std::sync::Arc::<[u8]>::from(nasty.clone()),
         first_seq: 99,
         seq: 99,
     };
@@ -1489,7 +1490,7 @@ async fn socket_binary_terminal_output_round_trip() {
         ..
     }) = got
     {
-        assert_eq!(bytes, Arc::<[u8]>::from(nasty.clone()));
+        assert_eq!(bytes, std::sync::Arc::<[u8]>::from(nasty.clone()));
         assert_eq!(first_seq, 99);
         assert_eq!(seq, 99);
     } else {

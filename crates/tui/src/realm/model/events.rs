@@ -1115,7 +1115,9 @@ impl<T: TerminalAdapter> Model<T> {
                 // one. Exhaustive on purpose — a new Event variant
                 // must be classified here (does it carry workspaces
                 // needing the merge latch?) before this compiles.
-                IpcEvent::ViewerIdentities { .. }
+                IpcEvent::ResizeTerminal { .. }
+                | IpcEvent::TerminalInjectProgress { .. }
+                | IpcEvent::ViewerIdentities { .. }
                 | IpcEvent::AutoFixPolicyConfig { .. }
                 | IpcEvent::ShellCommandConfig { .. }
                 | IpcEvent::AgentAvailabilityConfig { .. }
@@ -1998,7 +2000,9 @@ impl<T: TerminalAdapter> Model<T> {
             // Deliberately ignored: not sync-attempt outcomes.
             // Exhaustive on purpose — a new Event variant must be
             // classified here before this compiles.
-            IpcEvent::Snapshot { .. }
+            IpcEvent::ResizeTerminal { .. }
+            | IpcEvent::TerminalInjectProgress { .. }
+            | IpcEvent::Snapshot { .. }
             | IpcEvent::ViewerIdentities { .. }
             | IpcEvent::AutoFixPolicyConfig { .. }
             | IpcEvent::ShellCommandConfig { .. }
@@ -2275,7 +2279,9 @@ impl<T: TerminalAdapter> Model<T> {
                 // failure semantics. Exhaustive on purpose — a new
                 // Event variant must be classified here before this
                 // compiles.
-                IpcEvent::Snapshot { .. }
+                IpcEvent::ResizeTerminal { .. }
+                | IpcEvent::TerminalInjectProgress { .. }
+                | IpcEvent::Snapshot { .. }
                 | IpcEvent::ViewerIdentities { .. }
                 | IpcEvent::AutoFixPolicyConfig { .. }
                 | IpcEvent::ShellCommandConfig { .. }

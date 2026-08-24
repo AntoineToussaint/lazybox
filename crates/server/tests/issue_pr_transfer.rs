@@ -155,7 +155,7 @@ fn gh_task(key: &str, is_pr: bool, branch: Option<&str>, closes: Vec<TaskId>) ->
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: lazybox_core::Mergeable::Mergeable,
+        mergeable: lazybox_core::Mergeable::mergeable(),
         is_behind_base: false,
         merge_blocked: false,
         approval_policy: Default::default(),

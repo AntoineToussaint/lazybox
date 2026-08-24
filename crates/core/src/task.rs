@@ -339,7 +339,7 @@ pub struct Reviewer {
 /// Includes an observation timestamp so stale verdicts (older than
 /// ~5 minutes) can be re-fetched and re-evaluated, preventing the UI
 /// from showing outdated merge status after CI passes (#1218).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct Mergeable {
     /// The actual mergeability state: Unknown, Mergeable, or Conflicting.
@@ -385,6 +385,24 @@ impl Mergeable {
         Self {
             state: MergeableState::Unknown,
             observed_at: None,
+        }
+    }
+
+    /// A confirmed-clean verdict, observed now. Convenience for tests and
+    /// fixtures migrating off the old `Mergeable::Mergeable` enum variant.
+    pub fn mergeable() -> Self {
+        Self {
+            state: MergeableState::Mergeable,
+            observed_at: Some(Utc::now()),
+        }
+    }
+
+    /// A confirmed-conflict verdict, observed now. Convenience for tests
+    /// and fixtures migrating off the old `Mergeable::Conflicting` variant.
+    pub fn conflicting() -> Self {
+        Self {
+            state: MergeableState::Conflicting,
+            observed_at: Some(Utc::now()),
         }
     }
 

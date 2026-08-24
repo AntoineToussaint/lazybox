@@ -637,7 +637,7 @@ pub(super) fn coalesce_adjacent_output(events: Vec<IpcEvent>) -> Vec<IpcEvent> {
                     // Convert Arc<[u8]> to Vec<u8>, extend it, and convert back.
                     let mut combined = prev_bytes.to_vec();
                     combined.extend_from_slice(&bytes);
-                    *prev_bytes = Arc::<[u8]>::from(combined);
+                    *prev_bytes = std::sync::Arc::<[u8]>::from(combined);
                     *prev_seq = seq;
                     continue;
                 }

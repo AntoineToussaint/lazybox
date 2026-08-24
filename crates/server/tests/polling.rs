@@ -188,7 +188,7 @@ fn make_task(key: &str) -> Task {
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: lazybox_core::Mergeable::Mergeable,
+        mergeable: lazybox_core::Mergeable::mergeable(),
         is_behind_base: false,
         merge_blocked: false,
         approval_policy: Default::default(),
@@ -4932,7 +4932,7 @@ async fn tick_outcome_flags_unknown_mergeable_when_any_task_is_unknown() {
     // quick re-poll that chases GitHub's lazy compute.
     let config = ServerConfig::in_memory();
     let mut t = make_task("o/r#unknown");
-    t.mergeable = lazybox_core::Mergeable::Unknown;
+    t.mergeable = lazybox_core::Mergeable::unknown();
     let source: Box<dyn TaskSource> = Box::new(FakeSource {
         name: "github".into(),
         tasks: vec![t],
@@ -4969,10 +4969,10 @@ async fn terminal_task_with_unknown_mergeable_does_not_flag_fast_repoll() {
     let config = ServerConfig::in_memory();
     let mut merged = make_task("o/r#77");
     merged.state = TaskState::Merged;
-    merged.mergeable = lazybox_core::Mergeable::Unknown;
+    merged.mergeable = lazybox_core::Mergeable::unknown();
     let mut closed = make_task("o/r#78");
     closed.state = TaskState::Closed;
-    closed.mergeable = lazybox_core::Mergeable::Unknown;
+    closed.mergeable = lazybox_core::Mergeable::unknown();
     let source: Box<dyn TaskSource> = Box::new(FakeSource {
         name: "github".into(),
         tasks: vec![merged, closed],
@@ -4995,7 +4995,7 @@ async fn unknown_mergeable_fast_repoll_is_capped_per_task() {
     let mut state = polling::TickState::default();
     let unknown_source = || -> Box<dyn TaskSource> {
         let mut t = make_task("o/r#9");
-        t.mergeable = lazybox_core::Mergeable::Unknown;
+        t.mergeable = lazybox_core::Mergeable::unknown();
         Box::new(FakeSource {
             name: "github".into(),
             tasks: vec![t],
@@ -5020,7 +5020,7 @@ async fn unknown_mergeable_fast_repoll_is_capped_per_task() {
     // A definitive value resets the streak…
     let resolved: Box<dyn TaskSource> = Box::new(FakeSource {
         name: "github".into(),
-        tasks: vec![make_task("o/r#9")], // Mergeable::Mergeable
+        tasks: vec![make_task("o/r#9")], // Mergeable::mergeable()
     });
     let outcome = polling::tick_with_state(&config, &[resolved], &mut state).await;
     assert!(!outcome.saw_unknown_mergeable);
@@ -7454,7 +7454,7 @@ async fn concurrent_upsert_and_store_access_no_deadlock() {
     // Spawn concurrent store readers that try to access workspaces.
     // These should NOT block waiting for the upserters' locks.
     let mut reader_handles = vec![];
-    for i in 0..4 {
+    for _i in 0..4 {
         let cfg = config.clone();
         let handle = tokio::spawn(async move {
             for _ in 0..10 {

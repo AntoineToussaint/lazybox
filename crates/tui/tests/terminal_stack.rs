@@ -85,7 +85,7 @@ fn output_event_appends_to_recent_buffer() {
     t.set_active_session(Some(sk("o/r#1")));
     t.on_event(&Event::TerminalOutput {
         terminal_id: TerminalId(1),
-        bytes: b"hello world\n".to_vec(),
+        bytes: b"hello world\n".to_vec().into(),
         first_seq: 1,
         seq: 1,
     });
@@ -99,7 +99,7 @@ fn output_for_unknown_terminal_is_dropped() {
     // No spawn — output arrives for a terminal we don't know about.
     t.on_event(&Event::TerminalOutput {
         terminal_id: TerminalId(999),
-        bytes: b"nobody home".to_vec(),
+        bytes: b"nobody home".to_vec().into(),
         first_seq: 1,
         seq: 1,
     });
@@ -117,7 +117,7 @@ fn output_preserves_raw_escapes_for_inspection() {
     let raw = b"\x1b[31mred\x1b[0m text".to_vec();
     t.on_event(&Event::TerminalOutput {
         terminal_id: TerminalId(1),
-        bytes: raw.clone(),
+        bytes: raw.clone().into(),
         first_seq: 1,
         seq: 1,
     });
@@ -152,7 +152,7 @@ fn recent_buffer_is_capped() {
     for seq in 1..=10 {
         t.on_event(&Event::TerminalOutput {
             terminal_id: TerminalId(1),
-            bytes: chunk.clone(),
+            bytes: chunk.clone().into(),
             first_seq: seq,
             seq,
         });
@@ -579,7 +579,7 @@ fn render_shows_tab_bar_and_content() {
     t.set_active_session(Some(sk("o/r#1")));
     t.on_event(&Event::TerminalOutput {
         terminal_id: TerminalId(1),
-        bytes: b"first line\nsecond line\n".to_vec(),
+        bytes: b"first line\nsecond line\n".to_vec().into(),
         first_seq: 1,
         seq: 1,
     });
@@ -607,7 +607,7 @@ fn render_shows_scrollbar_when_terminal_has_scrollback() {
     }
     t.on_event(&Event::TerminalOutput {
         terminal_id: TerminalId(1),
-        bytes,
+        bytes: bytes.into(),
         first_seq: 1,
         seq: 1,
     });
@@ -626,7 +626,7 @@ fn render_hides_scrollbar_when_terminal_fits() {
     render_to_string(&mut t, 60, 10, true);
     t.on_event(&Event::TerminalOutput {
         terminal_id: TerminalId(1),
-        bytes: b"just one line\r\n".to_vec(),
+        bytes: b"just one line\r\n".to_vec().into(),
         first_seq: 1,
         seq: 1,
     });
@@ -653,7 +653,7 @@ fn shift_pageup_scrolls_local_scrollback_without_pty_writes() {
     }
     t.on_event(&Event::TerminalOutput {
         terminal_id: TerminalId(1),
-        bytes,
+        bytes: bytes.into(),
         first_seq: 1,
         seq: 1,
     });
@@ -734,13 +734,13 @@ fn render_tab_bar_updates_after_cycle() {
     t.set_active_session(Some(sk("o/r#1")));
     t.on_event(&Event::TerminalOutput {
         terminal_id: TerminalId(1),
-        bytes: b"AGENT_OUTPUT".to_vec(),
+        bytes: b"AGENT_OUTPUT".to_vec().into(),
         first_seq: 1,
         seq: 1,
     });
     t.on_event(&Event::TerminalOutput {
         terminal_id: TerminalId(2),
-        bytes: b"SHELL_OUTPUT".to_vec(),
+        bytes: b"SHELL_OUTPUT".to_vec().into(),
         first_seq: 1,
         seq: 1,
     });
@@ -1704,7 +1704,7 @@ fn render_inserts_blank_spacer_between_recap_and_agent_grid() {
     // distinguishable from the blank spacer.
     t.on_event(&Event::TerminalOutput {
         terminal_id: TerminalId(1),
-        bytes: b"AGENTLINE".to_vec(),
+        bytes: b"AGENTLINE".to_vec().into(),
         first_seq: 1,
         seq: 1,
     });

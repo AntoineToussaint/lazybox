@@ -1380,7 +1380,7 @@ async fn spawned_subprocess_output_reaches_client_via_bus() {
                     terminal_id: tid,
                     bytes,
                     ..
-                } => *tid == terminal_id && bytes == b"lazybox-marker",
+                } => *tid == terminal_id && bytes.as_ref() == b"lazybox-marker",
                 _ => false,
             },
             Duration::from_secs(2),
@@ -1466,7 +1466,7 @@ async fn snapshot_replay_includes_buffered_pty_output_for_late_subscribers() {
         let _ = wait_for(
             &mut producer,
             |e| match e {
-                Event::TerminalOutput { bytes, .. } => bytes == b"lazybox-replay-marker",
+                Event::TerminalOutput { bytes, .. } => bytes.as_ref() == b"lazybox-replay-marker",
                 _ => false,
             },
             Duration::from_secs(2),
@@ -3706,7 +3706,7 @@ fn collapse_task(key: &str, url: &str, closes: Vec<lazybox_core::TaskId>) -> laz
         assignees: vec![],
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: lazybox_core::Mergeable::Mergeable,
+        mergeable: lazybox_core::Mergeable::mergeable(),
         is_behind_base: false,
         merge_blocked: false,
         approval_policy: Default::default(),
@@ -4294,6 +4294,7 @@ async fn resize_emits_event_with_output_watermark() {
                 initial_prompt: None,
                 initial_snippet: None,
                 on_main: false,
+                force_new: false,
             })
             .unwrap();
 
@@ -4310,7 +4311,7 @@ async fn resize_emits_event_with_output_watermark() {
         .expect("terminal spawn event");
 
         // Emit some output through the mock backend
-        let backend_key = mock.list().await.unwrap()[0].0.clone();
+        let backend_key = mock.list().await.unwrap()[0].clone();
         for i in 0..3 {
             mock.emit(&backend_key, format!("output {}\r\n", i).as_bytes())
                 .await;
@@ -4358,7 +4359,7 @@ async fn resize_emits_event_with_output_watermark() {
                     Event::ResizeTerminal {
                         terminal_id: tid,
                         ..
-                    } if tid == terminal_id
+                    } if *tid == terminal_id
                 )
             },
             Duration::from_secs(2),

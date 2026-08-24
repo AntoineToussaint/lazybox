@@ -182,7 +182,7 @@ mod status_pill_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: lazybox_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::mergeable(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),
@@ -276,7 +276,7 @@ mod status_pill_tests {
     #[test]
     fn conflicts_trump_ci_status() {
         let mut t = base_task();
-        t.mergeable = lazybox_core::Mergeable::Conflicting;
+        t.mergeable = lazybox_core::Mergeable::conflicting();
         t.ci = CiStatus::Success;
         // `⚠` carries a trailing U+FE0E text-presentation selector so it
         // renders one cell wide on emoji-forcing terminals (#1046).
@@ -366,7 +366,7 @@ mod status_pill_tests {
         use super::super::status_pills;
         let mut t = base_task();
         t.state = TaskState::Draft;
-        t.mergeable = lazybox_core::Mergeable::Conflicting;
+        t.mergeable = lazybox_core::Mergeable::conflicting();
         let (a, b) = status_pills(&t);
         assert_eq!(a.unwrap().label, " ◇", "slot one stays the draft glyph");
         assert_eq!(
@@ -401,7 +401,7 @@ mod status_pill_tests {
         use super::super::status_pills;
         let mut t = base_task();
         t.state = TaskState::Draft;
-        t.mergeable = lazybox_core::Mergeable::Conflicting;
+        t.mergeable = lazybox_core::Mergeable::conflicting();
         t.ci = CiStatus::Failure;
         let (_a, b) = status_pills(&t);
         assert_eq!(b.unwrap().label, " ⚠\u{fe0e}");
@@ -696,9 +696,9 @@ mod status_pill_consistency_tests {
             CiStatus::Mixed,
         ];
         let mergeables = [
-            Mergeable::Mergeable,
-            Mergeable::Conflicting,
-            Mergeable::Unknown,
+            Mergeable::mergeable(),
+            Mergeable::conflicting(),
+            Mergeable::unknown(),
         ];
 
         let mut rendered: BTreeSet<String> = BTreeSet::new();
@@ -747,7 +747,7 @@ mod status_pill_consistency_tests {
         let mut cases: Vec<lazybox_core::Task> = Vec::new();
         cases.push({
             let mut t = base_task();
-            t.mergeable = lazybox_core::Mergeable::Conflicting;
+            t.mergeable = lazybox_core::Mergeable::conflicting();
             t
         });
         cases.push({

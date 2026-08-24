@@ -985,7 +985,7 @@ impl GhSource {
 
     async fn fetch_hot_only(&self) -> Result<Vec<Task>, lazybox_core::ProviderError> {
         let hot_targets = self.hot_notification_targets();
-        let requests = rank_targeted_requests(&hot_targets, &[], &self.cold_targets);
+        let (requests, _coverage) = rank_targeted_requests(&hot_targets, &[], &self.cold_targets);
         let targeted = self.fetch_targeted(requests).await?;
         Ok(apply_needs_reply_toggle(
             filter_github_tasks_with_watches(
@@ -1032,7 +1032,8 @@ impl GhSource {
         ));
 
         let hot_targets = self.hot_notification_targets();
-        let requests = rank_targeted_requests(&hot_targets, &entries, &self.cold_targets);
+        let (requests, _coverage) =
+            rank_targeted_requests(&hot_targets, &entries, &self.cold_targets);
         let targeted = self.fetch_targeted(requests).await?;
 
         // At-most-once cursor advance coupled to work completion (#512).
@@ -1485,7 +1486,7 @@ impl TaskSource for GhSource {
                             match stage {
                                 FullSweepStage::Focused => {
                                     let hot_targets = self.hot_notification_targets();
-                                    let requests = rank_targeted_requests(
+                                    let (requests, _coverage) = rank_targeted_requests(
                                         &hot_targets,
                                         &[],
                                         &self.cold_targets,
@@ -2385,7 +2386,7 @@ mod linear_cadence_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: lazybox_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::mergeable(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),

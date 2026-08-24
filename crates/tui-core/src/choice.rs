@@ -901,7 +901,7 @@ mod tests {
             reviewers: vec![],
             reviews: vec![],
             labels: vec![],
-            mergeable: lazybox_core::Mergeable::Mergeable,
+            mergeable: lazybox_core::Mergeable::mergeable(),
             auto_merge_enabled: false,
             is_in_merge_queue: false,
             is_behind_base: false,

@@ -736,7 +736,7 @@ mod optimistic_assignee_tests {
             assignees,
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: Mergeable::Unknown,
+            mergeable: Mergeable::unknown(),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),

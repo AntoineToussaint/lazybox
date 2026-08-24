@@ -575,7 +575,7 @@ fn read_scrollback_tail(path: &Path, max: usize) -> Vec<u8> {
 /// escape sequence or UTF8 byte that might be left from a crashed write.
 /// This is a conservative approach that preserves complete output lines.
 fn trim_trailing_incomplete_eof(buf: &mut Vec<u8>) {
-    if let Some(nl_pos) = buf.rfind(|&b| b == b'\n') {
+    if let Some(nl_pos) = buf.iter().rposition(|&b| b == b'\n') {
         buf.truncate(nl_pos + 1);
     } else {
         // No newline in buffer; could be incomplete on first read.

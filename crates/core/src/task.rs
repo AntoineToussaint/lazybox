@@ -371,6 +371,7 @@ impl Default for Mergeable {
     }
 }
 
+#[allow(clippy::self_named_constructors)] // `Mergeable::mergeable()` mirrors the old enum variant name
 impl Mergeable {
     /// Create a new Mergeable verdict with the current timestamp.
     pub fn new(state: MergeableState, now: DateTime<Utc>) -> Self {

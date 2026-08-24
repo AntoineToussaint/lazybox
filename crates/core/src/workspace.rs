@@ -1400,7 +1400,7 @@ fn preserve_lazy_pr_fields(mut incoming: Task, existing: &Task) -> Task {
     if incoming.mergeable.state == crate::MergeableState::Unknown
         && existing.mergeable.state != crate::MergeableState::Unknown
     {
-        incoming.mergeable = existing.mergeable.clone();
+        incoming.mergeable = existing.mergeable;
         incoming.is_behind_base = existing.is_behind_base;
     }
     // Once a provider has typed this task's kind, a later poll that

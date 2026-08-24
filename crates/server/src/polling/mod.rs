@@ -680,12 +680,16 @@ mod engagement_tier_tests {
                 }
             }))
             .expect("hot notification fixture");
-        let ranked = rank_targeted_requests(
+        let (ranked, all_dispatched) = rank_targeted_requests(
             &[hot],
             &[notification.clone(), hot_notification.clone()],
             &std::collections::BTreeSet::new(),
         );
         assert_eq!(ranked.len(), 2);
+        assert!(
+            all_dispatched,
+            "all entries should be dispatched when no cold targets"
+        );
         assert_eq!(ranked[0].target.number, 2);
         assert!(ranked[0].flags.hot);
         assert!(ranked[0].flags.notification);
@@ -693,12 +697,16 @@ mod engagement_tier_tests {
         assert!(!ranked[1].flags.hot);
 
         let cold_targets = [target(1)].into_iter().collect();
-        let ranked = rank_targeted_requests(
+        let (ranked, all_dispatched) = rank_targeted_requests(
             &[target(2)],
             &[notification, hot_notification],
             &cold_targets,
         );
         assert_eq!(ranked.len(), 1);
+        assert!(
+            !all_dispatched,
+            "all_dispatched should be false when cold targets are filtered"
+        );
         assert_eq!(ranked[0].target.number, 2);
         assert!(ranked[0].flags.hot);
         assert!(ranked[0].flags.notification);

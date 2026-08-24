@@ -1397,10 +1397,10 @@ fn preserve_lazy_pr_fields(mut incoming: Task, existing: &Task) -> Task {
     if incoming.reviews.is_empty() && !existing.reviews.is_empty() {
         incoming.reviews = existing.reviews.clone();
     }
-    if incoming.mergeable == crate::Mergeable::Unknown
-        && existing.mergeable != crate::Mergeable::Unknown
+    if incoming.mergeable.state == crate::MergeableState::Unknown
+        && existing.mergeable.state != crate::MergeableState::Unknown
     {
-        incoming.mergeable = existing.mergeable;
+        incoming.mergeable = existing.mergeable.clone();
         incoming.is_behind_base = existing.is_behind_base;
     }
     // Once a provider has typed this task's kind, a later poll that
@@ -2058,7 +2058,7 @@ mod tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: crate::Mergeable::Mergeable,
+            mergeable: crate::Mergeable::new(crate::MergeableState::Mergeable, Utc::now()),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),
@@ -2449,20 +2449,20 @@ mod tests {
     #[test]
     fn attach_pr_preserves_mergeable_when_incoming_is_unknown() {
         let mut first = pr("o/r#1");
-        first.mergeable = crate::Mergeable::Conflicting;
+        first.mergeable = crate::Mergeable::new(crate::MergeableState::Conflicting, Utc::now());
         first.is_behind_base = true;
         let mut ws = Workspace::from_task(first, now());
 
         // Next poll: GitHub hasn't recomputed mergeability yet.
         let mut next = pr("o/r#1");
-        next.mergeable = crate::Mergeable::Unknown;
+        next.mergeable = crate::Mergeable::unknown();
         next.is_behind_base = false;
         ws.attach_task(next);
 
         let pr_ref = ws.pr.as_ref().unwrap();
         assert_eq!(
-            pr_ref.mergeable,
-            crate::Mergeable::Conflicting,
+            pr_ref.mergeable.state,
+            crate::MergeableState::Conflicting,
             "conflict verdict must survive an UNKNOWN re-poll",
         );
         assert!(
@@ -2478,20 +2478,20 @@ mod tests {
     #[test]
     fn attach_pr_mergeable_known_verdict_overwrites_stored() {
         let mut first = pr("o/r#1");
-        first.mergeable = crate::Mergeable::Conflicting;
+        first.mergeable = crate::Mergeable::new(crate::MergeableState::Conflicting, Utc::now());
         first.is_behind_base = true;
         let mut ws = Workspace::from_task(first, now());
 
         // Next poll: conflict resolved, GitHub reports a real verdict.
         let mut next = pr("o/r#1");
-        next.mergeable = crate::Mergeable::Mergeable;
+        next.mergeable = crate::Mergeable::new(crate::MergeableState::Mergeable, Utc::now());
         next.is_behind_base = false;
         ws.attach_task(next);
 
         let pr_ref = ws.pr.as_ref().unwrap();
         assert_eq!(
-            pr_ref.mergeable,
-            crate::Mergeable::Mergeable,
+            pr_ref.mergeable.state,
+            crate::MergeableState::Mergeable,
             "a resolved verdict must replace the stale conflict",
         );
         assert!(!pr_ref.is_behind_base);

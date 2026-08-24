@@ -336,9 +336,22 @@ pub struct Reviewer {
 /// "GitHub hasn't computed yet" and is observably different from
 /// `Mergeable` (no conflict). The sidebar surfaces `Unknown` as a
 /// `?` pill so the user can tell lazybox doesn't actually know.
+/// Includes an observation timestamp so stale verdicts (older than
+/// ~5 minutes) can be re-fetched and re-evaluated, preventing the UI
+/// from showing outdated merge status after CI passes (#1218).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct Mergeable {
+    /// The actual mergeability state: Unknown, Mergeable, or Conflicting.
+    pub state: MergeableState,
+    /// When this verdict was last observed from the provider.
+    /// `None` for old snapshots or Unknown verdicts (which may need re-querying).
+    pub observed_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
-pub enum Mergeable {
+pub enum MergeableState {
     /// GitHub hasn't computed mergeability yet. Re-query nudges
     /// computation; usually resolves within a poll cycle or two.
     #[default]
@@ -349,12 +362,54 @@ pub enum Mergeable {
     Conflicting,
 }
 
+impl Default for Mergeable {
+    fn default() -> Self {
+        Self {
+            state: MergeableState::Unknown,
+            observed_at: None,
+        }
+    }
+}
+
 impl Mergeable {
+    /// Create a new Mergeable verdict with the current timestamp.
+    pub fn new(state: MergeableState, now: DateTime<Utc>) -> Self {
+        Self {
+            state,
+            observed_at: Some(now),
+        }
+    }
+
+    /// Create an Unknown verdict (no observation timestamp).
+    pub fn unknown() -> Self {
+        Self {
+            state: MergeableState::Unknown,
+            observed_at: None,
+        }
+    }
+
     /// Did we positively confirm a conflict? `Unknown` returns
     /// false — caller should treat ambiguity separately rather
     /// than collapsing it into "no conflict".
-    pub fn is_conflicting(self) -> bool {
-        matches!(self, Self::Conflicting)
+    pub fn is_conflicting(&self) -> bool {
+        matches!(self.state, MergeableState::Conflicting)
+    }
+
+    /// Check if this verdict is stale (older than 5 minutes).
+    /// Unknown verdicts with no observation are not considered stale.
+    pub fn is_stale(&self, now: DateTime<Utc>) -> bool {
+        if let Some(observed) = self.observed_at {
+            // Stale if observed more than 5 minutes ago
+            (now - observed).num_seconds() > 300
+        } else {
+            false
+        }
+    }
+
+    /// Get the state as it was before this struct was introduced,
+    /// for compatibility with code that only cares about the verdict.
+    pub fn as_state(&self) -> MergeableState {
+        self.state
     }
 }
 
@@ -1108,7 +1163,7 @@ mod status_tag_tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: crate::Mergeable::Mergeable,
+            mergeable: crate::Mergeable::new(crate::MergeableState::Mergeable, Utc::now()),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),
@@ -1316,7 +1371,7 @@ mod status_tag_tests {
     #[test]
     fn conflict_trumps_everything() {
         let mut t = base();
-        t.mergeable = crate::Mergeable::Conflicting;
+        t.mergeable = crate::Mergeable::new(crate::MergeableState::Conflicting, Utc::now());
         t.ci = CiStatus::Failure;
         t.review = ReviewStatus::ChangesRequested;
         t.is_in_merge_queue = true;
@@ -1371,7 +1426,7 @@ mod status_tag_tests {
     fn merged_trumps_everything() {
         let mut t = base();
         t.state = TaskState::Merged;
-        t.mergeable = crate::Mergeable::Conflicting; // ignored
+        t.mergeable = crate::Mergeable::new(crate::MergeableState::Conflicting, Utc::now()); // ignored
         t.ci = CiStatus::Failure; // ignored
         assert_eq!(StatusTag::for_task(&t), StatusTag::Merged);
     }

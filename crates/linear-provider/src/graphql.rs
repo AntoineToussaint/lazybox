@@ -411,7 +411,10 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
             .unwrap_or_default(),
         auto_merge_enabled: false,
         is_in_merge_queue: false,
-        mergeable: lazybox_core::Mergeable::Mergeable,
+        mergeable: lazybox_core::Mergeable::new(
+            lazybox_core::MergeableState::Mergeable,
+            Utc::now(),
+        ),
         is_behind_base: false,
         merge_blocked: false,
         approval_policy: Default::default(),

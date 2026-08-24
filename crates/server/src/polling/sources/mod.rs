@@ -312,21 +312,31 @@ pub(super) fn rank_targeted_requests(
     hot_targets: &[lazybox_gh::NotificationTarget],
     notification_entries: &[lazybox_gh::NotificationEntry],
     cold_targets: &std::collections::BTreeSet<lazybox_gh::NotificationTarget>,
-) -> Vec<TargetedRequest> {
+) -> (Vec<TargetedRequest>, bool) {
+    // Track whether all notification entries were included in the ranked requests.
+    // If any entries are filtered out (cold_targets only), we return false so the
+    // caller can avoid advancing the cursor (#1255).
+    let notification_targets: Vec<lazybox_gh::NotificationTarget> = notification_entries
+        .iter()
+        .filter_map(lazybox_gh::NotificationEntry::target)
+        .collect();
+
     let mut targets: std::collections::BTreeMap<lazybox_gh::NotificationTarget, TargetedFlags> =
         std::collections::BTreeMap::new();
     for target in hot_targets {
         targets.entry(target.clone()).or_default().hot = true;
     }
-    for target in notification_entries
-        .iter()
-        .filter_map(lazybox_gh::NotificationEntry::target)
-    {
-        if cold_targets.contains(&target) && !targets.get(&target).is_some_and(|flags| flags.hot) {
+
+    // Calculate notification count before consuming targets
+    let mut notification_count_in_targets = 0usize;
+    for target in &notification_targets {
+        if cold_targets.contains(target) && !targets.get(target).is_some_and(|flags| flags.hot) {
             continue;
         }
-        targets.entry(target).or_default().notification = true;
+        targets.entry(target.clone()).or_default().notification = true;
+        notification_count_in_targets += 1;
     }
+
     let mut ranked: Vec<TargetedRequest> = targets
         .into_iter()
         .map(|(target, flags)| TargetedRequest { target, flags })
@@ -338,7 +348,11 @@ pub(super) fn rank_targeted_requests(
             .cmp(&left.flags.hot)
             .then_with(|| left.target.cmp(&right.target))
     });
-    ranked
+
+    // Check if all notification entries made it through the filter.
+    let all_dispatched = notification_count_in_targets == notification_targets.len();
+
+    (ranked, all_dispatched)
 }
 
 fn merge_targeted_tasks(base: &mut Vec<Task>, targeted: Vec<Task>) {

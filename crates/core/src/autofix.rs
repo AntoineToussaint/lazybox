@@ -304,7 +304,7 @@ mod tests {
             assignees: vec![],
             auto_merge_enabled: false,
             is_in_merge_queue: false,
-            mergeable: Mergeable::Mergeable,
+            mergeable: Mergeable::new(crate::MergeableState::Mergeable, Utc::now()),
             is_behind_base: false,
             merge_blocked: false,
             approval_policy: Default::default(),
@@ -342,7 +342,7 @@ mod tests {
     #[test]
     fn conflict_triggers_and_outranks_ci() {
         let mut t = pr();
-        t.mergeable = Mergeable::Conflicting;
+        t.mergeable = Mergeable::new(crate::MergeableState::Conflicting, Utc::now());
         t.ci = CiStatus::Failure;
         assert_eq!(
             evaluate_auto_fix(&t, &enabled()),
@@ -360,7 +360,7 @@ mod tests {
     fn green_ci_no_conflict_does_nothing() {
         let mut t = pr();
         t.ci = CiStatus::Success;
-        t.mergeable = Mergeable::Mergeable;
+        t.mergeable = Mergeable::new(crate::MergeableState::Mergeable, Utc::now());
         assert_eq!(evaluate_auto_fix(&t, &enabled()), None);
     }
 
@@ -391,7 +391,7 @@ mod tests {
         t.state = TaskState::Draft;
         assert_eq!(evaluate_auto_fix(&t, &enabled()), None);
         // ...even with a conflict.
-        t.mergeable = crate::Mergeable::Conflicting;
+        t.mergeable = crate::Mergeable::new(crate::MergeableState::Conflicting, Utc::now());
         assert_eq!(evaluate_auto_fix(&t, &enabled()), None);
     }
 
@@ -433,7 +433,7 @@ mod tests {
         t.is_in_merge_queue = true;
         assert_eq!(evaluate_auto_fix(&t, &enabled()), None);
         // ...even on a conflict.
-        t.mergeable = Mergeable::Conflicting;
+        t.mergeable = Mergeable::new(crate::MergeableState::Conflicting, Utc::now());
         assert_eq!(evaluate_auto_fix(&t, &enabled()), None);
     }
 

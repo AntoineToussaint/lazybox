@@ -11553,6 +11553,54 @@ mod merge_focus_follow_tests {
         assert_eq!(m.sidebar.broadcast_selected_count(), 0);
     }
 
+    /// `g s` on a taskless, repo-scoped workspace (no PR/issue of its own —
+    /// e.g. one an agent created) triggers a sync so the daemon discovers
+    /// the repo's open issues + PRs, instead of the old "nothing to sync".
+    /// A workspace with no repo scope at all still has nothing to sync.
+    #[test]
+    fn sync_on_a_taskless_repo_workspace_syncs_the_repo() {
+        use lazybox_ipc::Event as IpcEvent;
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let mut ws = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new("github:o/r#scratch"),
+            "main",
+            chrono::Utc::now(),
+        );
+        ws.project_key = Some(lazybox_core::ProjectKey::github("o", "r"));
+        let key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&key));
+
+        let cmds = m.dispatch_action(&Action::SyncWorkspace);
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [IpcCommand::SyncWorkspace { workspace_key }]
+                    if workspace_key.as_str() == "github:o/r#scratch"
+            ),
+            "a repo-scoped taskless workspace syncs the repo, got {cmds:?}",
+        );
+
+        // No repo scope → genuinely nothing to sync.
+        let bare = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new("local:scratch#1"),
+            "main",
+            chrono::Utc::now(),
+        );
+        let bare_key = SessionKey::from(&bare.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(bare)));
+        assert!(m.sidebar.focus_workspace_key(&bare_key));
+        let cmds = m.dispatch_action(&Action::SyncWorkspace);
+        assert!(
+            cmds.is_empty(),
+            "no repo scope → nothing to sync, got {cmds:?}"
+        );
+    }
+
     /// #1243: the bulk `g d` confirm renders the mixed close/delete
     /// split — PRs are closed, issues deleted, and ineligible targets
     /// counted as skipped — so Yes is never a blind guess.

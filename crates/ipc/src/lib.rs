@@ -2358,6 +2358,14 @@ pub enum Event {
         terminal_id: TerminalId,
         message: String,
     },
+    /// Progress update during prompt injection readiness wait. Emitted
+    /// periodically while waiting for a permission prompt or input gate to
+    /// clear, so the user knows the injection is waiting, not frozen.
+    TerminalInjectProgress {
+        terminal_id: TerminalId,
+        message: String,
+        remaining_secs: u32,
+    },
     /// A daemon queue reached its explicit admission limit before accepting
     /// this command. The command was not executed; retry is safe after the
     /// named subsystem catches up.

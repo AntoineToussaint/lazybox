@@ -330,6 +330,36 @@ impl LinearClient {
         }
         Ok(outcome)
     }
+
+    /// Re-fetch a single Linear issue by its node id (UUID) for a
+    /// targeted `g s` sync of one workspace — the Linear counterpart to
+    /// the GitHub single-PR/issue re-poll. Returns `Ok(None)` when the id
+    /// no longer resolves (deleted, or outside the token's visibility).
+    /// Unlike [`Self::fetch_all`], this applies NO open-state filter, so
+    /// an issue that has since moved to completed/canceled comes back
+    /// with its new state instead of the sync silently keeping the stale
+    /// one.
+    pub async fn fetch_issue_by_id(&self, issue_id: &str) -> Result<Option<Task>, LinearError> {
+        // `issue_to_task` needs the viewer id for role attribution, same
+        // as the list path.
+        let viewer_body = serde_json::json!({ "query": graphql::VIEWER_QUERY });
+        let viewer: graphql::ViewerResponse = self.graphql(&viewer_body).await?;
+        if let Some(msg) = viewer.errors.as_deref().and_then(graphql::join_errors) {
+            return Err(LinearError::Graphql(msg));
+        }
+        let viewer_id = viewer
+            .data
+            .ok_or_else(|| LinearError::Graphql("no viewer data".into()))?
+            .viewer
+            .id;
+        let body = graphql::build_issue_body(issue_id);
+        let resp: graphql::IssueResponse = self.graphql(&body).await?;
+        if let Some(joined) = resp.errors.as_deref().and_then(graphql::join_errors) {
+            return Err(LinearError::Graphql(joined));
+        }
+        let issue = resp.data.and_then(|d| d.issue);
+        Ok(issue.map(|issue| graphql::issue_to_task(&issue, &viewer_id)))
+    }
 }
 
 /// Join a GraphQL response body's `errors` array into one message, or

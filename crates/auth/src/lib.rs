@@ -12,6 +12,6 @@ mod chain;
 mod credential;
 mod providers;
 
-pub use chain::CredentialChain;
+pub use chain::{CredentialChain, invalidate_chain_cache};
 pub use credential::{Credential, CredentialError, CredentialProvider};
 pub use providers::*;

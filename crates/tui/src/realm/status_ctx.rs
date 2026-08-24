@@ -190,8 +190,9 @@ impl MessageLog {
     }
 }
 
-/// How long retryable notices stay visible before fading. Permanent
-/// + auth notices ignore this — they stay until dismissed.
+/// How long retryable notices stay visible before fading. Auth notices
+/// and the two persistent system banners ignore this — they stay until
+/// dismissed or resolved.
 const RETRYABLE_FADE: Duration = Duration::from_secs(5);
 /// How long info notices ("Spawning shell…", "Setup saved", etc.)
 /// stay visible if their triggering event never lands. Longer than
@@ -206,8 +207,11 @@ const HINT_FADE: Duration = Duration::from_secs(3);
 /// is worth inspecting and the full text lives in the messages log
 /// (`Shift-M`) regardless — but finite, so a toast for an
 /// already-resolved condition doesn't own the footer until an explicit
-/// `Esc` (#588). `Esc` still dismisses immediately. Untagged Permanent
-/// system banners ignore this and never auto-fade.
+/// `Esc` (#588). `Esc` still dismisses immediately. EVERY Permanent error
+/// now uses this fade (tagged action toasts AND plain untagged failures)
+/// — the only exceptions are the two event-resolved system banners
+/// (daemon disconnected / build mismatch), which stay put (see
+/// [`Notice::is_persistent_system_banner`]).
 const PERMANENT_FADE: Duration = Duration::from_secs(45);
 /// How long an acknowledged error message (Esc'd or fully faded)
 /// suppresses identical re-fires from the footer. Long enough to stop
@@ -782,24 +786,27 @@ impl StatusCtx {
     /// - Retryable: 5s. Hiccups self-heal, no need to linger.
     /// - Info: 15s. Long enough for a slow spawn; short enough that
     ///   a stuck notice doesn't follow the user around forever.
-    /// - Action-error toast (Permanent + workspace-tagged): 45s. Long,
-    ///   but finite — the full text persists in the messages log, so the
-    ///   footer needn't hold a merge/close failure forever (#588).
-    /// - Other Permanent / Auth: persistent system banners (daemon
-    ///   disconnected, build mismatch, sync failed) — stay until
-    ///   dismissed or resolved, never auto-fade.
+    /// - Permanent (spawn/provider/sync failure, action toast): 45s.
+    ///   EVERY such error now auto-fades — a one-off or already-resolved
+    ///   failure must not own the footer forever (the "errors that never
+    ///   disappear" gripe). The full text stays in the messages log
+    ///   (`Shift-M`). The ONLY exceptions are the two genuinely-persistent
+    ///   system banners — daemon disconnected / build mismatch — which are
+    ///   event-resolved (not poll-re-fired), so fading them would drop a
+    ///   live problem indicator with nothing to bring it back.
+    /// - Auth: still sticky. It's specifically actionable ("fix your
+    ///   token"), rare, and self-clears on the next successful auth, so
+    ///   it stays until resolved or the user dismisses it with `Esc`.
     pub fn tick_notice(&mut self) -> bool {
         let Some(n) = &self.notice else { return false };
         let is_action = n.is_action_toast();
-        let timeout = if is_action {
-            Some(PERMANENT_FADE)
-        } else {
-            match n.severity {
-                NoticeSeverity::Retryable => Some(RETRYABLE_FADE),
-                NoticeSeverity::Info => Some(INFO_FADE),
-                NoticeSeverity::Hint => Some(HINT_FADE),
-                NoticeSeverity::Auth | NoticeSeverity::Permanent => None,
-            }
+        let timeout = match n.severity {
+            NoticeSeverity::Retryable => Some(RETRYABLE_FADE),
+            NoticeSeverity::Info => Some(INFO_FADE),
+            NoticeSeverity::Hint => Some(HINT_FADE),
+            NoticeSeverity::Permanent if n.is_persistent_system_banner() => None,
+            NoticeSeverity::Permanent => Some(PERMANENT_FADE),
+            NoticeSeverity::Auth => None,
         };
         // `n`'s borrow ends here (last read), freeing `&mut self` below.
         if matches!(timeout, Some(t) if n.set_at.elapsed() >= t) {
@@ -985,23 +992,34 @@ mod tests {
         assert!(stale.notice.is_none());
     }
 
-    /// Regression for #588: the auto-fade must NOT extend to persistent
-    /// system banners. An untagged Permanent notice (daemon
-    /// disconnected, build mismatch, sync failed) has no workspace tag
-    /// and must stay up indefinitely — even long past the action-toast
-    /// timeout — until the user dismisses it or the condition resolves.
+    /// Every hard failure now auto-fades — including an untagged
+    /// Permanent banner (revises #588, which kept these sticky forever).
+    /// A genuinely-persistent condition re-fires on its next poll after
+    /// `ACK_SUPPRESS`, so it pulses back rather than owning the footer.
     #[test]
-    fn untagged_permanent_banner_never_fades() {
-        let mut s = StatusCtx::new();
-        // Ancient, but untagged → a persistent system banner.
-        s.notice = Some(notice(
-            NoticeSeverity::Permanent,
-            Duration::from_secs(60 * 60),
-        ));
+    fn untagged_permanent_banner_fades_after_its_timeout() {
+        // Fresh (10s old) → still up.
+        let mut fresh = StatusCtx::new();
+        fresh.notice = Some(notice(NoticeSeverity::Permanent, Duration::from_secs(10)));
+        assert!(!fresh.tick_notice(), "a fresh error banner stays up");
+        assert!(fresh.notice.is_some());
+
+        // Past PERMANENT_FADE (45s) → gone, even without a workspace tag.
+        let mut stale = StatusCtx::new();
+        stale.notice = Some(notice(NoticeSeverity::Permanent, Duration::from_secs(60)));
         assert!(
-            !s.tick_notice(),
-            "an untagged Permanent system banner must not auto-fade"
+            stale.tick_notice(),
+            "an untagged Permanent banner auto-fades once its timeout elapses"
         );
+        assert!(stale.notice.is_none());
+    }
+
+    /// Auth stays sticky: it's actionable and self-clears on success.
+    #[test]
+    fn auth_banner_stays_sticky() {
+        let mut s = StatusCtx::new();
+        s.notice = Some(notice(NoticeSeverity::Auth, Duration::from_secs(60 * 60)));
+        assert!(!s.tick_notice(), "an Auth banner must not auto-fade");
         assert!(s.notice.is_some());
     }
 

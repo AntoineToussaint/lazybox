@@ -4182,10 +4182,17 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         self.daemon_disconnect_notified = true;
-        self.flash_error(
-            "✗ daemon disconnected — commands are no longer delivered; \
-             restart lazybox (or reconnect with `lazybox --connect …`) to resume",
-        );
+        let message = "✗ daemon disconnected — commands are no longer delivered; \
+             restart lazybox (or reconnect with `lazybox --connect …`) to resume";
+        self.flash_error(message);
+        // Tag it as the persistent connection banner so it (a) stays put
+        // instead of auto-fading like an ordinary error, and (b) can be
+        // retracted by its typed cause on reconnect.
+        if let Some(n) = self.status.notice.as_mut()
+            && n.message == message
+        {
+            n.key = Some(crate::realm::components::footer::NoticeKey::DaemonConnection);
+        }
     }
 
     /// Per-iteration daemon-health check: drain the `send_cmd` failure

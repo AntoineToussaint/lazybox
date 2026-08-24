@@ -2294,6 +2294,16 @@ pub(crate) async fn prompt_merged_pr_removal_with(
     let Some(workspace) = load_workspace(config, key) else {
         return;
     };
+    // A removal already in flight owns this workspace's fate: `remove()`
+    // marks `deleted_workspaces` before its slow (multi-GB) worktree
+    // reclaim and releases it only if the removal FAILS (the row survives)
+    // or after the row is gone. Re-deriving a cleanup prompt off the
+    // still-present row during that window would pop an orphan modal for a
+    // workspace that's on its way out — the level-trigger racing the single
+    // removal owner. Respect the owner's state instead of re-deciding.
+    if config.deleted_workspaces.lock().contains(key.as_str()) {
+        return;
+    }
     // A "keep" answer is durable (issue #499) — check it before the
     // throttle so a declined workspace never re-prompts, even after a
     // restart clears the in-memory cadence memory.

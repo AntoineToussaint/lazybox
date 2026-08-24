@@ -3021,6 +3021,16 @@ fn removal_candidate_state(
     config: &ServerConfig,
     workspace: &Workspace,
 ) -> Option<lazybox_ipc::RemovableTerminalState> {
+    // A removal already in flight owns this workspace: don't nominate it as
+    // a fresh cleanup candidate while `remove()` is tearing it down (the
+    // tombstone is released only if that removal fails or the row is gone).
+    if config
+        .deleted_workspaces
+        .lock()
+        .contains(workspace.key.as_str())
+    {
+        return None;
+    }
     if workspace.cleanup_prompt == lazybox_core::CleanupPrompt::Declined {
         return None;
     }
@@ -5522,9 +5532,40 @@ mod rescope_collapse_tests {
         );
 
         // ...unless the user already answered "keep" (durable decline).
-        let mut declined = Workspace::from_task(merged, Utc::now());
+        let mut declined = Workspace::from_task(merged.clone(), Utc::now());
         declined.cleanup_prompt = lazybox_core::CleanupPrompt::Declined;
         assert_eq!(removal_candidate_state(&config, &declined), None);
+
+        // ...and NOT while a removal is already in flight: `remove()` marks
+        // `deleted_workspaces` before its slow reclaim, so the level-trigger
+        // sweep must not re-nominate a workspace the single removal owner is
+        // already tearing down (orphan-modal race).
+        let in_flight = Workspace::from_task(merged, Utc::now());
+        assert_eq!(
+            removal_candidate_state(&config, &in_flight),
+            Some(lazybox_ipc::RemovableTerminalState::Merged),
+            "a merged PR is a candidate before any removal starts",
+        );
+        config
+            .deleted_workspaces
+            .lock()
+            .insert(in_flight.key.as_str().to_string());
+        assert_eq!(
+            removal_candidate_state(&config, &in_flight),
+            None,
+            "a workspace whose removal is in flight is no longer a cleanup candidate",
+        );
+        // Removal failed / released the tombstone → the row survives and the
+        // level trigger may offer cleanup again.
+        config
+            .deleted_workspaces
+            .lock()
+            .remove(in_flight.key.as_str());
+        assert_eq!(
+            removal_candidate_state(&config, &in_flight),
+            Some(lazybox_ipc::RemovableTerminalState::Merged),
+            "releasing the tombstone (removal failed) re-allows the prompt",
+        );
 
         let open = gh_task(
             "o/r#8",

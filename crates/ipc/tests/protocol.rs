@@ -501,6 +501,9 @@ fn all_commands() -> Vec<Command> {
             workspace_key: lazybox_core::WorkspaceKey::new("morning-plan"),
             completed: true,
         },
+        Command::SetSnippetKeepMine {
+            target: "snippet:rev:0123456789abcdef".into(),
+        },
         Command::Shutdown,
     ]
 }
@@ -1110,6 +1113,9 @@ fn all_events() -> Vec<Event> {
             terminal_id: TerminalId(12),
             hint: "add credits or switch subscription".into(),
         },
+        Event::SnippetKeepMine {
+            targets: vec!["snippet:rev:0123456789abcdef".into()],
+        },
     ]
 }
 
@@ -1200,6 +1206,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::SaveHopper { .. } => "SaveHopper",
         Command::AssignHopperProject { .. } => "AssignHopperProject",
         Command::SetHopperCompleted { .. } => "SetHopperCompleted",
+        Command::SetSnippetKeepMine { .. } => "SetSnippetKeepMine",
     }
 }
 
@@ -1299,6 +1306,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::ResourcePosture(_) => "ResourcePosture",
         Event::AgentCreditRecovery { .. } => "AgentCreditRecovery",
         Event::AgentCreditExhausted { .. } => "AgentCreditExhausted",
+        Event::SnippetKeepMine { .. } => "SnippetKeepMine",
     }
 }
 
@@ -1310,12 +1318,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        82,
+        83,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        89,
+        90,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

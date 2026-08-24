@@ -249,6 +249,40 @@ restart lazybox from a different directory to select a different directory
 layer. Both user-owned files are optional and work well in dotfiles or version
 control.
 
+## Stay current with built-in improvements
+
+An override silently shadows the built-in of the same key, so a snippet
+you forked once never sees later built-in improvements — and nothing
+tells you you're on a stale copy. The picker and browser close that gap
+with an **override-state badge** next to each entry's origin:
+
+| Badge | Meaning | What to do |
+| ----- | ------- | ---------- |
+| _(none)_ | The shipped built-in, unmodified. | Nothing. |
+| `custom` | Your snippet; no built-in of this key. | Nothing. |
+| `override` | Differs from the built-in; acknowledged as an intentional, up-to-date fork. | Nothing. |
+| `⚠ built-in changed` | Differs from the built-in, and the built-in has moved since you last reconciled. | Compare, then keep or adopt. |
+| `= built-in` | A redundant copy of the current built-in. | Adopt to drop it and track the built-in. |
+
+A stale (`⚠`) or redundant (`= built-in`) row also carries a `⚠` marker
+in the picker list itself. On any override row the `]]s` picker offers
+three reconcile actions (shown in the footer):
+
+- **`Ctrl-D` compare** — view your override next to the current built-in
+  in a scrollable reader, so you can see exactly what diverged.
+- **`Ctrl-K` keep mine** — acknowledge your override against the current
+  built-in. The `⚠` badge clears and stays quiet until the built-in
+  changes *again* (the acknowledgement is keyed to the built-in's
+  content, so a future built-in edit re-raises it).
+- **`Ctrl-A` adopt built-in** — drop a **global** override so the
+  improved built-in shows through. A repo-local override lives in a
+  shared, checked-in file, so adopt points you at
+  `.lazybox/snippets.yaml` to edit rather than editing it for you.
+
+Keep-mine acknowledgements are owned by the daemon and shared across
+in-process and `--connect` clients, exactly like dismissed update
+prompts — acknowledge on one, and it sticks everywhere.
+
 ## Broadcast one workflow to several workspaces
 
 Use snippets to keep a fleet of agents on the same process:

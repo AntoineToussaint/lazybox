@@ -25,6 +25,9 @@ const RECENT_SNIPPETS_KV_KEY: &str = "recent_snippets";
 const RECENT_SNIPPETS_MAX: usize = 5;
 /// kv key for the JSON list of dismissed update targets.
 const DISMISSED_UPDATES_KV_KEY: &str = "update_dismissals";
+/// kv key for the JSON list of snippet-override "keep mine"
+/// acknowledgements (`snippet:<key>:<builtin-content-hash>`, #1312).
+const SNIPPET_KEEPMINE_KV_KEY: &str = "snippet_keepmine";
 
 /// Record `key` as the freshly-used snippet: de-duplicate, move it to the
 /// front, cap the list, and persist. Best-effort — a write failure just
@@ -74,20 +77,66 @@ pub async fn set_update_dismissal(config: &ServerConfig, target: String) {
     }
 }
 
+/// Acknowledge (`keep mine`) a snippet override against the current
+/// built-in body: add `target` to the persisted set (a no-op if already
+/// present), silencing the picker's "built-in changed" nudge until the
+/// built-in — and therefore the target's embedded hash — changes again
+/// (#1312). Returns the full updated set so the caller can re-broadcast
+/// it to every attached client. Best-effort: on failure the previous set
+/// is returned unchanged and the nudge simply persists.
+pub async fn set_snippet_keepmine(config: &ServerConfig, target: String) -> Vec<String> {
+    let store = config.store.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let mut list = load_list(&*store, SNIPPET_KEEPMINE_KV_KEY);
+        if !list.iter().any(|t| t == &target) {
+            list.push(target);
+            let json = serde_json::to_string(&list).map_err(|e| e.to_string())?;
+            store
+                .set_kv(SNIPPET_KEEPMINE_KV_KEY, &json)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok::<Vec<String>, String>(list)
+    })
+    .await;
+    match result {
+        Ok(Ok(list)) => list,
+        Ok(Err(e)) => {
+            tracing::warn!("record snippet keep-mine failed: {e}");
+            snippet_keepmine(&*config.store)
+        }
+        Err(e) => {
+            tracing::warn!("record snippet keep-mine task failed: {e}");
+            snippet_keepmine(&*config.store)
+        }
+    }
+}
+
+/// The current snippet keep-mine set, for replay to a newly-subscribed
+/// client (pushed as its own [`lazybox_ipc::Event::SnippetKeepMine`] right
+/// after the snapshot, #1312).
+pub fn snippet_keepmine(store: &dyn lazybox_store::Store) -> Vec<String> {
+    load_list(store, SNIPPET_KEEPMINE_KV_KEY)
+}
+
 /// Load both client-preference lists for an outgoing snapshot. Runs on the
 /// blocking pool alongside the workspace/project load.
 pub fn snapshot(store: &dyn lazybox_store::Store) -> ClientKvSnapshot {
     ClientKvSnapshot {
         recent_snippets: load_list(store, RECENT_SNIPPETS_KV_KEY),
         dismissed_updates: load_list(store, DISMISSED_UPDATES_KV_KEY),
+        snippet_keepmine: load_list(store, SNIPPET_KEEPMINE_KV_KEY),
     }
 }
 
-/// The two client-preference lists replayed on every [`lazybox_ipc::Event::Snapshot`].
+/// The client-preference lists loaded together for a fresh subscriber:
+/// `recent_snippets` and `dismissed_updates` ride the [`lazybox_ipc::Event::Snapshot`]
+/// itself; `snippet_keepmine` is sent right after it as its own
+/// [`lazybox_ipc::Event::SnippetKeepMine`] (#1312).
 #[derive(Debug, Default, Clone)]
 pub struct ClientKvSnapshot {
     pub recent_snippets: Vec<String>,
     pub dismissed_updates: Vec<String>,
+    pub snippet_keepmine: Vec<String>,
 }
 
 /// Read a JSON `Vec<String>` from `key`, degrading to empty on any miss,
@@ -138,5 +187,24 @@ mod tests {
 
         let snap = snapshot(&*store);
         assert_eq!(snap.dismissed_updates, vec!["release:v1", "source:abc"]);
+    }
+
+    #[tokio::test]
+    async fn snippet_keepmine_is_idempotent_set_and_returns_full_list() {
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        let after_first = set_snippet_keepmine(&config, "snippet:rev:aaa".into()).await;
+        assert_eq!(after_first, vec!["snippet:rev:aaa"]);
+        // Re-acknowledging the same target is a no-op.
+        set_snippet_keepmine(&config, "snippet:rev:aaa".into()).await;
+        let after_second = set_snippet_keepmine(&config, "snippet:pr:bbb".into()).await;
+        assert_eq!(after_second, vec!["snippet:rev:aaa", "snippet:pr:bbb"]);
+
+        // A newly-subscribed client reads the same set back.
+        assert_eq!(
+            snippet_keepmine(&*store),
+            vec!["snippet:rev:aaa", "snippet:pr:bbb"],
+        );
     }
 }

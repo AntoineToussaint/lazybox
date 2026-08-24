@@ -1070,6 +1070,7 @@ impl Server {
                         lazybox_ipc::Command::SetNotes { .. } => "SetNotes",
                         lazybox_ipc::Command::DeliverSnippet { .. } => "DeliverSnippet",
                         lazybox_ipc::Command::SetUpdateDismissal { .. } => "SetUpdateDismissal",
+                        lazybox_ipc::Command::SetSnippetKeepMine { .. } => "SetSnippetKeepMine",
                         lazybox_ipc::Command::ResumeAgent { .. } => "ResumeAgent",
                         lazybox_ipc::Command::ReauthenticateAgent { .. } => {
                             "ReauthenticateAgent"
@@ -1347,6 +1348,7 @@ async fn build_and_send_lag_recovery_snapshot(
             let load_errors = workspaces.errors.len() + projects.errors.len();
             let mut terminals = spawn_handler::snapshot_terminals(&config).await;
             budget_snapshot_replay(&mut terminals);
+            let snippet_keepmine = client_kv.snippet_keepmine;
             let recovery = Event::Snapshot {
                 workspaces: workspaces.values,
                 terminals,
@@ -1360,6 +1362,11 @@ async fn build_and_send_lag_recovery_snapshot(
                     "lag-recovery snapshot could not enter reserved lane"
                 );
             }
+            // Re-sync snippet keep-mine acknowledgements alongside the
+            // recovery snapshot (#1312), mirroring the fresh-subscribe path.
+            let _ = tx.send(Event::SnippetKeepMine {
+                targets: snippet_keepmine,
+            });
             if load_errors > 0 {
                 let _ = tx.send(storage_recovery_event(load_errors));
             }
@@ -1564,12 +1571,19 @@ pub async fn dispatch_command(
                     })
                     .collect::<Vec<_>>()
             };
+            let snippet_keepmine = client_kv.snippet_keepmine;
             let _ = tx.send(Event::Snapshot {
                 workspaces: workspaces.values,
                 terminals,
                 projects: projects.values,
                 recent_snippets: client_kv.recent_snippets,
                 dismissed_updates: client_kv.dismissed_updates,
+            });
+            // Snippet keep-mine acknowledgements ride their own event right
+            // after the snapshot (like ViewerIdentities), so the picker can
+            // silence the "built-in changed" nudge for kept overrides (#1312).
+            let _ = tx.send(Event::SnippetKeepMine {
+                targets: snippet_keepmine,
             });
             if load_errors > 0 {
                 let _ = tx.send(storage_recovery_event(load_errors));
@@ -1990,6 +2004,13 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::SetUpdateDismissal { target } => {
             client_kv::set_update_dismissal(config, target).await;
+        }
+        lazybox_ipc::Command::SetSnippetKeepMine { target } => {
+            // Persist, then broadcast the updated set so every attached
+            // client (in-process or `--connect`) silences the nudge for the
+            // kept override, matching the update-dismissal flow (#1312).
+            let targets = client_kv::set_snippet_keepmine(config, target).await;
+            let _ = config.bus.send(Event::SnippetKeepMine { targets });
         }
         lazybox_ipc::Command::ResumeAgent { terminal_id } => {
             agent_auth::resume_agent(config, terminal_id).await;

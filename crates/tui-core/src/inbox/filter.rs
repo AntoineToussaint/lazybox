@@ -67,6 +67,12 @@ pub enum Filter {
     /// on a currently-live PTY — a workspace with a dormant agent
     /// session still matches even when its runner badge is dark.
     WithAgent,
+    /// A coding agent in this workspace is *currently working* — a LIVE
+    /// PTY reading `AgentState::Working`, not merely a recorded session
+    /// (that's `WithAgent`). Same live source as the sidebar runner
+    /// spinner and the `Shift-F`/attention predicates, so it never reads
+    /// 0 while an agent is actually running.
+    AgentWorking,
     /// Primary GitHub task has at least one active local or remote fleet
     /// claim (including a conservatively preserved legacy claim).
     Claimed,
@@ -116,8 +122,9 @@ impl Filter {
     /// Every fixed filter, in menu order (State, Role, Kind, Priority).
     /// Value-driven axes (Label, Linear state) are enumerated separately
     /// from the candidate set — see [`FilterSet`] and `Sidebar`.
-    pub const ALL: [Filter; 25] = [
+    pub const ALL: [Filter; 26] = [
         Filter::WithAgent,
+        Filter::AgentWorking,
         Filter::Claimed,
         Filter::CiFailing,
         Filter::CiRunning,
@@ -147,6 +154,7 @@ impl Filter {
     pub fn axis(self) -> FilterAxis {
         match self {
             Filter::WithAgent
+            | Filter::AgentWorking
             | Filter::Claimed
             | Filter::CiFailing
             | Filter::CiRunning
@@ -187,6 +195,7 @@ impl Filter {
     pub fn label(self) -> &'static str {
         match self {
             Filter::WithAgent => "with-agent",
+            Filter::AgentWorking => "working",
             Filter::Claimed => "claimed",
             Filter::CiFailing => "ci-failing",
             Filter::CiRunning => "ci-running",
@@ -223,6 +232,7 @@ impl Filter {
                 .sessions
                 .iter()
                 .any(|s| matches!(s.kind, lazybox_core::SessionKind::Agent { .. })),
+            Filter::AgentWorking => crate::agent_attention::workspace_is_working(w, ctx.agents),
             Filter::Claimed => w.is_claimed(),
             Filter::CiFailing => {
                 task.is_some_and(|t| matches!(t.ci, CiStatus::Failure | CiStatus::Mixed))
@@ -621,6 +631,38 @@ mod tests {
         let mut ws = Workspace::from_task(task, now());
         ws.key = WorkspaceKey(key.into());
         ws
+    }
+
+    #[test]
+    fn agent_working_matches_live_working_state_not_recorded_sessions() {
+        use lazybox_ipc::AgentState;
+        let ws = workspace_with("owner/repo#1", |_| {});
+        let sk = lazybox_core::SessionKey::from(&ws.key);
+
+        // No live agent state → does not match (this is the case where the
+        // recorded-session `WithAgent` filter reads 0 but a spinner is live).
+        let empty = HashMap::new();
+        assert!(!Filter::AgentWorking.matches(&FilterCtx {
+            w: &ws,
+            agents: &empty
+        }));
+
+        // A live agent reading `Working` → matches.
+        let working = HashMap::from([(sk.clone(), AgentState::Working)]);
+        assert!(Filter::AgentWorking.matches(&FilterCtx {
+            w: &ws,
+            agents: &working
+        }));
+
+        // Every other live state is NOT "working" (idle/done are handled by
+        // their own indicators; asking has the `Asking` filter).
+        for state in [AgentState::Idle, AgentState::Done, AgentState::InputNeeded] {
+            let m = HashMap::from([(sk.clone(), state)]);
+            assert!(
+                !Filter::AgentWorking.matches(&FilterCtx { w: &ws, agents: &m }),
+                "{state:?} must not match the working filter"
+            );
+        }
     }
 
     #[test]

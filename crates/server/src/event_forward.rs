@@ -1168,4 +1168,138 @@ mod tests {
         assert_eq!(snap.terminal_output_dropped, 0, "nothing dropped");
         assert_eq!(snap.terminal_resyncs, 0, "no resync counted");
     }
+
+    /// Two clients where one falls behind and detects a gap: only the
+    /// affected client gets a resync, not both. This verifies that gap
+    /// recovery is scoped per-connection, not broadcast to all subscribers.
+    #[tokio::test]
+    async fn gap_resync_scoped_to_affected_client_only() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&[], None, &[], "t")
+            .await
+            .expect("spawn");
+        // Seed the backend ring with 20 chunks
+        let mut ring = Vec::new();
+        for seq in 1..=20 {
+            let bytes = format!("chunk{seq}").into_bytes();
+            ring.extend_from_slice(&bytes);
+            mock.emit(&key, bytes).await;
+        }
+        let tid = TerminalId(1);
+        config.terminal.bind_backend(tid, key.clone()).await;
+
+        // Create two clients with different channel sizes:
+        // - client_fast has a roomy channel (10 slots)
+        // - client_slow has a tiny channel (2 slots)
+        let (client_fast_tx, mut client_fast_rx) = mpsc::channel(10);
+        let (client_slow_tx, mut client_slow_rx) = mpsc::channel(2);
+        let (raw_tx, forward_fast) = lazybox_ipc::event_forward_channel(client_fast_tx);
+        let (raw_tx2, forward_slow) = {
+            // Both clients read from the same raw stream, so we need to split
+            // the send side. For simplicity, we'll send to one forwarder and
+            // manually feed the other.
+            (
+                raw_tx.clone(),
+                lazybox_ipc::event_forward_channel(client_slow_tx),
+            )
+        };
+
+        // Actually, simpler approach: create two separate forwarders reading
+        // from independent raw streams, and send the same events to both.
+        let (raw_tx_fast, forward_fast) = lazybox_ipc::event_forward_channel(client_fast_tx);
+        let (raw_tx_slow, forward_slow) = lazybox_ipc::event_forward_channel(client_slow_tx);
+
+        let task_fast = tokio::spawn(forward_events(forward_fast, config.clone()));
+        let task_slow = tokio::spawn(forward_events(forward_slow, config.clone()));
+
+        // Send events to fast client: spawned + 20 chunks
+        raw_tx_fast
+            .send(Event::TerminalSpawned {
+                terminal_id: tid,
+                session_key: SessionKey::new("s"),
+                kind: TerminalKind::Shell,
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+            })
+            .unwrap();
+
+        // Send events to slow client: spawned
+        raw_tx_slow
+            .send(Event::TerminalSpawned {
+                terminal_id: tid,
+                session_key: SessionKey::new("s"),
+                kind: TerminalKind::Shell,
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+            })
+            .unwrap();
+
+        // Send first 20 chunks to fast client (room for all)
+        for seq in 1..=20 {
+            raw_tx_fast
+                .send(Event::TerminalOutput {
+                    terminal_id: tid,
+                    bytes: format!("chunk{seq}").into_bytes(),
+                    first_seq: seq,
+                    seq,
+                })
+                .unwrap();
+        }
+
+        // Send first 20 chunks to slow client, but it will overflow at seq 2
+        for seq in 1..=20 {
+            let _ = raw_tx_slow.send(Event::TerminalOutput {
+                terminal_id: tid,
+                bytes: format!("chunk{seq}").into_bytes(),
+                first_seq: seq,
+                seq,
+            });
+        }
+
+        drop(raw_tx_fast);
+        drop(raw_tx_slow);
+
+        // Collect events from fast client
+        let mut fast_outputs = 0;
+        let mut fast_resyncs = 0;
+        while let Ok(e) =
+            tokio::time::timeout(Duration::from_millis(100), client_fast_rx.recv()).await
+        {
+            match e {
+                Some(Event::TerminalOutput { .. }) => fast_outputs += 1,
+                Some(Event::TerminalResync { .. }) => fast_resyncs += 1,
+                None => break,
+                _ => {}
+            }
+        }
+
+        // Collect events from slow client
+        let mut slow_outputs = 0;
+        let mut slow_resyncs = 0;
+        while let Ok(e) =
+            tokio::time::timeout(Duration::from_millis(100), client_slow_rx.recv()).await
+        {
+            match e {
+                Some(Event::TerminalOutput { .. }) => slow_outputs += 1,
+                Some(Event::TerminalResync { .. }) => slow_resyncs += 1,
+                None => break,
+                _ => {}
+            }
+        }
+
+        task_fast.await.ok();
+        task_slow.await.ok();
+
+        // Fast client should get all 20 chunks without resync (no overflow)
+        assert_eq!(fast_outputs, 20, "fast client gets all output");
+        assert_eq!(fast_resyncs, 0, "fast client needs no resync");
+
+        // Slow client should get fewer chunks due to overflow, then a resync
+        assert!(slow_outputs < 20, "slow client drops some output");
+        assert_eq!(slow_resyncs, 1, "slow client gets exactly one resync");
+    }
 }

@@ -223,6 +223,7 @@ async fn stream_json_agent_run_emits_normalized_events_until_process_exit() {
             initial_input: None,
             resume_latest: false,
             access: lazybox_ipc::AgentRunAccess::Default,
+            model_alias: None,
         })
         .unwrap();
 
@@ -458,6 +459,7 @@ async fn codex_turn_processes_resume_as_one_logical_run() {
             }),
             resume_latest: false,
             access: lazybox_ipc::AgentRunAccess::Default,
+            model_alias: None,
         })
         .unwrap();
     let run_id = wait_for_started(
@@ -588,6 +590,7 @@ async fn workspace_less_run_resolves_to_neutral_cwd() {
             initial_input: None,
             resume_latest: true,
             access: lazybox_ipc::AgentRunAccess::ReadOnly,
+            model_alias: None,
         })
         .unwrap();
     wait_for_started(
@@ -679,6 +682,7 @@ async fn source_terminal_ownership_selects_the_exact_session_worktree() {
             initial_input: None,
             resume_latest: true,
             access: lazybox_ipc::AgentRunAccess::ReadOnly,
+            model_alias: None,
         })
         .unwrap();
 
@@ -762,6 +766,7 @@ async fn stdout_error_emits_run_finished_with_error() {
             initial_input: None,
             resume_latest: false,
             access: lazybox_ipc::AgentRunAccess::Default,
+            model_alias: None,
         })
         .unwrap();
     let run_id = wait_for_started(
@@ -809,6 +814,7 @@ async fn terminal_mode_agent_run_reports_that_spawn_should_be_used() {
             initial_input: None,
             resume_latest: false,
             access: lazybox_ipc::AgentRunAccess::Default,
+            model_alias: None,
         })
         .unwrap();
 

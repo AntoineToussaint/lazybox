@@ -301,7 +301,11 @@ direct chord that skips the picker (`open_with_app.<name>`, remappable);
 #1100), `x j` join
 issue
 into PR, `x z` long snooze, `x x` archive, `x c` close issue
-(as not-planned, upstream; issue workspaces only, confirmed first) —
+(as not-planned, upstream; issue workspaces only, confirmed first),
+`x k` close & kill — the combined `g d` + `x x`: delete/close the
+issue or PR upstream AND archive the workspace (killing its sessions)
+in one confirm, for ending a finished line of work (only when there's
+an open issue/PR; confirmed first) —
 the legacy `Shift-{N,A,J,X,C,Z}` direct aliases are gone (#304).
 `r` reply (works from the sidebar as well as the activity pane —
 it's a Workspace-section action). With a `sandbox:` box configured

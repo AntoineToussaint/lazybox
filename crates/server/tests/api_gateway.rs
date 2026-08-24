@@ -2725,6 +2725,7 @@ async fn stream_route_can_start_structured_agent_run() {
         }),
         resume_latest: false,
         access: lazybox_ipc::AgentRunAccess::Default,
+        model_alias: None,
     };
     let mut line = serde_json::to_vec(&JsonClientFrame::Command(command)).unwrap();
     line.push(b'\n');

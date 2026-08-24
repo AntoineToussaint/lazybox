@@ -4814,6 +4814,72 @@ snippets:
         assert!(notice.message.contains("→ continue codex"));
     }
 
+    /// A Critic conversion escalates the reviewer to the large model tier
+    /// (`L`) — a stronger model checks the work — while a Continue keeps the
+    /// working tier (asserted `None` above). The reviewer stays read-only.
+    #[test]
+    fn critic_conversion_spawns_the_reviewer_at_the_large_tier() {
+        use lazybox_core::prompts::AgentHandoffRole;
+        use lazybox_ipc::{
+            AgentRunId, AgentRuntimeMode, Event as IpcEvent, TerminalId, TerminalKind,
+        };
+        use lazybox_tui_core::action::Action;
+
+        let (mut model, mut server, key) = model_with_conversion_source("claude", false);
+        while server.rx.try_recv().is_ok() {}
+
+        model.dispatch_action(&Action::ConvertSession);
+        let commands =
+            model.handle_choice_picked(vec![ChoicePayload::HandoffRole(AgentHandoffRole::Critic)]);
+        let request_id = match &commands[0] {
+            IpcCommand::StartAgentRun { request_id, .. } => request_id.clone(),
+            other => panic!("expected StartAgentRun, got {other:?}"),
+        };
+        let source_session_id = lazybox_core::SessionId::new();
+        model.handle_daemon_event(IpcEvent::AgentRunStarted {
+            request_id,
+            run_id: AgentRunId(21),
+            session_key: key.clone(),
+            session_id: Some(source_session_id),
+            agent: "claude".into(),
+            mode: AgentRuntimeMode::StreamJson,
+        });
+        model.handle_daemon_event(IpcEvent::AgentAssistantTextDelta {
+            run_id: AgentRunId(21),
+            delta: "## Goal\nReview the diff\n\n## Repository state\nsrc/x.rs modified".into(),
+        });
+        model.handle_daemon_event(IpcEvent::AgentTurnFinished {
+            run_id: AgentRunId(21),
+            result: None,
+            session_id: Some("thread-critic".into()),
+            error: None,
+        });
+        // The replacement waits for the singleton source to exit.
+        model.handle_daemon_event(IpcEvent::TerminalExited {
+            terminal_id: TerminalId(7),
+            exit_code: None,
+            last_output: None,
+        });
+
+        let spawn = std::iter::from_fn(|| server.rx.try_recv().ok())
+            .find_map(|command| match command {
+                IpcCommand::Spawn {
+                    kind: TerminalKind::Agent(_),
+                    model_alias,
+                    access,
+                    ..
+                } => Some((model_alias, access)),
+                _ => None,
+            })
+            .expect("fresh critic agent spawned after source exit");
+        assert_eq!(
+            spawn.0.as_deref(),
+            Some("L"),
+            "the critic reviews at the large model tier",
+        );
+        assert_eq!(spawn.1, lazybox_ipc::AgentRunAccess::ReadOnly);
+    }
+
     #[test]
     fn failed_authored_handoff_leaves_the_source_agent_running() {
         use lazybox_core::prompts::AgentHandoffRole;
@@ -11485,6 +11551,124 @@ mod merge_focus_follow_tests {
         expected.sort();
         assert_eq!(closed, expected, "all three marked PRs are closed");
         assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+    }
+
+    /// `g s` on a taskless, repo-scoped workspace (no PR/issue of its own —
+    /// e.g. one an agent created) triggers a sync so the daemon discovers
+    /// the repo's open issues + PRs, instead of the old "nothing to sync".
+    /// A workspace with no repo scope at all still has nothing to sync.
+    #[test]
+    fn sync_on_a_taskless_repo_workspace_syncs_the_repo() {
+        use lazybox_ipc::Event as IpcEvent;
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let mut ws = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new("github:o/r#scratch"),
+            "main",
+            chrono::Utc::now(),
+        );
+        ws.project_key = Some(lazybox_core::ProjectKey::github("o", "r"));
+        let key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&key));
+
+        let cmds = m.dispatch_action(&Action::SyncWorkspace);
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [IpcCommand::SyncWorkspace { workspace_key }]
+                    if workspace_key.as_str() == "github:o/r#scratch"
+            ),
+            "a repo-scoped taskless workspace syncs the repo, got {cmds:?}",
+        );
+
+        // No repo scope → genuinely nothing to sync.
+        let bare = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new("local:scratch#1"),
+            "main",
+            chrono::Utc::now(),
+        );
+        let bare_key = SessionKey::from(&bare.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(bare)));
+        assert!(m.sidebar.focus_workspace_key(&bare_key));
+        let cmds = m.dispatch_action(&Action::SyncWorkspace);
+        assert!(
+            cmds.is_empty(),
+            "no repo scope → nothing to sync, got {cmds:?}"
+        );
+    }
+
+    /// The combined close & kill (`x k`): one confirm issues BOTH the
+    /// upstream `DeleteOrClose` and the local `Kill` for the target row,
+    /// and the row drops optimistically — the `g d` + `x x` pair in one
+    /// action.
+    #[test]
+    fn close_and_archive_emits_both_delete_and_kill() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let ws = workspace("owner/repo#1", true, Duration::hours(1)); // an open PR
+        let key = SessionKey::from(&ws.key);
+        let wskey = ws.key.clone();
+        seed_and_select(&mut m, vec![ws]);
+
+        assert!(m.dispatch_action(&Action::CloseAndArchive).is_empty());
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+        assert!(
+            matches!(
+                &m.modal_flow,
+                Some(ModalFlow::ActionConfirm {
+                    action: Action::CloseAndArchive,
+                    ..
+                })
+            ),
+            "a CloseAndArchive confirm is stashed",
+        );
+
+        let cmds = m.handle_confirmed(true);
+        let mut kinds: Vec<&str> = cmds
+            .iter()
+            .map(|c| match c {
+                IpcCommand::DeleteOrClose { workspace_key } => {
+                    assert_eq!(workspace_key, &wskey);
+                    "delete"
+                }
+                IpcCommand::Kill { session_key } => {
+                    assert_eq!(session_key, &key);
+                    "kill"
+                }
+                other => panic!("unexpected command: {other:?}"),
+            })
+            .collect();
+        kinds.sort();
+        assert_eq!(
+            kinds,
+            vec!["delete", "kill"],
+            "both the upstream close and the local kill fire",
+        );
+        assert!(
+            m.sidebar.workspace_by_key(&key).is_none(),
+            "the row drops optimistically like archive",
+        );
+    }
+
+    /// `x k` is gated like delete-or-close: it needs an open issue/PR (a
+    /// plain archive covers the rest), so a merged PR doesn't offer it.
+    #[test]
+    fn close_and_archive_needs_an_open_issue_or_pr() {
+        use lazybox_tui_core::action::{ActionKind, availability};
+        let open_pr = workspace("owner/repo#1", true, Duration::hours(1));
+        assert!(availability(ActionKind::CloseAndArchive, Some(&open_pr)));
+
+        let mut merged = workspace("owner/repo#2", true, Duration::hours(1));
+        merged.pr.as_mut().expect("pr row").state = lazybox_core::TaskState::Merged;
+        assert!(
+            !availability(ActionKind::CloseAndArchive, Some(&merged)),
+            "nothing left to close → not offered",
+        );
     }
 
     /// #1243: the bulk `g d` confirm renders the mixed close/delete

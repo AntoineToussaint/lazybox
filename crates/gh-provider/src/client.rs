@@ -32,6 +32,23 @@ pub enum GhError {
         content_type: String,
         body_excerpt: String,
     },
+    /// A 2xx response with a JSON content-type whose body is NOT valid
+    /// JSON — the raw `from_str::<Value>` failed at the *syntax* level
+    /// (e.g. "while parsing a string at line 1 column 219264"), NOT a
+    /// schema-shape mismatch. GitHub occasionally returns a truncated /
+    /// corrupt 200 body (the parse dies mid-string, deep into a large
+    /// response); that is transient, so — unlike a genuine schema
+    /// mismatch (`HttpStatus` " (json parse failed)") — this is retried.
+    /// Carries the body length + serde detail so a recurrence is
+    /// diagnosable from the footer, with the full body in the log.
+    #[error(
+        "github HTTP {status} returned a malformed/truncated body ({byte_len} bytes): {detail}"
+    )]
+    MalformedResponse {
+        status: u16,
+        byte_len: usize,
+        detail: String,
+    },
     /// Pagination safety cap hit — typically means the user's filter
     /// is too loose (>2000 matching PRs). Tail truncated.
     #[error("GraphQL paged out: returned {count} PRs across {pages} pages, hit safety cap")]
@@ -123,6 +140,11 @@ fn is_transient(e: &GhError) -> bool {
         | GhError::Api(octocrab::Error::Http { .. })
         | GhError::Api(octocrab::Error::Json { .. })
         | GhError::Api(octocrab::Error::Serde { .. }) => true,
+        // A truncated / corrupt 200 body — the raw JSON didn't even parse
+        // (syntax error mid-string). GitHub cut the response; the next
+        // attempt usually gets a whole one. Retryable, unlike a real
+        // schema mismatch (which stays a non-retryable `HttpStatus`).
+        GhError::MalformedResponse { .. } => true,
         GhError::Api(octocrab::Error::GitHub { source, .. }) => {
             matches!(source.status_code.as_u16(), 502..=504)
         }
@@ -551,6 +573,10 @@ fn detail_of(err: &GhError) -> String {
         GhError::WatchAllFailed { count } => {
             format!("all {count} configured watched-repo queries failed (network or auth issue)")
         }
+        GhError::MalformedResponse { byte_len, .. } => format!(
+            "GitHub returned a truncated/corrupt response body ({byte_len} bytes) — a transient \
+             partial reply. lazybox retries these; it should clear on the next sync."
+        ),
         GhError::HttpStatus { .. } => format!("{err}"),
         GhError::Timeout { .. } => format!("{err}"),
         GhError::Api(octo) => match octo {
@@ -625,6 +651,14 @@ impl From<GhError> for lazybox_core::ProviderError {
         // so it retries on the poll's normal cadence, never escalates to
         // an auth/permanent verdict (#825).
         if matches!(err, GhError::Timeout { .. }) {
+            return lazybox_core::ProviderError::retryable(SOURCE, detail);
+        }
+
+        // A truncated / corrupt 2xx body (the raw JSON didn't parse) is a
+        // transient partial response — retry on the poll's cadence, never a
+        // permanent or auth verdict. The in-call ladder already retried it a
+        // couple of times; surfacing it retryable keeps the poll trying.
+        if matches!(err, GhError::MalformedResponse { .. }) {
             return lazybox_core::ProviderError::retryable(SOURCE, detail);
         }
 
@@ -1609,7 +1643,37 @@ impl GhClient {
         // goes to `tracing` only: it can carry the full GraphQL
         // response (node payloads, JSON braces) which must never reach
         // a user-facing footer notice (issue #305).
-        serde_json::from_str::<serde_json::Value>(&raw_body)
+        // Split the two very different 2xx-JSON failures:
+        //   • `from_str::<Value>` (below) failing is a SYNTAX error — the
+        //     body isn't valid JSON at all, i.e. a truncated / corrupt 200
+        //     (GitHub cut the response mid-string). That is transient, so
+        //     it surfaces as the retryable `MalformedResponse`. The full
+        //     raw body goes to the log so a recurrence is diagnosable
+        //     (it never reaches the user-facing footer — issue #305).
+        //   • `from_value::<T>` (further down) failing is a real schema
+        //     mismatch on valid JSON — not retryable, kept as `HttpStatus`.
+        let value: serde_json::Value = match serde_json::from_str(&raw_body) {
+            Ok(value) => value,
+            Err(e) => {
+                self.budget.lock().observe_failed_response(
+                    operation,
+                    crate::rate_budget::ApiResource::Graphql,
+                    status,
+                    byte_len,
+                    elapsed,
+                );
+                tracing::warn!(
+                    "graphql 2xx body is not valid JSON — likely a truncated/corrupt \
+                     response ({byte_len} bytes) from `{operation}`: {e}\nfull body:\n{raw_body}"
+                );
+                return Err(GhError::MalformedResponse {
+                    status,
+                    byte_len,
+                    detail: e.to_string(),
+                });
+            }
+        };
+        Ok(value)
             .and_then(|value| {
                 let rate_limit = value
                     .get("data")
@@ -3673,6 +3737,46 @@ impl GhClient {
         let (tasks, _mentions) = self
             .fetch_all_issues_with_mentions(&std::collections::BTreeSet::new())
             .await?;
+        Ok(tasks)
+    }
+
+    /// User-initiated repo sync (`g s` on a repo-scoped workspace, #NNNN):
+    /// fetch a single repo's OPEN issues **and** PRs and return them as
+    /// tasks. Deliberately NOT gated on `involves:me` / `is:pr` the way the
+    /// background poll is — the poll only surfaces a watched repo's *PRs*
+    /// and issues that involve you, so a repo's plain open issues never
+    /// reach the inbox on their own. This is the explicit "get me this
+    /// repo's work" action, so it pulls both. First page only (up to the
+    /// search node cap) — plenty for a `g s`, and cheap.
+    pub async fn fetch_repo_open_tasks(&self, repo: &str) -> Result<Vec<Task>, GhError> {
+        // Open PRs — same shape as the round-robin/watched-repo branch.
+        let mut tasks = self
+            .fetch_pr_single_query(
+                "repo sync",
+                format!("is:open is:pr repo:{repo} archived:false"),
+            )
+            .await?;
+
+        // Open issues in the repo, repo-scoped rather than involves-scoped.
+        self.acquire_or_block("repo sync")?;
+        let mut quals = graphql::default_issues_qualifiers();
+        quals.push(format!("repo:{repo}"));
+        let body = graphql::issues_query_body(&graphql::build_issues_query(&quals), None);
+        let response: graphql::GqlIssueResponse =
+            self.post_graphql_with_retry("repo sync", &body).await?;
+        if let Some(errors) = &response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.message.clone())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(GhError::Graphql(joined));
+        }
+        if let Some(data) = response.data {
+            for issue in &data.search.nodes {
+                tasks.push(graphql::issue_to_task(issue, &self.user));
+            }
+        }
         Ok(tasks)
     }
 
@@ -6023,6 +6127,37 @@ mod tests {
         assert!(lazybox_core::ProviderError::from(err).is_retryable());
     }
 
+    /// A 2xx whose body is not valid JSON — the raw `from_str` failed at
+    /// the *syntax* level (GitHub's "while parsing a string at line 1
+    /// column N", a truncated/corrupt 200) — is transient: retried in-call
+    /// and surfaced retryable, NOT the permanent verdict that would fail
+    /// the whole sync. A genuine schema mismatch (valid JSON, wrong shape)
+    /// stays non-retryable.
+    #[test]
+    fn truncated_body_is_retryable_but_schema_mismatch_is_not() {
+        let truncated = GhError::MalformedResponse {
+            status: 200,
+            byte_len: 219_264,
+            detail: "while parsing a string at line 1 column 219264".to_string(),
+        };
+        assert!(
+            is_transient(&truncated),
+            "a truncated 200 is worth an in-call retry"
+        );
+        assert!(lazybox_core::ProviderError::from(truncated).is_retryable());
+
+        // Valid JSON but the wrong shape — a real bug in our types, kept as
+        // a non-retryable HttpStatus so we don't hammer GitHub for it.
+        let schema_mismatch = GhError::HttpStatus {
+            status: 200,
+            reason: " (json parse failed)".to_string(),
+            content_type: "application/json".to_string(),
+            body_excerpt: "missing field `foo`".to_string(),
+        };
+        let pe = lazybox_core::ProviderError::from(schema_mismatch);
+        assert!(!pe.is_retryable() && !pe.is_auth());
+    }
+
     /// A stringly GraphQL wrapper error has no typed status, so it
     /// falls through to the shared substring probe. Matching the
     /// shared classifier's verdicts proves the fallback delegates.
@@ -7203,11 +7338,13 @@ mod tests {
         );
     }
 
-    /// A 2xx response whose body fails JSON parsing surfaces with
-    /// the status + content-type intact, plus the parse-failure
-    /// detail in the body excerpt.
+    /// A 2xx whose body isn't valid JSON at all (a truncated / corrupt
+    /// reply — GitHub cut the response mid-serialization) is transient:
+    /// the in-call ladder retries it and it finally surfaces as the
+    /// retryable `MalformedResponse`, NOT the permanent verdict that used
+    /// to fail the whole sync ("HTTP 200 … while parsing a string").
     #[tokio::test(flavor = "current_thread")]
-    async fn http_200_with_invalid_json_surfaces_parse_failure() {
+    async fn http_200_with_invalid_json_is_retryable_malformed_response() {
         let base_uri =
             spawn_canned_response_server("200 OK", "application/json", "not actually json").await;
         let client = make_client(&base_uri);
@@ -7215,15 +7352,14 @@ mod tests {
         let err = client
             .post_graphql_with_retry::<serde_json::Value>("test", &body)
             .await
-            .expect_err("unparseable 2xx body should fail");
-        let msg = err.to_string();
+            .expect_err("unparseable 2xx body should fail after retries");
         assert!(
-            msg.contains("json parse failed"),
-            "expected parse-failure marker in error: {msg}"
+            matches!(err, GhError::MalformedResponse { status: 200, .. }),
+            "a syntactically-invalid 2xx body is a truncated response, got: {err:?}"
         );
         assert!(
-            matches!(err, GhError::HttpStatus { status: 200, .. }),
-            "expected HttpStatus(200), got: {err:?}"
+            lazybox_core::ProviderError::from(err).is_retryable(),
+            "a truncated body must be retryable, not fail the sync",
         );
     }
 

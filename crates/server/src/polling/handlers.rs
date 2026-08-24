@@ -1453,6 +1453,41 @@ pub async fn handle_sync_workspace(config: &ServerConfig, workspace_key: Workspa
         }
     }
 
+    // Repo-level discovery: when this workspace tracks no GitHub PR or issue
+    // of its own but is scoped to a github repo (a taskless / pre-PR
+    // workspace — e.g. one an agent created), `g s` fetches that repo's OPEN
+    // issues + PRs. The background poll only surfaces a watched repo's *PRs*
+    // and issues that *involve* you, so a repo's plain open issues never
+    // reach the inbox on their own — this is the explicit "sync this repo"
+    // the user expects (#NNNN).
+    if workspace.pr.is_none()
+        && workspace.gh_issues.is_empty()
+        && let Some(slug) = workspace
+            .project_key
+            .as_ref()
+            .and_then(|key| key.unambiguous_github_slug())
+    {
+        match client.fetch_repo_open_tasks(&slug).await {
+            Ok(tasks) => {
+                let discovered = tasks.len();
+                for task in tasks {
+                    super::upsert(config, task).await;
+                }
+                tracing::info!(
+                    workspace = %workspace_key,
+                    "sync_workspace: repo `{slug}` discovered {discovered} open issues/PRs"
+                );
+            }
+            Err(e) => {
+                tracing::warn!("sync_workspace repo `{slug}`: {e}");
+                let _ = config.bus.send(Event::provider_error_retryable(
+                    "github",
+                    format!("sync repo {slug}: {e}"),
+                ));
+            }
+        }
+    }
+
     tracing::info!(workspace = %workspace_key, "sync_workspace: targeted re-poll complete");
 }
 

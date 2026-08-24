@@ -216,6 +216,7 @@ pub(super) fn is_bulk_destructive(action: &lazybox_tui_core::action::Action) -> 
             | Action::LongSnooze
             | Action::DeleteOrClose
             | Action::CloseIssue
+            | Action::CloseAndArchive
     )
 }
 
@@ -230,6 +231,7 @@ fn bulk_confirmed_verb(action: &lazybox_tui_core::action::Action) -> &'static st
         Action::LongSnooze => "snoozed",
         Action::DeleteOrClose => "closed/deleted",
         Action::CloseIssue => "closed",
+        Action::CloseAndArchive => "closed & killed",
         _ => "applied to",
     }
 }
@@ -710,6 +712,16 @@ impl<T: TerminalAdapter> Model<T> {
                     )
                 }
             }
+            // Every selected row was gated on the same open-issue/PR
+            // predicate as delete-or-close, so all N get both the upstream
+            // close and the local archive.
+            Action::CloseAndArchive => {
+                format!(
+                    "Close/delete and archive {n} workspaces? Each issue is deleted \
+                     (or closed as not-planned) or its PR closed without merging, its \
+                     sessions killed, and the row dropped. {list}"
+                )
+            }
             // Only the `is_bulk_destructive` actions reach a bulk confirm;
             // a neutral fallback keeps a future mis-wiring from lying
             // ("Archive N…") about what a different action does.
@@ -821,6 +833,52 @@ impl<T: TerminalAdapter> Model<T> {
                         _ => {
                             self.flash_info(
                                 "the issue / PR is no longer open — nothing to delete or close",
+                            );
+                            Vec::new()
+                        }
+                    },
+                    // The combined `g d` + `x x`: close/delete the item
+                    // upstream AND archive the workspace in one go. Re-check
+                    // the same predicate the keypress was gated on, then emit
+                    // both commands. Archive optimistically (like Action::Archive)
+                    // so the row drops instantly; the daemon's DeleteOrClose is
+                    // best-effort upstream — the local kill is what ends the
+                    // workspace either way.
+                    Action::CloseAndArchive => match workspace.as_ref() {
+                        Some(ws)
+                            if lazybox_tui_core::action::availability(
+                                lazybox_tui_core::action::ActionKind::CloseAndArchive,
+                                Some(ws),
+                            ) =>
+                        {
+                            if let Some(pr) = ws.pr.as_ref() {
+                                self.flash_info(format!(
+                                    "closing PR{} & killing workspace…",
+                                    task_number_suffix(&pr.id.key)
+                                ));
+                            } else {
+                                self.flash_info(format!(
+                                    "deleting issue{} & killing workspace…",
+                                    task_number_suffix(
+                                        ws.gh_issues
+                                            .first()
+                                            .map(|i| i.id.key.as_str())
+                                            .unwrap_or("")
+                                    )
+                                ));
+                            }
+                            let workspace_key = ws.key.clone();
+                            self.optimistic_remove_workspace(session_key);
+                            vec![
+                                IpcCommand::DeleteOrClose { workspace_key },
+                                IpcCommand::Kill {
+                                    session_key: session_key.clone(),
+                                },
+                            ]
+                        }
+                        _ => {
+                            self.flash_info(
+                                "the issue / PR is no longer open — use archive (x x) to just kill the workspace",
                             );
                             Vec::new()
                         }
@@ -2082,13 +2140,26 @@ impl<T: TerminalAdapter> Model<T> {
                 let Some(ws) = self.sidebar.selected_workspace() else {
                     return cmds;
                 };
-                if ws.pr.is_none() && ws.gh_issues.is_empty() {
-                    self.flash_info("nothing to sync on this workspace");
+                // No tracked PR/issue: if the workspace is scoped to a github
+                // repo (a taskless / pre-PR workspace), sync discovers that
+                // repo's open issues + PRs daemon-side; only a workspace with
+                // no repo scope at all has genuinely nothing to sync.
+                let has_repo_scope = ws
+                    .project_key
+                    .as_ref()
+                    .is_some_and(|key| key.unambiguous_github_slug().is_some());
+                if ws.pr.is_none() && ws.gh_issues.is_empty() && !has_repo_scope {
+                    self.flash_info("nothing to sync — this workspace has no PR, issue, or repo");
                     return cmds;
                 }
+                let syncing_repo = ws.pr.is_none() && ws.gh_issues.is_empty();
                 let workspace_key = ws.key.clone();
                 cmds.push(IpcCommand::SyncWorkspace { workspace_key });
-                self.flash_hint("syncing…");
+                self.flash_hint(if syncing_repo {
+                    "syncing repo — fetching its open issues & PRs…"
+                } else {
+                    "syncing…"
+                });
             }
             Action::CyclePane => {
                 // The keyboard path normally consumes the chord in

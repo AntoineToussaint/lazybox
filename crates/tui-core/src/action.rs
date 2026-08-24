@@ -140,6 +140,12 @@ pub enum Action {
     /// "delete" resolves to a close here (reversible, provider-side).
     /// Confirm-guarded.
     CloseIssue,
+    /// Close/delete the issue or PR upstream AND archive the workspace
+    /// (killing its sessions) in one step — the combined `g d` + `x x`
+    /// so ending a finished line of work is one chord, not two. Gated
+    /// like [`ActionKind::DeleteOrClose`] (needs an open issue/PR);
+    /// GitHub-scoped. Confirm-guarded.
+    CloseAndArchive,
     /// Reset the focused workspace's running agent conversation in
     /// place — inject the agent's own clear-context command (`/clear`
     /// for Claude Code, `/new` for Codex) through the settle-gated
@@ -495,6 +501,7 @@ pub enum ActionKind {
     LongSnooze,
     Archive,
     CloseIssue,
+    CloseAndArchive,
     ResetAgentContext,
     MergePr,
     UpdateBranch,
@@ -646,6 +653,7 @@ impl ActionKind {
         Self::LongSnooze,
         Self::Archive,
         Self::CloseIssue,
+        Self::CloseAndArchive,
         Self::ResetAgentContext,
         // GitHub menu.
         Self::MergePr,
@@ -764,6 +772,7 @@ impl Action {
             Action::LongSnooze => ActionKind::LongSnooze,
             Action::Archive => ActionKind::Archive,
             Action::CloseIssue => ActionKind::CloseIssue,
+            Action::CloseAndArchive => ActionKind::CloseAndArchive,
             Action::ResetAgentContext => ActionKind::ResetAgentContext,
             Action::MergePr => ActionKind::MergePr,
             Action::UpdateBranch => ActionKind::UpdateBranch,
@@ -1258,6 +1267,13 @@ impl ActionDef {
                 default_keys: "x c",
                 label: "close issue",
                 describe: "Close the focused GitHub issue upstream (as not-planned). Only on issue workspaces; a true delete needs elevated permissions, so this closes instead. Confirmed first.",
+                section: Section::Workspace,
+            },
+            ActionKind::CloseAndArchive => &Self {
+                kind: ActionKind::CloseAndArchive,
+                default_keys: "x k",
+                label: "close & kill",
+                describe: "Delete/close the issue or PR upstream AND archive the workspace (killing its sessions) in one step — the combined `g d` + `x x` for ending a finished line of work. Only when there's an open issue/PR. Confirmed first.",
                 section: Section::Workspace,
             },
             ActionKind::ResetAgentContext => &Self {
@@ -1922,6 +1938,15 @@ impl ActionDef {
                  is closed as not-planned instead. A PR is closed without \
                  merging.",
             },
+            // Both the upstream mutation of DeleteOrClose and the local
+            // teardown of Archive, in one confirm.
+            ActionKind::CloseAndArchive => Guard::Confirm {
+                prompt: "Close/delete this issue or PR upstream AND archive \
+                 the workspace? The upstream item is closed (an issue is \
+                 deleted with admin rights, else closed as not-planned; a PR \
+                 is closed without merging), its sessions are killed, and the \
+                 row drops from the inbox.",
+            },
             // Explicitly invoked; merging mutates the mainline branch
             // immediately and is hard to undo.
             ActionKind::MergePr => Guard::Confirm {
@@ -2059,6 +2084,7 @@ impl ActionKind {
             ActionKind::LongSnooze => "long_snooze",
             ActionKind::Archive => "archive",
             ActionKind::CloseIssue => "close_issue",
+            ActionKind::CloseAndArchive => "close_and_archive",
             ActionKind::ResetAgentContext => "reset_agent_context",
             ActionKind::MergePr => "merge_pr",
             ActionKind::UpdateBranch => "update_branch",
@@ -2334,6 +2360,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::LongSnooze
         | ActionKind::Archive
         | ActionKind::CloseIssue
+        | ActionKind::CloseAndArchive
         | ActionKind::AdoptSessions
         | ActionKind::SendToSession
         | ActionKind::ConvertSession
@@ -2785,6 +2812,13 @@ pub fn contextual_label(
             Some(_) => "delete issue",
             None => default,
         },
+        // Name the upstream resolution + the local kill, mirroring
+        // DeleteOrClose's contextual verb.
+        Action::CloseAndArchive => match workspace {
+            Some(w) if w.pr.is_some() => "close PR & kill",
+            Some(_) => "delete issue & kill",
+            None => default,
+        },
         _ => default,
     }
 }
@@ -2911,6 +2945,10 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
                     .is_some_and(|i| i.state != lazybox_core::TaskState::Closed),
             })
             .unwrap_or(false),
+        // Same gate as DeleteOrClose — the combined action only makes
+        // sense when there's an open issue/PR to close; a plain archive
+        // (`x x`) covers the rest.
+        ActionKind::CloseAndArchive => availability(ActionKind::DeleteOrClose, workspace),
         ActionKind::SpawnShell => matches!(
             intent::resolve_spawn_shell(workspace),
             intent::Intent::SpawnShell { .. },

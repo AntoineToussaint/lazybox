@@ -901,13 +901,13 @@ pub(super) async fn commit_workspace_move(
     } else {
         Some(config.terminal.entries.clone().lock_owned().await)
     };
-    // Release workspace locks before the blocking store operation.
-    // Mutation data is fully prepared; no workspace state access is needed
-    // during persistence. This allows other clients to access these workspaces
-    // while the SQLite write is in progress, preventing lock-induced
-    // serialization (issue #1256).
-    drop(workspace_guards);
-
+    // NOTE: #1279 tried to release `workspace_guards` here (before the
+    // blocking store) as a liveness optimization, but that broke the
+    // delete↔spawn serialization — a losing spawn could acquire the lock
+    // during the SQLite write window and resurrect a workspace being
+    // deleted (`spawn_losing_to_merge_cannot_recreate_the_deleted_source`).
+    // The guards MUST stay held across the commit; they drop after the
+    // event tail inside the blocking owner below.
     let config_owned = config.clone();
     tokio::task::spawn_blocking(move || {
         let mut terminal_guard = terminal_guard;
@@ -947,6 +947,11 @@ pub(super) async fn commit_workspace_move(
         for event in post_commit_events {
             let _ = config_owned.bus.send(event);
         }
+        // Held across the entire commit + projection tail (see the note at
+        // the call site): drop the workspace locks only now, so a concurrent
+        // spawn can't race in between the SQLite commit and its in-memory /
+        // client projections and resurrect a just-deleted workspace.
+        drop(workspace_guards);
         Ok(outcome)
     })
     .await

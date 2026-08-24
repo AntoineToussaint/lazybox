@@ -14844,6 +14844,40 @@ mod destructive_confirm_tests {
         }
     }
 
+    /// `g s` on a repo-scoped workspace that owns no PR/issue (a scratch
+    /// / project workspace) still syncs: it emits a `SyncWorkspace`
+    /// command — the daemon turns it into a forced repo re-poll — rather
+    /// than dead-ending on "nothing to sync". Sync should not require an
+    /// entity to already exist; that's precisely when you want to poll.
+    #[test]
+    fn sync_workspace_on_repo_scoped_scratch_still_syncs() {
+        let mut m = build_model();
+        let mut ws = Workspace::empty(
+            WorkspaceKey::new("github:owner/repo#scratch"),
+            "scratch",
+            Utc::now(),
+        );
+        ws.project_key = Some(lazybox_core::ProjectKey::github("owner", "repo"));
+        assert!(
+            ws.repo_slug().is_some(),
+            "test setup: workspace is repo-scoped"
+        );
+        assert!(
+            ws.pr.is_none() && ws.gh_issues.is_empty(),
+            "test setup: no PR/issue of its own",
+        );
+        let sk = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&sk), "scratch row focusable");
+
+        let cmds = m.dispatch_action(&Action::SyncWorkspace);
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, IpcCommand::SyncWorkspace { .. })),
+            "repo-scoped scratch workspace still emits a sync, got {cmds:?}",
+        );
+    }
+
     /// A PR workspace GitHub would let you merge right now — CI green,
     /// no conflict — but with NO approving review, the case #144 was
     /// falsely blocking.

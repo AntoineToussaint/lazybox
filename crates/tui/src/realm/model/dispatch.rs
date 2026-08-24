@@ -2125,22 +2125,24 @@ impl<T: TerminalAdapter> Model<T> {
                 // and counted.
                 if self.bulk_active() {
                     return self.bulk_dispatch("synced", "nothing to sync", |ws| {
-                        (ws.pr.is_some() || !ws.gh_issues.is_empty()).then(|| {
-                            IpcCommand::SyncWorkspace {
+                        (ws.pr.is_some() || !ws.gh_issues.is_empty() || ws.repo_slug().is_some())
+                            .then(|| IpcCommand::SyncWorkspace {
                                 workspace_key: ws.key.clone(),
-                            }
-                        })
+                            })
                     });
                 }
                 // Targeted re-poll of just this workspace's PR / issue —
                 // cheaper than the global refresh when you're waiting on
                 // one PR's CI. The daemon deep-fetches the entity and
                 // upserts it, so the row's state + read markers update
-                // without a full sweep.
+                // without a full sweep. A repo-scoped workspace with no
+                // entity yet still syncs: the daemon falls back to a
+                // forced repo re-poll so `g s` never dead-ends on
+                // "nothing to sync" just because no PR/issue landed here.
                 let Some(ws) = self.sidebar.selected_workspace() else {
                     return cmds;
                 };
-                if ws.pr.is_none() && ws.gh_issues.is_empty() {
+                if ws.pr.is_none() && ws.gh_issues.is_empty() && ws.repo_slug().is_none() {
                     self.flash_info("nothing to sync on this workspace");
                     return cmds;
                 }

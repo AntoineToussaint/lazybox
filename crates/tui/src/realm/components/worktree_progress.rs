@@ -471,12 +471,16 @@ impl Component for WorktreeProgress {
         // Size the modal to the *wrapped* height, not the logical line
         // count — a long stale-base note or error message wraps inside
         // the fixed-width modal and would otherwise push the footer
-        // ("Esc dismiss") off the bottom.
+        // ("Esc dismiss") off the bottom. Measure with ratatui's own
+        // word-wrap (`Paragraph::line_count`) rather than a
+        // `ceil(width / inner_w)` guess: word-wrapping breaks at word
+        // boundaries and wastes tail space, so the guess UNDER-counted
+        // and clipped the last line — which for a branch-mismatch
+        // failure is exactly the `r recreate · Esc dismiss` action,
+        // making a recoverable error look like a dead end.
         let inner_w = modal_w.saturating_sub(2).max(1);
-        let visual_rows: u16 = lines
-            .iter()
-            .map(|l| (l.width() as u16).div_ceil(inner_w).max(1))
-            .sum();
+        let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+        let visual_rows = para.line_count(inner_w) as u16;
         let modal_h = (visual_rows + 2).min(area.height);
         let x = area.x + area.width.saturating_sub(modal_w) / 2;
         let y = area.y + area.height.saturating_sub(modal_h) / 2;
@@ -490,7 +494,7 @@ impl Component for WorktreeProgress {
             .border_style(theme.modal_border());
         let inner = block.inner(modal);
         frame.render_widget(block, modal);
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        frame.render_widget(para, inner);
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
@@ -959,6 +963,38 @@ mod tests {
             comp.on(&Event::Keyboard(KeyEvent::from(Key::Char('r')))),
             Some(Msg::WorktreeRecreate)
         ));
+    }
+
+    /// A branch-mismatch failure whose message wraps to several lines
+    /// (a long real worktree path) must STILL show its `r recreate`
+    /// action. The modal sizes its height from the wrapped row count;
+    /// the old `ceil(width / inner_w)` estimate under-counted the
+    /// word-wrapped error by a row and clipped the trailing affordance
+    /// off the bottom, so a recoverable failure rendered as an
+    /// action-less dead end (the reported "no action to take" bug).
+    #[test]
+    fn long_branch_mismatch_message_still_shows_recreate() {
+        let mut st = state();
+        st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
+        st.apply(
+            WorktreeStep::WorktreeAdd,
+            WorktreeStepStatus::Failed(
+                "worktree: checkout_at: worktree \
+                 /Users/antoine/.lazybox/v2/worktrees/github-antoinetoussaint-lazybox/bugs \
+                 is checked out on branch 'fix/desktop-collapsed-tickets', not the \
+                 requested branch 'bugs' — refusing to reuse it; preserve or switch \
+                 that checkout, then retry"
+                    .into(),
+            ),
+        );
+        assert_eq!(st.recovery(), Some(WorktreeRecovery::BranchMismatch));
+        // A generously tall screen — the clip was never a screen-height
+        // problem, it was the modal sizing itself too short.
+        let out = render(&mut WorktreeProgress::from_state(&st), 90, 40);
+        assert!(
+            out.contains("r recreate"),
+            "wrapped error must not clip the action line: {out}"
+        );
     }
 
     /// Issue #787: a `BranchHeldLive` failure offers a jump to the live

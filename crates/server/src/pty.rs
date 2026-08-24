@@ -557,12 +557,31 @@ fn read_scrollback_tail(path: &Path, max: usize) -> Vec<u8> {
     if file.read_to_end(&mut buf).is_err() {
         return Vec::new();
     }
+    // Trim leading partial line to a newline boundary
     if start > 0
         && let Some(nl) = buf.iter().position(|&b| b == b'\n')
     {
         buf.drain(..=nl);
     }
+    // Trim trailing incomplete escape sequences or UTF8 by truncating
+    // to the last complete newline. This prevents a crashed write
+    // mid-escape-sequence from corrupting the VT stream on replay.
+    // See issue #1254 finding 6.
+    trim_trailing_incomplete_eof(&mut buf);
     buf
+}
+
+/// Trim from EOF back to the last newline, removing any incomplete
+/// escape sequence or UTF8 byte that might be left from a crashed write.
+/// This is a conservative approach that preserves complete output lines.
+fn trim_trailing_incomplete_eof(buf: &mut Vec<u8>) {
+    if let Some(nl_pos) = buf.rfind(|&b| b == b'\n') {
+        buf.truncate(nl_pos + 1);
+    } else {
+        // No newline in buffer; could be incomplete on first read.
+        // Keep as-is to avoid losing valid single-line content on a
+        // file that has never been newline-terminated.
+    }
 }
 
 /// Whether a captured / replayed row carries no VISIBLE glyph — grid
@@ -2320,5 +2339,62 @@ mod exit_tests {
         };
         assert_eq!(a.await.unwrap(), Some(3));
         assert_eq!(b.await.unwrap(), Some(3));
+    }
+
+    #[test]
+    fn trim_trailing_incomplete_eof_removes_torn_escape_sequence() {
+        // Issue #1254 finding 6: a crashed write mid-escape-sequence
+        // can leave garbage at EOF that corrupts the VT stream.
+        // Verify that trimming to the last newline removes it.
+
+        // Valid output ending with a complete escape sequence
+        let mut buf = b"line 1\nline 2\x1b[0m\n".to_vec();
+        trim_trailing_incomplete_eof(&mut buf);
+        assert_eq!(
+            buf, b"line 1\nline 2\x1b[0m\n",
+            "complete escape sequence before newline is preserved"
+        );
+
+        // Torn escape sequence at EOF (no final character after CSI)
+        let mut buf = b"line 1\nline 2\n\x1b[3".to_vec();
+        trim_trailing_incomplete_eof(&mut buf);
+        assert_eq!(
+            buf, b"line 1\nline 2\n",
+            "torn escape sequence at EOF is trimmed to last newline"
+        );
+
+        // Incomplete UTF-8 sequence at EOF
+        let mut buf = b"line 1\nline 2\n\xc3".to_vec(); // incomplete UTF-8
+        trim_trailing_incomplete_eof(&mut buf);
+        assert_eq!(
+            buf, b"line 1\nline 2\n",
+            "incomplete UTF-8 at EOF is trimmed to last newline"
+        );
+
+        // Mixed: valid escape followed by torn escape
+        let mut buf = b"line 1\nline 2\x1b[0m\n\x1b[3".to_vec();
+        trim_trailing_incomplete_eof(&mut buf);
+        assert_eq!(
+            buf, b"line 1\nline 2\x1b[0m\n",
+            "torn sequence after complete escape is trimmed"
+        );
+
+        // No newline in buffer (single incomplete line)
+        let mut buf = b"incomplete".to_vec();
+        trim_trailing_incomplete_eof(&mut buf);
+        assert_eq!(
+            buf, b"incomplete",
+            "buffer with no newline is kept as-is (valid single-line content)"
+        );
+
+        // Empty buffer
+        let mut buf = Vec::<u8>::new();
+        trim_trailing_incomplete_eof(&mut buf);
+        assert!(buf.is_empty(), "empty buffer stays empty");
+
+        // Only a newline
+        let mut buf = b"\n".to_vec();
+        trim_trailing_incomplete_eof(&mut buf);
+        assert_eq!(buf, b"\n", "lone newline is preserved");
     }
 }

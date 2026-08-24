@@ -222,6 +222,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | `x z` | long snooze *(confirmed first)* |
 | `x x` | archive *(confirmed first)* |
 | `x c` | close issue *(confirmed first)* |
+| `x k` | close & kill *(confirmed first)* |
 | `x w` | reset agent *(confirmed first)* |
 | `x u` | move up |
 | `x d` | move down |

@@ -7423,3 +7423,66 @@ async fn rescope_preserves_manual_workspace_that_gained_a_pr(/* issue #87 */) {
         "manual workspace (with PR) must survive refresh; got: {after:?}"
     );
 }
+
+/// Regression test for issue #1256 (P2-11): polling-thread lock-across-SQLite.
+/// Verify that polling upserts don't hold workspace locks during store
+/// operations. This test spawns concurrent upserts and store accesses to
+/// ensure no deadlock occurs and latency remains reasonable.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_upsert_and_store_access_no_deadlock() {
+    let config = ServerConfig::in_memory();
+
+    // Spawn multiple concurrent polling tasks that will trigger upserts.
+    // Each upsert does load→modify→commit, which used to hold locks during
+    // the SQLite persist operation.
+    let mut handles = vec![];
+
+    // Spawn concurrent upserters.
+    for i in 0..4 {
+        let cfg = config.clone();
+        let handle = tokio::spawn(async move {
+            for j in 0..3 {
+                let task = make_task(&format!("o/r#{}", i * 10 + j));
+                polling::upsert(&cfg, task).await;
+                // Small yield to interleave operations.
+                tokio::task::yield_now().await;
+            }
+        });
+        handles.push(handle);
+    }
+
+    // Spawn concurrent store readers that try to access workspaces.
+    // These should NOT block waiting for the upserters' locks.
+    let mut reader_handles = vec![];
+    for i in 0..4 {
+        let cfg = config.clone();
+        let handle = tokio::spawn(async move {
+            for _ in 0..10 {
+                let _ = cfg.store.list_workspaces();
+                tokio::task::yield_now().await;
+            }
+        });
+        reader_handles.push(handle);
+    }
+
+    // Wait for all tasks to complete. The test framework's timeout
+    // (10s per `nextest.toml`) will catch any deadlock.
+    for handle in handles {
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("upserter should complete without hanging");
+    }
+
+    for handle in reader_handles {
+        let _ = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("reader should complete without hanging");
+    }
+
+    // Verify workspaces were actually created (not just that we didn't deadlock).
+    let workspaces = config.store.list_workspaces().unwrap();
+    assert!(
+        !workspaces.is_empty(),
+        "concurrent upserts should have created workspaces"
+    );
+}

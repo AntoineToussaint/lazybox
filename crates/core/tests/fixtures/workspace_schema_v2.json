@@ -130,7 +130,10 @@
     "author": "dave",
     "auto_merge_enabled": true,
     "is_in_merge_queue": true,
-    "mergeable": "Conflicting",
+    "mergeable": {
+      "state": "Conflicting",
+      "observed_at": "2026-03-14T12:00:00Z"
+    },
     "is_behind_base": true,
     "merge_blocked": false,
     "node_id": "PR_kwDOtest001",
@@ -213,7 +216,10 @@
       "author": "dave",
       "auto_merge_enabled": true,
       "is_in_merge_queue": true,
-      "mergeable": "Conflicting",
+      "mergeable": {
+        "state": "Conflicting",
+        "observed_at": "2026-03-14T12:00:00Z"
+      },
       "is_behind_base": true,
       "merge_blocked": false,
       "node_id": "PR_kwDOtest001",
@@ -292,7 +298,10 @@
       "author": "dave",
       "auto_merge_enabled": true,
       "is_in_merge_queue": true,
-      "mergeable": "Conflicting",
+      "mergeable": {
+        "state": "Conflicting",
+        "observed_at": "2026-03-14T12:00:00Z"
+      },
       "is_behind_base": true,
       "merge_blocked": false,
       "node_id": "PR_kwDOtest001",
@@ -363,8 +372,8 @@
   ],
   "seen_count": 1,
   "read_indices": [
-    0,
-    2
+    2,
+    0
   ],
   "snoozed_until": "2026-03-14T18:00:00Z",
   "auto_merge_on_green": true,

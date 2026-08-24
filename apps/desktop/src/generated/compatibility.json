@@ -261,7 +261,7 @@
               "linked_tasks": [],
               "merge_blocked": false,
               "mergeable": {
-                "observed_at": "2026-08-24T14:41:32.761854Z",
+                "observed_at": "2026-08-24T14:58:49.796001Z",
                 "state": "Mergeable"
               },
               "needs_reply": false,
@@ -347,7 +347,7 @@
           "linked_tasks": [],
           "merge_blocked": false,
           "mergeable": {
-            "observed_at": "2026-08-24T14:41:32.761854Z",
+            "observed_at": "2026-08-24T14:58:49.796001Z",
             "state": "Mergeable"
           },
           "needs_reply": false,

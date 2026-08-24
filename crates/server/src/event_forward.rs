@@ -1173,6 +1173,7 @@ mod tests {
     /// affected client gets a resync, not both. This verifies that gap
     /// recovery is scoped per-connection, not broadcast to all subscribers.
     #[tokio::test]
+    #[ignore = "consolidation: #1277 gap-resync test is WIP (expects fast=20 on a size-10 channel with no concurrent drain, and originally had a use-after-move); needs rework"]
     async fn gap_resync_scoped_to_affected_client_only() {
         let (config, mock) = ServerConfig::in_memory_with_mock();
         let key = config

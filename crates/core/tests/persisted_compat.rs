@@ -19,8 +19,8 @@
 use chrono::{DateTime, TimeZone, Utc};
 use lazybox_core::{
     Activity, ActivityKind, AutoFixKind, CheckRun, CiStatus, CleanupPrompt, Label, Mergeable,
-    PolicyArm, ReviewState, ReviewStatus, Reviewer, SessionId, SessionKind, SessionLayout,
-    SessionRunState, Task, TaskId, TaskKind, TaskRole, TaskState, TileTree,
+    MergeableState, PolicyArm, ReviewState, ReviewStatus, Reviewer, SessionId, SessionKind,
+    SessionLayout, SessionRunState, Task, TaskId, TaskKind, TaskRole, TaskState, TileTree,
     WORKSPACE_SCHEMA_VERSION, Workspace, WorkspaceKey, WorkspaceSession,
 };
 use std::collections::HashSet;
@@ -102,7 +102,7 @@ fn maximal_pr_task() -> Task {
         assignees: vec!["alice".into()],
         auto_merge_enabled: true,
         is_in_merge_queue: true,
-        mergeable: Mergeable::conflicting(),
+        mergeable: Mergeable::new(MergeableState::Conflicting, at(12, 0)),
         is_behind_base: true,
         merge_blocked: false,
         approval_policy: Default::default(),

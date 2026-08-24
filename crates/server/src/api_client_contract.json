@@ -216,7 +216,7 @@
             "linked_tasks": [],
             "merge_blocked": false,
             "mergeable": {
-              "observed_at": "2026-08-24T14:41:33.516429Z",
+              "observed_at": "2026-08-24T14:58:50.352184Z",
               "state": "Mergeable"
             },
             "needs_reply": false,

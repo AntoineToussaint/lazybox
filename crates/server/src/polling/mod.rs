@@ -1077,7 +1077,10 @@ impl TickState {
         if any_source_succeeded && polled_count == 0 {
             // Empty poll: double the multiplier, cap at 30x
             const MAX_BACKOFF: f64 = 30.0;
-            self.backoff_multiplier = (self.backoff_multiplier * 2.0).min(MAX_BACKOFF);
+            // `.max(1.0)` treats the derived-Default 0.0 as the resting 1.0
+            // (valid multipliers are always >= 1.0), so the first empty poll
+            // doubles from 1.0 -> 2.0 rather than staying stuck at 0.0.
+            self.backoff_multiplier = (self.backoff_multiplier.max(1.0) * 2.0).min(MAX_BACKOFF);
         } else if polled_count > 0 {
             // Data arrived: reset to base
             self.backoff_multiplier = 1.0;
@@ -1088,7 +1091,8 @@ impl TickState {
 
     /// Get the current exponential backoff multiplier.
     pub(crate) fn backoff_multiplier(&self) -> f64 {
-        self.backoff_multiplier
+        // Floor at the resting 1.0 so the derived-Default 0.0 reads as 1.0.
+        self.backoff_multiplier.max(1.0)
     }
 
     /// Broadcast a `ProviderError` for `source_key` unless it merely

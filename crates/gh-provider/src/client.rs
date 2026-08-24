@@ -1736,6 +1736,19 @@ impl GhClient {
         }
     }
 
+    /// Budget-admit AND pace a REST request that goes straight to
+    /// octocrab (not through `post_graphql_with_retry`, which already
+    /// paces + gates concurrency). Returns the concurrency permit to hold
+    /// across the send, so these calls get the same secondary-limit
+    /// spacing the polling paths do. Without it a burst path — the
+    /// working-claim label sync fires ~6 label writes per agent heartbeat
+    /// — sends unspaced and trips GitHub's abuse (secondary) limit under
+    /// many concurrent agents.
+    async fn acquire_rest(&self, op: &str) -> Result<tokio::sync::SemaphorePermit<'_>, GhError> {
+        self.acquire_or_block(op)?;
+        self.request_permit().await
+    }
+
     async fn request_permit(&self) -> Result<tokio::sync::SemaphorePermit<'_>, GhError> {
         // Pace BEFORE taking a concurrency slot: a request that is only
         // waiting out its governor gap is not doing work, so it must not
@@ -4442,7 +4455,7 @@ impl GhClient {
     ) -> Result<(), GhError> {
         let (owner, name, number) = working_claim_target(task_id, repo)?;
         let handler = self.inner.issues(owner, name);
-        self.acquire_or_block("list issue working labels")?;
+        let _permit = self.acquire_rest("list issue working labels").await?;
         let mut page = handler
             .list_labels_for_issue(number)
             .per_page(100)
@@ -4455,7 +4468,9 @@ impl GhClient {
             if page.next.is_none() {
                 break;
             }
-            self.acquire_or_block("list issue working labels next page")?;
+            let _permit = self
+                .acquire_rest("list issue working labels next page")
+                .await?;
             page = match self
                 .inner
                 .get_page::<octocrab::models::Label>(&page.next)
@@ -4487,7 +4502,7 @@ impl GhClient {
             if !owned.iter().any(|name| name == desired) {
                 let mut available = false;
                 if let Some(previous) = owned.first() {
-                    self.acquire_or_block("renew working claim label")?;
+                    let _permit = self.acquire_rest("renew working claim label").await?;
                     match handler
                         .update_label(
                             previous,
@@ -4503,7 +4518,7 @@ impl GhClient {
                     }
                 }
                 if !available {
-                    self.acquire_or_block("create working claim label")?;
+                    let _permit = self.acquire_rest("create working claim label").await?;
                     match handler
                         .create_label(
                             desired,
@@ -4517,7 +4532,7 @@ impl GhClient {
                         Err(error) => return Err(GhError::Api(error)),
                     }
                 }
-                self.acquire_or_block("add working claim label")?;
+                let _permit = self.acquire_rest("add working claim label").await?;
                 handler
                     .add_labels(number, &[desired.to_string()])
                     .await
@@ -4529,7 +4544,7 @@ impl GhClient {
             // leak one dead label into the repo's label picker per heartbeat
             // (the rename path above already carried the definition forward).
             for previous in owned.iter().filter(|name| name.as_str() != desired) {
-                self.acquire_or_block("delete working claim label")?;
+                let _permit = self.acquire_rest("delete working claim label").await?;
                 if let Err(error) = handler.delete_label(previous).await
                     && octocrab_error_status(&error) != Some(404)
                 {
@@ -4541,7 +4556,7 @@ impl GhClient {
             // detaches it from the issue) so a finished claim leaves nothing
             // behind in the repo's label picker.
             for label in &owned {
-                self.acquire_or_block("delete working claim label")?;
+                let _permit = self.acquire_rest("delete working claim label").await?;
                 if let Err(error) = handler.delete_label(label).await
                     && octocrab_error_status(&error) != Some(404)
                 {
@@ -4574,7 +4589,7 @@ impl GhClient {
                     "working claim cleanup: refusing malformed or legacy label".into(),
                 ));
             }
-            self.acquire_or_block("delete working claim label")?;
+            let _permit = self.acquire_rest("delete working claim label").await?;
             if let Err(error) = handler.delete_label(label).await
                 && octocrab_error_status(&error) != Some(404)
             {

@@ -1408,12 +1408,14 @@ pub(super) fn github_target(task: &lazybox_core::Task) -> Option<(String, String
 /// with no GitHub PR/issue; per-entity fetch failures are logged and
 /// skipped so one bad entity never poisons the rest.
 pub async fn handle_sync_workspace(config: &ServerConfig, workspace_key: WorkspaceKey) {
-    let Some(client) = resolve_gh_client(config).await else {
-        return;
-    };
     let Some(workspace) = load_workspace(config, &workspace_key) else {
         return;
     };
+    // The GitHub client is OPTIONAL here: a Linear-only workspace has no
+    // GitHub credentials, and their absence must not abort the Linear
+    // re-poll below (before this, `g s` on a Linear issue resolved no gh
+    // client and silently returned — the whole sync did nothing).
+    let gh_client = resolve_gh_client(config).await;
 
     // Interactive priority (#1218): `g s` is user-initiated — it must
     // not queue behind the background budget, and a refusal must be
@@ -1426,63 +1428,105 @@ pub async fn handle_sync_workspace(config: &ServerConfig, workspace_key: Workspa
             format!("sync {owner}/{repo}#{number}: {e}"),
         ));
     };
-    if let Some(pr) = workspace.pr.as_ref()
-        && let Some((owner, repo, number)) = github_target(pr)
-    {
-        match client
-            .fetch_single_pr_interactive(&owner, &repo, number)
-            .await
+    if let Some(client) = gh_client.as_ref() {
+        if let Some(pr) = workspace.pr.as_ref()
+            && let Some((owner, repo, number)) = github_target(pr)
         {
-            Ok(Some(task)) => super::upsert(config, task).await,
-            Ok(None) => {}
-            Err(e) => surface("pr", &owner, &repo, number, &e),
+            match client
+                .fetch_single_pr_interactive(&owner, &repo, number)
+                .await
+            {
+                Ok(Some(task)) => super::upsert(config, task).await,
+                Ok(None) => {}
+                Err(e) => surface("pr", &owner, &repo, number, &e),
+            }
         }
-    }
 
-    for issue in &workspace.gh_issues {
-        let Some((owner, repo, number)) = github_target(issue) else {
-            continue;
-        };
-        match client
-            .fetch_single_issue_interactive(&owner, &repo, number)
-            .await
+        for issue in &workspace.gh_issues {
+            let Some((owner, repo, number)) = github_target(issue) else {
+                continue;
+            };
+            match client
+                .fetch_single_issue_interactive(&owner, &repo, number)
+                .await
+            {
+                Ok(Some(task)) => super::upsert(config, task).await,
+                Ok(None) => {}
+                Err(e) => surface("issue", &owner, &repo, number, &e),
+            }
+        }
+
+        // Repo-level discovery: when this workspace tracks no GitHub PR or
+        // issue of its own but is scoped to a github repo (a taskless /
+        // pre-PR workspace — e.g. one an agent created), `g s` fetches that
+        // repo's OPEN issues + PRs. The background poll only surfaces a
+        // watched repo's *PRs* and issues that *involve* you, so a repo's
+        // plain open issues never reach the inbox on their own — this is the
+        // explicit "sync this repo" the user expects (#NNNN).
+        if workspace.pr.is_none()
+            && workspace.gh_issues.is_empty()
+            && let Some(slug) = workspace
+                .project_key
+                .as_ref()
+                .and_then(|key| key.unambiguous_github_slug())
         {
-            Ok(Some(task)) => super::upsert(config, task).await,
-            Ok(None) => {}
-            Err(e) => surface("issue", &owner, &repo, number, &e),
-        }
-    }
-
-    // Repo-level discovery: when this workspace tracks no GitHub PR or issue
-    // of its own but is scoped to a github repo (a taskless / pre-PR
-    // workspace — e.g. one an agent created), `g s` fetches that repo's OPEN
-    // issues + PRs. The background poll only surfaces a watched repo's *PRs*
-    // and issues that *involve* you, so a repo's plain open issues never
-    // reach the inbox on their own — this is the explicit "sync this repo"
-    // the user expects (#NNNN).
-    if workspace.pr.is_none()
-        && workspace.gh_issues.is_empty()
-        && let Some(slug) = workspace
-            .project_key
-            .as_ref()
-            .and_then(|key| key.unambiguous_github_slug())
-    {
-        match client.fetch_repo_open_tasks(&slug).await {
-            Ok(tasks) => {
-                let discovered = tasks.len();
-                for task in tasks {
-                    super::upsert(config, task).await;
+            match client.fetch_repo_open_tasks(&slug).await {
+                Ok(tasks) => {
+                    let discovered = tasks.len();
+                    for task in tasks {
+                        super::upsert(config, task).await;
+                    }
+                    tracing::info!(
+                        workspace = %workspace_key,
+                        "sync_workspace: repo `{slug}` discovered {discovered} open issues/PRs"
+                    );
                 }
-                tracing::info!(
-                    workspace = %workspace_key,
-                    "sync_workspace: repo `{slug}` discovered {discovered} open issues/PRs"
-                );
+                Err(e) => {
+                    tracing::warn!("sync_workspace repo `{slug}`: {e}");
+                    let _ = config.bus.send(Event::provider_error_retryable(
+                        "github",
+                        format!("sync repo {slug}: {e}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    // Linear issues: re-fetch each tracked Linear ticket by its node id.
+    // The Linear client is resolved lazily and only when the workspace
+    // actually tracks Linear issues, so a GitHub-only workspace pays no
+    // credential lookup. A single-issue fetch applies no open-state
+    // filter, so a ticket that has since closed comes back with its new
+    // state instead of the sync keeping the stale one.
+    if !workspace.linear_issues.is_empty() {
+        match lazybox_linear::credential_chain()
+            .resolve(lazybox_linear::SOURCE)
+            .await
+        {
+            Ok(cred) => {
+                let linear = LinearClient::from_credential(cred);
+                for issue in &workspace.linear_issues {
+                    let Some(node_id) = issue.node_id.as_deref() else {
+                        continue;
+                    };
+                    match linear.fetch_issue_by_id(node_id).await {
+                        Ok(Some(task)) => super::upsert(config, task).await,
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::warn!("sync_workspace linear `{}`: {e}", issue.id.key);
+                            let _ = config.bus.send(Event::provider_error_retryable(
+                                "linear",
+                                format!("sync {}: {e}", issue.id.key),
+                            ));
+                        }
+                    }
+                }
             }
             Err(e) => {
-                tracing::warn!("sync_workspace repo `{slug}`: {e}");
+                tracing::warn!("sync_workspace linear credentials: {e}");
                 let _ = config.bus.send(Event::provider_error_retryable(
-                    "github",
-                    format!("sync repo {slug}: {e}"),
+                    "linear",
+                    format!("sync linear credentials: {e}"),
                 ));
             }
         }

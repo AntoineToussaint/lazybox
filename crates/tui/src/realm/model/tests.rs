@@ -8524,6 +8524,51 @@ mod modal_input_responsiveness_tests {
         }
     }
 
+    /// `g s` on a Linear-only workspace (a Linear ticket, no GitHub PR /
+    /// issue / repo scope) must dispatch a targeted sync — not refuse with
+    /// "nothing to sync". Before the Linear branch, the gate only counted
+    /// `pr` / `gh_issues` / a github repo slug, so every Linear workspace
+    /// fell through to the refusal and `g s` silently did nothing.
+    #[test]
+    fn sync_workspace_dispatched_for_linear_only_workspace() {
+        use lazybox_core::{SessionKey, TaskId, Workspace};
+        use lazybox_ipc::Command as IpcCommand;
+        use lazybox_tui_core::action::Action;
+
+        let mut model = build_model();
+        let mut linear = repo_task("ENG-1", "acme");
+        linear.id = TaskId {
+            source: "linear".into(),
+            key: "ENG-1".into(),
+        };
+        linear.url = "https://linear.app/acme/issue/ENG-1".into();
+        linear.repo = Some("linear/ENG".into());
+        linear.node_id = Some("uuid-eng-1".into());
+
+        let workspace = Workspace::from_task(linear, chrono::Utc::now());
+        let workspace_key = workspace.key.clone();
+        assert!(workspace.pr.is_none(), "no PR");
+        assert!(workspace.gh_issues.is_empty(), "no gh issue");
+        assert!(
+            !workspace.linear_issues.is_empty(),
+            "the linear-source task lands in linear_issues"
+        );
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
+        let session_key: SessionKey = (&workspace_key).into();
+        assert!(model.sidebar.focus_workspace_key(&session_key));
+
+        let cmds = model.dispatch_action(&Action::SyncWorkspace);
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [IpcCommand::SyncWorkspace { workspace_key: k }] if k == &workspace_key
+            ),
+            "a Linear-only workspace must dispatch a targeted sync, got: {cmds:?}"
+        );
+    }
+
     /// #1211 journey on a temp `LAZYBOX_HOME`: `x R` on a Space header
     /// renames the Space in place — repos regroup under the new name,
     /// the collapse flag follows, `ui.spaces` persists — while `x R`

@@ -6,6 +6,75 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-08-24
+
+The rate-limit, liveness, and multi-agent release. GitHub API pressure is now
+*paced* rather than refused, the UI never blocks on the fleet, agents recover
+and multiply instead of dead-ending, and stale modals / footer errors stop
+lingering. It also continues the state-machine cleanup so whole classes of bug
+resolve at their single owner rather than through divergent paths.
+
+### Highlights
+
+- **GitHub rate limiting is paced, never refused.** The rate governor paces
+  requests and parks per-source instead of imposing polling blackouts; a
+  two-tier hot refresh probes freshness and fetches detail only on change;
+  heartbeat backoff sweeps once then hot-only; interactive targeted syncs and
+  secondary-cooldown handling keep you unblocked; the working-claim label REST
+  burst is paced; and a truncated 2xx GraphQL body is retried instead of failing
+  the whole sync.
+- **Nothing is refused for capacity.** Commands queue and always deliver; the
+  keystroke path is off the global-lock queue; agent spawns run at reduced
+  scheduling priority so the fleet never starves the UI; agent input is never
+  destroyed by backpressure; and capacity limits warn honestly instead of
+  dropping work.
+- **Agents recover and multiply.** Recover an agent from exhausted credit;
+  `a r` resets an agent's context in place; the explicit `a c` / `a x` / `a u`
+  keys start a NEW agent beside an idle one (no more one-agent-per-workspace)
+  while still collapsing genuine spawn races and issue→PR handoffs; fleet claim
+  ownership is crash-safe; and sessions whose PR/issue closed are reaped.
+- **Stale modals and footer errors stop lingering.** Footer errors auto-fade
+  instead of sitting forever (only the daemon-disconnect / build-mismatch
+  banners stay); orphaned per-workspace modals dismiss when their workspace is
+  removed; the merged/closed cleanup prompt respects the in-flight removal owner
+  so it can't re-prompt for a workspace on its way out; every confirm defaults
+  to Yes with destructive ones warning-colored; and footer alerts fade honestly
+  (a re-fire counts, it doesn't reset the clock).
+- **Organization: Spaces, Hopper, focus layouts.** Persistent Hopper
+  workspaces; rename a Space from its header; reorder repos and Spaces in place;
+  a move-to-Space picker with last-used preselection; and focus-mode two-up
+  splits and a 2×2 grid over the starred roster.
+- **Snippets.** SOTA review discipline with readable, details-first output;
+  provenance-aware overrides with badges, compare, keep-mine, and adopt; and the
+  snippet MRU is recorded when a snippet *starts* a session, not only when
+  injected.
+- **State-machine foundations.** Snippet delivery is encapsulated in a
+  state-owning type with an honest `]N` count; footer notices route through a
+  typed `NoticeKey` + one resolve primitive; the last prompt's age shows on the
+  `you ▸` recap; and terminal replay/resync continue to converge on single
+  owners.
+- **Desktop.** Visual redesign and feature parity with the TUI; the desktop
+  attaches to a running daemon instead of refusing to start.
+
+### Also
+
+- Agent spawns auto-switch a clean drifted worktree back to the session branch;
+  shells open branch-agnostically on drifted worktrees; bare clones carry the
+  fetch refspec and `unpushed()` checks the branch's own remote.
+- `ui.*` settings survive restarts, attach clients, and concurrent writers;
+  queued keystroke saves flush on quit.
+- `g m` on an already-merged PR is a no-op success (it asks GitHub; cached soft
+  state advises, never refuses); `g s` on a repo-scoped workspace discovers the
+  repo's open issues + PRs; `x k` closes/deletes upstream and archives in one
+  chord; hand work to a stronger model for review (headless model tiers + Critic
+  escalation).
+- Autonomous spawns no longer disable the user's MCP servers; typing latency
+  from flow-control overflow is fixed; the selection highlight is clipped to its
+  anchor tile; multi-select is clearable everywhere and bulk actions fan out
+  over it.
+- An outdated-build guard opens a dismissable update modal when a newer
+  dev/release build exists, without ever self-updating.
+
 ## [0.1.11] - 2026-08-17
 
 The data-safe reliability release. Workspace creation now has an explicit,

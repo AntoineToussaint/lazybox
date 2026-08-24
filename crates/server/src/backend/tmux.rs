@@ -653,6 +653,45 @@ impl TmuxBackend {
         }
         seed
     }
+
+    /// Deduplicate overlapping chunks when reattaching to an existing tmux
+    /// session. If there's an existing ring buffer with live output, the
+    /// captured seed may contain the same bytes that are already in the ring.
+    /// This function detects and removes the overlap by comparing the tail of
+    /// the existing ring with the head of the captured seed.
+    ///
+    /// Returns the deduplicated seed. If there's no existing ring or no overlap,
+    /// returns the seed unchanged.
+    fn dedup_reattach_seed(&self, existing_ring: Option<Vec<u8>>, mut seed: Vec<u8>) -> Vec<u8> {
+        let Some(ring) = existing_ring else {
+            return seed;
+        };
+        if ring.is_empty() || seed.is_empty() {
+            return seed;
+        }
+
+        // Look for the longest overlap where the tail of the ring matches
+        // the head of the seed. We scan backwards from the end of the ring,
+        // checking increasingly long potential overlaps.
+        let max_overlap = ring.len().min(seed.len());
+        for overlap_len in (1..=max_overlap).rev() {
+            let ring_tail = &ring[ring.len() - overlap_len..];
+            let seed_head = &seed[..overlap_len];
+            if ring_tail == seed_head {
+                // Found an overlap — skip it in the seed
+                seed.drain(..overlap_len);
+                tracing::debug!(
+                    overlap_len,
+                    original_seed_len = seed.len() + overlap_len,
+                    deduplicated_seed_len = seed.len(),
+                    "tmux reattach dedup: removed {} overlapping bytes",
+                    overlap_len
+                );
+                return seed;
+            }
+        }
+        seed
+    }
 }
 
 impl Drop for TmuxBackend {
@@ -998,20 +1037,24 @@ impl SessionBackend for TmuxBackend {
             // it would hand back a closed broadcast — stale replay,
             // no live output, no recovery. Detect that and open a
             // fresh attach client instead, replacing the dead Slot.
-            let cached = {
+            let cached_or_finished_ring = {
                 let mut map = self.sessions.lock().await;
                 if map.get(key).is_some_and(|slot| !slot.client.is_finished()) {
-                    map.get(key).map(|slot| slot.client.clone())
+                    (Some(map.get(key).map(|slot| slot.client.clone())), None)
                 } else {
                     // Drop a finished conduit BEFORE allocating its
                     // replacement. One relay owns three PTY descriptors and
                     // a socketpair; retaining those while `openpty()` tries
                     // to reserve the next set makes recovery impossible when
                     // the process is already close to RLIMIT_NOFILE.
+                    let finished_ring = map
+                        .get(key)
+                        .and_then(|slot| slot.client.snapshot_for_dedup().ok());
                     map.remove(key);
-                    None
+                    (None, finished_ring)
                 }
             };
+            let (cached, finished_ring) = cached_or_finished_ring;
             let pty = if let Some(pty) = cached {
                 pty
             } else {
@@ -1023,7 +1066,10 @@ impl SessionBackend for TmuxBackend {
                 // WITHOUT the sessions lock held: `capture-pane` is a tmux
                 // round trip, and the hot reuse path above must never wait
                 // on it.
-                let seed = self.capture_history(key).await;
+                let mut seed = self.capture_history(key).await;
+                // Deduplicate overlapping bytes between the existing ring buffer
+                // (from a previous client) and the captured seed (#1254).
+                seed = self.dedup_reattach_seed(finished_ring, seed);
                 // Attach at the pane's CURRENT size, not a hardcoded
                 // default. The surviving pane still carries the viewport
                 // size its last client set, so matching it means tmux sees
@@ -1513,5 +1559,65 @@ mod tests {
             assert_eq!(format!("-{}", backend.history_limit), format!("-{limit}"));
             let _ = std::fs::remove_file(&backend.config_path);
         }
+    }
+
+    /// Deduplication removes overlapping chunks between an existing ring
+    /// buffer and a captured seed. When reattaching to a tmux session,
+    /// the captured history may contain bytes already in the ring from
+    /// polling, causing visual duplication (#1254). This test verifies
+    /// that overlaps are detected and removed.
+    #[test]
+    fn dedup_reattach_seed_removes_overlap() {
+        let socket = format!("lazybox-test-dedup-{}", std::process::id());
+        let backend = TmuxBackend::with_socket(&socket).expect("backend created");
+
+        // Case 1: No existing ring — seed returned unchanged.
+        let seed = b"new content".to_vec();
+        let result = backend.dedup_reattach_seed(None, seed.clone());
+        assert_eq!(result, seed, "no ring → seed unchanged");
+
+        // Case 2: Empty existing ring — seed returned unchanged.
+        let result = backend.dedup_reattach_seed(Some(vec![]), seed.clone());
+        assert_eq!(result, seed, "empty ring → seed unchanged");
+
+        // Case 3: Empty seed — returned unchanged.
+        let ring = b"existing".to_vec();
+        let result = backend.dedup_reattach_seed(Some(ring), vec![]);
+        assert_eq!(result, vec![], "empty seed → returned unchanged");
+
+        // Case 4: No overlap — seed returned unchanged.
+        let ring = b"foo".to_vec();
+        let seed = b"bar".to_vec();
+        let result = backend.dedup_reattach_seed(Some(ring), seed.clone());
+        assert_eq!(result, seed, "no overlap → seed unchanged");
+
+        // Case 5: Partial overlap at boundary — deduplicated.
+        // Ring ends with "...orld", seed starts with "orldly"
+        let ring = b"hello world".to_vec();
+        let seed = b"orldly".to_vec();
+        let result = backend.dedup_reattach_seed(Some(ring), seed);
+        assert_eq!(result, b"ly".to_vec(), "partial overlap removed");
+
+        // Case 6: Full seed overlap with ring tail — completely removed.
+        let ring = b"hello world".to_vec();
+        let seed = b"world".to_vec();
+        let result = backend.dedup_reattach_seed(Some(ring), seed);
+        assert_eq!(result, b"".to_vec(), "full overlap removed");
+
+        // Case 7: Longest overlap takes precedence.
+        // Ring ends with "...abcdef", seed starts with "cdefgh"
+        // Should detect 4-byte overlap "cdef" over shorter overlaps
+        let ring = b"123abcdef".to_vec();
+        let seed = b"cdefgh".to_vec();
+        let result = backend.dedup_reattach_seed(Some(ring), seed);
+        assert_eq!(result, b"gh".to_vec(), "longest overlap wins");
+
+        // Case 8: Multiline overlap with escape sequences.
+        let ring = b"line1\r\nline2\r\n\x1b[31mred\x1b[0m".to_vec();
+        let seed = b"\x1b[31mred\x1b[0m\r\nline3".to_vec();
+        let result = backend.dedup_reattach_seed(Some(ring), seed);
+        assert_eq!(result, b"\r\nline3".to_vec(), "escape sequences handled");
+
+        let _ = std::fs::remove_file(&backend.config_path);
     }
 }

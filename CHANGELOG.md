@@ -84,7 +84,6 @@ resolve at their single owner rather than through divergent paths.
 ### Install
 
 brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/AntoineToussaint/lazybox/releases/download/v0.1.13/lazybox-tui-installer.sh | sh
 
 ## [0.1.11] - 2026-08-17
 

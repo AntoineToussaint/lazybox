@@ -37,13 +37,12 @@ jobs:
             | contains("lazybox-tui-boot")
             | not
           ' <<< "$PLAN"
+          # Install is brew-only: the release notes must NOT advertise the
+          # curl shell installer (the `### Install` block is brew tap + install).
           jq -e '
-            . as $plan
-            | .releases[]
-            | select(.app_name == "lazybox-tui-boot")
-            | .app_version as $version
-            | $plan.announcement_changelog
-            | contains("releases/download/v\($version)/lazybox-tui-installer.sh")
+            .announcement_changelog
+            | contains("lazybox-tui-installer.sh")
+            | not
           ' <<< "$PLAN"
 
   archives:

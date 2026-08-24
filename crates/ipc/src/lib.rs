@@ -1337,6 +1337,16 @@ pub enum Command {
         resume_latest: bool,
         #[serde(default)]
         access: AgentRunAccess,
+        /// Model-tier alias for this structured run (`agents.<id>.models`,
+        /// e.g. `"L"` for Opus), so a headless run — a Critic review, an
+        /// Ask-about-this-PR — can be escalated to a stronger model instead
+        /// of always using the agent's default (#1312 follow-up). `None`
+        /// keeps the agent's own default, unchanged. Resolved daemon-side
+        /// via `Config::agent_models().resolve_args()`, mirroring PTY
+        /// spawns. Trailing `#[serde(default)]` — same wire-tolerance as the
+        /// fields above.
+        #[serde(default)]
+        model_alias: Option<String>,
     },
     SendAgentInput {
         run_id: AgentRunId,

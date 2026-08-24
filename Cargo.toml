@@ -141,7 +141,11 @@ crossterm          = { version = "0.29", features = ["event-stream"] }
 # restore. crossterm can't serve that path: its teardown locks stdout and
 # allocates, neither of which is legal inside a signal handler.
 libc               = "0.2"
-ratatui            = "0.30"
+# `unstable-rendered-line-info` exposes `Paragraph::line_count`, the exact
+# word-wrap row count used at render time. Modals size themselves from it so
+# a wrapped error never clips its trailing action line (see
+# worktree_progress.rs).
+ratatui            = { version = "0.30", features = ["unstable-rendered-line-info"] }
 tuirealm           = "4.1"
 tui-markdown       = "0.3"
 unicode-segmentation = "1"

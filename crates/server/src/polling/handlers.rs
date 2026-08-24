@@ -1415,6 +1415,26 @@ pub async fn handle_sync_workspace(config: &ServerConfig, workspace_key: Workspa
         return;
     };
 
+    // A repo-scoped workspace with no PR/issue of its own (a scratch /
+    // project workspace) has no entity to deep-fetch — but the user still
+    // pressed `g s` to sync. Fall back to a forced re-poll of the repo so
+    // freshly-opened PRs/issues surface now, instead of dead-ending on
+    // "nothing to sync". Mirrors the manual `Command::Refresh` path.
+    if workspace.pr.is_none() && workspace.gh_issues.is_empty() {
+        if workspace.repo_slug().is_some() {
+            if let Some(client) = config.poll.cached_gh_client() {
+                client.force_full_sweep();
+            }
+            config.poll.request_force_refresh();
+            config.poll.wake(true);
+            tracing::info!(
+                workspace = %workspace_key,
+                "sync_workspace: no PR/issue on the workspace — forced a repo re-poll",
+            );
+        }
+        return;
+    }
+
     // Interactive priority (#1218): `g s` is user-initiated — it must
     // not queue behind the background budget, and a refusal must be
     // VISIBLE, not a swallowed log line: before this, a `g s` during a

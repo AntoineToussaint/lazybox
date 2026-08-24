@@ -767,7 +767,7 @@ impl WorktreeManager {
             && validate_worktree_dir(self.git_runner(), wt_path, &bare_path).await?
                 == WorktreeDirState::Valid
         {
-            ensure_worktree_branch(wt_path, branch).await?;
+            let adopted = ensure_worktree_branch(wt_path, branch).await?;
             let name = wt_path
                 .file_name()
                 .map(|f| f.to_string_lossy().into_owned())
@@ -775,7 +775,7 @@ impl WorktreeManager {
             return Ok(Worktree {
                 name,
                 path: wt_path.to_path_buf(),
-                branch: branch.into(),
+                branch: adopted.unwrap_or_else(|| branch.to_string()),
             });
         }
 
@@ -997,7 +997,7 @@ impl WorktreeManager {
             && validate_worktree_dir(self.git_runner(), wt_path, &bare_path).await?
                 == WorktreeDirState::Valid
         {
-            ensure_worktree_branch(wt_path, new_branch).await?;
+            let adopted = ensure_worktree_branch(wt_path, new_branch).await?;
             let name = wt_path
                 .file_name()
                 .map(|f| f.to_string_lossy().into_owned())
@@ -1005,7 +1005,7 @@ impl WorktreeManager {
             return Ok(Worktree {
                 name,
                 path: wt_path.to_path_buf(),
-                branch: new_branch.into(),
+                branch: adopted.unwrap_or_else(|| new_branch.to_string()),
             });
         }
 
@@ -3044,30 +3044,55 @@ pub async fn worktree_dir_ready_on_branch(wt_path: &Path, expected_branch: &str)
             })
 }
 
-/// Guard the idempotent re-entry: a worktree already at the session path
-/// must be on the expected branch before we reuse it, else a completed
-/// checkout on the *wrong named branch* would be silently repurposed
-/// (`BranchMismatch`). A *detached* HEAD is deliberately tolerated — it
-/// is a state lazybox itself creates when the branch is exclusively held
-/// by another live worktree (#721), and one an agent/user reaches by
-/// inspecting a commit. Erroring the re-entry (or forcing HEAD back onto
-/// the branch) would strand the session or yank work; sync already
-/// refuses to advance a detached HEAD (`worktree_unsafe_to_advance`), so
-/// reusing it in place is consistent.
-async fn ensure_worktree_branch(wt_path: &Path, expected: &str) -> Result<(), GitError> {
+/// Guard the idempotent re-entry: reconcile a worktree already at the
+/// session path with the branch the session expects. Returns the branch
+/// the worktree is actually on afterwards — `None` means "on `expected`"
+/// (unchanged, switched onto it, or a tolerated detached HEAD the caller
+/// keeps labelled as `expected`); `Some(actual)` means the session
+/// **adopted** a branch the worktree had drifted onto, and the caller
+/// records that as the worktree's branch.
+///
+/// The three drift outcomes:
+/// - **Detached HEAD** (`None` from the branch probe) is tolerated — it
+///   is a state lazybox itself creates when the branch is exclusively
+///   held by another live worktree (#721), and one an agent/user reaches
+///   by inspecting a commit. Sync already refuses to advance a detached
+///   HEAD (`worktree_unsafe_to_advance`), so reusing it in place is
+///   consistent.
+/// - **Drift onto a feature branch** (any branch that is not the repo's
+///   base) is *adopted*: an agent's `git switch -c fix/…` IS the work,
+///   and both forcing HEAD back and dead-ending behind a modal were
+///   worse than simply continuing on that branch. Adoption never moves
+///   files, so it is safe whether or not the tree is dirty.
+/// - **Drift onto the base branch** (`main`/`master`/the repo default) is
+///   a degenerate state, not work: a CLEAN one switches back to the
+///   session branch automatically (advise-never-forbid); a dirty or
+///   failed-switch one keeps the explicit `BranchMismatch` prompt, whose
+///   modal offers a one-key recreate.
+async fn ensure_worktree_branch(
+    wt_path: &Path,
+    expected: &str,
+) -> Result<Option<String>, GitError> {
     match current_worktree_branch(wt_path).await? {
-        None => Ok(()),
-        Some(actual) if actual == expected => Ok(()),
+        None => Ok(None),
+        Some(actual) if actual == expected => Ok(None),
+        // A feature-branch drift carries the session's real work — adopt
+        // it in place rather than switching away or refusing to spawn.
+        Some(actual) if !worktree_branch_is_base(wt_path, &actual).await => {
+            tracing::info!(
+                worktree = %wt_path.display(),
+                expected = %expected,
+                adopted = %actual,
+                "worktree drifted onto a feature branch — adopting it for this session",
+            );
+            Ok(Some(actual))
+        }
         Some(actual) => {
-            // A CLEAN drifted checkout switches back automatically
-            // (advise-never-forbid): the drift is usually an agent's
-            // leftover `git switch`, and refusing to spawn over it
-            // dead-ended the user behind a modal. Committed work on the
-            // wrong branch stays on that branch (lossless); untracked
-            // files ride along. Anything uncommitted-and-tracked keeps
-            // the explicit prompt — that is real work at stake. A
-            // failed switch (branch held elsewhere, etc.) falls back to
-            // the same prompt.
+            // On the base branch: get back to the session branch when
+            // that is lossless. Committed work on the base stays on it;
+            // untracked files ride along. Uncommitted TRACKED changes,
+            // or a failed switch (branch held elsewhere, etc.), keep the
+            // explicit prompt — real work is at stake.
             if worktree_tracked_changes_clean(wt_path).await {
                 let output = apply_git_env(
                     Command::new("git")
@@ -3081,16 +3106,16 @@ async fn ensure_worktree_branch(wt_path: &Path, expected: &str) -> Result<(), Gi
                         worktree = %wt_path.display(),
                         from = %actual,
                         to = %expected,
-                        "clean drifted worktree switched back to its session branch",
+                        "clean worktree on the base branch switched back to its session branch",
                     );
-                    return Ok(());
+                    return Ok(None);
                 }
                 tracing::warn!(
                     worktree = %wt_path.display(),
                     from = %actual,
                     to = %expected,
                     stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-                    "auto-switch of clean drifted worktree failed — falling back to the prompt",
+                    "auto-switch off the base branch failed — falling back to the prompt",
                 );
             }
             Err(GitError::WorktreeBranchMismatch {
@@ -3100,6 +3125,31 @@ async fn ensure_worktree_branch(wt_path: &Path, expected: &str) -> Result<(), Gi
             })
         }
     }
+}
+
+/// Is `branch` the repo's base (default) branch, as seen from this
+/// worktree? Consults the shared bare clone's `origin/HEAD` symbolic ref
+/// (which resolves a non-standard default like `develop` correctly), and
+/// falls back to the conventional `main`/`master` names when `origin/HEAD`
+/// was never set. Errs toward `false` (treat as a feature branch, i.e.
+/// adopt) so an unresolved default degrades to "just keep working" rather
+/// than a dead-end.
+async fn worktree_branch_is_base(wt_path: &Path, branch: &str) -> bool {
+    if let Ok(output) = apply_git_env(Command::new("git").current_dir(wt_path).args([
+        "symbolic-ref",
+        "--short",
+        "refs/remotes/origin/HEAD",
+    ]))
+    .output()
+    .await
+        && output.status.success()
+    {
+        let head = String::from_utf8_lossy(&output.stdout);
+        if let Some(default) = head.trim().strip_prefix("origin/") {
+            return default == branch;
+        }
+    }
+    matches!(branch, "main" | "master")
 }
 
 /// No staged or unstaged changes to TRACKED files — the lossless-switch
@@ -5308,26 +5358,62 @@ mod track_main_tests {
         git(src, &["commit", "-q", "-m", "advance"]);
     }
 
-    /// A CLEAN checkout that drifted to another branch switches back
-    /// automatically on re-entry (advise-never-forbid: the "worktree is
-    /// on another branch" refusal wall dead-ended agent spawns); a
-    /// checkout with uncommitted tracked changes keeps the explicit
-    /// mismatch prompt — real work is at stake.
+    /// A checkout that drifted onto a FEATURE branch is *adopted* on
+    /// re-entry — an agent's `git switch -c fix/…` is the session's real
+    /// work, so lazybox continues on that branch instead of forcing HEAD
+    /// back or dead-ending behind a modal. Adoption never moves files, so
+    /// it holds whether the tree is clean or dirty.
     #[tokio::test]
-    async fn clean_drifted_worktree_switches_back_dirty_keeps_the_prompt() {
+    async fn drift_onto_a_feature_branch_is_adopted() {
         let (_tmp, _mgr, _src, wt) = tracked_worktree().await;
 
-        // Drift: an agent-style `git switch -c` onto another branch.
-        git(&wt, &["switch", "-q", "-c", "docs/side-quest"]);
-        // Committed work on the drift branch is LOSSLESS to switch away
-        // from — it stays on that branch.
+        // Drift: an agent-style `git switch -c` onto a feature branch,
+        // with committed work on it.
+        git(&wt, &["switch", "-q", "-c", "fix/side-quest"]);
         std::fs::write(wt.join("side.txt"), "side\n").expect("write");
         git(&wt, &["add", "side.txt"]);
         git(&wt, &["commit", "-q", "-m", "side work"]);
 
-        ensure_worktree_branch(&wt, "scratch")
+        let adopted = ensure_worktree_branch(&wt, "scratch")
             .await
-            .expect("clean drifted checkout must auto-switch back");
+            .expect("feature-branch drift must not error");
+        assert_eq!(
+            adopted.as_deref(),
+            Some("fix/side-quest"),
+            "the drifted feature branch is reported back as adopted",
+        );
+        assert_eq!(
+            current_worktree_branch(&wt)
+                .await
+                .expect("branch")
+                .as_deref(),
+            Some("fix/side-quest"),
+            "the worktree is left on the adopted branch, untouched",
+        );
+
+        // Even with UNCOMMITTED tracked changes, a feature-branch drift
+        // is adopted (nothing is switched, so nothing is at risk).
+        std::fs::write(wt.join("side.txt"), "uncommitted edit\n").expect("write");
+        let adopted = ensure_worktree_branch(&wt, "scratch")
+            .await
+            .expect("dirty feature-branch drift is still adopted");
+        assert_eq!(adopted.as_deref(), Some("fix/side-quest"));
+    }
+
+    /// A CLEAN checkout that drifted onto the BASE branch switches back
+    /// to its session branch automatically; a dirty one keeps the
+    /// explicit mismatch prompt (whose modal offers a recreate) — real
+    /// work is at stake and the base branch is not it.
+    #[tokio::test]
+    async fn drift_onto_the_base_branch_switches_back_dirty_keeps_the_prompt() {
+        let (_tmp, _mgr, _src, wt) = tracked_worktree().await;
+
+        // Drift onto `main` (the base) — a degenerate state, not work.
+        git(&wt, &["switch", "-q", "main"]);
+        let adopted = ensure_worktree_branch(&wt, "scratch")
+            .await
+            .expect("clean base-branch drift must auto-switch back");
+        assert_eq!(adopted, None, "switched back to the session branch");
         assert_eq!(
             current_worktree_branch(&wt)
                 .await
@@ -5336,19 +5422,20 @@ mod track_main_tests {
             Some("scratch"),
         );
 
-        // Drift again, this time with UNCOMMITTED tracked changes.
-        git(&wt, &["switch", "-q", "docs/side-quest"]);
-        std::fs::write(wt.join("side.txt"), "uncommitted edit\n").expect("write");
+        // Drift onto the base again, this time with UNCOMMITTED tracked
+        // changes — the switch would risk them, so keep the prompt.
+        git(&wt, &["switch", "-q", "main"]);
+        std::fs::write(wt.join("f.txt"), "uncommitted edit\n").expect("write");
         let err = ensure_worktree_branch(&wt, "scratch")
             .await
-            .expect_err("dirty drifted checkout keeps the prompt");
+            .expect_err("dirty base-branch drift keeps the prompt");
         assert!(matches!(err, GitError::WorktreeBranchMismatch { .. }));
         assert_eq!(
             current_worktree_branch(&wt)
                 .await
                 .expect("branch")
                 .as_deref(),
-            Some("docs/side-quest"),
+            Some("main"),
             "the dirty checkout was not touched",
         );
     }

@@ -2076,9 +2076,11 @@ pub async fn dispatch_command(
                 client.force_full_sweep();
             }
             // An explicit refresh also bypasses Linear's slow cadence gate
-            // for this one tick (#1032). This is the ONLY caller of
-            // `request_force_refresh` — the generic `wake(true)` used by
-            // post-mutation/subscribe paths must not force Linear.
+            // for this one tick (#1032). Only the two user-initiated sync
+            // paths call `request_force_refresh` (this and the repo-level
+            // `g s` fallback in `handle_sync_workspace`) — the generic
+            // `wake(true)` used by post-mutation/subscribe paths must not
+            // force Linear.
             config.poll.request_force_refresh();
             config.poll.wake(true);
         }

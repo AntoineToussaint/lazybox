@@ -2841,10 +2841,13 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         ActionKind::ManagePolicies => workspace
             .map(|w| w.pr.is_some() || !w.gh_issues.is_empty())
             .unwrap_or(false),
-        // Targeted re-poll only has something to fetch when the
-        // workspace owns a GitHub entity — a PR or a linked issue.
+        // A PR/issue workspace gets a targeted deep-fetch; a repo-scoped
+        // workspace with no entity yet (scratch / project) still syncs —
+        // `g s` there forces a re-poll of the repo so new PRs/issues
+        // surface, instead of dead-ending on "nothing to sync". Only a
+        // workspace with no GitHub scope at all has nothing to do.
         ActionKind::SyncWorkspace => workspace
-            .map(|w| w.pr.is_some() || !w.gh_issues.is_empty())
+            .map(|w| w.pr.is_some() || !w.gh_issues.is_empty() || w.repo_slug().is_some())
             .unwrap_or(false),
         ActionKind::Work | ActionKind::WorkWith => intent::classify_work(workspace, &[]).is_some(),
         ActionKind::OpenEditor => matches!(

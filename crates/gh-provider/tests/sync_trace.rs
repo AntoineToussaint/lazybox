@@ -89,15 +89,18 @@ async fn capture_fetch_all_prs_trace() {
     // exists to measure. Pass a recent `Some(updated_since)` instead to
     // profile a steady-state windowed sweep (issue #14).
     let started = std::time::Instant::now();
-    let tasks = client
+    let outcome = client
         .fetch_all_prs(None)
         .await
         .expect("fetch_all_prs succeeds");
     eprintln!(
         "\n=== fetch_all_prs returned {} PRs in {}ms ===",
-        tasks.len(),
+        outcome.tasks.len(),
         started.elapsed().as_millis()
     );
+    if let Some(partial_msg) = &outcome.partial_failure {
+        eprintln!("  (partial failure: {partial_msg})");
+    }
 }
 
 /// Prefetch scoring, mirrored from `prefetch_top_pr_details` in

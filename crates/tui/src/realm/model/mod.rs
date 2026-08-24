@@ -2246,7 +2246,7 @@ const RECENT_SNIPPETS_MAX: usize = 5;
 /// migrated from the pre-history single-value recap, whose real submit
 /// time is gone — shown as "earlier". Times in the future (clock skew)
 /// collapse to "just now".
-fn relative_age(timestamp_ms: u64, now_ms: u64) -> String {
+pub(crate) fn relative_age(timestamp_ms: u64, now_ms: u64) -> String {
     if timestamp_ms == 0 {
         return "earlier".to_string();
     }

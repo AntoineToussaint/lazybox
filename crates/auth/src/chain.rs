@@ -204,6 +204,13 @@ pub fn invalidate_chain_cache() {
 mod tests {
     use super::*;
 
+    /// Serializes the tests that touch the process-global chain cache.
+    /// They each `invalidate_chain_cache()` and assert exact provider
+    /// call counts, so running them concurrently lets one test's
+    /// invalidate/resolve race another's and flip a count assertion. This
+    /// lock makes them run one at a time; non-cache tests are unaffected.
+    static CACHE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// A provider that always fails with a preset error — lets the chain
     /// tests assert which cause survives to the exhausted result.
     struct Failing {
@@ -232,6 +239,7 @@ mod tests {
 
     #[tokio::test]
     async fn all_absent_reports_exhausted() {
+        let _cache_guard = CACHE_TEST_LOCK.lock().await;
         invalidate_chain_cache();
         let chain = CredentialChain::new()
             .with(Failing {
@@ -251,6 +259,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_real_provider_failure_is_surfaced_not_masked() {
+        let _cache_guard = CACHE_TEST_LOCK.lock().await;
         invalidate_chain_cache();
         // A transient `gh auth token` failure must not read as "nothing
         // configured" (Exhausted) — the specific cause survives.
@@ -272,6 +281,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_later_absence_does_not_overwrite_an_earlier_failure() {
+        let _cache_guard = CACHE_TEST_LOCK.lock().await;
         invalidate_chain_cache();
         let chain = CredentialChain::new()
             .with(Failing {
@@ -291,6 +301,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_exhausted_sentinel_does_not_overwrite_an_earlier_failure() {
+        let _cache_guard = CACHE_TEST_LOCK.lock().await;
         invalidate_chain_cache();
         // A provider echoing this chain's own `Exhausted` sentinel (e.g. a
         // nested chain that found nothing) signals absence, not a failure —
@@ -331,6 +342,7 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_provider_result_is_cached_on_second_resolve() {
+        let _cache_guard = CACHE_TEST_LOCK.lock().await;
         // A disabled provider (all return NotFound) must not re-run the full
         // chain on every resolve. The first resolve runs the chain; the second
         // must hit the cache and skip the providers.
@@ -366,6 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn different_scopes_have_independent_caches() {
+        let _cache_guard = CACHE_TEST_LOCK.lock().await;
         // Two different scopes should maintain independent caches.
         invalidate_chain_cache();
 
@@ -404,6 +417,7 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_invalidation_allows_fresh_run() {
+        let _cache_guard = CACHE_TEST_LOCK.lock().await;
         // After invalidating the cache explicitly, the next resolve must
         // re-run the providers — simulating a user refresh.
         invalidate_chain_cache();
@@ -441,6 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn successful_credential_is_cached_too() {
+        let _cache_guard = CACHE_TEST_LOCK.lock().await;
         // Successes are also cached, not just failures.
         invalidate_chain_cache();
 

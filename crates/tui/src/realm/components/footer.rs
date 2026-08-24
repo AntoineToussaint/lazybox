@@ -41,9 +41,15 @@ use tuirealm::ratatui::widgets::Paragraph;
 pub enum NoticeSeverity {
     /// Transient hiccup. `theme.warn`. Auto-fades.
     Retryable,
-    /// Auth or other actionable error. `theme.warn`. Sticky.
+    /// Auth or other actionable error. `theme.warn`. Sticky — never
+    /// auto-fades (self-clears on the next successful auth).
     Auth,
-    /// Hard failure. `theme.error`. Sticky.
+    /// Hard failure. `theme.error`. Owns the footer slot (a routine flash
+    /// can't displace it) and auto-fades after `PERMANENT_FADE` so no
+    /// error sits in the footer forever — the sole exceptions are the two
+    /// event-resolved system banners (daemon disconnected / build
+    /// mismatch), which stay until their condition clears (see
+    /// [`Notice::is_persistent_system_banner`]).
     Permanent,
     /// Plain informational. `theme.text_dim`. 15s fade.
     Info,
@@ -132,13 +138,28 @@ impl Notice {
 
     /// True for an action-error toast — a Permanent failure tagged with
     /// the workspace whose merge/close/update/delete GitHub rejected.
-    /// These carry a bounded auto-fade and self-clear on a superseding
-    /// success (#588). Untagged Permanent banners (daemon disconnected,
-    /// build mismatch, sync failed) are persistent system state and must
-    /// stay until dismissed or resolved — so the fade keys off this, not
-    /// off `Permanent` severity alone.
+    /// Both tagged and untagged Permanent notices now auto-fade on the
+    /// same `PERMANENT_FADE` clock — no error sits in the footer forever.
+    /// This flag only selects the EXTRA behavior a tagged action error
+    /// gets on fade: a workspace-scoped "already dismissed" record so a
+    /// superseding success or an identical re-fire self-clears (#832/#588).
     pub fn is_action_toast(&self) -> bool {
         matches!(self.key, Some(NoticeKey::WorkspaceAction(_)))
+    }
+
+    /// A genuinely-persistent system-state banner that must stay until its
+    /// condition resolves — the daemon connection dropped, or the daemon
+    /// is a build mismatch. These are event-resolved (reconnect / matching
+    /// build), NOT poll-re-fired, so they get no auto-fade: fading one
+    /// would silently drop a live problem indicator with nothing to bring
+    /// it back. Every OTHER Permanent error (spawn/provider/sync failures,
+    /// action toasts) auto-fades — a one-off failure must not own the
+    /// footer forever.
+    pub fn is_persistent_system_banner(&self) -> bool {
+        matches!(
+            self.key,
+            Some(NoticeKey::DaemonConnection | NoticeKey::DaemonBuildMismatch)
+        )
     }
 }
 

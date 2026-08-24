@@ -4636,9 +4636,23 @@ impl TerminalStack {
     /// the user has to parse. Truncates with `…` when the message
     /// overflows the row width — same affordance the empty-state
     /// hint uses elsewhere in this pane.
-    fn render_user_message_recap(frame: &mut Frame, area: Rect, msg: &str) {
+    fn render_user_message_recap(frame: &mut Frame, area: Rect, msg: &str, age: &str) {
         let theme = crate::theme::current();
         let summary = summarize_message(msg);
+        // A relative age ("5m ago") on the right lets the user judge whether
+        // the conversation is stale at a glance, without opening `]]h` (#523).
+        // It's supplementary, so it yields to the message: reserve space only
+        // when the row is wide enough for both, and drop it otherwise.
+        let age_w = age.chars().count() as u16;
+        let age_reserve = if age.is_empty() || area.width < age_w + 12 {
+            0
+        } else {
+            age_w + 2 // one-column gap before the age, one of breathing room
+        };
+        let summary_area = Rect {
+            width: area.width.saturating_sub(age_reserve),
+            ..area
+        };
         let line = ratatui::text::Line::from(vec![
             Span::styled(
                 RECAP_PREFIX,
@@ -4648,8 +4662,22 @@ impl TerminalStack {
             ),
             Span::styled(summary, Style::default().fg(theme.text_dim)),
         ]);
-        let line = crate::components::table::truncate_line(line, area.width as usize);
-        frame.render_widget(Paragraph::new(line), area);
+        let line = crate::components::table::truncate_line(line, summary_area.width as usize);
+        frame.render_widget(Paragraph::new(line), summary_area);
+        if age_reserve > 0 {
+            let age_area = Rect {
+                x: area.x + area.width - age_w,
+                width: age_w,
+                ..area
+            };
+            frame.render_widget(
+                Paragraph::new(ratatui::text::Line::from(Span::styled(
+                    age.to_string(),
+                    Style::default().fg(theme.text_dim),
+                ))),
+                age_area,
+            );
+        }
     }
 
     /// Rows carved off the top of a terminal's body for the pinned
@@ -4702,7 +4730,7 @@ impl TerminalStack {
                 rect
             };
             if recap > 0
-                && let Some(msg) = slot.prompt_history.last().map(|p| p.text.as_str())
+                && let Some(last) = slot.prompt_history.last()
             {
                 let header_rect = Rect {
                     x: rect.x,
@@ -4710,7 +4738,8 @@ impl TerminalStack {
                     width: rect.width,
                     height: 1,
                 };
-                Self::render_user_message_recap(frame, header_rect, msg);
+                let age = crate::realm::model::relative_age(last.timestamp_ms, now_ms());
+                Self::render_user_message_recap(frame, header_rect, &last.text, &age);
             }
             // Reserve the rightmost column of the body as a scrollbar
             // gutter. Held back unconditionally so the PTY width stays
@@ -6520,6 +6549,50 @@ mod selection_offset_tests {
             .selection_point(id, rect, end.0, end.1)
             .expect("focus");
         stack.extract_selection(id, a, b)
+    }
+
+    /// #523: the pinned `you ▸` recap above the agent grid shows the last
+    /// prompt's relative age on the right, so staleness reads at a glance
+    /// without opening `]]h`.
+    #[test]
+    fn recap_row_shows_relative_age_on_the_right() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        const W: u16 = 60;
+        let area = Rect::new(0, 0, W, 1);
+        let mut term = Terminal::new(TestBackend::new(W, 1)).unwrap();
+        term.draw(|f| {
+            TerminalStack::render_user_message_recap(f, area, "review the diff", "5m ago")
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        let row: String = (0..W).map(|x| buf[(x, 0)].symbol()).collect();
+        assert!(row.contains("you ▸"), "prefix present: {row:?}");
+        assert!(row.contains("review the diff"), "message present: {row:?}");
+        assert!(
+            row.trim_end().ends_with("5m ago"),
+            "age is right-aligned: {row:?}"
+        );
+    }
+
+    /// The age is supplementary: on a row too narrow for both, the message
+    /// wins and the age is dropped rather than clipping the prompt.
+    #[test]
+    fn recap_row_drops_age_when_too_narrow() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        const W: u16 = 14;
+        let area = Rect::new(0, 0, W, 1);
+        let mut term = Terminal::new(TestBackend::new(W, 1)).unwrap();
+        term.draw(|f| TerminalStack::render_user_message_recap(f, area, "hello there", "5m ago"))
+            .unwrap();
+        let buf = term.backend().buffer();
+        let row: String = (0..W).map(|x| buf[(x, 0)].symbol()).collect();
+        assert!(
+            !row.contains("5m ago"),
+            "age dropped on a narrow row: {row:?}"
+        );
+        assert!(row.contains("you ▸"), "prefix still present: {row:?}");
     }
 
     #[test]

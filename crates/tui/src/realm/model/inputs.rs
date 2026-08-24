@@ -850,6 +850,7 @@ showing keybinding search only",
             }),
             resume_latest: false,
             access: AgentRunAccess::ReadOnly,
+            model_alias: None,
         })
     }
 
@@ -1052,6 +1053,7 @@ showing keybinding search only",
             }),
             resume_latest: false,
             access: AgentRunAccess::ReadOnly,
+            model_alias: None,
         })
     }
 

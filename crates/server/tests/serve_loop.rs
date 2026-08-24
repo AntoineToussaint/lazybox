@@ -463,6 +463,7 @@ async fn start_agent_run_unknown_agent_reports_error() {
             initial_input: None,
             resume_latest: false,
             access: lazybox_ipc::AgentRunAccess::Default,
+            model_alias: None,
         })
         .unwrap();
 
@@ -838,6 +839,7 @@ fn all_non_shutdown_commands() -> Vec<Command> {
             initial_input: None,
             resume_latest: false,
             access: lazybox_ipc::AgentRunAccess::Default,
+            model_alias: None,
         },
         Command::SendAgentInput {
             run_id: AgentRunId(1),

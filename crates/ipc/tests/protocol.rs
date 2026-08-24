@@ -178,6 +178,7 @@ fn all_commands() -> Vec<Command> {
             }),
             resume_latest: true,
             access: lazybox_ipc::AgentRunAccess::Default,
+            model_alias: Some("L".into()),
         },
         Command::StartAgentRun {
             request_id: AgentRunRequestId("request-2".into()),
@@ -190,6 +191,7 @@ fn all_commands() -> Vec<Command> {
             initial_input: None,
             resume_latest: false,
             access: lazybox_ipc::AgentRunAccess::Default,
+            model_alias: None,
         },
         Command::SendAgentInput {
             run_id: AgentRunId(9),

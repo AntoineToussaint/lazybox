@@ -371,6 +371,20 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         };
         conversion.phase = super::ConversionPhase::Spawning;
+        // A Critic review escalates to the large model tier (`L` — Opus for
+        // Claude): the whole point of a review pass is a *stronger* model
+        // checking the work, so junior-tier work gets a senior review. An
+        // agent with no `L` tier resolves to no `--model` (its own default),
+        // so this is graceful. Continue keeps the working tier — it's
+        // finishing the task, not reviewing it.
+        let (access, model_alias) = match conversion.role {
+            lazybox_core::prompts::AgentHandoffRole::Continue => {
+                (lazybox_ipc::AgentRunAccess::Default, None)
+            }
+            lazybox_core::prompts::AgentHandoffRole::Critic => {
+                (lazybox_ipc::AgentRunAccess::ReadOnly, Some("L".to_string()))
+            }
+        };
         let command = IpcCommand::Spawn {
             session_key: conversion.draft.source.clone(),
             session_id: Some(session_id),
@@ -380,15 +394,8 @@ impl<T: TerminalAdapter> Model<T> {
             initial_prompt: Some(prompt),
             initial_snippet: None,
             on_main: false,
-            model_alias: None,
-            access: match conversion.role {
-                lazybox_core::prompts::AgentHandoffRole::Continue => {
-                    lazybox_ipc::AgentRunAccess::Default
-                }
-                lazybox_core::prompts::AgentHandoffRole::Critic => {
-                    lazybox_ipc::AgentRunAccess::ReadOnly
-                }
-            },
+            model_alias,
+            access,
             force_new: false,
         };
         self.spawn_follow_to = Some(conversion.draft.source.clone());

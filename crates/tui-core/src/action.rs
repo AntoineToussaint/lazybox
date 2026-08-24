@@ -1331,7 +1331,7 @@ impl ActionDef {
                 kind: ActionKind::ConvertSession,
                 default_keys: "x f",
                 label: "convert session",
-                describe: "Replace this agent with a fresh Continue or Critic session in the same worktree, seeded from a structured handoff authored by the current agent.",
+                describe: "Replace this agent with a fresh Continue or Critic session in the same worktree, seeded from a structured handoff authored by the current agent. Critic runs read-only and at the large model tier (a stronger model reviews the work); Continue keeps the working tier.",
                 section: Section::Workspace,
             },
             ActionKind::CollapseIntoPr => &Self {

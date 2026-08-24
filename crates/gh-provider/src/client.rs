@@ -923,6 +923,7 @@ fn request_profile(
         | "review-requested"
         | "merged-sweep"
         | "watched-repo"
+        | "watched-repo issues"
         | "round-robin-repo" => (ApiResource::Graphql, RequestPriority::Recent),
         operation if operation.starts_with("list ") || operation == "post issue comment" => {
             (ApiResource::rest("core"), RequestPriority::Interactive)
@@ -1662,9 +1663,22 @@ impl GhClient {
                     byte_len,
                     elapsed,
                 );
+                // Log the TAIL (where a truncation cuts off), bounded to a
+                // few KB — dumping the whole ~200KB body on every occurrence
+                // would bloat the log. Char-boundary-safe.
+                let tail = {
+                    let target = raw_body.len().saturating_sub(2048);
+                    raw_body.get(target..).unwrap_or_else(|| {
+                        raw_body
+                            .char_indices()
+                            .find(|&(i, _)| i >= target)
+                            .map_or(raw_body.as_str(), |(i, _)| &raw_body[i..])
+                    })
+                };
                 tracing::warn!(
                     "graphql 2xx body is not valid JSON — likely a truncated/corrupt \
-                     response ({byte_len} bytes) from `{operation}`: {e}\nfull body:\n{raw_body}"
+                     response ({byte_len} bytes) from `{operation}`: {e}; last {} bytes: {tail}",
+                    tail.len(),
                 );
                 return Err(GhError::MalformedResponse {
                     status,
@@ -3780,6 +3794,45 @@ impl GhClient {
         Ok(tasks)
     }
 
+    /// One page of a WATCHED repo's open issues, for the poll's per-repo
+    /// issue fan-out. The main issues query is `involves:you`-scoped, so a
+    /// watched repo's issues that don't involve you never appear otherwise —
+    /// this closes that gap (a watched repo surfaced only its PRs before).
+    /// Best-effort: the caller logs + skips a repo that errors. Mention-
+    /// scanned like the main query so `@lazybox` still fires on these.
+    async fn fetch_watched_repo_issues(
+        &self,
+        repo: &str,
+        allowed_logins: &std::collections::BTreeSet<String>,
+    ) -> Result<(Vec<Task>, Vec<crate::LazyboxMention>), GhError> {
+        self.acquire_paced("watched-repo issues").await?;
+        let mut quals = graphql::default_issues_qualifiers();
+        quals.push(format!("repo:{repo}"));
+        let body = graphql::issues_query_body(&graphql::build_issues_query(&quals), None);
+        let response: graphql::GqlIssueResponse = self
+            .post_graphql_with_retry("watched-repo issues", &body)
+            .await?;
+        if let Some(errors) = &response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.message.clone())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(GhError::Graphql(joined));
+        }
+        let mut tasks = Vec::new();
+        let mut mentions = Vec::new();
+        if let Some(data) = response.data {
+            for issue in &data.search.nodes {
+                tasks.push(graphql::issue_to_task(issue, &self.user));
+                if !allowed_logins.is_empty() {
+                    mentions.extend(crate::mentions::scan_issue(issue, allowed_logins));
+                }
+            }
+        }
+        Ok((tasks, mentions))
+    }
+
     /// Same as `fetch_all_issues` but also scans each raw issue for
     /// `@lazybox` mentions from `allowed_logins` and returns the
     /// resulting [`crate::LazyboxMention`] list. Done in one pass so we
@@ -3895,6 +3948,41 @@ impl GhClient {
                 tasks.len(),
                 reason,
             ));
+        }
+
+        // Watched repos: the main query above is `involves:you`-scoped, so a
+        // watched repo's issues that DON'T involve you never appear (before
+        // this, a watched repo surfaced only its PRs). Fan out a per-repo
+        // issues query for each watched repo and merge, deduping by key
+        // against what the main query already returned. Best-effort — mirrors
+        // the PR watched fan-out in `fetch_all_prs`; a repo that errors just
+        // logs and is skipped, never failing the whole issue poll.
+        if !self.watch_repos.is_empty() {
+            use futures::stream::{self, StreamExt};
+            const WATCHED_ISSUE_CONCURRENCY: usize = 5;
+            let mut seen: std::collections::HashSet<String> =
+                tasks.iter().map(|t| t.id.key.clone()).collect();
+            let results = stream::iter(self.watch_repos.iter().cloned())
+                .map(|repo| async move {
+                    let result = self.fetch_watched_repo_issues(&repo, allowed_logins).await;
+                    (repo, result)
+                })
+                .buffer_unordered(WATCHED_ISSUE_CONCURRENCY)
+                .collect::<Vec<_>>()
+                .await;
+            for (repo, result) in results {
+                match result {
+                    Ok((repo_tasks, mut repo_mentions)) => {
+                        for task in repo_tasks {
+                            if seen.insert(task.id.key.clone()) {
+                                tasks.push(task);
+                            }
+                        }
+                        mentions.append(&mut repo_mentions);
+                    }
+                    Err(e) => tracing::warn!("watched-repo issues `{repo}` failed: {e}"),
+                }
+            }
         }
 
         let elapsed_ms = started.elapsed().as_millis();
@@ -7054,6 +7142,78 @@ mod tests {
             keys,
             vec!["o/r#1", "o/r#2"],
             "both pages' PRs must be returned — page 2 was previously dropped"
+        );
+    }
+
+    /// Minimal-but-valid issue SEARCH_QUERY page carrying the given
+    /// issue numbers, all in `repo`, with a terminal (`hasNextPage:false`)
+    /// pageInfo. Counterpart to [`pr_search_page`] for the issue path.
+    fn issue_search_page(numbers: &[u64], repo: &str) -> String {
+        let nodes = numbers
+            .iter()
+            .map(|n| {
+                format!(
+                    r#"{{
+                      "id": "I_{n}",
+                      "number": {n},
+                      "title": "Issue {n}",
+                      "body": null,
+                      "url": "https://github.com/{repo}/issues/{n}",
+                      "updatedAt": "2026-05-28T12:00:00Z",
+                      "createdAt": "2026-05-27T09:00:00Z",
+                      "closedAt": null,
+                      "state": "OPEN",
+                      "author": {{ "login": "carol" }},
+                      "labels": {{ "nodes": [] }},
+                      "assignees": {{ "nodes": [] }},
+                      "comments": {{ "nodes": [], "totalCount": 0 }},
+                      "repository": {{ "nameWithOwner": "{repo}" }}
+                    }}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{
+              "data": {{
+                "search": {{
+                  "issueCount": {count},
+                  "pageInfo": {{ "hasNextPage": false, "endCursor": null }},
+                  "nodes": [ {nodes} ]
+                }},
+                "rateLimit": {{ "cost": 1, "limit": 5000, "remaining": 4999, "resetAt": "2026-05-28T13:00:00Z" }}
+              }},
+              "errors": null
+            }}"#,
+            count = numbers.len(),
+        )
+    }
+
+    /// A watched repo's plain open issues (ones that don't `involve:you`)
+    /// never reach the inbox through the main `involves:you` issue query.
+    /// The per-repo fan-out must fetch them AND dedup an issue the main
+    /// query already returned, so a watched repo doesn't double-list.
+    #[tokio::test(flavor = "current_thread")]
+    async fn watched_repo_issues_are_fetched_and_deduped() {
+        // Request 1: the main involves-you query returns issue #1.
+        // Request 2: the watched-repo fan-out returns #1 again (dedup) and
+        // #2 (a repo issue that doesn't involve the viewer → new).
+        let main_page: &'static str = Box::leak(issue_search_page(&[1], "o/r").into_boxed_str());
+        let watched_page: &'static str =
+            Box::leak(issue_search_page(&[1, 2], "o/r").into_boxed_str());
+        let base_uri = spawn_sequenced_response_server(vec![main_page, watched_page]).await;
+        let client = make_client(&base_uri).with_watch_repos(vec!["o/r".into()]);
+
+        let tasks = client
+            .fetch_all_issues()
+            .await
+            .expect("issue fetch succeeds");
+        let mut keys: Vec<&str> = tasks.iter().map(|t| t.id.key.as_str()).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["o/r#1", "o/r#2"],
+            "watched-repo issue #2 must be added and #1 deduped, not double-listed"
         );
     }
 

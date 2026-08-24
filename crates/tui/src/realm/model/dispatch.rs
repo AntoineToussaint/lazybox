@@ -2125,10 +2125,11 @@ impl<T: TerminalAdapter> Model<T> {
                 // and counted.
                 if self.bulk_active() {
                     return self.bulk_dispatch("synced", "nothing to sync", |ws| {
-                        (ws.pr.is_some() || !ws.gh_issues.is_empty()).then(|| {
-                            IpcCommand::SyncWorkspace {
-                                workspace_key: ws.key.clone(),
-                            }
+                        (ws.pr.is_some()
+                            || !ws.gh_issues.is_empty()
+                            || !ws.linear_issues.is_empty())
+                        .then(|| IpcCommand::SyncWorkspace {
+                            workspace_key: ws.key.clone(),
                         })
                     });
                 }
@@ -2148,11 +2149,19 @@ impl<T: TerminalAdapter> Model<T> {
                     .project_key
                     .as_ref()
                     .is_some_and(|key| key.unambiguous_github_slug().is_some());
-                if ws.pr.is_none() && ws.gh_issues.is_empty() && !has_repo_scope {
+                if ws.pr.is_none()
+                    && ws.gh_issues.is_empty()
+                    && ws.linear_issues.is_empty()
+                    && !has_repo_scope
+                {
                     self.flash_info("nothing to sync — this workspace has no PR, issue, or repo");
                     return cmds;
                 }
-                let syncing_repo = ws.pr.is_none() && ws.gh_issues.is_empty();
+                // Repo-discovery only when there's genuinely no tracked entity
+                // (GitHub *or* Linear) — a Linear ticket syncs itself, not the
+                // repo.
+                let syncing_repo =
+                    ws.pr.is_none() && ws.gh_issues.is_empty() && ws.linear_issues.is_empty();
                 let workspace_key = ws.key.clone();
                 cmds.push(IpcCommand::SyncWorkspace { workspace_key });
                 self.flash_hint(if syncing_repo {

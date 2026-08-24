@@ -32,6 +32,69 @@ fn scope_clause(scope: LinearScope) -> &'static str {
 // `or` the `issues` connection returns EVERY open issue in every team
 // the token can see (the whole workspace), so an empty scope falls back
 // to [`LinearScope::default_scopes`] rather than emitting a bare filter.
+/// The field selection for one issue node. Shared verbatim between the
+/// paged `issues` list query and the single-issue `issue(id:)` lookup so
+/// both deserialize into the same [`Issue`] and map through the same
+/// [`issue_to_task`] — a field added here reaches both paths at once.
+const ISSUE_NODE_FIELDS: &str = r#"
+      id
+      identifier
+      title
+      description
+      url
+      updatedAt
+      createdAt
+      priority
+      state { name type }
+      assignee { id name }
+      creator { id name }
+      team { key }
+      parent { id identifier }
+      labels(first: 10) { nodes { name } }
+      attachments(first: 20) { nodes { url } }
+      comments(first: 20, orderBy: createdAt) { nodes { id body createdAt user { id name } } }
+"#;
+
+/// Query a single issue by its node id (UUID). Unlike [`issues_query`],
+/// this applies NO `state.type` filter — a `g s` re-poll must see an
+/// issue that has since moved to completed/canceled so the workspace can
+/// reflect the new state, not silently keep the stale one.
+fn issue_query() -> String {
+    format!(
+        r#"
+query($id: String!) {{
+  issue(id: $id) {{
+    {ISSUE_NODE_FIELDS}
+  }}
+}}
+"#
+    )
+}
+
+/// Build the request body for a single-issue lookup by node id.
+pub fn build_issue_body(id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": issue_query(),
+        "variables": { "id": id },
+    })
+}
+
+/// Response shape for the single-issue query: `{ data: { issue: <node|null> } }`.
+#[derive(Deserialize, Debug)]
+pub struct IssueResponse {
+    pub data: Option<IssueData>,
+    #[serde(default)]
+    pub errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct IssueData {
+    /// `null` when the id doesn't resolve (deleted, or outside the
+    /// token's visibility).
+    #[serde(default)]
+    pub issue: Option<Issue>,
+}
+
 fn issues_query(scope: &[LinearScope]) -> String {
     let mut selected: Vec<LinearScope> = Vec::new();
     for &s in scope {
@@ -62,22 +125,7 @@ query($after: String) {{
   ) {{
     pageInfo {{ hasNextPage endCursor }}
     nodes {{
-      id
-      identifier
-      title
-      description
-      url
-      updatedAt
-      createdAt
-      priority
-      state {{ name type }}
-      assignee {{ id name }}
-      creator {{ id name }}
-      team {{ key }}
-      parent {{ id identifier }}
-      labels(first: 10) {{ nodes {{ name }} }}
-      attachments(first: 20) {{ nodes {{ url }} }}
-      comments(first: 20, orderBy: createdAt) {{ nodes {{ id body createdAt user {{ id name }} }} }}
+    {ISSUE_NODE_FIELDS}
     }}
   }}
 }}
@@ -489,6 +537,73 @@ mod tests {
             !q.contains("subscribers"),
             "default must NOT request the subscriber flood: {q}"
         );
+    }
+
+    #[test]
+    fn single_issue_query_targets_id_without_state_filter() {
+        let body = build_issue_body("uuid-123");
+        let q = body["query"].as_str().expect("query string");
+        assert!(q.contains("issue(id: $id)"), "queries by id: {q}");
+        // No open-state filter — a `g s` re-poll must see a since-closed
+        // issue with its new state, not silently keep the stale one.
+        assert!(
+            !q.contains("nin"),
+            "single-issue query must carry no state filter: {q}"
+        );
+        // Reuses the shared node fragment.
+        assert!(q.contains("identifier"));
+        assert!(q.contains("comments("));
+        assert!(q.contains("attachments("));
+        assert_eq!(body["variables"]["id"], "uuid-123");
+    }
+
+    #[test]
+    fn single_issue_and_list_share_node_fields() {
+        let single = issue_query();
+        let list = issues_query(&LinearScope::default_scopes());
+        for field in [
+            "identifier",
+            "state { name type }",
+            "team { key }",
+            "parent { id identifier }",
+        ] {
+            assert!(single.contains(field), "single query missing `{field}`");
+            assert!(list.contains(field), "list query missing `{field}`");
+        }
+    }
+
+    #[test]
+    fn issue_response_parses_single_node_to_task() {
+        let json = serde_json::json!({
+            "data": { "issue": {
+                "id": "uuid-abc",
+                "identifier": "ENG-42",
+                "title": "Fix the thing",
+                "url": "https://linear.app/x/issue/ENG-42",
+                "updatedAt": "2026-01-01T00:00:00Z",
+                "state": { "name": "Done", "type": "completed" }
+            }}
+        });
+        let resp: IssueResponse = serde_json::from_value(json).expect("parses");
+        let issue = resp.data.and_then(|d| d.issue).expect("issue present");
+        let task = issue_to_task(&issue, "viewer-id");
+        assert_eq!(task.id.key, "ENG-42");
+        // `node_id` is the UUID the sync path passes back to fetch-by-id.
+        assert_eq!(task.node_id.as_deref(), Some("uuid-abc"));
+        assert_eq!(
+            task.state,
+            TaskState::Closed,
+            "a completed issue maps to Closed so the workspace reflects it"
+        );
+    }
+
+    #[test]
+    fn issue_response_null_issue_is_none() {
+        // A deleted / out-of-visibility id comes back as `{issue: null}` —
+        // the sync path treats it as Ok(None), not an error.
+        let json = serde_json::json!({ "data": { "issue": null } });
+        let resp: IssueResponse = serde_json::from_value(json).expect("parses");
+        assert!(resp.data.and_then(|d| d.issue).is_none());
     }
 
     #[test]

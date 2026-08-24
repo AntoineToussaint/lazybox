@@ -1485,7 +1485,7 @@ mod filter_tests {
     #[test]
     fn every_filter_has_an_axis_and_appears_in_all() {
         // ALL must list each variant exactly once; drives the menu.
-        assert_eq!(Filter::ALL.len(), 25);
+        assert_eq!(Filter::ALL.len(), 26);
         let mut seen = std::collections::BTreeSet::new();
         for f in Filter::ALL {
             assert!(seen.insert(f), "{f:?} listed twice in Filter::ALL");

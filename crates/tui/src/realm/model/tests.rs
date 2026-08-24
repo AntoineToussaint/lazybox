@@ -8957,6 +8957,7 @@ mod merge_focus_follow_tests {
             on_main: false,
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
+            force_new: false,
         }]);
 
         assert_eq!(model.top_modal(), Some(&Id::ClaimedSpawnConfirm));
@@ -8978,6 +8979,7 @@ mod merge_focus_follow_tests {
             on_main: false,
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
+            force_new: false,
         }]);
         assert!(matches!(
             model.handle_confirmed(true).as_slice(),
@@ -9014,6 +9016,7 @@ mod merge_focus_follow_tests {
             on_main: false,
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::ReadOnly,
+            force_new: false,
         }]);
 
         assert_ne!(model.top_modal(), Some(&Id::ClaimedSpawnConfirm));
@@ -9818,6 +9821,7 @@ mod merge_focus_follow_tests {
             on_main: false,
             model_alias: None,
             access: AgentRunAccess::ReadOnly,
+            force_new: false,
         };
 
         assert!(matches!(
@@ -9993,9 +9997,16 @@ mod merge_focus_follow_tests {
 
         let cmds = m.dispatch_action(&Action::SpawnAgent("claude".into()));
         assert!(
-            cmds.iter()
-                .any(|command| matches!(command, Command::Spawn { .. })),
-            "spawning a sibling agent on a credit-exhausted workspace is never vetoed: {cmds:?}",
+            cmds.iter().any(|command| matches!(
+                command,
+                // #1310: the explicit `a c` key carries force_new so it starts
+                // a second agent instead of collapsing onto an idle sibling.
+                Command::Spawn {
+                    force_new: true,
+                    ..
+                }
+            )),
+            "spawning a sibling agent on a credit-exhausted workspace is never vetoed and forces a new terminal: {cmds:?}",
         );
     }
 
@@ -17426,6 +17437,7 @@ mod worktree_progress_recovery_tests {
             initial_prompt: None,
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         }
     }
 
@@ -17941,6 +17953,7 @@ mod worktree_progress_recovery_tests {
             initial_prompt: Some("fix it".into()),
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         });
         m.handle_daemon_event(IpcEvent::WorktreeProgress {
             session_key,
@@ -17987,6 +18000,7 @@ mod worktree_progress_recovery_tests {
             initial_prompt: Some("fix it".into()),
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         });
         m.handle_daemon_event(IpcEvent::WorktreeProgress {
             session_key,

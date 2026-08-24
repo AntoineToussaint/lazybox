@@ -5983,6 +5983,7 @@ mod live_collapse_e2e {
                 initial_prompt: None,
                 initial_snippet: None,
                 on_main: false,
+                force_new: false,
             })
             .unwrap();
         let terminal_id = wait_spawned(&mut client).await;

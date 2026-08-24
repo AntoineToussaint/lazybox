@@ -23,6 +23,11 @@ pub struct SpawnOptions {
     pub access: AgentRunAccess,
     pub client_request_id: Option<String>,
     pub origin: SpawnOrigin,
+    /// Deliberately start a new agent even when an idle singleton of the
+    /// same kind is already running (#1310). Suppresses idle-singleton
+    /// reuse only — the concurrent-race collapse and the issue→PR
+    /// managed-branch-owner transfer still apply.
+    pub force_new: bool,
 }
 
 #[derive(Debug)]

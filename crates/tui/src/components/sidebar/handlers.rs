@@ -113,6 +113,8 @@ impl Sidebar {
                         initial_prompt: prompt,
                         initial_snippet: None,
                         on_main: false,
+                        // Sidebar `w w` continues a live conversation.
+                        force_new: false,
                     });
                 }
                 PaneOutcome::Consumed
@@ -140,6 +142,7 @@ impl Sidebar {
                             initial_prompt: None,
                             initial_snippet: None,
                             on_main: false,
+                            force_new: false,
                         });
                     }
                     _ => {

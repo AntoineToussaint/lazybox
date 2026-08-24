@@ -796,6 +796,18 @@ pub enum Command {
         /// terminals ignore this field.
         #[serde(default)]
         access: AgentRunAccess,
+        /// Deliberately start a NEW agent even when a matching singleton
+        /// is already running in this workspace (#1310). Set by the
+        /// explicit `a c` / `a x` / `a u` spawn keys so a second agent
+        /// can be launched beside an idle one. The daemon skips its
+        /// idle-singleton reuse for this spawn — but still honors the
+        /// concurrent-race collapse (the SpawnCoordinator) and the
+        /// issue→PR managed-branch-owner *transfer* (adopting the
+        /// migrated session is not "reuse of an idle duplicate"). Bare
+        /// contextual `w` / autonomous mentions / bulk leave this false
+        /// so they keep collapsing onto a live agent.
+        #[serde(default)]
+        force_new: bool,
     },
     /// Cancel an in-flight `Spawn` for this workspace that is still
     /// provisioning its worktree (cold clone / fetch). The daemon

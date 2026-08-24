@@ -280,6 +280,7 @@ async fn hook_ingest_over_socket_reaches_shared_embedded_config() {
         initial_prompt: None,
         initial_snippet: None,
         on_main: false,
+        force_new: false,
     })
     .expect("spawn");
     let spawned = tokio::time::timeout(Duration::from_secs(2), async {
@@ -374,6 +375,7 @@ async fn shutdown_drains_in_flight_mutations_before_abort() {
             initial_prompt: None,
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         })
         .expect("spawn command");
     // Give the frame time to cross the socket and the serve loop time

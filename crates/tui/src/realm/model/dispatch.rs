@@ -105,6 +105,9 @@ fn bulk_spawn_command(
         on_main: false,
         model_alias,
         access: lazybox_ipc::AgentRunAccess::Default,
+        // Bulk starts inject into any workspace already running an agent
+        // (#932) — reuse-friendly, so never force a duplicate.
+        force_new: false,
     }
 }
 
@@ -911,6 +914,8 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_prompt: None,
                         initial_snippet: None,
                         on_main: true,
+                        // `b c` / `b x` / `b u` explicit agent spawn (#1310).
+                        force_new: true,
                     }],
                     Action::SpawnShellOnMain => vec![IpcCommand::Spawn {
                         model_alias: None,
@@ -923,6 +928,7 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_prompt: None,
                         initial_snippet: None,
                         on_main: true,
+                        force_new: false,
                     }],
                     // A future destructive action that hasn't grown a
                     // targeted arm yet falls back to the legacy
@@ -1193,6 +1199,7 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_prompt: None,
                         initial_snippet: None,
                         on_main: false,
+                        force_new: false,
                     });
                 }
             }
@@ -1212,6 +1219,9 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_prompt: None,
                         initial_snippet: None,
                         on_main: false,
+                        // Explicit `a c` / `a x` / `a u`: always start a new
+                        // agent, even beside an idle one of the same kind (#1310).
+                        force_new: true,
                     });
                 }
             }
@@ -1289,6 +1299,8 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_prompt: None,
                         initial_snippet: None,
                         on_main: false,
+                        // `r c` / `r x` / `r u` mirror `a c` (#1310).
+                        force_new: true,
                     };
                     self.send_to_remote(&remote, spawn);
                     // Optimistic client-side tag so the sidebar row shows
@@ -1318,6 +1330,8 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_prompt: None,
                         initial_snippet: None,
                         on_main: true,
+                        // `b c` / `b x` / `b u` are explicit agent spawns too (#1310).
+                        force_new: true,
                     });
                 }
             }
@@ -1334,6 +1348,7 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_prompt: None,
                         initial_snippet: None,
                         on_main: true,
+                        force_new: false,
                     });
                 }
             }
@@ -1388,6 +1403,8 @@ impl<T: TerminalAdapter> Model<T> {
                         on_main: false,
                         model_alias: Some(alias.clone()),
                         access: lazybox_ipc::AgentRunAccess::Default,
+                        // `a S` / `a M` / `a L` are explicit agent spawns (#1310).
+                        force_new: true,
                     });
                 }
             }
@@ -2841,6 +2858,9 @@ impl<T: TerminalAdapter> Model<T> {
                     on_main: false,
                     model_alias,
                     access: lazybox_ipc::AgentRunAccess::Default,
+                    // `w` / `w w` continue an existing conversation when one is
+                    // live (reuse/inject) — never force a duplicate.
+                    force_new: false,
                 };
                 let command = match terminal_id {
                     Some(terminal_id) => self.rewrite_spawn_to_terminal(spawn, terminal_id),

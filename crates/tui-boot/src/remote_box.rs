@@ -793,6 +793,7 @@ mod tests {
             on_main: false,
             model_alias: None,
             access: Default::default(),
+            force_new: false,
         }
     }
 

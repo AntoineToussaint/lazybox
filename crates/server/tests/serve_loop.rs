@@ -360,6 +360,7 @@ async fn graceful_stop_drains_in_flight_mutation_before_exit() {
             initial_prompt: None,
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         })
         .expect("spawn");
     // Let the serve loop dequeue Spawn onto the mutations JoinSet and
@@ -417,6 +418,7 @@ async fn graceful_stop_abandons_mutation_past_the_drain_bound() {
             initial_prompt: None,
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         })
         .expect("spawn");
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -677,6 +679,7 @@ fn all_non_shutdown_commands() -> Vec<Command> {
             initial_prompt: None,
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         },
         Command::Write {
             terminal_id: tid,
@@ -944,6 +947,7 @@ async fn a_stalled_handler_does_not_block_poll_forwarding() {
             initial_prompt: None,
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         })
         .unwrap();
 

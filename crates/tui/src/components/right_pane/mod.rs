@@ -2246,6 +2246,8 @@ impl RightPane {
                         initial_prompt: prompt,
                         initial_snippet: None,
                         on_main: false,
+                        // Activity-pane `w` continues a live conversation.
+                        force_new: false,
                     });
                     self.feed.clear_selection();
                 }

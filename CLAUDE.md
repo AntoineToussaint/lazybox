@@ -364,7 +364,16 @@ tick, mirroring the terminal's held literal `]`. (The dedicated
 already updates every behind PR in the set, #484/#932.) `a` is a leader
 for the **agent** group (which-key popup): `a c` claude, `a x` codex,
 `a u` cursor — no top-level `c`/`x`/`u` aliases (re-add via
-`ui.action_keys`, keyed `spawn_agent.<id>`). Both the `w` and `a`
+`ui.action_keys`, keyed `spawn_agent.<id>`). These explicit spawn keys
+(and `r c`/`r x`/`r u`, `b c`/`b x`/`b u`, `a S`/`a M`/`a L`) always
+start a NEW agent, even beside an idle one of the same kind (#1310, via
+`Spawn { force_new: true }`) — lazybox no longer enforces one-agent-per-
+workspace. The daemon still collapses genuinely-concurrent duplicate
+spawns (the SpawnCoordinator) and adopts an issue→PR managed-branch-owner
+transfer, so a double-fire or a rebadge never silently forks two backends.
+The reuse-first keys stay reuse-first: bare `w`/`w w` inject into a live
+conversation, and bulk / autonomous (`@lazybox` mentions, auto-fix) still
+collapse onto a running agent. Both the `w` and `a`
 leaders also carry **model-tier** chords (#308): `w S`/`w M`/`w L` work
 on the contextual agent at the small / medium / large model, and
 `a S`/`a M`/`a L` spawn the default agent at that tier. Tiers are

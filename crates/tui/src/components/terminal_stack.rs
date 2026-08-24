@@ -4291,6 +4291,7 @@ impl TerminalStack {
             // A tile-split shell lands in the workspace's default
             // (isolated) worktree, not the shared main checkout.
             on_main: false,
+            force_new: false,
         });
     }
 

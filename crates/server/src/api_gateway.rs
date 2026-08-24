@@ -662,6 +662,9 @@ impl DesktopCommand {
                 on_main,
                 model_alias,
                 access: lazybox_ipc::AgentRunAccess::Default,
+                // Desktop clients don't yet expose an explicit new-agent
+                // gesture; preserve the reuse-on-spawn behavior (#1310).
+                force_new: false,
             },
             DesktopCommand::SpawnShell {
                 session_key,
@@ -677,6 +680,7 @@ impl DesktopCommand {
                 on_main,
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
+                force_new: false,
             },
             DesktopCommand::CreateWorkspace {
                 name,

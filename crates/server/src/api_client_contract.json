@@ -26,6 +26,7 @@
           "access": "Default",
           "client_request_id": "web-1",
           "cwd": null,
+          "force_new": false,
           "initial_prompt": null,
           "initial_snippet": null,
           "kind": {
@@ -45,6 +46,7 @@
           "access": "Default",
           "client_request_id": "web-2",
           "cwd": null,
+          "force_new": false,
           "initial_prompt": null,
           "initial_snippet": null,
           "kind": "Shell",

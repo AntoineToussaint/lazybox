@@ -143,6 +143,7 @@ async fn spawn_and_wait(
             initial_prompt: None,
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         })
         .unwrap();
     let spawned = wait_for(
@@ -764,6 +765,7 @@ async fn interactive_claude_spawn_keeps_permission_prompts() {
                 initial_prompt: None,
                 initial_snippet: None,
                 on_main: false,
+                force_new: false,
             })
             .unwrap();
         let spawned = wait_for(
@@ -843,6 +845,7 @@ async fn spawn_hot_path_never_copies_into_the_stable_bin_dir() {
                 initial_prompt: None,
                 initial_snippet: None,
                 on_main: false,
+                force_new: false,
             })
             .unwrap();
         wait_for(
@@ -880,6 +883,7 @@ async fn read_only_spawn_rejects_a_writable_singleton() {
                 on_main: false,
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
+                force_new: false,
             })
             .unwrap();
         wait_for(
@@ -901,6 +905,7 @@ async fn read_only_spawn_rejects_a_writable_singleton() {
                 on_main: false,
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::ReadOnly,
+                force_new: false,
             })
             .unwrap();
 
@@ -951,6 +956,7 @@ async fn read_only_prompt_spawn_cannot_inherit_autonomous_bypass() {
                 on_main: false,
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::ReadOnly,
+                force_new: false,
             })
             .unwrap();
 
@@ -1097,6 +1103,7 @@ async fn hook_session_identity_is_persisted_and_used_for_restore() {
                 on_main: false,
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
+                force_new: false,
             })
             .unwrap();
         let Event::TerminalSpawned { terminal_id, .. } = wait_for(
@@ -1259,6 +1266,7 @@ async fn unknown_agent_id_emits_provider_error() {
                 initial_prompt: None,
                 initial_snippet: None,
                 on_main: false,
+                force_new: false,
             })
             .unwrap();
         let evt = wait_for(
@@ -1316,6 +1324,7 @@ async fn successful_spawn_emits_its_correlated_completion() {
                 on_main: false,
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
+                force_new: false,
             })
             .unwrap();
 
@@ -1725,6 +1734,7 @@ async fn spawn_with_initial_prompt_delivers_work_to_agent() {
                 initial_prompt: Some(WORK.into()),
                 initial_snippet: None,
                 on_main: false,
+                force_new: false,
             })
             .unwrap();
         let _ = wait_for(
@@ -1801,6 +1811,7 @@ async fn codex_initial_prompt_pastes_then_sends_enter_separately() {
                 initial_prompt: Some(WORK.into()),
                 initial_snippet: None,
                 on_main: false,
+                force_new: false,
             })
             .unwrap();
         wait_for(
@@ -1899,6 +1910,7 @@ async fn spawn_onto_existing_singleton_injects_the_prompt() {
                 initial_prompt: Some(WORK.into()),
                 initial_snippet: None,
                 on_main: false,
+                force_new: false,
             })
             .unwrap();
 
@@ -1990,6 +2002,7 @@ async fn linked_workspace_agent_spawn_is_a_singleton() {
                 initial_prompt: None,
                 initial_snippet: None,
                 on_main: false,
+                force_new: false,
             })
             .unwrap();
         };
@@ -2025,6 +2038,86 @@ async fn linked_workspace_agent_spawn_is_a_singleton() {
             "a linked workspace must run one Claude, not two, in the real tree",
         );
         let _ = first;
+    })
+    .await
+    .expect("deadline");
+}
+
+/// #1310: the explicit `a c` / `a x` / `a u` keys carry `force_new: true`,
+/// which opts the spawn OUT of idle-singleton reuse so a second agent of
+/// the same kind starts beside an idle one. Mirror of
+/// `linked_workspace_agent_spawn_is_a_singleton` — same setup, but the
+/// second spawn forces a new terminal instead of focusing the first.
+#[tokio::test]
+async fn force_new_spawn_starts_a_second_agent_beside_the_idle_one() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+
+        let checkout = tempfile::tempdir().unwrap();
+        let mut ws = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new("acme-widget"),
+            "feature-x",
+            chrono::Utc::now(),
+        );
+        ws.local = true;
+        ws.linked_checkout = Some(checkout.path().to_path_buf());
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: ws.key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
+
+        let mut client = subscribed(config.clone()).await;
+        let spawn = |c: &mut lazybox_ipc::Client, force_new: bool| {
+            c.send(Command::Spawn {
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+                session_key: "acme-widget".into(),
+                session_id: None,
+                client_request_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: None,
+                initial_prompt: None,
+                initial_snippet: None,
+                on_main: false,
+                force_new,
+            })
+            .unwrap();
+        };
+
+        // First spawn: an ordinary (reuse-eligible) agent starts.
+        spawn(&mut client, false);
+        wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("first agent spawns");
+        assert_eq!(mock.list().await.unwrap().len(), 1, "one agent so far");
+
+        // Second spawn with force_new: a genuinely new terminal, NOT a
+        // focus-the-existing collapse.
+        spawn(&mut client, true);
+        let second = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(
+            second.is_some(),
+            "force_new must start a second terminal, not focus the first",
+        );
+        assert_eq!(
+            mock.list().await.unwrap().len(),
+            2,
+            "force_new starts a second Claude beside the idle one (#1310)",
+        );
     })
     .await
     .expect("deadline");
@@ -2410,6 +2503,7 @@ async fn wedged_session_does_not_block_subscribe_or_subsequent_spawn() {
                 initial_prompt: None,
                 initial_snippet: None,
                 on_main: false,
+                force_new: false,
             })
             .unwrap();
         let spawned = wait_for(
@@ -3206,6 +3300,7 @@ async fn detectorless_spawn_prompt_pastes_blindly_at_the_hard_deadline() {
                 initial_prompt: Some(WORK.into()),
                 initial_snippet: None,
                 on_main: false,
+                force_new: false,
             })
             .unwrap();
         wait_for(
@@ -3705,6 +3800,7 @@ async fn collapse_into_pr_carries_live_terminal_to_the_pr() {
                 initial_prompt: None,
                 initial_snippet: None,
                 on_main: false,
+                force_new: false,
             })
             .unwrap();
         let terminal_id = match wait_for(
@@ -4130,6 +4226,7 @@ async fn failed_provision_fails_spawn_loudly_and_leaves_no_session() {
                 initial_prompt: None,
                 initial_snippet: None,
                 on_main: false,
+                force_new: false,
             })
             .unwrap();
 

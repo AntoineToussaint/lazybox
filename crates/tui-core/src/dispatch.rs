@@ -49,6 +49,11 @@ pub fn plan_spawn_for_terminal(cmd: Command, terminal_id: TerminalId) -> Command
             initial_snippet: _,
             on_main: _,
             access,
+            // A deliberate new-agent spawn (#1310) must never be folded
+            // back into an inject onto the existing terminal — that would
+            // silently defeat "start a second agent". Only the reuse-eligible
+            // spawns (force_new == false) rewrite.
+            force_new: false,
         } if access == lazybox_ipc::AgentRunAccess::Default => Command::InjectPrompt {
             terminal_id,
             prompt,
@@ -99,6 +104,7 @@ mod tests {
             on_main: false,
             model_alias: Some("L".to_string()),
             access: lazybox_ipc::AgentRunAccess::Default,
+            force_new: false,
         }
     }
 
@@ -156,6 +162,36 @@ mod tests {
                 ..
             } if prompt == "continue" && agent == "codex" && cwd == "/tmp/worktree"
         ));
+    }
+
+    #[test]
+    fn plan_dispatch_never_rewrites_a_force_new_spawn() {
+        // #1310: a deliberate new-agent spawn must reach the daemon as a
+        // Spawn even when a matching terminal is already running — folding it
+        // into an inject would silently defeat "start a second agent".
+        let session_key = SessionKey::new("owner/repo/1");
+        let view = View(HashMap::from([(
+            (session_key.clone(), "codex".to_string()),
+            TerminalId(7),
+        )]));
+
+        let mut command = spawn(Some("start fresh"));
+        let Command::Spawn { force_new, .. } = &mut command else {
+            unreachable!("spawn helper returns Spawn");
+        };
+        *force_new = true;
+
+        let planned = plan_dispatch(vec![command], &view);
+        assert!(
+            matches!(
+                &planned[0],
+                Command::Spawn {
+                    force_new: true,
+                    ..
+                }
+            ),
+            "force_new spawn must not be rewritten to InjectPrompt",
+        );
     }
 
     #[test]

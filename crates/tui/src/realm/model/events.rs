@@ -389,6 +389,7 @@ impl<T: TerminalAdapter> Model<T> {
                     lazybox_ipc::AgentRunAccess::ReadOnly
                 }
             },
+            force_new: false,
         };
         self.spawn_follow_to = Some(conversion.draft.source.clone());
         self.last_spawn = Some(command.clone());

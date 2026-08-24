@@ -1753,6 +1753,7 @@ impl<T: TerminalAdapter> Model<T> {
             on_main: false,
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
+            force_new: false,
         });
         if self.modal_stack.last() == Some(&Id::ErrorInbox) {
             self.pop_modal();
@@ -3113,6 +3114,9 @@ impl<T: TerminalAdapter> Model<T> {
             on_main,
             model_alias,
             access,
+            // The recreate retry re-provisions the same target; it is a
+            // reuse-eligible replay, not a deliberate second agent.
+            force_new: _,
         }) = self.last_spawn.clone()
         else {
             self.flash_hint("nothing to recreate");

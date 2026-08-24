@@ -898,6 +898,9 @@ impl<T: TerminalAdapter> Model<T> {
                     initial_prompt: Some(prompt.clone()),
                     initial_snippet: None,
                     on_main: false,
+                    // Reconstructed from an inject fallback — the reuse-eligible
+                    // path, so it must not force a duplicate.
+                    force_new: false,
                 });
             }
         }

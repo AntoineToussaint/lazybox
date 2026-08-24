@@ -1184,6 +1184,7 @@ async fn handle_spawn_inner(
         access,
         client_request_id,
         origin,
+        force_new,
     } = options;
     let access = if matches!(&kind, TerminalKind::Agent(_)) {
         access
@@ -1292,15 +1293,24 @@ async fn handle_spawn_inner(
             return None;
         }
     };
-    // Singleton enforcement at the daemon (the source of truth for
-    // who's running what). The TUI also intercepts duplicates
-    // client-side for snappy focus-not-spawn behavior, but that
-    // alone fails the moment a second client connects to the same
-    // daemon. The guard here protects the invariant for everyone:
-    // at most one Claude per session, one Codex per session, etc.
-    if let Some(existing) =
-        find_existing_singleton(config, &session_key, &kind, Some(on_main)).await
-    {
+    // Idle-singleton reuse at the daemon (the source of truth for who's
+    // running what). The TUI also intercepts duplicates client-side for
+    // snappy focus-not-spawn behavior, but that alone fails the moment a
+    // second client connects to the same daemon. Normally a spawn onto a
+    // workspace already running this agent-kind focuses the live one
+    // instead of stacking a duplicate.
+    //
+    // `force_new` (the explicit `a c` / `a x` / `a u` keys, #1310) opts a
+    // spawn OUT of this reuse so a second agent can run beside an idle
+    // one. We still *look* — `pre_existing` records what was already
+    // running here so the post-resolution re-check below can tell a
+    // freshly-migrated managed-branch owner (adopt it) apart from the
+    // same idle agent we're deliberately spawning beside (don't collapse).
+    // The concurrent-race collapse (SpawnCoordinator, above) is
+    // unconditional regardless of `force_new`: a genuine double-fire of
+    // the same key still resolves to one backend.
+    let pre_existing = find_existing_singleton(config, &session_key, &kind, Some(on_main)).await;
+    if !force_new && let Some(existing) = pre_existing {
         if terminal_access_for(config, existing).await != access {
             let _ = config.bus.send(Event::provider_error_permanent(
                 "spawn",
@@ -1401,25 +1411,42 @@ async fn handle_spawn_inner(
     // before that transfer, when the terminal still belonged to the old
     // workspace key, so re-check now. Without this, `w` correctly preserved
     // the old agent but immediately launched a duplicate beside it.
+    //
+    // Under `force_new` this re-check must NOT resurrect the idle agent the
+    // first check deliberately skipped — only *adopt a terminal that
+    // appeared during resolution* (the managed-branch transfer), which is a
+    // migrated session, not an idle duplicate. Comparing against
+    // `pre_existing` distinguishes the two: a rebadge surfaces a terminal
+    // that wasn't here before resolution.
     if let Some(existing) =
         find_existing_singleton(config, &session_key, &kind, Some(landed_on_main)).await
     {
-        if terminal_access_for(config, existing).await != access {
-            let _ = config.bus.send(Event::provider_error_permanent(
-                "spawn",
-                "an agent with a different host-access policy is already running in this checkout",
-            ));
-            return None;
+        // Adopt the existing terminal when this isn't a deliberate new-agent
+        // spawn, OR when resolution just migrated a managed-branch owner onto
+        // this key. `Some(existing) != pre_existing` is the migration signal:
+        // a rebadge surfaces a terminal that wasn't here before resolution, so
+        // it's THIS work's session — not the idle duplicate a `force_new` spawn
+        // is deliberately starting beside.
+        let migrated_during_resolution = Some(existing) != pre_existing;
+        if !force_new || migrated_during_resolution {
+            if terminal_access_for(config, existing).await != access {
+                let _ = config.bus.send(Event::provider_error_permanent(
+                    "spawn",
+                    "an agent with a different host-access policy is already running in this checkout",
+                ));
+                return None;
+            }
+            if let Some(prompt) = initial_prompt.as_deref() {
+                Box::pin(handle_inject_prompt(config, existing, prompt, None, true)).await;
+                record_spawn_snippet(config, existing, &session_key, initial_snippet.as_ref())
+                    .await;
+            }
+            let _ = config.bus.send(Event::TerminalFocusRequested {
+                terminal_id: existing,
+            });
+            outcome.complete();
+            return Some(existing);
         }
-        if let Some(prompt) = initial_prompt.as_deref() {
-            Box::pin(handle_inject_prompt(config, existing, prompt, None, true)).await;
-            record_spawn_snippet(config, existing, &session_key, initial_snippet.as_ref()).await;
-        }
-        let _ = config.bus.send(Event::TerminalFocusRequested {
-            terminal_id: existing,
-        });
-        outcome.complete();
-        return Some(existing);
     }
     // Session + worktree are resolved here — for a fresh issue this is
     // where a cold clone / `git fetch` / setup script gets paid

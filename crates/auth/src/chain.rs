@@ -25,7 +25,7 @@ fn chain_cache() -> &'static Mutex<HashMap<String, CacheEntry>> {
 /// Modeled after AWS SDK's credential chain.
 ///
 /// Chain resolutions (both successes and failures) are cached per scope for
-/// [`CHAIN_CACHE_TTL`] to avoid expensive repeated provider attempts when
+/// `CHAIN_CACHE_TTL` to avoid expensive repeated provider attempts when
 /// configured credentials are absent or disabled.
 ///
 /// ```rust,no_run
@@ -85,7 +85,7 @@ impl CredentialChain {
     /// Try each provider in order. Returns the first successful credential.
     ///
     /// Chain resolutions are cached per scope; if a cached result exists and
-    /// is still fresh (within [`CHAIN_CACHE_TTL`]), it is returned immediately
+    /// is still fresh (within `CHAIN_CACHE_TTL`), it is returned immediately
     /// without running any providers. This avoids expensive re-runs when
     /// configured credentials are absent or disabled.
     ///

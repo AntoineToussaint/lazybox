@@ -261,7 +261,7 @@
               "linked_tasks": [],
               "merge_blocked": false,
               "mergeable": {
-                "observed_at": "2026-08-24T14:58:49.796001Z",
+                "observed_at": "2026-08-24T15:17:12.047713Z",
                 "state": "Mergeable"
               },
               "needs_reply": false,
@@ -347,7 +347,7 @@
           "linked_tasks": [],
           "merge_blocked": false,
           "mergeable": {
-            "observed_at": "2026-08-24T14:58:49.796001Z",
+            "observed_at": "2026-08-24T15:17:12.047713Z",
             "state": "Mergeable"
           },
           "needs_reply": false,
@@ -550,6 +550,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 92543344,
+  "protocol_fingerprint": 67912540,
   "protocol_version": 4
 }

@@ -1553,6 +1553,19 @@ pub enum Command {
         workspace_key: lazybox_core::WorkspaceKey,
         completed: bool,
     },
+    /// Acknowledge ("keep mine") a snippet override against the current
+    /// built-in body, silencing the "built-in changed" nudge until the
+    /// built-in changes again (#1312). `target` is the opaque
+    /// `snippet:<key>:<builtin-content-hash>` key the client derives via
+    /// `lazybox_config::keep_mine_target`; because it embeds the built-in
+    /// hash, a later built-in edit produces a fresh target that no prior
+    /// acknowledgement covers. The daemon persists the set and replays it
+    /// via `Event::Snapshot`'s `snippet_keepmine`, so an acknowledgement on
+    /// one client sticks for all. Appended last (bincode is
+    /// ordinal-sensitive).
+    SetSnippetKeepMine {
+        target: String,
+    },
 }
 
 impl Command {
@@ -2568,6 +2581,18 @@ pub enum Event {
         session_key: SessionKey,
         terminal_id: TerminalId,
         hint: String,
+    },
+    /// The user's snippet-override "keep mine" acknowledgements
+    /// (`snippet:<key>:<builtin-content-hash>`), so the picker's
+    /// "built-in changed" nudge stays silenced for an override the user
+    /// chose to keep — until the built-in changes again (#1312). Pushed as
+    /// its own event right after `Snapshot` (like `ViewerIdentities`),
+    /// rather than a `Snapshot` field, so adding it doesn't churn the many
+    /// `Snapshot` construction sites. Re-sent whenever the set changes so
+    /// an acknowledgement on one client lands on all. Appended last
+    /// (bincode is ordinal-sensitive).
+    SnippetKeepMine {
+        targets: Vec<String>,
     },
 }
 

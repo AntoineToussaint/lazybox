@@ -1070,6 +1070,7 @@ impl Server {
                         lazybox_ipc::Command::SetNotes { .. } => "SetNotes",
                         lazybox_ipc::Command::DeliverSnippet { .. } => "DeliverSnippet",
                         lazybox_ipc::Command::SetUpdateDismissal { .. } => "SetUpdateDismissal",
+                        lazybox_ipc::Command::SetSnippetKeepMine { .. } => "SetSnippetKeepMine",
                         lazybox_ipc::Command::ResumeAgent { .. } => "ResumeAgent",
                         lazybox_ipc::Command::ReauthenticateAgent { .. } => {
                             "ReauthenticateAgent"
@@ -1347,6 +1348,7 @@ async fn build_and_send_lag_recovery_snapshot(
             let load_errors = workspaces.errors.len() + projects.errors.len();
             let mut terminals = spawn_handler::snapshot_terminals(&config).await;
             budget_snapshot_replay(&mut terminals);
+            let snippet_keepmine = client_kv.snippet_keepmine;
             let recovery = Event::Snapshot {
                 workspaces: workspaces.values,
                 terminals,
@@ -1363,6 +1365,13 @@ async fn build_and_send_lag_recovery_snapshot(
             if load_errors > 0 {
                 let _ = tx.send(storage_recovery_event(load_errors));
             }
+            // Re-sync snippet keep-mine acknowledgements after the snapshot
+            // and its recovery notice (#1312), mirroring the fresh-subscribe
+            // ordering so a consumer expecting the storage warning to follow
+            // the snapshot isn't disturbed.
+            let _ = tx.send(Event::SnippetKeepMine {
+                targets: snippet_keepmine,
+            });
             config.event_metrics.record_bus_lag_recovery();
         }
         Err(e) => {
@@ -1564,6 +1573,7 @@ pub async fn dispatch_command(
                     })
                     .collect::<Vec<_>>()
             };
+            let snippet_keepmine = client_kv.snippet_keepmine;
             let _ = tx.send(Event::Snapshot {
                 workspaces: workspaces.values,
                 terminals,
@@ -1634,6 +1644,14 @@ pub async fn dispatch_command(
                     lazybox_core::AutoFixSettings::default()
                 }
             };
+            // Snippet keep-mine acknowledgements are post-snapshot
+            // scaffolding like ViewerIdentities — sent after the snapshot and
+            // its recovery/restart notices so consumers that expect those to
+            // immediately follow the snapshot aren't disturbed, but BEFORE
+            // AutoFixPolicyConfig so that stays the end-of-replay marker (#1312).
+            let _ = tx.send(Event::SnippetKeepMine {
+                targets: snippet_keepmine,
+            });
             // Keep the auto-fix policy as the last post-subscribe push so
             // existing consumers can use it as the end-of-replay marker.
             let _ = tx.send(Event::AutoFixPolicyConfig {
@@ -1990,6 +2008,13 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::SetUpdateDismissal { target } => {
             client_kv::set_update_dismissal(config, target).await;
+        }
+        lazybox_ipc::Command::SetSnippetKeepMine { target } => {
+            // Persist, then broadcast the updated set so every attached
+            // client (in-process or `--connect`) silences the nudge for the
+            // kept override, matching the update-dismissal flow (#1312).
+            let targets = client_kv::set_snippet_keepmine(config, target).await;
+            let _ = config.bus.send(Event::SnippetKeepMine { targets });
         }
         lazybox_ipc::Command::ResumeAgent { terminal_id } => {
             agent_auth::resume_agent(config, terminal_id).await;

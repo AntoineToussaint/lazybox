@@ -12,4 +12,18 @@ export type PickerRow = { key: string, description: string, category: string, bo
  * trivially serializable for the desktop; the picker only ever
  * displays it.
  */
-origin: string, };
+origin: string,
+/**
+ * Override-state badge — `"custom"` / `"= built-in"` / `"override"` /
+ * `"⚠ built-in changed"` / `""` (#1312). A plain string for the same
+ * serialization reason as `origin`; derived from
+ * [`lazybox_config::SnippetState::badge`]. Defaulted so the desktop and
+ * older callers stay source-compatible.
+ */
+badge: string,
+/**
+ * Whether the badge is a reconcile nudge (a stale fork or a redundant
+ * copy), so the picker can color it as attention-worthy rather than
+ * mere provenance.
+ */
+attention: boolean, };

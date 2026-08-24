@@ -43,15 +43,19 @@ pub struct BrowserRow {
     description: String,
     body: String,
     origin: SnippetOrigin,
+    /// Override-state relative to the built-in library (#1312), rendered as
+    /// a badge alongside `[origin]`.
+    state: lazybox_config::SnippetState,
 }
 
 impl BrowserRow {
-    pub fn new(key: &str, snippet: &Snippet) -> Self {
+    pub fn new(key: &str, snippet: &Snippet, state: lazybox_config::SnippetState) -> Self {
         Self {
             key: key.to_string(),
             description: snippet.description.clone(),
             body: snippet.dispatch_body(),
             origin: snippet.origin,
+            state,
         }
     }
 }
@@ -117,6 +121,21 @@ impl SnippetBrowser {
                 head.push(Span::styled(
                     format!("[{origin}]"),
                     Style::default().fg(theme.text_dim).italic(),
+                ));
+            }
+            // Override-state badge (#1312): a stale fork or redundant copy is
+            // colored as a nudge; a plain "override"/"custom" is dim.
+            let badge = r.state.badge();
+            if !badge.is_empty() {
+                let color = if r.state.needs_attention() {
+                    theme.warn
+                } else {
+                    theme.text_dim
+                };
+                head.push(Span::raw("  "));
+                head.push(Span::styled(
+                    badge.to_string(),
+                    Style::default().fg(color).italic(),
                 ));
             }
             lines.extend(wrap_one(Line::from(head), width));
@@ -240,6 +259,7 @@ mod tests {
                     provider: None,
                     origin: SnippetOrigin::BuiltIn,
                 },
+                lazybox_config::SnippetState::Builtin,
             ),
             BrowserRow::new(
                 "rev",
@@ -251,6 +271,7 @@ mod tests {
                     provider: None,
                     origin: SnippetOrigin::Global,
                 },
+                lazybox_config::SnippetState::OverrideStale,
             ),
         ]
     }
@@ -296,6 +317,11 @@ mod tests {
         );
         assert!(out.contains("[built-in]"), "missing origin tag: {out}");
         assert!(out.contains("[global]"), "missing origin tag: {out}");
+        // The stale-override badge renders next to its origin (#1312).
+        assert!(
+            out.contains("built-in changed"),
+            "missing override-state badge: {out}"
+        );
     }
 
     #[test]
@@ -319,6 +345,9 @@ mod tests {
                     provider: None,
                     origin: SnippetOrigin::Global,
                 },
+                // No badge: this test exercises body wrapping, not the
+                // override badge (which would widen the heading).
+                lazybox_config::SnippetState::Builtin,
             )],
             ']',
         );

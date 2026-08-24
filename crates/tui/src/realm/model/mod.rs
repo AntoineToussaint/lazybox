@@ -1086,6 +1086,17 @@ pub enum Msg {
     /// `e` pressed in the snippets browser — close it and open the
     /// global snippets YAML in the user's editor (#237).
     OpenSnippetsFile,
+    /// `Ctrl-D` on a snippet row — compare a user override against the
+    /// current built-in body in a reader modal (#1312). Carries the key.
+    SnippetCompare(String),
+    /// `Ctrl-K` on a snippet row — "keep mine": acknowledge the override
+    /// against the current built-in so the "built-in changed" nudge stays
+    /// silenced until the built-in changes again (#1312). Carries the key.
+    SnippetKeepMine(String),
+    /// `Ctrl-A` on a snippet row — "adopt built-in": drop a global user
+    /// override so the (improved) built-in shows through on reload (#1312).
+    /// Carries the key.
+    SnippetAdopt(String),
     /// `a` in the Settings editors panel (#1102) — start the add-editor
     /// input flow (id → launch command).
     EditorAdd,
@@ -2029,6 +2040,13 @@ pub struct Model<T: TerminalAdapter> {
     /// `Event::Snapshot` (#548). `show_update_if_new` checks membership so
     /// a dismissed target never re-mounts the startup modal.
     dismissed_updates: Vec<String>,
+    /// Snippet-override "keep mine" acknowledgements
+    /// (`snippet:<key>:<builtin-content-hash>`), seeded from
+    /// `Event::SnippetKeepMine` and updated on each keep-mine action
+    /// (#1312). Classification reads this to decide whether an override
+    /// that differs from the built-in is an intentional up-to-date fork
+    /// (`OverrideCurrent`) or a possibly-stale one (`OverrideStale`).
+    snippet_keepmine: Vec<String>,
     /// The update the build guard found, stashed until the first snapshot
     /// lands so the dismissal check runs against the daemon's authoritative
     /// `dismissed_updates` rather than an empty set (#548). Not a
@@ -2445,6 +2463,7 @@ impl<T: TerminalAdapter> Model<T> {
             recent_snippets: Vec::new(),
             recent_skills: Vec::new(),
             dismissed_updates: Vec::new(),
+            snippet_keepmine: Vec::new(),
             pending_update: None,
             snapshot_seen: false,
             theme_picker_prev: None,
@@ -3276,12 +3295,35 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// The provider-scoped picker rows fed to `mount_snippet_picker`.
     /// Split out so its test exercises the filter the picker actually shows.
+    /// Each row carries its override-state badge (#1312).
     fn scoped_picker_rows(&self) -> Vec<crate::realm::components::snippet_picker::PickerRow> {
         use crate::realm::components::snippet_picker::PickerRow;
+        let builtins = lazybox_config::Snippets::builtin();
         self.scoped_snippets()
             .into_iter()
-            .map(|(key, snippet)| PickerRow::new(key, snippet))
+            .map(|(key, snippet)| {
+                PickerRow::classified(key, snippet, self.snippet_state(key, snippet, &builtins))
+            })
             .collect()
+    }
+
+    /// Classify one merged-catalog entry against the built-in library and
+    /// the user's keep-mine acknowledgements (#1312). The daemon never
+    /// sees snippet bodies, so this is purely client-side: the shadowed
+    /// built-in body comes from [`lazybox_config::Snippets::builtin`], not
+    /// the merged catalog (which retains only the winning override).
+    pub(crate) fn snippet_state(
+        &self,
+        key: &str,
+        active: &lazybox_config::Snippet,
+        builtins: &lazybox_config::Snippets,
+    ) -> lazybox_config::SnippetState {
+        let builtin = builtins.get(key);
+        let kept = builtin.is_some_and(|b| {
+            let target = lazybox_config::keep_mine_target(key, &b.content_hash());
+            self.snippet_keepmine.iter().any(|t| t == &target)
+        });
+        lazybox_config::classify_snippet(active, builtin, kept)
     }
 
     /// Mount the skills picker (`]]l`, issue #797): the Claude Code skills
@@ -3342,6 +3384,9 @@ impl<T: TerminalAdapter> Model<T> {
                 category: skill.scope.label().to_string(),
                 body: skill.description,
                 origin: String::new(),
+                // Skills aren't overrides of built-in snippets — no badge.
+                badge: String::new(),
+                attention: false,
             })
             .collect();
         let picker = SnippetPicker::new(rows, initial_filter)
@@ -3547,15 +3592,123 @@ impl<T: TerminalAdapter> Model<T> {
         // (#868), so the two surfaces agree on what's relevant here; opened
         // from Settings with no session focused, `scoped_snippets` returns
         // the whole catalog.
+        let builtins = lazybox_config::Snippets::builtin();
         let rows: Vec<BrowserRow> = self
             .scoped_snippets()
             .into_iter()
-            .map(|(k, v)| BrowserRow::new(k, v))
+            .map(|(k, v)| BrowserRow::new(k, v, self.snippet_state(k, v, &builtins)))
             .collect();
         self.mount_modal(
             Id::SnippetBrowser,
             SnippetBrowser::new(rows, self.ui_defaults.terminal_escape_char),
         );
+    }
+
+    /// `Ctrl-D` in the snippet picker: show the highlighted override next to
+    /// the current built-in in a scrollable reader modal so the user can see
+    /// exactly what diverged (#1312). Reuses the markdown reader mounted for
+    /// PR descriptions; dismissing it returns to the picker.
+    fn compare_snippet_override(&mut self, key: &str) {
+        let builtins = lazybox_config::Snippets::builtin();
+        let Some(builtin) = builtins.get(key) else {
+            self.flash_info(format!("`{key}` has no built-in to compare against"));
+            return;
+        };
+        let Some(active) = self.snippets.get(key) else {
+            self.flash_info(format!("`{key}` is not in the catalog"));
+            return;
+        };
+        if active.origin == lazybox_config::SnippetOrigin::BuiltIn {
+            self.flash_info(format!("`{key}` is the built-in — nothing to compare"));
+            return;
+        }
+        let md = format!(
+            "## Your override (`{origin}`)\n\n```\n{yours}\n```\n\n## Current built-in\n\n```\n{builtin_body}\n```\n",
+            origin = active.origin.label(),
+            yours = active.body.trim(),
+            builtin_body = builtin.body.trim(),
+        );
+        self.mount_modal(
+            Id::DescriptionModal,
+            crate::realm::components::markdown_modal::MarkdownModal::new(
+                format!("Compare ]{key}"),
+                md,
+            ),
+        );
+    }
+
+    /// `Ctrl-K` in the snippet picker: acknowledge ("keep mine") the
+    /// highlighted override against the current built-in body, silencing the
+    /// "built-in changed" nudge until the built-in changes again (#1312).
+    fn keep_mine_snippet_override(&mut self, key: &str) {
+        let builtins = lazybox_config::Snippets::builtin();
+        let Some(builtin) = builtins.get(key) else {
+            self.flash_info(format!("`{key}` has no built-in — nothing to keep"));
+            return;
+        };
+        let Some(active) = self.snippets.get(key) else {
+            return;
+        };
+        if !self.snippet_state(key, active, &builtins).is_override() {
+            self.flash_info(format!("`{key}` isn't an override — nothing to keep"));
+            return;
+        }
+        let target = lazybox_config::keep_mine_target(key, &builtin.content_hash());
+        if !self.snippet_keepmine.iter().any(|t| t == &target) {
+            self.snippet_keepmine.push(target.clone());
+        }
+        self.send_cmd(lazybox_ipc::Command::SetSnippetKeepMine { target });
+        self.flash_info(format!("kept `{key}` — built-in-changed nudge silenced"));
+        self.refresh_open_snippet_picker();
+    }
+
+    /// `Ctrl-A` in the snippet picker: "adopt built-in" — drop a *global*
+    /// user override so the (improved) built-in shows through on reload
+    /// (#1312). A repo-local override lives in a shared checked-in file, so
+    /// it's not auto-edited — the user is pointed at the file instead.
+    fn adopt_builtin_snippet(&mut self, key: &str) {
+        if lazybox_config::Snippets::builtin().get(key).is_none() {
+            self.flash_info(format!("`{key}` has no built-in to adopt"));
+            return;
+        }
+        let Some(origin) = self.snippets.get(key).map(|s| s.origin) else {
+            return;
+        };
+        match origin {
+            lazybox_config::SnippetOrigin::BuiltIn => {
+                self.flash_info(format!("`{key}` is already the built-in"));
+            }
+            lazybox_config::SnippetOrigin::Global => {
+                match lazybox_config::Snippets::delete_global_snippet(key) {
+                    Ok(()) => {
+                        self.apply_snippets(lazybox_config::Snippets::load_for_launch_dir(
+                            std::env::current_dir().ok().as_deref(),
+                        ));
+                        self.flash_info(format!(
+                            "adopted built-in `{key}` (dropped your override)"
+                        ));
+                        self.refresh_open_snippet_picker();
+                    }
+                    Err(e) => self.flash_error(format!("couldn't adopt `{key}`: {e}")),
+                }
+            }
+            lazybox_config::SnippetOrigin::Repo | lazybox_config::SnippetOrigin::Unknown => {
+                self.flash_info(format!(
+                    "`{key}` is a repo-local override — edit .lazybox/snippets.yaml to adopt"
+                ));
+            }
+        }
+    }
+
+    /// Re-mount the snippet picker with freshly-classified rows so a
+    /// keep-mine or adopt is reflected immediately (badge cleared, or the
+    /// adopted row now showing the built-in). No-op unless the picker is the
+    /// top modal.
+    fn refresh_open_snippet_picker(&mut self) {
+        if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
+            self.pop_modal();
+            self.mount_snippet_picker(String::new());
+        }
     }
 
     /// Mount the fuzzy workspace switcher (`JumpToWorkspace`). Rows are
@@ -6422,6 +6575,9 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 self.open_snippets_file();
             }
+            Msg::SnippetCompare(key) => self.compare_snippet_override(&key),
+            Msg::SnippetKeepMine(key) => self.keep_mine_snippet_override(&key),
+            Msg::SnippetAdopt(key) => self.adopt_builtin_snippet(&key),
             Msg::EditorAdd => self.start_editor_add(),
             Msg::EditorEdit(id) => self.start_editor_edit(&id),
             Msg::EditorRemove(id) => self.prompt_remove_editor(id),

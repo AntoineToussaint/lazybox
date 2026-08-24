@@ -3084,6 +3084,85 @@ snippets:
         assert_eq!(rev.body, "please review");
     }
 
+    /// A global override that differs from the built-in classifies as
+    /// stale, and "keep mine" flips it to an intentional up-to-date
+    /// override, recording the built-in-hashed target locally (#1312).
+    #[test]
+    fn snippet_keep_mine_flips_stale_override_to_current() {
+        let mut m = build_model();
+        // Built-in library plus a global `rev` override whose body differs.
+        let overlay = snippets_from_yaml(
+            "keep-mine",
+            "snippets:\n  rev:\n    body: my custom review\n",
+        );
+        m.apply_snippets(lazybox_config::Snippets::merged(
+            lazybox_config::Snippets::builtin(),
+            overlay,
+        ));
+
+        let builtins = lazybox_config::Snippets::builtin();
+        let active = m.snippets.get("rev").expect("rev override").clone();
+        assert_eq!(
+            m.snippet_state("rev", &active, &builtins),
+            lazybox_config::SnippetState::OverrideStale,
+            "an un-acknowledged divergent override is stale",
+        );
+
+        m.keep_mine_snippet_override("rev");
+
+        let target = lazybox_config::keep_mine_target(
+            "rev",
+            &builtins.get("rev").expect("built-in rev").content_hash(),
+        );
+        assert!(
+            m.snippet_keepmine.contains(&target),
+            "keep-mine records the built-in-hashed target locally",
+        );
+        assert_eq!(
+            m.snippet_state("rev", &active, &builtins),
+            lazybox_config::SnippetState::OverrideCurrent,
+            "after keep-mine the override is an intentional, up-to-date fork",
+        );
+    }
+
+    /// "Adopt built-in" drops a global override so the built-in shows
+    /// through on the next catalog load (#1312).
+    #[test]
+    fn snippet_adopt_reports_repo_override_is_not_auto_editable() {
+        let mut m = build_model();
+        // A repo-local override can't be auto-dropped (shared checked-in
+        // file); adopt should decline gracefully rather than edit it.
+        let tmp = std::env::temp_dir().join(format!(
+            "lazybox-adopt-repo-{}/.lazybox",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("snippets.yaml"),
+            "snippets:\n  rev:\n    body: repo rev\n",
+        )
+        .unwrap();
+        let repo = lazybox_config::Snippets::load_from(
+            &tmp.join("snippets.yaml"),
+            lazybox_config::SnippetOrigin::Repo,
+        )
+        .unwrap();
+        m.apply_snippets(lazybox_config::Snippets::merged(
+            lazybox_config::Snippets::builtin(),
+            repo,
+        ));
+
+        // Should not panic and should leave the override in place (repo
+        // files aren't auto-edited).
+        m.adopt_builtin_snippet("rev");
+        assert_eq!(
+            m.snippets.get("rev").expect("rev").origin,
+            lazybox_config::SnippetOrigin::Repo,
+            "a repo-local override is left untouched by adopt",
+        );
+        let _ = std::fs::remove_dir_all(tmp.parent().unwrap());
+    }
+
     /// Build a model with N seeded workspaces (`github:o/r#1..N`) and
     /// one terminal per `Some(kind)` entry (terminal ids 1..N, index-
     /// aligned with the workspaces). Returns the workspace session

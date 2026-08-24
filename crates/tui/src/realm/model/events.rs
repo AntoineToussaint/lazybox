@@ -1181,6 +1181,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentCreditExhausted { .. }
                 | IpcEvent::WorkspaceCreated { .. }
                 | IpcEvent::ErrorInbox { .. }
+                | IpcEvent::SnippetKeepMine { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -1372,6 +1373,14 @@ impl<T: TerminalAdapter> Model<T> {
             self.seed_recent_snippets_from_snapshot(recent_snippets.clone());
             self.snapshot_seen = true;
             self.maybe_show_pending_update();
+        }
+
+        // Snippet-override keep-mine acknowledgements ride their own event
+        // right after the snapshot (and re-broadcast on every keep-mine),
+        // so the picker/browser badges reflect the shared, persisted set
+        // across in-process and `--connect` clients (#1312).
+        if let IpcEvent::SnippetKeepMine { targets } = &event {
+            self.snippet_keepmine = targets.clone();
         }
 
         // A broadcast-lag recovery `Snapshot` stands in for the events
@@ -2054,6 +2063,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::AgentCreditExhausted { .. }
             | IpcEvent::WorkspaceCreated { .. }
             | IpcEvent::ErrorInbox { .. }
+            | IpcEvent::SnippetKeepMine { .. }
             | IpcEvent::ResourcePosture(..) => {}
         }
         // Background-poll indicator. Lights up whenever the daemon
@@ -2330,6 +2340,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentCreditExhausted { .. }
                 | IpcEvent::WorkspaceCreated { .. }
                 | IpcEvent::ErrorInbox { .. }
+                | IpcEvent::SnippetKeepMine { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }

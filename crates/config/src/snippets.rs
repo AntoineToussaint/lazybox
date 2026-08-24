@@ -167,6 +167,100 @@ impl SnippetOrigin {
     }
 }
 
+/// How a merged-catalog entry relates to the built-in library (#1312).
+///
+/// A user override silently shadows the built-in of the same key, so a
+/// once-forked snippet never sees later built-in improvements and the
+/// user has no signal they're on a stale copy. This classification
+/// drives the picker/browser badge and which reconcile actions apply.
+/// It is computed client-side by [`classify_snippet`] — the daemon never
+/// sees snippet bodies, only the opaque "keep mine" acknowledgement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnippetState {
+    /// The active entry is the shipped built-in — not overridden.
+    Builtin,
+    /// A user snippet with no built-in of the same key — purely custom,
+    /// nothing to reconcile.
+    Custom,
+    /// A user override whose body is byte-for-byte (whitespace-normalized)
+    /// the current built-in — a redundant copy that can be dropped so the
+    /// built-in tracks forward automatically.
+    Redundant,
+    /// A user override that differs from the built-in and has been
+    /// acknowledged against the *current* built-in body ("keep mine") —
+    /// an intentional, up-to-date fork.
+    OverrideCurrent,
+    /// A user override that differs from the built-in and has *not* been
+    /// acknowledged against the current built-in — either never
+    /// reconciled, or the built-in has moved since it was. The fork may
+    /// be stale and is worth a look.
+    OverrideStale,
+}
+
+impl SnippetState {
+    /// Short picker/browser badge. Empty for a plain built-in (the
+    /// unremarkable default).
+    pub fn badge(self) -> &'static str {
+        match self {
+            SnippetState::Builtin => "",
+            SnippetState::Custom => "custom",
+            SnippetState::Redundant => "= built-in",
+            SnippetState::OverrideCurrent => "override",
+            SnippetState::OverrideStale => "⚠ built-in changed",
+        }
+    }
+
+    /// Whether this state warrants a reconcile nudge — a stale fork or a
+    /// redundant copy the user probably wants to drop.
+    pub fn needs_attention(self) -> bool {
+        matches!(self, SnippetState::OverrideStale | SnippetState::Redundant)
+    }
+
+    /// Whether the row is a user override of a built-in, i.e. the
+    /// compare / adopt / keep-mine actions apply to it.
+    pub fn is_override(self) -> bool {
+        matches!(
+            self,
+            SnippetState::Redundant | SnippetState::OverrideCurrent | SnippetState::OverrideStale
+        )
+    }
+}
+
+/// Classify a merged-catalog entry against the built-in library (#1312).
+///
+/// `builtin` is the shipped entry of the same key (`None` when the key is
+/// purely custom); `kept` is whether the user has acknowledged this
+/// override against the *current* built-in body (membership of
+/// [`keep_mine_target`] in the daemon-persisted keep-mine set). Pure and
+/// side-effect-free so it is trivially testable and can run on every
+/// render.
+pub fn classify_snippet(active: &Snippet, builtin: Option<&Snippet>, kept: bool) -> SnippetState {
+    if active.origin == SnippetOrigin::BuiltIn {
+        return SnippetState::Builtin;
+    }
+    match builtin {
+        None => SnippetState::Custom,
+        Some(b) => {
+            if active.content_hash() == b.content_hash() {
+                SnippetState::Redundant
+            } else if kept {
+                SnippetState::OverrideCurrent
+            } else {
+                SnippetState::OverrideStale
+            }
+        }
+    }
+}
+
+/// The "keep mine" acknowledgement target for a snippet override, keyed
+/// by the built-in body it was reconciled against so a *later* built-in
+/// change re-raises the nudge — mirroring the update-guard dismissal
+/// target, where "a newer target is never covered by an older
+/// dismissal" (#1312).
+pub fn keep_mine_target(key: &str, builtin_hash: &str) -> String {
+    format!("snippet:{key}:{builtin_hash}")
+}
+
 impl Snippet {
     /// Normalize `skill` to uphold its invariant: trim surrounding
     /// whitespace, and collapse a blank value to `None`. A user file with
@@ -229,6 +323,24 @@ impl Snippet {
                 }
             }
         }
+    }
+
+    /// Stable content hash of the body, whitespace-normalized so
+    /// reflowing or re-indenting the YAML block doesn't change it (#1312).
+    /// Used to tell a user override apart from the built-in it shadows and
+    /// to detect when a built-in body has moved since the user last
+    /// reconciled. FNV-1a/64 rendered as hex — deterministic across
+    /// platforms and builds, unlike `std`'s `DefaultHasher`. Body only:
+    /// overriding just the `description`/`category`/binding is not a body
+    /// divergence.
+    pub fn content_hash(&self) -> String {
+        let normalized = self.body.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in normalized.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        format!("{hash:016x}")
     }
 }
 
@@ -1357,6 +1469,46 @@ impl Snippets {
             ),
         ]);
         Self { by_key }
+    }
+
+    /// Remove `key` from the global `<lazybox_home>/snippets.yaml` — the
+    /// inverse of [`Self::upsert_global_snippet`]. A missing file or a
+    /// missing key is a no-op success. Used by the #1312 "adopt built-in"
+    /// action: dropping a user override lets the (improved) built-in show
+    /// through on the next catalog reload.
+    pub fn delete_global_snippet(key: &str) -> Result<(), SnippetsError> {
+        Self::delete_snippet_at(&Self::default_global_path(), key)
+    }
+
+    /// The path-parameterized core of [`Self::delete_global_snippet`],
+    /// split out so tests exercise it without touching the real
+    /// `LAZYBOX_HOME`. Round-trips through `serde_yaml::Value` (so YAML
+    /// comments are not preserved, matching [`Self::upsert_snippet_at`]),
+    /// and only rewrites the file when the key was actually present.
+    fn delete_snippet_at(path: &Path, key: &str) -> Result<(), SnippetsError> {
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        if raw.trim().is_empty() {
+            return Ok(());
+        }
+        let mut root: serde_yaml::Value = serde_yaml::from_str(&raw)?;
+        // A file that parsed to a non-mapping is not a snippets file we can
+        // safely edit — refuse rather than clobber it, like the upsert path.
+        let Some(map) = root.as_mapping_mut() else {
+            return Err(SnippetsError::NotAMapping(path.to_path_buf()));
+        };
+        let removed = map
+            .get_mut(serde_yaml::Value::from("snippets"))
+            .and_then(serde_yaml::Value::as_mapping_mut)
+            .map(|snippets| snippets.remove(serde_yaml::Value::from(key)).is_some())
+            .unwrap_or(false);
+        if removed {
+            write_yaml_atomically(path, &root)?;
+        }
+        Ok(())
     }
 
     /// Commented starter file written by the "Edit snippets" settings
@@ -2499,5 +2651,136 @@ snippets:
                 _ => assert_eq!(s.provider, None, "generic `{key}` stays unscoped"),
             }
         }
+    }
+
+    /// The content hash ignores whitespace/reflow but tracks the words,
+    /// so re-indenting a YAML block is invisible while an actual edit is
+    /// not (#1312).
+    #[test]
+    fn content_hash_is_whitespace_insensitive_and_body_sensitive() {
+        let a = snippet("Review", "d", "Review   the\n  diff carefully.");
+        let b = snippet("Review", "d", "Review the diff carefully.");
+        assert_eq!(a.content_hash(), b.content_hash(), "whitespace-normalized");
+
+        let c = snippet("Review", "d", "Review the diff sloppily.");
+        assert_ne!(a.content_hash(), c.content_hash(), "different words differ");
+
+        // Description/category are not part of the body hash.
+        let d = snippet("Other", "different desc", "Review the diff carefully.");
+        assert_eq!(a.content_hash(), d.content_hash(), "body only");
+    }
+
+    /// The full classification table (#1312): built-in, custom, redundant,
+    /// up-to-date override, stale override.
+    #[test]
+    fn classify_snippet_covers_every_state() {
+        let builtin = snippet("Review", "built-in rev", "Review the diff, hard.");
+
+        // The active entry IS the built-in → Builtin, regardless of `kept`.
+        let mut b = builtin.clone();
+        b.origin = SnippetOrigin::BuiltIn;
+        assert_eq!(
+            classify_snippet(&b, Some(&builtin), false),
+            SnippetState::Builtin,
+        );
+
+        // A user snippet with no matching built-in → Custom.
+        let mut custom = snippet("Review", "mine", "Something bespoke.");
+        custom.origin = SnippetOrigin::Global;
+        assert_eq!(classify_snippet(&custom, None, false), SnippetState::Custom);
+
+        // A user override identical to the built-in → Redundant.
+        let mut copy = builtin.clone();
+        copy.origin = SnippetOrigin::Global;
+        assert_eq!(
+            classify_snippet(&copy, Some(&builtin), false),
+            SnippetState::Redundant,
+        );
+
+        // A user override that differs, not acknowledged → OverrideStale.
+        let mut fork = snippet("Review", "mine", "Review the diff, my way.");
+        fork.origin = SnippetOrigin::Global;
+        assert_eq!(
+            classify_snippet(&fork, Some(&builtin), false),
+            SnippetState::OverrideStale,
+        );
+
+        // Same fork, acknowledged against the current built-in → OverrideCurrent.
+        assert_eq!(
+            classify_snippet(&fork, Some(&builtin), true),
+            SnippetState::OverrideCurrent,
+        );
+    }
+
+    /// The keep-mine target embeds the built-in hash so a later built-in
+    /// change produces a different target and re-raises the nudge.
+    #[test]
+    fn keep_mine_target_embeds_the_builtin_hash() {
+        assert_eq!(keep_mine_target("rev", "abc123"), "snippet:rev:abc123");
+        assert_ne!(
+            keep_mine_target("rev", "abc123"),
+            keep_mine_target("rev", "def456"),
+            "a changed built-in yields a fresh, un-dismissed target",
+        );
+    }
+
+    /// `needs_attention` / `is_override` gate the badge and the reconcile
+    /// actions correctly.
+    #[test]
+    fn snippet_state_predicates() {
+        assert!(SnippetState::OverrideStale.needs_attention());
+        assert!(SnippetState::Redundant.needs_attention());
+        assert!(!SnippetState::OverrideCurrent.needs_attention());
+        assert!(!SnippetState::Custom.needs_attention());
+        assert!(!SnippetState::Builtin.needs_attention());
+
+        assert!(SnippetState::OverrideStale.is_override());
+        assert!(SnippetState::OverrideCurrent.is_override());
+        assert!(SnippetState::Redundant.is_override());
+        assert!(!SnippetState::Custom.is_override());
+        assert!(!SnippetState::Builtin.is_override());
+    }
+
+    /// Deleting a global override removes just that key and preserves the
+    /// rest, so "adopt built-in" lets the built-in show through (#1312).
+    #[test]
+    fn delete_snippet_removes_key_and_preserves_siblings() {
+        let path = write_tmp(
+            "delete-key",
+            "snippets:\n  rev:\n    body: mine\n  keep:\n    body: keep me\n",
+        );
+        Snippets::delete_snippet_at(&path, "rev").expect("delete succeeds");
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).expect("reloads");
+        assert!(loaded.get("rev").is_none(), "override dropped");
+        assert_eq!(loaded.get("keep").expect("sibling").body, "keep me");
+    }
+
+    /// Deleting a missing key or a missing file is a no-op success — the
+    /// adopt action never errors just because there's nothing to drop.
+    #[test]
+    fn delete_snippet_is_a_noop_when_absent() {
+        let path = write_tmp("delete-absent", "snippets:\n  other:\n    body: x\n");
+        Snippets::delete_snippet_at(&path, "rev").expect("missing key is a no-op");
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).expect("reloads");
+        assert!(loaded.get("other").is_some(), "untouched");
+
+        Snippets::delete_snippet_at(
+            &PathBuf::from("/nonexistent/snippets-delete-missing.yaml"),
+            "rev",
+        )
+        .expect("missing file is a no-op");
+    }
+
+    /// A non-mapping file is refused, not clobbered — same guard as upsert.
+    #[test]
+    fn delete_snippet_refuses_a_non_mapping_file() {
+        let path = write_tmp("delete-non-mapping", "- one\n- two\n");
+        let err =
+            Snippets::delete_snippet_at(&path, "rev").expect_err("non-mapping must be refused");
+        assert!(matches!(err, SnippetsError::NotAMapping(_)));
+        assert!(
+            std::fs::read_to_string(&path).unwrap().contains("- one"),
+            "original content intact",
+        );
     }
 }

@@ -10,7 +10,10 @@ pub use skills::{
     Skill, SkillError, SkillScope, discover_skills, scaffold_skill, skill_md_path,
     validate_skill_name,
 };
-pub use snippets::{Snippet, SnippetOrigin, Snippets, SnippetsError};
+pub use snippets::{
+    Snippet, SnippetOrigin, SnippetState, Snippets, SnippetsError, classify_snippet,
+    keep_mine_target,
+};
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

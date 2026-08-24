@@ -2082,13 +2082,26 @@ impl<T: TerminalAdapter> Model<T> {
                 let Some(ws) = self.sidebar.selected_workspace() else {
                     return cmds;
                 };
-                if ws.pr.is_none() && ws.gh_issues.is_empty() {
-                    self.flash_info("nothing to sync on this workspace");
+                // No tracked PR/issue: if the workspace is scoped to a github
+                // repo (a taskless / pre-PR workspace), sync discovers that
+                // repo's open issues + PRs daemon-side; only a workspace with
+                // no repo scope at all has genuinely nothing to sync.
+                let has_repo_scope = ws
+                    .project_key
+                    .as_ref()
+                    .is_some_and(|key| key.unambiguous_github_slug().is_some());
+                if ws.pr.is_none() && ws.gh_issues.is_empty() && !has_repo_scope {
+                    self.flash_info("nothing to sync — this workspace has no PR, issue, or repo");
                     return cmds;
                 }
+                let syncing_repo = ws.pr.is_none() && ws.gh_issues.is_empty();
                 let workspace_key = ws.key.clone();
                 cmds.push(IpcCommand::SyncWorkspace { workspace_key });
-                self.flash_hint("syncing…");
+                self.flash_hint(if syncing_repo {
+                    "syncing repo — fetching its open issues & PRs…"
+                } else {
+                    "syncing…"
+                });
             }
             Action::CyclePane => {
                 // The keyboard path normally consumes the chord in

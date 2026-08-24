@@ -3676,6 +3676,46 @@ impl GhClient {
         Ok(tasks)
     }
 
+    /// User-initiated repo sync (`g s` on a repo-scoped workspace, #NNNN):
+    /// fetch a single repo's OPEN issues **and** PRs and return them as
+    /// tasks. Deliberately NOT gated on `involves:me` / `is:pr` the way the
+    /// background poll is — the poll only surfaces a watched repo's *PRs*
+    /// and issues that involve you, so a repo's plain open issues never
+    /// reach the inbox on their own. This is the explicit "get me this
+    /// repo's work" action, so it pulls both. First page only (up to the
+    /// search node cap) — plenty for a `g s`, and cheap.
+    pub async fn fetch_repo_open_tasks(&self, repo: &str) -> Result<Vec<Task>, GhError> {
+        // Open PRs — same shape as the round-robin/watched-repo branch.
+        let mut tasks = self
+            .fetch_pr_single_query(
+                "repo sync",
+                format!("is:open is:pr repo:{repo} archived:false"),
+            )
+            .await?;
+
+        // Open issues in the repo, repo-scoped rather than involves-scoped.
+        self.acquire_or_block("repo sync")?;
+        let mut quals = graphql::default_issues_qualifiers();
+        quals.push(format!("repo:{repo}"));
+        let body = graphql::issues_query_body(&graphql::build_issues_query(&quals), None);
+        let response: graphql::GqlIssueResponse =
+            self.post_graphql_with_retry("repo sync", &body).await?;
+        if let Some(errors) = &response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.message.clone())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(GhError::Graphql(joined));
+        }
+        if let Some(data) = response.data {
+            for issue in &data.search.nodes {
+                tasks.push(graphql::issue_to_task(issue, &self.user));
+            }
+        }
+        Ok(tasks)
+    }
+
     /// Same as `fetch_all_issues` but also scans each raw issue for
     /// `@lazybox` mentions from `allowed_logins` and returns the
     /// resulting [`crate::LazyboxMention`] list. Done in one pass so we

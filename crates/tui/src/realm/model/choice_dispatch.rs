@@ -488,6 +488,10 @@ impl<T: TerminalAdapter> Model<T> {
                         }),
                         resume_latest: true,
                         access: lazybox_ipc::AgentRunAccess::ReadOnly,
+                        // Step 1: the handoff-generation run uses the agent's
+                        // default model; escalating the Critic to a stronger
+                        // tier is the next step (#1312 follow-up).
+                        model_alias: None,
                     });
                     self.flash_info(format!(
                         "asking {} to author a {} handoff…",

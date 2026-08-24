@@ -1818,6 +1818,7 @@ pub async fn dispatch_command(
             initial_input,
             resume_latest,
             access,
+            model_alias,
         } => {
             agent_runs::handle_start_agent_run(
                 config,
@@ -1831,6 +1832,7 @@ pub async fn dispatch_command(
                 initial_input,
                 resume_latest,
                 access,
+                model_alias,
             )
             .await;
         }

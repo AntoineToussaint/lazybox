@@ -2,6 +2,8 @@
 // crate-wide blocking-call ban in clippy.toml targets the run loop.
 #![allow(clippy::disallowed_methods)]
 
+use std::sync::Arc;
+
 /// Serializes tests that mutate the process-global `LAZYBOX_HOME` so a
 /// parallel test can't observe another's temp home (or the real one).
 /// Shared across every test module in this binary — a per-module lock
@@ -6033,7 +6035,7 @@ mod input_starvation_tests {
         for seq in 0..n {
             tx.try_send(Event::TerminalOutput {
                 terminal_id: TerminalId(1),
-                bytes: b"streaming output chunk\n".to_vec(),
+                bytes: Arc::<[u8]>::from(b"streaming output chunk\n".to_vec()),
                 first_seq: seq as u64,
                 seq: seq as u64,
             })
@@ -6324,7 +6326,7 @@ mod wake_tests {
     fn daemon_event(seq: u64) -> Event {
         Event::TerminalOutput {
             terminal_id: TerminalId(1),
-            bytes: b"echo".to_vec(),
+            bytes: Arc::<[u8]>::from(b"echo".to_vec()),
             first_seq: seq,
             seq,
         }
@@ -12325,7 +12327,7 @@ mod daemon_event_fastpath_tests {
         m.redraw = false;
         m.handle_daemon_event(IpcEvent::TerminalOutput {
             terminal_id: TerminalId(99),
-            bytes: b"background noise".to_vec(),
+            bytes: Arc::<[u8]>::from(b"background noise".to_vec()),
             first_seq: 1,
             seq: 1,
         });
@@ -12352,7 +12354,7 @@ mod daemon_event_fastpath_tests {
         m.redraw = false;
         m.handle_daemon_event(IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
-            bytes: b"$ ls\n".to_vec(),
+            bytes: Arc::<[u8]>::from(b"$ ls\n".to_vec()),
             first_seq: 1,
             seq: 1,
         });
@@ -12556,7 +12558,7 @@ mod wheel_routing_tests {
 
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
-            bytes: b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec(),
+            bytes: Arc::<[u8]>::from(b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec()),
             first_seq: 1,
             seq: 1,
         });
@@ -12628,7 +12630,7 @@ mod wheel_routing_tests {
         }
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
-            bytes,
+            bytes: Arc::<[u8]>::from(bytes),
             first_seq: 1,
             seq: 1,
         });
@@ -12662,7 +12664,7 @@ mod wheel_routing_tests {
             if agent_id == "claude" {
                 m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
                     terminal_id: TerminalId(7),
-                    bytes: b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec(),
+                    bytes: Arc::<[u8]>::from(b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec()),
                     first_seq: 1,
                     seq: 1,
                 });
@@ -12676,7 +12678,7 @@ mod wheel_routing_tests {
                 bytes.extend_from_slice(&history);
                 m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
                     terminal_id: TerminalId(7),
-                    bytes,
+                    bytes: Arc::<[u8]>::from(bytes),
                     first_seq: 1,
                     seq: 1,
                 });
@@ -12711,7 +12713,7 @@ mod wheel_routing_tests {
 
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
-            bytes: b"\x1b[?1002h\x1b[?1006h".to_vec(),
+            bytes: Arc::<[u8]>::from(b"\x1b[?1002h\x1b[?1006h".to_vec()),
             first_seq: 1,
             seq: 1,
         });
@@ -12731,7 +12733,7 @@ mod wheel_routing_tests {
         }
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(7),
-            bytes,
+            bytes: Arc::<[u8]>::from(bytes),
             first_seq: 2,
             seq: 2,
         });
@@ -13366,7 +13368,7 @@ mod leader_tile_tests {
             }
             m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
                 terminal_id: TerminalId(id),
-                bytes,
+                bytes: Arc::<[u8]>::from(bytes),
                 first_seq: 1,
                 seq: 1,
             });
@@ -13446,7 +13448,7 @@ mod leader_tile_tests {
 
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(2),
-            bytes: b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec(),
+            bytes: Arc::<[u8]>::from(b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec()),
             first_seq: 1,
             seq: 1,
         });
@@ -13619,7 +13621,9 @@ mod leader_tile_tests {
         while server.rx.try_recv().is_ok() {}
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(1),
-            bytes: b"see https://a.example.com and https://b.example.com\r\n".to_vec(),
+            bytes: Arc::<[u8]>::from(
+                b"see https://a.example.com and https://b.example.com\r\n".to_vec(),
+            ),
             first_seq: 1,
             seq: 1,
         });
@@ -13641,7 +13645,7 @@ mod leader_tile_tests {
         while server.rx.try_recv().is_ok() {}
         m.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(1),
-            bytes: b"no links here\r\n".to_vec(),
+            bytes: Arc::<[u8]>::from(b"no links here\r\n".to_vec()),
             first_seq: 1,
             seq: 1,
         });
@@ -13907,7 +13911,7 @@ mod terminal_url_mouse_tests {
     fn feed(model: &mut TestModel, terminal_id: u64, bytes: Vec<u8>) {
         model.terminals.on_daemon_event(&IpcEvent::TerminalOutput {
             terminal_id: TerminalId(terminal_id),
-            bytes,
+            bytes: Arc::<[u8]>::from(bytes),
             first_seq: 1,
             seq: 1,
         });
@@ -16511,7 +16515,7 @@ mod focus_mode_tests {
         for seq in 0..20 {
             m.handle_daemon_event(IpcEvent::TerminalOutput {
                 terminal_id: TerminalId(1),
-                bytes: b"codex spinner churn...\r\n".to_vec(),
+                bytes: Arc::<[u8]>::from(b"codex spinner churn...\r\n".to_vec()),
                 first_seq: seq,
                 seq,
             });

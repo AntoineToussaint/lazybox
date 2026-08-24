@@ -215,7 +215,10 @@
             "last_commenter": null,
             "linked_tasks": [],
             "merge_blocked": false,
-            "mergeable": "Mergeable",
+            "mergeable": {
+              "observed_at": "2026-08-24T14:41:33.516429Z",
+              "state": "Mergeable"
+            },
             "needs_reply": false,
             "node_id": null,
             "parent": null,

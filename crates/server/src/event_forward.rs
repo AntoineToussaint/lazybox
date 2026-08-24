@@ -26,6 +26,13 @@
 //!   dropped.
 //! - **Every other (lifecycle / structured) event is lossless.** It's
 //!   buffered in order and delivered as capacity allows, never dropped.
+//! - **Congestion is per terminal** (#1254): output is only quarantined
+//!   behind this terminal's own debt or a queued event that mutates this
+//!   terminal's stream (or a global `Snapshot`) — one overflowing
+//!   terminal never converts the others' output into resync debt. Repeat
+//!   replays for the same terminal are paced ([`RESYNC_DEBOUNCE`]) and
+//!   capped at the snapshot replay budget, so recovery traffic cannot
+//!   itself sustain the congestion it is recovering from.
 //!
 //! Both the raw ingress and lossless backlog are bounded. A client that stops
 //! consuming long enough to exhaust either structured-event cap is
@@ -51,6 +58,17 @@ const RESYNC_SNAPSHOT_TIMEOUT: Duration = Duration::from_millis(500);
 /// bounded backlog, then fail the connection closed rather than drop them or
 /// grow memory without limit.
 const MAX_PENDING_STRUCTURED_EVENTS: usize = lazybox_ipc::RAW_EVENT_CHANNEL_CAPACITY;
+
+/// Minimum spacing between two authoritative replays for the SAME
+/// terminal (#1254). A replay is the fattest event the forwarder emits
+/// (seed + ring, MiBs); re-materializing one per congestion episode with
+/// no floor let the replies themselves refill the channel and
+/// self-sustain the storm. Pace, never skip — the debt stays queued and
+/// the replay is delivered when the window opens, exactly the
+/// `LAG_RECOVERY_DEBOUNCE` posture the serve loop takes for bus-lag
+/// snapshots. Other terminals are unaffected: pacing is per terminal and
+/// `deliver_one` picks the first *ready* debtor.
+const RESYNC_DEBOUNCE: Duration = Duration::from_secs(2);
 
 /// Drain the raw event stream into the bounded client channel, applying
 /// drop-and-resync to `TerminalOutput`. Runs until either end closes.
@@ -95,10 +113,24 @@ pub async fn forward_events(forward: EventForward, config: ServerConfig) {
                 }
             }
         } else {
-            // Something is queued behind a full channel. Race the next
-            // raw event against the channel freeing a slot — biased
-            // toward delivery so a sustained flood can't starve the
-            // buffered lifecycle events / pending resync.
+            // Something is queued behind a full channel (or inside its
+            // pacing window). Race the next raw event against the
+            // channel freeing a slot — biased toward delivery so a
+            // sustained flood can't starve the buffered lifecycle
+            // events / pending resync. When everything queued is a
+            // paced resync there is nothing to reserve a slot FOR yet;
+            // arming the reserve anyway would busy-spin
+            // (reserve → deliver nothing → reserve …), so delivery is
+            // gated on readiness and the pace-deadline arm wakes the
+            // loop when the earliest window opens — a quiescent stream
+            // must not strand a paced debt forever.
+            let now = tokio::time::Instant::now();
+            let deliverable = state.has_deliverable(now);
+            let pace_deadline = if deliverable {
+                None
+            } else {
+                state.next_pace_deadline()
+            };
             tokio::select! {
                 biased;
                 _ = health.overloaded() => {
@@ -108,7 +140,7 @@ pub async fn forward_events(forward: EventForward, config: ServerConfig) {
                     );
                     break;
                 }
-                permit = client_tx.reserve(), if state.has_buffered() => {
+                permit = client_tx.reserve(), if deliverable => {
                     match permit {
                         Ok(permit) => state.deliver_one(permit, &config).await,
                         Err(_) => break, // client gone
@@ -123,6 +155,11 @@ pub async fn forward_events(forward: EventForward, config: ServerConfig) {
                         }
                         None => input_open = false,
                     }
+                }
+                _ = tokio::time::sleep_until(
+                    pace_deadline.unwrap_or_else(tokio::time::Instant::now)
+                ), if pace_deadline.is_some() => {
+                    // Pacing elapsed — loop and re-evaluate readiness.
                 }
             }
         }
@@ -149,6 +186,25 @@ struct ForwardState {
     /// unavailable notice. Prevents a chatty terminal from spamming one
     /// lossless notice per retry.
     resync_unavailable_announced: HashSet<TerminalId>,
+    /// Per-terminal count of queued lossless events that mutate that
+    /// terminal's byte-stream state client-side (spawn/replace/exit,
+    /// replays, deltas, scrollback). Live output for a terminal must
+    /// never overtake one of THESE — but a queued event for terminal A
+    /// says nothing about terminal B's stream, so B's output may still
+    /// `try_send` (#1254: the process-wide `has_buffered()` gate turned
+    /// one congested terminal into a dropped-output → resync episode for
+    /// every terminal). Entries are removed at zero so membership is the
+    /// gate.
+    pending_stream_refs: HashMap<TerminalId, usize>,
+    /// Count of queued events with process-wide stream impact — a
+    /// `Snapshot` rebuilds every terminal's grid, so while one is queued
+    /// all live output holds.
+    pending_global_refs: usize,
+    /// Per-terminal pacing floor for authoritative replays: no second
+    /// `TerminalResync` for a terminal before this instant (see
+    /// [`RESYNC_DEBOUNCE`]). Entries are dropped when the terminal
+    /// exits.
+    resync_paced_until: HashMap<TerminalId, tokio::time::Instant>,
     /// Highest per-terminal `seq` already delivered to the client inside
     /// a replay — either a `TerminalResync` (channel-overflow recovery)
     /// or a `Snapshot` (broadcast-lag recovery). The replay already
@@ -170,6 +226,45 @@ struct ForwardState {
 
 use std::ops::ControlFlow;
 
+/// Which terminals' byte-stream state a lossless event mutates on the
+/// client — i.e. which terminals' live output must queue behind it to
+/// preserve the ordering invariant `route` protects. Events that don't
+/// touch a `TerminalStack` slot's stream reconstruction (workspace
+/// upserts, agent-state badges, notifications, …) are `Free`: output
+/// overtaking them cannot corrupt a grid, and treating them as global
+/// was exactly the #1254 storm.
+enum StreamScope {
+    Free,
+    Terminals([Option<TerminalId>; 2]),
+    Global,
+}
+
+fn stream_scope(evt: &Event) -> StreamScope {
+    match evt {
+        // Rebuilds EVERY terminal's grid on the client.
+        Event::Snapshot { .. } => StreamScope::Global,
+        // Slot lifecycle + authoritative stream mutations for one
+        // terminal. New stream-mutating event variants must be added
+        // here, or their terminal's output may overtake them.
+        Event::TerminalSpawned { terminal_id, .. }
+        | Event::TerminalResync { terminal_id, .. }
+        | Event::TerminalResyncUnavailable { terminal_id }
+        | Event::TerminalDelta { terminal_id, .. }
+        | Event::TerminalDeltaUnavailable { terminal_id }
+        | Event::TerminalExited { terminal_id, .. }
+        | Event::TerminalScrollback { terminal_id, .. }
+        | Event::AgentAuthReplay { terminal_id, .. } => {
+            StreamScope::Terminals([Some(*terminal_id), None])
+        }
+        Event::TerminalReplaced {
+            old_terminal_id,
+            terminal_id,
+            ..
+        } => StreamScope::Terminals([Some(*old_terminal_id), Some(*terminal_id)]),
+        _ => StreamScope::Free,
+    }
+}
+
 impl ForwardState {
     fn new(metrics: Arc<EventMetrics>) -> Self {
         Self {
@@ -178,9 +273,79 @@ impl ForwardState {
             resync_set: HashSet::new(),
             resync_debt: HashMap::new(),
             resync_unavailable_announced: HashSet::new(),
+            pending_stream_refs: HashMap::new(),
+            pending_global_refs: 0,
+            resync_paced_until: HashMap::new(),
             covered_seq: HashMap::new(),
             metrics,
         }
+    }
+
+    /// Enqueue one lossless event, tracking which terminals' streams it
+    /// gates. The ONLY writer of `pending` — bookkeeping and queue can't
+    /// drift.
+    fn push_pending(&mut self, evt: Event) {
+        match stream_scope(&evt) {
+            StreamScope::Free => {}
+            StreamScope::Global => self.pending_global_refs += 1,
+            StreamScope::Terminals(ids) => {
+                for id in ids.into_iter().flatten() {
+                    *self.pending_stream_refs.entry(id).or_insert(0) += 1;
+                }
+            }
+        }
+        self.pending.push_back(evt);
+    }
+
+    /// Dequeue the oldest lossless event, releasing its stream gates.
+    /// The ONLY reader of `pending` — mirror of [`Self::push_pending`].
+    fn pop_pending(&mut self) -> Option<Event> {
+        let evt = self.pending.pop_front()?;
+        match stream_scope(&evt) {
+            StreamScope::Free => {}
+            StreamScope::Global => {
+                self.pending_global_refs = self.pending_global_refs.saturating_sub(1);
+            }
+            StreamScope::Terminals(ids) => {
+                for id in ids.into_iter().flatten() {
+                    if let Some(count) = self.pending_stream_refs.get_mut(&id) {
+                        *count -= 1;
+                        if *count == 0 {
+                            self.pending_stream_refs.remove(&id);
+                        }
+                    }
+                }
+            }
+        }
+        Some(evt)
+    }
+
+    /// Does the lossless queue hold an event live output for
+    /// `terminal_id` must not overtake?
+    fn pending_blocks_output(&self, terminal_id: TerminalId) -> bool {
+        self.pending_global_refs > 0 || self.pending_stream_refs.contains_key(&terminal_id)
+    }
+
+    /// Is this queued resync past its pacing floor?
+    fn resync_ready(&self, terminal_id: TerminalId, now: tokio::time::Instant) -> bool {
+        self.resync_paced_until
+            .get(&terminal_id)
+            .is_none_or(|&until| now >= until)
+    }
+
+    /// Anything a freed channel slot could carry right now — a lossless
+    /// event, or a resync whose pacing window has opened.
+    fn has_deliverable(&self, now: tokio::time::Instant) -> bool {
+        !self.pending.is_empty() || self.resync_queue.iter().any(|t| self.resync_ready(*t, now))
+    }
+
+    /// Earliest pacing deadline among queued resyncs — the wake-up the
+    /// forwarder arms when every queued debt is inside its window.
+    fn next_pace_deadline(&self) -> Option<tokio::time::Instant> {
+        self.resync_queue
+            .iter()
+            .filter_map(|t| self.resync_paced_until.get(t).copied())
+            .min()
     }
 
     /// Record that `seq` (and everything before it) for `terminal_id`
@@ -200,10 +365,6 @@ impl ForwardState {
 
     fn is_idle(&self) -> bool {
         self.pending.is_empty() && self.resync_queue.is_empty()
-    }
-
-    fn has_buffered(&self) -> bool {
-        !self.pending.is_empty() || !self.resync_queue.is_empty()
     }
 
     fn schedule_resync(&mut self, terminal_id: TerminalId, required_seq: u64) {
@@ -259,12 +420,20 @@ impl ForwardState {
             | Event::AgentAuthOutput {
                 terminal_id, seq, ..
             }) => {
-                // Ordering rule: if anything is already buffered, or
-                // this terminal is mid-resync, we cannot forward live
-                // output without reordering it ahead of the queue — so
-                // drop it and (re)schedule the resync, which carries
-                // the up-to-date ring anyway.
-                if self.has_buffered()
+                // Ordering rule, PER TERMINAL (#1254): live output must
+                // not overtake a queued structured event that mutates
+                // THIS terminal's stream state (or a Snapshot, which
+                // rebuilds every grid), and a terminal mid-resync stays
+                // quarantined until its replay lands — forwarding would
+                // reorder it ahead of the queue, so drop it and
+                // (re)schedule the resync, which carries the up-to-date
+                // ring anyway. Another terminal's backlog or debt never
+                // gates this one: the old process-wide `has_buffered()`
+                // gate converted one congested terminal into dropped
+                // output — and therefore a fat resync — for every
+                // terminal, and the replies refilled the channel until
+                // the client was disconnected as slow.
+                if self.pending_blocks_output(terminal_id)
                     || self.resync_set.contains(&terminal_id)
                     || self.resync_debt.contains_key(&terminal_id)
                 {
@@ -308,10 +477,12 @@ impl ForwardState {
                     self.mark_covered(*terminal_id, *seq);
                     self.drop_resync(terminal_id);
                 }
-                // A terminal that exits no longer needs a resync.
+                // A terminal that exits no longer needs a resync — nor a
+                // pacing floor.
                 if let Event::TerminalExited { terminal_id, .. } = &other {
                     self.drop_resync(terminal_id);
                     self.covered_seq.remove(terminal_id);
+                    self.resync_paced_until.remove(terminal_id);
                 }
                 // Lossless: send immediately when the channel has room
                 // and nothing is queued ahead of it; otherwise enqueue
@@ -320,7 +491,7 @@ impl ForwardState {
                     match client_tx.try_send(other) {
                         Ok(()) => ControlFlow::Continue(()),
                         Err(TrySendError::Full(evt)) => {
-                            self.pending.push_back(evt);
+                            self.push_pending(evt);
                             ControlFlow::Continue(())
                         }
                         Err(TrySendError::Closed(_)) => ControlFlow::Break(()),
@@ -333,7 +504,7 @@ impl ForwardState {
                         );
                         ControlFlow::Break(())
                     } else {
-                        self.pending.push_back(other);
+                        self.push_pending(other);
                         ControlFlow::Continue(())
                     }
                 }
@@ -343,37 +514,72 @@ impl ForwardState {
 
     /// Deliver one buffered item into a freed channel slot. Lossless
     /// events drain first (they're ordered ahead of resyncs); once
-    /// they're gone, materialize one resync from the current ring.
+    /// they're gone, materialize one resync from the current ring —
+    /// picking the first debtor whose pacing window is open, so one
+    /// chatty terminal inside its [`RESYNC_DEBOUNCE`] never stalls
+    /// another terminal's recovery.
     async fn deliver_one(
         &mut self,
         permit: tokio::sync::mpsc::Permit<'_, Event>,
         config: &ServerConfig,
     ) {
-        if let Some(evt) = self.pending.pop_front() {
+        if let Some(evt) = self.pop_pending() {
             permit.send(evt);
             return;
         }
-        if let Some(terminal_id) = self.resync_queue.pop_front() {
-            self.resync_set.remove(&terminal_id);
-            let required_seq = self.resync_debt.get(&terminal_id).copied().unwrap_or(0);
-            if let Some(snapshot) = resync_replay(config, terminal_id, required_seq).await {
-                // The replay carries every chunk through `last_seq`; record
-                // the floor so in-flight chunks already inside it are not
-                // re-fed after the reset.
-                self.mark_covered(terminal_id, snapshot.last_seq);
-                self.resync_debt.remove(&terminal_id);
-                self.resync_unavailable_announced.remove(&terminal_id);
-                permit.send(Event::TerminalResync {
-                    terminal_id,
-                    replay: snapshot.replay,
-                    seq: snapshot.last_seq,
-                });
-            } else if self.resync_unavailable_announced.insert(terminal_id) {
-                permit.send(Event::TerminalResyncUnavailable { terminal_id });
+        let now = tokio::time::Instant::now();
+        let ready = self
+            .resync_queue
+            .iter()
+            .position(|t| self.resync_ready(*t, now));
+        let Some(terminal_id) = ready.and_then(|pos| self.resync_queue.remove(pos)) else {
+            // Every queued debt is inside its pacing window; the permit
+            // is released and the forwarder's pace-deadline arm re-arms
+            // delivery when the earliest window opens.
+            return;
+        };
+        self.resync_set.remove(&terminal_id);
+        let required_seq = self.resync_debt.get(&terminal_id).copied().unwrap_or(0);
+        if let Some(snapshot) = resync_replay(config, terminal_id, required_seq).await {
+            // Same whole-replay byte budget the Subscribe / bus-lag
+            // snapshot enforces (`budget_snapshot_replay`): a replay
+            // is atomic — slicing a prefix can begin inside
+            // UTF-8/CSI state — so an over-budget one is omitted
+            // whole and announced unavailable. The client preserves
+            // its last coherent grid and retries with backoff.
+            if snapshot.replay.len() > crate::SNAPSHOT_REPLAY_BUDGET {
+                tracing::warn!(
+                    ?terminal_id,
+                    replay_bytes = snapshot.replay.len(),
+                    budget = crate::SNAPSHOT_REPLAY_BUDGET,
+                    "resync replay exceeds snapshot budget — reporting unavailable"
+                );
+                if self.resync_unavailable_announced.insert(terminal_id) {
+                    permit.send(Event::TerminalResyncUnavailable { terminal_id });
+                }
+                return;
             }
-            // On repeated failure the permit is simply released.
-            // `resync_debt` remains, and the next output retries.
+            // The replay carries every chunk through `last_seq`; record
+            // the floor so in-flight chunks already inside it are not
+            // re-fed after the reset.
+            self.mark_covered(terminal_id, snapshot.last_seq);
+            self.resync_debt.remove(&terminal_id);
+            self.resync_unavailable_announced.remove(&terminal_id);
+            // Pace only materialized replays: they're the fat events
+            // that refill the channel. An unavailable notice is tiny
+            // and must not delay the retry that finally converges.
+            self.resync_paced_until
+                .insert(terminal_id, now + RESYNC_DEBOUNCE);
+            permit.send(Event::TerminalResync {
+                terminal_id,
+                replay: snapshot.replay,
+                seq: snapshot.last_seq,
+            });
+        } else if self.resync_unavailable_announced.insert(terminal_id) {
+            permit.send(Event::TerminalResyncUnavailable { terminal_id });
         }
+        // On repeated failure the permit is simply released.
+        // `resync_debt` remains, and the next output retries.
     }
 }
 
@@ -820,6 +1026,98 @@ mod tests {
             vec![6, 7],
             "only chunks past the snapshot floor survive"
         );
+    }
+
+    /// #1254 finding 1: congestion is per terminal. One terminal in
+    /// resync debt must not drop the OTHER terminals' output (the old
+    /// process-wide `has_buffered()` gate converted one congested
+    /// terminal into a resync for every terminal), and repeat replays
+    /// for the congested terminal are paced — O(1) resync events per
+    /// congestion episode, with the deferred debt still converging once
+    /// the pacing window opens.
+    #[tokio::test(start_paused = true)]
+    async fn resync_storm_does_not_amplify_across_terminals() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let key = config
+            .backend
+            .spawn(&[], None, &[], "t")
+            .await
+            .expect("spawn");
+        mock.emit(&key, b"ring-1").await; // congested terminal's ring, seq 1
+        let congested = TerminalId(1);
+        config.terminal.bind_backend(congested, key.clone()).await;
+
+        let mut state = ForwardState::new(config.event_metrics.clone());
+        let (tx, mut rx) = mpsc::channel(64);
+
+        // The congested terminal's output overflowed: it owes a resync.
+        state.schedule_resync(congested, 1);
+
+        // Healthy terminals keep streaming right through the episode.
+        for t in 2..=5u64 {
+            let cf = state.route(
+                &tx,
+                Event::TerminalOutput {
+                    terminal_id: TerminalId(t),
+                    bytes: vec![b'x'],
+                    first_seq: 1,
+                    seq: 1,
+                },
+            );
+            assert!(matches!(cf, ControlFlow::Continue(())));
+        }
+        let mut streamed = 0;
+        while let Ok(evt) = rx.try_recv() {
+            match evt {
+                Event::TerminalOutput { terminal_id, .. } => {
+                    assert_ne!(terminal_id, congested);
+                    streamed += 1;
+                }
+                other => panic!("unexpected event during the episode: {other:?}"),
+            }
+        }
+        assert_eq!(
+            streamed, 4,
+            "one terminal's debt must not quarantine the others' output"
+        );
+        assert_eq!(
+            state.resync_queue.len(),
+            1,
+            "the episode owes exactly one terminal's resync — no cross-terminal debt"
+        );
+
+        // The episode resolves with exactly one replay.
+        let permit = tx.reserve().await.expect("permit");
+        state.deliver_one(permit, &config).await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Event::TerminalResync { terminal_id, seq: 1, .. }) if terminal_id == congested
+        ));
+
+        // Renewed congestion inside the pacing window must not amplify
+        // into another fat replay...
+        mock.emit(&key, b"ring-2").await; // seq 2
+        state.schedule_resync(congested, 2);
+        let permit = tx.reserve().await.expect("permit");
+        state.deliver_one(permit, &config).await;
+        assert!(
+            rx.try_recv().is_err(),
+            "a repeat replay within the pacing window is deferred, not amplified"
+        );
+        assert!(
+            state.has_deliverable(tokio::time::Instant::now() + RESYNC_DEBOUNCE),
+            "the deferred debt stays queued for the next window"
+        );
+
+        // ...but the debt still converges once the window opens
+        // (pace, never skip).
+        tokio::time::advance(RESYNC_DEBOUNCE).await;
+        let permit = tx.reserve().await.expect("permit");
+        state.deliver_one(permit, &config).await;
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Event::TerminalResync { terminal_id, seq: 2, .. }) if terminal_id == congested
+        ));
     }
 
     /// With a roomy channel and a consumer that keeps up, nothing is

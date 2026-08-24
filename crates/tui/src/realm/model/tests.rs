@@ -7070,6 +7070,53 @@ mod coalesce_tests {
         );
     }
 
+    /// #1254 finding 7: Ctrl-L is the user's "what I see is wrong" hatch.
+    /// Clearing the host terminal only fixes what the HOST forgot; a wrong
+    /// client VT grid needs the daemon's authoritative replay. Dispatching
+    /// the force-redraw action must mark every visible slot desynced and
+    /// enqueue a resync request for each.
+    #[test]
+    fn ctrl_l_requests_authoritative_state() {
+        let (client, mut server) = lazybox_ipc::channel::pair();
+        let mut model = Model::new_for_test(client, tuirealm::ratatui::layout::Size::new(120, 40))
+            .expect("model");
+        while server.rx.try_recv().is_ok() {} // initial Subscribe
+        let session_key = lazybox_core::SessionKey::new("s");
+        model
+            .terminals
+            .set_active_session(Some(session_key.clone()));
+        for id in [1u64, 2] {
+            model.terminals.on_daemon_event(&Event::TerminalSpawned {
+                terminal_id: TerminalId(id),
+                session_key: session_key.clone(),
+                kind: lazybox_ipc::TerminalKind::Shell,
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+            });
+            model.handle_daemon_event(out(id, b"coherent-and-possibly-wrong", 1));
+        }
+        assert!(
+            server.rx.try_recv().is_err(),
+            "precondition: coherent panes request nothing on their own"
+        );
+
+        model.dispatch_action(&lazybox_tui_core::action::Action::ForceRedraw);
+
+        let Ok(IpcCommand::RequestTerminalResync { requests }) = server.rx.try_recv() else {
+            panic!("Ctrl-L must request authoritative replays for visible terminals");
+        };
+        // Requests are only drained from slots in `Desynced` with an armed
+        // latch, so their presence proves every visible slot was marked.
+        let mut ids: Vec<u64> = requests.iter().map(|r| r.terminal_id.0).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec![1, 2], "every visible terminal is re-requested");
+        assert!(
+            requests.iter().all(|r| r.required_seq == 1),
+            "each request covers the terminal's current watermark"
+        );
+    }
+
     /// Output for a different terminal ends the run — no cross-terminal
     /// merging, and order is preserved.
     #[test]

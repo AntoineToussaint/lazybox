@@ -2424,7 +2424,10 @@ fn load_workspaces(store: &dyn Store) -> LoadOutcome<lazybox_core::Workspace> {
 /// re-requesting the same unsendable snapshot forever. Half the frame
 /// cap leaves ample headroom for the workspaces/projects JSON and
 /// bincode overhead riding in the same frame.
-const SNAPSHOT_REPLAY_BUDGET: usize = (lazybox_ipc::MAX_FRAME_BYTES as usize) / 2;
+/// `pub(crate)`: the per-connection forwarder applies the SAME budget to
+/// a single `TerminalResync` replay (#1254) — one uncapped replay must
+/// not be able to do what a whole snapshot is forbidden from doing.
+pub(crate) const SNAPSHOT_REPLAY_BUDGET: usize = (lazybox_ipc::MAX_FRAME_BYTES as usize) / 2;
 
 /// Keep whole authoritative replay buffers within
 /// [`SNAPSHOT_REPLAY_BUDGET`]. A replay is atomic: slicing its prefix can

@@ -79,7 +79,7 @@ pub fn build_issue_body(id: &str) -> serde_json::Value {
     })
 }
 
-/// Response shape for [`issue_query`]: `{ data: { issue: <node|null> } }`.
+/// Response shape for the single-issue query: `{ data: { issue: <node|null> } }`.
 #[derive(Deserialize, Debug)]
 pub struct IssueResponse {
     pub data: Option<IssueData>,

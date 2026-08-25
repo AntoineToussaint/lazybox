@@ -760,6 +760,7 @@ fn all_non_shutdown_commands() -> Vec<Command> {
             project_key: pkey(),
             spawn_agent: None,
             client_request_id: None,
+            initial_prompt: None,
         },
         Command::CreateProject { name: "p".into() },
         Command::SetSessionLayout {

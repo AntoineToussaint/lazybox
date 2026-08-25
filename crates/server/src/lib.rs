@@ -1911,12 +1911,15 @@ pub async fn dispatch_command(
             project_key,
             spawn_agent,
             client_request_id,
+            initial_prompt,
         } => {
             // create_empty_workspace returns the final key — which may
             // carry a `-2` collision suffix the client can't predict — so
             // chain any requested spawn off it here rather than
-            // round-tripping through the client. Bare interactive spawn
-            // (no prompt) keeps the human-in-the-loop approval gate.
+            // round-tripping through the client. A bare spawn (no
+            // `initial_prompt`) keeps the human-in-the-loop approval gate;
+            // a prompt hands the agent its brief and makes the spawn
+            // autonomous (the agent-to-agent handoff path).
             let key = match workspace::create_empty_workspace(config, &name, project_key) {
                 Ok(key) => key,
                 Err(error) => {
@@ -1944,6 +1947,7 @@ pub async fn dispatch_command(
                     lazybox_ipc::TerminalKind::Agent(agent_id),
                     spawn_handler::SpawnOptions {
                         client_request_id,
+                        initial_prompt,
                         ..Default::default()
                     },
                 )

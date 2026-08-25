@@ -474,6 +474,9 @@ impl<T: TerminalAdapter> Model<T> {
                             project_key,
                             spawn_agent,
                             client_request_id: Some(client_request_id),
+                            // The `x n` new-workspace flow spawns bare
+                            // (interactive); only the CLI seeds a brief.
+                            initial_prompt: None,
                         });
                     }
                     (false, None) => {

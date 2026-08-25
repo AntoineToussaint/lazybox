@@ -691,6 +691,8 @@ impl DesktopCommand {
                 project_key,
                 spawn_agent: agent,
                 client_request_id,
+                // The desktop create flow spawns bare; no brief to seed.
+                initial_prompt: None,
             },
             DesktopCommand::FocusWorkspace { session_key } => {
                 Command::FocusWorkspace { session_key }

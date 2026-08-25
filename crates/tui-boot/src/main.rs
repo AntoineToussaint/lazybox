@@ -58,7 +58,7 @@ use lazybox_server::lifecycle::{self, ServerStatus};
 use lazybox_server::socket_service::SocketService;
 use lazybox_server::{Server, ServerConfig};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Fallback poll interval when `~/.lazybox/config.yaml::providers.github.poll_interval`
@@ -622,7 +622,8 @@ async fn workspace_subcommand(args: &[String]) -> anyhow::Result<()> {
         other => {
             anyhow::bail!(
                 "unknown `lazybox workspace` verb {:?}; usage: lazybox workspace create \
-                 --name <name> [--project <key> | --repo <owner/repo>] [--agent <id>] [--cwd <path>]",
+                 --name <name> [--project <key> | --repo <owner/repo>] [--agent <id>] \
+                 [--prompt <text> | --prompt-file <path>] [--cwd <path>]",
                 other.unwrap_or("<none>"),
             );
         }
@@ -630,10 +631,13 @@ async fn workspace_subcommand(args: &[String]) -> anyhow::Result<()> {
 }
 
 /// `lazybox workspace create --name <name> [--project <key> | --repo
-/// <owner/repo>] [--agent <id>] [--cwd <path>]` — create a taskless pre-PR
-/// workspace by sending `Command::CreateWorkspace` to the daemon over its
-/// socket, the same IPC path `hook-ingest` uses. With `--agent`, the daemon
-/// spawns that agent into the fresh workspace so a live session lands in it.
+/// <owner/repo>] [--agent <id>] [--prompt <text> | --prompt-file <path>]
+/// [--cwd <path>]` — create a taskless pre-PR workspace by sending
+/// `Command::CreateWorkspace` to the daemon over its socket, the same IPC
+/// path `hook-ingest` uses. With `--agent`, the daemon spawns that agent
+/// into the fresh workspace so a live session lands in it; adding
+/// `--prompt`/`--prompt-file` hands that agent its brief (injected once it
+/// is ready) so one agent can create-and-task another in a single call.
 ///
 /// The Project is resolved from `--project`/`--repo`, else inferred from the
 /// checkout at `--cwd` (default: the process cwd) — so an agent running in a
@@ -646,6 +650,8 @@ async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
     let project = take_value(&mut args, "--project");
     let repo = take_value(&mut args, "--repo");
     let agent = take_value(&mut args, "--agent");
+    let prompt = take_value(&mut args, "--prompt");
+    let prompt_file = take_value(&mut args, "--prompt-file").map(PathBuf::from);
     let cwd = take_value(&mut args, "--cwd").map(PathBuf::from);
     let socket_path = take_value(&mut args, "--socket")
         .map(PathBuf::from)
@@ -657,6 +663,7 @@ async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
     if let Some(agent) = agent.as_deref() {
         validate_agent_id(agent)?;
     }
+    let initial_prompt = resolve_initial_prompt(prompt, prompt_file, agent.is_some())?;
     let cwd = match cwd {
         Some(path) => path,
         None => std::env::current_dir()
@@ -691,6 +698,7 @@ async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
             project_key: project_key.clone(),
             spawn_agent: agent.clone(),
             client_request_id: Some(client_request_id.clone()),
+            initial_prompt,
         })
         .map_err(|e| anyhow::anyhow!("send CreateWorkspace: {e}"))?;
 
@@ -708,6 +716,49 @@ async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
         None => println!("Created workspace {key} \"{name}\" in {project_key}"),
     }
     Ok(())
+}
+
+/// Resolve the optional initial prompt for `workspace create` from
+/// `--prompt <text>` or `--prompt-file <path>` (`-` reads stdin, for long
+/// specs). At most one source may be given. A prompt only does anything
+/// with `--agent` — there is no agent to inject it into otherwise — so
+/// pairing it with a bare create is a usage error rather than a silent
+/// no-op. An all-whitespace prompt resolves to `None`.
+fn resolve_initial_prompt(
+    prompt: Option<String>,
+    prompt_file: Option<PathBuf>,
+    has_agent: bool,
+) -> anyhow::Result<Option<String>> {
+    if prompt.is_some() && prompt_file.is_some() {
+        anyhow::bail!("pass at most one of --prompt or --prompt-file");
+    }
+    let raw = match (prompt, prompt_file) {
+        (Some(text), None) => Some(text),
+        (None, Some(path)) => Some(read_prompt_file(&path)?),
+        (None, None) => None,
+        (Some(_), Some(_)) => unreachable!("guarded above"),
+    };
+    let resolved = raw.filter(|p| !p.trim().is_empty());
+    if resolved.is_some() && !has_agent {
+        anyhow::bail!(
+            "--prompt / --prompt-file needs --agent: there is no agent to hand the brief to \
+             without one",
+        );
+    }
+    Ok(resolved)
+}
+
+/// Read a `--prompt-file`, treating `-` as stdin so a caller can pipe a
+/// long spec (`… --prompt-file - < spec.md`).
+fn read_prompt_file(path: &Path) -> anyhow::Result<String> {
+    if path.as_os_str() == "-" {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+            .map_err(|e| anyhow::anyhow!("read prompt from stdin: {e}"))?;
+        return Ok(buf);
+    }
+    std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("read prompt file {}: {e}", path.display()))
 }
 
 /// Wait until Subscribe has installed the live stream. The daemon's contract
@@ -2174,6 +2225,30 @@ mod argv_tests {
     }
 
     #[test]
+    fn resolve_initial_prompt_rules() {
+        // No prompt → None (bare spawn), regardless of agent.
+        assert_eq!(resolve_initial_prompt(None, None, true).unwrap(), None);
+        assert_eq!(resolve_initial_prompt(None, None, false).unwrap(), None);
+        // A --prompt with an agent forwards verbatim.
+        assert_eq!(
+            resolve_initial_prompt(Some("do the thing".into()), None, true).unwrap(),
+            Some("do the thing".into()),
+        );
+        // Whitespace-only prompt collapses to None (nothing to inject).
+        assert_eq!(
+            resolve_initial_prompt(Some("   \n".into()), None, true).unwrap(),
+            None,
+        );
+        // A prompt without --agent is a usage error, not a silent no-op:
+        // there is no agent to hand it to.
+        assert!(resolve_initial_prompt(Some("brief".into()), None, false).is_err());
+        // --prompt and --prompt-file are mutually exclusive.
+        assert!(
+            resolve_initial_prompt(Some("a".into()), Some(PathBuf::from("/tmp/x")), true).is_err()
+        );
+    }
+
+    #[test]
     fn take_flag_finds_and_removes() {
         let mut a = args(&["--fresh", "--workspace", "foo"]);
         assert!(take_flag(&mut a, "--fresh"));
@@ -2349,7 +2424,6 @@ mod argv_tests {
 
     #[test]
     fn perf_log_path_is_a_sibling_of_the_main_log() {
-        use std::path::Path;
         assert_eq!(
             perf_log_path(Path::new("/tmp/lazybox.log")),
             Path::new("/tmp/lazybox-perf.log")

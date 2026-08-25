@@ -178,6 +178,7 @@ async fn workspace_create_infers_project_from_cwd_and_reports_the_daemon_key() {
             project_key,
             spawn_agent,
             client_request_id,
+            initial_prompt,
         } => {
             assert_eq!(name, "flaky-test investigation");
             assert_eq!(
@@ -186,6 +187,68 @@ async fn workspace_create_infers_project_from_cwd_and_reports_the_daemon_key() {
             );
             assert_eq!(spawn_agent.as_deref(), Some("claude"));
             assert!(client_request_id.is_some());
+            // No --prompt passed here → bare spawn.
+            assert_eq!(initial_prompt, None);
+        }
+        other => panic!("expected CreateWorkspace, got {other:?}"),
+    }
+}
+
+/// `--prompt` with `--agent` forwards the brief as the command's
+/// `initial_prompt`, so one agent can create-and-task another in a single
+/// call (the agent-to-agent handoff `SendMessage` could not do).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_create_forwards_prompt_as_initial_prompt() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let checkout = temp.path().join("acme-widget");
+    std::fs::create_dir(&checkout).expect("checkout dir");
+    init_checkout(&checkout, "git@github.com:acme/widget.git");
+
+    let socket_path = temp.path().join("daemon.sock");
+    let listener = transport::Listener::bind(&socket_path)
+        .await
+        .expect("bind test socket");
+    let server = fake_daemon(listener, "briefed-1");
+
+    let binary = env!("CARGO_BIN_EXE_lazybox");
+    let child = run_workspace_create(
+        binary,
+        &[
+            "--name",
+            "briefed",
+            "--agent",
+            "claude",
+            "--prompt",
+            "Investigate the flaky test in foo_test.rs and propose a fix.",
+            "--cwd",
+            &checkout.to_string_lossy(),
+            "--socket",
+            &socket_path.to_string_lossy(),
+        ],
+        temp.path().join("home"),
+    );
+
+    let output = tokio::time::timeout(Duration::from_secs(10), child)
+        .await
+        .expect("cli exits")
+        .expect("cli task");
+    assert!(output.status.success(), "workspace create exited non-zero");
+
+    let command = tokio::time::timeout(Duration::from_secs(1), server)
+        .await
+        .expect("cli sends command")
+        .expect("server task");
+    match command {
+        Command::CreateWorkspace {
+            spawn_agent,
+            initial_prompt,
+            ..
+        } => {
+            assert_eq!(spawn_agent.as_deref(), Some("claude"));
+            assert_eq!(
+                initial_prompt.as_deref(),
+                Some("Investigate the flaky test in foo_test.rs and propose a fix.")
+            );
         }
         other => panic!("expected CreateWorkspace, got {other:?}"),
     }
@@ -233,11 +296,13 @@ async fn workspace_create_uses_explicit_project_without_a_checkout() {
             project_key,
             spawn_agent,
             client_request_id,
+            initial_prompt,
         } => {
             assert_eq!(name, "scratch");
             assert_eq!(project_key, lazybox_core::ProjectKey::new("local-sandbox"));
             assert_eq!(spawn_agent, None);
             assert!(client_request_id.is_some());
+            assert_eq!(initial_prompt, None);
         }
         other => panic!("expected CreateWorkspace, got {other:?}"),
     }

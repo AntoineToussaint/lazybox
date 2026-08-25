@@ -1129,6 +1129,7 @@ async fn create_workspace_command_returns_allocated_key_and_completion() {
             project_key: lazybox_core::ProjectKey::github("AntoineToussaint", "lazybox"),
             spawn_agent: None,
             client_request_id: Some(request_id.clone()),
+            initial_prompt: None,
         })
         .unwrap();
 
@@ -1182,6 +1183,7 @@ async fn create_workspace_command_reports_store_failure_without_success_ack() {
             project_key: lazybox_core::ProjectKey::local("test"),
             spawn_agent: None,
             client_request_id: Some(request_id.clone()),
+            initial_prompt: None,
         })
         .unwrap();
 

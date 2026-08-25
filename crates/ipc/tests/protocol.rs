@@ -316,6 +316,7 @@ fn all_commands() -> Vec<Command> {
             project_key: lazybox_core::ProjectKey::github("o", "r"),
             spawn_agent: Some("codex".into()),
             client_request_id: Some("create-audit-wire".into()),
+            initial_prompt: Some("investigate the flaky test".into()),
         },
         Command::CreateProject {
             name: "local project".into(),

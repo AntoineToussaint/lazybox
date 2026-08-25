@@ -1052,6 +1052,15 @@ pub enum Command {
         /// from another client's concurrent create with the same name.
         #[serde(default)]
         client_request_id: Option<String>,
+        /// Optional brief to hand the spawned agent. Only meaningful with
+        /// `spawn_agent`: the daemon forwards it as the spawn's
+        /// `initial_prompt`, so the agent starts on-task instead of empty.
+        /// A present prompt makes the spawn autonomous (skips the
+        /// interactive approval gate) — that's the agent-to-agent handoff
+        /// path (`lazybox workspace create --agent … --prompt …`). `None`
+        /// keeps the bare interactive spawn.
+        #[serde(default)]
+        initial_prompt: Option<String>,
     },
     /// Create a brand-new local Project — a top-level container the
     /// sidebar groups workspaces under, like a github repo but with

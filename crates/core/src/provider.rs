@@ -508,8 +508,11 @@ pub trait TaskProvider: Send + Sync {
     /// Convert the workspace's PR to a draft. Defaults to `unsupported`
     /// so a provider without a draft concept opts in explicitly.
     ///
-    /// Idempotency: converting an already-draft PR returns `Ok(())` —
-    /// the polling cycle reconciles the local copy regardless.
+    /// Idempotency: the underlying backend mutation may reject an
+    /// already-draft PR (GitHub does), so implementations should re-check
+    /// the PR's state on error and return `Ok(())` when it is already a
+    /// draft — the desired end-state — rather than surfacing a retry as a
+    /// failure.
     async fn convert_to_draft(&self, workspace: &Workspace) -> Result<(), ProviderError> {
         let _ = workspace;
         Err(ProviderError::unsupported(self.name(), "convert_to_draft"))
@@ -519,8 +522,10 @@ pub trait TaskProvider: Send + Sync {
     /// `unsupported` so a provider without a draft concept opts in
     /// explicitly.
     ///
-    /// Idempotency: marking an already-ready PR returns `Ok(())` — the
-    /// polling cycle reconciles the local copy regardless.
+    /// Idempotency: the underlying backend mutation may reject a
+    /// non-draft PR (GitHub does), so implementations should re-check the
+    /// PR's state on error and return `Ok(())` when it is already ready —
+    /// the desired end-state — rather than surfacing a retry as a failure.
     async fn mark_ready(&self, workspace: &Workspace) -> Result<(), ProviderError> {
         let _ = workspace;
         Err(ProviderError::unsupported(self.name(), "mark_ready"))

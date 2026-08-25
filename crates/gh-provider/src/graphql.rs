@@ -1074,8 +1074,11 @@ pub fn close_pr_body(pull_request_node_id: &str) -> serde_json::Value {
     })
 }
 
-/// GraphQL mutation that converts an open PR to a draft. Converting an
-/// already-draft PR is a no-op on GitHub's side, so retrying is safe.
+/// GraphQL mutation that converts an open PR to a draft. NOTE: unlike
+/// `closePullRequest`, this is NOT idempotent — GitHub rejects converting
+/// an already-draft PR with an error. The provider's `convert_to_draft`
+/// re-checks the PR's state on error and treats "already a draft" as
+/// success, so a lost-response retry doesn't surface a spurious failure.
 const CONVERT_PR_TO_DRAFT_MUTATION: &str = r#"
 mutation($id: ID!) {
   convertPullRequestToDraft(input: { pullRequestId: $id }) {
@@ -1091,9 +1094,11 @@ pub fn convert_pr_to_draft_body(pull_request_node_id: &str) -> serde_json::Value
     })
 }
 
-/// GraphQL mutation that marks a draft PR ready for review. Marking an
-/// already-ready PR ready is a no-op on GitHub's side, so retrying is
-/// safe.
+/// GraphQL mutation that marks a draft PR ready for review. NOTE: unlike
+/// `closePullRequest`, this is NOT idempotent — GitHub rejects marking a
+/// non-draft PR ready with an error. The provider's `mark_ready`
+/// re-checks the PR's state on error and treats "already ready" as
+/// success, so a lost-response retry doesn't surface a spurious failure.
 const MARK_PR_READY_MUTATION: &str = r#"
 mutation($id: ID!) {
   markPullRequestReadyForReview(input: { pullRequestId: $id }) {

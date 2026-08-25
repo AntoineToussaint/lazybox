@@ -1686,10 +1686,14 @@ pub struct AgentEntry {
     /// a bare spawn uses. Empty → fall back to the built-in preset for
     /// this agent id.
     pub models: lazybox_core::AgentModels,
-    /// Let lazybox apply this agent's CLI updates automatically when
-    /// its scheduled out-of-band check finds a newer version. Off by
-    /// default: the check still runs and surfaces "update available",
-    /// but installing waits for the manual "update agent CLIs" action.
+    /// Opt this agent into automatic CLI updates when its scheduled
+    /// out-of-band check finds a newer version. Off by default: the check
+    /// still runs and surfaces "update available", but installing waits
+    /// for the manual "update agent CLIs" action or the global
+    /// `agent.auto_update` switch. To auto-update everything EXCEPT a
+    /// specific agent, turn on the global switch and add the agent to
+    /// `agent.auto_update_except` — that exclusion is how you pin an
+    /// agent under the global switch (this per-agent flag is opt-IN only).
     pub auto_update: bool,
 }
 
@@ -1765,6 +1769,14 @@ pub struct AgentSection {
     /// opt in via `agents.<id>.auto_update` while this stays off.
     #[serde(default)]
     pub auto_update: bool,
+    /// Agent ids to hold back from the global `auto_update` switch. Lets
+    /// you express "auto-update everything EXCEPT these" — without it, a
+    /// global switch could only be all-or-nothing and would silently
+    /// override a pinned agent. An excluded agent never auto-updates, even
+    /// if its own `agents.<id>.auto_update` is on, so this is the single
+    /// authoritative opt-out. Ignored when the global switch is off.
+    #[serde(default)]
+    pub auto_update_except: Vec<String>,
     /// Fail-safe watchdog window: seconds a `Working` agent terminal
     /// may sit with no meaningful screen change (spinner/status churn
     /// doesn't count) before the daemon classifies the screen and
@@ -1834,6 +1846,7 @@ impl Default for AgentSection {
             llm_gateway_url: None,
             metering_proxy: false,
             auto_update: false,
+            auto_update_except: Vec::new(),
             working_watchdog_secs: None,
             quiet_classify_secs: None,
             max_live_agents: None,

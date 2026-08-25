@@ -329,6 +329,17 @@ struct UpdatableAgent {
     channel: UpdateChannel,
 }
 
+/// Whether an agent auto-updates: the global `agent.auto_update` switch
+/// OR the per-agent `agents.<id>.auto_update` opt-in, minus the global
+/// `agent.auto_update_except` opt-out. The exclusion is authoritative so
+/// "auto-update everything except this one" is expressible — without it a
+/// global switch could only be all-or-nothing and would silently update a
+/// pinned agent. The exclusion also beats a per-agent opt-in, so it is
+/// the single "never auto-update this" answer.
+fn resolve_auto_update(per_agent: bool, global: bool, excluded: bool) -> bool {
+    (global || per_agent) && !excluded
+}
+
 /// The enabled agents that advertise an update channel, in stable
 /// (sorted) order.
 fn updatable_agents(config: &ServerConfig) -> Vec<UpdatableAgent> {
@@ -339,9 +350,10 @@ fn updatable_agents(config: &ServerConfig) -> Vec<UpdatableAgent> {
             return Vec::new();
         }
     };
-    // The global `agent.auto_update` switch forces auto-update for every
-    // updatable agent; otherwise it's the per-agent `agents.<id>.auto_update`
-    // opt-in.
+    // The global switch auto-updates every agent, minus any listed in
+    // `agent.auto_update_except` (the authoritative opt-out so "everything
+    // except X" is expressible); a per-agent opt-in still works when the
+    // global switch is off.
     let global_auto = cfg.agent.auto_update;
     cfg.setup
         .agents
@@ -349,11 +361,13 @@ fn updatable_agents(config: &ServerConfig) -> Vec<UpdatableAgent> {
         .filter_map(|id| {
             let agent = config.agents.get(id)?;
             let channel = agent.update_channel()?;
+            let per_agent = cfg.agents.get(id).is_some_and(|entry| entry.auto_update);
+            let excluded = cfg.agent.auto_update_except.iter().any(|x| x == id);
+            let auto_update = resolve_auto_update(per_agent, global_auto, excluded);
             Some(UpdatableAgent {
                 id: id.clone(),
                 display_name: agent.display_name().to_string(),
-                auto_update: global_auto
-                    || cfg.agents.get(id).is_some_and(|entry| entry.auto_update),
+                auto_update,
                 channel,
             })
         })
@@ -531,6 +545,26 @@ async fn scheduled_pass(config: &ServerConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The global switch OR a per-agent opt-in enables auto-update, but
+    /// the `auto_update_except` exclusion is authoritative — it holds an
+    /// agent back even under the global switch (the "everything except X"
+    /// the plain global switch could not express) and even over a
+    /// per-agent opt-in. Without the exclusion a global switch silently
+    /// updated a pinned agent.
+    #[test]
+    fn resolve_auto_update_honors_global_opt_in_and_authoritative_exclusion() {
+        // Neither opts in → no update.
+        assert!(!resolve_auto_update(false, false, false));
+        // Global switch updates every non-excluded agent.
+        assert!(resolve_auto_update(false, true, false));
+        // Per-agent opt-in works while the global switch is off.
+        assert!(resolve_auto_update(true, false, false));
+        // Exclusion beats the global switch — "everything except this".
+        assert!(!resolve_auto_update(false, true, true));
+        // Exclusion beats even a per-agent opt-in — the single "never".
+        assert!(!resolve_auto_update(true, false, true));
+    }
 
     fn sh(script: &str) -> Vec<String> {
         vec!["sh".into(), "-c".into(), script.into()]

@@ -7434,6 +7434,7 @@ mod stale_input_tests {
                 | Id::SyncStatus
                 | Id::Messages
                 | Id::ErrorInbox
+                | Id::Stats
                 | Id::InspectLoading
                 | Id::WorktreeProgress
                 | Id::DescriptionModal

@@ -310,6 +310,17 @@ pub(super) async fn execute_spawn_plan(
         tracing::error!("execute_spawn_plan: bus.send(spawn lifecycle) failed: {error}");
     }
 
+    // A fresh (non-resumed, non-replacing) agent spawn is a *new* session.
+    // The usage-stats accumulator (#1339) counts this rather than
+    // `TerminalSpawned`, because that fires again for the same logical
+    // session on every startup restore/recovery reattach (resume: true) —
+    // counting it would inflate "agent sessions" on each daemon restart.
+    if replace_terminal_id.is_none() && !flags.resume && matches!(kind, TerminalKind::Agent(_)) {
+        let _ = config.bus.send(Event::AgentSessionStarted {
+            session_key: session_key.clone(),
+        });
+    }
+
     Ok(SpawnExecutionOutcome::Spawned(ExecutedSpawn {
         backend_key,
         session_key,

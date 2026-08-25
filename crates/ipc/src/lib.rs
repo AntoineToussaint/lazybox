@@ -1596,6 +1596,10 @@ pub enum Command {
     SetSnippetKeepMine {
         target: String,
     },
+    /// Request the daily usage-stats rollup for the day/week view (#1339).
+    /// The daemon reads its persisted accumulator and replies with
+    /// [`Event::Stats`]. Appended last (bincode is ordinal-sensitive).
+    GetStats,
 }
 
 impl Command {
@@ -1705,6 +1709,42 @@ pub struct ErrorInboxRecord {
     pub count: u64,
     pub first_seen: chrono::DateTime<chrono::Utc>,
     pub last_seen: chrono::DateTime<chrono::Utc>,
+}
+
+/// One rolled-up daily usage bucket, mirrored onto the wire from the
+/// store's `StatBucket` (#1339). `metric` is one of the opaque keys in
+/// [`stats`]; `value` is a count or a summable quantity (tokens, USD
+/// micros). The TUI aggregates these into today/week totals and a
+/// per-day series — the daemon ships the raw daily rollup, keeping the
+/// query handler trivial and the client free to slice it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct StatBucket {
+    /// UTC calendar day, `YYYY-MM-DD`.
+    pub day: String,
+    pub metric: String,
+    pub value: i64,
+}
+
+/// Usage-stats metric keys (#1339) — the shared vocabulary the daemon
+/// accumulator emits and the TUI day/week view labels. Kept as opaque
+/// strings so the store stays source-agnostic (it never interprets a
+/// metric), the same stance the Error Inbox takes with `source`.
+pub mod stats {
+    /// Agent sessions started (interactive agent terminals).
+    pub const SESSIONS: &str = "sessions";
+    /// Prompts delivered to an agent (snippet + composer sends).
+    pub const PROMPTS: &str = "prompts";
+    /// PRs merged (manual + auto-merge).
+    pub const MERGED: &str = "merged";
+    /// Agent turns completed.
+    pub const TURNS: &str = "turns";
+    /// Input tokens metered across agent responses.
+    pub const INPUT_TOKENS: &str = "input_tokens";
+    /// Output tokens metered across agent responses.
+    pub const OUTPUT_TOKENS: &str = "output_tokens";
+    /// Cost in USD micros (millionths of a dollar) metered across responses.
+    pub const COST_MICROS: &str = "cost_micros";
 }
 
 /// Connection → TUI.
@@ -2652,6 +2692,21 @@ pub enum Event {
     /// (bincode is ordinal-sensitive).
     SnippetKeepMine {
         targets: Vec<String>,
+    },
+    /// Reply to [`Command::GetStats`]: the daily usage-stats rollup
+    /// (#1339), most-recent day last. The client aggregates these into
+    /// the day/week view. Appended last (bincode is ordinal-sensitive).
+    Stats {
+        buckets: Vec<StatBucket>,
+    },
+    /// A genuinely-fresh agent session started (#1339) — a new
+    /// conversation, not a restart-recovery/restore reattach or a resume
+    /// continuation (all of which re-emit `TerminalSpawned` for an
+    /// already-counted session). The usage-stats accumulator counts this,
+    /// so "sessions" stays one-per-logical-session across daemon
+    /// restarts. Appended last (bincode is ordinal-sensitive).
+    AgentSessionStarted {
+        session_key: SessionKey,
     },
 }
 

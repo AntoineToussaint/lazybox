@@ -1199,6 +1199,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentCreditExhausted { .. }
                 | IpcEvent::WorkspaceCreated { .. }
                 | IpcEvent::ErrorInbox { .. }
+                | IpcEvent::Stats { .. }
+                | IpcEvent::AgentSessionStarted { .. }
                 | IpcEvent::SnippetKeepMine { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
@@ -1877,6 +1879,13 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
+        // Usage-stats snapshot (#1339) — repaint the open stats window. A
+        // snapshot that lands while it's closed is dropped by `update_stats`.
+        if let IpcEvent::Stats { buckets } = &event {
+            self.update_stats(buckets.clone());
+            self.redraw = true;
+            return;
+        }
         // First-time worktree provisioning progress. A user-initiated
         // spawn drives the spinner + step checklist modal; an autonomous
         // (GitHub label / `@lazybox` mention) spawn is background work
@@ -2144,6 +2153,8 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::AgentCreditExhausted { .. }
             | IpcEvent::WorkspaceCreated { .. }
             | IpcEvent::ErrorInbox { .. }
+            | IpcEvent::Stats { .. }
+            | IpcEvent::AgentSessionStarted { .. }
             | IpcEvent::SnippetKeepMine { .. }
             | IpcEvent::ResourcePosture(..) => {}
         }
@@ -2424,6 +2435,8 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentCreditExhausted { .. }
                 | IpcEvent::WorkspaceCreated { .. }
                 | IpcEvent::ErrorInbox { .. }
+                | IpcEvent::Stats { .. }
+                | IpcEvent::AgentSessionStarted { .. }
                 | IpcEvent::SnippetKeepMine { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }

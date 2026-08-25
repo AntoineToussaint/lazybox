@@ -72,6 +72,7 @@ pub mod slack;
 pub mod socket_service;
 pub mod spawn_handler;
 mod spawn_plan;
+pub mod stats_accumulator;
 mod terminal_commands;
 mod terminal_io;
 mod working_claims;
@@ -1087,6 +1088,7 @@ impl Server {
                         lazybox_ipc::Command::ClearErrors => "ClearErrors",
                         lazybox_ipc::Command::DeleteError { .. } => "DeleteError",
                         lazybox_ipc::Command::GetResourcePosture => "GetResourcePosture",
+                        lazybox_ipc::Command::GetStats => "GetStats",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` and `RecordComposingBuffer` fire on every
@@ -2255,6 +2257,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::GetResourcePosture => {
             broadcast_resource_posture(config).await;
+        }
+        lazybox_ipc::Command::GetStats => {
+            stats_accumulator::handle_get(config).await;
         }
         lazybox_ipc::Command::Shutdown => {
             unreachable!("Shutdown is loop control, intercepted by the serve loop")

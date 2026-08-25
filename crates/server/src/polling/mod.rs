@@ -377,6 +377,23 @@ pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnaps
     };
 
     let now = Utc::now();
+    // Source-attention ladder (#scale): the ONE place user curation
+    // reaches the scheduler. The client persists `ui.source_attention`;
+    // `Config::load()` is mtime-cached, so this observes the change on
+    // the tick after the write. A Muted (or source-snoozed) repo's
+    // workspaces classify Cold — clearing every hot/forced signal —
+    // which parks the repo via `suspended_cold` and drops its
+    // notification targets; a Digest repo merely stops forcing itself
+    // into every sweep and never promotes to the hot cadence.
+    let user_cfg = lazybox_config::Config::load().unwrap_or_default();
+    let source_level = |label: &str| {
+        lazybox_config::effective_source_attention(
+            &user_cfg.ui.source_attention,
+            label,
+            Some(&lazybox_config::space_of(label, &user_cfg.ui.spaces)),
+        )
+        .effective_level(now)
+    };
     let mut candidates = Vec::new();
     for record in records {
         let Some(json) = record.workspace_json else {
@@ -395,12 +412,16 @@ pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnaps
             continue;
         };
         let repo = format!("{owner}/{repo_name}");
+        let level = source_level(&repo);
+        let muted = level == lazybox_config::SourceAttentionLevel::Muted;
+        let digest = level == lazybox_config::SourceAttentionLevel::Digest;
         let active = !matches!(
             task.state,
             lazybox_core::TaskState::Closed | lazybox_core::TaskState::Merged
         );
-        let own_open_pr = task.is_pr() && active && task.role == lazybox_core::TaskRole::Author;
-        let cold = workspace.is_snoozed(now) || !active;
+        let own_open_pr =
+            task.is_pr() && active && task.role == lazybox_core::TaskRole::Author && !muted;
+        let cold = workspace.is_snoozed(now) || !active || muted;
         candidates.push(EngagementCandidate {
             workspace_key: workspace.key.clone(),
             target: lazybox_gh::NotificationTarget {
@@ -417,9 +438,9 @@ pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnaps
             repo,
             updated_at: task.updated_at,
             cold,
-            live_agent: live_agent_workspaces.contains(workspace.key.as_str()),
+            live_agent: !muted && live_agent_workspaces.contains(workspace.key.as_str()),
             own_open_pr,
-            sessioned: !workspace.sessions.is_empty(),
+            sessioned: !(muted || digest) && !workspace.sessions.is_empty(),
         });
     }
 

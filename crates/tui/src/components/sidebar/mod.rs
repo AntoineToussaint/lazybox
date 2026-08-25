@@ -118,6 +118,12 @@ pub struct Sidebar {
     /// Spaces the user collapsed. Mirrors `collapsed_repos` one tier up;
     /// persisted to `ui.collapsed_spaces`.
     collapsed_spaces: BTreeSet<String>,
+    /// Per-source attention ladder (#scale): group label / `space:…`
+    /// keys → level + optional snooze. Seeded from
+    /// `ui.source_attention`, mutated by the header `z` / `x ,`
+    /// actions, read by `compute_visible` (sink/collapse/punch-through)
+    /// and the row/badge renderers.
+    source_attention: BTreeMap<String, lazybox_config::SourceAttention>,
     /// Set once `apply_config` has seeded the persisted view state
     /// (stars, pins, collapse, Spaces). Until then the in-memory lists
     /// are empty by construction, not by user intent, so anything that
@@ -447,6 +453,7 @@ impl Sidebar {
             focused_workspaces: Vec::new(),
             spaces: Vec::new(),
             collapsed_spaces: BTreeSet::new(),
+            source_attention: BTreeMap::new(),
             config_seeded: false,
             snapshot_prune: true,
             collapsed_tickets: HashSet::new(),
@@ -1084,6 +1091,66 @@ impl Sidebar {
             self.mailbox = mailbox;
         }
         self.reset_cursor_and_recompute();
+    }
+
+    /// Seed the persisted `ui.source_attention` ladder at startup
+    /// (#scale). Direct field set — no persist echo, no recompute (the
+    /// boot path recomputes once after all seeding).
+    pub fn seed_source_attention(
+        &mut self,
+        map: BTreeMap<String, lazybox_config::SourceAttention>,
+    ) {
+        self.source_attention = map;
+    }
+
+    /// The attention entry in effect for a source label (Space tier
+    /// honored). Readers: header render, the `z`/`x ,` header actions.
+    pub fn source_attention_for(&self, label: &str) -> lazybox_config::SourceAttention {
+        lazybox_config::effective_source_attention(
+            &self.source_attention,
+            label,
+            Some(&lazybox_tui_core::inbox::space_of(label, &self.spaces)),
+        )
+    }
+
+    /// Set (or clear, when the entry is default) one source's attention
+    /// and persist the map. Muting also collapses the group once — the
+    /// muted residue header at the bottom of the sidebar — via the
+    /// existing `ui.collapsed_repos` mechanics, so the user can still
+    /// expand it with `Space` (#scale: muted-but-counted, never
+    /// invisible). `key` is a group label (`owner/repo`, `linear/TEAM`)
+    /// or `space:<name>`.
+    pub fn set_source_attention(&mut self, key: &str, entry: lazybox_config::SourceAttention) {
+        let now_muted =
+            entry.effective_level(self.now()) == lazybox_config::SourceAttentionLevel::Muted;
+        if entry.is_default() {
+            self.source_attention.remove(key);
+        } else {
+            self.source_attention.insert(key.to_string(), entry.clone());
+        }
+        // Persist as a targeted read-modify-write against the on-disk
+        // map (#1244-style): another client's entries survive. Seed-
+        // gated like `persist_lens`, so unsandboxed tests can never
+        // write the developer's real config.yaml.
+        if self.config_seeded {
+            let key_owned = key.to_string();
+            lazybox_config::Config::save_with_async(move |c| {
+                if entry.is_default() {
+                    c.ui.source_attention.remove(&key_owned);
+                } else {
+                    c.ui.source_attention.insert(key_owned, entry);
+                }
+            });
+        }
+        if now_muted && !key.starts_with("space:") && self.collapsed_repos.insert(key.to_string()) {
+            if self.config_seeded {
+                lazybox_config::Config::mutate_ui_list(
+                    |c| &mut c.ui.collapsed_repos,
+                    lazybox_config::UiListOp::Add(key.to_string()),
+                );
+            }
+        }
+        self.recompute_visible();
     }
 
     /// Disable the snapshot-time stale-star prune. Called (via the realm
@@ -1935,8 +2002,17 @@ impl Sidebar {
         self.persist_lens();
     }
 
+    /// Apply a lens as a user action (#scale, saved views): seed it
+    /// AND persist it as the last lens — unlike the boot-time
+    /// [`Self::seed_lens`], which must not echo a write.
+    pub fn apply_lens(&mut self, lens: &lazybox_config::LensSection) {
+        self.seed_lens(lens);
+        self.persist_lens();
+    }
+
     /// The current lens (filters / sort / mailbox) as config tokens.
-    fn current_lens(&self) -> lazybox_config::LensSection {
+    /// Public for the save-view flow (`x v` freezes it under a name).
+    pub fn current_lens(&self) -> lazybox_config::LensSection {
         let mut filters: Vec<String> = self.filters.iter().map(|f| f.label().to_string()).collect();
         filters.extend(self.filters.labels().iter().map(|n| format!("label:{n}")));
         filters.extend(
@@ -3507,6 +3583,7 @@ impl Sidebar {
                 collapsed_spaces: &self.collapsed_spaces,
                 collapsed_tickets: &self.collapsed_tickets,
                 attention: &self.attention,
+                source_attention: &self.source_attention,
                 agents: &self.agents,
                 now: self.now(),
                 search: self.search.as_ref(),

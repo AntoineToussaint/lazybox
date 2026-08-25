@@ -7363,6 +7363,9 @@ mod stale_input_tests {
                 | Id::ThemePicker
                 | Id::FilterMenu
                 | Id::SnoozeDuration
+                | Id::SourceSnooze
+                | Id::SourceLevel
+                | Id::ViewPicker
                 | Id::MoveToSpacePicker
                 | Id::DefaultAgentPicker
                 | Id::DefaultModelPicker
@@ -7417,6 +7420,7 @@ mod stale_input_tests {
                 | Id::StartAgentProject
                 | Id::LlmGatewayUrl
                 | Id::AddScanRoot
+                | Id::SaveViewName
                 | Id::BroadcastSnippet
                 | Id::HandoffTarget
                 | Id::ConvertSessionRole

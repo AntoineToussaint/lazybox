@@ -228,6 +228,9 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | `x d` | move down |
 | `x t` | move to top |
 | `x b` | move to bottom |
+| `x ,` | source attention |
+| `x v` | save view |
+| `x V` | views |
 
 ## Mouse
 

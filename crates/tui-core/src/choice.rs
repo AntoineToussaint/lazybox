@@ -17,6 +17,21 @@ use crate::{
     editors::{EditorTemplate, OpenWithApp, OpenWithContext},
 };
 
+/// Sentinel duration for the source-snooze picker's "Until I unmute"
+/// row (#scale): resolution maps it to `level = Muted` with no
+/// deadline instead of arithmetic on an absurd span.
+pub const SOURCE_MUTE_SENTINEL: Duration = Duration::MAX;
+
+/// Canonical row order of the `x ,` source-level picker. Resolution
+/// indexes into this, so picker construction MUST list rows in the
+/// same order (both sides use this constant).
+pub const SOURCE_LEVELS: [lazybox_config::SourceAttentionLevel; 4] = [
+    lazybox_config::SourceAttentionLevel::Live,
+    lazybox_config::SourceAttentionLevel::Quiet,
+    lazybox_config::SourceAttentionLevel::Digest,
+    lazybox_config::SourceAttentionLevel::Muted,
+];
+
 /// Payload access needed by [`resolve_pick`]. The renderer owns its picker
 /// payload enum; this trait keeps the pure resolver independent of it.
 pub trait PickPayload {
@@ -136,6 +151,28 @@ pub enum PickFlow {
         session_key: Option<SessionKey>,
         now: DateTime<Utc>,
     },
+    /// Header `z` on a Repo/Space header (#scale): the source-snooze
+    /// duration picker. Duration rows time-box the mute (the stored
+    /// `level` is preserved so expiry falls back to it); the trailing
+    /// "Until I unmute" row carries [`SOURCE_MUTE_SENTINEL`] and sets
+    /// the level to Muted outright.
+    SourceSnooze {
+        key: String,
+        level: lazybox_config::SourceAttentionLevel,
+        now: DateTime<Utc>,
+    },
+    /// `x ,` source-settings picker: an index into [`SOURCE_LEVELS`].
+    /// Picking any level clears an active source snooze — choosing
+    /// "live" while snoozed must wake the source, not arm a latent
+    /// level under a still-ticking snooze.
+    SourceLevel {
+        key: String,
+    },
+    /// `x V` saved-views picker (#scale, proposal D): each row indexes
+    /// into `views`; the pick applies that view's frozen lens.
+    View {
+        views: Vec<lazybox_config::ViewConfig>,
+    },
     Labels {
         workspace_key: Option<WorkspaceKey>,
     },
@@ -215,6 +252,21 @@ pub enum PickOutcome<F> {
     Commands {
         commands: Vec<Command>,
         notice: Option<String>,
+    },
+    /// Set one source's attention-ladder entry (#scale): the renderer
+    /// applies it via `Sidebar::set_source_attention` (client state +
+    /// config persistence — no daemon command; the daemon observes the
+    /// config on its next tick).
+    SourceAttention {
+        key: String,
+        entry: lazybox_config::SourceAttention,
+        notice: String,
+    },
+    /// Apply a saved view's lens (#scale, proposal D): the renderer
+    /// seeds + persists it via `Sidebar::apply_lens`.
+    ApplyView {
+        name: String,
+        lens: lazybox_config::LensSection,
     },
     /// A `Shift-Enter` snippet pick: deliver the body to `terminal_id`
     /// without submitting (compose only) AND mirror it into the client's
@@ -640,6 +692,58 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                 _ => PickOutcome::NoOp,
             }
         }
+        PickFlow::SourceSnooze { key, level, now } => {
+            match picks.first().and_then(P::as_duration) {
+                Some(d) if d == SOURCE_MUTE_SENTINEL => PickOutcome::SourceAttention {
+                    notice: format!("{key} muted — z on its header unmutes"),
+                    entry: lazybox_config::SourceAttention {
+                        level: lazybox_config::SourceAttentionLevel::Muted,
+                        snoozed_until: None,
+                    },
+                    key,
+                },
+                Some(duration) => {
+                    let until = now
+                        + chrono::Duration::from_std(duration)
+                            .unwrap_or(chrono::Duration::hours(4));
+                    PickOutcome::SourceAttention {
+                        notice: format!("{key} snoozed for {}", duration_label(duration)),
+                        entry: lazybox_config::SourceAttention {
+                            level,
+                            snoozed_until: Some(until),
+                        },
+                        key,
+                    }
+                }
+                None => PickOutcome::NoOp,
+            }
+        }
+        PickFlow::View { views } => match picks
+            .first()
+            .and_then(P::as_index)
+            .and_then(|i| views.get(i).cloned())
+        {
+            Some(view) => PickOutcome::ApplyView {
+                name: view.name,
+                lens: view.lens,
+            },
+            None => PickOutcome::NoOp,
+        },
+        PickFlow::SourceLevel { key } => match picks
+            .first()
+            .and_then(P::as_index)
+            .and_then(|i| SOURCE_LEVELS.get(i).copied())
+        {
+            Some(level) => PickOutcome::SourceAttention {
+                notice: format!("{key}: {}", level.label()),
+                entry: lazybox_config::SourceAttention {
+                    level,
+                    snoozed_until: None,
+                },
+                key,
+            },
+            None => PickOutcome::NoOp,
+        },
         PickFlow::Labels { workspace_key } => match workspace_key {
             Some(workspace_key) => PickOutcome::Labels {
                 workspace_key,
@@ -1469,5 +1573,70 @@ mod tests {
             resolve_pick(&[Payload::Index(9)], PickFlow::OpenWith { apps, ctx }),
             PickOutcome::NoOp
         ));
+    }
+
+    /// Source-attention picker resolution (#scale): a duration row
+    /// time-boxes the snooze preserving the stored level; the
+    /// "Until I unmute" sentinel goes straight to Muted; the level
+    /// picker indexes SOURCE_LEVELS and clears any snooze.
+    #[test]
+    fn source_pickers_resolve_to_attention_entries() {
+        use lazybox_config::SourceAttentionLevel;
+        let now = chrono::Utc::now();
+
+        let outcome = resolve_pick(
+            &[Payload::Duration(Duration::from_secs(3600))],
+            PickFlow::SourceSnooze {
+                key: "o/r".into(),
+                level: SourceAttentionLevel::Quiet,
+                now,
+            },
+        );
+        match outcome {
+            PickOutcome::SourceAttention { key, entry, .. } => {
+                assert_eq!(key, "o/r");
+                assert_eq!(
+                    entry.level,
+                    SourceAttentionLevel::Quiet,
+                    "a timed snooze preserves the stored level for expiry"
+                );
+                assert_eq!(entry.snoozed_until, Some(now + chrono::Duration::hours(1)));
+            }
+            other => panic!("expected SourceAttention, got {other:?}"),
+        }
+
+        let outcome = resolve_pick(
+            &[Payload::Duration(SOURCE_MUTE_SENTINEL)],
+            PickFlow::SourceSnooze {
+                key: "o/r".into(),
+                level: SourceAttentionLevel::Live,
+                now,
+            },
+        );
+        match outcome {
+            PickOutcome::SourceAttention { entry, .. } => {
+                assert_eq!(entry.level, SourceAttentionLevel::Muted);
+                assert_eq!(
+                    entry.snoozed_until, None,
+                    "mute-forever carries no deadline"
+                );
+            }
+            other => panic!("expected SourceAttention, got {other:?}"),
+        }
+
+        let outcome = resolve_pick(
+            &[Payload::Index(2)],
+            PickFlow::SourceLevel { key: "o/r".into() },
+        );
+        match outcome {
+            PickOutcome::SourceAttention { entry, .. } => {
+                assert_eq!(entry.level, SourceAttentionLevel::Digest);
+                assert_eq!(
+                    entry.snoozed_until, None,
+                    "picking a level clears any snooze"
+                );
+            }
+            other => panic!("expected SourceAttention, got {other:?}"),
+        }
     }
 }

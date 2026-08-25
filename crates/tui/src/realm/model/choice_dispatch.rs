@@ -192,6 +192,24 @@ impl<T: TerminalAdapter> Model<T> {
                 },
                 now: chrono::Utc::now(),
             },
+            Id::SourceSnooze => match &self.modal_flow {
+                Some(ModalFlow::SourceSnooze { key, level }) => PickFlow::SourceSnooze {
+                    key: key.clone(),
+                    level: *level,
+                    now: chrono::Utc::now(),
+                },
+                _ => PickFlow::Plain,
+            },
+            Id::SourceLevel => match &self.modal_flow {
+                Some(ModalFlow::SourceLevel { key }) => PickFlow::SourceLevel { key: key.clone() },
+                _ => PickFlow::Plain,
+            },
+            Id::ViewPicker => match &self.modal_flow {
+                Some(ModalFlow::ViewPick { views }) => PickFlow::View {
+                    views: views.clone(),
+                },
+                _ => PickFlow::Plain,
+            },
             Id::ManageLabels => PickFlow::Labels {
                 workspace_key: self.awaiting_repo_labels.clone(),
             },
@@ -254,6 +272,9 @@ impl<T: TerminalAdapter> Model<T> {
             | Id::PolicyPicker
             | Id::WorkAgentPicker
             | Id::SnoozeDuration
+            | Id::SourceSnooze
+            | Id::SourceLevel
+            | Id::ViewPicker
             | Id::AddAssignees
             | Id::ImportCheckoutList
             | Id::LinearTeamRepo
@@ -317,6 +338,19 @@ impl<T: TerminalAdapter> Model<T> {
                 if let Some(notice) = notice {
                     self.flash_info(notice);
                 }
+            }
+            // Source-attention ladder (#scale): a client-side effect —
+            // the sidebar applies + persists it; the daemon observes
+            // the config change on its next tick.
+            PickOutcome::SourceAttention { key, entry, notice } => {
+                self.sidebar.set_source_attention(&key, entry);
+                self.flash_info(notice);
+            }
+            // Saved view recall (#scale): apply + persist the frozen
+            // lens.
+            PickOutcome::ApplyView { name, lens } => {
+                self.sidebar.apply_lens(&lens);
+                self.flash_info(format!("view: {name}"));
             }
             PickOutcome::InsertSnippetDraft {
                 terminal_id,

@@ -339,6 +339,10 @@ fn updatable_agents(config: &ServerConfig) -> Vec<UpdatableAgent> {
             return Vec::new();
         }
     };
+    // The global `agent.auto_update` switch forces auto-update for every
+    // updatable agent; otherwise it's the per-agent `agents.<id>.auto_update`
+    // opt-in.
+    let global_auto = cfg.agent.auto_update;
     cfg.setup
         .agents
         .iter()
@@ -348,7 +352,8 @@ fn updatable_agents(config: &ServerConfig) -> Vec<UpdatableAgent> {
             Some(UpdatableAgent {
                 id: id.clone(),
                 display_name: agent.display_name().to_string(),
-                auto_update: cfg.agents.get(id).is_some_and(|entry| entry.auto_update),
+                auto_update: global_auto
+                    || cfg.agents.get(id).is_some_and(|entry| entry.auto_update),
                 channel,
             })
         })

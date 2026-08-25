@@ -1756,6 +1756,15 @@ pub struct AgentSection {
     /// until you want live usage. Set `true` to enable.
     #[serde(default)]
     pub metering_proxy: bool,
+    /// Apply EVERY updatable agent's CLI updates automatically when the
+    /// scheduled out-of-band check finds a newer version — the global
+    /// switch over the per-agent `agents.<id>.auto_update` opt-in. Off by
+    /// default; set `true` and lazybox keeps all agent CLIs current
+    /// silently through the bounded background pass (never inside a live
+    /// session PTY, never on the spawn path). Individual agents can still
+    /// opt in via `agents.<id>.auto_update` while this stays off.
+    #[serde(default)]
+    pub auto_update: bool,
     /// Fail-safe watchdog window: seconds a `Working` agent terminal
     /// may sit with no meaningful screen change (spinner/status churn
     /// doesn't count) before the daemon classifies the screen and
@@ -1824,6 +1833,7 @@ impl Default for AgentSection {
             skip_permissions: false,
             llm_gateway_url: None,
             metering_proxy: false,
+            auto_update: false,
             working_watchdog_secs: None,
             quiet_classify_secs: None,
             max_live_agents: None,
@@ -5066,6 +5076,22 @@ agents:
         assert!(cfg.agents["claude"].auto_update);
         assert!(!cfg.agents["codex"].auto_update);
         assert!(!AgentEntry::default().auto_update);
+    }
+
+    #[test]
+    fn global_agent_auto_update_defaults_off_and_parses() {
+        // Absent → off (the safe default; the check still runs, install
+        // waits for the manual action or a per-agent opt-in).
+        assert!(!AgentSection::default().auto_update);
+        let empty: Config = serde_yaml::from_str("{}").expect("parse empty");
+        assert!(!empty.agent.auto_update);
+        // The global switch parses under `agent:`.
+        let yaml = r#"
+agent:
+  auto_update: true
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse global auto_update");
+        assert!(cfg.agent.auto_update);
     }
 
     #[test]

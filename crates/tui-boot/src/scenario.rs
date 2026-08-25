@@ -397,7 +397,8 @@ pub enum Stage {
     #[allow(dead_code)]
     BusOnly,
     /// Tier 2: real daemon terminals via [`MockBackend`]. Each `Spawn` issues
-    /// a genuine `Command::Spawn` through [`dispatch_command`], so the terminal
+    /// a genuine `Command::Spawn` through [`lazybox_server::dispatch_command`],
+    /// so the terminal
     /// is registered in the daemon's `TerminalRegistry` — it survives recovery
     /// snapshots AND accepts input (keystrokes land as backend writes, not
     /// `NotFound`). Output is fed through `MockBackend::emit`, so the daemon's

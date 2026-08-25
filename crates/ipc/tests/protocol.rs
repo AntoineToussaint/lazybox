@@ -372,6 +372,15 @@ fn all_commands() -> Vec<Command> {
         Command::DeleteOrClose {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
         },
+        Command::ClosePr {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+        },
+        Command::ConvertPrToDraft {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+        },
+        Command::MarkPrReady {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+        },
         Command::RequestReviewers {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
             logins: vec!["octocat".into()],
@@ -607,6 +616,22 @@ fn all_events() -> Vec<Event> {
         Event::PrClosed {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
             pr_label: "o/r#2".into(),
+        },
+        Event::PrCloseFailed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            pr_label: "o/r#2".into(),
+            reason: "permission denied".into(),
+        },
+        Event::PrDraftChanged {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            pr_label: "o/r#2".into(),
+            is_draft: true,
+        },
+        Event::PrDraftChangeFailed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            pr_label: "o/r#2".into(),
+            to_draft: false,
+            reason: "permission denied".into(),
         },
         Event::IssueDeleted {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
@@ -1165,6 +1190,9 @@ fn command_tag(command: &Command) -> &'static str {
         Command::MergePr { .. } => "MergePr",
         Command::CloseIssue { .. } => "CloseIssue",
         Command::DeleteOrClose { .. } => "DeleteOrClose",
+        Command::ClosePr { .. } => "ClosePr",
+        Command::ConvertPrToDraft { .. } => "ConvertPrToDraft",
+        Command::MarkPrReady { .. } => "MarkPrReady",
         Command::RequestReviewers { .. } => "RequestReviewers",
         Command::AddAssignees { .. } => "AddAssignees",
         Command::SetAssignees { .. } => "SetAssignees",
@@ -1235,6 +1263,9 @@ fn event_tag(event: &Event) -> &'static str {
         Event::IssueClosed { .. } => "IssueClosed",
         Event::IssueCloseFailed { .. } => "IssueCloseFailed",
         Event::PrClosed { .. } => "PrClosed",
+        Event::PrCloseFailed { .. } => "PrCloseFailed",
+        Event::PrDraftChanged { .. } => "PrDraftChanged",
+        Event::PrDraftChangeFailed { .. } => "PrDraftChangeFailed",
         Event::IssueDeleted { .. } => "IssueDeleted",
         Event::DeleteOrCloseFailed { .. } => "DeleteOrCloseFailed",
         Event::MergedPrRemovable { .. } => "MergedPrRemovable",
@@ -1320,12 +1351,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        83,
+        86,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        90,
+        93,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

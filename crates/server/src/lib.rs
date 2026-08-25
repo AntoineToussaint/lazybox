@@ -1024,6 +1024,9 @@ impl Server {
                         lazybox_ipc::Command::UpdateBranch { .. } => "UpdateBranch",
                         lazybox_ipc::Command::CloseIssue { .. } => "CloseIssue",
                         lazybox_ipc::Command::DeleteOrClose { .. } => "DeleteOrClose",
+                        lazybox_ipc::Command::ClosePr { .. } => "ClosePr",
+                        lazybox_ipc::Command::ConvertPrToDraft { .. } => "ConvertPrToDraft",
+                        lazybox_ipc::Command::MarkPrReady { .. } => "MarkPrReady",
                         lazybox_ipc::Command::ConfirmMerge { .. } => "ConfirmMerge",
                         lazybox_ipc::Command::Snooze { .. } => "Snooze",
                         lazybox_ipc::Command::Unsnooze { .. } => "Unsnooze",
@@ -2157,6 +2160,15 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::DeleteOrClose { workspace_key } => {
             polling::handle_delete_or_close(config, workspace_key).await;
+        }
+        lazybox_ipc::Command::ClosePr { workspace_key } => {
+            polling::handle_close_pr(config, workspace_key).await;
+        }
+        lazybox_ipc::Command::ConvertPrToDraft { workspace_key } => {
+            polling::handle_convert_to_draft(config, workspace_key).await;
+        }
+        lazybox_ipc::Command::MarkPrReady { workspace_key } => {
+            polling::handle_mark_ready(config, workspace_key).await;
         }
         lazybox_ipc::Command::FetchPrDetails { workspace_key } => {
             polling::handle_fetch_pr_details(config, workspace_key).await;

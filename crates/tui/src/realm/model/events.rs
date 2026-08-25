@@ -1126,6 +1126,9 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::IssueClosed { .. }
                 | IpcEvent::IssueCloseFailed { .. }
                 | IpcEvent::PrClosed { .. }
+                | IpcEvent::PrCloseFailed { .. }
+                | IpcEvent::PrDraftChanged { .. }
+                | IpcEvent::PrDraftChangeFailed { .. }
                 | IpcEvent::IssueDeleted { .. }
                 | IpcEvent::DeleteOrCloseFailed { .. }
                 | IpcEvent::MergedPrRemovable { .. }
@@ -1639,6 +1642,57 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
+        // `g c` reached GitHub and was rejected — the PR was NOT closed.
+        // Persistent error naming the reason (mirrors `IssueCloseFailed`).
+        // The PR stays open/actionable.
+        if let IpcEvent::PrCloseFailed {
+            workspace_key,
+            pr_label,
+            reason,
+        } = &event
+        {
+            self.flash_action_error(
+                workspace_key,
+                action_failure_notice("close", pr_label, reason),
+            );
+            self.redraw = true;
+            return;
+        }
+        // `g f` / `g y` reached GitHub and the PR's draft state flipped.
+        // Flash now; the next poll reconciles the row's badge.
+        if let IpcEvent::PrDraftChanged {
+            workspace_key,
+            pr_label,
+            is_draft,
+        } = &event
+        {
+            self.clear_action_error(workspace_key);
+            if *is_draft {
+                self.flash_info(format!("{pr_label} converted to draft"));
+            } else {
+                self.flash_info(format!("{pr_label} marked ready for review"));
+            }
+            self.redraw = true;
+            return;
+        }
+        // `g f` / `g y` reached GitHub and was rejected — nothing changed.
+        // Persistent error naming the reason and the attempted direction.
+        if let IpcEvent::PrDraftChangeFailed {
+            workspace_key,
+            pr_label,
+            to_draft,
+            reason,
+        } = &event
+        {
+            let verb = if *to_draft {
+                "convert to draft"
+            } else {
+                "mark ready"
+            };
+            self.flash_action_error(workspace_key, action_failure_notice(verb, pr_label, reason));
+            self.redraw = true;
+            return;
+        }
         // `g d` reached GitHub and the issue is gone — hard-deleted, or
         // (when the token lacked the admin rights a delete needs) closed
         // as not-planned. Name the degradation so "delete" never
@@ -2020,6 +2074,9 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::IssueClosed { .. }
             | IpcEvent::IssueCloseFailed { .. }
             | IpcEvent::PrClosed { .. }
+            | IpcEvent::PrCloseFailed { .. }
+            | IpcEvent::PrDraftChanged { .. }
+            | IpcEvent::PrDraftChangeFailed { .. }
             | IpcEvent::IssueDeleted { .. }
             | IpcEvent::DeleteOrCloseFailed { .. }
             | IpcEvent::MergedPrRemovable { .. }
@@ -2297,6 +2354,9 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::IssueClosed { .. }
                 | IpcEvent::IssueCloseFailed { .. }
                 | IpcEvent::PrClosed { .. }
+                | IpcEvent::PrCloseFailed { .. }
+                | IpcEvent::PrDraftChanged { .. }
+                | IpcEvent::PrDraftChangeFailed { .. }
                 | IpcEvent::IssueDeleted { .. }
                 | IpcEvent::DeleteOrCloseFailed { .. }
                 | IpcEvent::MergedPrRemovable { .. }

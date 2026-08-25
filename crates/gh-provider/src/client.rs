@@ -4936,6 +4936,26 @@ impl GhClient {
         )
     }
 
+    /// Idempotency re-check for the draft toggles, mirroring
+    /// [`Self::pr_already_merged`]. GitHub's `convertPullRequestToDraft` /
+    /// `markPullRequestReadyForReview` are NOT no-ops — converting an
+    /// already-draft PR (or readying a non-draft one) returns an error.
+    /// So a lost-response retry re-fires the mutation and GitHub rejects
+    /// it, even though the desired end-state already holds. On mutation
+    /// error we re-fetch the PR and ask whether it already reached the
+    /// target draft state; if so the caller treats it as success instead
+    /// of surfacing a spurious failure. A fetch failure returns `false`
+    /// so a genuine mutation error is still reported.
+    async fn pr_reached_draft_state(&self, pr: &lazybox_core::Task, want_draft: bool) -> bool {
+        let Some((owner, name, number)) = parse_github_pr_key(&pr.id.key) else {
+            return false;
+        };
+        matches!(
+            self.fetch_single_pr_interactive(owner, name, number).await,
+            Ok(Some(task)) if draft_end_state_reached(task.state, want_draft)
+        )
+    }
+
     /// When a merge failed with GitHub's generic "Repository rule
     /// violations found" (issue #998), best-effort append the base
     /// branch's active rule names so the server's humanizer can name
@@ -5025,6 +5045,39 @@ impl GhClient {
         Ok(())
     }
 
+    pub async fn convert_pr_to_draft_node(
+        &self,
+        pull_request_node_id: &str,
+    ) -> Result<(), GhError> {
+        self.acquire_or_block("convertPullRequestToDraft mutation")?;
+        let body = graphql::convert_pr_to_draft_body(pull_request_node_id);
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("convertPullRequestToDraft mutation", &body)
+            .await?;
+        if let Some(errors) = response.errors {
+            return Err(mutation_error_response(
+                "convertPullRequestToDraft mutation",
+                &errors,
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn mark_pr_ready_node(&self, pull_request_node_id: &str) -> Result<(), GhError> {
+        self.acquire_or_block("markPullRequestReadyForReview mutation")?;
+        let body = graphql::mark_pr_ready_body(pull_request_node_id);
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("markPullRequestReadyForReview mutation", &body)
+            .await?;
+        if let Some(errors) = response.errors {
+            return Err(mutation_error_response(
+                "markPullRequestReadyForReview mutation",
+                &errors,
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn delete_issue_node(&self, issue_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("deleteIssue mutation")?;
         let body = graphql::delete_issue_body(issue_node_id);
@@ -5053,6 +5106,25 @@ fn parse_github_pr_key(key: &str) -> Option<(&str, &str, u64)> {
     let (owner, name) = repo_path.split_once('/')?;
     let number = number.parse::<u64>().ok()?;
     Some((owner, name, number))
+}
+
+/// Whether a PR's freshly-fetched state means a draft toggle already
+/// reached its target, used by [`GhClient::pr_reached_draft_state`] to
+/// make the toggles idempotent. `want_draft` = the state the caller was
+/// trying to produce: `true` (convert-to-draft) is reached only by an
+/// actual draft; `false` (mark-ready) is reached only by an *open*,
+/// non-draft PR — a Closed/Merged PR is NOT a successful "ready", so the
+/// original mutation error is surfaced rather than masked.
+fn draft_end_state_reached(state: lazybox_core::TaskState, want_draft: bool) -> bool {
+    use lazybox_core::TaskState;
+    if want_draft {
+        state == TaskState::Draft
+    } else {
+        matches!(
+            state,
+            TaskState::Open | TaskState::InProgress | TaskState::InReview
+        )
+    }
 }
 
 fn working_claim_target<'a>(
@@ -5221,6 +5293,74 @@ impl lazybox_core::TaskProvider for GhClient {
         self.close_pr_node(node_id)
             .await
             .map_err(mutation_provider_error)
+    }
+
+    /// Convert the workspace's PR to a draft. Requires
+    /// `workspace.pr.node_id` — the polling cycle fills it in.
+    async fn convert_to_draft(
+        &self,
+        workspace: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        let Some(pr) = workspace.pr.as_ref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                format!("workspace {} has no PR", workspace.key),
+            ));
+        };
+        let Some(node_id) = pr.node_id.as_deref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                "PR has no node_id (poll first)",
+            ));
+        };
+        match self.convert_pr_to_draft_node(node_id).await {
+            Ok(()) => Ok(()),
+            // Idempotent: GitHub errors when the PR is already a draft, so
+            // a lost-response retry must not surface a spurious failure —
+            // if it already IS a draft, the desired end-state holds.
+            Err(_) if self.pr_reached_draft_state(pr, true).await => {
+                tracing::info!(
+                    "convert-to-draft {}: PR already a draft on GitHub — treating as no-op success",
+                    pr.id.key
+                );
+                Ok(())
+            }
+            Err(err) => Err(mutation_provider_error(err)),
+        }
+    }
+
+    /// Mark the workspace's draft PR ready for review. Requires
+    /// `workspace.pr.node_id` — the polling cycle fills it in.
+    async fn mark_ready(
+        &self,
+        workspace: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        let Some(pr) = workspace.pr.as_ref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                format!("workspace {} has no PR", workspace.key),
+            ));
+        };
+        let Some(node_id) = pr.node_id.as_deref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                "PR has no node_id (poll first)",
+            ));
+        };
+        match self.mark_pr_ready_node(node_id).await {
+            Ok(()) => Ok(()),
+            // Idempotent: GitHub errors when the PR is not a draft, so a
+            // lost-response retry must not surface a spurious failure — if
+            // it's already ready (open, non-draft), the end-state holds.
+            Err(_) if self.pr_reached_draft_state(pr, false).await => {
+                tracing::info!(
+                    "mark-ready {}: PR already ready on GitHub — treating as no-op success",
+                    pr.id.key
+                );
+                Ok(())
+            }
+            Err(err) => Err(mutation_provider_error(err)),
+        }
     }
 
     /// List the accounts requestable as reviewers on the workspace's
@@ -6138,6 +6278,31 @@ mod tests {
         assert_eq!(parse_github_pr_key("owner/repo#notanumber"), None);
         assert_eq!(parse_github_pr_key("no-hash-here"), None);
         assert_eq!(parse_github_pr_key("owneronly#5"), None);
+    }
+
+    /// The draft toggles are made idempotent by re-checking the PR state
+    /// on mutation error (GitHub rejects a redundant convert/mark-ready).
+    /// This is the decision that turns that re-fetch into success-or-not:
+    /// convert-to-draft is only "reached" by an actual draft; mark-ready
+    /// only by an OPEN non-draft PR — a Closed/Merged PR is not a
+    /// successful "ready", so the real mutation error is still surfaced.
+    /// A wrong decision here would either mask a genuine failure or flash
+    /// a spurious one on a lost-response retry.
+    #[test]
+    fn draft_end_state_reached_matches_target_only() {
+        use lazybox_core::TaskState;
+        // convert-to-draft (want_draft = true): only Draft counts.
+        assert!(draft_end_state_reached(TaskState::Draft, true));
+        assert!(!draft_end_state_reached(TaskState::Open, true));
+        assert!(!draft_end_state_reached(TaskState::Closed, true));
+        assert!(!draft_end_state_reached(TaskState::Merged, true));
+        // mark-ready (want_draft = false): only an open, non-draft PR.
+        assert!(draft_end_state_reached(TaskState::Open, false));
+        assert!(draft_end_state_reached(TaskState::InReview, false));
+        assert!(!draft_end_state_reached(TaskState::Draft, false));
+        // A closed/merged PR is NOT a successful "ready" — surface the error.
+        assert!(!draft_end_state_reached(TaskState::Closed, false));
+        assert!(!draft_end_state_reached(TaskState::Merged, false));
     }
 
     /// A `mergePullRequest` re-sent after a client-side timeout (first

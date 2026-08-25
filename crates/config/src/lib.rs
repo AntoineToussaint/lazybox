@@ -1715,10 +1715,14 @@ pub struct AgentEntry {
     /// a bare spawn uses. Empty → fall back to the built-in preset for
     /// this agent id.
     pub models: lazybox_core::AgentModels,
-    /// Let lazybox apply this agent's CLI updates automatically when
-    /// its scheduled out-of-band check finds a newer version. Off by
-    /// default: the check still runs and surfaces "update available",
-    /// but installing waits for the manual "update agent CLIs" action.
+    /// Opt this agent into automatic CLI updates when its scheduled
+    /// out-of-band check finds a newer version. Off by default: the check
+    /// still runs and surfaces "update available", but installing waits
+    /// for the manual "update agent CLIs" action or the global
+    /// `agent.auto_update` switch. To auto-update everything EXCEPT a
+    /// specific agent, turn on the global switch and add the agent to
+    /// `agent.auto_update_except` — that exclusion is how you pin an
+    /// agent under the global switch (this per-agent flag is opt-IN only).
     pub auto_update: bool,
 }
 
@@ -1785,6 +1789,23 @@ pub struct AgentSection {
     /// until you want live usage. Set `true` to enable.
     #[serde(default)]
     pub metering_proxy: bool,
+    /// Apply EVERY updatable agent's CLI updates automatically when the
+    /// scheduled out-of-band check finds a newer version — the global
+    /// switch over the per-agent `agents.<id>.auto_update` opt-in. Off by
+    /// default; set `true` and lazybox keeps all agent CLIs current
+    /// silently through the bounded background pass (never inside a live
+    /// session PTY, never on the spawn path). Individual agents can still
+    /// opt in via `agents.<id>.auto_update` while this stays off.
+    #[serde(default)]
+    pub auto_update: bool,
+    /// Agent ids to hold back from the global `auto_update` switch. Lets
+    /// you express "auto-update everything EXCEPT these" — without it, a
+    /// global switch could only be all-or-nothing and would silently
+    /// override a pinned agent. An excluded agent never auto-updates, even
+    /// if its own `agents.<id>.auto_update` is on, so this is the single
+    /// authoritative opt-out. Ignored when the global switch is off.
+    #[serde(default)]
+    pub auto_update_except: Vec<String>,
     /// Fail-safe watchdog window: seconds a `Working` agent terminal
     /// may sit with no meaningful screen change (spinner/status churn
     /// doesn't count) before the daemon classifies the screen and
@@ -1853,6 +1874,8 @@ impl Default for AgentSection {
             skip_permissions: false,
             llm_gateway_url: None,
             metering_proxy: false,
+            auto_update: false,
+            auto_update_except: Vec::new(),
             working_watchdog_secs: None,
             quiet_classify_secs: None,
             max_live_agents: None,
@@ -5095,6 +5118,22 @@ agents:
         assert!(cfg.agents["claude"].auto_update);
         assert!(!cfg.agents["codex"].auto_update);
         assert!(!AgentEntry::default().auto_update);
+    }
+
+    #[test]
+    fn global_agent_auto_update_defaults_off_and_parses() {
+        // Absent → off (the safe default; the check still runs, install
+        // waits for the manual action or a per-agent opt-in).
+        assert!(!AgentSection::default().auto_update);
+        let empty: Config = serde_yaml::from_str("{}").expect("parse empty");
+        assert!(!empty.agent.auto_update);
+        // The global switch parses under `agent:`.
+        let yaml = r#"
+agent:
+  auto_update: true
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse global auto_update");
+        assert!(cfg.agent.auto_update);
     }
 
     #[test]

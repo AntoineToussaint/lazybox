@@ -1179,6 +1179,26 @@ pub enum Command {
     DeleteOrClose {
         workspace_key: lazybox_core::WorkspaceKey,
     },
+    /// Close the workspace's PR without merging (`closePullRequest`).
+    /// Fires from the github leader's `g c` chord, after a confirm.
+    /// Unlike [`Command::DeleteOrClose`], this only ever targets a PR
+    /// (never deletes an issue) and leaves the workspace in place — the
+    /// next poll's rescope sweep reconciles the closed state.
+    ClosePr {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
+    /// Convert the workspace's open PR to a draft
+    /// (`convertPullRequestToDraft`). Fires from the github leader's
+    /// `g f` chord. The next poll picks up the draft state.
+    ConvertPrToDraft {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
+    /// Mark the workspace's draft PR ready for review
+    /// (`markPullRequestReadyForReview`). Fires from the github leader's
+    /// `g y` chord. The next poll picks up the ready state.
+    MarkPrReady {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
     /// Request reviews on the workspace's PR from the given GitHub
     /// logins. Adds to the existing reviewer set (no replacement).
     /// Only meaningful when the focused workspace's primary task is
@@ -1926,6 +1946,35 @@ pub enum Event {
     DeleteOrCloseFailed {
         workspace_key: lazybox_core::WorkspaceKey,
         label: String,
+        reason: String,
+    },
+    /// `Command::ClosePr` failed at the GitHub API — the user pressed
+    /// `g c` and the PR was NOT closed. Surfaced as a prominent,
+    /// persistent error naming the reason, mirroring `IssueCloseFailed`.
+    /// The PR stays open/actionable. (Success reuses `Event::PrClosed`.)
+    PrCloseFailed {
+        workspace_key: lazybox_core::WorkspaceKey,
+        pr_label: String,
+        reason: String,
+    },
+    /// The PR for `workspace_key` had its draft state changed via
+    /// `Command::ConvertPrToDraft` (`is_draft = true`) or
+    /// `Command::MarkPrReady` (`is_draft = false`). The local Task still
+    /// reads the old state until the next poll catches up, so the TUI
+    /// flashes a footer notice so the keypress doesn't look like a no-op.
+    PrDraftChanged {
+        workspace_key: lazybox_core::WorkspaceKey,
+        pr_label: String,
+        is_draft: bool,
+    },
+    /// `Command::ConvertPrToDraft` / `Command::MarkPrReady` failed at the
+    /// GitHub API — nothing changed. Surfaced as a prominent, persistent
+    /// error naming the reason, mirroring `PrCloseFailed`. `to_draft`
+    /// records which direction was attempted so the TUI can say so.
+    PrDraftChangeFailed {
+        workspace_key: lazybox_core::WorkspaceKey,
+        pr_label: String,
+        to_draft: bool,
         reason: String,
     },
     /// A workspace's primary task reached a terminal state (a PR
@@ -2911,6 +2960,14 @@ pub enum WorktreeRecovery {
     /// read-only mount, `git init` half-write). Retryable once the
     /// filesystem problem is cleared.
     Disk,
+    /// The requested branch name collides with an existing branch in the
+    /// same namespace — git can't hold both `release` and `release/*`
+    /// (a directory/file conflict). The daemon already tried a safe
+    /// auto-delete of the conflicting branch and it couldn't be cleared
+    /// (unmerged, or checked out live), so a bare retry just replays the
+    /// same failure. The fix is manual: delete or rename the conflicting
+    /// branch. The conflicting name is recovered via [`Self::df_conflict_branch`].
+    BranchDirFileConflict,
     /// Unclassified — surface the raw text and still offer a retry, since
     /// a failed provision persists no session and re-pressing is clean.
     Unknown,
@@ -2989,7 +3046,27 @@ impl WorktreeRecovery {
             || message.contains("index.lock")
             || message.contains("cannot lock ref")
         {
+            // A directory/file branch conflict is NOT a transient lock,
+            // yet git's raw phrasing is "cannot lock ref '…': '…' exists;
+            // cannot create '…'" — which trips the "cannot lock ref" arm
+            // above. Match git's own D/F marker ("exists; cannot create"),
+            // not the wrapped BranchDirFileConflict's "directory/file
+            // conflict" phrasing (that message never contains "cannot lock
+            // ref", so it reaches the post-block check instead). Without
+            // this, a raw D/F error would be mislabeled Transient and the
+            // modal would offer the exact doomed retry this class prevents.
+            if message.contains("exists; cannot create")
+                || message.contains("directory/file conflict")
+            {
+                return Self::BranchDirFileConflict;
+            }
             return Self::Transient;
+        }
+        // Directory/file branch-name conflict the daemon couldn't clear
+        // safely. Matched on the distinct phrase from
+        // `GitError::BranchDirFileConflict`.
+        if message.contains("directory/file conflict") {
+            return Self::BranchDirFileConflict;
         }
         Self::Unknown
     }
@@ -3013,6 +3090,7 @@ impl WorktreeRecovery {
             | Self::BranchMismatch
             | Self::DirtyLeftover
             | Self::Offline
+            | Self::BranchDirFileConflict
             | Self::Disk => WorktreeStep::WorktreeAdd,
             // Unknown: keep it on whatever row the display is showing —
             // the modal's `fail_current` treats `Fetch` as "use the
@@ -3140,8 +3218,26 @@ impl WorktreeRecovery {
                  tickets use — lazybox remembers the choice."
             }
             Self::Disk => "Disk or permission error. Free space or fix permissions, then press r.",
+            Self::BranchDirFileConflict => {
+                "The branch name collides with an existing branch (a directory/file \
+                 conflict). Delete or rename the conflicting branch — a bare retry \
+                 can't clear it."
+            }
             Self::Unknown => "Press r to retry, or Esc to dismiss.",
         }
+    }
+
+    /// The existing conflicting branch name parsed out of a
+    /// [`Self::BranchDirFileConflict`] message. The daemon's error names
+    /// it verbatim (`… because '<conflicting>' already exists —`), so the
+    /// modal can tell the user exactly which branch to delete or rename.
+    /// `None` for every other class / message shape.
+    pub fn df_conflict_branch(message: &str) -> Option<String> {
+        let after = message.split_once("already exists")?.0;
+        let end = after.rfind('\'')?;
+        let start = after[..end].rfind('\'')? + 1;
+        let name = after[start..end].trim();
+        (!name.is_empty()).then(|| name.to_string())
     }
 
     /// Concrete recovery text for a particular failure message.
@@ -3864,6 +3960,23 @@ mod worktree_recovery_tests {
                 WorktreeStep::Fetch,
             ),
             (
+                "branch 'release' can't be created because 'release/v0.2.102' already \
+                 exists — git can't hold both a branch and a path named 'release' (a \
+                 directory/file conflict). Delete or rename 'release/v0.2.102', then retry",
+                WorktreeRecovery::BranchDirFileConflict,
+                WorktreeStep::WorktreeAdd,
+            ),
+            (
+                // Git's RAW D/F phrasing also contains "cannot lock ref"
+                // (the transient-lock marker) — it must still classify as
+                // the D/F conflict, not a retryable transient, or the
+                // modal offers a doomed retry.
+                "fatal: cannot lock ref 'refs/heads/release': \
+                 'refs/heads/release/v0.2.102' exists; cannot create 'refs/heads/release'",
+                WorktreeRecovery::BranchDirFileConflict,
+                WorktreeStep::WorktreeAdd,
+            ),
+            (
                 "something the classifier has never seen",
                 WorktreeRecovery::Unknown,
                 WorktreeStep::Fetch,
@@ -3878,6 +3991,29 @@ mod worktree_recovery_tests {
                 "hint for {class:?} must not be empty"
             );
         }
+    }
+
+    /// The directory/file branch conflict is a manual-fix class: it must
+    /// NOT be retryable (a bare replay re-runs the same doomed add) nor
+    /// recreatable (the conflict is a foreign branch, not the workspace's
+    /// own worktree), and the conflicting branch name is recoverable so
+    /// the modal can name it.
+    #[test]
+    fn dir_file_conflict_is_manual_fix_and_names_the_branch() {
+        let msg = "branch 'release' can't be created because 'release/v0.2.102' already \
+             exists — git can't hold both a branch and a path named 'release' (a \
+             directory/file conflict). Delete or rename 'release/v0.2.102', then retry";
+        let class = WorktreeRecovery::classify(msg);
+        assert_eq!(class, WorktreeRecovery::BranchDirFileConflict);
+        assert!(!class.retryable(), "a bare retry replays the same failure");
+        assert!(
+            !class.recreatable(),
+            "the conflict is a foreign branch, not the workspace's own worktree"
+        );
+        assert_eq!(
+            WorktreeRecovery::df_conflict_branch(msg).as_deref(),
+            Some("release/v0.2.102"),
+        );
     }
 
     /// The disk marker must beat the network markers: a message that is

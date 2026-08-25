@@ -2568,6 +2568,9 @@ pub(super) fn action_from_kind(
         ActionKind::SyncWorkspace => Action::SyncWorkspace,
         ActionKind::OpenInBrowser => Action::OpenInBrowser,
         ActionKind::DeleteOrClose => Action::DeleteOrClose,
+        ActionKind::ClosePr => Action::ClosePr,
+        ActionKind::ConvertToDraft => Action::ConvertToDraft,
+        ActionKind::MarkReady => Action::MarkReady,
         // Activity-pane cursor jumps (`g` / `Shift-G` under Right
         // focus). Dispatching these through the catalog is what keeps
         // a reflexive `g` in the activity pane from arming the

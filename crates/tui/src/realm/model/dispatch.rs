@@ -215,6 +215,7 @@ pub(super) fn is_bulk_destructive(action: &lazybox_tui_core::action::Action) -> 
             | Action::MergePr
             | Action::LongSnooze
             | Action::DeleteOrClose
+            | Action::ClosePr
             | Action::CloseIssue
             | Action::CloseAndArchive
     )
@@ -230,6 +231,7 @@ fn bulk_confirmed_verb(action: &lazybox_tui_core::action::Action) -> &'static st
         Action::MergePr => "merged",
         Action::LongSnooze => "snoozed",
         Action::DeleteOrClose => "closed/deleted",
+        Action::ClosePr => "closed",
         Action::CloseIssue => "closed",
         Action::CloseAndArchive => "closed & killed",
         _ => "applied to",
@@ -712,6 +714,36 @@ impl<T: TerminalAdapter> Model<T> {
                     )
                 }
             }
+            Action::ClosePr => {
+                let ready = targets
+                    .iter()
+                    .filter(|t| match t {
+                        ActionConfirmTarget::Workspace(k) => {
+                            self.sidebar.workspace_by_key(k).is_some_and(|ws| {
+                                lazybox_tui_core::action::availability(
+                                    lazybox_tui_core::action::ActionKind::ClosePr,
+                                    Some(ws),
+                                )
+                            })
+                        }
+                        ActionConfirmTarget::Project(_) => false,
+                    })
+                    .count();
+                let skipped = n - ready;
+                let plural = |n: usize| if n == 1 { "" } else { "s" };
+                if ready == 0 {
+                    format!(
+                        "None of the {n} selected have an open PR to close — nothing will happen. {list}"
+                    )
+                } else if skipped == 0 {
+                    format!("Close {ready} PR{} without merging? {list}", plural(ready))
+                } else {
+                    format!(
+                        "Close {ready} of {n} selected PR{} without merging? {skipped} will be skipped (no open PR). {list}",
+                        plural(ready)
+                    )
+                }
+            }
             // Every selected row was gated on the same open-issue/PR
             // predicate as delete-or-close, so all N get both the upstream
             // close and the local archive.
@@ -834,6 +866,28 @@ impl<T: TerminalAdapter> Model<T> {
                             self.flash_info(
                                 "the issue / PR is no longer open — nothing to delete or close",
                             );
+                            Vec::new()
+                        }
+                    },
+                    Action::ClosePr => match workspace.as_ref() {
+                        Some(ws)
+                            if lazybox_tui_core::action::availability(
+                                lazybox_tui_core::action::ActionKind::ClosePr,
+                                Some(ws),
+                            ) =>
+                        {
+                            if let Some(pr) = ws.pr.as_ref() {
+                                self.flash_info(format!(
+                                    "closing PR{}…",
+                                    task_number_suffix(&pr.id.key)
+                                ));
+                            }
+                            vec![IpcCommand::ClosePr {
+                                workspace_key: ws.key.clone(),
+                            }]
+                        }
+                        _ => {
+                            self.flash_info("the PR is no longer open — nothing to close");
                             Vec::new()
                         }
                     },
@@ -1191,6 +1245,18 @@ impl<T: TerminalAdapter> Model<T> {
                     )
                 }
             });
+        }
+        // Close-PR names its exact target — the number + title of the PR
+        // the confirmed keypress closes.
+        if matches!(action, Action::ClosePr) {
+            let sk = target_ws_key.or_else(|| self.sidebar.selected_workspace_key())?;
+            let ws = self.sidebar.workspace_by_key(sk)?;
+            let pr = ws.pr.as_ref()?;
+            return Some(format!(
+                "Close PR {} — \"{}\" — without merging? Reopen on GitHub to undo.",
+                pr.id.key,
+                truncate_title(&pr.title),
+            ));
         }
         if !matches!(action, Action::Archive) {
             return None;
@@ -1728,6 +1794,71 @@ impl<T: TerminalAdapter> Model<T> {
                 let workspace = self.sidebar.selected_workspace().cloned();
                 let intent = crate::intent::resolve_update_branch(workspace.as_ref());
                 cmds.extend(self.execute_dispatch_intent(intent, workspace.as_ref()));
+            }
+            Action::ConvertToDraft => {
+                // Non-destructive (Guard::None) — fires straight through.
+                // Selection-first: a `v` multi-select converts every open,
+                // non-draft PR in the set; otherwise the focused row.
+                let eligible = |ws: &lazybox_core::Workspace| {
+                    lazybox_tui_core::action::availability(
+                        lazybox_tui_core::action::ActionKind::ConvertToDraft,
+                        Some(ws),
+                    )
+                    .then(|| IpcCommand::ConvertPrToDraft {
+                        workspace_key: ws.key.clone(),
+                    })
+                };
+                if self.bulk_active() {
+                    return self.bulk_dispatch(
+                        "converting to draft",
+                        "no open PR to draft",
+                        eligible,
+                    );
+                }
+                if let Some(ws) = self.sidebar.selected_workspace().cloned() {
+                    if let Some(cmd) = eligible(&ws) {
+                        self.flash_info(format!(
+                            "converting PR{} to draft…",
+                            ws.pr
+                                .as_ref()
+                                .map(|pr| task_number_suffix(&pr.id.key))
+                                .unwrap_or_default()
+                        ));
+                        cmds.push(cmd);
+                    } else {
+                        self.flash_info("no open PR to convert to draft");
+                    }
+                }
+            }
+            Action::MarkReady => {
+                // Non-destructive (Guard::None). Selection-first: a `v`
+                // multi-select marks every draft PR in the set ready.
+                let eligible = |ws: &lazybox_core::Workspace| {
+                    lazybox_tui_core::action::availability(
+                        lazybox_tui_core::action::ActionKind::MarkReady,
+                        Some(ws),
+                    )
+                    .then(|| IpcCommand::MarkPrReady {
+                        workspace_key: ws.key.clone(),
+                    })
+                };
+                if self.bulk_active() {
+                    return self.bulk_dispatch("marking ready", "not a draft PR", eligible);
+                }
+                if let Some(ws) = self.sidebar.selected_workspace().cloned() {
+                    if let Some(cmd) = eligible(&ws) {
+                        self.flash_info(format!(
+                            "marking PR{} ready for review…",
+                            ws.pr
+                                .as_ref()
+                                .map(|pr| task_number_suffix(&pr.id.key))
+                                .unwrap_or_default()
+                        ));
+                        cmds.push(cmd);
+                    } else {
+                        self.flash_info("no draft PR to mark ready");
+                    }
+                }
             }
             Action::ToggleAutoMerge => {
                 // Bulk (#899): arm auto-merge-on-green across every

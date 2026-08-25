@@ -9,35 +9,34 @@ assert.ok(stylesheetPath, 'expected the built homepage stylesheet');
 const css = await readFile(new URL(`../dist${stylesheetPath}`, import.meta.url), 'utf8');
 const socialPreview = await readFile(new URL('../public/og.png', import.meta.url));
 
-const brewCommand = 'brew install AntoineToussaint/lazybox/lazybox';
-const installerCommand =
-  "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/AntoineToussaint/lazybox/releases/latest/download/lazybox-tui-installer.sh | sh";
+// `&&` is HTML-escaped to `&amp;&amp;` in the built markup; the raw HTML we read
+// here contains the escaped form, so these constants match what ships.
+const brewCommand =
+  'brew tap AntoineToussaint/lazybox &amp;&amp; brew trust AntoineToussaint/lazybox &amp;&amp; brew install lazybox';
 const sourceCommand =
-  'cargo install --git https://github.com/AntoineToussaint/lazybox --locked lazybox-tui-boot';
+  'git clone https://github.com/AntoineToussaint/lazybox &amp;&amp; cd lazybox &amp;&amp; make setup &amp;&amp; make run';
 
-test('the homepage prioritizes prebuilt installs over the source build', () => {
+test('the homepage leads with the brew-only install and buries the source build', () => {
   const detailsIndex = html.indexOf('<details class="install-more">');
   const brewIndex = html.indexOf(brewCommand);
-  const installerIndex = html.indexOf('Installer script <span>Prebuilt</span>');
-  const sourceIndex = html.indexOf('Advanced / from source');
+  const sourceIndex = html.indexOf('From source <span>Contributors</span>');
 
-  assert.ok(detailsIndex > 0, 'expected alternate install methods to be disclosed');
-  assert.ok(brewIndex > 0 && brewIndex < detailsIndex, 'expected Homebrew before alternate methods');
-  assert.ok(installerIndex > detailsIndex, 'expected the prebuilt installer in alternate methods');
-  assert.ok(sourceIndex > installerIndex, 'expected the source build to be the last method');
+  assert.ok(detailsIndex > 0, 'expected the contributor build to be disclosed behind a details toggle');
+  assert.ok(brewIndex > 0 && brewIndex < detailsIndex, 'expected the brew command before the disclosed build');
+  assert.ok(sourceIndex > detailsIndex, 'expected the source build inside the details disclosure');
   assert.equal(
     html.slice(0, detailsIndex).includes(sourceCommand),
     false,
-    'source install must not appear as the primary command',
+    'source build must not appear as a primary command',
   );
-  assert.ok(
-    html.includes('Compiles the current main branch (HEAD) locally. Requires Rust 1.88+'),
-    'expected the source build requirements',
-  );
+  // No deprecated user-facing installers on the homepage.
+  assert.equal(html.includes('lazybox-tui-installer.sh'), false, 'the curl installer must not be advertised');
+  assert.equal(html.includes('cargo install --git'), false, 'the broken cargo-install path must not be advertised');
+  assert.ok(html.includes('Requires Rust 1.88+'), 'expected the source build requirements');
 });
 
 test('every install method has a copy control for its exact command', () => {
-  for (const command of [brewCommand, installerCommand, sourceCommand]) {
+  for (const command of [brewCommand, sourceCommand]) {
     assert.ok(html.includes(`data-copy="${command}"`), `missing copy control for: ${command}`);
   }
 });

@@ -148,8 +148,15 @@ Start from an unread GitHub event and carry it to completion:
    assignees, or `g l` for labels.
 4. Inspect CI, review, and conflict state in the workspace. Use `g g` to arm
    lazybox's merge-on-green behavior or `g m` to merge an eligible PR now.
+   `g s` runs a targeted sync of just this workspace — cheap when you're waiting
+   on one PR's CI. On a **repo-scoped** workspace (no single PR/issue), `g s`
+   instead **discovers** the repo's open issues and PRs so you can pull them in
+   without a full `Shift-R` sweep.
 5. On an issue, `x c` closes it upstream after confirmation. When the work is
-   finished, `x x` archives the workspace and cleans up its sessions.
+   finished, `x x` archives the workspace and cleans up its sessions. To do both
+   at once — close/delete the issue or PR upstream **and** archive the workspace
+   (killing its sessions) — use `x k` (close & kill), a single confirmed step for
+   ending a finished line of work.
 
 The browser remains available through `g o`, but it is an escape hatch rather
 than a required step. See the
@@ -162,12 +169,26 @@ A representative lazybox workload can have **10 repositories and 15 live
 sessions**. Keep it controlled by navigating outcomes instead of terminals:
 
 1. Use the sidebar's repository groups to keep each task, agent state, GitHub
-   activity, and terminal together.
+   activity, and terminal together. Group repos one tier higher into **Spaces**
+   with `x m` (move the cursor's source into a named Space — repos across owners
+   collect under one header); the assignment and its collapse state persist.
 2. Press `` ` `` for the fuzzy workspace picker across all repositories.
-3. Press `!` for the agent requesting input or `Shift-F` for failing CI.
+3. Press `!` for the agent requesting input or `Shift-F` for failing CI. Press
+   `f` and toggle the **working** predicate to see only workspaces whose agent is
+   live-working right now.
 4. From inside a terminal, use `` ]]` `` for the same cross-repository picker.
 5. Multi-select rows with `v`, then use `Shift-B` to broadcast one snippet or
    instruction across the selected live sessions.
+6. Open the **Hopper** with `Shift-H` (or `]]H` from inside a terminal) — a
+   persistent scratch list where each line is its own workspace, so a stream of
+   "do this next" items each become a place you can jump to and run an agent.
+7. In focus mode, `]]v` cycles the layout Single → SplitV → SplitH → 2×2 Grid
+   over your starred workspaces, so several live agents stay on screen at once;
+   the choice persists as `ui.focus_layout`.
+
+Each row's pinned `you ▸` recap shows the last prompt sent to that workspace's
+agent, now with its **age**, so you can tell at a glance how long ago you last
+directed each session.
 
 You can move among many repositories without remembering paths because every
 jump lands in a workspace that already owns its checkout and terminals.

@@ -14,21 +14,13 @@ zero-setup `--test` mode does not need GitHub or `gh`.
 
 ## 1. Install
 
-The fastest path is a prebuilt binary.
-
-**Homebrew** (macOS arm64/x86_64 or Linux x86_64):
+Install with **Homebrew** (macOS arm64/x86_64 or Linux x86_64):
 
 ```sh
 brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox
 ```
 
-**Or `curl | sh`:**
-
-```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/AntoineToussaint/lazybox/releases/latest/download/lazybox-tui-installer.sh | sh
-```
-
-Both drop a `lazybox` binary on your `PATH`. Skip to [Launch](#2-launch).
+This drops a `lazybox` binary on your `PATH`. Skip to [Launch](#2-launch).
 
 :::note[Pre-1.0]
 lazybox is daily-driven on macOS; Linux runs the same code paths but is less
@@ -109,7 +101,9 @@ An empty sidebar right after setup is normal, not a bug:
 - The first poll can take up to ~60s (`providers.github.poll_interval`). Press
   `Shift-R` to force a refresh instead of waiting.
 - Rows can be hidden by active filters. Press `f` to open the filter menu and
-  clear any toggled predicates.
+  clear any toggled predicates. The `working` predicate there narrows the
+  sidebar to workspaces whose agent is *live-working* right now (distinct from
+  `with-agent`, which matches any recorded session).
 - If you simply have little GitHub activity, there may be nothing to show. You
   don't need a PR to get the win above — press `x n` to spin up a fresh scratch
   workspace and open a session in it.

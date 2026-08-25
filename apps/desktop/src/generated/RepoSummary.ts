@@ -14,6 +14,20 @@ active: number,
  * attention: unread activity, CI failing, review pending /
  * changes-requested, agent in `Asking` state. Configurable in
  * the future; defaults are the indicators lazybox already
- * surfaces as badges on workspace rows.
+ * surfaces as badges on workspace rows. For a Quiet / Digest /
+ * Muted source (#scale) only punch-through rows count.
  */
-attention: number, };
+attention: number,
+/**
+ * Effective source-attention level (#scale): `None` = Live;
+ * `Some("quiet" | "digest" | "muted")` otherwise (an active
+ * source snooze reads as `"muted"`). A string rather than the
+ * config enum so this TS-exported DTO stays dependency-free.
+ */
+source_attention: string | null,
+/**
+ * Active source-snooze deadline as epoch milliseconds — drives
+ * the header's "⏾ wakes in 3d" label. `None` when the source
+ * isn't time-box snoozed.
+ */
+source_snooze_until_epoch_ms: number | null, };

@@ -504,6 +504,25 @@ impl<T: TerminalAdapter> Model<T> {
                     tracing::warn!("rename-space submit without a stashed name — dropped");
                 }
             }
+            Some(Id::SaveViewName) => {
+                // Freeze the CURRENT lens under the typed name (#scale,
+                // proposal D). Same-name saves replace — iterating on a
+                // view must not accrete stale copies. Targeted
+                // read-modify-write so another client's views survive.
+                let name = text.trim().to_string();
+                if !name.is_empty() {
+                    let lens = self.sidebar.current_lens();
+                    let view_name = name.clone();
+                    lazybox_config::Config::save_with_async(move |c| {
+                        c.ui.views.retain(|v| v.name != view_name);
+                        c.ui.views.push(lazybox_config::ViewConfig {
+                            name: view_name,
+                            lens,
+                        });
+                    });
+                    self.flash_info(format!("view saved: {name} — recall with x V"));
+                }
+            }
             Some(Id::RenameWorkspace) => {
                 let name = text.trim().to_string();
                 let target = match self.modal_flow.take() {

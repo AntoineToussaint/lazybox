@@ -282,6 +282,17 @@ pub enum Action {
     MoveGroupTop,
     /// [`Self::MoveGroupUp`], straight to the bottom of its tier.
     MoveGroupBottom,
+    /// Source-attention settings for the Repo/Space header at the
+    /// cursor (#scale): the live / quiet / digest / muted level picker.
+    /// Time-boxed source snoozing rides the header-contextual `z`
+    /// instead.
+    SourceSettings,
+    /// Freeze the current lens (filters / sort / mailbox) under a name
+    /// (#scale, proposal D): the saved views that make reorganizing a
+    /// query instead of a migration.
+    SaveView,
+    /// Recall a saved view — the named-lens picker.
+    OpenViews,
     /// Star / unstar the cursor's workspace, lifting it into (or out
     /// of) the synthetic `★ Focused` section at the top of the sidebar.
     /// The manual, per-workspace counterpart to [`Self::ToggleRepoPin`]:
@@ -552,6 +563,9 @@ pub enum ActionKind {
     MoveGroupDown,
     MoveGroupTop,
     MoveGroupBottom,
+    SourceSettings,
+    SaveView,
+    OpenViews,
     ToggleFocusWorkspace,
     SelectWorkspace,
     BroadcastToSelected,
@@ -707,6 +721,9 @@ impl ActionKind {
         Self::MoveGroupDown,
         Self::MoveGroupTop,
         Self::MoveGroupBottom,
+        Self::SourceSettings,
+        Self::SaveView,
+        Self::OpenViews,
         Self::ToggleFocusWorkspace,
         Self::FocusPaneRight,
         Self::SelectWorkspace,
@@ -829,6 +846,9 @@ impl Action {
             Action::MoveGroupDown => ActionKind::MoveGroupDown,
             Action::MoveGroupTop => ActionKind::MoveGroupTop,
             Action::MoveGroupBottom => ActionKind::MoveGroupBottom,
+            Action::SourceSettings => ActionKind::SourceSettings,
+            Action::SaveView => ActionKind::SaveView,
+            Action::OpenViews => ActionKind::OpenViews,
             Action::ToggleFocusWorkspace => ActionKind::ToggleFocusWorkspace,
             Action::SelectWorkspace => ActionKind::SelectWorkspace,
             Action::BroadcastToSelected => ActionKind::BroadcastToSelected,
@@ -1534,6 +1554,27 @@ impl ActionDef {
                 describe: "Move the group at the cursor straight to the bottom of its tier (Space among Spaces, repo within its Space). Persists via ui.spaces.",
                 section: Section::Sidebar,
             },
+            ActionKind::SourceSettings => &Self {
+                kind: ActionKind::SourceSettings,
+                default_keys: "x ,",
+                label: "source attention",
+                describe: "Set the attention level for the Repo/Space header at the cursor: live (full badges), quiet (badges only when it's about you), digest (accumulates at idle poll cadence), or muted (sinks, folds, and leaves the GitHub sweep). Persists to ui.source_attention; z on the header time-boxes a snooze instead.",
+                section: Section::Sidebar,
+            },
+            ActionKind::SaveView => &Self {
+                kind: ActionKind::SaveView,
+                default_keys: "x v",
+                label: "save view",
+                describe: "Freeze the current lens — active filters, sort mode, and mailbox — under a name in ui.views. Recall it with x V; saving under an existing name replaces that view.",
+                section: Section::Sidebar,
+            },
+            ActionKind::OpenViews => &Self {
+                kind: ActionKind::OpenViews,
+                default_keys: "x V",
+                label: "views",
+                describe: "Pick a saved view (ui.views) and apply its frozen lens — filters, sort, and mailbox — in one step.",
+                section: Section::Sidebar,
+            },
             ActionKind::ToggleFocusWorkspace => &Self {
                 kind: ActionKind::ToggleFocusWorkspace,
                 default_keys: "*",
@@ -2179,6 +2220,9 @@ impl ActionKind {
             ActionKind::MoveGroupDown => "move_group_down",
             ActionKind::MoveGroupTop => "move_group_top",
             ActionKind::MoveGroupBottom => "move_group_bottom",
+            ActionKind::SourceSettings => "source_settings",
+            ActionKind::SaveView => "save_view",
+            ActionKind::OpenViews => "open_views",
             ActionKind::ToggleFocusWorkspace => "toggle_focus_workspace",
             ActionKind::SelectWorkspace => "select_workspace",
             ActionKind::BroadcastToSelected => "broadcast_to_selected",
@@ -2439,6 +2483,9 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::MoveGroupDown
         | ActionKind::MoveGroupTop
         | ActionKind::MoveGroupBottom
+        | ActionKind::SourceSettings
+        | ActionKind::SaveView
+        | ActionKind::OpenViews
         | ActionKind::ResetAgentContext
         | ActionKind::CollapseIntoPr => Some("workspace"),
         _ => None,
@@ -3135,6 +3182,9 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::MoveGroupDown
         | ActionKind::MoveGroupTop
         | ActionKind::MoveGroupBottom
+        | ActionKind::SourceSettings
+        | ActionKind::SaveView
+        | ActionKind::OpenViews
         // Acts on the repo group at/above the cursor (a header row has
         // no workspace, so `has_ws` would wrongly hide it there); the
         // dispatcher no-ops with a notice when the cursor isn't in a

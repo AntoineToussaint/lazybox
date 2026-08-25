@@ -534,6 +534,38 @@ impl Sidebar {
         self.inner.seed_lens(lens);
     }
 
+    /// See `Sidebar::apply_lens` — apply + persist a saved view's
+    /// lens (#scale).
+    pub fn apply_lens(&mut self, lens: &lazybox_config::LensSection) {
+        self.inner.apply_lens(lens);
+    }
+
+    /// See `Sidebar::current_lens` — the active lens as config tokens,
+    /// frozen by the save-view flow (#scale).
+    pub fn current_lens(&self) -> lazybox_config::LensSection {
+        self.inner.current_lens()
+    }
+
+    /// See `Sidebar::seed_source_attention` — the persisted
+    /// `ui.source_attention` ladder applied at startup (#scale).
+    pub fn seed_source_attention(
+        &mut self,
+        map: std::collections::BTreeMap<String, lazybox_config::SourceAttention>,
+    ) {
+        self.inner.seed_source_attention(map);
+    }
+
+    /// See `Sidebar::source_attention_for` (#scale).
+    pub fn source_attention_for(&self, label: &str) -> lazybox_config::SourceAttention {
+        self.inner.source_attention_for(label)
+    }
+
+    /// See `Sidebar::set_source_attention` — apply + persist one
+    /// source's ladder entry (#scale).
+    pub fn set_source_attention(&mut self, key: &str, entry: lazybox_config::SourceAttention) {
+        self.inner.set_source_attention(key, entry);
+    }
+
     /// See `Sidebar::set_snapshot_prune` — disabled by
     /// `Model::with_remote` so an attach client never prunes local stars
     /// against another machine's workspace set (#1244).
@@ -721,6 +753,13 @@ impl Sidebar {
     /// fire `toggle_repo_at_cursor`.
     pub fn cursor_on_repo_header(&self) -> bool {
         self.inner.cursor_on_repo_header()
+    }
+
+    /// See `Sidebar::cursor_space` — the Space header at/above the
+    /// cursor. Used by the header-scoped source-attention actions
+    /// (#scale) together with `cursor_on_space_header`.
+    pub fn cursor_space(&self) -> Option<String> {
+        self.inner.cursor_space()
     }
 
     /// Index of the cursor row within the visible list. Observability

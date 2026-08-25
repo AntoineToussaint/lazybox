@@ -3046,12 +3046,18 @@ impl WorktreeRecovery {
             || message.contains("index.lock")
             || message.contains("cannot lock ref")
         {
-            // A directory/file branch conflict ("cannot lock ref … exists;
-            // cannot create") is NOT a transient lock — the daemon's
-            // BranchDirFileConflict names it explicitly below, but git's
-            // raw phrasing also mentions "cannot lock ref", so keep the
-            // D/F check ahead of returning Transient here.
-            if message.contains("directory/file conflict") {
+            // A directory/file branch conflict is NOT a transient lock,
+            // yet git's raw phrasing is "cannot lock ref '…': '…' exists;
+            // cannot create '…'" — which trips the "cannot lock ref" arm
+            // above. Match git's own D/F marker ("exists; cannot create"),
+            // not the wrapped BranchDirFileConflict's "directory/file
+            // conflict" phrasing (that message never contains "cannot lock
+            // ref", so it reaches the post-block check instead). Without
+            // this, a raw D/F error would be mislabeled Transient and the
+            // modal would offer the exact doomed retry this class prevents.
+            if message.contains("exists; cannot create")
+                || message.contains("directory/file conflict")
+            {
                 return Self::BranchDirFileConflict;
             }
             return Self::Transient;
@@ -3957,6 +3963,16 @@ mod worktree_recovery_tests {
                 "branch 'release' can't be created because 'release/v0.2.102' already \
                  exists — git can't hold both a branch and a path named 'release' (a \
                  directory/file conflict). Delete or rename 'release/v0.2.102', then retry",
+                WorktreeRecovery::BranchDirFileConflict,
+                WorktreeStep::WorktreeAdd,
+            ),
+            (
+                // Git's RAW D/F phrasing also contains "cannot lock ref"
+                // (the transient-lock marker) — it must still classify as
+                // the D/F conflict, not a retryable transient, or the
+                // modal offers a doomed retry.
+                "fatal: cannot lock ref 'refs/heads/release': \
+                 'refs/heads/release/v0.2.102' exists; cannot create 'refs/heads/release'",
                 WorktreeRecovery::BranchDirFileConflict,
                 WorktreeStep::WorktreeAdd,
             ),

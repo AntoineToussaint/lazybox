@@ -111,6 +111,12 @@ pub enum GitError {
         expected: String,
         actual: String,
     },
+    #[error(
+        "branch '{branch}' can't be created because '{conflicting}' already exists — git can't \
+         hold both a branch and a path named '{branch}' (a directory/file conflict). Delete or \
+         rename '{conflicting}', then retry"
+    )]
+    BranchDirFileConflict { branch: String, conflicting: String },
 }
 
 /// Boxed async result returned by [`GitRunner`] operations.
@@ -2601,7 +2607,8 @@ fn fetch_failure_reason(err: &GitError, authed: bool) -> String {
         GitError::Io(e) => e.to_string(),
         GitError::BranchHeldLive { .. }
         | GitError::BranchHeldManaged { .. }
-        | GitError::WorktreeBranchMismatch { .. } => err.to_string(),
+        | GitError::WorktreeBranchMismatch { .. }
+        | GitError::BranchDirFileConflict { .. } => err.to_string(),
     };
     let line = raw
         .lines()
@@ -2833,6 +2840,42 @@ async fn add_worktree_resilient(
                 .await
                 .map_err(explain_promisor_failure);
         }
+        if let Some(conflicting) = branch_dir_file_conflict(&err) {
+            // A stale local branch occupies the namespace `branch` needs
+            // (e.g. `release/v0.2.102` blocking `release`, or vice-versa).
+            // Try a SAFE delete — `git branch -d` refuses an unmerged or
+            // checked-out branch, so this never discards unpushed work or
+            // takes a branch from a live worktree — then retry the add.
+            // Loop to clear a run of sibling version branches
+            // (`release/v0.2.101`, `…102`, …), bounded so a pathological
+            // repo can't spin. If a conflict can't be cleared safely,
+            // surface a distinct D/F error so the caller reports it (and
+            // a blind retry doesn't just replay the same failure).
+            const MAX_DF_CLEANUP: usize = 32;
+            let mut conflicting = conflicting;
+            for _ in 0..MAX_DF_CLEANUP {
+                if run_git_in(git, bare_path, &["branch", "-d", &conflicting])
+                    .await
+                    .is_err()
+                {
+                    return Err(GitError::BranchDirFileConflict {
+                        branch: branch.to_string(),
+                        conflicting,
+                    });
+                }
+                match git.run_transfer(bare_path, &plain, auth, None).await {
+                    Ok(()) => return Ok(()),
+                    Err(e) => match branch_dir_file_conflict(&e) {
+                        Some(next) => conflicting = next,
+                        None => return Err(explain_promisor_failure(e)),
+                    },
+                }
+            }
+            return Err(GitError::BranchDirFileConflict {
+                branch: branch.to_string(),
+                conflicting,
+            });
+        }
         return Err(explain_promisor_failure(err));
     };
 
@@ -2933,6 +2976,35 @@ fn worktree_missing_but_registered(err: &GitError) -> bool {
         return false;
     };
     msg.contains("missing but already registered worktree")
+}
+
+/// Parse the *existing* conflicting ref out of git's directory/file
+/// (D/F) branch-creation refusal. Creating a branch `release` while
+/// `release/v0.2.102` exists (or vice-versa) fails with
+/// `'refs/heads/release/v0.2.102' exists; cannot create 'refs/heads/release'`
+/// — refs are files on disk, so a name can't be both a leaf and a
+/// directory. Returns the short name of the existing branch that
+/// occupies the namespace (`release/v0.2.102`), or `None` for any other
+/// failure. The short form (no `refs/heads/` prefix) is what
+/// `git branch -d` expects.
+fn branch_dir_file_conflict(err: &GitError) -> Option<String> {
+    let GitError::Command(msg) = err else {
+        return None;
+    };
+    let marker = "exists; cannot create";
+    let idx = msg.find(marker)?;
+    // The existing ref sits in the single-quoted token immediately
+    // before the marker: `… '<existing>' exists; cannot create …`.
+    let before = &msg[..idx];
+    let end = before.rfind('\'')?;
+    let start = before[..end].rfind('\'')? + 1;
+    let existing = before[start..end].trim();
+    Some(
+        existing
+            .strip_prefix("refs/heads/")
+            .unwrap_or(existing)
+            .to_string(),
+    )
 }
 
 /// Whether the worktree at `wt_path` is in a state a background sync
@@ -4968,6 +5040,36 @@ mod resilient_add_tests {
         assert_eq!(branch_already_checked_out_at(&unrelated), None);
     }
 
+    /// The directory/file branch-conflict matcher pulls the *existing*
+    /// conflicting ref out of git's refusal (short form, ready for
+    /// `git branch -d`), and ignores unrelated failures.
+    #[test]
+    fn parses_the_dir_file_conflict_branch() {
+        // The exact shape git emits (the #-reported `release` case).
+        let df = GitError::Command(
+            "Preparing worktree (new branch 'release')\n\
+             fatal: cannot lock ref 'refs/heads/release': 'refs/heads/release/v0.2.102' \
+             exists; cannot create 'refs/heads/release'\n"
+                .into(),
+        );
+        assert_eq!(
+            branch_dir_file_conflict(&df).as_deref(),
+            Some("release/v0.2.102")
+        );
+        // The reverse direction (leaf blocks a namespace) parses too.
+        let reverse = GitError::Command(
+            "fatal: 'refs/heads/release' exists; cannot create 'refs/heads/release/v1'\n".into(),
+        );
+        assert_eq!(
+            branch_dir_file_conflict(&reverse).as_deref(),
+            Some("release")
+        );
+        // Unrelated failures don't match.
+        let unrelated =
+            GitError::Command("fatal: 'feat' is already used by worktree at '/x'\n".into());
+        assert_eq!(branch_dir_file_conflict(&unrelated), None);
+    }
+
     /// The headline #439 case: a nested Claude Code agent worktree
     /// (living *inside* the bare clone) already holds the branch.
     /// Provisioning must resolve it with `--force` — landing lazybox's
@@ -5007,6 +5109,84 @@ mod resilient_add_tests {
             std::fs::read_to_string(nested.join("agent-work.txt")).expect("still readable"),
             "in progress",
             "the agent worktree's files are left in place"
+        );
+    }
+
+    /// A directory/file branch conflict — a stale, mergeable
+    /// `release/v0.2.102` blocking a new `release` branch — is cleared by
+    /// a safe `git branch -d` of the conflicting branch, after which the
+    /// worktree provisions on the requested name. The #-reported case.
+    #[tokio::test]
+    async fn dir_file_branch_conflict_is_cleared_and_provisions() {
+        let (tmp, bare) = local_bare_clone();
+        // A sibling branch at HEAD occupies the `release/` namespace.
+        // It's merged (points at HEAD), so `git branch -d` can drop it.
+        git(&bare, &["branch", "release/v0.2.102", "HEAD"]);
+
+        let target = tmp.path().join("target");
+        add_worktree_resilient(default_git_runner(), &bare, &target, "release", "HEAD", &[])
+            .await
+            .expect("the D/F conflict must be cleared, not fail");
+
+        assert!(target.join(".git").exists(), "target is a real worktree");
+        let branch_exists = |name: &str| {
+            std::process::Command::new("git")
+                .current_dir(&bare)
+                .args([
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{name}"),
+                ])
+                .status()
+                .expect("run git show-ref")
+                .success()
+        };
+        // The conflicting branch was safely removed…
+        assert!(
+            !branch_exists("release/v0.2.102"),
+            "the stale conflicting branch was deleted"
+        );
+        // …and the requested branch now exists.
+        assert!(branch_exists("release"), "the requested branch was created");
+    }
+
+    /// When the conflicting branch can't be safely deleted (unmerged
+    /// local work), the resilient add surfaces a distinct
+    /// [`GitError::BranchDirFileConflict`] rather than a bare `Command`
+    /// error, so the caller can classify it and NOT offer a doomed retry.
+    #[tokio::test]
+    async fn unmergeable_dir_file_conflict_surfaces_typed_error() {
+        let (tmp, bare) = local_bare_clone();
+        // Give `release/v0.2.102` a commit not reachable from HEAD so
+        // `git branch -d` refuses it (would lose work).
+        let holder = tmp.path().join("holder");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                holder.to_str().unwrap(),
+                "-B",
+                "release/v0.2.102",
+                "HEAD",
+            ],
+        );
+        std::fs::write(holder.join("extra.txt"), "unmerged work").expect("write");
+        git(&holder, &["add", "."]);
+        git(&holder, &["commit", "-m", "unmerged commit"]);
+        // Detach the holder so the branch isn't "checked out" (which would
+        // block for a different reason) but remains unmerged.
+        git(&holder, &["checkout", "--detach", "HEAD"]);
+
+        let target = tmp.path().join("target");
+        let err =
+            add_worktree_resilient(default_git_runner(), &bare, &target, "release", "HEAD", &[])
+                .await
+                .expect_err("an unmergeable conflict must not silently succeed");
+        assert!(
+            matches!(err, GitError::BranchDirFileConflict { .. }),
+            "expected a typed D/F conflict, got: {err:?}"
         );
     }
 

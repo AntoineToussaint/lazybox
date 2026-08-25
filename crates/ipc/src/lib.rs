@@ -2911,6 +2911,14 @@ pub enum WorktreeRecovery {
     /// read-only mount, `git init` half-write). Retryable once the
     /// filesystem problem is cleared.
     Disk,
+    /// The requested branch name collides with an existing branch in the
+    /// same namespace — git can't hold both `release` and `release/*`
+    /// (a directory/file conflict). The daemon already tried a safe
+    /// auto-delete of the conflicting branch and it couldn't be cleared
+    /// (unmerged, or checked out live), so a bare retry just replays the
+    /// same failure. The fix is manual: delete or rename the conflicting
+    /// branch. The conflicting name is recovered via [`Self::df_conflict_branch`].
+    BranchDirFileConflict,
     /// Unclassified — surface the raw text and still offer a retry, since
     /// a failed provision persists no session and re-pressing is clean.
     Unknown,
@@ -2989,7 +2997,21 @@ impl WorktreeRecovery {
             || message.contains("index.lock")
             || message.contains("cannot lock ref")
         {
+            // A directory/file branch conflict ("cannot lock ref … exists;
+            // cannot create") is NOT a transient lock — the daemon's
+            // BranchDirFileConflict names it explicitly below, but git's
+            // raw phrasing also mentions "cannot lock ref", so keep the
+            // D/F check ahead of returning Transient here.
+            if message.contains("directory/file conflict") {
+                return Self::BranchDirFileConflict;
+            }
             return Self::Transient;
+        }
+        // Directory/file branch-name conflict the daemon couldn't clear
+        // safely. Matched on the distinct phrase from
+        // `GitError::BranchDirFileConflict`.
+        if message.contains("directory/file conflict") {
+            return Self::BranchDirFileConflict;
         }
         Self::Unknown
     }
@@ -3013,6 +3035,7 @@ impl WorktreeRecovery {
             | Self::BranchMismatch
             | Self::DirtyLeftover
             | Self::Offline
+            | Self::BranchDirFileConflict
             | Self::Disk => WorktreeStep::WorktreeAdd,
             // Unknown: keep it on whatever row the display is showing —
             // the modal's `fail_current` treats `Fetch` as "use the
@@ -3140,8 +3163,26 @@ impl WorktreeRecovery {
                  tickets use — lazybox remembers the choice."
             }
             Self::Disk => "Disk or permission error. Free space or fix permissions, then press r.",
+            Self::BranchDirFileConflict => {
+                "The branch name collides with an existing branch (a directory/file \
+                 conflict). Delete or rename the conflicting branch — a bare retry \
+                 can't clear it."
+            }
             Self::Unknown => "Press r to retry, or Esc to dismiss.",
         }
+    }
+
+    /// The existing conflicting branch name parsed out of a
+    /// [`Self::BranchDirFileConflict`] message. The daemon's error names
+    /// it verbatim (`… because '<conflicting>' already exists —`), so the
+    /// modal can tell the user exactly which branch to delete or rename.
+    /// `None` for every other class / message shape.
+    pub fn df_conflict_branch(message: &str) -> Option<String> {
+        let after = message.split_once("already exists")?.0;
+        let end = after.rfind('\'')?;
+        let start = after[..end].rfind('\'')? + 1;
+        let name = after[start..end].trim();
+        (!name.is_empty()).then(|| name.to_string())
     }
 
     /// Concrete recovery text for a particular failure message.
@@ -3864,6 +3905,13 @@ mod worktree_recovery_tests {
                 WorktreeStep::Fetch,
             ),
             (
+                "branch 'release' can't be created because 'release/v0.2.102' already \
+                 exists — git can't hold both a branch and a path named 'release' (a \
+                 directory/file conflict). Delete or rename 'release/v0.2.102', then retry",
+                WorktreeRecovery::BranchDirFileConflict,
+                WorktreeStep::WorktreeAdd,
+            ),
+            (
                 "something the classifier has never seen",
                 WorktreeRecovery::Unknown,
                 WorktreeStep::Fetch,
@@ -3878,6 +3926,29 @@ mod worktree_recovery_tests {
                 "hint for {class:?} must not be empty"
             );
         }
+    }
+
+    /// The directory/file branch conflict is a manual-fix class: it must
+    /// NOT be retryable (a bare replay re-runs the same doomed add) nor
+    /// recreatable (the conflict is a foreign branch, not the workspace's
+    /// own worktree), and the conflicting branch name is recoverable so
+    /// the modal can name it.
+    #[test]
+    fn dir_file_conflict_is_manual_fix_and_names_the_branch() {
+        let msg = "branch 'release' can't be created because 'release/v0.2.102' already \
+             exists — git can't hold both a branch and a path named 'release' (a \
+             directory/file conflict). Delete or rename 'release/v0.2.102', then retry";
+        let class = WorktreeRecovery::classify(msg);
+        assert_eq!(class, WorktreeRecovery::BranchDirFileConflict);
+        assert!(!class.retryable(), "a bare retry replays the same failure");
+        assert!(
+            !class.recreatable(),
+            "the conflict is a foreign branch, not the workspace's own worktree"
+        );
+        assert_eq!(
+            WorktreeRecovery::df_conflict_branch(msg).as_deref(),
+            Some("release/v0.2.102"),
+        );
     }
 
     /// The disk marker must beat the network markers: a message that is

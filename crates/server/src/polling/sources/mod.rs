@@ -44,6 +44,79 @@ fn full_sweep_admitted(
     will_full_sweep && governor_plan.admits_complete_graphql_unit(manual_refresh, required_points)
 }
 
+/// Round-robin schedule for one GitHub tick. A manual Shift-R refresh
+/// is promoted to the GLOBAL reconcile path (its `force_full_sweep`
+/// flag already makes `next_pr_sweep_window` return `None`, i.e. an
+/// unwindowed sweep covering every involved PR, review-requested,
+/// merged, watched repos, and issues) — and the per-repo pick stays
+/// governor-capped, because `fetch_round_robin_with_status` skips the
+/// per-repo fan-out entirely when `run_global` is set. The old shape
+/// lifted `max_repos` to `usize::MAX` instead, fanning one paginated
+/// `repo:` search out PER SESSIONED REPO in the manual tick — ~30 open
+/// worktrees meant ~30 extra searches, all serialized behind the
+/// request pacer's per-request gap and racing the 180s tick timeout.
+fn schedule_github_tick(
+    round_robin: &mut crate::polling::scheduler::RoundRobinState,
+    sessioned_repos: &std::collections::HashSet<String>,
+    manual_refresh: bool,
+    full_sweep_admitted: bool,
+    max_repos: usize,
+    now: std::time::Instant,
+) -> RoundRobinPick {
+    let mut scheduling = plan_round_robin_tick_budgeted(
+        round_robin,
+        sessioned_repos,
+        full_sweep_admitted,
+        DEFAULT_ROUND_ROBIN_N,
+        max_repos,
+        now,
+    );
+    if manual_refresh {
+        scheduling.run_global = true;
+    }
+    scheduling
+}
+
+#[cfg(test)]
+mod schedule_github_tick_tests {
+    use super::*;
+
+    /// Regression (#scale): a manual refresh must NOT lift the per-tick
+    /// repo cap. It rides the global reconcile instead — capped pick,
+    /// `run_global` forced — so Shift-R with many open worktrees can't
+    /// fan one `repo:` search out per sessioned repo in a single tick.
+    #[test]
+    fn manual_refresh_rides_the_global_sweep_not_a_repo_fanout() {
+        let mut state = crate::polling::scheduler::RoundRobinState::default();
+        let now = std::time::Instant::now();
+        let sessioned: std::collections::HashSet<String> =
+            (0..30).map(|i| format!("owner/repo-{i:02}")).collect();
+        for repo in &sessioned {
+            state.record_sync(repo, now);
+        }
+        // Pick a tick where the normal cadence would NOT run the global
+        // sweep, so the promotion below is observable.
+        state.tick = 1;
+        assert!(!will_run_global(
+            state.cursor.len(),
+            state.tick,
+            DEFAULT_ROUND_ROBIN_N
+        ));
+
+        let max_repos = 3; // governor-shaped cap
+        let scheduling = schedule_github_tick(&mut state, &sessioned, true, true, max_repos, now);
+        assert!(
+            scheduling.run_global,
+            "manual refresh promotes the tick to the global reconcile"
+        );
+        assert!(
+            scheduling.repos.len() <= max_repos,
+            "manual refresh must keep the per-repo pick governor-capped, got {}",
+            scheduling.repos.len()
+        );
+    }
+}
+
 #[cfg(test)]
 mod full_sweep_commit_tests {
     use super::*;
@@ -147,6 +220,14 @@ pub struct GhSource {
     /// `sources_for` call produces a fresh source.
     scheduling: RoundRobinPick,
     governor_plan: lazybox_gh::BackgroundPlan,
+    /// Whether the governor admitted a due full sweep on this tick.
+    /// `false` while a sweep is due but the budget can't cover it —
+    /// the state `governor_status` must NAME (#scale): past ~25
+    /// watched repos the forecast's required points can permanently
+    /// exceed the per-tick allowance, and sync then silently stops
+    /// reconciling. Shift-D used to report "next=global reconcile"
+    /// forever in that state, indistinguishable from a healthy queue.
+    full_sweep_admitted: bool,
     cursor_store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
     /// Mode of the last successful fetch — read after `fetch` resolves
     /// by [`TaskSource::last_fetch_kind`]. `parking_lot::Mutex` is fine:
@@ -381,6 +462,19 @@ impl GhSource {
             at.to_rfc3339()
         } else if !self.client.should_full_sweep() {
             "notification heartbeat / hot targets".to_string()
+        } else if !self.full_sweep_admitted {
+            // A sweep is DUE but the budget can't cover it. Name the
+            // numbers and the lever: with many `watch:` repos the
+            // required points can exceed the allowance on EVERY tick,
+            // and reconcile then never runs — the "sync silently
+            // stopped" failure (#scale). Shift-R still forces it.
+            format!(
+                "full sweep DEFERRED — needs {} pts, allowance {} ({} watched repos); \
+                 fewer `watch:` filters or a higher background_budget_share would unblock it",
+                self.required_sweep_points(),
+                self.governor_plan.graphql_points,
+                self.watch_repos.len(),
+            )
         } else if self.scheduling.run_global {
             "global reconcile".to_string()
         } else if self.scheduling.repos.is_empty() {
@@ -3237,32 +3331,34 @@ async fn push_github_source(
     let scan_issues = filter.issue_enabled() || !mention_allowed.is_empty();
     let forecast = client.background_sweep_forecast(want_prs, scan_issues);
     state.round_robin.prune(now);
-    let global_due = will_run_global(
-        state.round_robin.cursor.len(),
-        state.round_robin.tick,
+    let manual_refresh = client.manual_refresh_pending();
+    // A manual Shift-R runs as ONE unwindowed global reconcile (its
+    // `force_full_sweep` flag makes `next_pr_sweep_window` return
+    // `None`), which covers every involved PR, review-requested,
+    // merged, watched repos, and issues in a single fixed-size sweep.
+    let global_due = manual_refresh
+        || will_run_global(
+            state.round_robin.cursor.len(),
+            state.round_robin.tick,
+            DEFAULT_ROUND_ROBIN_N,
+        );
+    let required_sweep_points = forecast.required_points(global_due, want_prs);
+    let max_repos = forecast.repo_capacity(
+        governor_plan.graphql_points,
+        global_due,
         DEFAULT_ROUND_ROBIN_N,
     );
-    let required_sweep_points = forecast.required_points(global_due, want_prs);
-    let max_repos = if client.manual_refresh_pending() {
-        usize::MAX
-    } else {
-        forecast.repo_capacity(
-            governor_plan.graphql_points,
-            global_due,
-            DEFAULT_ROUND_ROBIN_N,
-        )
-    };
     let full_sweep_admitted = full_sweep_admitted(
         will_full_sweep,
-        client.manual_refresh_pending(),
+        manual_refresh,
         &governor_plan,
         required_sweep_points,
     );
-    let scheduling = plan_round_robin_tick_budgeted(
+    let scheduling = schedule_github_tick(
         &mut state.round_robin,
         sessioned_repos,
+        manual_refresh,
         full_sweep_admitted,
-        DEFAULT_ROUND_ROBIN_N,
         max_repos,
         now,
     );
@@ -3296,6 +3392,7 @@ async fn push_github_source(
         pending_actions: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
         scheduling,
         governor_plan,
+        full_sweep_admitted,
         cursor_store: cursor_store.clone(),
         // Default to Full so a never-fetched
         // source doesn't accidentally block rescope.

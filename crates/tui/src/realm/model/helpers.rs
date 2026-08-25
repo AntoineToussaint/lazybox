@@ -1454,6 +1454,7 @@ pub(super) fn run_loop_step<T: TerminalAdapter>(
     model.tick_tips();
     model.tick_right();
     model.tick_working();
+    model.tick_pr_details();
     model.tick_terminal_leader();
     model.tick_terminal_drag();
     model.tick_mouse_capture();

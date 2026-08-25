@@ -2815,3 +2815,82 @@ fn workspace_removal_forgets_only_the_removed_star() {
         "only the removed workspace's key left the config"
     );
 }
+
+/// #scale: the active lens (filters / sort / mailbox) round-trips
+/// through a restart. Change the lens on a seeded sidebar → flush →
+/// reload the YAML → seed a FRESH sidebar exactly like the boot path
+/// (`Model::apply_client_config` → `seed_lens`) → the same lens is
+/// active. Also: unknown tokens degrade silently instead of wedging.
+#[test]
+fn lens_round_trips_through_restart() {
+    use lazybox_tui_core::inbox::{Filter, FilterEntry, SortMode};
+    let home = ConfigHome::sandbox();
+    let now = Utc::now();
+    let w1 = make_workspace("owner/rt", "rt#1", now);
+
+    let mut first = Sidebar::new(PaneId::new(1));
+    apply_persisted(&mut first, Vec::new(), Vec::new());
+    first.on_event(&snapshot_of(vec![w1.clone()]));
+    first.set_filter_entries([
+        FilterEntry::Predicate(Filter::CiFailing),
+        FilterEntry::Label("bug".into()),
+        FilterEntry::Person("alice".into()),
+    ]);
+    first.cycle_sort_mode(); // ByRoleSplit (default) → Recent
+    first.cycle_mailbox(); // Inbox → Inactive
+
+    let cfg = home.reload();
+    let lens = cfg.ui.last_lens.as_ref().expect("lens persisted");
+    assert_eq!(
+        lens.filters,
+        vec![
+            "ci-failing".to_string(),
+            "label:bug".to_string(),
+            "person:alice".to_string()
+        ],
+        "every axis persists as its stable token"
+    );
+    assert_eq!(lens.sort.as_deref(), Some("recent"));
+    assert_eq!(lens.mailbox.as_deref(), Some("inactive"));
+
+    // "Restart": seed a fresh sidebar from the reloaded lens.
+    let mut second = Sidebar::new(PaneId::new(1));
+    apply_persisted(&mut second, Vec::new(), Vec::new());
+    second.seed_lens(lens);
+    assert!(
+        second
+            .filters()
+            .contains_entry(&FilterEntry::Predicate(Filter::CiFailing))
+    );
+    assert!(
+        second
+            .filters()
+            .contains_entry(&FilterEntry::Label("bug".into()))
+    );
+    assert!(
+        second
+            .filters()
+            .contains_entry(&FilterEntry::Person("alice".into()))
+    );
+    assert_eq!(second.sort_mode(), SortMode::Recent);
+    assert_eq!(second.mailbox(), Mailbox::Inactive);
+
+    // A stale token (renamed predicate, hand-edited YAML) is dropped,
+    // never fatal.
+    let mut degraded = lens.clone();
+    degraded.filters.push("no-such-filter".into());
+    degraded.sort = Some("no-such-sort".into());
+    let mut third = Sidebar::new(PaneId::new(1));
+    apply_persisted(&mut third, Vec::new(), Vec::new());
+    third.seed_lens(&degraded);
+    assert_eq!(
+        third.filters().len(),
+        3,
+        "unknown filter tokens are dropped silently"
+    );
+    assert_eq!(
+        third.sort_mode(),
+        SortMode::default(),
+        "an unknown sort token leaves the default"
+    );
+}

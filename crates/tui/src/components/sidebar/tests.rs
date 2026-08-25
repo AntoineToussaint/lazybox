@@ -1470,7 +1470,11 @@ mod filter_tests {
         w: &'a Workspace,
         agents: &'a HashMap<SessionKey, lazybox_ipc::AgentState>,
     ) -> FilterCtx<'a> {
-        FilterCtx { w, agents }
+        FilterCtx {
+            w,
+            agents,
+            now: chrono::Utc::now(),
+        }
     }
 
     #[test]
@@ -1485,7 +1489,7 @@ mod filter_tests {
     #[test]
     fn every_filter_has_an_axis_and_appears_in_all() {
         // ALL must list each variant exactly once; drives the menu.
-        assert_eq!(Filter::ALL.len(), 26);
+        assert_eq!(Filter::ALL.len(), 27);
         let mut seen = std::collections::BTreeSet::new();
         for f in Filter::ALL {
             assert!(seen.insert(f), "{f:?} listed twice in Filter::ALL");
@@ -1613,6 +1617,93 @@ mod filter_tests {
         assert_eq!(by[&Filter::Author], 1);
         assert_eq!(by[&Filter::Pr], 1);
         assert_eq!(by[&Filter::Reviewer], 0);
+    }
+
+    /// Regression (#scale): `is_bot` must stay authoritative regardless
+    /// of which task field names a bot first. A suffix-less bot login
+    /// (no `[bot]`) that is BOTH a requested reviewer (plain string, no
+    /// flag) and a submitted-review author (`is_bot: true`) used to be
+    /// tallied from the reviewers field first and mis-sorted among the
+    /// humans; it must land in the bot bucket, after every human, in the
+    /// People axis.
+    #[test]
+    fn people_axis_sorts_flagged_bots_after_humans_regardless_of_field_order() {
+        use crate::components::sidebar::FilterEntry;
+        let mut t = base_task();
+        t.id.key = "o/r#1".into();
+        t.url = "https://github.com/o/r/pull/1".into();
+        // The human `zoe` sorts AFTER the bot `renovate` alphabetically,
+        // so only correct bucketing (bot last) reorders them — a test
+        // with an alpha-earlier human wouldn't catch the mis-sort.
+        t.author = "zoe".into();
+        // `renovate` carries no `[bot]` suffix; only the submitted review
+        // flags it. It is ALSO a requested reviewer, tallied first.
+        t.reviewers = vec!["renovate".into()];
+        t.reviews = vec![lazybox_core::Reviewer {
+            login: "renovate".into(),
+            state: lazybox_core::ReviewState::Approved,
+            is_bot: true,
+        }];
+        let w = Workspace::from_task(t, chrono::Utc::now());
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(SessionKey::from(&w.key), w);
+        sb.recompute_visible();
+
+        let people: Vec<String> = sb
+            .filter_menu_entries()
+            .into_iter()
+            .filter_map(|(e, _)| match e {
+                FilterEntry::Person(login) => Some(login),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            people,
+            vec!["zoe".to_string(), "renovate".to_string()],
+            "the flagged bot sorts after the human, not among them"
+        );
+    }
+
+    /// Regression (#scale): the People-axis menu treats a login as its
+    /// case-insensitive identity. An active mixed-case person (a
+    /// hand-edited `person:Alice` lens token) against a discovered
+    /// lowercase `alice` must render as ONE checked row, not the discovered
+    /// row plus a phantom count-0 duplicate a case-sensitive reconciliation
+    /// would add.
+    #[test]
+    fn people_axis_menu_folds_case_variants_into_one_row() {
+        use crate::components::sidebar::FilterEntry;
+        let mut t = base_task();
+        t.id.key = "o/r#1".into();
+        t.url = "https://github.com/o/r/pull/1".into();
+        t.author = "alice".into(); // discovered as lowercase
+        let w = Workspace::from_task(t, chrono::Utc::now());
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(SessionKey::from(&w.key), w);
+        // An active filter carrying a different case — as a hand-edited
+        // lens token would seed it.
+        sb.set_filter_entries([FilterEntry::Person("Alice".into())]);
+        sb.recompute_visible();
+
+        let people: Vec<(String, usize)> = sb
+            .filter_menu_entries()
+            .into_iter()
+            .filter_map(|(e, c)| match e {
+                FilterEntry::Person(login) => Some((login, c)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            people,
+            vec![("alice".to_string(), 1)],
+            "one row for the person, at the real count — no case-variant phantom"
+        );
+        // And that single row reads as active (pre-checked).
+        assert!(
+            sb.filters()
+                .contains_entry(&FilterEntry::Person("alice".into())),
+            "the discovered row is the active filter"
+        );
     }
 
     #[test]
@@ -2067,6 +2158,56 @@ mod search_tests {
                  of the #1090 class). Profile prebuild_workspace_lines."
             );
         }
+    }
+
+    /// The line prebuild must only lay out groups intersecting the
+    /// viewport window. The cursor is part of the cache signature, so
+    /// every j/k misses the cache — building the ENTIRE list on each
+    /// miss made cursor motion O(total workspaces) on a crowded
+    /// sidebar. Intersecting groups still build in full so their
+    /// column widths stay stable while scrolling (#22 / #961).
+    #[test]
+    fn prebuild_lays_out_only_viewport_groups() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        for repo in 0..10 {
+            for num in 0..10 {
+                let w = issue_ws_in_repo(
+                    &format!("owner/repo-{repo:02}"),
+                    &format!("{num}"),
+                    &format!("Issue {repo}-{num}"),
+                );
+                sb.workspaces.insert(SessionKey::from(&w.key), w);
+            }
+        }
+        sb.recompute_visible();
+        let theme = crate::theme::current();
+        let now = chrono::Utc::now();
+
+        // Rows: header at 0, then 10 workspace rows per group. A window
+        // cutting into the first group mid-way…
+        let lines = sb.cached_workspace_lines(60, theme, now, true, 0..5);
+        assert!(
+            lines[8].is_some(),
+            "a partially-visible group is laid out in full (stable columns)"
+        );
+        let last_ws = sb
+            .visible
+            .iter()
+            .rposition(|r| matches!(r, VisibleRow::Workspace(_)))
+            .expect("workspace rows exist");
+        assert!(
+            lines[last_ws].is_none(),
+            "groups entirely below the window must not be built"
+        );
+
+        // …and a window at the bottom leaves the top groups unbuilt.
+        let total = sb.visible.len();
+        let lines = sb.cached_workspace_lines(60, theme, now, true, total - 5..total);
+        assert!(lines[8].is_none(), "top group is outside the bottom window");
+        assert!(
+            lines[last_ws].is_some(),
+            "the bottom group must be built for a bottom window"
+        );
     }
 
     fn key(c: char) -> KeyEvent {
@@ -2974,13 +3115,13 @@ mod workspace_removal_cursor_tests {
         let theme = crate::theme::current();
 
         // First frame builds.
-        let _ = sb.cached_workspace_lines(40, theme, now, true);
+        let _ = sb.cached_workspace_lines(40, theme, now, true, 0..40);
         assert_eq!(sb.workspace_line_builds.get(), 1);
 
         // Repeated identical frames — the streaming-redraw path — must hit the
         // cache and never rebuild.
         for _ in 0..10 {
-            let _ = sb.cached_workspace_lines(40, theme, now, true);
+            let _ = sb.cached_workspace_lines(40, theme, now, true, 0..40);
         }
         assert_eq!(
             sb.workspace_line_builds.get(),
@@ -2989,24 +3130,24 @@ mod workspace_removal_cursor_tests {
         );
 
         // A width change re-lays out → one rebuild, then holds.
-        let _ = sb.cached_workspace_lines(30, theme, now, true);
-        let _ = sb.cached_workspace_lines(30, theme, now, true);
+        let _ = sb.cached_workspace_lines(30, theme, now, true, 0..40);
+        let _ = sb.cached_workspace_lines(30, theme, now, true, 0..40);
         assert_eq!(sb.workspace_line_builds.get(), 2);
 
         // A focus change restyles rows → one rebuild.
-        let _ = sb.cached_workspace_lines(30, theme, now, false);
+        let _ = sb.cached_workspace_lines(30, theme, now, false, 0..40);
         assert_eq!(sb.workspace_line_builds.get(), 3);
 
         // Workspace data changing (any daemon upsert recomputes) bumps
         // `data_version` → the cache invalidates.
         sb.recompute_visible();
-        let _ = sb.cached_workspace_lines(30, theme, now, false);
+        let _ = sb.cached_workspace_lines(30, theme, now, false, 0..40);
         assert_eq!(
             sb.workspace_line_builds.get(),
             4,
             "a recompute (workspace-data change) must invalidate the cache"
         );
-        let _ = sb.cached_workspace_lines(30, theme, now, false);
+        let _ = sb.cached_workspace_lines(30, theme, now, false, 0..40);
         assert_eq!(sb.workspace_line_builds.get(), 4);
     }
 

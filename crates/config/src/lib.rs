@@ -895,6 +895,30 @@ pub struct SpaceConfig {
     pub sources: Vec<String>,
 }
 
+/// The sidebar lens — active filters, sort mode, and mailbox — as of
+/// the user's last change, re-applied at startup so a restart doesn't
+/// silently drop the narrowing they were working in (#scale). Stored
+/// as plain string tokens rather than the TUI's typed filter enums so
+/// the config crate stays free of UI-crate dependencies: filter tokens
+/// are the predicate's stable label (`"ci-failing"`) or a prefixed
+/// value (`"label:bug"`, `"linear-state:In Review"`,
+/// `"person:alice"`); `sort` / `mailbox` hold the chip labels
+/// (`"recent"` / `"split"`, `"inbox"` / `"snoozed"`). Unknown tokens
+/// are dropped silently on load — a lens must degrade, never wedge
+/// startup. The transient `/` search query is deliberately NOT part of
+/// the lens: search is a momentary narrowing (Esc clears it), and
+/// resurrecting yesterday's query on launch reads as a bug.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LensSection {
+    /// Active filter tokens, every axis.
+    pub filters: Vec<String>,
+    /// Sort-mode chip label. None = default sort.
+    pub sort: Option<String>,
+    /// Mailbox chip label. None = Inbox.
+    pub mailbox: Option<String>,
+}
+
 /// `ui:` block — user-facing view state lazybox writes back so UI
 /// preferences survive restart.
 ///
@@ -939,6 +963,10 @@ pub struct UiSection {
     /// longer exists; readers must validate against `spaces`.
     #[serde(default)]
     pub last_space: Option<String>,
+    /// The sidebar lens (filters / sort / mailbox) as of the last
+    /// change, re-applied at startup (#scale). See [`LensSection`].
+    #[serde(default)]
+    pub last_lens: Option<LensSection>,
     /// Sidebar column width as a percentage of total. None = use
     /// the default (40%).
     pub sidebar_pct: Option<u16>,
@@ -1134,6 +1162,7 @@ impl Default for UiSection {
             spaces: Vec::new(),
             collapsed_spaces: std::collections::BTreeSet::new(),
             last_space: None,
+            last_lens: None,
             keymap_preset: None,
             theme: None,
             sidebar_pct: None,

@@ -675,16 +675,6 @@ impl Sidebar {
         };
 
         let row_budget = inner_width as usize;
-        // Workspace rows are laid out per group, not globally: each repo /
-        // provider group runs its own column pre-pass over just its own
-        // rows. GitHub's `#NNN` and Linear's `TEAM-NNNN` are different
-        // shapes, and their status columns differ (GitHub has CI / review,
-        // Linear doesn't) — a single global layout let one provider's
-        // widest reference bloat the other's column and reserved
-        // provider-specific status columns for groups that never fill them.
-        // Sizing within a group keeps alignment clean where the eye
-        // actually scans (issue #961).
-        let rendered_workspace_lines = self.cached_workspace_lines(row_budget, theme, now, focused);
 
         // Clamp the scroll BEFORE building any rows (2026-08-19 audit,
         // U5), then build ONLY the viewport window. Every `VisibleRow`
@@ -707,6 +697,24 @@ impl Sidebar {
         }
         self.last_viewport = viewport;
         self.rendered_scroll = self.scroll;
+
+        // Workspace rows are laid out per group, not globally: each repo /
+        // provider group runs its own column pre-pass over just its own
+        // rows. GitHub's `#NNN` and Linear's `TEAM-NNNN` are different
+        // shapes, and their status columns differ (GitHub has CI / review,
+        // Linear doesn't) — a single global layout let one provider's
+        // widest reference bloat the other's column and reserved
+        // provider-specific status columns for groups that never fill them.
+        // Sizing within a group keeps alignment clean where the eye
+        // actually scans (issue #961). Only groups intersecting the
+        // viewport window are built at all: the cursor is part of the
+        // line-cache signature, so every j/k used to rebuild the ENTIRE
+        // list — O(total workspaces) per keystroke on a crowded sidebar.
+        // A partially-visible group still lays out ALL its rows, so
+        // column widths stay stable while it scrolls (#22 / #961).
+        let window = self.scroll..self.scroll + viewport;
+        let rendered_workspace_lines =
+            self.cached_workspace_lines(row_budget, theme, now, focused, window);
 
         let lines: Vec<Line> = self
             .visible
@@ -1271,11 +1279,16 @@ impl Sidebar {
         row_budget: usize,
         focused: bool,
         now: chrono::DateTime<chrono::Utc>,
+        window: &std::ops::Range<usize>,
     ) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.data_version.hash(&mut h);
         self.cursor.hash(&mut h);
+        // Only viewport-intersecting groups are built, so the cached
+        // lines are only valid for the window they were built against.
+        window.start.hash(&mut h);
+        window.end.hash(&mut h);
         self.working_spinner_frame.hash(&mut h);
         // Relative timestamps ("2h", "3d") only shift at minute granularity,
         // so quantize — otherwise every frame is a fresh second and the cache
@@ -1349,8 +1362,9 @@ impl Sidebar {
         theme: &crate::theme::Theme,
         now: chrono::DateTime<chrono::Utc>,
         focused: bool,
+        window: std::ops::Range<usize>,
     ) -> std::rc::Rc<Vec<Option<Line<'static>>>> {
-        let sig = self.workspace_lines_signature(row_budget, focused, now);
+        let sig = self.workspace_lines_signature(row_budget, focused, now, &window);
         if let Some((cached_sig, lines)) = &self.workspace_line_cache {
             if *cached_sig == sig {
                 // Rc, not a deep clone (2026-08-19 audit, U2): a HIT
@@ -1361,8 +1375,9 @@ impl Sidebar {
                 return std::rc::Rc::clone(lines);
             }
         }
-        let lines =
-            std::rc::Rc::new(self.prebuild_workspace_lines(row_budget, theme, now, focused));
+        let lines = std::rc::Rc::new(
+            self.prebuild_workspace_lines(row_budget, theme, now, focused, &window),
+        );
         #[cfg(test)]
         self.workspace_line_builds
             .set(self.workspace_line_builds.get() + 1);
@@ -1393,6 +1408,7 @@ impl Sidebar {
         theme: &crate::theme::Theme,
         now: chrono::DateTime<chrono::Utc>,
         focused: bool,
+        window: &std::ops::Range<usize>,
     ) -> Vec<Option<Line<'static>>> {
         // 1-based jump numbers for the first nine focused workspaces, in
         // sidebar order — the badge that pairs with the `]]<digit>`
@@ -1411,6 +1427,19 @@ impl Sidebar {
         let badges_by_key = self.runner_badges_by_key();
         let models_by_key = self.agent_models_by_key();
         let mut out: Vec<Option<Line<'static>>> = vec![None; self.visible.len()];
+        // Only groups that intersect the viewport window get laid out —
+        // off-screen groups' slots stay `None`, which the consumer never
+        // reads (it walks exactly the window). A group that intersects
+        // is built IN FULL, so its column widths are sized over all of
+        // its rows and stay stable as it scrolls through the viewport
+        // (#22 / #961). Indices in a group are ascending, so the
+        // overlap test is a range check on its endpoints.
+        let intersects = |group: &[usize]| {
+            group
+                .first()
+                .zip(group.last())
+                .is_some_and(|(&first, &last)| first < window.end && last >= window.start)
+        };
         // Partition workspace rows into groups delimited by their
         // top-level container header — a repo group, or the synthetic
         // Focused pin. A `KindHeader` (PRs vs Issues) doesn't split the
@@ -1420,34 +1449,38 @@ impl Sidebar {
         for (i, row) in self.visible.iter().enumerate() {
             match row {
                 VisibleRow::FocusedHeader | VisibleRow::RepoHeader(_) => {
-                    self.render_workspace_group(
-                        &group,
-                        &agent_numbers,
-                        &badges_by_key,
-                        &models_by_key,
-                        row_budget,
-                        theme,
-                        now,
-                        focused,
-                        &mut out,
-                    );
+                    if intersects(&group) {
+                        self.render_workspace_group(
+                            &group,
+                            &agent_numbers,
+                            &badges_by_key,
+                            &models_by_key,
+                            row_budget,
+                            theme,
+                            now,
+                            focused,
+                            &mut out,
+                        );
+                    }
                     group.clear();
                 }
                 VisibleRow::Workspace(_) => group.push(i),
                 _ => {}
             }
         }
-        self.render_workspace_group(
-            &group,
-            &agent_numbers,
-            &badges_by_key,
-            &models_by_key,
-            row_budget,
-            theme,
-            now,
-            focused,
-            &mut out,
-        );
+        if intersects(&group) {
+            self.render_workspace_group(
+                &group,
+                &agent_numbers,
+                &badges_by_key,
+                &models_by_key,
+                row_budget,
+                theme,
+                now,
+                focused,
+                &mut out,
+            );
+        }
         out
     }
 

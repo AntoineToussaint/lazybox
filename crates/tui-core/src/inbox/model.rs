@@ -49,6 +49,17 @@ impl Mailbox {
             Mailbox::Snoozed => "snoozed",
         }
     }
+
+    /// Parse a persisted `ui.last_lens` mailbox token (the
+    /// [`Self::chip_label`] round-trip). `None` for unknown tokens.
+    pub fn from_chip_label(label: &str) -> Option<Self> {
+        match label {
+            "inbox" => Some(Mailbox::Inbox),
+            "inactive" => Some(Mailbox::Inactive),
+            "snoozed" => Some(Mailbox::Snoozed),
+            _ => None,
+        }
+    }
 }
 
 /// How the inbox orders workspaces within each repo group.
@@ -85,6 +96,17 @@ impl SortMode {
             SortMode::Recent => "recent",
             SortMode::ByRole => "by-role",
             SortMode::ByRoleSplit => "split",
+        }
+    }
+
+    /// Parse a persisted `ui.last_lens` sort token (the
+    /// [`Self::chip_label`] round-trip). `None` for unknown tokens.
+    pub fn from_chip_label(label: &str) -> Option<Self> {
+        match label {
+            "recent" => Some(SortMode::Recent),
+            "by-role" => Some(SortMode::ByRole),
+            "split" => Some(SortMode::ByRoleSplit),
+            _ => None,
         }
     }
 }

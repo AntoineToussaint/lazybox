@@ -123,8 +123,8 @@ pub const CLAUDE_BLOCKING_INTERSTITIAL_PHRASES: &[&str] = &[
 ];
 
 /// Phrases Claude Code renders ONLY when it has hit its provider usage /
-/// monthly limit and paused on the "limit reached — Wait?" prompt (issue
-/// #847). No normal chat output produces "usage limit reached" as a live
+/// monthly / weekly limit and paused on the "limit reached — Wait?" prompt
+/// (issues #847, #1337). No normal chat output produces these as a live
 /// gate, so — like [`CLAUDE_BLOCKING_INTERSTITIAL_PHRASES`] — a single
 /// match is enough confidence to classify the distinct
 /// [`AgentState::LimitReached`] rather than a generic `InputNeeded`.
@@ -133,10 +133,18 @@ pub const CLAUDE_BLOCKING_INTERSTITIAL_PHRASES: &[&str] = &[
 /// rather than space bytes) still matches. The reset countdown Claude
 /// prints alongside (`resets 3pm`) is deliberately NOT required here —
 /// the wording of the time varies and the banner alone is the block.
+///
+/// The weekly-limit banner (`You've hit your weekly limit · resets …`)
+/// uses "hit" rather than "reached" and a "weekly" period, and drops the
+/// user into the `/rate-limit-options` numbered menu — none of which the
+/// original three phrases caught, so the block read as a generic chooser.
 pub const CLAUDE_USAGE_LIMIT_PHRASES: &[&str] = &[
     "usage limit reached",
     "reached your usage limit",
     "monthly limit reached",
+    "hit your usage limit",
+    "weekly limit",
+    "/rate-limit-options",
 ];
 
 /// Best-effort extraction of the reset time Claude prints alongside a
@@ -171,20 +179,63 @@ pub fn parse_usage_limit_reset(recent_output: &[u8]) -> Option<String> {
         .find_map(|(i, kw)| reset_token(&compact[i + kw.len()..]))
 }
 
-/// The time token immediately after a `resets` keyword, or `None` when
-/// what follows isn't a digit-led time. Skips an `at`/`in` connective
-/// (`resets at 3pm`, `resets in 2h`).
+/// Month abbreviations a date-style reset leads with (`resets Aug 30 at
+/// 2pm`), which the compacted buffer delivers as `resetsaug30at2pm`.
+const MONTH_ABBREVS: &[&str] = &[
+    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+];
+
+/// The reset hint immediately after a `resets` keyword, or `None` when
+/// what follows is neither a clock time nor a calendar date. Skips an
+/// `at`/`in` connective (`resets at 3pm`, `resets in 2h`).
 fn reset_token(after: &str) -> Option<String> {
     let after = after
         .strip_prefix("at")
         .or_else(|| after.strip_prefix("in"))
         .unwrap_or(after);
+    time_token(after).or_else(|| date_token(after))
+}
+
+/// A digit-led clock token (`3pm`, `3:00pm`, `2h`) at the start of `after`.
+/// Deliberately conservative — a leading digit run plus `:` and the am/pm +
+/// h/m/s/d time letters, stopping at the first byte outside that set — so a
+/// trailing `∙` / newline / `❯ 1. wait` never bleeds in.
+fn time_token(after: &str) -> Option<String> {
     let token: String = after
         .chars()
         .take_while(|c| c.is_ascii_digit() || matches!(c, ':' | 'a' | 'p' | 'm' | 'h' | 's' | 'd'))
         .take(12)
         .collect();
     (token.len() >= 2 && token.starts_with(|c: char| c.is_ascii_digit())).then_some(token)
+}
+
+/// A calendar-date reset (`resets Aug 30 at 2pm` → `resetsaug30at2pm`) —
+/// the weekly-limit banner's form, which `time_token` can't read because it
+/// leads with a month name, not a digit (#1337). Emits a spaced,
+/// display-ready hint (`aug 30 at 2pm`); the trailing clock time is
+/// optional, so `resets Aug 30` still yields `aug 30`.
+fn date_token(after: &str) -> Option<String> {
+    let month = MONTH_ABBREVS.iter().find(|m| after.starts_with(**m))?;
+    // Tolerate a full month name (`august`) after the 3-letter anchor.
+    let rest = after[month.len()..].trim_start_matches(|c: char| c.is_ascii_alphabetic());
+    let day: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .take(2)
+        .collect();
+    if day.is_empty() {
+        return None;
+    }
+    let mut hint = format!("{month} {day}");
+    let rest = rest[day.len()..]
+        .strip_prefix("at")
+        .or_else(|| rest[day.len()..].strip_prefix("in"))
+        .unwrap_or(&rest[day.len()..]);
+    if let Some(time) = time_token(rest) {
+        hint.push_str(" at ");
+        hint.push_str(&time);
+    }
+    Some(hint)
 }
 
 /// Substring "any-of" match. Plain text in; bytes should be passed
@@ -2273,6 +2324,32 @@ mod tests {
     }
 
     #[test]
+    fn weekly_limit_rate_limit_options_menu_reads_as_limit_reached() {
+        // #1337: the current weekly-limit banner uses "hit" (not "reached")
+        // and a "weekly" period, then drops into the `/rate-limit-options`
+        // numbered menu. None of the original phrases caught it, so the
+        // block read as a generic `InputNeeded` chooser and Shift-K found
+        // nothing to resume. The exact banner + menu must classify as
+        // `LimitReached`.
+        let blocked = "You've hit your weekly limit · resets Aug 30 at 2pm (America/New_York)\n\n\
+             /rate-limit-options\n\n\
+             What do you want to do?\n\
+             ❯ 1. Stop and wait for limit to reset\n  \
+             2. Switch to usage credits\n  \
+             3. Switch to Team plan";
+        assert_eq!(
+            claude_state(blocked.as_bytes()),
+            Some(AgentState::LimitReached),
+        );
+        assert!(!claude_ready_for_prompt(blocked.as_bytes()));
+        // The date-style reset is extracted for the badge hint.
+        assert_eq!(
+            parse_usage_limit_reset(blocked.as_bytes()),
+            Some("aug 30 at 2pm".into()),
+        );
+    }
+
+    #[test]
     fn a_usage_limit_phrase_above_a_resting_composer_is_stale_scrollback() {
         // Regression for the false-positive the review caught: a finished
         // turn whose OUTPUT merely mentioned a usage limit, now at rest
@@ -2311,6 +2388,18 @@ mod tests {
         assert_eq!(
             parse_usage_limit_reset(b"reached your usage limit - resets in 2h"),
             Some("2h".into()),
+        );
+
+        // #1337: a calendar-date reset ("resets Aug 30 at 2pm") is read
+        // despite leading with a month name rather than a digit. The
+        // trailing clock time is optional.
+        assert_eq!(
+            parse_usage_limit_reset(b"You've hit your weekly limit resets Aug 30 at 2pm"),
+            Some("aug 30 at 2pm".into()),
+        );
+        assert_eq!(
+            parse_usage_limit_reset(b"weekly limit reached, resets Sep 3"),
+            Some("sep 3".into()),
         );
     }
 

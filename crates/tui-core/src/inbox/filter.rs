@@ -426,7 +426,11 @@ impl FilterEntry {
             return Some(FilterEntry::LinearState(name.to_string()));
         }
         if let Some(login) = token.strip_prefix("person:") {
-            return Some(FilterEntry::Person(login.to_string()));
+            // Normalize to the case-insensitive identity (see
+            // `FilterSet::replace_entries`) so a hand-edited `person:Alice`
+            // token collapses onto the discovered `alice`, not a phantom
+            // second row.
+            return Some(FilterEntry::Person(login.to_ascii_lowercase()));
         }
         Filter::ALL
             .into_iter()
@@ -509,7 +513,16 @@ impl FilterSet {
                     self.linear_states.insert(name);
                 }
                 FilterEntry::Person(login) => {
-                    self.people.insert(login);
+                    // A GitHub login is case-insensitive, so the People
+                    // set's identity is the ASCII-lowercased login — the
+                    // same normalization `task_involves` matches with. The
+                    // menu discovery lowercases its bucket keys to match,
+                    // so an active login and its discovered row are ONE
+                    // entry regardless of the case a token or task field
+                    // carried; without this a `person:Alice` token and a
+                    // discovered `alice` render as two rows, the active one
+                    // showing an unchecked, count-0 duplicate.
+                    self.people.insert(login.to_ascii_lowercase());
                 }
             }
         }
@@ -547,7 +560,7 @@ impl FilterSet {
             FilterEntry::Predicate(f) => self.active.contains(f),
             FilterEntry::Label(name) => self.labels.contains(name),
             FilterEntry::LinearState(name) => self.linear_states.contains(name),
-            FilterEntry::Person(login) => self.people.contains(login),
+            FilterEntry::Person(login) => self.people.contains(&login.to_ascii_lowercase()),
         }
     }
 
@@ -963,6 +976,45 @@ mod tests {
         assert_eq!(set.chips(), vec!["@alice"]);
         set.replace_entries(std::iter::empty());
         assert!(set.is_empty());
+    }
+
+    /// A GitHub login is case-insensitive, so the People axis's identity
+    /// is the lowercased login. A mixed-case entry (a hand-edited
+    /// `person:Alice` lens token round-tripped through `from_token`, or
+    /// any caller passing canonical GitHub casing) must collapse onto that
+    /// identity — stored, matched via `contains_entry`, and displayed as
+    /// one `@alice`, never a second phantom row that a case-sensitive set
+    /// would mint.
+    #[test]
+    fn person_axis_identity_is_case_insensitive() {
+        let mut set = FilterSet::new();
+        set.replace_entries([FilterEntry::Person("Alice".into())]);
+        assert_eq!(
+            set.people().iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            vec!["alice"],
+            "the login is normalized to its lowercase identity on insert"
+        );
+        // `contains_entry` (drives the menu's pre-checked rows) matches
+        // regardless of the query's case, so the discovered `alice` row
+        // reads as active.
+        assert!(set.contains_entry(&FilterEntry::Person("alice".into())));
+        assert!(set.contains_entry(&FilterEntry::Person("ALICE".into())));
+        assert_eq!(set.chips(), vec!["@alice"]);
+
+        // Still matches the task whatever case the field carries.
+        let agents = HashMap::new();
+        let authored = workspace_with("a", |t| t.author = "Alice".into());
+        assert!(set.accepts(&FilterCtx {
+            w: &authored,
+            agents: &agents,
+            now: now(),
+        }));
+
+        // The persisted-token round-trip normalizes too.
+        assert_eq!(
+            FilterEntry::from_token("person:Bob"),
+            Some(FilterEntry::Person("bob".into())),
+        );
     }
 
     #[test]

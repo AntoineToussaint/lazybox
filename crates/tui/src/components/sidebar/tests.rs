@@ -1664,6 +1664,48 @@ mod filter_tests {
         );
     }
 
+    /// Regression (#scale): the People-axis menu treats a login as its
+    /// case-insensitive identity. An active mixed-case person (a
+    /// hand-edited `person:Alice` lens token) against a discovered
+    /// lowercase `alice` must render as ONE checked row, not the discovered
+    /// row plus a phantom count-0 duplicate a case-sensitive reconciliation
+    /// would add.
+    #[test]
+    fn people_axis_menu_folds_case_variants_into_one_row() {
+        use crate::components::sidebar::FilterEntry;
+        let mut t = base_task();
+        t.id.key = "o/r#1".into();
+        t.url = "https://github.com/o/r/pull/1".into();
+        t.author = "alice".into(); // discovered as lowercase
+        let w = Workspace::from_task(t, chrono::Utc::now());
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(SessionKey::from(&w.key), w);
+        // An active filter carrying a different case — as a hand-edited
+        // lens token would seed it.
+        sb.set_filter_entries([FilterEntry::Person("Alice".into())]);
+        sb.recompute_visible();
+
+        let people: Vec<(String, usize)> = sb
+            .filter_menu_entries()
+            .into_iter()
+            .filter_map(|(e, c)| match e {
+                FilterEntry::Person(login) => Some((login, c)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            people,
+            vec![("alice".to_string(), 1)],
+            "one row for the person, at the real count — no case-variant phantom"
+        );
+        // And that single row reads as active (pre-checked).
+        assert!(
+            sb.filters()
+                .contains_entry(&FilterEntry::Person("alice".into())),
+            "the discovered row is the active filter"
+        );
+    }
+
     #[test]
     fn sort_mode_default_is_split() {
         assert_eq!(SortMode::default(), SortMode::ByRoleSplit);

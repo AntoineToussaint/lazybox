@@ -2058,23 +2058,30 @@ impl Sidebar {
             // into the humans list the moment it's also a requested
             // reviewer. Scan the reviews up front so `is_bot` is
             // authoritative regardless of which field mentions the login.
-            let bot_logins: std::collections::BTreeSet<&str> = task
+            // Keys are the ASCII-lowercased login: a GitHub login is
+            // case-insensitive, so this is the People axis's identity —
+            // the same normalization `FilterSet` stores and `task_involves`
+            // matches with. Matching the filter set's case here is what
+            // keeps an active `person:Alice` and a discovered `alice` on
+            // ONE row instead of a duplicated, unchecked count-0 phantom.
+            let bot_logins: std::collections::BTreeSet<String> = task
                 .reviews
                 .iter()
                 .filter(|r| r.is_bot)
-                .map(|r| r.login.as_str())
+                .map(|r| r.login.to_ascii_lowercase())
                 .collect();
             let mut seen_people = std::collections::BTreeSet::new();
             let mut tally = |login: &str| {
-                if login.is_empty() || !seen_people.insert(login.to_string()) {
+                let key = login.to_ascii_lowercase();
+                if key.is_empty() || !seen_people.insert(key.clone()) {
                     return;
                 }
-                let bucket = if bot_logins.contains(login) || login.ends_with("[bot]") {
+                let bucket = if bot_logins.contains(&key) || key.ends_with("[bot]") {
                     &mut bots
                 } else {
                     &mut people
                 };
-                *bucket.entry(login.to_string()).or_default() += 1;
+                *bucket.entry(key).or_default() += 1;
             };
             tally(&task.author);
             for r in &task.reviewers {

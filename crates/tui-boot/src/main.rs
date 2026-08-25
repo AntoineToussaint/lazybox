@@ -43,6 +43,7 @@ mod device_cli;
 mod relay_e2e;
 mod remote_box;
 mod sandbox;
+mod scenario;
 mod serve;
 mod setup_detect;
 mod setup_persist;
@@ -439,6 +440,7 @@ async fn main() -> anyhow::Result<()> {
 
     let fresh = take_flag(&mut args, "--fresh");
     let test_mode = take_flag(&mut args, "--test");
+    let demo_mode = take_flag(&mut args, "--demo");
     let preselect_workspace = take_value(&mut args, "--workspace");
     let preselect_session = take_value(&mut args, "--session");
     let preselect = preselect_workspace.map(|w| lazybox_tui::realm::model::Preselect {
@@ -447,6 +449,9 @@ async fn main() -> anyhow::Result<()> {
     });
     if fresh {
         wipe_state_db();
+    }
+    if demo_mode {
+        return run_demo(preselect).await;
     }
     if test_mode {
         return run_test(preselect).await;
@@ -875,6 +880,67 @@ async fn run_test(preselect: Option<lazybox_tui::realm::model::Preselect>) -> an
     });
 
     // No drain handle: --test state is a throwaway tempdir.
+    spawn_terminal_restore_on_signal(None);
+    let snippets = fixture.snippets.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut model = lazybox_tui::realm::Model::new(client, snippets)?;
+        if let Some(p) = preselect {
+            model = model.with_preselect(p);
+        }
+        lazybox_tui::realm::model::run_loop_with_model(model)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("realm task panicked: {e}"))?
+    // `fixture` drops here → TempDir cleanup.
+}
+
+/// `lazybox --demo` boots against a throwaway multi-repo inbox (no
+/// GitHub, no PTY) and runs the built-in "fleet" scenario: it publishes a
+/// scripted timeline of synthetic daemon events onto the process-wide bus,
+/// bringing the whole UI to life — agents working across repos, one asking,
+/// one done, one rate-limited, live terminals streaming canned output — so
+/// the six v0.1.13 features can be exercised and recorded deterministically.
+///
+/// The scenario driver is a *second producer* on the same bus the daemon
+/// uses; the daemon still runs (it owns the Subscribe → Snapshot handshake
+/// and the bus → client relay), so this is the production event path fed
+/// synthetic events, not a bypass. See `scenario.rs` for the harness and its
+/// documented interface gaps.
+async fn run_demo(preselect: Option<lazybox_tui::realm::model::Preselect>) -> anyhow::Result<()> {
+    let fixture = scenario::DemoFixture::seed()?;
+    let repos: std::collections::BTreeSet<&str> =
+        fixture.workspaces.iter().map(|w| w.repo.as_str()).collect();
+    eprintln!(
+        "--demo: {} seeded workspaces across {} ({}); repo at {}",
+        fixture.workspaces.len(),
+        repos.len(),
+        repos.into_iter().collect::<Vec<_>>().join(", "),
+        fixture.repo.path().display()
+    );
+    let _ = std::env::set_current_dir(fixture.repo.path());
+
+    let (client, server) = channel::pair();
+    let config = ServerConfig::with_store(fixture.store.clone());
+    // Grab a bus handle BEFORE `config` moves into the daemon — the scenario
+    // driver publishes onto the same bus every connected TUI subscribes to.
+    let bus = config.bus.clone();
+
+    tokio::spawn(async move {
+        if let Err(e) = Server::new(config).serve(server).await {
+            tracing::error!("demo-mode daemon exited: {e}");
+        }
+    });
+
+    // Drive the scripted timeline in the background. The settle delay lets the
+    // TUI's Subscribe → Snapshot land before the first live event, so nothing
+    // is broadcast into the void.
+    let steps = scenario::fleet_scenario(&fixture);
+    tokio::spawn(scenario::run(
+        bus,
+        std::time::Duration::from_millis(1200),
+        steps,
+    ));
+
     spawn_terminal_restore_on_signal(None);
     let snippets = fixture.snippets.clone();
     tokio::task::spawn_blocking(move || {

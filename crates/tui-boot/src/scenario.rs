@@ -1,0 +1,638 @@
+//! `lazybox --demo` — a scripted **scenario-injection harness** that drives
+//! the full UI from synthetic daemon events, with no PTY, no git worktrees,
+//! no GitHub. It boots the real in-process daemon (so the Subscribe →
+//! Snapshot handshake and the bus → client relay are exactly the production
+//! paths) and then acts as a *second producer* on the process-wide event
+//! bus, publishing a timed sequence of [`Event`]s.
+//!
+//! ## Why this exists
+//!
+//! Two jobs, one mechanism:
+//!
+//! 1. **Deterministic demos / screenshots.** A recorded VHS cast needs the
+//!    inbox to come alive — agents working, terminals streaming, CI flipping
+//!    — without credentials or a live fleet. A pure-bus producer replays a
+//!    scripted timeline that renders identically every run.
+//! 2. **Interface-completeness review.** If the whole UI can be brought to
+//!    life by `bus.send(Event)` alone, the daemon→client `Event` contract is
+//!    complete. Where it *can't* be (see the known gaps below), that's a real
+//!    interface gap worth fixing — this harness is where such gaps surface.
+//!
+//! ## The one hard constraint: terminal sequence numbers
+//!
+//! The client terminal is a self-contained VT emulator; it renders injected
+//! [`Event::TerminalOutput`] bytes with no PTY behind it. But `append_output`
+//! requires each chunk's `first_seq == last_seq + 1` — a gap flips the slot
+//! to *Desynced*, drops the bytes, and asks the daemon to resync. So the
+//! driver keeps a per-terminal monotonic counter and assigns contiguous
+//! seqs; scenario authors never hand-count.
+//!
+//! ## Known interface gaps (bus-only is not enough for these)
+//!
+//! - **Terminal input.** A bus-injected terminal has no backend session, so a
+//!   keystroke resolves to `BackendError::NotFound`. Pure-event terminals are
+//!   *playback-only* — perfect for a recorded cast, insufficient for typing.
+//! - **Recovery durability.** A `Snapshot` (initial, or after a broadcast
+//!   `Lagged`) rebuilds terminals from the daemon's registry, not client VT
+//!   state, so bus-only terminals vanish on recovery. Workspaces survive
+//!   (they live in the store); fake terminals do not. Benign for a short
+//!   scripted demo that never lags.
+//!
+//! Closing either needs the `MockBackend` (`Arc<dyn SessionBackend>`) seam —
+//! deliberately out of scope for this passive Tier-1 harness.
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+use chrono::Utc;
+use lazybox_core::{
+    CiStatus, Label, Mergeable, ReviewStatus, SessionKey, SessionKind, Task, TaskId, TaskRole,
+    TaskState, Workspace, WorkspaceSession,
+};
+use lazybox_ipc::{AgentState, Event, TerminalId, TerminalKind};
+use lazybox_store::{MemoryStore, Store, WorkspaceRecord};
+use tempfile::TempDir;
+use tokio::sync::broadcast;
+
+/// A seeded workspace plus the handles the scenario script needs to address
+/// it: its `SessionKey` (for `AgentState` / terminal events), its display
+/// repo, and the built `Workspace` itself so a scenario can re-upsert a
+/// mutated copy (e.g. flip CI red → green mid-demo).
+pub struct SeededWorkspace {
+    pub key: SessionKey,
+    pub repo: String,
+    pub workspace: Arc<Workspace>,
+}
+
+/// Built artifacts of the demo fixture: the throwaway repo dir, the seeded
+/// in-memory store the daemon serves, the client-side snippet catalog, and
+/// the ordered roster of seeded workspaces the scenario drives.
+pub struct DemoFixture {
+    /// Owns the temp dir — drop = delete.
+    pub repo: TempDir,
+    pub store: Arc<dyn Store>,
+    pub snippets: lazybox_config::Snippets,
+    pub workspaces: Vec<SeededWorkspace>,
+}
+
+/// Parameters for one seeded workspace. Deliberately small — the scenario
+/// varies only the handful of `Task` fields that change what the sidebar and
+/// activity pane render.
+struct WsSpec {
+    repo: &'static str,
+    number: u64,
+    title: &'static str,
+    is_pr: bool,
+    ci: CiStatus,
+    review: ReviewStatus,
+    unread: u32,
+    mergeable: Mergeable,
+    behind: bool,
+    labels: &'static [&'static str],
+}
+
+impl DemoFixture {
+    /// Seed a multi-repo, multi-owner inbox into a fresh `MemoryStore`. The
+    /// owners (`obin-ai/*`, `acme/*`, `personal/*`) auto-group into Spaces;
+    /// the varied CI / unread / review states give the filter menu and
+    /// sidebar something real to render. Every workspace gets a shell session
+    /// rooted at the shared throwaway repo so it has on-disk presence.
+    pub fn seed() -> anyhow::Result<Self> {
+        let repo = tempfile::Builder::new()
+            .prefix("lazybox-demo-")
+            .tempdir()
+            .map_err(|e| anyhow::anyhow!("create tempdir: {e}"))?;
+        crate::test_mode::run_git_init(repo.path())?;
+
+        let store = Arc::new(MemoryStore::new()) as Arc<dyn Store>;
+        crate::test_mode::seed_skip_setup(&*store)?;
+
+        let specs = [
+            WsSpec {
+                repo: "obin-ai/lazybox",
+                number: 1332,
+                title: "probe author:@me to surface self/agent PRs fast",
+                is_pr: true,
+                ci: CiStatus::Success,
+                review: ReviewStatus::Approved,
+                unread: 0,
+                mergeable: Mergeable::Mergeable,
+                behind: false,
+                labels: &["backend"],
+            },
+            WsSpec {
+                repo: "obin-ai/lazybox",
+                number: 1340,
+                title: "footer notices auto-fade on a severity timer",
+                is_pr: true,
+                ci: CiStatus::Failure,
+                review: ReviewStatus::ChangesRequested,
+                unread: 3,
+                mergeable: Mergeable::Mergeable,
+                behind: true,
+                labels: &["ui", "bug"],
+            },
+            WsSpec {
+                repo: "obin-ai/web",
+                number: 88,
+                title: "refresh landing page for v0.1.13",
+                is_pr: true,
+                ci: CiStatus::Running,
+                review: ReviewStatus::None,
+                unread: 1,
+                mergeable: Mergeable::Mergeable,
+                behind: false,
+                labels: &["web"],
+            },
+            WsSpec {
+                repo: "acme/api",
+                number: 210,
+                title: "token-bucket rate limiter for the gateway",
+                is_pr: true,
+                ci: CiStatus::Success,
+                review: ReviewStatus::Approved,
+                unread: 0,
+                mergeable: Mergeable::Mergeable,
+                behind: false,
+                labels: &["perf"],
+            },
+            WsSpec {
+                repo: "acme/api",
+                number: 211,
+                title: "cache resolved credentials across polls",
+                is_pr: false,
+                ci: CiStatus::None,
+                review: ReviewStatus::None,
+                unread: 2,
+                mergeable: Mergeable::Unknown,
+                behind: false,
+                labels: &["enhancement"],
+            },
+            WsSpec {
+                repo: "acme/cli",
+                number: 45,
+                title: "shell tab-completion for the `acme` binary",
+                is_pr: true,
+                ci: CiStatus::Success,
+                review: ReviewStatus::Pending,
+                unread: 4,
+                mergeable: Mergeable::Conflicting,
+                behind: true,
+                labels: &["cli"],
+            },
+            WsSpec {
+                repo: "personal/dotfiles",
+                number: 7,
+                title: "faster zsh prompt with async git status",
+                is_pr: true,
+                ci: CiStatus::Success,
+                review: ReviewStatus::None,
+                unread: 1,
+                mergeable: Mergeable::Mergeable,
+                behind: false,
+                labels: &[],
+            },
+        ];
+
+        let mut workspaces = Vec::new();
+        for spec in specs {
+            let ws = build_workspace(&spec, repo.path());
+            let key = SessionKey::from(&ws.key);
+            let json = serde_json::to_string(&ws)?;
+            store
+                .save_workspace(&WorkspaceRecord {
+                    key: ws.key.as_str().to_string(),
+                    created_at: ws.created_at,
+                    workspace_json: Some(json),
+                })
+                .map_err(|e| anyhow::anyhow!("save_workspace: {e}"))?;
+            workspaces.push(SeededWorkspace {
+                key,
+                repo: spec.repo.to_string(),
+                workspace: Arc::new(ws),
+            });
+        }
+
+        Ok(Self {
+            repo,
+            store,
+            snippets: lazybox_config::Snippets::builtin(),
+            workspaces,
+        })
+    }
+}
+
+/// Construct one synthetic PR/issue `Workspace` from a spec, rooted at the
+/// shared throwaway repo. Mirrors `test_mode::seed_one_session`'s shape so
+/// the classifier treats it as a real PR/issue with a usable worktree.
+fn build_workspace(spec: &WsSpec, worktree: &Path) -> Workspace {
+    let kind_seg = if spec.is_pr { "pull" } else { "issues" };
+    let task = Task {
+        author: "octo-agent".into(),
+        id: TaskId {
+            source: "github".into(),
+            key: format!("{}#{}", spec.repo, spec.number),
+        },
+        title: spec.title.into(),
+        body: Some(format!(
+            "Synthetic {} seeded by `lazybox --demo`.",
+            if spec.is_pr { "pull request" } else { "issue" }
+        )),
+        state: TaskState::Open,
+        role: TaskRole::Author,
+        ci: spec.ci,
+        review: spec.review,
+        checks: vec![],
+        unread_count: spec.unread,
+        url: format!(
+            "https://github.com/{}/{}/{}",
+            spec.repo, kind_seg, spec.number
+        ),
+        repo: Some(spec.repo.into()),
+        branch: Some(format!("feature/{}", spec.number)),
+        base_branch: Some("main".into()),
+        updated_at: Utc::now(),
+        created_at: None,
+        closed_at: None,
+        labels: spec.labels.iter().map(|l| Label::new(*l)).collect(),
+        reviewers: vec![],
+        reviews: vec![],
+        assignees: vec![],
+        auto_merge_enabled: false,
+        is_in_merge_queue: false,
+        mergeable: spec.mergeable,
+        is_behind_base: spec.behind,
+        merge_blocked: matches!(spec.mergeable, Mergeable::Conflicting),
+        approval_policy: Default::default(),
+        node_id: None,
+        needs_reply: spec.unread > 0,
+        last_commenter: None,
+        recent_activity: vec![],
+        additions: 0,
+        deletions: 0,
+        changed_files: 0,
+        kind: None,
+        closes_issues: vec![],
+        linked_tasks: vec![],
+        parent: None,
+        priority: None,
+        state_label: None,
+    };
+    let mut workspace = Workspace::from_task(task, Utc::now());
+    let now = Utc::now();
+    workspace.add_session(WorkspaceSession::new(
+        workspace.key.clone(),
+        SessionKind::Shell,
+        worktree.to_path_buf(),
+        now,
+    ));
+    workspace
+}
+
+// ── Scenario vocabulary ─────────────────────────────────────────────────
+
+/// One scripted beat: wait `after` (relative to the previous beat), then
+/// apply `action`. Relative delays keep a scenario readable as a timeline.
+pub struct Step {
+    pub after: Duration,
+    pub action: Action,
+}
+
+impl Step {
+    pub fn new(after_ms: u64, action: Action) -> Self {
+        Self {
+            after: Duration::from_millis(after_ms),
+            action,
+        }
+    }
+}
+
+/// An ergonomic layer over [`Event`] that owns the one thing the raw enum
+/// can't: the per-terminal sequence counter (see the module docs). Everything
+/// here lowers to a single `bus.send(Event)`.
+pub enum Action {
+    /// Flip a workspace's agent state (sidebar pill + spinner).
+    Agent {
+        key: SessionKey,
+        terminal: TerminalId,
+        state: AgentState,
+    },
+    /// Register a live agent/shell terminal (no PTY behind it).
+    SpawnTerminal {
+        terminal: TerminalId,
+        key: SessionKey,
+        kind: TerminalKind,
+    },
+    /// Feed raw (optionally ANSI) bytes into a terminal's VT parser. Seqs are
+    /// assigned by the driver.
+    Output {
+        terminal: TerminalId,
+        bytes: Vec<u8>,
+    },
+    /// Flash a footer notice.
+    Notify { title: String, body: String },
+    /// Re-broadcast a full workspace (e.g. flip CI red → green mid-demo).
+    UpsertWorkspace(Arc<Workspace>),
+}
+
+/// Convenience: a `SpawnTerminal` for a Claude agent.
+pub fn spawn_claude(terminal: u64, key: &SessionKey) -> Action {
+    Action::SpawnTerminal {
+        terminal: TerminalId(terminal),
+        key: key.clone(),
+        kind: TerminalKind::Agent("claude".into()),
+    }
+}
+
+/// Convenience: a `SpawnTerminal` for a Codex agent.
+pub fn spawn_codex(terminal: u64, key: &SessionKey) -> Action {
+    Action::SpawnTerminal {
+        terminal: TerminalId(terminal),
+        key: key.clone(),
+        kind: TerminalKind::Agent("codex".into()),
+    }
+}
+
+/// Convenience: stream a chunk of terminal output.
+pub fn output(terminal: u64, text: impl Into<String>) -> Action {
+    Action::Output {
+        terminal: TerminalId(terminal),
+        bytes: text.into().into_bytes(),
+    }
+}
+
+/// Convenience: an agent-state flip.
+pub fn agent(terminal: u64, key: &SessionKey, state: AgentState) -> Action {
+    Action::Agent {
+        key: key.clone(),
+        terminal: TerminalId(terminal),
+        state,
+    }
+}
+
+// ── Driver ──────────────────────────────────────────────────────────────
+
+/// Publishes scenario actions onto the daemon bus, maintaining the contiguous
+/// per-terminal sequence numbers `append_output` demands.
+struct Driver {
+    bus: broadcast::Sender<Event>,
+    seqs: HashMap<u64, u64>,
+}
+
+impl Driver {
+    fn new(bus: broadcast::Sender<Event>) -> Self {
+        Self {
+            bus,
+            seqs: HashMap::new(),
+        }
+    }
+
+    fn send(&self, event: Event) {
+        // A send fails only if there are zero subscribers — during a demo the
+        // TUI is always attached, so a drop just means the beat is invisible;
+        // never fatal.
+        let _ = self.bus.send(event);
+    }
+
+    fn apply(&mut self, action: Action) {
+        match action {
+            Action::Agent {
+                key,
+                terminal,
+                state,
+            } => self.send(Event::AgentState {
+                session_key: key,
+                terminal_id: terminal,
+                state,
+            }),
+            Action::SpawnTerminal {
+                terminal,
+                key,
+                kind,
+            } => {
+                self.seqs.insert(terminal.0, 0);
+                self.send(Event::TerminalSpawned {
+                    terminal_id: terminal,
+                    session_key: key,
+                    kind,
+                    no_permission: false,
+                    on_main: false,
+                    model_label: None,
+                });
+            }
+            Action::Output { terminal, bytes } => {
+                let seq = self.seqs.entry(terminal.0).or_insert(0);
+                *seq += 1;
+                let seq = *seq;
+                self.send(Event::TerminalOutput {
+                    terminal_id: terminal,
+                    bytes,
+                    first_seq: seq,
+                    seq,
+                });
+            }
+            Action::Notify { title, body } => self.send(Event::Notification { title, body }),
+            Action::UpsertWorkspace(ws) => self.send(Event::WorkspaceUpserted(ws)),
+        }
+    }
+}
+
+/// Run a scenario against the bus. Sleeps to each beat, then publishes it.
+/// An initial settle delay lets the TUI's Subscribe → Snapshot complete
+/// before the first live event, so nothing is broadcast into the void.
+pub async fn run(bus: broadcast::Sender<Event>, settle: Duration, steps: Vec<Step>) {
+    tokio::time::sleep(settle).await;
+    let mut driver = Driver::new(bus);
+    for step in steps {
+        tokio::time::sleep(step.after).await;
+        driver.apply(step.action);
+    }
+}
+
+/// The built-in "fleet" scenario: brings the seeded inbox to life — several
+/// agents working across repos, one asking, one done, one rate-limited — with
+/// live terminals streaming canned Claude/Codex output for the focus-mode
+/// grid. Designed to exercise the six v0.1.13 features on camera.
+pub fn fleet_scenario(fx: &DemoFixture) -> Vec<Step> {
+    // Stable terminal-id assignment per seeded workspace index.
+    let ws = &fx.workspaces;
+    let k = |i: usize| ws[i].key.clone();
+
+    // ── Phase 1: light up the whole fleet fast ───────────────────────────
+    // Spawn every terminal and set every agent state within ~1.5s so the
+    // sidebar comes alive at once and all terminals exist for the focus
+    // grid, rather than trickling in over 12s. Terminal ids: 1=lazybox
+    // (working claude), 2=web (working codex), 3=footer-fade (asking),
+    // 4=rate-limiter (done), 5=cli (rate-limited).
+    let mut steps = vec![
+        Step::new(150, spawn_claude(1, &k(0))),
+        Step::new(100, spawn_codex(2, &k(2))),
+        Step::new(100, spawn_claude(3, &k(1))),
+        Step::new(100, spawn_claude(4, &k(3))),
+        Step::new(100, spawn_claude(5, &k(5))),
+        Step::new(150, agent(1, &k(0), AgentState::Working)),
+        Step::new(80, agent(2, &k(2), AgentState::Working)),
+        Step::new(80, agent(3, &k(1), AgentState::InputNeeded)),
+        Step::new(80, agent(4, &k(3), AgentState::Done)),
+        Step::new(80, agent(5, &k(5), AgentState::LimitReached)),
+        // Seed the resting terminals with their one-shot content immediately.
+        Step::new(120, output(3, ASK_TRANSCRIPT)),
+        Step::new(120, output(4, DONE_TRANSCRIPT)),
+        Step::new(120, output(5, LIMIT_TRANSCRIPT)),
+    ];
+
+    // ── Phase 2: stream the two working agents round-robin ───────────────
+    // Interleave Claude (t1) and Codex (t2) so both terminals visibly churn
+    // at the same time — the multi-agent fleet in motion.
+    let max = CLAUDE_TRANSCRIPT.len().max(CODEX_TRANSCRIPT.len());
+    for i in 0..max {
+        if let Some(line) = CLAUDE_TRANSCRIPT.get(i) {
+            steps.push(Step::new(420, output(1, *line)));
+        }
+        if let Some(line) = CODEX_TRANSCRIPT.get(i) {
+            steps.push(Step::new(180, output(2, *line)));
+        }
+    }
+
+    // The reactive inbox surfacing a change: the footer-fade PR's CI, red at
+    // seed time, flips green. Re-upsert a mutated copy — the CI indicator is
+    // store/payload-carried, so a fresh WorkspaceUpserted is how it changes.
+    let mut greened = (*ws[1].workspace).clone();
+    if let Some(task) = greened.primary_task_mut() {
+        task.ci = CiStatus::Success;
+        task.review = ReviewStatus::Approved;
+        task.is_behind_base = false;
+        task.updated_at = Utc::now();
+    }
+    steps.push(Step::new(1200, Action::UpsertWorkspace(Arc::new(greened))));
+    steps.push(Step::new(
+        150,
+        Action::Notify {
+            title: "lazybox".into(),
+            body: "obin-ai/lazybox #1340 · CI passed · changes addressed".into(),
+        },
+    ));
+
+    steps
+}
+
+/// Canned Claude Code output — a compact, realistic working transcript with
+/// ANSI color so the rendered terminal looks alive.
+const CLAUDE_TRANSCRIPT: &[&str] = &[
+    "\x1b[38;5;208m✻\x1b[0m Working on \x1b[1mprobe author:@me\x1b[0m…\r\n",
+    "  \x1b[36m⎿\x1b[0m Read crates/gh-provider/src/client.rs (2841 lines)\r\n",
+    "  \x1b[36m⎿\x1b[0m Read crates/gh-provider/src/notifications.rs\r\n",
+    "\x1b[32m●\x1b[0m Adding the author-probe cadence to NotificationsState\r\n",
+    "  \x1b[36m⎿\x1b[0m Edited notifications.rs (+18 -0)\r\n",
+    "\x1b[32m●\x1b[0m Wiring the probe into the fetch dispatch\r\n",
+    "  \x1b[36m⎿\x1b[0m Edited polling/sources/mod.rs (+27 -1)\r\n",
+    "\x1b[90m$ cargo build -p lazybox-gh\x1b[0m\r\n",
+    "   \x1b[32mCompiling\x1b[0m lazybox-gh v0.1.13\r\n",
+    "    \x1b[32mFinished\x1b[0m in 41.2s\r\n",
+];
+
+/// Canned Codex output — a different agent voice, so the grid reads as a
+/// genuine multi-agent fleet.
+const CODEX_TRANSCRIPT: &[&str] = &[
+    "\x1b[35mcodex\x1b[0m refreshing the landing hero\r\n",
+    "  updating web/src/pages/index.astro\r\n",
+    "  \x1b[32m+\x1b[0m added feature grid for v0.1.13\r\n",
+    "\x1b[90m$ pnpm build\x1b[0m\r\n",
+    "  \x1b[36mvite\x1b[0m building for production…\r\n",
+    "  \x1b[32m✓\x1b[0m 214 modules transformed\r\n",
+    "  \x1b[32m✓\x1b[0m built in 3.71s\r\n",
+];
+
+const ASK_TRANSCRIPT: &str = "\x1b[32m●\x1b[0m The fade timer could key off severity or a flat 45s.\r\n\
+     \x1b[1mWhich should permanent-but-dismissable notices use?\x1b[0m\r\n\
+     \x1b[36m❯ 1.\x1b[0m Severity-scaled (retryable faster than auth)\r\n  \
+     2. Flat 45s for everything\r\n";
+
+const DONE_TRANSCRIPT: &str = "\x1b[32m●\x1b[0m Rate limiter landed — token bucket at 150 req/s.\r\n  \
+     \x1b[36m⎿\x1b[0m All 41 tests pass.\r\n\
+     \x1b[90m─ done (4m 12s) ─\x1b[0m\r\n";
+
+const LIMIT_TRANSCRIPT: &str = "\x1b[33m⏳ Claude usage limit reached.\x1b[0m\r\n  \
+     Resets at 4:00 PM. \x1b[1mWait, or switch account?\x1b[0m\r\n";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixture_seeds_multiple_owners_for_spaces() {
+        let fx = DemoFixture::seed().expect("fixture builds");
+        let rows = fx.store.list_workspaces().expect("list");
+        assert_eq!(rows.len(), 7, "seven seeded workspaces");
+        let owners: std::collections::BTreeSet<_> = fx
+            .workspaces
+            .iter()
+            .map(|w| w.repo.split('/').next().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            owners.len(),
+            3,
+            "three distinct owners so Spaces auto-group: {owners:?}"
+        );
+    }
+
+    #[test]
+    fn seeded_workspaces_are_real_prs_with_a_worktree() {
+        let fx = DemoFixture::seed().unwrap();
+        let rows = fx.store.list_workspaces().unwrap();
+        let ws: Workspace = serde_json::from_str(rows[0].workspace_json.as_ref().unwrap()).unwrap();
+        assert_eq!(ws.session_count(), 1, "one shell session");
+        assert!(ws.primary_task().is_some(), "classified as a real task");
+    }
+
+    #[test]
+    fn driver_assigns_contiguous_terminal_seqs() {
+        // The critical invariant: TerminalOutput seqs must be 1,2,3… per
+        // terminal or the client desyncs. Drive a spawn + three outputs and
+        // assert the emitted seqs.
+        let (bus, mut rx) = broadcast::channel(64);
+        let mut driver = Driver::new(bus);
+        let key = SessionKey::from("demo/repo#1");
+        driver.apply(Action::SpawnTerminal {
+            terminal: TerminalId(7),
+            key: key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+        });
+        for _ in 0..3 {
+            driver.apply(Action::Output {
+                terminal: TerminalId(7),
+                bytes: b"x".to_vec(),
+            });
+        }
+        // First event is the spawn.
+        assert!(matches!(rx.try_recv(), Ok(Event::TerminalSpawned { .. })));
+        let mut seen = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::TerminalOutput { first_seq, seq, .. } = ev {
+                assert_eq!(first_seq, seq, "single-chunk first_seq == seq");
+                seen.push(seq);
+            }
+        }
+        assert_eq!(seen, vec![1, 2, 3], "contiguous per-terminal seqs from 1");
+    }
+
+    #[test]
+    fn fleet_scenario_covers_every_agent_state() {
+        let fx = DemoFixture::seed().unwrap();
+        let steps = fleet_scenario(&fx);
+        let mut states = std::collections::BTreeSet::new();
+        for step in &steps {
+            if let Action::Agent { state, .. } = &step.action {
+                states.insert(format!("{state:?}"));
+            }
+        }
+        for want in ["Working", "InputNeeded", "Done", "LimitReached"] {
+            assert!(
+                states.contains(want),
+                "scenario exercises {want}: {states:?}"
+            );
+        }
+    }
+}

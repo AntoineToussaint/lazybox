@@ -1004,6 +1004,55 @@ impl Snippets {
                      with a human-readable summary and the PR URL.",
                 ),
             ),
+            (
+                "designissues".to_string(),
+                scoped(
+                    gh,
+                    "GitHub",
+                    "Create coordinated GitHub issues from a design",
+                    "Turn the design already in your context into the actual GitHub \
+                     issues needed across the repositories it touches — the deliverable \
+                     is created, cross-linked issues via `gh issue create`, not a list of \
+                     suggested titles or draft bodies. Bias toward execution: create the \
+                     issues. First read the complete design and supporting context and \
+                     pin down the intended outcome, the user or operator problem, the \
+                     important decisions, constraints, non-goals, rollout assumptions, and \
+                     open questions — preserve the reasoning behind the design, don't \
+                     reduce it to a disconnected checklist. Then inspect the relevant \
+                     repositories and their remotes, ownership boundaries, existing issue \
+                     conventions, labels, milestones, and current implementation, so repo \
+                     assignment is grounded in reality rather than inferred from names \
+                     alone. Before creating anything, search open *and* closed issues in \
+                     every candidate repository (`gh issue list`, `gh search issues`) and \
+                     reuse or reference what already exists — do not create duplicates. \
+                     Decompose the design by independently deliverable outcome and assign \
+                     each issue to the repository that owns that work, avoiding both one \
+                     vague umbrella issue and excessively granular file-by-file tasks. \
+                     Create each issue with `gh issue create` in its repository, giving it \
+                     enough context to stand alone: the problem and intent; the relevant \
+                     design context and why this piece belongs in that repository; the \
+                     proposed scope and concrete behavior; acceptance criteria and \
+                     verification expectations; constraints, edge cases, migration or \
+                     compatibility concerns, and non-goals; dependencies, ordering, \
+                     rollout implications, and links to sibling or parent issues; and the \
+                     unresolved questions that genuinely require a decision. For \
+                     cross-repository work establish a coordination structure — create an \
+                     umbrella or tracking issue only when it adds value, describe the \
+                     dependency graph and recommended sequence, and make every related \
+                     issue link back to the tracker and to its direct blockers or \
+                     dependents. After creation, revisit the issues to fill in their real \
+                     URLs and cross-links so the dependency graph is navigable from any \
+                     issue, not left as placeholder references. Apply labels, milestones, \
+                     or assignees only when the repository conventions make the correct \
+                     values clear — don't invent metadata or silently guess ownership. If \
+                     the target repositories or a consequential design decision can't be \
+                     determined safely from the available context, stop on that specific \
+                     ambiguity and ask one focused question rather than guessing. Finish \
+                     with a concise report grouped by repository: the issues created and \
+                     their URLs, existing issues reused, the dependency or rollout order, \
+                     and any ambiguity that prevented an issue from being created.",
+                ),
+            ),
             // ── Linear ──────────────────────────────────────────────
             (
                 "wip".to_string(),
@@ -2650,6 +2699,45 @@ snippets:
                 "Linear" => assert_eq!(s.provider.as_deref(), Some("linear"), "{key}"),
                 _ => assert_eq!(s.provider, None, "generic `{key}` stays unscoped"),
             }
+        }
+    }
+
+    /// `designissues` ships as a provider-scoped GitHub workflow (#1341)
+    /// that turns a design in the agent context into actual, cross-linked
+    /// GitHub issues. It biases toward execution — real `gh issue create`
+    /// calls, duplicate detection, repository-ownership validation,
+    /// standalone context, and post-creation cross-linking — so the body
+    /// can't regress to "suggest some titles."
+    #[test]
+    fn builtin_ships_designissues() {
+        let b = Snippets::builtin();
+        let s = b
+            .get("designissues")
+            .expect("`designissues` ships built-in");
+        assert_eq!(s.category, "GitHub");
+        assert_eq!(s.provider.as_deref(), Some("github"));
+        assert_eq!(s.origin, SnippetOrigin::BuiltIn);
+        assert_eq!(
+            s.description,
+            "Create coordinated GitHub issues from a design"
+        );
+        let body = s.body.to_ascii_lowercase();
+        for anchor in [
+            "gh issue create", // actual issue creation with gh
+            "duplicate",       // duplicate detection
+            "closed issue",    // search open AND closed before creating
+            "ownership",       // repository ownership validation
+            "stand alone",     // standalone context per issue
+            "non-goal",        // intent and non-goals
+            "acceptance criteria",
+            "dependenc",                  // dependencies / dependency graph
+            "cross-link",                 // post-creation cross-linking
+            "umbrella or tracking issue", // cross-repo coordination structure
+        ] {
+            assert!(
+                body.contains(anchor),
+                "`designissues` body should anchor on {anchor:?}",
+            );
         }
     }
 

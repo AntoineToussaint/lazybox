@@ -42,6 +42,8 @@ fn execute_graphql(
     let (bytes, duration) = match class {
         "PR search" => (150_000, std::time::Duration::from_millis(1_800)),
         "single-PR notification deep-fetch" => (12_000, std::time::Duration::from_millis(700)),
+        // Windowed `author:USER` search: a near-empty single page most ticks.
+        "authored-PR probe" => (2_000, std::time::Duration::from_millis(400)),
         _ => (1_000, std::time::Duration::from_millis(350)),
     };
     budget.observe_graphql_response(
@@ -148,6 +150,13 @@ fn governed(changed_targets: u32, external_pressure: bool) -> HourReplay {
             operations.push("single-PR notification deep-fetch");
             changes_left -= 1;
         }
+        // Discovery probe: a cheap `author:USER` search on non-sweep ticks so
+        // a self/agent-created PR (which has no notification) surfaces within
+        // a tick or two instead of waiting out the 30-min full sweep. Bounded
+        // to ~one small near-empty page per `AUTHORED_PROBE_INTERVAL`.
+        if !admitted && minute % 2 == 0 {
+            operations.push("authored-PR probe");
+        }
         for class in operations {
             if let Some((bytes, _)) = execute_graphql(
                 &mut budget,
@@ -219,10 +228,27 @@ async fn reproducible_four_scenario_baseline_and_after_report() {
     let baseline = captured_current_main(0);
     let after = governed(0, false);
     let reduction = 1.0 - f64::from(after.graphql_points) / f64::from(baseline.graphql_points);
+    // The governor still roughly halves the quiet scheduled load versus old
+    // main. The threshold is 0.50 rather than 0.75 because we deliberately
+    // spend part of that headroom on the `author:USER` discovery probe: a
+    // small near-empty search every couple of ticks that surfaces
+    // self/agent-created PRs (which have no notification) in ~one tick
+    // instead of waiting out the 30-min sweep. Even with the probe the quiet
+    // hour costs ~38 GraphQL points — under 1% of GitHub's 5000/hr budget —
+    // so the absolute floor stays trivially small; this assertion guards the
+    // reduction from silently eroding further.
     assert!(
-        reduction >= 0.75,
+        reduction >= 0.50,
         "quiet GraphQL point reduction was {:.1}%",
         reduction * 100.0
+    );
+    // Absolute ceiling: the whole quiet hour must stay a tiny fraction of the
+    // GraphQL budget even after the probe, so the probe can never grow into a
+    // rate-limit hazard without tripping this.
+    assert!(
+        after.graphql_points < 250,
+        "quiet GraphQL points {} exceeded the absolute safety ceiling",
+        after.graphql_points
     );
 }
 

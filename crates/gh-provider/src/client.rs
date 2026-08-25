@@ -919,6 +919,7 @@ fn request_profile(
         | "single-issue notification deep-fetch"
         | "PR details background prefetch"
         | "PR search"
+        | "authored-PR probe"
         | "issues search"
         | "review-requested"
         | "merged-sweep"
@@ -2294,6 +2295,14 @@ impl GhClient {
     pub const FULL_RECONCILE_INTERVAL: std::time::Duration =
         std::time::Duration::from_secs(60 * 60);
 
+    /// Cadence for the cheap `author:USER` discovery probe
+    /// ([`fetch_recently_authored_prs`](Self::fetch_recently_authored_prs)).
+    /// Short — this is the fast path that surfaces a self/agent-created PR
+    /// (which has no notification) without waiting for the 30-min full
+    /// sweep. One small windowed search per interval, independent of repo
+    /// count, so it stays well within the rate budget.
+    pub const AUTHORED_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(90);
+
     /// Should the next sync cycle run a heavy full sweep, or is the
     /// notifications-driven incremental path safe to use? Returns true
     /// when no sweep has run yet (first tick after daemon start) or
@@ -2329,6 +2338,18 @@ impl GhClient {
         if state.last_modified.is_none() {
             state.last_modified = Some(notifications::format_http_date(chrono::Utc::now()));
         }
+    }
+
+    /// Whether the cheap `author:USER` discovery probe is due this tick.
+    pub fn authored_probe_due(&self) -> bool {
+        self.notifications_state
+            .lock()
+            .is_authored_probe_due(Self::AUTHORED_PROBE_INTERVAL)
+    }
+
+    /// Stamp the discovery probe as just-run so it re-arms on its cadence.
+    pub fn mark_authored_probe_done(&self) {
+        self.notifications_state.lock().mark_authored_probe_done();
     }
 
     /// Decide the `updated:>=` floor for the next GLOBAL `involves:` PR
@@ -3113,6 +3134,39 @@ impl GhClient {
         Ok(issue.map(|i| graphql::issue_to_task(&i, &self.user)))
     }
 
+    /// Cheap discovery probe for PRs the authenticated user AUTHORED that
+    /// changed since `since`. Unlike [`fetch_all_prs`](Self::fetch_all_prs)
+    /// — a heavy multi-query `involves:` fan-out — this is a SINGLE
+    /// windowed `author:USER is:pr updated:>=since` search: a near-empty
+    /// page on a steady inbox, independent of how many repos you watch.
+    ///
+    /// It exists because a PR you (or your agent) just created generates
+    /// NO GitHub notification, so the incremental notifications path never
+    /// sees it and it would otherwise wait for the next 30-min full sweep.
+    /// Running this on the fast tick surfaces it in ~one tick, and because
+    /// the result feeds the normal upsert it also fires the issue→PR
+    /// rollover promptly. Priced as its own light budget class so it isn't
+    /// charged like the full `involves:` sweep.
+    pub async fn fetch_recently_authored_prs(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Task>, GhError> {
+        let query = Self::authored_probe_query(&self.user, since);
+        tracing::debug!("authored-PR discovery probe: {query}");
+        self.fetch_pr_search_paginated_as("authored-PR probe", "authored-probe", &query)
+            .await
+    }
+
+    /// Build the `author:USER … updated:>=since` search string for the
+    /// discovery probe. Split out so the query shape is unit-testable
+    /// without a live GraphQL round-trip.
+    pub(crate) fn authored_probe_query(user: &str, since: chrono::DateTime<chrono::Utc>) -> String {
+        let mut quals = graphql::default_search_qualifiers();
+        quals.push(format!("author:{user}"));
+        quals.push(graphql::updated_since_qualifier(since));
+        graphql::build_query(&quals)
+    }
+
     /// `since` narrows the main `involves:` paginated search to PRs
     /// updated at or after that instant (issue #14) — `None` fetches
     /// every open involved PR (a reconcile sweep). When `since` is set,
@@ -3539,14 +3593,28 @@ impl GhClient {
     /// fetch can `tokio::join!` it alongside the merged-sweep + the
     /// watched-repo fan-out.
     async fn fetch_pr_search_paginated(&self, search_query: &str) -> Result<Vec<Task>, GhError> {
+        self.fetch_pr_search_paginated_as("PR search", "involves-main", search_query)
+            .await
+    }
+
+    /// [`fetch_pr_search_paginated`] with an explicit request `class` and
+    /// metrics `label`. The class drives the rate-budget accounting — the
+    /// lightweight author probe (#discovery) is a distinct, cheap class so
+    /// it isn't priced like the heavy `involves:` sweep.
+    async fn fetch_pr_search_paginated_as(
+        &self,
+        class: &'static str,
+        metrics_label: &'static str,
+        search_query: &str,
+    ) -> Result<Vec<Task>, GhError> {
         let started = std::time::Instant::now();
-        let metrics = parking_lot::Mutex::new(BranchMetrics::new("involves-main"));
+        let metrics = parking_lot::Mutex::new(BranchMetrics::new(metrics_label));
         let outcome = paginate(
             |cursor, page| {
                 let metrics = &metrics;
                 async move {
-                    self.acquire_paced("PR search").await.map_err(|error| {
-                        tracing::error!("PR search budget error (page {page}): {error}");
+                    self.acquire_paced(class).await.map_err(|error| {
+                        tracing::error!("{class} budget error (page {page}): {error}");
                         error
                     })?;
                     let body = graphql::query_body_after(search_query, cursor.as_deref());
@@ -3555,7 +3623,7 @@ impl GhClient {
                         serde_json::to_string(&body).unwrap_or_default()
                     );
                     let (raw, page_bytes): (serde_json::Value, usize) = self
-                        .post_graphql_with_retry_measured("PR search", &body)
+                        .post_graphql_with_retry_measured(class, &body)
                         .await
                         .map_err(|e| {
                             tracing::error!("GraphQL HTTP error (page {page}): {e}\n{e:?}");
@@ -3603,7 +3671,7 @@ impl GhClient {
                         metrics.lock().graphql_cost += rl.cost.unwrap_or(0);
                     }
                     self.budget.lock().note_expected_pages(
-                        "PR search",
+                        class,
                         graphql::pr_page_count(data.search.issue_count),
                     );
                     Ok(FetchPage {
@@ -3636,11 +3704,7 @@ impl GhClient {
                 "GraphQL pagination stopped after {} pages; tail is non-authoritative",
                 metrics.requests
             );
-            return Err(incomplete_pagination_error(
-                "PR search",
-                tasks.len(),
-                reason,
-            ));
+            return Err(incomplete_pagination_error(class, tasks.len(), reason));
         }
         Ok(tasks)
     }
@@ -5600,6 +5664,26 @@ mod tests {
 
     fn graphql_error(message: &str) -> GhError {
         GhError::Graphql(message.to_string())
+    }
+
+    #[test]
+    fn authored_probe_query_is_windowed_pr_search_for_the_user() {
+        let since = chrono::DateTime::parse_from_rfc3339("2026-08-25T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let query = GhClient::authored_probe_query("octo-agent", since);
+        // PR-only, open, non-archived — never issues, never a repo scan.
+        assert!(query.contains("is:pr"), "{query}");
+        assert!(query.contains("is:open"), "{query}");
+        assert!(query.contains("archived:false"), "{query}");
+        // Scoped to the caller and windowed, so it stays a near-empty page
+        // rather than the heavy `involves:` sweep.
+        assert!(query.contains("author:octo-agent"), "{query}");
+        assert!(
+            query.contains("updated:>=2026-08-25T10:00:00+00:00"),
+            "{query}"
+        );
+        assert!(!query.contains("involves:"), "{query}");
     }
 
     /// Pagination + owner handling for `accessible_scopes`, against a

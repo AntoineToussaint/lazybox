@@ -196,6 +196,10 @@ pub(crate) struct NotificationsState {
     /// first tick after daemon start always runs a full sweep to
     /// bootstrap the inbox.
     pub(crate) last_full_sweep_at: Option<DateTime<Utc>>,
+    /// When the cheap `author:USER` discovery probe last ran. `None` =
+    /// never (probe on the first eligible tick). Ephemeral — not
+    /// persisted; a restart just probes immediately, which is fine.
+    pub(crate) last_authored_probe_at: Option<std::time::Instant>,
     /// "Skip the cheap heartbeat round-trip and go straight to full
     /// sweep" deadline. Armed by `note_heartbeat_failed` when the
     /// notifications endpoint errors (auth scope missing, REST
@@ -263,6 +267,20 @@ impl NotificationsState {
     /// client.
     pub fn is_full_sweep_due(&self, threshold: std::time::Duration) -> bool {
         self.is_full_sweep_due_at(threshold, Utc::now())
+    }
+
+    /// Whether the cheap `author:USER` discovery probe is due (never run,
+    /// or last run at least `threshold` ago).
+    pub fn is_authored_probe_due(&self, threshold: std::time::Duration) -> bool {
+        match self.last_authored_probe_at {
+            None => true,
+            Some(t) => t.elapsed() >= threshold,
+        }
+    }
+
+    /// Stamp the discovery probe as just-run.
+    pub fn mark_authored_probe_done(&mut self) {
+        self.last_authored_probe_at = Some(std::time::Instant::now());
     }
 
     fn is_full_sweep_due_at(&self, threshold: std::time::Duration, now: DateTime<Utc>) -> bool {
@@ -513,6 +531,19 @@ mod tests {
         assert!(future.is_full_reconcile_due_at(std::time::Duration::from_secs(3600), now));
         assert!(future.last_pr_sweep_at_utc.is_none());
         assert!(future.last_merged_sweep_at_utc.is_none());
+    }
+
+    #[test]
+    fn authored_probe_gating_fires_once_per_interval() {
+        let mut state = NotificationsState::default();
+        let interval = std::time::Duration::from_secs(90);
+        // Never run → due immediately.
+        assert!(state.is_authored_probe_due(interval));
+        state.mark_authored_probe_done();
+        // Just ran → not due until the interval elapses.
+        assert!(!state.is_authored_probe_due(interval));
+        // A zero threshold is always due regardless of the stamp.
+        assert!(state.is_authored_probe_due(std::time::Duration::ZERO));
     }
 
     #[test]

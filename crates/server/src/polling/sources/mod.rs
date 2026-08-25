@@ -1463,7 +1463,8 @@ impl TaskSource for GhSource {
                     required_sweep_points,
                 );
                 let plan = gh_fetch_plan(full_sweep_admitted, self.poll_notifications);
-                let (tasks, kind) = match plan {
+                let is_full_plan = matches!(plan, GhFetchPlan::Full);
+                let (mut tasks, kind) = match plan {
                     GhFetchPlan::Full => {
                         let mut focused = Vec::new();
                         let mut broad = None;
@@ -1515,6 +1516,33 @@ impl TaskSource for GhSource {
                         }
                     },
                 };
+
+                // Discovery probe: a PR you (or your agent) just created has
+                // no notification, so Hot/Warm ticks never see it — it would
+                // wait out the full sweep. On a bounded cadence, run a cheap
+                // `author:USER` search and merge any hits, so a fresh PR (and
+                // the issue→PR rollover it drives) surfaces within a tick or
+                // two. Full is already comprehensive, so skip it there.
+                if !is_full_plan && self.client.authored_probe_due() {
+                    let since = chrono::Utc::now() - chrono::Duration::minutes(10);
+                    match self.client.fetch_recently_authored_prs(since).await {
+                        Ok(authored) if !authored.is_empty() => {
+                            let authored = apply_needs_reply_toggle(
+                                filter_github_tasks_with_watches(
+                                    authored,
+                                    &self.filter,
+                                    &self.scopes,
+                                    &self.watch_repos,
+                                ),
+                                self.detect_needs_reply,
+                            );
+                            merge_targeted_tasks(&mut tasks, authored);
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("authored-PR discovery probe failed: {e}"),
+                    }
+                    self.client.mark_authored_probe_done();
+                }
 
                 self.queue_auto_fix_actions(&tasks);
                 self.set_last_kind(kind);

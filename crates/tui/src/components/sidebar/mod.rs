@@ -2050,27 +2050,41 @@ impl Sidebar {
             if let Some(state) = &task.state_label {
                 *states.entry(state.clone()).or_default() += 1;
             }
+            // `is_bot` only rides submitted reviews, but a bot can also
+            // appear as author / requested reviewer / assignee — plain
+            // strings with no flag. Bucketing per-field would let
+            // whichever field names the login FIRST win (the per-workspace
+            // `seen_people` is first-wins), mis-sorting a suffix-less bot
+            // into the humans list the moment it's also a requested
+            // reviewer. Scan the reviews up front so `is_bot` is
+            // authoritative regardless of which field mentions the login.
+            let bot_logins: std::collections::BTreeSet<&str> = task
+                .reviews
+                .iter()
+                .filter(|r| r.is_bot)
+                .map(|r| r.login.as_str())
+                .collect();
             let mut seen_people = std::collections::BTreeSet::new();
-            let mut tally = |login: &str, is_bot: bool| {
+            let mut tally = |login: &str| {
                 if login.is_empty() || !seen_people.insert(login.to_string()) {
                     return;
                 }
-                let bucket = if is_bot || login.ends_with("[bot]") {
+                let bucket = if bot_logins.contains(login) || login.ends_with("[bot]") {
                     &mut bots
                 } else {
                     &mut people
                 };
                 *bucket.entry(login.to_string()).or_default() += 1;
             };
-            tally(&task.author, false);
+            tally(&task.author);
             for r in &task.reviewers {
-                tally(r, false);
+                tally(r);
             }
             for r in &task.reviews {
-                tally(&r.login, r.is_bot);
+                tally(&r.login);
             }
             for a in &task.assignees {
-                tally(a, false);
+                tally(a);
             }
         }
         // Always surface currently-active values, even when no candidate

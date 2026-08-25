@@ -1619,6 +1619,51 @@ mod filter_tests {
         assert_eq!(by[&Filter::Reviewer], 0);
     }
 
+    /// Regression (#scale): `is_bot` must stay authoritative regardless
+    /// of which task field names a bot first. A suffix-less bot login
+    /// (no `[bot]`) that is BOTH a requested reviewer (plain string, no
+    /// flag) and a submitted-review author (`is_bot: true`) used to be
+    /// tallied from the reviewers field first and mis-sorted among the
+    /// humans; it must land in the bot bucket, after every human, in the
+    /// People axis.
+    #[test]
+    fn people_axis_sorts_flagged_bots_after_humans_regardless_of_field_order() {
+        use crate::components::sidebar::FilterEntry;
+        let mut t = base_task();
+        t.id.key = "o/r#1".into();
+        t.url = "https://github.com/o/r/pull/1".into();
+        // The human `zoe` sorts AFTER the bot `renovate` alphabetically,
+        // so only correct bucketing (bot last) reorders them — a test
+        // with an alpha-earlier human wouldn't catch the mis-sort.
+        t.author = "zoe".into();
+        // `renovate` carries no `[bot]` suffix; only the submitted review
+        // flags it. It is ALSO a requested reviewer, tallied first.
+        t.reviewers = vec!["renovate".into()];
+        t.reviews = vec![lazybox_core::Reviewer {
+            login: "renovate".into(),
+            state: lazybox_core::ReviewState::Approved,
+            is_bot: true,
+        }];
+        let w = Workspace::from_task(t, chrono::Utc::now());
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(SessionKey::from(&w.key), w);
+        sb.recompute_visible();
+
+        let people: Vec<String> = sb
+            .filter_menu_entries()
+            .into_iter()
+            .filter_map(|(e, _)| match e {
+                FilterEntry::Person(login) => Some(login),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            people,
+            vec!["zoe".to_string(), "renovate".to_string()],
+            "the flagged bot sorts after the human, not among them"
+        );
+    }
+
     #[test]
     fn sort_mode_default_is_split() {
         assert_eq!(SortMode::default(), SortMode::ByRoleSplit);

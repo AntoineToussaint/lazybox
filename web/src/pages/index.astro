@@ -8,11 +8,10 @@ const contactEmail = 'toussaint.antoine@gmail.com';
 const authorSite = 'https://antoinetoussaint.com';
 const docs = '/docs/';
 const workflows = '/docs/tutorials/core-workflows/';
-const brewInstallCmd = 'brew install AntoineToussaint/lazybox/lazybox';
-const installerCmd =
-  "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/AntoineToussaint/lazybox/releases/latest/download/lazybox-tui-installer.sh | sh";
+const brewInstallCmd =
+  'brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox';
 const sourceInstallCmd =
-  'cargo install --git https://github.com/AntoineToussaint/lazybox --locked lazybox-tui-boot';
+  'git clone https://github.com/AntoineToussaint/lazybox && cd lazybox && make setup && make run';
 
 const features = [
   {
@@ -30,7 +29,7 @@ const features = [
   {
     icon: '⊞',
     title: 'Start a fleet by tagging issues',
-    body: 'Drop a lazybox:claude label on GitHub issues you authored or are assigned to — across one repo or many — and lazybox opens each worktree and spawns an agent on the next sweep. No TUI, no terminal. Tag an eligible triaged backlog and come back to dozens of agents already working. An optional high, medium, or low issue label picks the model and effort.',
+    body: 'Drop a lazybox:claude label on GitHub issues you authored or are assigned to — across one repo or many — and lazybox opens each worktree and spawns an agent on the next sweep. No TUI, no terminal. Tag an eligible triaged backlog and come back to dozens of agents already working. An optional best, high, medium, or low issue label picks the model and effort.',
     wide: true,
   },
   {
@@ -184,38 +183,29 @@ const steps = [
           </div>
 
           <details class="install-more">
-            <summary>Other options: installer script or advanced source build</summary>
+            <summary>Contributor build (from source)</summary>
             <div class="install-alternatives">
-              <div class="install-option">
-                <p class="install-label">Installer script <span>Prebuilt</span></p>
-                <div class="install" data-install>
-                  <code><span class="prompt">$</span>{installerCmd}</code>
-                  <button class="copy" type="button" aria-label="Copy installer script command" data-copy={installerCmd}>
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" data-icon="copy"><rect x="5" y="5" width="9" height="9" rx="1.5"></rect><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5"></path></svg>
-                    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" data-icon="check" style="display:none"><path d="M3.5 8.5l3 3 6-6"></path></svg>
-                  </button>
-                </div>
-              </div>
-
               <div class="install-option install-option-source">
-                <p class="install-label">Advanced / from source</p>
+                <p class="install-label">From source <span>Contributors</span></p>
                 <div class="install" data-install>
                   <code><span class="prompt">$</span>{sourceInstallCmd}</code>
-                  <button class="copy" type="button" aria-label="Copy source install command" data-copy={sourceInstallCmd}>
+                  <button class="copy" type="button" aria-label="Copy source build command" data-copy={sourceInstallCmd}>
                     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" data-icon="copy"><rect x="5" y="5" width="9" height="9" rx="1.5"></rect><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5"></path></svg>
                     <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true" data-icon="check" style="display:none"><path d="M3.5 8.5l3 3 6-6"></path></svg>
                   </button>
                 </div>
                 <p class="install-caption">
-                  Compiles the current main branch (HEAD) locally. Requires Rust 1.88+,
-                  Zig 0.16.0, and a native C/C++ toolchain.
+                  For contributors and hackers. <code>make setup</code> fetches the
+                  pinned Zig 0.16.0 and Ghostty toolchain <code>cargo install</code>
+                  can't provide on its own. Requires Rust 1.88+ and a native
+                  C/C++ toolchain.
                 </p>
               </div>
             </div>
           </details>
 
           <p class="install-guide">
-            <a href="/docs/tutorials/quickstart/#1-install">See every install method and platform.</a>
+            <a href="/docs/tutorials/quickstart/#1-install">See install details and platforms.</a>
           </p>
         </div>
       </div>

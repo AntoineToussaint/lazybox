@@ -26,14 +26,14 @@ which is the canonical source of truth for defaults and field names.
 | [`repos`](#repos) | Per-repo env, mounts, scripts, branch prefix |
 | [`agent`](#agent) | Permission prompts, LLM gateway, agent state-detection timers |
 | [`agents`](#agentsid) | Custom CLI definitions and per-agent model-tier overrides |
-| [`server`](#server) | Daemon-level tuning: ring buffer and credential cache |
+| [`server`](#server) | Daemon-level tuning: ring buffer, credential cache, polling backoff |
 | [`worktree`](#worktree) | Global mounts, scripts, branch prefix, merged-cleanup |
 | [`scan`](#scan) | Roots and depth for read-only external-checkout discovery |
 | [`terminal`](#terminal) | Terminal escape chord + scrollback behavior |
 | [`ui`](#ui) | View state, key remaps, keymap preset, theme, timings, browser |
 | [`display`](#display) | Sort, filtering, glyphs |
 | [`attention`](#attention) | Which signals raise the per-repo badge + notification delivery |
-| [`providers`](#providers) | GitHub polling + filters |
+| [`providers`](#providers) | GitHub polling + filters, Linear teams / branch templates / cadence |
 | [`slack`](#slack) | Slack mirror tokens + channels |
 | [`hooks`](#hooks) | Periodic maintenance scripts |
 | [`mention`](#mention) | Auto-spawn on `@lazybox` mention |
@@ -41,7 +41,8 @@ which is the canonical source of truth for defaults and field names.
 | [`merge_on_green`](#merge_on_green) | Opt bot authors into merge-on-green |
 | [`conventions`](#conventions) | Commit / PR conventions injected into the agent-work brief |
 | [`shell`](#shell) | Shell command for the `s` spawn |
-| [`remote`](#remote) | Remote-access wiring: per-worktree host targeting (`remote.host`) |
+| [`sandbox`](#sandbox) | Remote dev-box lifecycle for `lazybox sandbox …` and the `r`-spawn |
+| [`remote`](#remote) | Client-side `--connect` port-forward supervisor (`remote.tunnel`) |
 | [`account`](#account) | Cached non-secret platform organization, plan, and entitlement association |
 
 Snippet workflows are **not** part of `config.yaml` — they live in their own
@@ -293,6 +294,7 @@ hand.
 | --- | --- | --- | --- |
 | `ring_buffer_bytes` | int | `2097152` | Per-terminal ring buffer capacity in bytes for scrollback history replay on reconnect. Range: 64 KiB – 100 MiB. Raise for sessions with very long outputs; lower to reduce per-terminal memory usage. |
 | `cred_cache_ttl_secs` | int | `300` | Credential cache TTL in seconds. Command-provider credentials (e.g., `gh auth token`) are cached for this duration before running the command again, reducing subprocess churn. Default is 5 minutes. |
+| `polling_backoff_cap_secs` | int | `120` | Ceiling in seconds for provider polling's exponential backoff on transient errors (timeouts, rate limits, 5xx). The backoff is clamped here so a persistently failing provider retries no slower than this. |
 
 ## `agent`
 
@@ -303,6 +305,11 @@ hand.
 | `llm_gateway_url` | string | unset | Global LLM-gateway base URL. When set, every spawned agent gets it injected as the base-URL env var its CLI reads (`ANTHROPIC_BASE_URL` for Claude, `OPENAI_BASE_URL` for Codex / Cursor). A per-repo `env` entry for the same var wins. Auth keys are deliberately not managed here. |
 | `working_watchdog_secs` | int | `15` | Fail-safe window: seconds a `Working` agent terminal may sit with no meaningful screen change before the daemon classifies the screen and forces the turn out of `Working`. `0` disables the watchdog. |
 | `quiet_classify_secs` | int | `5` | Quiet-timer window: seconds of PTY silence before a `Working` turn settles to `Done`. Cannot be disabled (`0` falls back to 5); raise it to be less eager to call a turn finished. |
+| `metering_proxy` | bool | `false` | Route every spawned agent's LLM traffic through lazybox's local metering proxy — the real data source behind the header's usage summary. The proxy forwards each request to the true upstream (or `llm_gateway_url` when set) and reads token counts off the response, so both Claude and Codex (and interactive terminal sessions) report real per-provider quota. Opt-in: it inserts a loopback hop in front of every agent API call. |
+| `max_live_agents` | int | `32` | Advisory ceiling on concurrently live agent terminals across all workspaces. Over the cap, spawns and startup recovery **warn** (a footer notice naming `]]x`) but are never refused — lazybox advises, it does not forbid. `0` disables the warnings. |
+| `nice` | int | `10` | Scheduling niceness for spawned agent processes and their children, so a large fleet yields under contention and never starves the interactive UI (liveness over throughput). `0` disables (agents run at normal priority). Clamped to `0..=20`. |
+| `strict_mcp` | bool | `false` | Launch unattended (skip-permissions) Claude spawns with `--strict-mcp-config`, disabling every ambient MCP server you configured. Default `false`: autonomous agents inherit your normal MCP setup. Read-only reviewer spawns stay strict regardless. |
+| `reap_closed_after` | duration | `48h` | How long after a workspace's PR/issue merges or closes its persistent sessions may keep running before the daemon reaps them (an idle agent is a ~110 MB memory ratchet). Reaped sessions stop being restored at startup; `w w` respawns one fresh and prompt history persists. `0s` disables reaping entirely. |
 
 The legacy `name`, `command`, `args`, `resume_args`, and `asking_patterns`
 fields under `agent` remain accepted so old files parse, but new custom agents
@@ -441,6 +448,11 @@ default keymap.
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `collapsed_repos` | list of string | `[]` | Repo names whose sidebar group starts collapsed (written back automatically) |
+| `pinned_repos` | list of string | `[]` | Repo names pinned to the top of the sidebar, in pin order (`p` toggles). A list, not a set — the order you pinned in is the display order. Written back automatically. |
+| `focused_workspaces` | list of string | `[]` | Workspace keys you've starred ("focused"), in focus order — lifted into a synthetic `★ Focused` section at the top and numbered for `]]<digit>` focus jumps. Written back automatically. |
+| `spaces` | list | `[]` | User-defined Spaces — the grouping tier above repo headers (`x m` moves a source into one). Each entry names a bucket and lists its assigned source labels; the list position is the display order. Written back automatically. |
+| `collapsed_spaces` | list of string | `[]` | Space names whose groups start collapsed (`Space` on a Space header). Written back automatically. |
+| `last_space` | string | _(unset)_ | Space most recently assigned via `x m`, preselected in the move-to-Space picker. Written back automatically. |
 | `sidebar_pct` | int | `40` | Sidebar width as a percent of the screen |
 | `right_top_pct` | int | `25` | Activity-row height as a percent of the right column |
 | `auto_mark_delay` | duration | `1s` | How long the cursor sits on an unread row before it auto-marks read |
@@ -458,6 +470,13 @@ default keymap.
 | `show_tips` | bool | `true` | Show progressive feature-discovery tips (opt-out) |
 | `terminal_new_layout` | `split` \| `tabs` | `split` | How an ordinary second terminal opens. Explicit `]]\|` / `]]-` splits are unaffected; `]]t` toggles and persists this value. |
 | `activity_pane_default` | `full` \| `summary` \| `hidden` | `full` | Where the right (activity) pane starts for a workspace you haven't toggled. `summary` shows a one-line count of new activity / failing CI; `hidden` folds it away. `Shift-P` cycles the three per workspace; a workspace with nothing to show still auto-hides. |
+| `focus_layout` | `single` \| `split-v` \| `split-h` \| `grid` | `single` | Focus-mode multi-workspace layout: `single` (fullscreen terminal), two side by side, two stacked, or a 2×2 grid over the starred roster. `]]v` cycles it inside focus mode and persists back here. |
+| `usage_summary` | bool | `true` | Show the always-visible per-provider usage summary in the sidebar header (a compact `Claude ▓▓▓░░ 62% · 76k left` widget per agent with a live terminal). Set `false` to hide the row. |
+| `usage_budgets` | map of string → int | `{}` | Plan-window token budget per agent id (`claude: 200000000`), the denominator for the usage summary's percentage. OAuth/plan agents expose no usage API, so set the window size here to unlock the `62% · 76k left` bar; without one an agent degrades to a bare token total. |
+| `usage_limit_alerts` | bool | `true` | Raise an escalating footer alert as agents hit their provider usage limit (transient notice → sticky banner naming the resume action → retracted once they recover). The `⏳ N limited` header count and per-row pill are always shown; this only gates the footer escalation. Set `false` to keep the passive signals only. |
+| `auto_wait_on_limit` | bool | `false` | Auto-press "Wait" when a Claude agent hits its usage / monthly limit, so N agents hitting the cap at once don't each need a manual visit — re-auth with another account and then `Shift-K` to resume them. Re-read on every transition. |
+| `show_agent_model` | bool | `true` | Show each running agent's model + reasoning effort next to its sidebar badge (`C Opus`, `X gpt-5.5 · xhigh`) and on its terminal tab. Set `false` to keep the sidebar compact. |
+| `credit_recovery_prompt` | string | built-in | Prompt submitted after a credit chooser has cleared and the provider composer is ready (the `Ctrl-k` recover-credit flow). |
 | `confirm_default.destructive_shortcut` | `yes` \| `no` | `yes` | Which button `Enter` highlights on a Confirm modal raised by a destructive chord (`x x` archive, `g m` merge, …). The chord is the intent, so `Enter` confirms; set `no` to require an explicit arrow-then-Enter. |
 | `confirm_default.event` | `yes` \| `no` | `no` | Which button `Enter` highlights on a Confirm modal raised unsolicited by a provider event (a merged-PR "remove this workspace?"). Defaults to `no` so a stray `Enter` can't destroy a workspace you didn't ask about. |
 
@@ -496,11 +515,15 @@ booleans all default to `true`.
 
 ## `providers`
 
+### `providers.github`
+
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `github.poll_interval` | seconds | `60` | How often the GitHub provider polls |
-| `github.detect_needs_reply` | bool | `true` | Show needs-reply badges when GitHub reports a reply is needed |
-| `github.filters` | list | `[]` | Narrow which PRs appear (empty = everything) |
+| `poll_interval` | seconds | `60` | How often the GitHub provider polls |
+| `detect_needs_reply` | bool | `true` | Show needs-reply badges when GitHub reports a reply is needed |
+| `filters` | list | `[]` | Narrow which PRs appear (empty = everything) |
+| `background_budget_share` | float | `0.55` | Maximum share of each observed GitHub primary rate-limit budget that scheduled polling may consume; the remainder stays available to interactive `gh`, agents, and bursts. |
+| `include_accessible_repos` | bool | `false` | Widen the inbox scope to every repo you can reach — owned, org-member, and direct-collaborator — not just the scopes you ticked in setup. Involved PRs/issues in any of those surface without a manual tick; repos you can't access stay hidden. |
 
 Each `filters` entry has exactly one of:
 
@@ -509,6 +532,37 @@ Each `filters` entry has exactly one of:
 | `org` | PRs involving you in this org |
 | `repo` | PRs involving you in `owner/name` |
 | `watch` | All open PRs in `owner/name`, regardless of involvement |
+
+### `providers.linear`
+
+Linear issue polling and the branch/checkout wiring for working on Linear
+tickets. A ticket's own `repo` is the synthetic `linear/<team>`; the `teams` map
+routes each team to a clonable GitHub repo.
+
+```yaml
+providers:
+  linear:
+    scope: [assigned, created, subscribed]
+    handle: antoine
+    teams:
+      OBI: obin-ai/obin-platform
+    branch_template: "{handle}/{type}-{id}-{slug}"
+    label_types:
+      Bug: fix
+      Feature: feat
+    poll_interval_secs: 60
+    idle_poll_interval_secs: 300
+```
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `scope` | list | `[assigned, created]` | Which issues the poller requests, as `or` clauses: any subset of `assigned` / `created` / `subscribed`. `subscribed` is opt-in because Linear auto-subscribes you to entire teams. An unrecognized entry warns and is dropped; an empty list falls back to the default. |
+| `handle` | string | git `user.name` | Personal git handle for the `{handle}` branch token. |
+| `teams` | map of string → string | `{}` | Linear team key → GitHub `owner/repo` to clone when working on that team's issues. An unmapped team fails loudly rather than cloning the synthetic `linear/<team>`. |
+| `branch_template` | string | _(unset)_ | Branch-name template. Tokens: `{handle}`, `{type}`, `{id}`, `{slug}`; empty tokens and their orphaned separators collapse. Unset → the generic `linear-<id>-<slug>`. |
+| `label_types` | map of string → string | `{}` | Linear label name → commit-type token (`feat` / `fix` / `chore` / …) for the `{type}` branch token. Multiple matches resolve by a fixed precedence (`fix` > `feat` > `chore` > `docs`). |
+| `poll_interval_secs` | int | `60` | Base cadence for the Linear poll while tickets are actively changing (decoupled from GitHub's hot loop — Linear changes less often). |
+| `idle_poll_interval_secs` | int | `300` | Cadence the poll backs off to once several consecutive sweeps returned an unchanged ticket set. Clamped up to at least `poll_interval_secs`. |
 
 ## `slack`
 
@@ -627,32 +681,113 @@ account:
 
 ## `remote`
 
-Remote-access wiring. The block is omitted from a written config when unset.
+Client-side remote-access wiring for `lazybox --connect`. The block is omitted
+from a written config when unset. Its one sub-block, `remote.tunnel`, replaces
+the operator-run `autossh` of the bring-your-own-remote runbook: when set,
+`--connect` spawns and keepalive-supervises an SSH (or IAP-tunneled SSH) forward
+that carries the daemon socket and any workload ports before it dials.
 
-### `remote.host`
+To provision and drive the box itself (not just forward to one you already run),
+use the higher-level [`sandbox`](#sandbox) block, which owns the box lifecycle
+and the `r`-spawn.
 
-Target a provisioned remote box per worktree instead of running the worktree on
-the daemon host. Off by default; when enabled, lazybox stamps a box from a
-golden image for a remote worktree, reuses it across sessions, and tears it down
-on cleanup.
+### `remote.tunnel`
 
 ```yaml
 remote:
-  host:
-    enabled: true
-    project: internal-robin-dev
-    zone: us-central1-a
-    machine_type: e2-standard-8
-    source_image: projects/internal-robin-dev/global/machineImages/lazybox-golden
-    instance_prefix: lazybox
+  tunnel:
+    mode: ssh              # ssh | iap
+    host: me@box           # ssh destination (mode: ssh)
+    remote_socket: /home/me/.lazybox/run/daemon.sock
+    ports: [3000, 8082]    # workload TCP ports, localhost→localhost
+```
+
+The forward carries the daemon Unix socket (`--connect`'s endpoint) plus any
+workload TCP ports, all bound to `localhost` on the client, supervised with
+capped-backoff keepalive so a dropped link is re-established without operator
+intervention.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `mode` | `ssh` \| `iap` | `ssh` | Transport: a direct `ssh -N -L …` (`ssh`), or SSH-over-GCP-Identity-Aware-Proxy for a box with no public IP (`iap`). |
+| `host` | string | _(unset)_ | SSH destination (`user@host` or a `~/.ssh/config` alias). Required for `mode: ssh`. |
+| `instance` | string | _(unset)_ | GCE instance name. Required for `mode: iap`. |
+| `user` | string | _(unset)_ | Login user for `mode: iap` (the instance's default OS-Login user otherwise). |
+| `zone` | string | _(unset)_ | GCE zone for `mode: iap` (falls back to gcloud's active zone). |
+| `project` | string | _(unset)_ | GCP project for `mode: iap` (falls back to gcloud's active project). |
+| `remote_socket` | string | _(unset)_ | Absolute path of the daemon socket on the box, forwarded to the local `--connect` socket. Unset → only the workload ports are forwarded. sshd does not expand `~`, so give an absolute path. |
+| `local_socket` | path | `--connect` path | Local socket the forward binds. |
+| `ports` | list of int | `[]` | Workload TCP ports forwarded `localhost:<p>` → `localhost:<p>` on the box (e.g. `3000`, `8082`). |
+| `server_alive_interval` | int | `15` | SSH `ServerAliveInterval` — seconds of link idle before a keepalive probe. |
+| `server_alive_count_max` | int | `3` | How many missed probes before the link is torn down and re-established. |
+
+## `sandbox`
+
+Remote dev-box lifecycle wiring, read by `lazybox sandbox <ensure|wake|sleep|
+status|connect|rebuild|destroy>` and by the sidebar `r`-spawn (which brings the
+box up lazily on demand). Names the provider placement/template, the deployment
+overlay, and the socket the connect forward carries. Every field is optional, so
+the block round-trips out of a written config when unset, and each command's
+flags override what is set here. Omitted from a written config when empty.
+
+```yaml
+sandbox:
+  provider: gcp
+  project: my-proj
+  region: us-central1
+  zone: us-central1-a
+  terraform_dir: ./terraform/sandbox/gcp
+  deployment: ./.lazybox/sandbox.yaml
+  remote_socket: /home/me/.lazybox/run/daemon.sock
+  ports: [3000, 8082, 8787]
+```
+
+E2B uses `template` and `timeout_seconds` instead of the GCP placement fields:
+
+```yaml
+sandbox:
+  provider: e2b
+  template: lazybox-e2b
+  timeout_seconds: 3600
 ```
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `enabled` | bool | `false` | Master switch. While off, every worktree runs on the daemon host and no box is ever provisioned. |
-| `project` | string | _(unset)_ | GCP project the box lives in. |
-| `zone` | string | _(unset)_ | GCE zone the box is created in (e.g. `us-central1-a`). |
-| `machine_type` | string | `e2-standard-8` | Machine type for a freshly stamped box. |
-| `source_image` | string | _(unset)_ | A `--source-machine-image` to stamp from. Ignored when `instance_template` is set. |
-| `instance_template` | string | _(unset)_ | A `--source-instance-template` to stamp from. Wins over `source_image` when both are present. |
-| `instance_prefix` | string | `lazybox` | Prefix for the per-worktree instance name; the worktree's stable identifier is appended and sanitized to GCE's naming rules. |
+| `provider` | `gcp` \| `e2b` | _(unset)_ | Provider id. |
+| `project` | string | _(unset)_ | GCP project. |
+| `region` | string | _(unset)_ | GCP region. |
+| `zone` | string | _(unset)_ | GCP zone (e.g. `us-central1-a`). |
+| `template` | string | _(unset)_ | E2B template id or alias. |
+| `timeout_seconds` | int | _(unset)_ | E2B running timeout; on expiry E2B performs a full-memory auto-pause. |
+| `terraform_dir` | path | `terraform/sandbox/gcp` | Terraform module `ensure` / `destroy` run against. |
+| `deployment` | path | _(unset)_ | Deployment overlay YAML deep-merged onto the embedded default; unset → the generic default recipe. |
+| `user` | string | _(unset)_ | SSH / gcloud login user for the IAP connect. |
+| `remote_socket` | string | _(unset)_ | Absolute daemon-socket path on the box the connect forward carries. |
+| `local_socket` | path | `--connect` path | Local socket the forward binds. |
+| `ports` | list of int | `[]` | Workload TCP ports the connect forward carries. |
+| `install_lazybox` | bool | `true` | Whether `ensure` provisions a box that builds + runs the lazybox daemon on boot. Set `false` for a bring-your-own-stack deployment that manages its own. |
+| `auto_connect` | bool | `false` | Connect to the box in the background at launch. Off by default: nothing touches the billed box until you connect (with `Shift-C`, or lazily on the first `r`-spawn). Governs only startup, not on-demand spawns. |
+| `require_connect` | bool | `false` | Hard-gate a remote (`r`-)spawn on an already-live connection. Off by default: an `r`-spawn while disconnected lazily brings the box up. Set `true` to refuse a spawn while disconnected and point at `Shift-C`. |
+
+### `sandbox.auth`
+
+How the provider authenticates to the cloud, so the box lifecycle runs off
+configured credentials rather than whatever ambient `gcloud auth login` / ADC
+the machine happens to have. Credentials are injected explicitly into every
+provider call and scoped to a lazybox-owned gcloud config, so your own `gcloud`
+is never touched. An empty block means ambient credentials.
+
+```yaml
+sandbox:
+  auth:
+    service_account_key: ~/.lazybox/gcp-sa.json
+    impersonate_service_account: deploy@my-proj.iam.gserviceaccount.com
+```
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `service_account_key` | path | _(unset)_ | Service-account key (or any `GOOGLE_APPLICATION_CREDENTIALS`-compatible credential file). The headless / CI path. |
+| `impersonate_service_account` | string | _(unset)_ | Service account to impersonate; the base credentials (a `service_account_key`, else ambient) mint tokens for it. |
+| `config_dir` | path | lazybox-owned dir | Override the provider-scoped `CLOUDSDK_CONFIG` directory. |
+
+See [Remote over SSH](/docs/how-to/remote-over-ssh/) for the end-to-end setup.

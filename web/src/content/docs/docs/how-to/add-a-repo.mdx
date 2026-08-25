@@ -38,10 +38,13 @@ A repo group can be folded or unfolded with `Space` on the group row.
 Once rows arrive, you usually don't want all of them at once. From the sidebar:
 
 - Press `f` to open the **filter menu** — a multi-select over state, role, and
-  kind predicates (unread, CI-failing, with-agent, author, reviewer, assignee,
-  mentioned, PR/issue, …), each shown with a live match count. Toggle
+  kind predicates (unread, CI-failing, with-agent, working, author, reviewer,
+  assignee, mentioned, PR/issue, …), each shown with a live match count. Toggle
   predicates and confirm; active filters appear as removable chips in the
-  sidebar header.
+  sidebar header. The **working** predicate narrows to workspaces whose agent is
+  *live-working* right now — keyed off the runtime agent state, distinct from
+  **with-agent** (which matches any recorded session and can read 0 while agents
+  are running).
 - Press `o` to cycle the **sort order**: `recent → by-role → split`.
 
 So to see only the PRs where you've been asked to review, press `f`, toggle

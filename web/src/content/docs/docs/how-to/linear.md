@@ -47,6 +47,10 @@ Restart lazybox (or press `Shift-R` to refresh) and the Linear poller starts.
 - Everything workspace-shaped works the same: `Enter` opens it, `s` opens a
   shell, `w w` puts your default agent on it — lazybox cuts a branch and an
   isolated worktree for the ticket just as it does for a GitHub issue.
+- `g s` runs a targeted sync of the focused workspace. On a **team-scoped**
+  Linear workspace it **discovers** that team's tickets on demand — a cheap way
+  to pull a team's open issues in without waiting for the next full poll or
+  running a global `Shift-R` sweep.
 
 ## Role filtering
 

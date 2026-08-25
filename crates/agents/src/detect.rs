@@ -143,7 +143,7 @@ pub const CLAUDE_USAGE_LIMIT_PHRASES: &[&str] = &[
     "reached your usage limit",
     "monthly limit reached",
     "hit your usage limit",
-    "weekly limit",
+    "hit your weekly limit",
     "/rate-limit-options",
 ];
 
@@ -2365,6 +2365,13 @@ mod tests {
         let bypass =
             "earlier you reached your usage limit\nbypass permissions on (shift+tab to cycle)";
         assert_eq!(claude_state(bypass.as_bytes()), Some(AgentState::Idle));
+        // #1337: the weekly-limit wording gets the same gate — a resting
+        // composer redrawn below the banner means the block already cleared.
+        let stale_weekly = "You've hit your weekly limit · resets Aug 30 at 2pm\n? for shortcuts";
+        assert_eq!(
+            claude_state(stale_weekly.as_bytes()),
+            Some(AgentState::Idle)
+        );
     }
 
     #[test]
@@ -2398,7 +2405,7 @@ mod tests {
             Some("aug 30 at 2pm".into()),
         );
         assert_eq!(
-            parse_usage_limit_reset(b"weekly limit reached, resets Sep 3"),
+            parse_usage_limit_reset(b"You've hit your weekly limit, resets Sep 3"),
             Some("sep 3".into()),
         );
     }
@@ -2438,6 +2445,12 @@ mod tests {
         // limits doesn't trip it — only the exact banner wording matches.
         let prose = "I checked and you have not reached any limit yet.\n? for shortcuts";
         assert_eq!(claude_state(prose.as_bytes()), Some(AgentState::Idle));
+
+        // #1337: the weekly-limit phrase is anchored on the banner's full
+        // "hit your weekly limit" — a bare "weekly limit" mention (a
+        // rate-limiter the agent just wrote about) must NOT read as a block.
+        let bare = "The GitHub API weekly limit is 5000 requests.\n? for shortcuts";
+        assert_eq!(claude_state(bare.as_bytes()), Some(AgentState::Idle));
     }
 
     #[test]

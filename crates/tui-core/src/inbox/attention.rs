@@ -202,3 +202,40 @@ pub fn workspace_needs_attention(
         .iter()
         .any(|s| attention_gate(*s, cfg))
 }
+
+/// Direct-address punch-through for the source-attention ladder
+/// (#scale, proposal A): the signals that surface and badge REGARDLESS
+/// of a source's Quiet / Digest / Muted level — the Gmail/Slack
+/// contract that makes muting feel safe. Deliberately narrower than
+/// [`workspace_attention_signals`]: ambient unread and
+/// somebody-requested-a-review-from-someone don't qualify; only things
+/// addressed at *you* or owned by you do.
+///
+/// - an agent in the workspace is asking for input,
+/// - a review is requested of YOU (viewer role is Reviewer with the
+///   review still pending / returned),
+/// - YOUR own PR's CI is failing,
+/// - you are @mentioned and the row has unread activity.
+pub fn punches_through(
+    w: &Workspace,
+    agents: &HashMap<SessionKey, lazybox_ipc::AgentState>,
+) -> bool {
+    if crate::agent_attention::workspace_is_asking(w, agents) {
+        return true;
+    }
+    let Some(t) = w.primary_task() else {
+        return false;
+    };
+    match t.role {
+        lazybox_core::TaskRole::Reviewer => matches!(
+            t.review,
+            lazybox_core::ReviewStatus::Pending | lazybox_core::ReviewStatus::ChangesRequested,
+        ),
+        lazybox_core::TaskRole::Author => matches!(
+            t.ci,
+            lazybox_core::CiStatus::Failure | lazybox_core::CiStatus::Mixed
+        ),
+        lazybox_core::TaskRole::Mentioned => w.unread_count() > 0,
+        lazybox_core::TaskRole::Assignee => false,
+    }
+}

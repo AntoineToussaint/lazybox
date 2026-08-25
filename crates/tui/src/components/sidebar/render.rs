@@ -856,15 +856,29 @@ impl Sidebar {
                         Some(bg) => bg,
                         None => Style::default().fg(theme.text_dim),
                     };
+                    // Source-attention ladder (#scale): a demoted (quiet /
+                    // digest / muted) group's header drops the loud
+                    // bold-warn styling — dim, so a wall of muted repos
+                    // reads as background, not work.
+                    let demoted = self
+                        .repo_summaries
+                        .get(name)
+                        .and_then(|s| s.source_attention.as_deref())
+                        .is_some();
+                    let name_style = if demoted {
+                        row_bg
+                            .unwrap_or_default()
+                            .fg(theme.text_dim)
+                            .add_modifier(Modifier::DIM)
+                    } else {
+                        row_bg
+                            .unwrap_or_default()
+                            .fg(theme.warn)
+                            .add_modifier(Modifier::BOLD)
+                    };
                     let mut spans: Vec<Span> = vec![
                         Span::styled(format!("{glyph} "), glyph_style),
-                        Span::styled(
-                            format!("{} {}", icons::REPO, name),
-                            row_bg
-                                .unwrap_or_default()
-                                .fg(theme.warn)
-                                .add_modifier(Modifier::BOLD),
-                        ),
+                        Span::styled(format!("{} {}", icons::REPO, name), name_style),
                     ];
                     // A pin marker on a pinned group — the visual
                     // affordance for the "float to top" order (#760).
@@ -882,6 +896,31 @@ impl Sidebar {
                         ));
                     }
                     if let Some(s) = self.repo_summaries.get(name) {
+                        // Attention-ladder chip (#scale): name the
+                        // level, the wake time for a time-boxed source
+                        // snooze, and — for a collapsed muted group —
+                        // the count of rows folded behind the residue
+                        // header (muted-but-counted, never invisible).
+                        if let Some(level) = s.source_attention.as_deref() {
+                            let mut chip = match s.source_snooze_until_epoch_ms {
+                                Some(ms) => {
+                                    let until = chrono::DateTime::from_timestamp_millis(ms)
+                                        .unwrap_or_else(chrono::Utc::now);
+                                    format!(
+                                        "  ⏾ wakes {}",
+                                        crate::components::sidebar::relative_time(now, until)
+                                    )
+                                }
+                                None => format!("  ⌀ {level}"),
+                            };
+                            if collapsed && s.active > 0 {
+                                chip.push_str(&format!(" · {}", s.active));
+                            }
+                            spans.push(Span::styled(
+                                chip,
+                                row_bg.unwrap_or_default().fg(theme.text_dim),
+                            ));
+                        }
                         // Active count is redundant — the workspace
                         // rows are visible directly under the header,
                         // so the user can count them. The attention
@@ -1648,6 +1687,21 @@ impl Sidebar {
                 track_main_behind: workspace.is_some_and(|w| w.track_main && w.track_main_behind),
                 has_notes: workspace.is_some_and(|w| w.has_notes()),
                 sent_snippet_count: workspace.map_or(0, |w| w.sent_snippets.total()),
+                // Source-attention ladder (#scale): a row in a Quiet /
+                // Digest / Muted source drops its ambient unread badge
+                // unless it punches through (direct address).
+                source_quiet: workspace.is_some_and(|w| {
+                    let label = crate::components::visible_rows::group_label(
+                        w,
+                        &self.projects,
+                        &self.workspaces,
+                    );
+                    self.repo_summaries
+                        .get(&label)
+                        .and_then(|s| s.source_attention.as_deref())
+                        .is_some()
+                        && !lazybox_tui_core::inbox::punches_through(w, &self.agents)
+                }),
                 ticket_tree: self.ticket_tree.get(key).copied(),
                 stack: self.stacks.get(key),
                 model_shorts: &self.model_shorts,

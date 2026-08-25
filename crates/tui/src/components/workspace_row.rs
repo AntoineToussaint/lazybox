@@ -141,6 +141,10 @@ pub struct WorkspaceRowCtx<'a> {
     pub sent_snippet_count: usize,
     /// Visible ticket-tree placement. `None` for rows outside a hierarchy;
     /// roots with children still carry metadata so they get a disclosure.
+    /// The row's source is Quiet / Digest / Muted and the row does NOT
+    /// punch through (#scale): ambient badges (the unread pill) are
+    /// suppressed so a demoted source stops shouting.
+    pub source_quiet: bool,
     pub ticket_tree: Option<lazybox_tui_core::inbox::TicketTreeMeta>,
     /// This workspace's PR is part of a detected stack (issue #969) — its
     /// [`StackPosition`](lazybox_core::StackPosition). Renders a ` ⇗k/N `
@@ -821,6 +825,12 @@ fn label_text_style(theme: &Theme, hex: &str) -> Style {
 }
 
 fn cell_unread(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    // Quiet/Digest/Muted sources suppress the ambient unread badge
+    // (#scale); punch-through rows keep it (the ctx flag is already
+    // punch-through-aware).
+    if ctx.source_quiet {
+        return Cell::empty();
+    }
     let unread = ctx.workspace.map(|w| w.unread_count()).unwrap_or(0);
     if unread == 0 {
         return Cell::empty();
@@ -1466,6 +1476,7 @@ mod tests {
         theme: &'a Theme,
     ) -> WorkspaceRowCtx<'a> {
         WorkspaceRowCtx {
+            source_quiet: false,
             workspace: Some(workspace),
             task: Some(task),
             theme,
@@ -1893,6 +1904,7 @@ mod tests {
         );
         let theme = theme();
         let ctx = WorkspaceRowCtx {
+            source_quiet: false,
             workspace: Some(&ws),
             task: None,
             theme: &theme,
@@ -2385,6 +2397,7 @@ mod tests {
         );
         let theme = theme();
         let ctx = WorkspaceRowCtx {
+            source_quiet: false,
             workspace: Some(&ws),
             task: None,
             theme: &theme,
@@ -3748,6 +3761,7 @@ mod tests {
             fixed_time(),
         );
         let ctx_scratch = WorkspaceRowCtx {
+            source_quiet: false,
             workspace: Some(&ws_scratch),
             task: None,
             theme: &theme,

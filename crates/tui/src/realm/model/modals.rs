@@ -1099,6 +1099,123 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::SnoozeDuration, modal);
     }
 
+    /// `z` on a Repo/Space header (#scale): snooze the whole SOURCE.
+    /// The workspace duration menu plus a trailing "Until I unmute"
+    /// row (the [`lazybox_tui_core::choice::SOURCE_MUTE_SENTINEL`]
+    /// sentinel → `Muted` with no deadline). `key` is a group label or
+    /// `space:<name>`; `level` is the source's stored level, preserved
+    /// so a timed snooze falls back to it on expiry.
+    pub(crate) fn mount_source_snooze_picker(
+        &mut self,
+        key: String,
+        level: lazybox_config::SourceAttentionLevel,
+    ) {
+        use crate::realm::components::choice::Choice;
+        use std::time::Duration;
+        if matches!(self.modal_stack.last(), Some(Id::SourceSnooze)) {
+            return;
+        }
+        let mut options: Vec<(&'static str, Duration)> = vec![
+            ("4 hours", Duration::from_secs(4 * 3600)),
+            ("Until tomorrow", Duration::from_secs(24 * 3600)),
+            ("1 week", Duration::from_secs(7 * 24 * 3600)),
+            ("1 month", Duration::from_secs(30 * 24 * 3600)),
+        ];
+        options.push((
+            "Until I unmute",
+            lazybox_tui_core::choice::SOURCE_MUTE_SENTINEL,
+        ));
+        self.set_modal_flow(ModalFlow::SourceSnooze {
+            key: key.clone(),
+            level,
+        });
+        let modal = Choice::single(format!("Snooze {key} — every row, one gesture"), options)
+            .title("Snooze source")
+            .label(|(l, _): &(&'static str, Duration)| (*l).to_string())
+            .payload_for(|(_, d): &(&'static str, Duration)| ChoicePayload::Duration(*d));
+        self.mount_modal(Id::SourceSnooze, modal);
+    }
+
+    /// `x v` (#scale, proposal D): name input freezing the current
+    /// lens into `ui.views` on submit.
+    pub(crate) fn mount_save_view_input(&mut self) {
+        use crate::realm::components::input::Input;
+        if matches!(self.modal_stack.last(), Some(Id::SaveViewName)) {
+            return;
+        }
+        let modal = Input::new("Save the current filters / sort / mailbox as…")
+            .title("Save view")
+            .with_validator(|s: &str| !s.trim().is_empty());
+        self.mount_modal(Id::SaveViewName, modal);
+    }
+
+    /// `x V` (#scale, proposal D): the saved-views picker. Rows index
+    /// into the `ModalFlow::ViewPick` snapshot so resolution can't
+    /// drift from render order.
+    pub(crate) fn mount_view_picker(&mut self, views: Vec<lazybox_config::ViewConfig>) {
+        use crate::realm::components::choice::Choice;
+        if matches!(self.modal_stack.last(), Some(Id::ViewPicker)) {
+            return;
+        }
+        let rows: Vec<(usize, String)> = views
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let mut label = v.name.clone();
+                if !v.lens.filters.is_empty() {
+                    label.push_str(&format!("  ({})", v.lens.filters.join(", ")));
+                }
+                (i, label)
+            })
+            .collect();
+        self.set_modal_flow(ModalFlow::ViewPick { views });
+        let modal = Choice::single("Apply a saved view", rows)
+            .title("Views")
+            .label(|(_, l): &(usize, String)| l.clone())
+            .payload_for(|(i, _): &(usize, String)| ChoicePayload::Index(*i));
+        self.mount_modal(Id::ViewPicker, modal);
+    }
+
+    /// `x ,` on a Repo/Space header (#scale): the attention-level
+    /// picker. Rows in [`lazybox_tui_core::choice::SOURCE_LEVELS`]
+    /// order — resolution indexes into that constant.
+    pub(crate) fn mount_source_level_picker(
+        &mut self,
+        key: String,
+        current: lazybox_config::SourceAttentionLevel,
+    ) {
+        use crate::realm::components::choice::Choice;
+        if matches!(self.modal_stack.last(), Some(Id::SourceLevel)) {
+            return;
+        }
+        let rows: Vec<(usize, String)> = lazybox_tui_core::choice::SOURCE_LEVELS
+            .iter()
+            .enumerate()
+            .map(|(i, level)| {
+                let desc = match level {
+                    lazybox_config::SourceAttentionLevel::Live => "full badges, engaged polling",
+                    lazybox_config::SourceAttentionLevel::Quiet => {
+                        "badges only when it's about you"
+                    }
+                    lazybox_config::SourceAttentionLevel::Digest => {
+                        "accumulates quietly, polled at idle cadence"
+                    }
+                    lazybox_config::SourceAttentionLevel::Muted => {
+                        "sinks + folds, leaves the GitHub sweep"
+                    }
+                };
+                let marker = if *level == current { "● " } else { "  " };
+                (i, format!("{marker}{} — {desc}", level.label()))
+            })
+            .collect();
+        self.set_modal_flow(ModalFlow::SourceLevel { key: key.clone() });
+        let modal = Choice::single(format!("Attention for {key}"), rows)
+            .title("Source attention")
+            .label(|(_, l): &(usize, String)| l.clone())
+            .payload_for(|(i, _): &(usize, String)| ChoicePayload::Index(*i));
+        self.mount_modal(Id::SourceLevel, modal);
+    }
+
     /// Mount the single global LLM-gateway URL input (Settings →
     /// "Configure LLM gateway"), pre-filled with the current value.
     /// Submit → `handle_input_submitted` writes `agent.llm_gateway_url`

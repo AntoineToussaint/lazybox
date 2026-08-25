@@ -895,6 +895,145 @@ pub struct SpaceConfig {
     pub sources: Vec<String>,
 }
 
+/// Default Space for a source that carries no owner boundary and isn't
+/// explicitly assigned — Linear project labels, the `(no repo)` bucket.
+pub const UNGROUPED_SPACE: &str = "Ungrouped";
+
+/// Which Space a source group label belongs to. An explicit
+/// `ui.spaces` assignment wins; otherwise the owner segment of an
+/// `owner/repo` label auto-seeds an owner-named Space; everything else
+/// falls into [`UNGROUPED_SPACE`]. Canonical here (config) so the
+/// daemon can resolve Space-level [`SourceAttention`] without a UI
+/// dependency; `lazybox_tui_core::inbox::space_of` delegates.
+pub fn space_of(label: &str, spaces: &[SpaceConfig]) -> String {
+    for s in spaces {
+        if s.sources.iter().any(|src| src == label) {
+            return s.name.clone();
+        }
+    }
+    if let Some((owner, _)) = label.split_once('/')
+        && !owner.is_empty()
+    {
+        return owner.to_string();
+    }
+    UNGROUPED_SPACE.to_string()
+}
+
+/// Attention level for one sidebar source — a repo group
+/// (`owner/repo`), a Linear team (`linear/TEAM`), or a whole Space
+/// (`space:<name>`). The ladder (#scale, proposal A):
+///
+/// - `Live` — today's behavior: full badging, engaged poll cadence.
+/// - `Quiet` — rows stay, but ambient badges (unread counts, attention
+///   glow) are suppressed unless the row *punches through* (see
+///   `lazybox_tui_core::inbox::punches_through`).
+/// - `Digest` — additionally polled at the idle cadence; the group
+///   accumulates quietly.
+/// - `Muted` — the group sinks to the bottom of the sidebar, dim and
+///   collapsed with a count (muted-but-counted, never invisible), and
+///   its repos leave the GitHub sweep entirely (parked via the
+///   round-robin's `suspended_cold` mechanism; `watch:` entries drop
+///   out of the watched fan-out). Punch-through rows still surface
+///   and badge.
+///
+/// Muting is attention state, NOT membership: workspaces, read state,
+/// notes, and stars all persist — unlike un-ticking the repo in
+/// Settings, which deletes them. One key lifts it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceAttentionLevel {
+    #[default]
+    Live,
+    Quiet,
+    Digest,
+    Muted,
+}
+
+impl SourceAttentionLevel {
+    /// Short label for pickers / header glyph tooltips.
+    pub fn label(self) -> &'static str {
+        match self {
+            SourceAttentionLevel::Live => "live",
+            SourceAttentionLevel::Quiet => "quiet",
+            SourceAttentionLevel::Digest => "digest",
+            SourceAttentionLevel::Muted => "muted",
+        }
+    }
+}
+
+/// Per-source attention state persisted under `ui.source_attention`.
+/// `snoozed_until` is a time-boxed mute (the header-`z` path): while
+/// it's in the future the source behaves as `Muted` regardless of
+/// `level`, and it auto-reverts when the instant passes — no clearing
+/// write required (readers compare against *now*).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SourceAttention {
+    pub level: SourceAttentionLevel,
+    pub snoozed_until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl SourceAttention {
+    /// The level in effect at `now`: an active snooze reads as `Muted`,
+    /// an expired one falls back to the stored level.
+    pub fn effective_level(&self, now: chrono::DateTime<chrono::Utc>) -> SourceAttentionLevel {
+        if self.snoozed_until.is_some_and(|until| until > now) {
+            SourceAttentionLevel::Muted
+        } else {
+            self.level
+        }
+    }
+
+    /// The active snooze deadline, if any (drives the header wake-time
+    /// label).
+    pub fn active_snooze(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.snoozed_until.filter(|until| *until > now)
+    }
+
+    /// True when this entry is indistinguishable from the default —
+    /// writers drop such entries instead of persisting noise.
+    pub fn is_default(&self) -> bool {
+        self.level == SourceAttentionLevel::Live && self.snoozed_until.is_none()
+    }
+}
+
+/// Resolve the attention in effect for a source label, honoring the
+/// Space tier: an explicit per-source entry wins; otherwise the entry
+/// for the Space the source sits in (`space:<name>`) applies; otherwise
+/// Live. `space` is the display Space of the label as computed by
+/// `lazybox_tui_core::inbox::space_of` — passed in rather than derived
+/// here so config stays free of the grouping logic.
+pub fn effective_source_attention(
+    map: &std::collections::BTreeMap<String, SourceAttention>,
+    label: &str,
+    space: Option<&str>,
+) -> SourceAttention {
+    if let Some(entry) = map.get(label) {
+        return entry.clone();
+    }
+    if let Some(space) = space
+        && let Some(entry) = map.get(&format!("space:{space}"))
+    {
+        return entry.clone();
+    }
+    SourceAttention::default()
+}
+
+/// One saved sidebar view (#scale, proposal D): a named, frozen lens.
+/// `x v` freezes the current filters/sort/mailbox under a name; `x V`
+/// recalls one. Stored as the same string tokens as
+/// [`LensSection`], so views survive predicate additions (unknown
+/// tokens drop silently) and are hand-editable / shareable in YAML.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ViewConfig {
+    pub name: String,
+    #[serde(flatten)]
+    pub lens: LensSection,
+}
+
 /// The sidebar lens — active filters, sort mode, and mailbox — as of
 /// the user's last change, re-applied at startup so a restart doesn't
 /// silently drop the narrowing they were working in (#scale). Stored
@@ -967,6 +1106,17 @@ pub struct UiSection {
     /// change, re-applied at startup (#scale). See [`LensSection`].
     #[serde(default)]
     pub last_lens: Option<LensSection>,
+    /// Per-source attention ladder (#scale): repo / Linear-team /
+    /// Space keys → [`SourceAttention`]. Read by BOTH the renderer
+    /// (sink/dim/badge suppression) and the polling scheduler (muted
+    /// sources leave the sweep) — the one user-curation signal that is
+    /// wired end-to-end. Absent key = Live.
+    #[serde(default)]
+    pub source_attention: std::collections::BTreeMap<String, SourceAttention>,
+    /// Saved views (#scale): named frozen lenses, in save order.
+    /// `x v` saves (replacing a same-named entry), `x V` recalls.
+    #[serde(default)]
+    pub views: Vec<ViewConfig>,
     /// Sidebar column width as a percentage of total. None = use
     /// the default (40%).
     pub sidebar_pct: Option<u16>,
@@ -1163,6 +1313,8 @@ impl Default for UiSection {
             collapsed_spaces: std::collections::BTreeSet::new(),
             last_space: None,
             last_lens: None,
+            source_attention: std::collections::BTreeMap::new(),
+            views: Vec::new(),
             keymap_preset: None,
             theme: None,
             sidebar_pct: None,
@@ -5272,5 +5424,89 @@ open_with:
         let yaml = "server:\n  polling_backoff_cap_secs: 180"; // 3 min
         let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
         assert_eq!(cfg.server.polling_backoff_cap_secs(), 180);
+    }
+
+    /// #scale proposal A: the source-attention ladder model. A live
+    /// snooze reads as Muted regardless of stored level and auto-
+    /// reverts; resolution honors source-over-Space precedence; the
+    /// map round-trips through YAML with kebab-case levels.
+    #[test]
+    fn source_attention_resolves_and_round_trips() {
+        use chrono::{Duration, TimeZone, Utc};
+        let now = Utc.with_ymd_and_hms(2026, 8, 25, 12, 0, 0).unwrap();
+
+        // Active snooze wins over the stored level; expiry reverts.
+        let snoozed = SourceAttention {
+            level: SourceAttentionLevel::Quiet,
+            snoozed_until: Some(now + Duration::hours(2)),
+        };
+        assert_eq!(snoozed.effective_level(now), SourceAttentionLevel::Muted);
+        assert_eq!(
+            snoozed.effective_level(now + Duration::hours(3)),
+            SourceAttentionLevel::Quiet,
+            "an expired snooze falls back to the stored level"
+        );
+        assert!(snoozed.active_snooze(now).is_some());
+        assert!(snoozed.active_snooze(now + Duration::hours(3)).is_none());
+        assert!(SourceAttention::default().is_default());
+        assert!(!snoozed.is_default());
+
+        // Source entry beats the Space entry; the Space covers the rest.
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(
+            "space:acme".to_string(),
+            SourceAttention {
+                level: SourceAttentionLevel::Digest,
+                snoozed_until: None,
+            },
+        );
+        map.insert(
+            "acme/api".to_string(),
+            SourceAttention {
+                level: SourceAttentionLevel::Muted,
+                snoozed_until: None,
+            },
+        );
+        assert_eq!(
+            effective_source_attention(&map, "acme/api", Some("acme")).level,
+            SourceAttentionLevel::Muted,
+        );
+        assert_eq!(
+            effective_source_attention(&map, "acme/web", Some("acme")).level,
+            SourceAttentionLevel::Digest,
+            "a source without its own entry inherits its Space's"
+        );
+        assert!(
+            effective_source_attention(&map, "other/repo", Some("other")).is_default(),
+            "unlisted sources are Live"
+        );
+
+        // YAML round trip via the ui section.
+        let yaml = "ui:\n  source_attention:\n    acme/api:\n      level: muted\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(
+            cfg.ui.source_attention["acme/api"].level,
+            SourceAttentionLevel::Muted
+        );
+        let dumped = serde_yaml::to_string(&cfg).expect("dump");
+        let back: Config = serde_yaml::from_str(&dumped).expect("reparse");
+        assert_eq!(back.ui.source_attention, cfg.ui.source_attention);
+    }
+
+    /// #scale proposal D: `ui.views` round-trips with the flattened
+    /// lens shape — the YAML a user hand-edits or shares.
+    #[test]
+    fn saved_views_round_trip() {
+        let yaml = "ui:\n  views:\n    - name: hot\n      filters: [ci-failing, \"person:alice\"]\n      sort: recent\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.ui.views.len(), 1);
+        let v = &cfg.ui.views[0];
+        assert_eq!(v.name, "hot");
+        assert_eq!(v.lens.filters, vec!["ci-failing", "person:alice"]);
+        assert_eq!(v.lens.sort.as_deref(), Some("recent"));
+        assert_eq!(v.lens.mailbox, None);
+        let dumped = serde_yaml::to_string(&cfg).expect("dump");
+        let back: Config = serde_yaml::from_str(&dumped).expect("reparse");
+        assert_eq!(back.ui.views, cfg.ui.views);
     }
 }

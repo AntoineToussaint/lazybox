@@ -2154,6 +2154,96 @@ pub fn github_watch_repos_from_filters(
         .collect()
 }
 
+/// Source-attention ladder (#scale): Muted (or source-snoozed)
+/// `watch:` repos leave the watched fan-out entirely — each entry
+/// costs 2 unrotated queries per sweep AND inflates the governor's
+/// required-points forecast (the ~25-repo cliff where full sweeps
+/// stop being admitted). Muting is the lever that buys that budget
+/// back; unmuting restores the entry on the next tick, because the
+/// watch list is rebuilt from config every `sources_for`.
+fn retain_unmuted_watches(
+    watch_repos: &mut std::collections::BTreeSet<String>,
+    cfg: &lazybox_config::Config,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    if cfg.ui.source_attention.is_empty() {
+        return;
+    }
+    watch_repos.retain(|repo| {
+        lazybox_config::effective_source_attention(
+            &cfg.ui.source_attention,
+            repo,
+            Some(&lazybox_config::space_of(repo, &cfg.ui.spaces)),
+        )
+        .effective_level(now)
+            != lazybox_config::SourceAttentionLevel::Muted
+    });
+}
+
+#[cfg(test)]
+mod retain_unmuted_watches_tests {
+    use super::*;
+
+    /// Regression (#scale, proposal A): muting a `watch:` repo — or the
+    /// Space it sits in, or time-box-snoozing it — must drop it from
+    /// the watched fan-out; expiry restores it.
+    #[test]
+    fn muted_and_snoozed_watches_leave_the_fanout() {
+        use lazybox_config::{SourceAttention, SourceAttentionLevel, SpaceConfig};
+        let now = chrono::Utc::now();
+        let mut cfg = lazybox_config::Config::default();
+        cfg.ui.spaces = vec![SpaceConfig {
+            name: "acme".into(),
+            sources: vec!["acme/inherited".into()],
+        }];
+        cfg.ui.source_attention.insert(
+            "o/muted".into(),
+            SourceAttention {
+                level: SourceAttentionLevel::Muted,
+                snoozed_until: None,
+            },
+        );
+        cfg.ui.source_attention.insert(
+            "o/napping".into(),
+            SourceAttention {
+                level: SourceAttentionLevel::Live,
+                snoozed_until: Some(now + chrono::Duration::hours(2)),
+            },
+        );
+        cfg.ui.source_attention.insert(
+            "o/expired".into(),
+            SourceAttention {
+                level: SourceAttentionLevel::Live,
+                snoozed_until: Some(now - chrono::Duration::hours(2)),
+            },
+        );
+        cfg.ui.source_attention.insert(
+            "space:acme".into(),
+            SourceAttention {
+                level: SourceAttentionLevel::Muted,
+                snoozed_until: None,
+            },
+        );
+
+        let mut watches: std::collections::BTreeSet<String> = [
+            "o/live".to_string(),
+            "o/muted".to_string(),
+            "o/napping".to_string(),
+            "o/expired".to_string(),
+            "acme/inherited".to_string(),
+        ]
+        .into();
+        retain_unmuted_watches(&mut watches, &cfg, now);
+        let kept: Vec<&str> = watches.iter().map(String::as_str).collect();
+        assert_eq!(
+            kept,
+            vec!["o/expired", "o/live"],
+            "muted, actively-snoozed, and Space-inherited watches leave; \
+             an expired snooze restores"
+        );
+    }
+}
+
 /// Re-admit `@lazybox`-mentioned issue tasks that `filter_github_tasks`
 /// dropped, so an auto-spawn lands in a real workspace/worktree.
 ///
@@ -3147,9 +3237,12 @@ async fn push_github_source(
     let config_scopes = github_cfg
         .map(|g| github_scopes_from_filters(&g.filters))
         .unwrap_or_default();
-    let watch_repos = github_cfg
+    let mut watch_repos = github_cfg
         .map(|g| github_watch_repos_from_filters(&g.filters))
         .unwrap_or_default();
+    if let Some(cfg) = cfg.as_ref() {
+        retain_unmuted_watches(&mut watch_repos, cfg, chrono::Utc::now());
+    }
     let detect_needs_reply = github_cfg.map(|g| g.detect_needs_reply).unwrap_or(true);
     let poll_interval = github_cfg
         .map(|g| g.poll_interval)

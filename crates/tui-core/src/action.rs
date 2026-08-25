@@ -223,6 +223,19 @@ pub enum Action {
     /// to a close-as-not-planned (with a notice) otherwise.
     /// Confirm-guarded — destructive and outward-facing.
     DeleteOrClose,
+    /// Close the workspace's PR without merging (`closePullRequest`).
+    /// Only surfaces on PR workspaces whose PR is still open. Unlike
+    /// [`ActionKind::DeleteOrClose`] this never touches an issue and
+    /// leaves the workspace in place. Confirm-guarded — outward-facing.
+    ClosePr,
+    /// Convert the workspace's open PR to a draft
+    /// (`convertPullRequestToDraft`). Only surfaces on a PR workspace
+    /// whose PR is open and not already a draft.
+    ConvertToDraft,
+    /// Mark the workspace's draft PR ready for review
+    /// (`markPullRequestReadyForReview`). Only surfaces on a PR
+    /// workspace whose PR is currently a draft.
+    MarkReady,
     /// Open the notes editor (a Textarea) for the focused workspace —
     /// a free-form local scratchpad that never syncs to a provider
     /// (issue #458). Pre-filled with the current note; submit persists.
@@ -519,6 +532,9 @@ pub enum ActionKind {
     SyncWorkspace,
     OpenInBrowser,
     DeleteOrClose,
+    ClosePr,
+    ConvertToDraft,
+    MarkReady,
     EditNotes,
     // Sidebar list management
     OpenFilterMenu,
@@ -668,6 +684,9 @@ impl ActionKind {
         Self::SyncWorkspace,
         Self::OpenInBrowser,
         Self::DeleteOrClose,
+        Self::ClosePr,
+        Self::ConvertToDraft,
+        Self::MarkReady,
         Self::Reply,
         Self::EditNotes,
         // Sidebar list management
@@ -790,6 +809,9 @@ impl Action {
             Action::SyncWorkspace => ActionKind::SyncWorkspace,
             Action::OpenInBrowser => ActionKind::OpenInBrowser,
             Action::DeleteOrClose => ActionKind::DeleteOrClose,
+            Action::ClosePr => ActionKind::ClosePr,
+            Action::ConvertToDraft => ActionKind::ConvertToDraft,
+            Action::MarkReady => ActionKind::MarkReady,
             Action::OpenFilterMenu => ActionKind::OpenFilterMenu,
             Action::CycleSort => ActionKind::CycleSort,
             Action::CycleMailbox => ActionKind::CycleMailbox,
@@ -1399,6 +1421,27 @@ impl ActionDef {
                 describe: "Delete the focused issue (close as not-planned when the token lacks the admin rights a hard delete needs) or close the PR without merging. Confirmed first.",
                 section: Section::Workspace,
             },
+            ActionKind::ClosePr => &Self {
+                kind: ActionKind::ClosePr,
+                default_keys: "g c",
+                label: "close PR",
+                describe: "Close the focused PR without merging it. Only on PR workspaces whose PR is still open; the workspace stays put and the next poll retires the closed row. Confirmed first.",
+                section: Section::Workspace,
+            },
+            ActionKind::ConvertToDraft => &Self {
+                kind: ActionKind::ConvertToDraft,
+                default_keys: "g f",
+                label: "convert to draft",
+                describe: "Convert the focused open PR to a draft (GitHub's convertPullRequestToDraft). Only on a PR workspace whose PR is open and not already a draft.",
+                section: Section::Workspace,
+            },
+            ActionKind::MarkReady => &Self {
+                kind: ActionKind::MarkReady,
+                default_keys: "g y",
+                label: "mark ready",
+                describe: "Mark the focused draft PR ready for review (GitHub's markPullRequestReadyForReview). Only on a PR workspace whose PR is currently a draft.",
+                section: Section::Workspace,
+            },
             // ── Sidebar list management ─────────────────────────────
             ActionKind::OpenFilterMenu => &Self {
                 kind: ActionKind::OpenFilterMenu,
@@ -1938,6 +1981,12 @@ impl ActionDef {
                  is closed as not-planned instead. A PR is closed without \
                  merging.",
             },
+            // Closes the PR upstream (reopen on GitHub to undo).
+            ActionKind::ClosePr => Guard::Confirm {
+                prompt: "Close this PR upstream without merging? It drops \
+                 out of the inbox once the close lands. Reopen on GitHub \
+                 to undo.",
+            },
             // Both the upstream mutation of DeleteOrClose and the local
             // teardown of Archive, in one confirm.
             ActionKind::CloseAndArchive => Guard::Confirm {
@@ -2102,6 +2151,9 @@ impl ActionKind {
             ActionKind::SyncWorkspace => "sync_workspace",
             ActionKind::OpenInBrowser => "open_in_browser",
             ActionKind::DeleteOrClose => "delete_or_close",
+            ActionKind::ClosePr => "close_pr",
+            ActionKind::ConvertToDraft => "convert_to_draft",
+            ActionKind::MarkReady => "mark_ready",
             ActionKind::OpenFilterMenu => "open_filter_menu",
             ActionKind::CycleSort => "cycle_sort",
             ActionKind::CycleMailbox => "cycle_mailbox",
@@ -2346,7 +2398,10 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::ManageLabels
         | ActionKind::SyncWorkspace
         | ActionKind::OpenInBrowser
-        | ActionKind::DeleteOrClose => Some("github"),
+        | ActionKind::DeleteOrClose
+        | ActionKind::ClosePr
+        | ActionKind::ConvertToDraft
+        | ActionKind::MarkReady => Some("github"),
         ActionKind::SpawnAgent | ActionKind::RecoverAllAgentCredit => Some("agent"),
         ActionKind::SpawnAgentRemote => Some("remote"),
         ActionKind::Work | ActionKind::WorkWith => Some("work"),
@@ -2949,6 +3004,35 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // sense when there's an open issue/PR to close; a plain archive
         // (`x x`) covers the rest.
         ActionKind::CloseAndArchive => availability(ActionKind::DeleteOrClose, workspace),
+        // Only on a PR workspace whose PR is still open (any open state,
+        // draft included). A merged/closed PR has nothing left to close,
+        // and an issue-only workspace routes through DeleteOrClose/CloseIssue.
+        ActionKind::ClosePr => workspace
+            .and_then(|w| w.pr.as_ref())
+            .is_some_and(|pr| {
+                matches!(
+                    pr.state,
+                    lazybox_core::TaskState::Open
+                        | lazybox_core::TaskState::InProgress
+                        | lazybox_core::TaskState::InReview
+                        | lazybox_core::TaskState::Draft
+                )
+            }),
+        // Only on a PR workspace whose PR is open and NOT already a draft.
+        ActionKind::ConvertToDraft => workspace
+            .and_then(|w| w.pr.as_ref())
+            .is_some_and(|pr| {
+                matches!(
+                    pr.state,
+                    lazybox_core::TaskState::Open
+                        | lazybox_core::TaskState::InProgress
+                        | lazybox_core::TaskState::InReview
+                )
+            }),
+        // Only on a PR workspace whose PR is currently a draft.
+        ActionKind::MarkReady => workspace
+            .and_then(|w| w.pr.as_ref())
+            .is_some_and(|pr| pr.state == lazybox_core::TaskState::Draft),
         ActionKind::SpawnShell => matches!(
             intent::resolve_spawn_shell(workspace),
             intent::Intent::SpawnShell { .. },
@@ -3941,6 +4025,112 @@ mod tests {
         // A PR workspace → reviewers offered.
         issue.pr = Some(task("github", "acme/widget#8", TaskKind::Pr));
         assert!(availability(ActionKind::RequestReviewers, Some(&issue)));
+    }
+
+    #[test]
+    fn close_pr_and_draft_actions_gate_on_pr_state() {
+        // ClosePr surfaces on any open PR (draft included); ConvertToDraft
+        // only on an open, non-draft PR; MarkReady only on a draft PR. None
+        // surface without a PR or on a terminal (merged/closed) PR.
+        use chrono::Utc;
+        use lazybox_core::{
+            CiStatus, Mergeable, ReviewStatus, Task, TaskId, TaskKind, TaskRole, TaskState,
+            Workspace, WorkspaceKey,
+        };
+        let pr_in = |state: TaskState| Task {
+            author: String::new(),
+            id: TaskId {
+                source: "github".into(),
+                key: "acme/widget#8".into(),
+            },
+            title: "widget".into(),
+            body: None,
+            state,
+            role: TaskRole::Author,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: String::new(),
+            repo: Some("acme/widget".into()),
+            branch: None,
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: Mergeable::Mergeable,
+            is_behind_base: false,
+            merge_blocked: false,
+            approval_policy: Default::default(),
+            node_id: Some("node".into()),
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            kind: Some(TaskKind::Pr),
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            parent: None,
+            priority: None,
+            state_label: None,
+        };
+        let ws_with_pr = |state: TaskState| {
+            let mut ws = Workspace::empty(
+                WorkspaceKey("github-acme-widget-8".into()),
+                "main",
+                Utc::now(),
+            );
+            ws.pr = Some(pr_in(state));
+            ws
+        };
+
+        // No workspace → nothing offered.
+        assert!(!availability(ActionKind::ClosePr, None));
+        assert!(!availability(ActionKind::ConvertToDraft, None));
+        assert!(!availability(ActionKind::MarkReady, None));
+
+        // Open PR: close + convert-to-draft yes, mark-ready no.
+        let open = ws_with_pr(TaskState::Open);
+        assert!(availability(ActionKind::ClosePr, Some(&open)));
+        assert!(availability(ActionKind::ConvertToDraft, Some(&open)));
+        assert!(!availability(ActionKind::MarkReady, Some(&open)));
+
+        // Draft PR: close + mark-ready yes, convert-to-draft no.
+        let draft = ws_with_pr(TaskState::Draft);
+        assert!(availability(ActionKind::ClosePr, Some(&draft)));
+        assert!(!availability(ActionKind::ConvertToDraft, Some(&draft)));
+        assert!(availability(ActionKind::MarkReady, Some(&draft)));
+
+        // Merged/closed PR: nothing left to do.
+        for terminal in [TaskState::Merged, TaskState::Closed] {
+            let ws = ws_with_pr(terminal);
+            assert!(!availability(ActionKind::ClosePr, Some(&ws)));
+            assert!(!availability(ActionKind::ConvertToDraft, Some(&ws)));
+            assert!(!availability(ActionKind::MarkReady, Some(&ws)));
+        }
+
+        // Issue-only workspace (no PR): none of the three surface.
+        let mut issue = Workspace::empty(
+            WorkspaceKey("github-acme-widget-7".into()),
+            "main",
+            Utc::now(),
+        );
+        let mut issue_task = pr_in(TaskState::Open);
+        issue_task.id.key = "acme/widget#7".into();
+        issue_task.kind = Some(TaskKind::Issue);
+        issue.attach_task(issue_task);
+        assert!(issue.pr.is_none());
+        assert!(!availability(ActionKind::ClosePr, Some(&issue)));
+        assert!(!availability(ActionKind::ConvertToDraft, Some(&issue)));
+        assert!(!availability(ActionKind::MarkReady, Some(&issue)));
     }
 
     #[test]

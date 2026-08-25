@@ -143,6 +143,24 @@ impl ProviderHandle {
             Self::Linear(c) => lazybox_core::TaskProvider::close_pr(c, ws).await,
         }
     }
+    pub async fn convert_to_draft(
+        &self,
+        ws: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        match self {
+            Self::Github(c) => lazybox_core::TaskProvider::convert_to_draft(c, ws).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::convert_to_draft(c, ws).await,
+        }
+    }
+    pub async fn mark_ready(
+        &self,
+        ws: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        match self {
+            Self::Github(c) => lazybox_core::TaskProvider::mark_ready(c, ws).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::mark_ready(c, ws).await,
+        }
+    }
     pub async fn delete_issue(
         &self,
         ws: &lazybox_core::Workspace,
@@ -1029,6 +1047,138 @@ async fn delete_or_close_task(config: &ServerConfig, workspace_key: WorkspaceKey
     }
     // Wake the poll loop so the vanished/closed state (and the rescope
     // removal) lands in <5s instead of waiting out the full interval.
+    config.poll.wake(true);
+}
+
+/// Handle `Command::ClosePr`: close the workspace's PR without merging
+/// (`closePullRequest`). Unlike [`handle_delete_or_close`] this only ever
+/// targets a PR — the catalog gates the `g c` chord to PR workspaces.
+/// Success wakes the poll loop; the rescope sweep retires the closed PR's
+/// workspace. Failure surfaces as a persistent `Event::PrCloseFailed`.
+pub async fn handle_close_pr(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let config = config.clone();
+    detach_mutation(async move { close_pr_task(&config, workspace_key).await });
+}
+
+async fn close_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let emit_err = |msg: &str| {
+        let _ = config
+            .bus
+            .send(Event::provider_error_retryable("close-pr", msg));
+    };
+
+    let Some(ws) = load_workspace(config, &workspace_key) else {
+        emit_err(&format!("close-pr: workspace {workspace_key} not found"));
+        return;
+    };
+    let pr_label = ws
+        .pr
+        .as_ref()
+        .map(|pr| pr.id.key.clone())
+        .filter(|k| !k.is_empty())
+        .unwrap_or_else(|| workspace_key.as_str().to_string());
+
+    let provider = match build_provider_for_workspace(config, &workspace_key).await {
+        Ok(p) => p,
+        Err(e) => {
+            emit_err(&e);
+            return;
+        }
+    };
+    if let Err(e) =
+        run_mutation_with_retry(&config.bus, "close-pr", || provider.close_pr(&ws)).await
+    {
+        tracing::warn!("close-pr {workspace_key}: {e:?}");
+        let _ = config.bus.send(Event::PrCloseFailed {
+            workspace_key: workspace_key.clone(),
+            pr_label,
+            reason: humanize_mutation_failure("close-pr", &e),
+        });
+        return;
+    }
+    tracing::info!("closed PR for workspace {workspace_key}");
+    let _ = config.bus.send(Event::PrClosed {
+        workspace_key: workspace_key.clone(),
+        pr_label,
+    });
+    // Wake the poll loop so the closed state (and the rescope removal)
+    // lands in <5s instead of waiting out the full interval.
+    config.poll.wake(true);
+}
+
+/// Handle `Command::ConvertPrToDraft`: convert the workspace's open PR to
+/// a draft. Success flashes a notice and wakes the poll loop to pick up
+/// the draft state; failure surfaces as a persistent
+/// `Event::PrDraftChangeFailed`.
+pub async fn handle_convert_to_draft(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let config = config.clone();
+    detach_mutation(async move { draft_change_task(&config, workspace_key, true).await });
+}
+
+/// Handle `Command::MarkPrReady`: mark the workspace's draft PR ready for
+/// review. Mirror of [`handle_convert_to_draft`] in the other direction.
+pub async fn handle_mark_ready(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let config = config.clone();
+    detach_mutation(async move { draft_change_task(&config, workspace_key, false).await });
+}
+
+/// Shared body for the two draft-toggle commands. `to_draft` selects the
+/// direction: `true` converts an open PR to a draft, `false` marks a
+/// draft PR ready for review.
+async fn draft_change_task(config: &ServerConfig, workspace_key: WorkspaceKey, to_draft: bool) {
+    let op = if to_draft {
+        "convert-to-draft"
+    } else {
+        "mark-ready"
+    };
+    let emit_err = |msg: &str| {
+        let _ = config.bus.send(Event::provider_error_retryable(op, msg));
+    };
+
+    let Some(ws) = load_workspace(config, &workspace_key) else {
+        emit_err(&format!("{op}: workspace {workspace_key} not found"));
+        return;
+    };
+    let pr_label = ws
+        .pr
+        .as_ref()
+        .map(|pr| pr.id.key.clone())
+        .filter(|k| !k.is_empty())
+        .unwrap_or_else(|| workspace_key.as_str().to_string());
+
+    let provider = match build_provider_for_workspace(config, &workspace_key).await {
+        Ok(p) => p,
+        Err(e) => {
+            emit_err(&e);
+            return;
+        }
+    };
+    let result = run_mutation_with_retry(&config.bus, op, || async {
+        if to_draft {
+            provider.convert_to_draft(&ws).await
+        } else {
+            provider.mark_ready(&ws).await
+        }
+    })
+    .await;
+    if let Err(e) = result {
+        tracing::warn!("{op} {workspace_key}: {e:?}");
+        let _ = config.bus.send(Event::PrDraftChangeFailed {
+            workspace_key: workspace_key.clone(),
+            pr_label,
+            to_draft,
+            reason: humanize_mutation_failure(op, &e),
+        });
+        return;
+    }
+    tracing::info!("{op} for workspace {workspace_key}");
+    let _ = config.bus.send(Event::PrDraftChanged {
+        workspace_key: workspace_key.clone(),
+        pr_label,
+        is_draft: to_draft,
+    });
+    // Wake the poll loop so the new draft state lands in <5s instead of
+    // waiting out the full interval.
     config.poll.wake(true);
 }
 

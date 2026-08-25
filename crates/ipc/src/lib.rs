@@ -1179,6 +1179,26 @@ pub enum Command {
     DeleteOrClose {
         workspace_key: lazybox_core::WorkspaceKey,
     },
+    /// Close the workspace's PR without merging (`closePullRequest`).
+    /// Fires from the github leader's `g c` chord, after a confirm.
+    /// Unlike [`Command::DeleteOrClose`], this only ever targets a PR
+    /// (never deletes an issue) and leaves the workspace in place — the
+    /// next poll's rescope sweep reconciles the closed state.
+    ClosePr {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
+    /// Convert the workspace's open PR to a draft
+    /// (`convertPullRequestToDraft`). Fires from the github leader's
+    /// `g f` chord. The next poll picks up the draft state.
+    ConvertPrToDraft {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
+    /// Mark the workspace's draft PR ready for review
+    /// (`markPullRequestReadyForReview`). Fires from the github leader's
+    /// `g y` chord. The next poll picks up the ready state.
+    MarkPrReady {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
     /// Request reviews on the workspace's PR from the given GitHub
     /// logins. Adds to the existing reviewer set (no replacement).
     /// Only meaningful when the focused workspace's primary task is
@@ -1926,6 +1946,35 @@ pub enum Event {
     DeleteOrCloseFailed {
         workspace_key: lazybox_core::WorkspaceKey,
         label: String,
+        reason: String,
+    },
+    /// `Command::ClosePr` failed at the GitHub API — the user pressed
+    /// `g c` and the PR was NOT closed. Surfaced as a prominent,
+    /// persistent error naming the reason, mirroring `IssueCloseFailed`.
+    /// The PR stays open/actionable. (Success reuses `Event::PrClosed`.)
+    PrCloseFailed {
+        workspace_key: lazybox_core::WorkspaceKey,
+        pr_label: String,
+        reason: String,
+    },
+    /// The PR for `workspace_key` had its draft state changed via
+    /// `Command::ConvertPrToDraft` (`is_draft = true`) or
+    /// `Command::MarkPrReady` (`is_draft = false`). The local Task still
+    /// reads the old state until the next poll catches up, so the TUI
+    /// flashes a footer notice so the keypress doesn't look like a no-op.
+    PrDraftChanged {
+        workspace_key: lazybox_core::WorkspaceKey,
+        pr_label: String,
+        is_draft: bool,
+    },
+    /// `Command::ConvertPrToDraft` / `Command::MarkPrReady` failed at the
+    /// GitHub API — nothing changed. Surfaced as a prominent, persistent
+    /// error naming the reason, mirroring `PrCloseFailed`. `to_draft`
+    /// records which direction was attempted so the TUI can say so.
+    PrDraftChangeFailed {
+        workspace_key: lazybox_core::WorkspaceKey,
+        pr_label: String,
+        to_draft: bool,
         reason: String,
     },
     /// A workspace's primary task reached a terminal state (a PR

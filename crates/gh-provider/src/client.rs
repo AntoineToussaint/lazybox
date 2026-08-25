@@ -5021,6 +5021,39 @@ impl GhClient {
         Ok(())
     }
 
+    pub async fn convert_pr_to_draft_node(
+        &self,
+        pull_request_node_id: &str,
+    ) -> Result<(), GhError> {
+        self.acquire_or_block("convertPullRequestToDraft mutation")?;
+        let body = graphql::convert_pr_to_draft_body(pull_request_node_id);
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("convertPullRequestToDraft mutation", &body)
+            .await?;
+        if let Some(errors) = response.errors {
+            return Err(mutation_error_response(
+                "convertPullRequestToDraft mutation",
+                &errors,
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn mark_pr_ready_node(&self, pull_request_node_id: &str) -> Result<(), GhError> {
+        self.acquire_or_block("markPullRequestReadyForReview mutation")?;
+        let body = graphql::mark_pr_ready_body(pull_request_node_id);
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("markPullRequestReadyForReview mutation", &body)
+            .await?;
+        if let Some(errors) = response.errors {
+            return Err(mutation_error_response(
+                "markPullRequestReadyForReview mutation",
+                &errors,
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn delete_issue_node(&self, issue_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("deleteIssue mutation")?;
         let body = graphql::delete_issue_body(issue_node_id);
@@ -5215,6 +5248,52 @@ impl lazybox_core::TaskProvider for GhClient {
             ));
         };
         self.close_pr_node(node_id)
+            .await
+            .map_err(mutation_provider_error)
+    }
+
+    /// Convert the workspace's PR to a draft. Requires
+    /// `workspace.pr.node_id` — the polling cycle fills it in.
+    async fn convert_to_draft(
+        &self,
+        workspace: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        let Some(pr) = workspace.pr.as_ref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                format!("workspace {} has no PR", workspace.key),
+            ));
+        };
+        let Some(node_id) = pr.node_id.as_deref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                "PR has no node_id (poll first)",
+            ));
+        };
+        self.convert_pr_to_draft_node(node_id)
+            .await
+            .map_err(mutation_provider_error)
+    }
+
+    /// Mark the workspace's draft PR ready for review. Requires
+    /// `workspace.pr.node_id` — the polling cycle fills it in.
+    async fn mark_ready(
+        &self,
+        workspace: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        let Some(pr) = workspace.pr.as_ref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                format!("workspace {} has no PR", workspace.key),
+            ));
+        };
+        let Some(node_id) = pr.node_id.as_deref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                "PR has no node_id (poll first)",
+            ));
+        };
+        self.mark_pr_ready_node(node_id)
             .await
             .map_err(mutation_provider_error)
     }

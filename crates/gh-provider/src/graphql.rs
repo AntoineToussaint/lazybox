@@ -1074,6 +1074,41 @@ pub fn close_pr_body(pull_request_node_id: &str) -> serde_json::Value {
     })
 }
 
+/// GraphQL mutation that converts an open PR to a draft. Converting an
+/// already-draft PR is a no-op on GitHub's side, so retrying is safe.
+const CONVERT_PR_TO_DRAFT_MUTATION: &str = r#"
+mutation($id: ID!) {
+  convertPullRequestToDraft(input: { pullRequestId: $id }) {
+    pullRequest { id isDraft }
+  }
+}
+"#;
+
+pub fn convert_pr_to_draft_body(pull_request_node_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": CONVERT_PR_TO_DRAFT_MUTATION,
+        "variables": { "id": pull_request_node_id },
+    })
+}
+
+/// GraphQL mutation that marks a draft PR ready for review. Marking an
+/// already-ready PR ready is a no-op on GitHub's side, so retrying is
+/// safe.
+const MARK_PR_READY_MUTATION: &str = r#"
+mutation($id: ID!) {
+  markPullRequestReadyForReview(input: { pullRequestId: $id }) {
+    pullRequest { id isDraft }
+  }
+}
+"#;
+
+pub fn mark_pr_ready_body(pull_request_node_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": MARK_PR_READY_MUTATION,
+        "variables": { "id": pull_request_node_id },
+    })
+}
+
 /// GraphQL mutation that hard-deletes an issue. GitHub only allows
 /// this for repo admins — everyone else gets a FORBIDDEN error, which
 /// the caller degrades to a `closeIssue` (NOT_PLANNED) instead.
@@ -3683,6 +3718,22 @@ mod tests {
         assert!(query.contains("closePullRequest"));
     }
 
+    #[test]
+    fn convert_pr_to_draft_body_targets_the_node() {
+        let body = convert_pr_to_draft_body("PR_kwDOabc123");
+        assert_eq!(body["variables"]["id"], "PR_kwDOabc123");
+        let query = body["query"].as_str().unwrap();
+        assert!(query.contains("convertPullRequestToDraft"));
+    }
+
+    #[test]
+    fn mark_pr_ready_body_targets_the_node() {
+        let body = mark_pr_ready_body("PR_kwDOabc123");
+        assert_eq!(body["variables"]["id"], "PR_kwDOabc123");
+        let query = body["query"].as_str().unwrap();
+        assert!(query.contains("markPullRequestReadyForReview"));
+    }
+
     /// Issue #822: `rateLimit` lives on the `Query` root, never on
     /// `Mutation`. Selecting it inside a `mutation { … }` document makes
     /// GitHub reject the whole thing at schema validation
@@ -3698,6 +3749,8 @@ mod tests {
             ("REMOVE_ASSIGNEES_MUTATION", REMOVE_ASSIGNEES_MUTATION),
             ("CLOSE_ISSUE_MUTATION", CLOSE_ISSUE_MUTATION),
             ("CLOSE_PR_MUTATION", CLOSE_PR_MUTATION),
+            ("CONVERT_PR_TO_DRAFT_MUTATION", CONVERT_PR_TO_DRAFT_MUTATION),
+            ("MARK_PR_READY_MUTATION", MARK_PR_READY_MUTATION),
             ("DELETE_ISSUE_MUTATION", DELETE_ISSUE_MUTATION),
             ("ADD_REACTION_MUTATION", ADD_REACTION_MUTATION),
             ("ADD_LABELS_MUTATION", ADD_LABELS_MUTATION),

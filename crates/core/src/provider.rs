@@ -505,6 +505,27 @@ pub trait TaskProvider: Send + Sync {
         Err(ProviderError::unsupported(self.name(), "close_pr"))
     }
 
+    /// Convert the workspace's PR to a draft. Defaults to `unsupported`
+    /// so a provider without a draft concept opts in explicitly.
+    ///
+    /// Idempotency: converting an already-draft PR returns `Ok(())` —
+    /// the polling cycle reconciles the local copy regardless.
+    async fn convert_to_draft(&self, workspace: &Workspace) -> Result<(), ProviderError> {
+        let _ = workspace;
+        Err(ProviderError::unsupported(self.name(), "convert_to_draft"))
+    }
+
+    /// Mark the workspace's draft PR ready for review. Defaults to
+    /// `unsupported` so a provider without a draft concept opts in
+    /// explicitly.
+    ///
+    /// Idempotency: marking an already-ready PR returns `Ok(())` — the
+    /// polling cycle reconciles the local copy regardless.
+    async fn mark_ready(&self, workspace: &Workspace) -> Result<(), ProviderError> {
+        let _ = workspace;
+        Err(ProviderError::unsupported(self.name(), "mark_ready"))
+    }
+
     /// Hard-delete the workspace's issue upstream. Most backends gate
     /// this behind elevated permissions (GitHub requires admin), so
     /// callers should treat an error as "fall back to

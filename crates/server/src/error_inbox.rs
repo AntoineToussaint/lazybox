@@ -184,6 +184,42 @@ pub(crate) fn occurrence_from_event(
             reason,
             at,
         )),
+        Event::PrCloseFailed {
+            workspace_key,
+            pr_label,
+            reason,
+        } => Some(occurrence(
+            "github",
+            "permanent",
+            Some("close-pr"),
+            Some(workspace_key),
+            format!("✗ close failed — {pr_label}: {reason}"),
+            reason.clone(),
+            reason,
+            at,
+        )),
+        Event::PrDraftChangeFailed {
+            workspace_key,
+            pr_label,
+            to_draft,
+            reason,
+        } => {
+            let (op, verb) = if *to_draft {
+                ("convert-to-draft", "convert to draft")
+            } else {
+                ("mark-ready", "mark ready")
+            };
+            Some(occurrence(
+                "github",
+                "permanent",
+                Some(op),
+                Some(workspace_key),
+                format!("✗ {verb} failed — {pr_label}: {reason}"),
+                reason.clone(),
+                reason,
+                at,
+            ))
+        }
         Event::ProviderError {
             source,
             message,
@@ -380,6 +416,50 @@ mod tests {
         assert_eq!(empty.severity, "permanent");
         // Empty detail falls back to the message as the raw sample.
         assert_eq!(empty.raw, "boom");
+    }
+
+    #[test]
+    fn pr_lifecycle_failures_record_with_distinct_operations() {
+        // Close-PR and both draft-toggle directions each persist as their
+        // own operation class (mirroring IssueCloseFailed), so the inbox
+        // and Shift-D sync status surface them — not just the TUI flash.
+        let close = occurrence_from_event(
+            &Event::PrCloseFailed {
+                workspace_key: WorkspaceKey::new("github:o/r#1"),
+                pr_label: "o/r#1".into(),
+                reason: "permission denied".into(),
+            },
+            at(),
+        )
+        .unwrap();
+        assert_eq!(close.operation.as_deref(), Some("close-pr"));
+        assert_eq!(close.severity, "permanent");
+
+        let to_draft = occurrence_from_event(
+            &Event::PrDraftChangeFailed {
+                workspace_key: WorkspaceKey::new("github:o/r#2"),
+                pr_label: "o/r#2".into(),
+                to_draft: true,
+                reason: "permission denied".into(),
+            },
+            at(),
+        )
+        .unwrap();
+        assert_eq!(to_draft.operation.as_deref(), Some("convert-to-draft"));
+        assert!(to_draft.message.contains("convert to draft"));
+
+        let to_ready = occurrence_from_event(
+            &Event::PrDraftChangeFailed {
+                workspace_key: WorkspaceKey::new("github:o/r#3"),
+                pr_label: "o/r#3".into(),
+                to_draft: false,
+                reason: "permission denied".into(),
+            },
+            at(),
+        )
+        .unwrap();
+        assert_eq!(to_ready.operation.as_deref(), Some("mark-ready"));
+        assert!(to_ready.message.contains("mark ready"));
     }
 
     #[test]

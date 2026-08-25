@@ -730,15 +730,17 @@ impl<T: TerminalAdapter> Model<T> {
                     })
                     .count();
                 let skipped = n - ready;
+                let plural = |n: usize| if n == 1 { "" } else { "s" };
                 if ready == 0 {
                     format!(
                         "None of the {n} selected have an open PR to close — nothing will happen. {list}"
                     )
                 } else if skipped == 0 {
-                    format!("Close {ready} PRs without merging? {list}")
+                    format!("Close {ready} PR{} without merging? {list}", plural(ready))
                 } else {
                     format!(
-                        "Close {ready} of {n} selected PRs without merging? {skipped} will be skipped (no open PR). {list}"
+                        "Close {ready} of {n} selected PR{} without merging? {skipped} will be skipped (no open PR). {list}",
+                        plural(ready)
                     )
                 }
             }

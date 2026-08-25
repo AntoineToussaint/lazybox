@@ -1075,6 +1075,10 @@ pub enum Command {
     Snooze {
         session_key: SessionKey,
         until: chrono::DateTime<chrono::Utc>,
+        /// Event that ends the snooze before `until` (#scale, B4):
+        /// new activity / CI settling / a review landing — checked by
+        /// the daemon's upsert path on every poll. `None` = time-only.
+        wake: Option<lazybox_core::SnoozeWake>,
     },
     Unsnooze {
         session_key: SessionKey,

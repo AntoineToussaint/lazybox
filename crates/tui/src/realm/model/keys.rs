@@ -2605,6 +2605,7 @@ pub(super) fn action_from_kind(
         ActionKind::SourceSettings => Action::SourceSettings,
         ActionKind::SaveView => Action::SaveView,
         ActionKind::OpenViews => Action::OpenViews,
+        ActionKind::AddRepo => Action::AddRepo,
         ActionKind::ToggleFocusWorkspace => Action::ToggleFocusWorkspace,
         ActionKind::SelectWorkspace => Action::SelectWorkspace,
         ActionKind::BroadcastToSelected => Action::BroadcastToSelected,

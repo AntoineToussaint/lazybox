@@ -235,6 +235,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | `x ,` | source attention |
 | `x v` | save view |
 | `x V` | views |
+| `x A` | add repo |
 
 ## Mouse
 

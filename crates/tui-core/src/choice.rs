@@ -22,6 +22,13 @@ use crate::{
 /// deadline instead of arithmetic on an absurd span.
 pub const SOURCE_MUTE_SENTINEL: Duration = Duration::MAX;
 
+/// Text payloads for the workspace snooze picker's event-conditional
+/// rows (#scale, B4). Both the picker construction and the resolution
+/// use these constants so they can't drift.
+pub const SNOOZE_WAKE_ACTIVITY: &str = "wake:activity";
+pub const SNOOZE_WAKE_CI: &str = "wake:ci-settled";
+pub const SNOOZE_WAKE_REVIEW: &str = "wake:review-landed";
+
 /// Canonical row order of the `x ,` source-level picker. Resolution
 /// indexes into this, so picker construction MUST list rows in the
 /// same order (both sides use this constant).
@@ -679,17 +686,50 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                 .unwrap_or(PickOutcome::NoOp)
         }
         PickFlow::Snooze { session_key, now } => {
-            match (session_key, picks.first().and_then(P::as_duration)) {
-                (Some(session_key), Some(duration)) => {
-                    let until = now
-                        + chrono::Duration::from_std(duration)
-                            .unwrap_or(chrono::Duration::hours(4));
-                    PickOutcome::Commands {
-                        commands: vec![Command::Snooze { session_key, until }],
-                        notice: Some(format!("snoozed for {}", duration_label(duration))),
-                    }
-                }
-                _ => PickOutcome::NoOp,
+            let Some(session_key) = session_key else {
+                return PickOutcome::NoOp;
+            };
+            if let Some(duration) = picks.first().and_then(P::as_duration) {
+                let until = now
+                    + chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::hours(4));
+                return PickOutcome::Commands {
+                    commands: vec![Command::Snooze {
+                        session_key,
+                        until,
+                        wake: None,
+                    }],
+                    notice: Some(format!("snoozed for {}", duration_label(duration))),
+                };
+            }
+            // Event-conditional rows (#scale, B4): "until <event>" —
+            // wake on the event or at a 1-year cap, whichever first
+            // (the cap only exists so the row can't hide forever if
+            // the event never comes).
+            let wake = picks.first().and_then(P::as_text).and_then(|t| match t {
+                SNOOZE_WAKE_ACTIVITY => Some(lazybox_core::SnoozeWake::Activity),
+                SNOOZE_WAKE_CI => Some(lazybox_core::SnoozeWake::CiSettled),
+                SNOOZE_WAKE_REVIEW => Some(lazybox_core::SnoozeWake::ReviewLanded),
+                _ => None,
+            });
+            match wake {
+                Some(wake) => PickOutcome::Commands {
+                    commands: vec![Command::Snooze {
+                        session_key,
+                        until: now + chrono::Duration::days(365),
+                        wake: Some(wake),
+                    }],
+                    notice: Some(
+                        match wake {
+                            lazybox_core::SnoozeWake::Activity => "snoozed until new activity",
+                            lazybox_core::SnoozeWake::CiSettled => "snoozed until CI settles",
+                            lazybox_core::SnoozeWake::ReviewLanded => {
+                                "snoozed until a review lands"
+                            }
+                        }
+                        .to_string(),
+                    ),
+                },
+                None => PickOutcome::NoOp,
             }
         }
         PickFlow::SourceSnooze { key, level, now } => {
@@ -1637,6 +1677,50 @@ mod tests {
                 );
             }
             other => panic!("expected SourceAttention, got {other:?}"),
+        }
+    }
+
+    /// Snooze picker's event-conditional rows (#scale, B4): a wake
+    /// token resolves to Command::Snooze with the condition + the
+    /// 1-year cap; duration rows stay time-only.
+    #[test]
+    fn snooze_wake_rows_resolve_to_conditional_snoozes() {
+        let now = chrono::Utc::now();
+        let key = SessionKey::from("test:ws");
+
+        let outcome = resolve_pick(
+            &[Payload::Text(SNOOZE_WAKE_CI.into())],
+            PickFlow::Snooze {
+                session_key: Some(key.clone()),
+                now,
+            },
+        );
+        match outcome {
+            PickOutcome::Commands { commands, .. } => match commands.as_slice() {
+                [Command::Snooze { until, wake, .. }] => {
+                    assert_eq!(*wake, Some(lazybox_core::SnoozeWake::CiSettled));
+                    assert_eq!(*until, now + chrono::Duration::days(365));
+                }
+                other => panic!("expected one Snooze, got {other:?}"),
+            },
+            other => panic!("expected Commands, got {other:?}"),
+        }
+
+        let outcome = resolve_pick(
+            &[Payload::Duration(Duration::from_secs(3600))],
+            PickFlow::Snooze {
+                session_key: Some(key),
+                now,
+            },
+        );
+        match outcome {
+            PickOutcome::Commands { commands, .. } => match commands.as_slice() {
+                [Command::Snooze { wake, .. }] => {
+                    assert_eq!(*wake, None, "duration rows stay time-only");
+                }
+                other => panic!("expected one Snooze, got {other:?}"),
+            },
+            other => panic!("expected Commands, got {other:?}"),
         }
     }
 }

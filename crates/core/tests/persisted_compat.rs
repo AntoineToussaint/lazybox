@@ -170,6 +170,11 @@ fn maximal_workspace() -> Workspace {
     ws.seen_count = 1;
     ws.read_indices = HashSet::from([0, 2]);
     ws.snoozed_until = Some(at(18, 0));
+    // Schema v8 (#scale, B4): event-conditional wake + the announced
+    // re-entry stamp ride the maximal fixture so their wire shape is
+    // pinned.
+    ws.snooze_wake = Some(lazybox_core::SnoozeWake::CiSettled);
+    ws.woke_at = Some(at(12, 30));
     ws.auto_merge_on_green = true;
     ws.track_main = true;
     ws.base_branch = Some("main".into());

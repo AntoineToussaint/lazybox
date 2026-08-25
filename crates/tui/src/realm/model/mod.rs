@@ -266,6 +266,16 @@ pub enum Id {
     /// `x V` (#scale): the saved-views picker; rows index into the
     /// `ModalFlow::ViewPick` stash.
     ViewPicker,
+    /// `x A` (#scale, proposal F): one-line `owner/repo` input that
+    /// appends to `setup.scopes` — repo subscription without the
+    /// wizard walk.
+    AddRepoName,
+    /// Settings → remove-repos confirm (#scale, proposal F): un-ticking
+    /// scopes deletes their workspaces, so the wizard's Finish defers
+    /// behind this when workspaces are at stake. The pending outcome
+    /// lives in `ModalFlow::ScopeRemovalConfirm`; `Msg::Confirmed(true)`
+    /// runs `finish_setup`.
+    ScopeRemovalConfirm,
     /// Single-line URL input for the "Configure LLM gateway" settings
     /// action. Submit → write the global `agent.llm_gateway_url` to YAML
     /// (empty input clears it).
@@ -835,6 +845,11 @@ pub(crate) enum ModalFlow {
     /// order.
     ViewPick {
         views: Vec<lazybox_config::ViewConfig>,
+    },
+    /// The wizard Finish outcome parked behind the remove-repos
+    /// confirm (#scale, proposal F).
+    ScopeRemovalConfirm {
+        outcome: Box<crate::setup_flow::SetupOutcome>,
     },
     /// Reply textarea → `Command::PostReply`. Carries the target
     /// workspace; consumed by `Msg::TextareaSubmitted`.

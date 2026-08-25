@@ -236,16 +236,18 @@
           "project_key": "github-o-r",
           "read_indices": [],
           "remote": null,
-          "schema": 7,
+          "schema": 8,
           "seen_count": 0,
           "sent_snippets": {
             "recent": [],
             "total": 0
           },
           "sessions": [],
+          "snooze_wake": null,
           "snoozed_until": null,
           "track_main": false,
-          "track_main_behind": false
+          "track_main_behind": false,
+          "woke_at": null
         }
       ]
     }

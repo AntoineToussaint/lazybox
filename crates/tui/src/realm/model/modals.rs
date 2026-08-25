@@ -1078,24 +1078,55 @@ impl<T: TerminalAdapter> Model<T> {
                 .to_std()
                 .unwrap_or(Duration::from_secs(7 * 24 * 3600))
         };
-        let options: Vec<(&'static str, Duration)> = vec![
-            ("1 hour", Duration::from_secs(3600)),
-            ("4 hours (default)", Duration::from_secs(4 * 3600)),
-            ("Until end of day (6pm)", until_eod),
-            ("Tomorrow morning (9am)", until_tomorrow),
-            ("Next Monday 9am", until_next_week),
-            ("1 week", Duration::from_secs(7 * 24 * 3600)),
-            ("1 month", Duration::from_secs(30 * 24 * 3600)),
-            ("Forever (1 year)", Duration::from_secs(365 * 24 * 3600)),
+        // Time rows carry Durations; the event-conditional rows
+        // (#scale, B4) carry the tui-core wake tokens — the snooze
+        // ends at the deadline OR on the event, whichever first, so a
+        // snooze is never a black hole.
+        let options: Vec<(&'static str, ChoicePayload)> = vec![
+            ("1 hour", ChoicePayload::Duration(Duration::from_secs(3600))),
+            (
+                "4 hours (default)",
+                ChoicePayload::Duration(Duration::from_secs(4 * 3600)),
+            ),
+            ("Until end of day (6pm)", ChoicePayload::Duration(until_eod)),
+            (
+                "Tomorrow morning (9am)",
+                ChoicePayload::Duration(until_tomorrow),
+            ),
+            ("Next Monday 9am", ChoicePayload::Duration(until_next_week)),
+            (
+                "1 week",
+                ChoicePayload::Duration(Duration::from_secs(7 * 24 * 3600)),
+            ),
+            (
+                "1 month",
+                ChoicePayload::Duration(Duration::from_secs(30 * 24 * 3600)),
+            ),
+            (
+                "Forever (1 year)",
+                ChoicePayload::Duration(Duration::from_secs(365 * 24 * 3600)),
+            ),
+            (
+                "Until new activity",
+                ChoicePayload::Text(lazybox_tui_core::choice::SNOOZE_WAKE_ACTIVITY.to_string()),
+            ),
+            (
+                "Until CI settles",
+                ChoicePayload::Text(lazybox_tui_core::choice::SNOOZE_WAKE_CI.to_string()),
+            ),
+            (
+                "Until a review lands",
+                ChoicePayload::Text(lazybox_tui_core::choice::SNOOZE_WAKE_REVIEW.to_string()),
+            ),
         ];
         self.set_modal_flow(ModalFlow::Snooze {
             workspace: session_key,
         });
-        // Each row carries its own duration (#512).
+        // Each row carries its own payload (#512).
         let modal = Choice::single("Snooze for…", options)
             .title("Snooze duration")
-            .label(|(l, _): &(&'static str, Duration)| (*l).to_string())
-            .payload_for(|(_, d): &(&'static str, Duration)| ChoicePayload::Duration(*d));
+            .label(|(l, _): &(&'static str, ChoicePayload)| (*l).to_string())
+            .payload_for(|(_, p): &(&'static str, ChoicePayload)| p.clone());
         self.mount_modal(Id::SnoozeDuration, modal);
     }
 

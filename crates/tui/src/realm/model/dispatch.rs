@@ -297,7 +297,11 @@ impl<T: TerminalAdapter> Model<T> {
                 let until = chrono::Utc::now()
                     + chrono::Duration::from_std(duration)
                         .unwrap_or_else(|_| chrono::Duration::days(365));
-                vec![IpcCommand::Snooze { session_key, until }]
+                vec![IpcCommand::Snooze {
+                    session_key,
+                    until,
+                    wake: None,
+                }]
             }
             Intent::MarkAllRead { session_key } => {
                 vec![IpcCommand::MarkRead { session_key }]
@@ -1743,6 +1747,19 @@ impl<T: TerminalAdapter> Model<T> {
                     self.mount_view_picker(views);
                 }
             }
+            Action::AddRepo => {
+                use crate::realm::components::input::Input;
+                if !matches!(self.modal_stack.last(), Some(super::Id::AddRepoName)) {
+                    let modal = Input::new("Subscribe a GitHub repo (owner/repo)")
+                        .title("Add repo")
+                        .with_validator(|s: &str| {
+                            s.trim()
+                                .split_once('/')
+                                .is_some_and(|(o, r)| !o.is_empty() && !r.is_empty())
+                        });
+                    self.mount_modal(super::Id::AddRepoName, modal);
+                }
+            }
             Action::SourceSettings => {
                 // Level picker for the source at/above the cursor
                 // (#scale): a Space header targets the Space; anywhere
@@ -1809,7 +1826,11 @@ impl<T: TerminalAdapter> Model<T> {
                         Some(if ws.is_snoozed(now) {
                             IpcCommand::Unsnooze { session_key }
                         } else {
-                            IpcCommand::Snooze { session_key, until }
+                            IpcCommand::Snooze {
+                                session_key,
+                                until,
+                                wake: None,
+                            }
                         })
                     });
                 }

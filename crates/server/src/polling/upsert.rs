@@ -550,6 +550,18 @@ async fn prepare_upsert(
 
     let mut workspace = match existing {
         Some(mut w) => {
+            // Event-conditional snooze (#scale, B4): compare the
+            // freshly polled task against the stored one BEFORE
+            // attaching — a satisfied wake condition ends the snooze
+            // and stamps `woke_at`, so the row re-enters the Inbox
+            // announced (wake pill + top-of-group boost) on this very
+            // upsert instead of waiting out its deadline.
+            if w.maybe_wake_on(&task, Utc::now()) {
+                tracing::info!(
+                    workspace = %key.as_str(),
+                    "snooze wake condition fired — waking workspace",
+                );
+            }
             w.attach_task(task);
             w
         }

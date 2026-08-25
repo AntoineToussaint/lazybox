@@ -145,6 +145,10 @@ pub struct WorkspaceRowCtx<'a> {
     /// punch through (#scale): ambient badges (the unread pill) are
     /// suppressed so a demoted source stops shouting.
     pub source_quiet: bool,
+    /// An event-conditional snooze fired within `WOKE_WINDOW` (#scale,
+    /// B4): render the wake glyph in the shared state slot so the
+    /// re-entry is announced. Yields to every live agent signal.
+    pub recently_woken: bool,
     pub ticket_tree: Option<lazybox_tui_core::inbox::TicketTreeMeta>,
     /// This workspace's PR is part of a detected stack (issue #969) — its
     /// [`StackPosition`](lazybox_core::StackPosition). Renders a ` ⇗k/N `
@@ -529,6 +533,12 @@ fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         (ctx.spawning_glyph, ctx.theme.text_dim)
     } else if ctx.exited {
         ("✗", ctx.theme.text_dim)
+    } else if ctx.recently_woken {
+        // Announced re-entry (#scale, B4): the snooze's wake condition
+        // fired. Single-width glyph on purpose — emoji here would
+        // shear the column grid. Lowest precedence: any live agent
+        // signal outranks the announcement.
+        (if ctx.ascii_glyphs { "w" } else { "↺" }, ctx.theme.accent)
     } else {
         return Cell::empty();
     };
@@ -1476,6 +1486,7 @@ mod tests {
         theme: &'a Theme,
     ) -> WorkspaceRowCtx<'a> {
         WorkspaceRowCtx {
+            recently_woken: false,
             source_quiet: false,
             workspace: Some(workspace),
             task: Some(task),
@@ -1904,6 +1915,7 @@ mod tests {
         );
         let theme = theme();
         let ctx = WorkspaceRowCtx {
+            recently_woken: false,
             source_quiet: false,
             workspace: Some(&ws),
             task: None,
@@ -2397,6 +2409,7 @@ mod tests {
         );
         let theme = theme();
         let ctx = WorkspaceRowCtx {
+            recently_woken: false,
             source_quiet: false,
             workspace: Some(&ws),
             task: None,
@@ -3761,6 +3774,7 @@ mod tests {
             fixed_time(),
         );
         let ctx_scratch = WorkspaceRowCtx {
+            recently_woken: false,
             source_quiet: false,
             workspace: Some(&ws_scratch),
             task: None,

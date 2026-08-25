@@ -484,6 +484,13 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
                 .primary_task()
                 .map(|t| t.updated_at)
                 .unwrap_or(b.created_at);
+            // Announced re-entry (#scale, B4): a row whose event-
+            // conditional snooze just fired floats to the top of its
+            // group for WOKE_WINDOW, in EVERY sort mode — a snooze
+            // ending must never be a silent reappearance mid-list.
+            let woke = b
+                .is_recently_woken(input.now)
+                .cmp(&a.is_recently_woken(input.now));
             let recency = b_ts.cmp(&a_ts);
             let tie = ka.as_str().cmp(kb.as_str());
             let role_cmp = || {
@@ -493,11 +500,12 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
             // `WorkspaceKind` derives `Ord` with `Pr < Issue`, so
             // a plain `cmp` does the PR-first ordering.
             let kind_cmp = || WorkspaceKind::classify(a).cmp(&WorkspaceKind::classify(b));
-            match input.sort_mode {
+            let base = match input.sort_mode {
                 SortMode::Recent => recency.then(tie),
                 SortMode::ByRole => role_cmp().then(recency).then(tie),
                 SortMode::ByRoleSplit => kind_cmp().then_with(role_cmp).then(recency).then(tie),
-            }
+            };
+            woke.then(base)
         });
     }
 
@@ -608,7 +616,12 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         .collect();
     let distinct_spaces: BTreeSet<&str> = space_of_repo.iter().map(String::as_str).collect();
 
-    if distinct_spaces.len() < 2 {
+    // The tier renders when it yields ≥2 distinct Spaces, OR when the
+    // user has ANY explicit `ui.spaces` entry (#scale, proposal F):
+    // the old ≥2-only gate silently hid the whole feature from
+    // single-org users — an explicitly-created Space must show up, or
+    // `x m` appears to do nothing.
+    if distinct_spaces.len() < 2 && input.spaces.is_empty() {
         // Even without the Space tier rendered, an explicit source
         // order on the lone Space's config still reorders the flat
         // repo list (#1211) — so `x u`-style moves keep working when
@@ -2120,6 +2133,23 @@ mod tests {
                 .any(|r| matches!(r, VisibleRow::SpaceHeader(_))),
             "one owner = one Space = no tier"
         );
+
+        // …but an EXPLICIT `ui.spaces` entry un-suppresses it even at
+        // one distinct Space (#scale, proposal F): a Space the user
+        // created must be visible, or move-to-Space looks broken.
+        let explicit = vec![lazybox_config::SpaceConfig {
+            name: "mine".into(),
+            sources: vec!["owner/a".into(), "owner/b".into()],
+        }];
+        let mut input = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        input.spaces = &explicit;
+        let out = compute_visible(input);
+        assert!(
+            out.visible
+                .iter()
+                .any(|r| matches!(r, VisibleRow::SpaceHeader(name) if name == "mine")),
+            "an explicit Space renders its header even when it is the only one"
+        );
     }
 
     /// Two owners auto-seed two Spaces, so the tier turns on: a
@@ -3048,6 +3078,56 @@ mod tests {
         // An unknown `is:` value degrades to bare text instead of
         // silently emptying the sidebar.
         assert!(!search_matches("is:banana", &ws));
+    }
+
+    /// Announced re-entry (#scale, B4): a row whose event-conditional
+    /// snooze fired within WOKE_WINDOW floats to the top of its group
+    /// in every sort mode; past the window it falls back into place.
+    #[test]
+    fn recently_woken_rows_float_to_the_top_of_their_group() {
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+
+        // "fresh" is more recently updated, so recency alone puts it
+        // first — the woke boost must override that for "woken".
+        let fresh = workspace_with_task("fresh", Some("repo"), 1);
+        let mut woken = workspace_with_task("woken", Some("repo"), 60);
+        woken.woke_at = Some(fixed_time() - Duration::minutes(5));
+        let ws: HashMap<SessionKey, Workspace> = [
+            (SessionKey::from("fresh"), fresh),
+            (SessionKey::from("woken"), woken),
+        ]
+        .into();
+
+        let order = |out: &ComputeOutcome| -> Vec<String> {
+            out.visible
+                .iter()
+                .filter_map(|r| match r {
+                    VisibleRow::Workspace(k) => Some(k.to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
+        assert_eq!(
+            order(&out),
+            vec!["woken".to_string(), "fresh".to_string()],
+            "the woken row leads its group despite older activity"
+        );
+
+        // Past the window the boost expires (stale woke_at).
+        let mut ws2 = ws.clone();
+        ws2.get_mut(&SessionKey::from("woken")).unwrap().woke_at =
+            Some(fixed_time() - lazybox_core::WOKE_WINDOW - Duration::minutes(1));
+        let out = compute_visible(inputs(&ws2, &sub, &col, &att, &asking, &projects));
+        assert_eq!(
+            order(&out),
+            vec!["fresh".to_string(), "woken".to_string()],
+            "an expired announcement falls back to normal order"
+        );
     }
 }
 

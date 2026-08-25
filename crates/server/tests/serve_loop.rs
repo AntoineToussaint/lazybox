@@ -770,6 +770,7 @@ fn all_non_shutdown_commands() -> Vec<Command> {
         Command::Snooze {
             session_key: "test:ws".into(),
             until: chrono::Utc::now(),
+            wake: None,
         },
         Command::Unsnooze {
             session_key: "test:ws".into(),

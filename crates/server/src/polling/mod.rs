@@ -819,6 +819,7 @@ mod engagement_tier_tests {
             &config,
             &cold_key,
             Some(Utc::now() + chrono::Duration::hours(1)),
+            None,
         )
         .await;
         set_focused_workspace(&config, &WorkspaceKey::new("local:other")).await;

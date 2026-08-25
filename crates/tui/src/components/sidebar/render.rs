@@ -1690,6 +1690,7 @@ impl Sidebar {
                 // Source-attention ladder (#scale): a row in a Quiet /
                 // Digest / Muted source drops its ambient unread badge
                 // unless it punches through (direct address).
+                recently_woken: workspace.is_some_and(|w| w.is_recently_woken(now)),
                 source_quiet: workspace.is_some_and(|w| {
                     let label = crate::components::visible_rows::group_label(
                         w,

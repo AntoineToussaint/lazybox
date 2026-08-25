@@ -804,7 +804,11 @@ impl DesktopCommand {
                 ci,
                 conflict,
             },
-            DesktopCommand::Snooze { session_key, until } => Command::Snooze { session_key, until },
+            DesktopCommand::Snooze { session_key, until } => Command::Snooze {
+                session_key,
+                until,
+                wake: None,
+            },
             DesktopCommand::Unsnooze { session_key } => Command::Unsnooze { session_key },
             DesktopCommand::SyncWorkspace { session_key } => Command::SyncWorkspace {
                 workspace_key: lazybox_core::WorkspaceKey::new(session_key.as_str()),

@@ -293,6 +293,10 @@ pub enum Action {
     SaveView,
     /// Recall a saved view — the named-lens picker.
     OpenViews,
+    /// One-line repo subscription (#scale, proposal F): type
+    /// `owner/repo`, skip the wizard walk. Appends to `setup.scopes`;
+    /// the daemon's next tick starts polling it.
+    AddRepo,
     /// Star / unstar the cursor's workspace, lifting it into (or out
     /// of) the synthetic `★ Focused` section at the top of the sidebar.
     /// The manual, per-workspace counterpart to [`Self::ToggleRepoPin`]:
@@ -566,6 +570,7 @@ pub enum ActionKind {
     SourceSettings,
     SaveView,
     OpenViews,
+    AddRepo,
     ToggleFocusWorkspace,
     SelectWorkspace,
     BroadcastToSelected,
@@ -724,6 +729,7 @@ impl ActionKind {
         Self::SourceSettings,
         Self::SaveView,
         Self::OpenViews,
+        Self::AddRepo,
         Self::ToggleFocusWorkspace,
         Self::FocusPaneRight,
         Self::SelectWorkspace,
@@ -849,6 +855,7 @@ impl Action {
             Action::SourceSettings => ActionKind::SourceSettings,
             Action::SaveView => ActionKind::SaveView,
             Action::OpenViews => ActionKind::OpenViews,
+            Action::AddRepo => ActionKind::AddRepo,
             Action::ToggleFocusWorkspace => ActionKind::ToggleFocusWorkspace,
             Action::SelectWorkspace => ActionKind::SelectWorkspace,
             Action::BroadcastToSelected => ActionKind::BroadcastToSelected,
@@ -1575,6 +1582,13 @@ impl ActionDef {
                 describe: "Pick a saved view (ui.views) and apply its frozen lens — filters, sort, and mailbox — in one step.",
                 section: Section::Sidebar,
             },
+            ActionKind::AddRepo => &Self {
+                kind: ActionKind::AddRepo,
+                default_keys: "x A",
+                label: "add repo",
+                describe: "Subscribe a repo by typing owner/repo — no wizard walk. Appends to setup.scopes; the daemon's next poll starts syncing it, and a header appears immediately. Remove repos via Settings (which confirms before deleting workspaces).",
+                section: Section::Sidebar,
+            },
             ActionKind::ToggleFocusWorkspace => &Self {
                 kind: ActionKind::ToggleFocusWorkspace,
                 default_keys: "*",
@@ -2223,6 +2237,7 @@ impl ActionKind {
             ActionKind::SourceSettings => "source_settings",
             ActionKind::SaveView => "save_view",
             ActionKind::OpenViews => "open_views",
+            ActionKind::AddRepo => "add_repo",
             ActionKind::ToggleFocusWorkspace => "toggle_focus_workspace",
             ActionKind::SelectWorkspace => "select_workspace",
             ActionKind::BroadcastToSelected => "broadcast_to_selected",
@@ -2486,6 +2501,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::SourceSettings
         | ActionKind::SaveView
         | ActionKind::OpenViews
+        | ActionKind::AddRepo
         | ActionKind::ResetAgentContext
         | ActionKind::CollapseIntoPr => Some("workspace"),
         _ => None,
@@ -3185,6 +3201,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::SourceSettings
         | ActionKind::SaveView
         | ActionKind::OpenViews
+        | ActionKind::AddRepo
         // Acts on the repo group at/above the cursor (a header row has
         // no workspace, so `has_ws` would wrongly hide it there); the
         // dispatcher no-ops with a notice when the cursor isn't in a

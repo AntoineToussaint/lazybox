@@ -342,6 +342,11 @@ pub enum Id {
     /// confirms — a single stray key must not do it; only an explicit
     /// Yes sends `Command::ClearErrors`. Mounted on top of `ErrorInbox`.
     ErrorInboxClearConfirm,
+    /// Usage-stats window (default `Shift-U`, #1339). Read-only day/week
+    /// breakdown (sessions, prompts, merges, turns, tokens, cost) fetched
+    /// via `Command::GetStats`; `tab` toggles today/week, any exit key
+    /// dismisses.
+    Stats,
     /// Spinner + step checklist shown while a first spawn on a fresh
     /// workspace provisions its worktree. Mounted on the first
     /// `WorktreeProgress` daemon event (so an instant resume never
@@ -502,6 +507,7 @@ impl Id {
                 | Id::SyncStatus
                 | Id::Messages
                 | Id::ErrorInbox
+                | Id::Stats
                 | Id::Error
                 | Id::SnippetPicker
                 | Id::SkillPicker

@@ -359,6 +359,10 @@ pub enum Action {
     /// the session-only messages log, it survives restart and can turn
     /// an error class into an issue, an agent run, or a JSONL export.
     OpenErrorInbox,
+    /// Open the usage-stats view (#1339) — a day/week breakdown of what
+    /// you've done (agent sessions, prompts, merges, turns, tokens,
+    /// cost) built from the daemon's persisted event accumulator.
+    OpenStats,
     /// Open the personal Hopper editor from any non-terminal pane.
     OpenHopper,
     /// Clear the current footer notice regardless of severity. Severity
@@ -572,6 +576,7 @@ pub enum ActionKind {
     OpenSyncStatus,
     OpenMessages,
     OpenErrorInbox,
+    OpenStats,
     OpenHopper,
     DismissNotice,
     InspectNotice,
@@ -619,6 +624,7 @@ impl ActionKind {
         Self::OpenSyncStatus,
         Self::OpenMessages,
         Self::OpenErrorInbox,
+        Self::OpenStats,
         Self::OpenHopper,
         Self::DismissNotice,
         Self::InspectNotice,
@@ -846,6 +852,7 @@ impl Action {
             Action::OpenSyncStatus => ActionKind::OpenSyncStatus,
             Action::OpenMessages => ActionKind::OpenMessages,
             Action::OpenErrorInbox => ActionKind::OpenErrorInbox,
+            Action::OpenStats => ActionKind::OpenStats,
             Action::OpenHopper => ActionKind::OpenHopper,
             Action::DismissNotice => ActionKind::DismissNotice,
             Action::OpenSettings => ActionKind::OpenSettings,
@@ -966,6 +973,13 @@ impl ActionDef {
                 default_keys: "Shift-E",
                 label: "errors",
                 describe: "Open the Error Inbox — the daemon's durable, deduplicated error store (survives restart), grouped by class with counts. Sorted by frequency, filterable by source; the selected class shows its full raw + humanized detail. Turn a class into a GitHub issue (`i`), route it to an agent (`a`), or export the set as JSONL (`x`); `d` deletes one class, `c` clears all.",
+                section: Section::Global,
+            },
+            ActionKind::OpenStats => &Self {
+                kind: ActionKind::OpenStats,
+                default_keys: "Shift-U",
+                label: "usage stats",
+                describe: "Open the usage-stats view — a day/week breakdown of what you've done, built from the daemon's persisted event history: agent sessions, prompts, PRs merged, agent turns, tokens, and cost. Press `w` there to toggle between today and this week.",
                 section: Section::Global,
             },
             ActionKind::OpenHopper => &Self {
@@ -2188,6 +2202,7 @@ impl ActionKind {
             ActionKind::OpenSyncStatus => "open_sync_status",
             ActionKind::OpenMessages => "open_messages",
             ActionKind::OpenErrorInbox => "open_error_inbox",
+            ActionKind::OpenStats => "open_stats",
             ActionKind::OpenHopper => "open_hopper",
             ActionKind::DismissNotice => "dismiss_notice",
             ActionKind::InspectNotice => "inspect_notice",
@@ -3157,6 +3172,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::OpenSyncStatus
         | ActionKind::OpenMessages
         | ActionKind::OpenErrorInbox
+        | ActionKind::OpenStats
         | ActionKind::OpenHopper
         | ActionKind::DismissNotice
         | ActionKind::InspectNotice

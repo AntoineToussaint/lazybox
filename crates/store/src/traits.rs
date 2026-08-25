@@ -139,6 +139,35 @@ pub struct ErrorOccurrence {
     pub at: DateTime<Utc>,
 }
 
+/// One measured occurrence to fold into the daily usage-stats rollup
+/// (#1339). The daemon stamps the calendar `day` on receipt (most events
+/// carry no emission time) and assigns an opaque `metric` key — the store
+/// interprets neither, the same source-agnostic stance the Error Inbox
+/// takes with `source`/`severity`. Keeping `day` a caller-supplied string
+/// (rather than deriving it from an instant here) leaves the timezone
+/// policy with the daemon — which buckets by *local* day so "my day" is
+/// the user's day, not UTC — and keeps this store TZ-independent.
+///
+/// `value` is either a unit count (`1` for "one session started") or a
+/// summable quantity (tokens, cost in USD micros); both fold with `+`
+/// into the `(day, metric)` bucket.
+#[derive(Debug, Clone)]
+pub struct StatEvent {
+    /// Local calendar day, `YYYY-MM-DD`.
+    pub day: String,
+    pub metric: String,
+    pub value: i64,
+}
+
+/// One rolled-up daily bucket read back from the usage-stats table.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StatBucket {
+    /// UTC calendar day, `YYYY-MM-DD` (sorts lexically by date).
+    pub day: String,
+    pub metric: String,
+    pub value: i64,
+}
+
 /// One durable mutation in an atomic [`Store::apply_batch`] call.
 ///
 /// The daemon uses batches for domain operations that span more than one
@@ -227,6 +256,27 @@ pub trait Store: Send + Sync {
     /// Wipe the whole inbox.
     fn clear_errors(&self) -> Result<(), StoreError> {
         Ok(())
+    }
+
+    // ── Usage stats ─────────────────────────────────────────────────
+    //
+    // A daily rollup of measured events (sessions, merges, prompts,
+    // tokens, cost) feeding the day/week usage view (#1339). Defaults
+    // are a silent no-op / empty so read-only stores legitimately carry
+    // no history — unlike the Error Inbox's `Unsupported`, a store with
+    // no stats table is a valid state, not a broken one.
+
+    /// Fold a batch of measured occurrences into the daily rollup. One
+    /// event may expand to several stats (a usage report yields tokens
+    /// *and* cost), so this takes a slice and applies them atomically.
+    fn record_stats(&self, _events: &[StatEvent]) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    /// Every daily bucket on or after `since_day` (`YYYY-MM-DD`),
+    /// ordered by day then metric.
+    fn list_stats_since(&self, _since_day: &str) -> Result<Vec<StatBucket>, StoreError> {
+        Ok(Vec::new())
     }
 
     // ── Workspaces ──────────────────────────────────────────────────

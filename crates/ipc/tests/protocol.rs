@@ -515,6 +515,7 @@ fn all_commands() -> Vec<Command> {
         Command::SetSnippetKeepMine {
             target: "snippet:rev:0123456789abcdef".into(),
         },
+        Command::GetStats,
         Command::Shutdown,
     ]
 }
@@ -1136,12 +1137,22 @@ fn all_events() -> Vec<Event> {
             stage: lazybox_ipc::AgentCreditRecoveryStage::WaitingForComposer,
         },
         Event::AgentCreditExhausted {
-            session_key: key,
+            session_key: key.clone(),
             terminal_id: TerminalId(12),
             hint: "add credits or switch subscription".into(),
         },
         Event::SnippetKeepMine {
             targets: vec!["snippet:rev:0123456789abcdef".into()],
+        },
+        Event::Stats {
+            buckets: vec![lazybox_ipc::StatBucket {
+                day: "2026-08-25".into(),
+                metric: lazybox_ipc::stats::SESSIONS.into(),
+                value: 3,
+            }],
+        },
+        Event::AgentSessionStarted {
+            session_key: key.clone(),
         },
     ]
 }
@@ -1237,6 +1248,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::AssignHopperProject { .. } => "AssignHopperProject",
         Command::SetHopperCompleted { .. } => "SetHopperCompleted",
         Command::SetSnippetKeepMine { .. } => "SetSnippetKeepMine",
+        Command::GetStats => "GetStats",
     }
 }
 
@@ -1340,6 +1352,8 @@ fn event_tag(event: &Event) -> &'static str {
         Event::AgentCreditRecovery { .. } => "AgentCreditRecovery",
         Event::AgentCreditExhausted { .. } => "AgentCreditExhausted",
         Event::SnippetKeepMine { .. } => "SnippetKeepMine",
+        Event::Stats { .. } => "Stats",
+        Event::AgentSessionStarted { .. } => "AgentSessionStarted",
     }
 }
 
@@ -1351,12 +1365,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        86,
+        87,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        93,
+        95,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

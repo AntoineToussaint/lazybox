@@ -1700,6 +1700,36 @@ impl<T: TerminalAdapter> Model<T> {
         );
     }
 
+    /// Open the usage-stats window (#1339). Mounts immediately in a
+    /// loading state and asks the daemon for the persisted daily rollup;
+    /// the answer (`Event::Stats`) repaints it via [`Model::update_stats`].
+    pub(super) fn mount_stats(&mut self) {
+        use crate::realm::components::stats::Stats;
+
+        if self.modal_stack.last() == Some(&Id::Stats) {
+            return;
+        }
+        self.mount_modal(
+            Id::Stats,
+            Stats::new(Vec::new(), chrono::Local::now().date_naive(), true),
+        );
+        self.send_cmd(lazybox_ipc::Command::GetStats);
+    }
+
+    /// Repaint a live usage-stats window with a fresh daemon snapshot. A
+    /// snapshot that arrives after the window was closed is dropped.
+    pub(super) fn update_stats(&mut self, buckets: Vec<lazybox_ipc::StatBucket>) {
+        use crate::realm::components::stats::Stats;
+
+        if self.modal_stack.last() != Some(&Id::Stats) {
+            return;
+        }
+        self.mount_modal(
+            Id::Stats,
+            Stats::new(buckets, chrono::Local::now().date_naive(), false),
+        );
+    }
+
     /// `i` in the Error Inbox — open a pre-filled GitHub *new issue*
     /// form in the browser, deriving the repo from the error's
     /// workspace key. Pre-filling the form (rather than creating the

@@ -32,6 +32,7 @@ pub mod sidebar;
 pub mod snippet_browser;
 pub mod snippet_picker;
 pub mod splash;
+pub mod stats;
 pub mod sync_status;
 pub mod terminals;
 pub mod textarea;

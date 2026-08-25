@@ -274,32 +274,28 @@ fn homepage_never_advertises_the_removed_single_w_action() {
 fn homepage_install_prioritizes_prebuilt_releases() {
     let page = read("web/src/pages/index.astro");
     let brew = page
-        .find("brew install AntoineToussaint/lazybox/lazybox")
+        .find("brew install lazybox")
         .expect("homepage is missing the Homebrew install");
     let alternatives = page
         .find("<details class=\"install-more\">")
         .expect("homepage is missing alternate install methods");
-    let installer = page
-        .find("Installer script <span>Prebuilt</span>")
-        .expect("homepage is missing the prebuilt installer");
     let source = page
-        .find("Advanced / from source")
-        .expect("homepage is missing the advanced source install");
+        .find("From source <span>Contributors</span>")
+        .expect("homepage is missing the contributor source install");
 
     assert!(
         brew < alternatives,
         "Homebrew must be the primary install method"
     );
     assert!(
-        alternatives < installer && installer < source,
-        "the prebuilt installer must come before the advanced source build"
+        alternatives < source,
+        "the contributor source build must come after the recommended Homebrew install"
     );
     assert!(
-        page.contains(
-            "cargo install --git https://github.com/AntoineToussaint/lazybox --locked lazybox-tui-boot"
-        ) && page.contains("Compiles the current main branch (HEAD) locally.")
+        page.contains("git clone https://github.com/AntoineToussaint/lazybox")
+            && page.contains("make setup")
             && page.contains("Zig 0.16.0"),
-        "the advanced source build must identify HEAD and its toolchain requirements"
+        "the contributor source build must identify the clone and its toolchain requirements"
     );
 }
 
@@ -602,7 +598,7 @@ fn launch_surfaces_use_current_support_and_provider_contracts() {
     assert!(read(".github/ISSUE_TEMPLATE/question.yml").contains("Question / setup help"));
 
     let readme = read("README.md");
-    assert!(readme.contains("lazybox-tui-installer.sh | sh"));
+    assert!(readme.contains("brew install lazybox"));
     let release_config = read("crates/tui-boot/Cargo.toml");
     assert!(release_config.contains("lazybox-tui-installer.sh"));
     let installer_compat = read("crates/tui-boot/lazybox-tui-installer.sh");

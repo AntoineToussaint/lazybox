@@ -27,19 +27,27 @@
 //! driver keeps a per-terminal monotonic counter and assigns contiguous
 //! seqs; scenario authors never hand-count.
 //!
-//! ## Known interface gaps (bus-only is not enough for these)
+//! ## Two tiers (and the interface gaps Tier 2 closes)
+//!
+//! [`Stage::BusOnly`] is the pure-bus producer: it drives the whole *passive*
+//! UI from `bus.send` alone. It has two inherent gaps, and characterizing them
+//! is the whole point of the review:
 //!
 //! - **Terminal input.** A bus-injected terminal has no backend session, so a
-//!   keystroke resolves to `BackendError::NotFound`. Pure-event terminals are
-//!   *playback-only* — perfect for a recorded cast, insufficient for typing.
+//!   keystroke resolves to `BackendError::NotFound`. Playback-only.
 //! - **Recovery durability.** A `Snapshot` (initial, or after a broadcast
 //!   `Lagged`) rebuilds terminals from the daemon's registry, not client VT
 //!   state, so bus-only terminals vanish on recovery. Workspaces survive
-//!   (they live in the store); fake terminals do not. Benign for a short
-//!   scripted demo that never lags.
+//!   (they live in the store); fake terminals do not.
 //!
-//! Closing either needs the `MockBackend` (`Arc<dyn SessionBackend>`) seam —
-//! deliberately out of scope for this passive Tier-1 harness.
+//! [`Stage::Backed`] closes both by spawning terminals the *real* way — a
+//! genuine `Command::Spawn` through `dispatch_command` against a
+//! [`MockBackend`]. The terminal is registered in the daemon's
+//! `TerminalRegistry` (so it survives recovery) and its input lane resolves to
+//! a real backend session (so keystrokes are accepted, not rejected). Output
+//! is fed via `MockBackend::emit`, so the daemon's own pump owns the sequence
+//! numbers. `--demo` uses `Backed`; it is a full interactive integration-test
+//! surface, not just a screenshot reel.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -52,9 +60,12 @@ use lazybox_core::{
     TaskState, Workspace, WorkspaceSession,
 };
 use lazybox_ipc::{AgentState, Event, TerminalId, TerminalKind};
+use lazybox_server::ServerConfig;
+use lazybox_server::backend::MockBackend;
 use lazybox_store::{MemoryStore, Store, WorkspaceRecord};
+use std::path::PathBuf;
 use tempfile::TempDir;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 
 /// A seeded workspace plus the handles the scenario script needs to address
 /// it: its `SessionKey` (for `AgentState` / terminal events), its display
@@ -309,27 +320,24 @@ impl Step {
     }
 }
 
-/// An ergonomic layer over [`Event`] that owns the one thing the raw enum
-/// can't: the per-terminal sequence counter (see the module docs). Everything
-/// here lowers to a single `bus.send(Event)`.
+/// The scenario vocabulary. Terminals are addressed by a stable *slot*
+/// number the author assigns; the driver resolves each slot to a concrete
+/// terminal at run time — a synthetic `TerminalId` in Tier 1, or a real
+/// daemon terminal (+ backend key) in Tier 2 (see [`Stage`]).
 pub enum Action {
-    /// Flip a workspace's agent state (sidebar pill + spinner).
-    Agent {
-        key: SessionKey,
-        terminal: TerminalId,
-        state: AgentState,
-    },
-    /// Register a live agent/shell terminal (no PTY behind it).
-    SpawnTerminal {
-        terminal: TerminalId,
+    /// Register a terminal in `slot` for workspace `key`, running `kind`.
+    Spawn {
+        slot: u64,
         key: SessionKey,
         kind: TerminalKind,
     },
-    /// Feed raw (optionally ANSI) bytes into a terminal's VT parser. Seqs are
-    /// assigned by the driver.
-    Output {
-        terminal: TerminalId,
-        bytes: Vec<u8>,
+    /// Feed raw (optionally ANSI) bytes into `slot`'s terminal.
+    Out { slot: u64, bytes: Vec<u8> },
+    /// Flip a workspace's agent state (sidebar pill + terminal tab badge).
+    State {
+        slot: u64,
+        key: SessionKey,
+        state: AgentState,
     },
     /// Flash a footer notice.
     Notify { title: String, body: String },
@@ -337,55 +345,101 @@ pub enum Action {
     UpsertWorkspace(Arc<Workspace>),
 }
 
-/// Convenience: a `SpawnTerminal` for a Claude agent.
-pub fn spawn_claude(terminal: u64, key: &SessionKey) -> Action {
-    Action::SpawnTerminal {
-        terminal: TerminalId(terminal),
+/// Convenience: spawn a Claude agent in `slot`.
+pub fn spawn_claude(slot: u64, key: &SessionKey) -> Action {
+    Action::Spawn {
+        slot,
         key: key.clone(),
         kind: TerminalKind::Agent("claude".into()),
     }
 }
 
-/// Convenience: a `SpawnTerminal` for a Codex agent.
-pub fn spawn_codex(terminal: u64, key: &SessionKey) -> Action {
-    Action::SpawnTerminal {
-        terminal: TerminalId(terminal),
+/// Convenience: spawn a Codex agent in `slot`.
+pub fn spawn_codex(slot: u64, key: &SessionKey) -> Action {
+    Action::Spawn {
+        slot,
         key: key.clone(),
         kind: TerminalKind::Agent("codex".into()),
     }
 }
 
-/// Convenience: stream a chunk of terminal output.
-pub fn output(terminal: u64, text: impl Into<String>) -> Action {
-    Action::Output {
-        terminal: TerminalId(terminal),
+/// Convenience: stream a chunk of terminal output into `slot`.
+pub fn output(slot: u64, text: impl Into<String>) -> Action {
+    Action::Out {
+        slot,
         bytes: text.into().into_bytes(),
     }
 }
 
-/// Convenience: an agent-state flip.
-pub fn agent(terminal: u64, key: &SessionKey, state: AgentState) -> Action {
-    Action::Agent {
+/// Convenience: an agent-state flip on `slot`'s workspace.
+pub fn agent(slot: u64, key: &SessionKey, state: AgentState) -> Action {
+    Action::State {
+        slot,
         key: key.clone(),
-        terminal: TerminalId(terminal),
         state,
     }
 }
 
 // ── Driver ──────────────────────────────────────────────────────────────
 
-/// Publishes scenario actions onto the daemon bus, maintaining the contiguous
-/// per-terminal sequence numbers `append_output` demands.
+/// How the driver realizes terminals — the two tiers from the interface
+/// review.
+// `Backed` carries a full `ServerConfig` (a bundle of `Arc`s) so it dwarfs the
+// unit `BusOnly`; the enum is instantiated exactly once per process, so the
+// size asymmetry is irrelevant and boxing would only add indirection.
+#[allow(clippy::large_enum_variant)]
+pub enum Stage {
+    /// Tier 1: pure bus producer. Terminals live only in each client's VT
+    /// state — perfect playback, but not durable across a recovery `Snapshot`
+    /// and not typeable (a keystroke has no backend session). Needs no daemon
+    /// handle — this is the tier that demonstrates the interface gaps, and the
+    /// one unit tests drive; `--demo` itself uses `Backed`.
+    #[allow(dead_code)]
+    BusOnly,
+    /// Tier 2: real daemon terminals via [`MockBackend`]. Each `Spawn` issues
+    /// a genuine `Command::Spawn` through [`dispatch_command`], so the terminal
+    /// is registered in the daemon's `TerminalRegistry` — it survives recovery
+    /// snapshots AND accepts input (keystrokes land as backend writes, not
+    /// `NotFound`). Output is fed through `MockBackend::emit`, so the daemon's
+    /// own pump owns the sequence numbers. This is what closes both interface
+    /// gaps; `--demo` uses it.
+    Backed {
+        config: ServerConfig,
+        mock: MockBackend,
+        /// The throwaway repo the spawns run in (overrides worktree
+        /// provisioning so no bare clone is needed).
+        cwd: PathBuf,
+    },
+}
+
+/// Publishes scenario actions, resolving each slot to a concrete terminal
+/// per the active [`Stage`].
 struct Driver {
     bus: broadcast::Sender<Event>,
+    stage: Stage,
+    /// slot → resolved terminal id (both tiers).
+    slot_tid: HashMap<u64, TerminalId>,
+    /// slot → backend session key (Tier 2 only).
+    slot_key: HashMap<u64, String>,
+    /// slot → next chunk seq (Tier 1 only — Tier 2's pump owns seqs).
     seqs: HashMap<u64, u64>,
+    /// Sink for `dispatch_command` replies (Tier 2). Kept alive so the
+    /// unbounded channel never reports closed; its contents are ignored.
+    sink: lazybox_ipc::EventSender,
+    _sink_rx: mpsc::UnboundedReceiver<Event>,
 }
 
 impl Driver {
-    fn new(bus: broadcast::Sender<Event>) -> Self {
+    fn new(bus: broadcast::Sender<Event>, stage: Stage) -> Self {
+        let (tx, _sink_rx) = mpsc::unbounded_channel();
         Self {
             bus,
+            stage,
+            slot_tid: HashMap::new(),
+            slot_key: HashMap::new(),
             seqs: HashMap::new(),
+            sink: lazybox_ipc::EventSender::from_unbounded(tx),
+            _sink_rx,
         }
     }
 
@@ -396,58 +450,136 @@ impl Driver {
         let _ = self.bus.send(event);
     }
 
-    fn apply(&mut self, action: Action) {
+    async fn apply(&mut self, action: Action) {
         match action {
-            Action::Agent {
-                key,
-                terminal,
-                state,
-            } => self.send(Event::AgentState {
-                session_key: key,
-                terminal_id: terminal,
-                state,
-            }),
-            Action::SpawnTerminal {
-                terminal,
-                key,
-                kind,
-            } => {
-                self.seqs.insert(terminal.0, 0);
-                self.send(Event::TerminalSpawned {
-                    terminal_id: terminal,
+            Action::Spawn { slot, key, kind } => self.spawn(slot, key, kind).await,
+            Action::Out { slot, bytes } => self.out(slot, bytes).await,
+            Action::State { slot, key, state } => {
+                let terminal = self
+                    .slot_tid
+                    .get(&slot)
+                    .copied()
+                    .unwrap_or(TerminalId(slot));
+                self.send(Event::AgentState {
                     session_key: key,
-                    kind,
-                    no_permission: false,
-                    on_main: false,
-                    model_label: None,
-                });
-            }
-            Action::Output { terminal, bytes } => {
-                let seq = self.seqs.entry(terminal.0).or_insert(0);
-                *seq += 1;
-                let seq = *seq;
-                self.send(Event::TerminalOutput {
                     terminal_id: terminal,
-                    bytes,
-                    first_seq: seq,
-                    seq,
+                    state,
                 });
             }
             Action::Notify { title, body } => self.send(Event::Notification { title, body }),
             Action::UpsertWorkspace(ws) => self.send(Event::WorkspaceUpserted(ws)),
         }
     }
+
+    async fn spawn(&mut self, slot: u64, key: SessionKey, kind: TerminalKind) {
+        // Clone the daemon handles out first so `self.stage` isn't borrowed
+        // while we mutate the slot maps below.
+        let (config, cwd) = match &self.stage {
+            Stage::BusOnly => {
+                let tid = TerminalId(slot);
+                self.slot_tid.insert(slot, tid);
+                self.seqs.insert(slot, 0);
+                self.send(Event::TerminalSpawned {
+                    terminal_id: tid,
+                    session_key: key,
+                    kind,
+                    no_permission: false,
+                    on_main: false,
+                    model_label: None,
+                });
+                return;
+            }
+            Stage::Backed { config, cwd, .. } => (config.clone(), cwd.clone()),
+        };
+
+        // Tier 2: spawn the real way. Snapshot the id set, issue the command,
+        // then find the id that appeared.
+        let before: std::collections::HashSet<u64> = config
+            .terminal
+            .terminal_ids()
+            .await
+            .into_iter()
+            .map(|t| t.0)
+            .collect();
+        let cmd = lazybox_ipc::Command::Spawn {
+            session_key: key,
+            session_id: None,
+            client_request_id: None,
+            kind,
+            cwd: Some(cwd.to_string_lossy().into_owned()),
+            initial_prompt: None,
+            initial_snippet: None,
+            on_main: false,
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
+            force_new: true,
+        };
+        lazybox_server::dispatch_command(&config, &self.sink, cmd).await;
+
+        // Registration can lag the command return (SpawnCoordinator). Poll
+        // briefly for the new id rather than racing it.
+        let mut tid = None;
+        for _ in 0..40 {
+            if let Some(found) = config
+                .terminal
+                .terminal_ids()
+                .await
+                .into_iter()
+                .find(|t| !before.contains(&t.0))
+            {
+                tid = Some(found);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let Some(tid) = tid else {
+            tracing::warn!("demo spawn for slot {slot} never registered a terminal");
+            return;
+        };
+        self.slot_tid.insert(slot, tid);
+        if let Some(backend_key) = config.terminal.backend_key_for(tid).await {
+            self.slot_key.insert(slot, backend_key);
+        }
+    }
+
+    async fn out(&mut self, slot: u64, bytes: Vec<u8>) {
+        match &self.stage {
+            Stage::BusOnly => {
+                let tid = self
+                    .slot_tid
+                    .get(&slot)
+                    .copied()
+                    .unwrap_or(TerminalId(slot));
+                let seq = self.seqs.entry(slot).or_insert(0);
+                *seq += 1;
+                let seq = *seq;
+                self.send(Event::TerminalOutput {
+                    terminal_id: tid,
+                    bytes,
+                    first_seq: seq,
+                    seq,
+                });
+            }
+            Stage::Backed { mock, .. } => {
+                if let Some(key) = self.slot_key.get(&slot) {
+                    // The daemon's pump reads this and emits an authoritative
+                    // TerminalOutput with its own contiguous seq.
+                    mock.emit(key, &bytes).await;
+                }
+            }
+        }
+    }
 }
 
-/// Run a scenario against the bus. Sleeps to each beat, then publishes it.
-/// An initial settle delay lets the TUI's Subscribe → Snapshot complete
-/// before the first live event, so nothing is broadcast into the void.
-pub async fn run(bus: broadcast::Sender<Event>, settle: Duration, steps: Vec<Step>) {
+/// Run a scenario. Sleeps to each beat, then applies it. An initial settle
+/// delay lets the TUI's Subscribe → Snapshot complete before the first live
+/// event, so nothing is broadcast into the void.
+pub async fn run(bus: broadcast::Sender<Event>, stage: Stage, settle: Duration, steps: Vec<Step>) {
     tokio::time::sleep(settle).await;
-    let mut driver = Driver::new(bus);
+    let mut driver = Driver::new(bus, stage);
     for step in steps {
         tokio::time::sleep(step.after).await;
-        driver.apply(step.action);
+        driver.apply(step.action).await;
     }
 }
 
@@ -587,24 +719,28 @@ mod tests {
         assert!(ws.primary_task().is_some(), "classified as a real task");
     }
 
-    #[test]
-    fn driver_assigns_contiguous_terminal_seqs() {
-        // The critical invariant: TerminalOutput seqs must be 1,2,3… per
+    #[tokio::test]
+    async fn driver_assigns_contiguous_terminal_seqs() {
+        // The Tier-1 invariant: TerminalOutput seqs must be 1,2,3… per
         // terminal or the client desyncs. Drive a spawn + three outputs and
         // assert the emitted seqs.
         let (bus, mut rx) = broadcast::channel(64);
-        let mut driver = Driver::new(bus);
+        let mut driver = Driver::new(bus, Stage::BusOnly);
         let key = SessionKey::from("demo/repo#1");
-        driver.apply(Action::SpawnTerminal {
-            terminal: TerminalId(7),
-            key: key.clone(),
-            kind: TerminalKind::Agent("claude".into()),
-        });
+        driver
+            .apply(Action::Spawn {
+                slot: 7,
+                key: key.clone(),
+                kind: TerminalKind::Agent("claude".into()),
+            })
+            .await;
         for _ in 0..3 {
-            driver.apply(Action::Output {
-                terminal: TerminalId(7),
-                bytes: b"x".to_vec(),
-            });
+            driver
+                .apply(Action::Out {
+                    slot: 7,
+                    bytes: b"x".to_vec(),
+                })
+                .await;
         }
         // First event is the spawn.
         assert!(matches!(rx.try_recv(), Ok(Event::TerminalSpawned { .. })));
@@ -618,13 +754,114 @@ mod tests {
         assert_eq!(seen, vec![1, 2, 3], "contiguous per-terminal seqs from 1");
     }
 
+    #[tokio::test]
+    async fn backed_stage_terminal_is_durable_and_typeable() {
+        // The whole point of Tier 2: a demo terminal spawned via the real
+        // daemon path is (a) registered in the terminal registry — so a
+        // recovery Snapshot includes it — and (b) input-accepting — a Write
+        // lands as a backend write, not `NotFound`. This test proves both
+        // interface gaps are closed.
+        use lazybox_ipc::{Command, EventSender, TerminalInputIntent};
+
+        let fx = DemoFixture::seed().unwrap();
+        let mock = MockBackend::new();
+        let config = ServerConfig::with_store_and_backend(fx.store.clone(), mock.as_backend());
+        let key = fx.workspaces[0].key.clone();
+        let mut driver = Driver::new(
+            config.bus.clone(),
+            Stage::Backed {
+                config: config.clone(),
+                mock: mock.clone(),
+                cwd: fx.repo.path().to_path_buf(),
+            },
+        );
+
+        driver
+            .apply(Action::Spawn {
+                slot: 1,
+                key,
+                kind: TerminalKind::Agent("claude".into()),
+            })
+            .await;
+        driver
+            .apply(Action::Out {
+                slot: 1,
+                bytes: b"hello from the agent\n".to_vec(),
+            })
+            .await;
+
+        let ids = config.terminal.terminal_ids().await;
+        assert_eq!(ids.len(), 1, "spawn registered exactly one real terminal");
+        let tid = ids[0];
+        let backend_key = config
+            .terminal
+            .backend_key_for(tid)
+            .await
+            .expect("real terminal has a backend session");
+
+        // Output flowed through the daemon's backend, not a synthetic bus event.
+        let snap = config
+            .backend
+            .snapshot(&backend_key)
+            .await
+            .expect("backend snapshot");
+        assert!(
+            snap.replay.windows(5).any(|w| w == b"hello"),
+            "emitted output reached the backend replay buffer"
+        );
+
+        // Gap 1 (input): a Write resolves to the backend session and is
+        // recorded — no `NotFound`.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let sink = EventSender::from_unbounded(tx);
+        lazybox_server::dispatch_command(
+            &config,
+            &sink,
+            Command::Write {
+                terminal_id: tid,
+                bytes: b"typed input\n".to_vec(),
+                intent: TerminalInputIntent::Submit,
+            },
+        )
+        .await;
+        let mut writes = Vec::new();
+        for _ in 0..40 {
+            writes = mock.writes_for(&backend_key).await;
+            if !writes.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            writes.iter().any(|w| w == b"typed input\n"),
+            "keystroke reached the backend — input gap closed: {writes:?}"
+        );
+
+        // Gap 2 (durability): a fresh recovery Subscribe rebuilds terminals
+        // from the daemon registry, and this terminal is present.
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink = EventSender::from_unbounded(tx);
+        lazybox_server::dispatch_command(&config, &sink, Command::Subscribe).await;
+        let mut in_snapshot = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let Event::Snapshot { terminals, .. } = ev {
+                in_snapshot = terminals.iter().any(|t| t.terminal_id == tid);
+                break;
+            }
+        }
+        assert!(
+            in_snapshot,
+            "recovery Snapshot includes the terminal — durability gap closed"
+        );
+    }
+
     #[test]
     fn fleet_scenario_covers_every_agent_state() {
         let fx = DemoFixture::seed().unwrap();
         let steps = fleet_scenario(&fx);
         let mut states = std::collections::BTreeSet::new();
         for step in &steps {
-            if let Action::Agent { state, .. } = &step.action {
+            if let Action::State { state, .. } = &step.action {
                 states.insert(format!("{state:?}"));
             }
         }

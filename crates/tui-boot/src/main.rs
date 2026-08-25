@@ -920,10 +920,17 @@ async fn run_demo(preselect: Option<lazybox_tui::realm::model::Preselect>) -> an
     let _ = std::env::set_current_dir(fixture.repo.path());
 
     let (client, server) = channel::pair();
-    let config = ServerConfig::with_store(fixture.store.clone());
-    // Grab a bus handle BEFORE `config` moves into the daemon — the scenario
-    // driver publishes onto the same bus every connected TUI subscribes to.
+    // Tier 2: back the daemon with an in-memory MockBackend so the scenario
+    // can spawn REAL daemon terminals (durable across recovery, input-accepting)
+    // and feed them canned output — no real PTY, no agent subprocess.
+    let mock = lazybox_server::backend::MockBackend::new();
+    let config = ServerConfig::with_store_and_backend(fixture.store.clone(), mock.as_backend());
+    // Grab handles BEFORE `config` moves into the daemon: the bus every TUI
+    // subscribes to, and a config clone the scenario uses to issue real spawn
+    // commands and resolve their backend keys.
     let bus = config.bus.clone();
+    let stage_config = config.clone();
+    let cwd = fixture.repo.path().to_path_buf();
 
     tokio::spawn(async move {
         if let Err(e) = Server::new(config).serve(server).await {
@@ -935,9 +942,15 @@ async fn run_demo(preselect: Option<lazybox_tui::realm::model::Preselect>) -> an
     // TUI's Subscribe → Snapshot land before the first live event, so nothing
     // is broadcast into the void.
     let steps = scenario::fleet_scenario(&fixture);
+    let stage = scenario::Stage::Backed {
+        config: stage_config,
+        mock,
+        cwd,
+    };
     tokio::spawn(scenario::run(
         bus,
-        std::time::Duration::from_millis(1200),
+        stage,
+        std::time::Duration::from_millis(1500),
         steps,
     ));
 

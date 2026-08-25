@@ -251,6 +251,31 @@ pub enum Id {
     /// `Msg::ChoicePicked` reads it + the picked Duration and
     /// dispatches `Command::Snooze`.
     SnoozeDuration,
+    /// `z` on a Repo/Space header (#scale): the source-snooze picker —
+    /// the workspace durations plus "Until I unmute". Target key lives
+    /// in `ModalFlow::SourceSnooze`; resolution applies
+    /// `Sidebar::set_source_attention`.
+    SourceSnooze,
+    /// `x ,` on a Repo/Space header: the attention-level picker
+    /// (live / quiet / digest / muted). Target key lives in
+    /// `ModalFlow::SourceLevel`.
+    SourceLevel,
+    /// `x v` (#scale): single-line name input freezing the current
+    /// lens into `ui.views`. Submit reads `Sidebar::current_lens`.
+    SaveViewName,
+    /// `x V` (#scale): the saved-views picker; rows index into the
+    /// `ModalFlow::ViewPick` stash.
+    ViewPicker,
+    /// `x A` (#scale, proposal F): one-line `owner/repo` input that
+    /// appends to `setup.scopes` — repo subscription without the
+    /// wizard walk.
+    AddRepoName,
+    /// Settings → remove-repos confirm (#scale, proposal F): un-ticking
+    /// scopes deletes their workspaces, so the wizard's Finish defers
+    /// behind this when workspaces are at stake. The pending outcome
+    /// lives in `ModalFlow::ScopeRemovalConfirm`; `Msg::Confirmed(true)`
+    /// runs `finish_setup`.
+    ScopeRemovalConfirm,
     /// Single-line URL input for the "Configure LLM gateway" settings
     /// action. Submit → write the global `agent.llm_gateway_url` to YAML
     /// (empty input clears it).
@@ -573,6 +598,9 @@ impl Id {
                 | Id::ThemePicker
                 | Id::FilterMenu
                 | Id::SnoozeDuration
+                | Id::SourceSnooze
+                | Id::SourceLevel
+                | Id::ViewPicker
                 | Id::MoveToSpacePicker
                 | Id::DefaultAgentPicker
                 | Id::DefaultModelPicker
@@ -802,6 +830,26 @@ pub(crate) enum ModalFlow {
     AgentAuth {
         terminal_id: lazybox_ipc::TerminalId,
         retry: bool,
+    },
+    /// Source-snooze picker target (#scale): a group label
+    /// (`owner/repo`, `linear/TEAM`) or `space:<name>`, plus the
+    /// stored level to preserve across a time-boxed snooze.
+    SourceSnooze {
+        key: String,
+        level: lazybox_config::SourceAttentionLevel,
+    },
+    /// Source-level picker target (`x ,`).
+    SourceLevel { key: String },
+    /// Saved-views picker rows (`x V`, #scale): the views snapshot the
+    /// picker was built from, so resolution can't drift from render
+    /// order.
+    ViewPick {
+        views: Vec<lazybox_config::ViewConfig>,
+    },
+    /// The wizard Finish outcome parked behind the remove-repos
+    /// confirm (#scale, proposal F).
+    ScopeRemovalConfirm {
+        outcome: Box<crate::setup_flow::SetupOutcome>,
     },
     /// Reply textarea → `Command::PostReply`. Carries the target
     /// workspace; consumed by `Msg::TextareaSubmitted`.
@@ -2990,6 +3038,12 @@ impl<T: TerminalAdapter> Model<T> {
         // subsequent lens changes persist.
         if let Some(lens) = user_config.ui.last_lens.as_ref() {
             self.sidebar.seed_lens(lens);
+        }
+        // Per-source attention ladder (#scale): muted / quiet / digest
+        // sources take effect from the first render.
+        if !user_config.ui.source_attention.is_empty() {
+            self.sidebar
+                .seed_source_attention(user_config.ui.source_attention.clone());
         }
         self.apply_auto_fix_config(
             user_config.auto_fix.enabled,

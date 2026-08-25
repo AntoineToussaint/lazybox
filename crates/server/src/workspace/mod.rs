@@ -604,12 +604,22 @@ pub async fn set_snooze(
     config: &ServerConfig,
     key: &WorkspaceKey,
     until: Option<chrono::DateTime<Utc>>,
+    wake: Option<lazybox_core::SnoozeWake>,
 ) {
     let _ws_guard = config.lock_workspace(key.as_str()).await;
     let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
         return;
     };
     workspace.snoozed_until = until;
+    // The wake condition rides the snooze it belongs to: setting a new
+    // snooze replaces it; un-snoozing (until = None) clears it. A
+    // MANUAL un-snooze also clears any woke stamp — the user is
+    // already looking at the row, so announcing the re-entry (#scale)
+    // would be noise.
+    workspace.snooze_wake = if until.is_some() { wake } else { None };
+    if until.is_none() {
+        workspace.woke_at = None;
+    }
     commit_upsert_offloaded_reported(config, key, workspace, "set workspace snooze").await;
 }
 

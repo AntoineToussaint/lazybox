@@ -504,6 +504,64 @@ impl<T: TerminalAdapter> Model<T> {
                     tracing::warn!("rename-space submit without a stashed name — dropped");
                 }
             }
+            Some(Id::AddRepoName) => {
+                // One-line repo subscription (#scale, proposal F). The
+                // daemon reads setup.scopes from YAML on every tick, so
+                // the config write is the whole daemon side; the cached
+                // persisted setup + placeholder header make it visible
+                // immediately.
+                let repo = text
+                    .trim()
+                    .trim_start_matches("github:")
+                    .trim_matches('/')
+                    .to_string();
+                let valid = repo
+                    .split_once('/')
+                    .is_some_and(|(o, r)| !o.is_empty() && !r.is_empty() && !r.contains('/'));
+                if valid {
+                    let scope = format!("github:{repo}");
+                    let scope_for_save = scope.clone();
+                    lazybox_config::Config::save_with_async(move |c| {
+                        c.setup.providers.insert("github".to_string());
+                        c.setup
+                            .scopes
+                            .entry("github".to_string())
+                            .or_default()
+                            .insert(scope_for_save);
+                    });
+                    if let Some(p) = self.setup.persisted.as_mut() {
+                        p.enabled_providers.insert("github".to_string());
+                        p.selected_scopes
+                            .entry("github".to_string())
+                            .or_default()
+                            .insert(scope);
+                    }
+                    self.refresh_subscribed_projects();
+                    cmds.push(IpcCommand::Refresh);
+                    self.flash_info(format!("subscribed {repo} — syncing…"));
+                } else if !repo.is_empty() {
+                    self.flash_hint(format!("not an owner/repo name: {repo}"));
+                }
+            }
+            Some(Id::SaveViewName) => {
+                // Freeze the CURRENT lens under the typed name (#scale,
+                // proposal D). Same-name saves replace — iterating on a
+                // view must not accrete stale copies. Targeted
+                // read-modify-write so another client's views survive.
+                let name = text.trim().to_string();
+                if !name.is_empty() {
+                    let lens = self.sidebar.current_lens();
+                    let view_name = name.clone();
+                    lazybox_config::Config::save_with_async(move |c| {
+                        c.ui.views.retain(|v| v.name != view_name);
+                        c.ui.views.push(lazybox_config::ViewConfig {
+                            name: view_name,
+                            lens,
+                        });
+                    });
+                    self.flash_info(format!("view saved: {name} — recall with x V"));
+                }
+            }
             Some(Id::RenameWorkspace) => {
                 let name = text.trim().to_string();
                 let target = match self.modal_flow.take() {
@@ -1273,6 +1331,19 @@ showing keybinding search only",
                     }
                 }
             }
+            Some(Id::ScopeRemovalConfirm) => {
+                if let Some(ModalFlow::ScopeRemovalConfirm { outcome }) = self.modal_flow.take() {
+                    if yes {
+                        self.finish_setup(*outcome);
+                    } else {
+                        self.flash_info(
+                            "kept your repos — z on a header mutes without deleting".to_string(),
+                        );
+                        self.send_cmd(IpcCommand::Subscribe);
+                        self.set_focus_attr();
+                    }
+                }
+            }
             Some(Id::RemoveOutOfScope) => {
                 if let Some(ModalFlow::RemovalPrompt { workspace, reason }) = self.modal_flow.take()
                 {
@@ -1748,56 +1819,30 @@ showing keybinding search only",
                 }
             }
             RunnerStep::Finish(outcome) => {
-                let sources: Vec<String> = outcome.enabled_providers.iter().cloned().collect();
-                let persisted = crate::setup_flow::outcome_to_persisted(&outcome);
-                // Persist FIRST (via the installed hook) and only
-                // cache the new state when the save actually landed —
-                // otherwise the session would act on scopes that
-                // evaporate on the next launch while the user saw a
-                // success message.
-                let save_result = match self.setup.on_complete.as_ref() {
-                    Some(hook) => hook(outcome),
-                    None => Ok(None),
-                };
-                self.unmount_setup_modal();
-                self.send_cmd(IpcCommand::Subscribe);
-                // Kick off an immediate poll so a freshly added repo
-                // surfaces its open PRs/issues within seconds instead
-                // of waiting for the long-lived 60s loop tick.
-                self.send_cmd(IpcCommand::Refresh);
-                self.set_focus_attr();
-                match save_result {
-                    Ok(backed_up) => {
-                        // Cache the new persisted state so subsequent
-                        // partial flows (Settings → Add a repo) see
-                        // the latest scopes, and push the new repo
-                        // subscriptions into the sidebar so a header
-                        // shows even before polling finds workspaces.
-                        self.setup.persisted = Some(persisted);
-                        self.refresh_subscribed_projects();
-                        if let Some(bak) = backed_up {
-                            self.flash_info(format!(
-                                "config.yaml was malformed — kept a backup at {}",
-                                bak.display(),
-                            ));
-                        }
-                        if !sources.is_empty() {
-                            self.show_polling(sources);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("setup save failed: {e:#}");
-                        self.flash(
-                            format!("settings NOT saved: {e}"),
-                            crate::realm::components::footer::NoticeSeverity::Permanent,
-                        );
-                    }
+                // Safe unsubscribe (#scale, proposal F): un-ticking a
+                // repo is DESTRUCTIVE — the daemon's rescope sweep
+                // deletes its workspaces with their notes, read state,
+                // and stars. When this Finish removes scopes that
+                // currently have workspaces, interpose a confirm that
+                // names the damage and points at mute (the
+                // non-destructive hide) before anything persists.
+                let doomed = self.removed_scope_workspace_count(&outcome);
+                if doomed > 0 {
+                    use crate::realm::components::confirm::Confirm;
+                    self.unmount_setup_modal();
+                    let prompt = format!(
+                        "Removing these repos DELETES their {doomed} workspace(s) — \
+                         notes, read state, and stars included. To just quiet a \
+                         repo without losing anything, press z on its header \
+                         (mute) instead. Remove and delete?",
+                    );
+                    self.set_modal_flow(ModalFlow::ScopeRemovalConfirm {
+                        outcome: Box::new(outcome),
+                    });
+                    self.mount_modal(Id::ScopeRemovalConfirm, Confirm::new(prompt).destructive());
+                    return;
                 }
-                // First-run users land here after completing the
-                // wizard — surface the feature tour now (no-op when
-                // it's already been seen, or when this Finish came
-                // from a partial Settings flow on a returning user).
-                self.maybe_mount_tour();
+                self.finish_setup(outcome);
             }
             RunnerStep::Cancel => {
                 self.unmount_setup_modal();
@@ -1808,6 +1853,106 @@ showing keybinding search only",
                 self.setup.runner = Some(runner);
             }
         }
+    }
+
+    /// The real wizard-Finish body: persist via the installed hook,
+    /// resubscribe, kick a poll, refresh headers, surface the tour.
+    /// Split from `handle_runner_step` so the scope-removal confirm
+    /// (#scale) can defer it behind a Yes.
+    pub(super) fn finish_setup(&mut self, outcome: crate::setup_flow::SetupOutcome) {
+        let sources: Vec<String> = outcome.enabled_providers.iter().cloned().collect();
+        let persisted = crate::setup_flow::outcome_to_persisted(&outcome);
+        // Persist FIRST (via the installed hook) and only
+        // cache the new state when the save actually landed —
+        // otherwise the session would act on scopes that
+        // evaporate on the next launch while the user saw a
+        // success message.
+        let save_result = match self.setup.on_complete.as_ref() {
+            Some(hook) => hook(outcome),
+            None => Ok(None),
+        };
+        self.unmount_setup_modal();
+        self.send_cmd(IpcCommand::Subscribe);
+        // Kick off an immediate poll so a freshly added repo
+        // surfaces its open PRs/issues within seconds instead
+        // of waiting for the long-lived 60s loop tick.
+        self.send_cmd(IpcCommand::Refresh);
+        self.set_focus_attr();
+        match save_result {
+            Ok(backed_up) => {
+                // Cache the new persisted state so subsequent
+                // partial flows (Settings → Add a repo) see
+                // the latest scopes, and push the new repo
+                // subscriptions into the sidebar so a header
+                // shows even before polling finds workspaces.
+                self.setup.persisted = Some(persisted);
+                self.refresh_subscribed_projects();
+                if let Some(bak) = backed_up {
+                    self.flash_info(format!(
+                        "config.yaml was malformed — kept a backup at {}",
+                        bak.display(),
+                    ));
+                }
+                if !sources.is_empty() {
+                    self.show_polling(sources);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("setup save failed: {e:#}");
+                self.flash(
+                    format!("settings NOT saved: {e}"),
+                    crate::realm::components::footer::NoticeSeverity::Permanent,
+                );
+            }
+        }
+        // First-run users land here after completing the
+        // wizard — surface the feature tour now (no-op when
+        // it's already been seen, or when this Finish came
+        // from a partial Settings flow on a returning user).
+        self.maybe_mount_tour();
+    }
+
+    /// How many workspaces the scopes REMOVED by `outcome` (vs the
+    /// cached persisted setup) currently hold (#scale, proposal F).
+    /// Zero when nothing is removed, when there is no cached baseline
+    /// (first run), or when the new scope set is empty — empty scopes
+    /// mean "all", which deletes nothing.
+    fn removed_scope_workspace_count(&self, outcome: &crate::setup_flow::SetupOutcome) -> usize {
+        let Some(old) = self
+            .setup
+            .persisted
+            .as_ref()
+            .and_then(|p| p.selected_scopes.get("github"))
+        else {
+            return 0;
+        };
+        let new = outcome.selected_scopes.get("github");
+        let new_set = new.cloned().unwrap_or_default();
+        if new_set.is_empty() {
+            return 0;
+        }
+        let removed: Vec<&String> = old.iter().filter(|s| !new_set.contains(*s)).collect();
+        if removed.is_empty() {
+            return 0;
+        }
+        let covers = |scope: &str, repo: &str| -> bool {
+            match scope.strip_prefix("github:") {
+                Some(s) if s.contains('/') => s == repo,
+                Some(owner) => repo
+                    .split_once('/')
+                    .is_some_and(|(repo_owner, _)| repo_owner == owner),
+                None => false,
+            }
+        };
+        self.sidebar
+            .workspace_iter()
+            .filter(|(_, w)| {
+                let Some(repo) = w.primary_task().and_then(|t| t.repo.as_deref()) else {
+                    return false;
+                };
+                removed.iter().any(|s| covers(s, repo)) && !new_set.iter().any(|s| covers(s, repo))
+            })
+            .count()
     }
 
     /// Unmount whatever's at `Id::Setup` (or `Id::Splash` if the

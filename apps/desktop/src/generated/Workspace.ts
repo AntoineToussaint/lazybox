@@ -6,6 +6,7 @@ import type { HopperMeta } from "./HopperMeta";
 import type { ProjectKey } from "./ProjectKey";
 import type { Session } from "./Session";
 import type { SnippetDeliveryLog } from "./SnippetDeliveryLog";
+import type { SnoozeWake } from "./SnoozeWake";
 import type { Task } from "./Task";
 import type { WorkspaceKey } from "./WorkspaceKey";
 
@@ -83,6 +84,20 @@ pr: Task | null, gh_issues: Array<Task>, linear_issues: Array<Task>,
  * Merged activity from every linked task, sorted newest-first.
  */
 activity: Array<Activity>, seen_count: number, read_indices: Array<number>, snoozed_until: string | null,
+/**
+ * Event that ends the snooze early (#scale): checked by the
+ * daemon on every poll of this workspace's primary task. `None`
+ * = time-only snooze (the pre-#scale behavior).
+ */
+snooze_wake: SnoozeWake | null,
+/**
+ * When an event-conditional snooze last fired (#scale): the
+ * "announced re-entry" stamp. Rows woken within
+ * [`WOKE_WINDOW`] sort to the top of their group and carry a
+ * wake pill, so a snooze ending never reads as a silent
+ * reappearance. Never set by a manual un-snooze.
+ */
+woke_at: string | null,
 /**
  * Per-workspace "auto-merge on green" arm. When `true`, the
  * **daemon's** polling commit path auto-fires a merge the moment

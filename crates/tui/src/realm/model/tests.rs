@@ -7363,6 +7363,9 @@ mod stale_input_tests {
                 | Id::ThemePicker
                 | Id::FilterMenu
                 | Id::SnoozeDuration
+                | Id::SourceSnooze
+                | Id::SourceLevel
+                | Id::ViewPicker
                 | Id::MoveToSpacePicker
                 | Id::DefaultAgentPicker
                 | Id::DefaultModelPicker
@@ -7380,6 +7383,7 @@ mod stale_input_tests {
                 | Id::BroadcastConfirm
                 | Id::BulkSpawnConfirm
                 | Id::ClaimedSpawnConfirm
+                | Id::ScopeRemovalConfirm
                 | Id::EditorRemoveConfirm
                 | Id::HelpActionConfirm => false,
                 // Drop — destructive-action menus / delete-routing lists.
@@ -7417,6 +7421,8 @@ mod stale_input_tests {
                 | Id::StartAgentProject
                 | Id::LlmGatewayUrl
                 | Id::AddScanRoot
+                | Id::SaveViewName
+                | Id::AddRepoName
                 | Id::BroadcastSnippet
                 | Id::HandoffTarget
                 | Id::ConvertSessionRole

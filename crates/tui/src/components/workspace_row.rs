@@ -141,6 +141,14 @@ pub struct WorkspaceRowCtx<'a> {
     pub sent_snippet_count: usize,
     /// Visible ticket-tree placement. `None` for rows outside a hierarchy;
     /// roots with children still carry metadata so they get a disclosure.
+    /// The row's source is Quiet / Digest / Muted and the row does NOT
+    /// punch through (#scale): ambient badges (the unread pill) are
+    /// suppressed so a demoted source stops shouting.
+    pub source_quiet: bool,
+    /// An event-conditional snooze fired within `WOKE_WINDOW` (#scale,
+    /// B4): render the wake glyph in the shared state slot so the
+    /// re-entry is announced. Yields to every live agent signal.
+    pub recently_woken: bool,
     pub ticket_tree: Option<lazybox_tui_core::inbox::TicketTreeMeta>,
     /// This workspace's PR is part of a detected stack (issue #969) — its
     /// [`StackPosition`](lazybox_core::StackPosition). Renders a ` ⇗k/N `
@@ -525,6 +533,12 @@ fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         (ctx.spawning_glyph, ctx.theme.text_dim)
     } else if ctx.exited {
         ("✗", ctx.theme.text_dim)
+    } else if ctx.recently_woken {
+        // Announced re-entry (#scale, B4): the snooze's wake condition
+        // fired. Single-width glyph on purpose — emoji here would
+        // shear the column grid. Lowest precedence: any live agent
+        // signal outranks the announcement.
+        (if ctx.ascii_glyphs { "w" } else { "↺" }, ctx.theme.accent)
     } else {
         return Cell::empty();
     };
@@ -821,6 +835,12 @@ fn label_text_style(theme: &Theme, hex: &str) -> Style {
 }
 
 fn cell_unread(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    // Quiet/Digest/Muted sources suppress the ambient unread badge
+    // (#scale); punch-through rows keep it (the ctx flag is already
+    // punch-through-aware).
+    if ctx.source_quiet {
+        return Cell::empty();
+    }
     let unread = ctx.workspace.map(|w| w.unread_count()).unwrap_or(0);
     if unread == 0 {
         return Cell::empty();
@@ -1466,6 +1486,8 @@ mod tests {
         theme: &'a Theme,
     ) -> WorkspaceRowCtx<'a> {
         WorkspaceRowCtx {
+            recently_woken: false,
+            source_quiet: false,
             workspace: Some(workspace),
             task: Some(task),
             theme,
@@ -1893,6 +1915,8 @@ mod tests {
         );
         let theme = theme();
         let ctx = WorkspaceRowCtx {
+            recently_woken: false,
+            source_quiet: false,
             workspace: Some(&ws),
             task: None,
             theme: &theme,
@@ -2385,6 +2409,8 @@ mod tests {
         );
         let theme = theme();
         let ctx = WorkspaceRowCtx {
+            recently_woken: false,
+            source_quiet: false,
             workspace: Some(&ws),
             task: None,
             theme: &theme,
@@ -3748,6 +3774,8 @@ mod tests {
             fixed_time(),
         );
         let ctx_scratch = WorkspaceRowCtx {
+            recently_woken: false,
+            source_quiet: false,
             workspace: Some(&ws_scratch),
             task: None,
             theme: &theme,

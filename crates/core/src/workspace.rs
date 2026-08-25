@@ -295,7 +295,59 @@ pub enum CleanupPrompt {
 ///   key array. Newer builds read the old array shape; older builds fail
 ///   to parse the object and route the row into preserve-and-report,
 ///   which is exactly the downgrade protection the stamp exists for.
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 7;
+/// - 8: `Workspace::snooze_wake` (event-conditional snooze wake, #scale)
+///   and `Workspace::woke_at` (the announced-re-entry stamp). Both
+///   optional with `#[serde(default)]`, so older records read back
+///   cleanly.
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 8;
+
+/// How long a workspace counts as "recently woken" after an
+/// event-conditional snooze fires (#scale): within this window the row
+/// sorts to the top of its group and carries the wake pill, so the
+/// re-entry is announced rather than silent. Deliberately short — an
+/// announcement, not a sticky state.
+pub const WOKE_WINDOW: chrono::Duration = chrono::Duration::hours(4);
+
+/// Event that ends a snooze early (#scale, proposal B4): the snooze
+/// returns at its deadline OR when this condition fires, whichever
+/// comes first — Linear's "snooze is never a black hole" semantics.
+/// Evaluated by the daemon's upsert path against the old vs freshly
+/// polled primary task; see [`snooze_wake_due`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+#[serde(rename_all = "kebab-case")]
+pub enum SnoozeWake {
+    /// Any new activity on the task (its `updated_at` advanced).
+    Activity,
+    /// CI left the in-flight states and reached a verdict.
+    CiSettled,
+    /// A review landed: a new submitted review, or the aggregate
+    /// review state turned decisive.
+    ReviewLanded,
+}
+
+/// Does `wake` fire for the transition `old` → `new`? Pure so the
+/// exact wake semantics are unit-tested without a daemon.
+pub fn snooze_wake_due(wake: SnoozeWake, old: &Task, new: &Task) -> bool {
+    match wake {
+        SnoozeWake::Activity => new.updated_at > old.updated_at,
+        SnoozeWake::CiSettled => {
+            new.ci != old.ci
+                && matches!(
+                    new.ci,
+                    crate::CiStatus::Success | crate::CiStatus::Failure | crate::CiStatus::Mixed
+                )
+        }
+        SnoozeWake::ReviewLanded => {
+            new.reviews.len() > old.reviews.len()
+                || (new.review != old.review
+                    && matches!(
+                        new.review,
+                        crate::ReviewStatus::Approved | crate::ReviewStatus::ChangesRequested
+                    ))
+        }
+    }
+}
 
 /// Personal queue metadata for a workspace captured in the Hopper.
 ///
@@ -409,6 +461,18 @@ pub struct Workspace {
     pub read_indices: HashSet<usize>,
     #[serde(default)]
     pub snoozed_until: Option<DateTime<Utc>>,
+    /// Event that ends the snooze early (#scale): checked by the
+    /// daemon on every poll of this workspace's primary task. `None`
+    /// = time-only snooze (the pre-#scale behavior).
+    #[serde(default)]
+    pub snooze_wake: Option<SnoozeWake>,
+    /// When an event-conditional snooze last fired (#scale): the
+    /// "announced re-entry" stamp. Rows woken within
+    /// [`WOKE_WINDOW`] sort to the top of their group and carry a
+    /// wake pill, so a snooze ending never reads as a silent
+    /// reappearance. Never set by a manual un-snooze.
+    #[serde(default)]
+    pub woke_at: Option<DateTime<Utc>>,
     /// Per-workspace "auto-merge on green" arm. When `true`, the
     /// **daemon's** polling commit path auto-fires a merge the moment
     /// this workspace's own PR becomes merge-ready (green CI, no
@@ -507,6 +571,8 @@ impl Workspace {
             seen_count: 0,
             read_indices: HashSet::new(),
             snoozed_until: None,
+            snooze_wake: None,
+            woke_at: None,
             auto_merge_on_green: false,
             track_main: false,
             base_branch: None,
@@ -999,6 +1065,11 @@ impl Workspace {
             remote: _,
             // ── user-owned state: one explicit merge rule each ──
             snoozed_until,
+            // The wake condition rides the snooze it belongs to (below);
+            // a woke stamp is the SOURCE row's history, not the
+            // destination's — never transferred.
+            snooze_wake,
+            woke_at: _,
             auto_merge_on_green,
             track_main,
             base_branch,
@@ -1015,6 +1086,12 @@ impl Workspace {
         // just because the folded issue was snoozed.
         if self.snoozed_until.is_some() {
             self.snoozed_until = later_opt(self.snoozed_until, *snoozed_until);
+            // Carry the source's wake condition only when the merge
+            // actually extended a snooze the destination already had —
+            // same never-newly-hide rule as the deadline itself.
+            if self.snooze_wake.is_none() {
+                self.snooze_wake = *snooze_wake;
+            }
         }
         // merge-on-green is a consequential daemon arm; carry it only
         // where there's actually a PR to merge. Mirrors the UI, which
@@ -1170,6 +1247,39 @@ impl Workspace {
             Some(until) => until > now,
             None => false,
         }
+    }
+
+    /// Event-conditional snooze check (#scale, proposal B4): if this
+    /// workspace is snoozed with a wake condition and `incoming` (the
+    /// freshly polled primary task) satisfies it against the currently
+    /// stored task, END the snooze — clear the deadline + condition and
+    /// stamp [`Self::woke_at`] so the re-entry is announced. Returns
+    /// whether it woke. Call BEFORE attaching `incoming` (the old task
+    /// is the comparison baseline).
+    pub fn maybe_wake_on(&mut self, incoming: &Task, now: DateTime<Utc>) -> bool {
+        if !self.is_snoozed(now) {
+            return false;
+        }
+        let Some(wake) = self.snooze_wake else {
+            return false;
+        };
+        let due = self
+            .primary_task()
+            .filter(|old| old.id == incoming.id)
+            .is_some_and(|old| snooze_wake_due(wake, old, incoming));
+        if due {
+            self.snoozed_until = None;
+            self.snooze_wake = None;
+            self.woke_at = Some(now);
+        }
+        due
+    }
+
+    /// Whether an event wake fired within [`WOKE_WINDOW`] — drives the
+    /// wake pill and the top-of-group sort boost.
+    pub fn is_recently_woken(&self, now: DateTime<Utc>) -> bool {
+        self.woke_at
+            .is_some_and(|at| at <= now && now - at < WOKE_WINDOW)
     }
 
     /// On-disk identifier for this workspace's worktrees. Human-
@@ -3859,5 +3969,87 @@ mod tests {
         assert_eq!(source.notes, "source note");
         assert_eq!(source.sent_snippets.recent().to_vec(), vec!["plan", "rev"]);
         assert_eq!(source.cleanup_prompt, CleanupPrompt::Declined);
+    }
+
+    /// Event-conditional snooze (#scale, B4): each wake condition's
+    /// exact firing semantics, and `maybe_wake_on`'s contract — ends
+    /// the snooze, stamps `woke_at`, guards on task identity, and
+    /// no-ops without a condition or outside a snooze.
+    #[test]
+    fn snooze_wake_conditions_and_lifecycle() {
+        use crate::{CiStatus, ReviewState, ReviewStatus, Reviewer};
+        let old = pr("o/r#1");
+
+        // Activity: any updated_at advance.
+        let mut newer = old.clone();
+        newer.updated_at = old.updated_at + chrono::Duration::minutes(1);
+        assert!(snooze_wake_due(SnoozeWake::Activity, &old, &newer));
+        assert!(!snooze_wake_due(SnoozeWake::Activity, &old, &old.clone()));
+
+        // CiSettled: a verdict, not another in-flight state.
+        let mut pending = old.clone();
+        pending.ci = CiStatus::Pending;
+        let mut running = pending.clone();
+        running.ci = CiStatus::Running;
+        assert!(!snooze_wake_due(SnoozeWake::CiSettled, &pending, &running));
+        let mut green = pending.clone();
+        green.ci = CiStatus::Success;
+        assert!(snooze_wake_due(SnoozeWake::CiSettled, &pending, &green));
+        assert!(
+            !snooze_wake_due(SnoozeWake::CiSettled, &green, &green.clone()),
+            "an unchanged verdict must not re-fire"
+        );
+
+        // ReviewLanded: a new submitted review, or a decisive flip.
+        let mut reviewed = old.clone();
+        reviewed.reviews = vec![Reviewer {
+            login: "alice".into(),
+            state: ReviewState::Approved,
+            is_bot: false,
+        }];
+        assert!(snooze_wake_due(SnoozeWake::ReviewLanded, &old, &reviewed));
+        let mut approved = old.clone();
+        approved.review = ReviewStatus::Approved;
+        assert!(snooze_wake_due(SnoozeWake::ReviewLanded, &old, &approved));
+        let mut pending_review = old.clone();
+        pending_review.review = ReviewStatus::Pending;
+        assert!(
+            !snooze_wake_due(SnoozeWake::ReviewLanded, &old, &pending_review),
+            "a mere review REQUEST is not a landed review"
+        );
+
+        // maybe_wake_on: ends the snooze + stamps woke_at.
+        let mut ws = Workspace::from_task(old.clone(), now());
+        ws.snoozed_until = Some(now() + chrono::Duration::hours(4));
+        ws.snooze_wake = Some(SnoozeWake::Activity);
+        assert!(ws.maybe_wake_on(&newer, now()));
+        assert_eq!(ws.snoozed_until, None);
+        assert_eq!(ws.snooze_wake, None);
+        assert_eq!(ws.woke_at, Some(now()));
+        assert!(ws.is_recently_woken(now()));
+        assert!(
+            !ws.is_recently_woken(now() + WOKE_WINDOW),
+            "the announcement expires with the window"
+        );
+
+        // Guards: no condition → time-only snooze stays put; a
+        // DIFFERENT task's update never wakes; unsnoozed → no-op.
+        let mut plain = Workspace::from_task(old.clone(), now());
+        plain.snoozed_until = Some(now() + chrono::Duration::hours(4));
+        assert!(!plain.maybe_wake_on(&newer, now()));
+        assert!(plain.is_snoozed(now()));
+
+        let mut other = Workspace::from_task(old.clone(), now());
+        other.snoozed_until = Some(now() + chrono::Duration::hours(4));
+        other.snooze_wake = Some(SnoozeWake::Activity);
+        let mut unrelated = pr("o/r#2");
+        unrelated.updated_at = old.updated_at + chrono::Duration::hours(1);
+        assert!(!other.maybe_wake_on(&unrelated, now()));
+        assert!(other.is_snoozed(now()));
+
+        let mut awake = Workspace::from_task(old, now());
+        awake.snooze_wake = Some(SnoozeWake::Activity);
+        assert!(!awake.maybe_wake_on(&newer, now()));
+        assert_eq!(awake.woke_at, None);
     }
 }

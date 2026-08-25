@@ -328,6 +328,7 @@ fn all_commands() -> Vec<Command> {
         Command::Snooze {
             session_key: key.clone(),
             until: sample_time() + chrono::Duration::hours(4),
+            wake: Some(lazybox_core::SnoozeWake::Activity),
         },
         Command::Unsnooze {
             session_key: key.clone(),

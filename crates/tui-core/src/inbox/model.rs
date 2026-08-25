@@ -301,8 +301,20 @@ pub struct RepoSummary {
     /// attention: unread activity, CI failing, review pending /
     /// changes-requested, agent in `Asking` state. Configurable in
     /// the future; defaults are the indicators lazybox already
-    /// surfaces as badges on workspace rows.
+    /// surfaces as badges on workspace rows. For a Quiet / Digest /
+    /// Muted source (#scale) only punch-through rows count.
     pub attention: usize,
+    /// Effective source-attention level (#scale): `None` = Live;
+    /// `Some("quiet" | "digest" | "muted")` otherwise (an active
+    /// source snooze reads as `"muted"`). A string rather than the
+    /// config enum so this TS-exported DTO stays dependency-free.
+    #[serde(default)]
+    pub source_attention: Option<String>,
+    /// Active source-snooze deadline as epoch milliseconds — drives
+    /// the header's "⏾ wakes in 3d" label. `None` when the source
+    /// isn't time-box snoozed.
+    #[serde(default)]
+    pub source_snooze_until_epoch_ms: Option<i64>,
 }
 
 #[cfg(test)]

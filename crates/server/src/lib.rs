@@ -1982,13 +1982,17 @@ pub async fn dispatch_command(
         } => {
             workspace::set_hopper_completed(config, &workspace_key, completed).await;
         }
-        lazybox_ipc::Command::Snooze { session_key, until } => {
+        lazybox_ipc::Command::Snooze {
+            session_key,
+            until,
+            wake,
+        } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            workspace::set_snooze(config, &key, Some(until)).await;
+            workspace::set_snooze(config, &key, Some(until), wake).await;
         }
         lazybox_ipc::Command::Unsnooze { session_key } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            workspace::set_snooze(config, &key, None).await;
+            workspace::set_snooze(config, &key, None, None).await;
         }
         lazybox_ipc::Command::SetNotes { session_key, notes } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());

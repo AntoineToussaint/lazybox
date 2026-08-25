@@ -297,7 +297,11 @@ impl<T: TerminalAdapter> Model<T> {
                 let until = chrono::Utc::now()
                     + chrono::Duration::from_std(duration)
                         .unwrap_or_else(|_| chrono::Duration::days(365));
-                vec![IpcCommand::Snooze { session_key, until }]
+                vec![IpcCommand::Snooze {
+                    session_key,
+                    until,
+                    wake: None,
+                }]
             }
             Intent::MarkAllRead { session_key } => {
                 vec![IpcCommand::MarkRead { session_key }]
@@ -1728,6 +1732,57 @@ impl<T: TerminalAdapter> Model<T> {
                     crate::intent::resolve_collapse_into_pr(issue_workspace.as_ref(), &workspaces);
                 cmds.extend(self.execute_dispatch_intent(intent, issue_workspace.as_ref()));
             }
+            Action::SaveView => {
+                self.mount_save_view_input();
+            }
+            Action::OpenViews => {
+                let views = lazybox_config::Config::load()
+                    .map(|c| c.ui.views)
+                    .unwrap_or_default();
+                if views.is_empty() {
+                    self.flash_hint(
+                        "no saved views yet — set up filters and press x v".to_string(),
+                    );
+                } else {
+                    self.mount_view_picker(views);
+                }
+            }
+            Action::AddRepo => {
+                use crate::realm::components::input::Input;
+                if !matches!(self.modal_stack.last(), Some(super::Id::AddRepoName)) {
+                    let modal = Input::new("Subscribe a GitHub repo (owner/repo)")
+                        .title("Add repo")
+                        .with_validator(|s: &str| {
+                            s.trim()
+                                .split_once('/')
+                                .is_some_and(|(o, r)| !o.is_empty() && !r.is_empty())
+                        });
+                    self.mount_modal(super::Id::AddRepoName, modal);
+                }
+            }
+            Action::SourceSettings => {
+                // Level picker for the source at/above the cursor
+                // (#scale): a Space header targets the Space; anywhere
+                // in a repo group targets the repo (mirrors the
+                // MoveToSpace cursor contract).
+                let source_key = if self.sidebar.cursor_on_space_header() {
+                    self.sidebar.cursor_space().map(|s| format!("space:{s}"))
+                } else {
+                    self.sidebar.cursor_repo()
+                };
+                match source_key {
+                    Some(key) => {
+                        let level = self
+                            .sidebar
+                            .source_attention_for(&key)
+                            .effective_level(chrono::Utc::now());
+                        self.mount_source_level_picker(key, level);
+                    }
+                    None => self.flash_info(
+                        "source attention: move onto a repo or Space first".to_string(),
+                    ),
+                }
+            }
             Action::ToggleSnooze => {
                 // When the workspace is already snoozed, `z` toggles
                 // it off (no picker — that'd be friction). When NOT
@@ -1735,6 +1790,30 @@ impl<T: TerminalAdapter> Model<T> {
                 // pick something meaningful instead of paying the
                 // YAML default every time.
                 let now = chrono::Utc::now();
+                // Header-contextual (#scale): `z` on a Repo/Space
+                // header snoozes/mutes the whole SOURCE — one mental
+                // model at every scale. On an already-demoted header
+                // the same key wakes it, mirroring the workspace
+                // toggle contract.
+                if !self.bulk_active() {
+                    let source_key = if self.sidebar.cursor_on_repo_header() {
+                        self.sidebar.cursor_repo()
+                    } else if self.sidebar.cursor_on_space_header() {
+                        self.sidebar.cursor_space().map(|s| format!("space:{s}"))
+                    } else {
+                        None
+                    };
+                    if let Some(key) = source_key {
+                        let att = self.sidebar.source_attention_for(&key);
+                        if att.effective_level(now) == lazybox_config::SourceAttentionLevel::Muted {
+                            self.sidebar.set_source_attention(&key, Default::default());
+                            self.flash_info(format!("{key} unmuted"));
+                        } else {
+                            self.mount_source_snooze_picker(key, att.level);
+                        }
+                        return cmds;
+                    }
+                }
                 // Bulk (#899): toggle each selected row against its own
                 // current state — snooze the awake, wake the snoozed —
                 // so a mixed selection resolves per-row without a picker.
@@ -1747,7 +1826,11 @@ impl<T: TerminalAdapter> Model<T> {
                         Some(if ws.is_snoozed(now) {
                             IpcCommand::Unsnooze { session_key }
                         } else {
-                            IpcCommand::Snooze { session_key, until }
+                            IpcCommand::Snooze {
+                                session_key,
+                                until,
+                                wake: None,
+                            }
                         })
                     });
                 }

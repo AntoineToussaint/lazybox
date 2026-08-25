@@ -627,7 +627,7 @@ async fn client_drop_terminates_daemon_loop() {
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct IsolatedHome {
-    _guard: std::sync::MutexGuard<'static, ()>,
+    _guard: Option<std::sync::MutexGuard<'static, ()>>,
     _tmp: tempfile::TempDir,
     prev: Option<std::ffi::OsString>,
 }
@@ -635,9 +635,21 @@ struct IsolatedHome {
 impl IsolatedHome {
     fn new() -> Self {
         let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        Self::with_guard(Some(guard))
+    }
+
+    /// For a caller that already holds [`ENV_LOCK`] across a larger
+    /// scope (the isolation-guard self-test): same behavior, no
+    /// re-lock (the mutex is not reentrant).
+    fn new_unlocked() -> Self {
+        Self::with_guard(None)
+    }
+
+    fn with_guard(guard: Option<std::sync::MutexGuard<'static, ()>>) -> Self {
         let tmp = tempfile::TempDir::new().unwrap();
         let prev = std::env::var_os("LAZYBOX_HOME");
-        // SAFETY: mutation is serialized by ENV_LOCK; restored on drop.
+        // SAFETY: mutation is serialized by ENV_LOCK (held by this
+        // guard or by the caller); restored on drop.
         unsafe { std::env::set_var("LAZYBOX_HOME", tmp.path()) };
         Self {
             _guard: guard,
@@ -1625,11 +1637,19 @@ async fn injected_paste_and_submit_are_atomic_against_user_input() {
 /// Verifies that concurrent tests don't interfere when modifying LAZYBOX_HOME.
 #[test]
 fn env_isolation_guard_restores_state() {
+    // Hold ENV_LOCK for the WHOLE test: the pre/post assertions are
+    // only meaningful while no other test's `IsolatedHome` can
+    // interleave. Reading `original` and asserting BETWEEN guard
+    // drops used to happen unlocked — another env test could set
+    // LAZYBOX_HOME in exactly that window, and once the daemon's
+    // per-tick config loads shifted test scheduling (#scale) the race
+    // fired deterministically.
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let original = std::env::var_os("LAZYBOX_HOME");
 
     // Scope 1: set to temp dir 1
     {
-        let _guard1 = IsolatedHome::new();
+        let _guard1 = IsolatedHome::new_unlocked();
         let temp1 = std::env::var_os("LAZYBOX_HOME").expect("should be set");
         let path1 = std::path::PathBuf::from(&temp1);
         assert!(path1.exists(), "temp dir 1 should exist");
@@ -1654,7 +1674,7 @@ fn env_isolation_guard_restores_state() {
 
     // Scope 2: independent isolation with no interference
     {
-        let _guard2 = IsolatedHome::new();
+        let _guard2 = IsolatedHome::new_unlocked();
         let temp2 = std::env::var_os("LAZYBOX_HOME").expect("should be set again");
         let path2 = std::path::PathBuf::from(&temp2);
         assert!(path2.exists(), "temp dir 2 should exist");

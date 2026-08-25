@@ -2805,6 +2805,17 @@ pub fn contextual_label(
                 default
             }
         }
+        // `z` toggles: on a snoozed row it WAKES. Naming that in the
+        // footer / which-key popup is what makes un-snoozing
+        // discoverable (#scale — there was no visible wake affordance
+        // anywhere; users had to know the toggle).
+        Action::ToggleSnooze => {
+            if workspace.is_some_and(|w| w.is_snoozed(chrono::Utc::now())) {
+                "wake"
+            } else {
+                default
+            }
+        }
         // Name the resolution the keypress would actually take so the
         // which-key popup / footer don't advertise an ambiguous verb.
         Action::DeleteOrClose => match workspace {

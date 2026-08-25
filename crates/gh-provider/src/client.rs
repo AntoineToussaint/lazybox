@@ -3435,7 +3435,11 @@ impl GhClient {
         const PER_REPO_CONCURRENCY: usize = 5;
         let per_repo_fut = stream::iter(repos.iter().cloned())
             .map(|repo| async move {
-                let query = format!("is:open is:pr repo:{repo} archived:false");
+                let watched = self
+                    .watch_repos
+                    .iter()
+                    .any(|w| w.eq_ignore_ascii_case(&repo));
+                let query = round_robin_repo_query(&repo, &self.user, watched);
                 let result = self.fetch_pr_single_query("round-robin-repo", query).await;
                 (repo, result)
             })
@@ -5652,11 +5656,49 @@ fn gql_errors_all_not_visible(errors: &[graphql::GqlError]) -> bool {
     !errors.is_empty() && errors.iter().all(graphql::GqlError::is_not_visible)
 }
 
+/// Search query for one repo picked by the round-robin rotation.
+///
+/// Non-watched repos are scoped to the viewer's involvement: the
+/// unscoped query downloaded a busy monorepo's ENTIRE open-PR set (up
+/// to 20 sequential pages / 500 PRs) every time the rotation picked
+/// it, only for `filter_github_tasks_with_watches` to discard every PR
+/// the user has no role in — the same `involves:` scope the global
+/// sweep's primary branch already uses. (GitHub's `involves:` misses
+/// review-requested; the reviewer companion branch in
+/// `fetch_prs_for_repos` covers that, exactly as it does for the
+/// global sweep.) Watched repos stay unscoped: their whole point is
+/// all open PRs regardless of involvement.
+fn round_robin_repo_query(repo: &str, user: &str, watched: bool) -> String {
+    if watched {
+        format!("is:open is:pr repo:{repo} archived:false")
+    } else {
+        format!("is:open is:pr repo:{repo} archived:false involves:{user}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    /// Regression (#scale): the round-robin per-repo query must scope
+    /// non-watched repos to the viewer — an unscoped query re-downloads
+    /// a busy repo's whole open-PR set (≤500 PRs) per rotation pick,
+    /// then discards the non-involved ones post-fetch. Watched repos
+    /// keep the unscoped query on purpose.
+    #[test]
+    fn round_robin_query_scopes_unwatched_repos_to_involvement() {
+        assert_eq!(
+            round_robin_repo_query("o/busy", "me", false),
+            "is:open is:pr repo:o/busy archived:false involves:me",
+        );
+        assert_eq!(
+            round_robin_repo_query("o/watched", "me", true),
+            "is:open is:pr repo:o/watched archived:false",
+            "watched repos want ALL open PRs, involvement-scoped or not",
+        );
+    }
 
     fn logins(names: &[&str]) -> std::collections::BTreeSet<String> {
         names.iter().map(|s| s.to_string()).collect()

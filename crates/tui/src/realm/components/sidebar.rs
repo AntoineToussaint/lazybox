@@ -528,6 +528,12 @@ impl Sidebar {
         );
     }
 
+    /// See `Sidebar::seed_lens` — the persisted `ui.last_lens`
+    /// applied at startup by `Model::apply_client_config` (#scale).
+    pub fn seed_lens(&mut self, lens: &lazybox_config::LensSection) {
+        self.inner.seed_lens(lens);
+    }
+
     /// See `Sidebar::set_snapshot_prune` — disabled by
     /// `Model::with_remote` so an attach client never prunes local stars
     /// against another machine's workspace set (#1244).

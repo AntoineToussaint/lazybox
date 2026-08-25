@@ -1057,6 +1057,35 @@ impl Sidebar {
         self.config_seeded = true;
     }
 
+    /// Seed the persisted `ui.last_lens` (filters / sort / mailbox) at
+    /// startup (#scale) — the write-side counterpart is
+    /// `persist_lens`. Unknown tokens are dropped silently: a
+    /// stale lens degrades, it never wedges boot. Fields are set
+    /// directly (not via `set_filter_entries` / `cycle_*`) so seeding
+    /// can't echo a persist of the very value just loaded.
+    pub fn seed_lens(&mut self, lens: &lazybox_config::LensSection) {
+        self.filters.replace_entries(
+            lens.filters
+                .iter()
+                .filter_map(|t| FilterEntry::from_token(t)),
+        );
+        if let Some(sort) = lens
+            .sort
+            .as_deref()
+            .and_then(lazybox_tui_core::inbox::SortMode::from_chip_label)
+        {
+            self.sort_mode = sort;
+        }
+        if let Some(mailbox) = lens
+            .mailbox
+            .as_deref()
+            .and_then(lazybox_tui_core::inbox::Mailbox::from_chip_label)
+        {
+            self.mailbox = mailbox;
+        }
+        self.reset_cursor_and_recompute();
+    }
+
     /// Disable the snapshot-time stale-star prune. Called (via the realm
     /// wrapper) by `Model::with_remote`: an attach client's daemon
     /// snapshot describes another machine's workspaces, so a local star
@@ -1542,6 +1571,7 @@ impl Sidebar {
         let filter_hides = !self.filters.accepts(&FilterCtx {
             w: workspace,
             agents: &self.agents,
+            now: self.now(),
         });
         let search_hides = self.search.as_ref().is_some_and(|search| {
             !search.query.is_empty()
@@ -1883,6 +1913,7 @@ impl Sidebar {
     pub fn cycle_sort_mode(&mut self) -> SortMode {
         self.sort_mode = self.sort_mode.next();
         self.reset_cursor_and_recompute();
+        self.persist_lens();
         self.sort_mode
     }
 
@@ -1893,13 +1924,51 @@ impl Sidebar {
     pub fn set_filters(&mut self, filters: impl IntoIterator<Item = Filter>) {
         self.filters.replace(filters);
         self.reset_cursor_and_recompute();
+        self.persist_lens();
     }
 
     /// Replace the active filters from picker entries (fixed predicates
-    /// plus the value-driven label / Linear-state axes).
+    /// plus the value-driven label / Linear-state / person axes).
     pub fn set_filter_entries(&mut self, entries: impl IntoIterator<Item = FilterEntry>) {
         self.filters.replace_entries(entries);
         self.reset_cursor_and_recompute();
+        self.persist_lens();
+    }
+
+    /// The current lens (filters / sort / mailbox) as config tokens.
+    fn current_lens(&self) -> lazybox_config::LensSection {
+        let mut filters: Vec<String> = self.filters.iter().map(|f| f.label().to_string()).collect();
+        filters.extend(self.filters.labels().iter().map(|n| format!("label:{n}")));
+        filters.extend(
+            self.filters
+                .linear_states()
+                .iter()
+                .map(|n| format!("linear-state:{n}")),
+        );
+        filters.extend(self.filters.people().iter().map(|l| format!("person:{l}")));
+        lazybox_config::LensSection {
+            filters,
+            sort: Some(self.sort_mode.chip_label().to_string()),
+            mailbox: Some(self.mailbox.chip_label().to_string()),
+        }
+    }
+
+    /// Persist the lens after a user-driven change (#scale: filters,
+    /// sort, and mailbox used to evaporate on restart). Whole-value
+    /// assignment like `ui.last_space` — the lens has a single writer
+    /// (the user's own action in this client), so the `mutate_ui_list`
+    /// read-modify-write machinery isn't needed. Seed-gated: before
+    /// `apply_config` has run, a lens change is programmatic (boot,
+    /// tests building a bare sidebar), not user intent — and unit
+    /// tests exercising `cycle_sort_mode` / `set_filters` without a
+    /// sandboxed `LAZYBOX_HOME` must never enqueue a write against the
+    /// developer's real config.yaml.
+    fn persist_lens(&self) {
+        if !self.config_seeded {
+            return;
+        }
+        let lens = self.current_lens();
+        lazybox_config::Config::save_with_async(move |c| c.ui.last_lens = Some(lens));
     }
 
     /// Every row the `f` filter menu offers, with its match count: the
@@ -1926,6 +1995,7 @@ impl Sidebar {
                         f.matches(&FilterCtx {
                             w,
                             agents: &self.agents,
+                            now,
                         })
                     })
                     .count();
@@ -1933,11 +2003,37 @@ impl Sidebar {
             })
             .collect();
 
+        // The `snoozed` count over Inbox candidates is always 0 — the
+        // mailbox excludes snoozed rows, which is exactly what the
+        // snoozed lens un-hides. Count what toggling would SURFACE
+        // (every currently-snoozed workspace), matching the menu's
+        // "what would this toggle show" contract.
+        if self.mailbox == Mailbox::Inbox
+            && let Some(row) = out
+                .iter_mut()
+                .find(|(e, _)| matches!(e, FilterEntry::Predicate(Filter::Snoozed)))
+        {
+            row.1 = self
+                .workspaces
+                .values()
+                .filter(|w| w.is_snoozed(now))
+                .count();
+        }
+
         // Distinct label names across candidates' primary tasks, counted
         // per workspace (a workspace with the label once, not per label
         // instance). BTreeMap keeps the rows in a stable alpha order.
         let mut labels: BTreeMap<String, usize> = BTreeMap::new();
         let mut states: BTreeMap<String, usize> = BTreeMap::new();
+        // People axis (#scale): distinct logins across the candidates'
+        // primary tasks — author + requested reviewers + submitted
+        // reviewers + assignees, the same role-union
+        // `filter::task_involves` matches against — counted per
+        // workspace. Bots (a submitted review's `is_bot`, or the
+        // GitHub `…[bot]` login convention) collect separately so
+        // they sort after every human in the menu.
+        let mut people: BTreeMap<String, usize> = BTreeMap::new();
+        let mut bots: BTreeMap<String, usize> = BTreeMap::new();
         for w in &candidates {
             let Some(task) = w.primary_task() else {
                 continue;
@@ -1954,6 +2050,28 @@ impl Sidebar {
             if let Some(state) = &task.state_label {
                 *states.entry(state.clone()).or_default() += 1;
             }
+            let mut seen_people = std::collections::BTreeSet::new();
+            let mut tally = |login: &str, is_bot: bool| {
+                if login.is_empty() || !seen_people.insert(login.to_string()) {
+                    return;
+                }
+                let bucket = if is_bot || login.ends_with("[bot]") {
+                    &mut bots
+                } else {
+                    &mut people
+                };
+                *bucket.entry(login.to_string()).or_default() += 1;
+            };
+            tally(&task.author, false);
+            for r in &task.reviewers {
+                tally(r, false);
+            }
+            for r in &task.reviews {
+                tally(&r.login, r.is_bot);
+            }
+            for a in &task.assignees {
+                tally(a, false);
+            }
         }
         // Always surface currently-active values, even when no candidate
         // carries them right now (count 0). Otherwise an active
@@ -1968,11 +2086,39 @@ impl Sidebar {
         for name in self.filters.linear_states() {
             states.entry(name.clone()).or_insert(0);
         }
+        for login in self.filters.people() {
+            if !people.contains_key(login) && !bots.contains_key(login) {
+                people.insert(login.clone(), 0);
+            }
+        }
+        // A login can straddle buckets across workspaces (tallied as a
+        // requested reviewer in one, flagged `is_bot` by a submitted
+        // review in another) — fold the human count into the bot row so
+        // one login never renders twice.
+        for (login, count) in std::mem::take(&mut people) {
+            if let Some(bot_count) = bots.get_mut(&login) {
+                *bot_count += count;
+            } else {
+                people.insert(login, count);
+            }
+        }
         out.extend(labels.into_iter().map(|(n, c)| (FilterEntry::Label(n), c)));
         out.extend(
             states
                 .into_iter()
                 .map(|(n, c)| (FilterEntry::LinearState(n), c)),
+        );
+        // Humans in alpha order, bots after — a review bot shows up on
+        // most PRs, and a high count must not drown the humans the
+        // People axis exists for.
+        out.extend(
+            people
+                .into_iter()
+                .map(|(login, c)| (FilterEntry::Person(login), c)),
+        );
+        out.extend(
+            bots.into_iter()
+                .map(|(login, c)| (FilterEntry::Person(login), c)),
         );
         out
     }
@@ -1991,6 +2137,7 @@ impl Sidebar {
             Mailbox::Snoozed => Mailbox::Inbox,
         };
         self.reset_cursor_and_recompute();
+        self.persist_lens();
         self.mailbox
     }
 

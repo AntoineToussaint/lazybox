@@ -24,7 +24,9 @@ pub use attention::{
     AttentionSignal, INACTIVE_GRACE, attention_gate, mailbox_membership,
     workspace_attention_signals, workspace_needs_attention,
 };
-pub use filter::{Filter, FilterAxis, FilterCtx, FilterEntry, FilterMenuItem, FilterSet};
+pub use filter::{
+    Filter, FilterAxis, FilterCtx, FilterEntry, FilterMenuItem, FilterSet, task_involves,
+};
 pub use model::{
     Mailbox, RepoSummary, SearchState, SortMode, TicketTreeMeta, VisibleRow, WorkspaceKind,
     role_rank,
@@ -323,12 +325,20 @@ pub fn rename_space(
 pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     // Step 1: filter by mailbox membership. Uses the cell-tested
     // `mailbox_membership` predicate so snooze/merged/empty cases
-    // can't drift from their unit tests.
+    // can't drift from their unit tests. The snoozed lens (#scale)
+    // widens Inbox membership: with `Filter::Snoozed` active, snoozed
+    // rows are admitted here so the State axis can then select them —
+    // showing every snoozed workspace in place (with its wake time)
+    // instead of two mailbox cycles away. Filters otherwise only
+    // narrow, so this is the one membership decision a filter makes.
+    let snoozed_lens =
+        input.filters.has(filter::Filter::Snoozed) && input.mailbox == Mailbox::Inbox;
     let mailbox_rows: Vec<(&SessionKey, &Workspace)> = input
         .workspaces
         .iter()
         .filter(|(_, w)| {
             mailbox_membership(w, input.mailbox, input.now, input.show_inactive_in_inbox)
+                || (snoozed_lens && w.is_snoozed(input.now))
         })
         .collect();
     let mut filtered: Vec<(&SessionKey, &Workspace)> = mailbox_rows
@@ -338,6 +348,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
             input.filters.accepts(&FilterCtx {
                 w,
                 agents: input.agents,
+                now: input.now,
             })
         })
         // Free-text search. A scoped search (`scope: Some`) filters
@@ -2660,5 +2671,65 @@ mod contract_tests {
         assert!(FilterAxis::decl(&cfg).contains("FilterAxis"));
         assert!(FilterMenuItem::decl(&cfg).contains("FilterMenuItem"));
         assert!(RepoSummary::decl(&cfg).contains("RepoSummary"));
+    }
+
+    /// The snoozed lens (#scale): `Filter::Snoozed` in the active set
+    /// widens Inbox membership to admit currently-snoozed rows — and
+    /// the State axis then selects exactly them. Without the filter,
+    /// snooze still always wins (row hidden from Inbox). An EXPIRED
+    /// snooze never matches the lens.
+    #[test]
+    fn snoozed_lens_shows_snoozed_rows_in_the_inbox() {
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+
+        let mut snoozed = workspace_with_task("snoozed", Some("repo"), 5);
+        snoozed.snoozed_until = Some(fixed_time() + Duration::hours(4));
+        let awake = workspace_with_task("awake", Some("repo"), 3);
+        let mut expired = workspace_with_task("expired", Some("repo"), 8);
+        expired.snoozed_until = Some(fixed_time() - Duration::hours(1));
+        let ws: HashMap<SessionKey, Workspace> = [
+            (SessionKey::from("snoozed"), snoozed),
+            (SessionKey::from("awake"), awake),
+            (SessionKey::from("expired"), expired),
+        ]
+        .into();
+
+        let keys = |out: &ComputeOutcome| -> Vec<String> {
+            out.visible
+                .iter()
+                .filter_map(|r| match r {
+                    VisibleRow::Workspace(k) => Some(k.to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Default Inbox: snooze always wins; expired snooze is awake.
+        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
+        let visible = keys(&out);
+        assert!(!visible.contains(&"snoozed".to_string()));
+        assert!(visible.contains(&"awake".to_string()));
+        assert!(visible.contains(&"expired".to_string()));
+
+        // Snoozed lens: exactly the currently-snoozed rows.
+        let mut lens = filter::FilterSet::new();
+        lens.toggle(filter::Filter::Snoozed);
+        let mut input = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        input.filters = &lens;
+        let out = compute_visible(input);
+        let visible = keys(&out);
+        assert!(visible.contains(&"snoozed".to_string()));
+        assert!(
+            !visible.contains(&"awake".to_string()),
+            "the State axis narrows to snoozed rows"
+        );
+        assert!(
+            !visible.contains(&"expired".to_string()),
+            "an expired snooze must read as awake, not match the lens"
+        );
     }
 }

@@ -25913,3 +25913,199 @@ mod focus_layout_tests {
         });
     }
 }
+
+mod pr_details_debounce_tests {
+    //! Regression (#scale): the lazy `FetchPrDetails` back-fill must not
+    //! fire per row *crossed* while scrolling. `sync_panes` used to send
+    //! one Interactive-priority GraphQL request the instant the cursor
+    //! landed on any unfetched PR row, so holding `j` through a crowded
+    //! sidebar queued hundreds of requests, self-throttled against the
+    //! daemon's request pacer, and could park the whole GitHub source.
+    //! The trigger is now a dwell debounce: `sync_panes` only ARMS a
+    //! candidate; `tick_pr_details` fires it after the cursor has rested
+    //! on the same row for `PR_DETAILS_DEBOUNCE`.
+    use super::super::Model;
+    use super::super::events::PR_DETAILS_DEBOUNCE;
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::{Client, Command as IpcCommand, EVENT_CHANNEL_CAPACITY, Event as IpcEvent};
+    use tokio::sync::mpsc;
+    use tuirealm::ratatui::layout::Size;
+
+    fn model_with_cmd_rx() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        mpsc::UnboundedReceiver<IpcCommand>,
+    ) {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let model = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        (model, cmd_rx)
+    }
+
+    /// Minimal PR workspace: a `/pull/` URL routes the task into the
+    /// workspace's `pr` slot, which is what arms the lazy fetch.
+    fn pr_workspace(key: &str) -> lazybox_core::Workspace {
+        use chrono::Utc;
+        let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
+        let task = lazybox_core::Task {
+            author: String::new(),
+            id: lazybox_core::TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: format!("task: {key}"),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/{path}/pull/{num}"),
+            repo: Some("owner/repo".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            merge_blocked: false,
+            approval_policy: Default::default(),
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            kind: None,
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            parent: None,
+            priority: None,
+            state_label: None,
+        };
+        lazybox_core::Workspace::from_task(task, Utc::now())
+    }
+
+    fn detail_fetches(rx: &mut mpsc::UnboundedReceiver<IpcCommand>) -> Vec<String> {
+        let mut keys = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            if let IpcCommand::FetchPrDetails { workspace_key } = cmd {
+                keys.push(workspace_key.as_str().to_string());
+            }
+        }
+        keys
+    }
+
+    /// Force the armed candidate past the dwell threshold, as the other
+    /// time-based model tests do by backdating their `Instant` fields.
+    fn backdate_pending(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) {
+        m.pending_pr_details = m
+            .pending_pr_details
+            .take()
+            .map(|(key, armed)| (key, armed - (PR_DETAILS_DEBOUNCE + PR_DETAILS_DEBOUNCE)));
+    }
+
+    fn seeded_model() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        mpsc::UnboundedReceiver<IpcCommand>,
+        Vec<SessionKey>,
+    ) {
+        let (mut m, cmd_rx) = model_with_cmd_rx();
+        let mut keys = Vec::new();
+        for n in 1..=3 {
+            let ws = pr_workspace(&format!("owner/repo#{n}"));
+            keys.push(SessionKey::from(&ws.key));
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        }
+        (m, cmd_rx, keys)
+    }
+
+    /// Crossing rows sends nothing: each selection change re-arms the
+    /// candidate (cancelling the previous row's), and without dwell the
+    /// tick never fires.
+    #[test]
+    fn scrolling_across_pr_rows_sends_no_detail_fetch() {
+        let (mut m, mut cmd_rx, keys) = seeded_model();
+        for key in &keys {
+            assert!(m.sidebar.focus_workspace_key(key), "row exists");
+            m.sync_panes();
+            m.tick_pr_details();
+        }
+        assert!(
+            detail_fetches(&mut cmd_rx).is_empty(),
+            "no FetchPrDetails may fire while the cursor is moving"
+        );
+        assert!(
+            m.pending_pr_details
+                .as_ref()
+                .is_some_and(|(k, _)| SessionKey::from(k) == keys[2]),
+            "the last row crossed stays armed for the dwell fire"
+        );
+    }
+
+    /// Resting on a row fires exactly one fetch for that row, and only
+    /// once — the fetched set dedupes any later re-visit.
+    #[test]
+    fn dwell_fires_once_for_the_rested_row() {
+        let (mut m, mut cmd_rx, keys) = seeded_model();
+        for key in &keys {
+            assert!(m.sidebar.focus_workspace_key(key), "row exists");
+            m.sync_panes();
+        }
+        backdate_pending(&mut m);
+        m.tick_pr_details();
+        assert_eq!(
+            detail_fetches(&mut cmd_rx),
+            vec![keys[2].to_string()],
+            "exactly one fetch, for the row the cursor rests on"
+        );
+        assert!(m.pending_pr_details.is_none(), "candidate is consumed");
+
+        // Re-visiting the fetched row must not re-arm.
+        assert!(m.sidebar.focus_workspace_key(&keys[0]), "row exists");
+        m.sync_panes();
+        assert!(m.sidebar.focus_workspace_key(&keys[2]), "row exists");
+        m.sync_panes();
+        assert!(
+            m.pending_pr_details
+                .as_ref()
+                .is_none_or(|(k, _)| SessionKey::from(k) != keys[2]),
+            "a fetched workspace never re-arms"
+        );
+    }
+
+    /// A workspace removed while its fetch is armed-but-unfired must not
+    /// fetch against the dead key on the next tick.
+    #[test]
+    fn removed_workspace_cancels_armed_fetch() {
+        let (mut m, mut cmd_rx, keys) = seeded_model();
+        assert!(m.sidebar.focus_workspace_key(&keys[1]), "row exists");
+        m.sync_panes();
+        assert!(m.pending_pr_details.is_some(), "candidate armed");
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(lazybox_core::WorkspaceKey::new(
+            keys[1].to_string(),
+        )));
+        // The removal re-lands the cursor on a NEIGHBORING live row,
+        // which may legitimately arm (and later fire) a fetch for that
+        // row — the invariant is only that the DEAD key never fetches.
+        backdate_pending(&mut m);
+        m.tick_pr_details();
+        assert!(
+            !detail_fetches(&mut cmd_rx).contains(&keys[1].to_string()),
+            "no fetch may fire for a removed workspace"
+        );
+    }
+}

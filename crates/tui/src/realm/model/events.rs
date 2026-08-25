@@ -23,6 +23,14 @@ const ACTION_DROPPED_NOTE: &str =
 
 const MOUSE_CAPTURE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How long the cursor must rest on an unfetched PR row before the lazy
+/// `FetchPrDetails` back-fill fires. Long enough that holding `j`
+/// through a crowded sidebar (row-to-row well under 100ms at key-repeat
+/// rate) never fires for the rows crossed; short enough to be
+/// imperceptible on the row the user actually stops on. The run loop's
+/// idle heartbeat (16ms) bounds the firing latency past the threshold.
+pub(super) const PR_DETAILS_DEBOUNCE: Duration = Duration::from_millis(250);
+
 impl<T: TerminalAdapter> Model<T> {
     /// Flush all client-side terminal sequence debts through bounded batch
     /// commands. Snapshot recovery can mark hundreds of terminals at once;
@@ -1731,6 +1739,15 @@ impl<T: TerminalAdapter> Model<T> {
             // PR/issue that no longer exists — dismiss it too.
             self.dismiss_modals_for_removed_workspace(key);
             self.pr_details_fetched.remove(key);
+            // An armed-but-unfired lazy fetch for the removed row would
+            // otherwise fire against a dead workspace on the next tick.
+            if self
+                .pending_pr_details
+                .as_ref()
+                .is_some_and(|(pending, _)| pending == key)
+            {
+                self.pending_pr_details = None;
+            }
             // Drop the confirmed-merge latch — the row is gone, so a
             // stale entry could only leak or mis-patch a re-added key.
             self.merge_confirmed.remove(key);
@@ -2930,6 +2947,42 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// Fire the armed lazy PR-details fetch once the cursor has dwelled
+    /// on the same row for `PR_DETAILS_DEBOUNCE`. Armed by
+    /// `sync_panes` when the selection lands on an unfetched PR
+    /// workspace; moving the cursor re-arms for the new row (which
+    /// cancels the old candidate), so holding `j` through a crowded
+    /// sidebar sends at most one request — for the row the cursor
+    /// finally rests on. Called once per run-loop iteration; a cheap
+    /// no-op unless a candidate is armed.
+    pub fn tick_pr_details(&mut self) {
+        let Some((key, armed_at)) = self.pending_pr_details.as_ref() else {
+            return;
+        };
+        if armed_at.elapsed() < PR_DETAILS_DEBOUNCE {
+            return;
+        }
+        // Stale-candidate guard: only fire while the armed row is still
+        // the selection AND still an unfetched PR workspace. (Selection
+        // changes normally re-arm via `sync_panes`, but a removal or a
+        // PR-less re-upsert can invalidate the candidate in place.)
+        let still_current = self
+            .sidebar
+            .selected_workspace()
+            .is_some_and(|w| w.key == *key && w.pr.is_some())
+            && !self.pr_details_fetched.contains(key);
+        let (key, _) = self.pending_pr_details.take().expect("checked above");
+        if !still_current {
+            return;
+        }
+        self.pr_details_fetched.insert(key.clone());
+        tracing::info!(
+            workspace_key = %key.as_str(),
+            "lazy-fetch: requesting PR details",
+        );
+        self.send_cmd(IpcCommand::FetchPrDetails { workspace_key: key });
+    }
+
     /// Clear the spawn spinner once a terminal for its target exists in
     /// the live terminal set. The spinner is a *projection* of that set,
     /// not a latch waiting on one `TerminalSpawned`/`TerminalFocusRequested`
@@ -3029,22 +3082,31 @@ impl<T: TerminalAdapter> Model<T> {
         }
         // Lazy-fetch trigger: when the focused workspace has a PR
         // and we haven't pulled its review-thread activity this
-        // session, kick off the back-fill. The dedupe set prevents
-        // re-firing on every key press / poll event for the same
-        // workspace; `WorkspaceRemoved` clears the entry so a
+        // session, ARM the back-fill — [`Self::tick_pr_details`]
+        // fires it only after the cursor dwells on the row for
+        // `PR_DETAILS_DEBOUNCE`. Firing here directly meant one
+        // Interactive-priority GraphQL request per row crossed while
+        // holding `j`, which self-throttled against the daemon's
+        // request pacer and could park the whole GitHub source.
+        // The dedupe set prevents re-arming a workspace we've
+        // already fetched; `WorkspaceRemoved` clears the entry so a
         // re-added workspace gets a fresh fetch.
-        if let Some(w) = workspace.as_ref()
-            && w.pr.is_some()
-            && !self.pr_details_fetched.contains(&w.key)
-        {
-            self.pr_details_fetched.insert(w.key.clone());
-            tracing::info!(
-                workspace_key = %w.key.as_str(),
-                "lazy-fetch: requesting PR details",
-            );
-            self.send_cmd(IpcCommand::FetchPrDetails {
-                workspace_key: w.key.clone(),
-            });
+        match workspace.as_ref() {
+            Some(w) if w.pr.is_some() && !self.pr_details_fetched.contains(&w.key) => {
+                // Keep the original arm time while the selection is
+                // unchanged: this body re-runs on every daemon event
+                // (pane revision bump), and resetting the dwell clock
+                // each time would starve the fetch under a steady
+                // event stream.
+                let already_armed = self
+                    .pending_pr_details
+                    .as_ref()
+                    .is_some_and(|(key, _)| *key == w.key);
+                if !already_armed {
+                    self.pending_pr_details = Some((w.key.clone(), std::time::Instant::now()));
+                }
+            }
+            _ => self.pending_pr_details = None,
         }
         // Also forward the workspace's persisted SessionLayout to
         // the terminal stack so the user's tile arrangement

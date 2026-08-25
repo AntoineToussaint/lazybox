@@ -1867,6 +1867,14 @@ pub struct Model<T: TerminalAdapter> {
     /// Cleared when a workspace is removed (`Event::WorkspaceRemoved`)
     /// so a re-added workspace gets a fresh fetch.
     pr_details_fetched: std::collections::HashSet<lazybox_core::WorkspaceKey>,
+    /// Dwell debounce for the lazy PR-details fetch: the candidate armed
+    /// by [`Self::sync_panes`] when the cursor lands on an unfetched PR
+    /// row, fired by [`Self::tick_pr_details`] only after the cursor has
+    /// rested there for [`events::PR_DETAILS_DEBOUNCE`]. Without this,
+    /// holding `j` through a crowded sidebar fired one Interactive
+    /// GraphQL request per row crossed — enough to trip the client-side
+    /// rate pacer and park the whole GitHub source.
+    pending_pr_details: Option<(lazybox_core::WorkspaceKey, std::time::Instant)>,
     /// Workspace keys whose PR GitHub confirmed as merged (via
     /// `Command::MergePr` → `Event::PrMerged`) but whose next poll hasn't
     /// caught up yet. Held Model-side — not in a single pane — because the
@@ -2424,6 +2432,7 @@ impl<T: TerminalAdapter> Model<T> {
             auto_fix_enabled: lazybox_core::AutoFixSettings::default().enabled,
             shell_command_config: None,
             pr_details_fetched: std::collections::HashSet::new(),
+            pending_pr_details: None,
             merge_confirmed: std::collections::HashSet::new(),
             usage_limit_reset: None,
             usage_limit_count: 0,
@@ -2969,6 +2978,13 @@ impl<T: TerminalAdapter> Model<T> {
             &ui_defaults,
             user_config.conventions.clone(),
         );
+        // Re-apply the lens (filters / sort / mailbox) the user was
+        // working in when they last quit (#scale) — must follow
+        // `apply_sidebar_config`, which flips the seed gate that lets
+        // subsequent lens changes persist.
+        if let Some(lens) = user_config.ui.last_lens.as_ref() {
+            self.sidebar.seed_lens(lens);
+        }
         self.apply_auto_fix_config(
             user_config.auto_fix.enabled,
             user_config.auto_fix.opt_out_labels.clone(),

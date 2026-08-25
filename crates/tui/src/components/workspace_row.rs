@@ -1332,6 +1332,31 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 }
 
 fn cell_time(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    // A snoozed row shows WHEN IT WAKES instead of its last activity —
+    // in the Snoozed mailbox and under the `snoozed` filter lens alike
+    // (#scale: the Snoozed mailbox used to be an undifferentiated list;
+    // "wakes in 3d" is the datum that makes un-snoozing an informed
+    // choice). `⏾` (ascii: `z`) marks the number as a wake time, not an
+    // age.
+    if let Some(w) = ctx.workspace
+        && let Some(until) = w.snoozed_until
+        && until > ctx.now
+    {
+        let glyph = if ctx.ascii_glyphs { "z" } else { "⏾" };
+        let text = format!(
+            "{glyph}{}",
+            crate::components::sidebar::relative_time(ctx.now, until)
+        );
+        let style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            Style::default().fg(ctx.theme.text_dim)
+        };
+        return Cell::new(vec![
+            Span::styled(" ", ctx.row_style()),
+            Span::styled(text, style),
+        ]);
+    }
     let Some(task) = ctx.task else {
         return Cell::empty();
     };
@@ -2878,6 +2903,32 @@ mod tests {
     /// column collapses (no pills anywhere) the time still reads as
     /// `<title flex padding>` + 1-cell gap + `5m`, not jammed against
     /// the title's last character.
+    #[test]
+    fn snoozed_row_time_cell_shows_wake_time() {
+        let task = make_task("owner/repo#1", "x");
+        let mut ws = Workspace::from_task(task.clone(), fixed_time());
+        ws.snoozed_until = Some(fixed_time() + chrono::Duration::hours(4));
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        let cell = cell_time(&ctx);
+        let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            text.trim(),
+            "⏾4h",
+            "a snoozed row's time column is its wake time, not its age"
+        );
+
+        // Expired snooze → the normal activity timestamp comes back.
+        ws.snoozed_until = Some(fixed_time() - chrono::Duration::hours(1));
+        let ctx = ctx_for(&ws, &task, &theme);
+        let cell = cell_time(&ctx);
+        let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            !text.contains('⏾'),
+            "an expired snooze must not render a wake glyph"
+        );
+    }
+
     #[test]
     fn cell_time_emits_leading_space() {
         let task = make_task("owner/repo#1", "x");

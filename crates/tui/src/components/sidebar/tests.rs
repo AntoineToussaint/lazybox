@@ -1470,7 +1470,11 @@ mod filter_tests {
         w: &'a Workspace,
         agents: &'a HashMap<SessionKey, lazybox_ipc::AgentState>,
     ) -> FilterCtx<'a> {
-        FilterCtx { w, agents }
+        FilterCtx {
+            w,
+            agents,
+            now: chrono::Utc::now(),
+        }
     }
 
     #[test]
@@ -1485,7 +1489,7 @@ mod filter_tests {
     #[test]
     fn every_filter_has_an_axis_and_appears_in_all() {
         // ALL must list each variant exactly once; drives the menu.
-        assert_eq!(Filter::ALL.len(), 26);
+        assert_eq!(Filter::ALL.len(), 27);
         let mut seen = std::collections::BTreeSet::new();
         for f in Filter::ALL {
             assert!(seen.insert(f), "{f:?} listed twice in Filter::ALL");
@@ -2067,6 +2071,56 @@ mod search_tests {
                  of the #1090 class). Profile prebuild_workspace_lines."
             );
         }
+    }
+
+    /// The line prebuild must only lay out groups intersecting the
+    /// viewport window. The cursor is part of the cache signature, so
+    /// every j/k misses the cache — building the ENTIRE list on each
+    /// miss made cursor motion O(total workspaces) on a crowded
+    /// sidebar. Intersecting groups still build in full so their
+    /// column widths stay stable while scrolling (#22 / #961).
+    #[test]
+    fn prebuild_lays_out_only_viewport_groups() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        for repo in 0..10 {
+            for num in 0..10 {
+                let w = issue_ws_in_repo(
+                    &format!("owner/repo-{repo:02}"),
+                    &format!("{num}"),
+                    &format!("Issue {repo}-{num}"),
+                );
+                sb.workspaces.insert(SessionKey::from(&w.key), w);
+            }
+        }
+        sb.recompute_visible();
+        let theme = crate::theme::current();
+        let now = chrono::Utc::now();
+
+        // Rows: header at 0, then 10 workspace rows per group. A window
+        // cutting into the first group mid-way…
+        let lines = sb.cached_workspace_lines(60, theme, now, true, 0..5);
+        assert!(
+            lines[8].is_some(),
+            "a partially-visible group is laid out in full (stable columns)"
+        );
+        let last_ws = sb
+            .visible
+            .iter()
+            .rposition(|r| matches!(r, VisibleRow::Workspace(_)))
+            .expect("workspace rows exist");
+        assert!(
+            lines[last_ws].is_none(),
+            "groups entirely below the window must not be built"
+        );
+
+        // …and a window at the bottom leaves the top groups unbuilt.
+        let total = sb.visible.len();
+        let lines = sb.cached_workspace_lines(60, theme, now, true, total - 5..total);
+        assert!(lines[8].is_none(), "top group is outside the bottom window");
+        assert!(
+            lines[last_ws].is_some(),
+            "the bottom group must be built for a bottom window"
+        );
     }
 
     fn key(c: char) -> KeyEvent {
@@ -2974,13 +3028,13 @@ mod workspace_removal_cursor_tests {
         let theme = crate::theme::current();
 
         // First frame builds.
-        let _ = sb.cached_workspace_lines(40, theme, now, true);
+        let _ = sb.cached_workspace_lines(40, theme, now, true, 0..40);
         assert_eq!(sb.workspace_line_builds.get(), 1);
 
         // Repeated identical frames — the streaming-redraw path — must hit the
         // cache and never rebuild.
         for _ in 0..10 {
-            let _ = sb.cached_workspace_lines(40, theme, now, true);
+            let _ = sb.cached_workspace_lines(40, theme, now, true, 0..40);
         }
         assert_eq!(
             sb.workspace_line_builds.get(),
@@ -2989,24 +3043,24 @@ mod workspace_removal_cursor_tests {
         );
 
         // A width change re-lays out → one rebuild, then holds.
-        let _ = sb.cached_workspace_lines(30, theme, now, true);
-        let _ = sb.cached_workspace_lines(30, theme, now, true);
+        let _ = sb.cached_workspace_lines(30, theme, now, true, 0..40);
+        let _ = sb.cached_workspace_lines(30, theme, now, true, 0..40);
         assert_eq!(sb.workspace_line_builds.get(), 2);
 
         // A focus change restyles rows → one rebuild.
-        let _ = sb.cached_workspace_lines(30, theme, now, false);
+        let _ = sb.cached_workspace_lines(30, theme, now, false, 0..40);
         assert_eq!(sb.workspace_line_builds.get(), 3);
 
         // Workspace data changing (any daemon upsert recomputes) bumps
         // `data_version` → the cache invalidates.
         sb.recompute_visible();
-        let _ = sb.cached_workspace_lines(30, theme, now, false);
+        let _ = sb.cached_workspace_lines(30, theme, now, false, 0..40);
         assert_eq!(
             sb.workspace_line_builds.get(),
             4,
             "a recompute (workspace-data change) must invalidate the cache"
         );
-        let _ = sb.cached_workspace_lines(30, theme, now, false);
+        let _ = sb.cached_workspace_lines(30, theme, now, false, 0..40);
         assert_eq!(sb.workspace_line_builds.get(), 4);
     }
 

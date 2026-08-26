@@ -645,6 +645,13 @@ impl<T: TerminalAdapter> Model<T> {
             // `r` case: Reply plus the `r <agent>` family both live in the
             // Workspace section, so `r` arms while `r r` falls back to Reply.
             let direct_rank = action_entry.and_then(|e| section_rank(e.section, rfocus));
+            // Arming is target-agnostic by design: a leader arms from the
+            // keyboard layer regardless of whether any continuation is
+            // actionable for the current selection, and the completed
+            // chord no-ops in `dispatch_action` if nothing applies (see
+            // `leader_g_arms_from_sidebar_without_workspace`). So the
+            // rank is read from the unfiltered continuations — the
+            // `availability` gate lives in the popup/dispatch, not here.
             let leader_rank = seq_continuations(&stroke, rfocus, &self.catalog)
                 .iter()
                 .filter(|(_, entry)| action_from_entry(entry).is_some())

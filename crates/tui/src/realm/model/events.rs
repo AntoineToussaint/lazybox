@@ -946,6 +946,27 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
+        // An armed leader's which-key popup — and the row index its
+        // `Enter` fires — is derived from the *selected workspace's*
+        // currently-available actions (#1351). A poll that lands
+        // mid-leader can reshape that list under the fixed
+        // `leader_highlight` index, so `Enter` would fire whatever now
+        // sits at that index rather than the row the user navigated to.
+        // Drop the highlight (not the leader) on any event that can
+        // reshape a workspace or move the selection, so a stale `Enter`
+        // disarms harmlessly and the user re-navigates the fresh list.
+        if self.leader_highlight.is_some()
+            && self.leader.pending().is_some()
+            && matches!(
+                event,
+                IpcEvent::WorkspaceUpserted(_)
+                    | IpcEvent::WorkspaceRemoved(_)
+                    | IpcEvent::WorkspaceOutOfScope { .. }
+                    | IpcEvent::Snapshot { .. }
+            )
+        {
+            self.leader_highlight = None;
+        }
         // Fold structured-run token usage into the per-provider running
         // total the header widget shows (#1059). Side-effect only — it
         // never consumes the event, so it must run before the

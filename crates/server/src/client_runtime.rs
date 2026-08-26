@@ -3,8 +3,6 @@ use lazybox_config::SlackConfig;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
-const RECOVERY_TIMEOUT: Duration = Duration::from_secs(5);
-
 pub struct ClientRuntimeOptions {
     pub poll_interval: Duration,
     pub restore_persisted_sessions: bool,
@@ -17,23 +15,34 @@ pub struct ClientRuntime {
 
 impl ClientRuntime {
     pub async fn start(config: ServerConfig, options: ClientRuntimeOptions) -> Self {
-        if tokio::time::timeout(
-            RECOVERY_TIMEOUT,
-            crate::spawn_handler::recover_sessions(&config),
-        )
-        .await
-        .is_err()
-        {
-            tracing::warn!("recover_sessions timed out after 5s — continuing without recovery");
-        }
-
         let mut tasks = Vec::new();
-        if options.restore_persisted_sessions {
-            let restore_config = config.clone();
-            tasks.push(tokio::spawn(async move {
-                crate::spawn_handler::restore_persisted_sessions(&restore_config).await;
-            }));
-        }
+        // Session recovery runs OFF the launch critical path. It used to be
+        // awaited under a 5s wall-clock, but that timeout cancelled the
+        // reattach loop MID-ITERATION and silently abandoned every live tmux
+        // session it hadn't reached yet — deterministically the
+        // alphabetically-late workspaces, since `backend.list()` returns
+        // sorted names. Those sessions stayed alive in tmux but unregistered,
+        // and the restore pass then REFUSED to resurrect them (its
+        // anti-double-spawn dedupe sees them alive in `backend.list()`),
+        // stranding them in limbo — invisible in the UI though the agent kept
+        // running. A slow or remote tmux server made the 5s budget hopeless for
+        // the whole fleet, collapsing recovery entirely.
+        //
+        // Instead: recover to completion in the background, then chain the
+        // restore pass after it (preserving the ordering the dedupe relies on
+        // — restore must observe recovery's registrations). Launch stays
+        // responsive because this is a detached task, not an awaited one, and a
+        // wedged tmux cannot hang it: every tmux call carries its own per-op
+        // timeout, so a stuck session errors and the loop moves on rather than
+        // the whole pass being cancelled.
+        let recovery_config = config.clone();
+        let restore_persisted = options.restore_persisted_sessions;
+        tasks.push(tokio::spawn(async move {
+            crate::spawn_handler::recover_sessions(&recovery_config).await;
+            if restore_persisted {
+                crate::spawn_handler::restore_persisted_sessions(&recovery_config).await;
+            }
+        }));
 
         crate::workspace::migrate_legacy_sandbox(&config);
         tasks.push(crate::polling::spawn(config.clone(), options.poll_interval));

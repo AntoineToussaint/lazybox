@@ -287,12 +287,21 @@ fn server_option_cmds(history_limit: u32) -> Vec<Vec<String>> {
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 32;
 
-/// Wall-clock cap on every tmux subprocess invocation. tmux commands
-/// are local and complete in milliseconds; a tmux server wedged on a
-/// dead socket (or a hung first-start) must surface as an error, not
-/// freeze whichever daemon task awaited it. `kill_on_drop` on the
-/// commands ensures a timed-out tmux child is reaped.
-const TMUX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Wall-clock cap on every tmux subprocess invocation. A tmux server
+/// wedged on a dead socket (or a hung first-start) must surface as an
+/// error, not freeze whichever daemon task awaited it. `kill_on_drop` on
+/// the commands ensures a timed-out tmux child is reaped.
+///
+/// Most tmux commands are local and finish in milliseconds, but two do
+/// not at scale: `list-sessions` over a large fleet and
+/// `capture-pane -S -50000` (a deep scrollback seed) can legitimately
+/// take seconds on a loaded or remote box. An earlier 5s cap turned those
+/// into spurious failures during restart recovery — the initial
+/// `backend.list()` timed out and the whole recovery pass bailed. The
+/// ceiling is generous because the happy path never approaches it (raising
+/// it does not slow normal use); it only gives a slow-but-alive operation
+/// room to finish before being declared dead.
+const TMUX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Per-session state. The DaemonPty is the tmux-attach client that
 /// streams I/O between lazybox and the underlying tmux session.

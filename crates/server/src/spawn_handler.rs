@@ -8660,8 +8660,8 @@ pub async fn recover_sessions(config: &ServerConfig) {
         }
     };
     let live_keys: std::collections::HashSet<_> = keys.iter().cloned().collect();
-    reconcile_missing_recovered_sessions(config, &live_keys).await;
-    tracing::info!("recovering {} surviving session(s)", keys.len());
+    let total_live = keys.len();
+    tracing::info!("recovering {total_live} surviving session(s)");
     let attach_permits =
         std::sync::Arc::new(tokio::sync::Semaphore::new(RECOVERY_ATTACH_CONCURRENCY));
     let resource_warning_emitted = std::sync::Arc::new(AtomicBool::new(false));
@@ -8945,6 +8945,22 @@ pub async fn recover_sessions(config: &ServerConfig) {
             }
         });
     }
+    // Reconcile persisted terminals whose tmux session is GONE (register them
+    // just long enough to commit Exited and release their working-claim).
+    // Deliberately AFTER the live-attach loop above: this pass is heavy — one
+    // backend round-trip plus store teardown per dead row, and a fleet can
+    // carry dozens of them — and under the old 5s launch budget it ran first
+    // and starved the live survivors of their attach before the timeout fired.
+    // Live and dead keys are disjoint by construction (`live_keys` is exactly
+    // what this skips), so ordering the cleanup last only delays it, never
+    // double-registers. Survivors now come back immediately on restart; dead
+    // rows are swept a moment later.
+    reconcile_missing_recovered_sessions(config, &live_keys).await;
+    // Registration ran to completion — this pass is no longer cancelled by a
+    // launch-time wall-clock, so every live tmux session above is reattached
+    // (the detached pumps then bind their I/O conduits). Logged so a restart's
+    // recovery is observable end-to-end rather than trailing off silently.
+    tracing::info!("session recovery complete: registered {total_live} live session(s)");
 }
 
 async fn reconcile_missing_recovered_sessions(
@@ -11302,6 +11318,66 @@ mod tests {
                 ..
             } if id == terminal_id && agent_id == "claude"
         ));
+    }
+
+    // Regression: a live tmux session that survived a restart must be
+    // reattached even when the store also holds many dead terminal rows to
+    // reconcile. The dead-row reconcile used to run FIRST inside a 5s launch
+    // budget and, on a real fleet, burned the whole budget before the
+    // live-attach loop ran — stranding alive agents (invisible in the UI though
+    // their `claude` process kept going). Recovery now attaches survivors first
+    // and sweeps dead rows after, with no wall-clock cancelling the pass.
+    #[tokio::test]
+    async fn recovery_reattaches_live_survivor_before_reconciling_dead_rows() {
+        let backend = crate::backend::MockBackend::new();
+        // The survivor: a live agent session that outlived the daemon.
+        let survivor_key = backend
+            .spawn(
+                &["claude".into()],
+                Some(std::path::Path::new("/tmp")),
+                &[],
+                "work-claude",
+            )
+            .await
+            .expect("spawn survivor backend");
+        let store: std::sync::Arc<dyn lazybox_store::Store> =
+            std::sync::Arc::new(lazybox_store::MemoryStore::new());
+        let seed = ServerConfig::with_store_and_backend(store.clone(), backend.as_backend());
+        let survivor_session = SessionKey::new("github:owner/repo#alive");
+        let survivor_kind = TerminalKind::Agent("claude".into());
+        persist_terminal_meta(&seed, &survivor_key, &survivor_session, &survivor_kind).await;
+
+        // Many dead rows: persisted terminals whose tmux session is gone (never
+        // spawned on this backend). Shells so the reconcile path is pure
+        // register→exit with no agent-state dependence.
+        for n in 0..24 {
+            let dead_key = format!("lazybox-dead-shell-{n}");
+            let dead_session = SessionKey::new(format!("github:owner/repo#dead{n}").as_str());
+            persist_terminal_meta(&seed, &dead_key, &dead_session, &TerminalKind::Shell).await;
+        }
+
+        let restarted = ServerConfig::with_store_and_backend(store, backend.as_backend());
+        recover_sessions(&restarted).await;
+
+        // The live survivor is reattached despite the pile of dead rows.
+        let snapshot = snapshot_terminals(&restarted).await;
+        let survivors: Vec<_> = snapshot
+            .iter()
+            .filter(|t| t.session_key == survivor_session)
+            .collect();
+        assert_eq!(
+            survivors.len(),
+            1,
+            "the live survivor must be reattached even with many dead rows to reconcile"
+        );
+        assert!(matches!(survivors[0].kind, TerminalKind::Agent(ref id) if id == "claude"));
+        // The dead rows are swept, not resurrected as live terminals.
+        assert!(
+            snapshot
+                .iter()
+                .all(|t| !t.session_key.as_str().contains("#dead")),
+            "dead persisted terminals must not surface as live recovered sessions"
+        );
     }
 
     #[tokio::test]

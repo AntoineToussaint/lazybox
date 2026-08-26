@@ -1,22 +1,13 @@
 WEBVTT
 
-NOTE
-"⌨ <chord> — <text>" lines render as a keycap chip + description in the
-overlay; plain lines are context. Drives both the native <track> and the
-styled overlay from one source.
-
 1
-00:00.400 --> 00:02.400
-⌨ a x — start Codex on this task
+00:00.000 --> 00:00.600
+⌨ a — start an agent on this task
 
 2
-00:02.600 --> 00:05.600
-lazybox provisions a dedicated git worktree for it
+00:00.600 --> 00:01.200
+Claude, Codex or Cursor, in a git worktree
 
 3
-00:05.800 --> 00:08.400
-The agent starts working in its own isolated checkout
-
-4
-00:08.600 --> 00:11.000
-One task, one worktree, one agent
+00:01.200 --> 00:01.700
+Each task gets its own isolated checkout

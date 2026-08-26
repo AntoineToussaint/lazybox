@@ -1,22 +1,13 @@
 WEBVTT
 
-NOTE
-"⌨ <chord> — <text>" lines render as a keycap chip + description in the
-overlay; plain lines are context. Drives both the native <track> and the
-styled overlay from one source.
-
 1
-00:00.400 --> 00:02.100
-⌨ ]]s — open the snippet picker inside the agent
+00:00.000 --> 00:00.600
+⌨ ]]s — open the snippet picker
 
 2
-00:02.300 --> 00:04.600
-Reusable prompts, most-recently-used floated to the top
+00:00.600 --> 00:01.200
+Reusable prompts, grouped and searchable
 
 3
-00:04.800 --> 00:06.500
-⌨ Enter — fire the 'deepreview' snippet into the agent
-
-4
-00:06.700 --> 00:08.700
-The running agent picks it up and starts the review
+00:01.200 --> 00:01.700
+Fire one into the agent with Enter

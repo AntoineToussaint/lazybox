@@ -11782,6 +11782,107 @@ mod merge_focus_follow_tests {
         );
     }
 
+    /// #1351: the which-key leader popup is workspace-aware. The `g`
+    /// github group must drop its PR-only rows on an issue workspace,
+    /// and the `x` workspace group must drop its issue-only rows on a
+    /// PR — the same `availability` gate the dispatcher and the
+    /// right-click context menu already consult.
+    #[test]
+    fn leader_popup_continuations_are_workspace_contextual() {
+        use super::super::helpers::seq_continuations_available;
+        use lazybox_tui_core::action::{ActionKind, KeyStroke};
+
+        let model = build_model();
+        let g = KeyStroke::parse("g").expect("`g` parses");
+        let x = KeyStroke::parse("x").expect("`x` parses");
+
+        let kinds = |prefix: &KeyStroke, ws: &Workspace| -> Vec<ActionKind> {
+            seq_continuations_available(prefix, PaneFocus::Sidebar, &model.catalog, Some(ws))
+                .into_iter()
+                .map(|(_, e)| e.kind)
+                .collect()
+        };
+
+        let issue = workspace("owner/repo#1", false, Duration::hours(1));
+        let issue_g = kinds(&g, &issue);
+        for pr_only in [
+            ActionKind::MergePr,
+            ActionKind::ClosePr,
+            ActionKind::UpdateBranch,
+            ActionKind::ConvertToDraft,
+            ActionKind::MarkReady,
+            ActionKind::RequestReviewers,
+        ] {
+            assert!(
+                !issue_g.contains(&pr_only),
+                "issue workspace must not advertise {pr_only:?} under `g`",
+            );
+        }
+        // Rows that DO apply to an issue keep the leader alive.
+        assert!(issue_g.contains(&ActionKind::DeleteOrClose));
+        assert!(issue_g.contains(&ActionKind::OpenInBrowser));
+
+        let pr = workspace("owner/repo#2", true, Duration::hours(1));
+        let pr_x = kinds(&x, &pr);
+        for issue_only in [ActionKind::CloseIssue, ActionKind::CollapseIntoPr] {
+            assert!(
+                !pr_x.contains(&issue_only),
+                "PR workspace must not advertise {issue_only:?} under `x`",
+            );
+        }
+        // The PR-only `g` rows show on a PR.
+        let pr_g = kinds(&g, &pr);
+        assert!(pr_g.contains(&ActionKind::MergePr));
+        assert!(pr_g.contains(&ActionKind::ClosePr));
+    }
+
+    /// #1351 regression: because the `g` popup is now workspace-aware, a
+    /// poll that lands mid-leader can reshape the continuation list under
+    /// the fixed highlight index. Pressing `Enter` must not then fire
+    /// whatever slid into that index — the highlight is dropped on the
+    /// reshaping upsert so a stale `Enter` disarms harmlessly.
+    #[test]
+    fn poll_under_armed_leader_drops_stale_highlight() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let open_pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&open_pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(open_pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        while server.rx.try_recv().is_ok() {}
+
+        // Arm `g` and navigate so a row is highlighted.
+        m.dispatch_key(KeyEvent::new(Key::Char('g'), KeyModifiers::NONE));
+        m.dispatch_key(KeyEvent::new(Key::Down, KeyModifiers::NONE));
+        assert_eq!(m.leader_highlight(), Some(0), "a row is highlighted");
+
+        // A poll re-reports the same workspace with its PR now merged —
+        // the PR-only rows (merge/close/update/draft/ready/reviewers/
+        // delete) drop out, so the list this highlight indexed into is
+        // gone.
+        let mut merged = workspace("owner/repo#1", true, Duration::hours(1));
+        merged.pr.as_mut().expect("pr row").state = lazybox_core::TaskState::Merged;
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(merged)));
+        assert_eq!(
+            m.leader_highlight(),
+            None,
+            "the reshaping poll clears the stale highlight",
+        );
+
+        // Enter now disarms without firing a surprise action.
+        m.dispatch_key(KeyEvent::new(Key::Enter, KeyModifiers::NONE));
+        assert!(m.leader_pending().is_none(), "Enter disarms the leader");
+        assert!(m.top_modal().is_none(), "no modal-mounting action fired");
+        assert!(
+            server.rx.try_recv().is_err(),
+            "no command dispatched by the stale Enter",
+        );
+    }
+
     /// #1243: the bulk `g d` confirm renders the mixed close/delete
     /// split — PRs are closed, issues deleted, and ineligible targets
     /// counted as skipped — so Yes is never a blind guess.

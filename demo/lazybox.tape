@@ -1,60 +1,47 @@
-# lazybox demo — the reactive PR inbox, end to end in one workflow.
+# lazybox demo — the reactive multi-repo agent inbox, alive.
 #
-# This tape is the SOURCE OF TRUTH for the README GIF. It is code, not a
-# binary blob: edit it here, regenerate, commit the outputs.
+# SOURCE OF TRUTH for the homepage hero + README GIF. It is code, not a
+# binary blob: edit here, regenerate, commit the outputs.
 #
 # Regenerate locally:
-#   cargo build -p lazybox-tui-boot       # produces target/debug/lazybox
+#   cargo build -p lazybox-tui-boot        # produces target/debug/lazybox
 #   PATH="$PWD/target/debug:$PATH" vhs demo/lazybox.tape
 #
-# Requires `vhs` (brew install vhs) and a `lazybox` binary on PATH.
-# Rendering is intentionally local/manual; CI uses deterministic TUI snapshots.
+# Requires `vhs` (brew install vhs) + a `lazybox` binary on PATH.
 #
-# Deterministic render: FontSize / Width / Height / Theme are pinned so the
-# output only changes when the tape or the UI changes — never from host drift.
+# Deterministic: `lazybox --demo` boots a throwaway multi-repo inbox (no
+# GitHub, no PTY) and replays the built-in "fleet" scenario — several agents
+# working across repos, one asking, one done, one rate-limited, live terminals
+# streaming, and a reactive CI red→green flip. It renders identically every
+# run. High-DPI (FontSize 32 @ 2560×1440) so text is crisp on retina and
+# downscales cleanly on the site — the old 1200×720 renders looked low-res.
 
 Output "demo/lazybox.gif"
 Output "demo/lazybox.mp4"
 
 Set Shell "bash"
-Set FontSize 16
-Set Width 1200
-Set Height 720
+Set FontSize 32
+Set Width 2560
+Set Height 1440
 Set Theme "Catppuccin Mocha"
-Set Padding 20
-Set TypingSpeed 70ms
-Set LoopOffset 25%
+Set Padding 30
+Set LoopOffset 30%
 
-# Boot the throwaway, no-GitHub sandbox: a seeded workspace, no credentials,
-# no setup wizard. Hide the launch command so the loop opens on the payoff.
+# Boot the deterministic fleet scenario; hide the launch command so the loop
+# opens on the payoff — the inbox already coming alive.
 Hide
-Type "lazybox --test"
+Type "lazybox --demo"
 Enter
-Sleep 3.5s
+# Block on the seeded selection painting at full size (robust to runner speed).
+Wait+Screen@45s /rate limiter/
 Show
 
-# The inbox: a workspace is selected, its activity in the right pane.
-Sleep 2s
+# The reactive inbox: repos auto-grouped into Spaces, agents lighting up with
+# their states (working / asking / done / rate-limited), terminals streaming.
+Sleep 5s
 
-# Open the workspace.
-Enter
-Sleep 1.5s
-
-# Spawn a shell in the workspace's git worktree.
-Type "s"
-Sleep 2.5s
-
-# It's a real terminal in a real worktree — run something.
-Type "git status"
-Enter
-Sleep 2.5s
-Type "git log --oneline"
-Enter
+# The payoff: a PR's CI flips red→green on its own and a notice lands — the
+# event arrived, no manual refresh. Static frame for the reduced-motion poster.
 Sleep 3s
-
-# Static frame for the README's prefers-reduced-motion fallback.
 Screenshot "demo/lazybox.png"
-
-# Back out to the inbox.
-Type "]]"
-Sleep 2.5s
+Sleep 3s

@@ -135,6 +135,91 @@ test('each captions file ships with parseable cues inside its clip', async () =>
   }
 });
 
+// "MM:SS.mmm" or "HH:MM:SS.mmm" → seconds.
+function cueSeconds(stamp) {
+  const parts = stamp.split(':').map(Number);
+  return parts.reduce((acc, n) => acc * 60 + n, 0);
+}
+
+// The playable length of an MP4's video track, read from its sample-table
+// (stts) — the only duration that matches what the browser loops a <video>
+// on. We walk the box tree (moov→trak→mdia→…) rather than byte-scanning for
+// box names, which false-matches inside the compressed mdat; and we sum stts
+// deltas rather than trusting mvhd/mdhd, whose headers can be padded past the
+// real samples (VHS clips 02–05 declare ~3s more than they play).
+function mp4Boxes(buf, start, end) {
+  const out = [];
+  let p = start;
+  while (p + 8 <= end) {
+    const size = buf.readUInt32BE(p);
+    const type = buf.toString('latin1', p + 4, p + 8);
+    let headerSize = 8;
+    let boxEnd;
+    if (size === 1) {
+      boxEnd = p + Number(buf.readBigUInt64BE(p + 8));
+      headerSize = 16;
+    } else if (size === 0) {
+      boxEnd = end;
+    } else {
+      boxEnd = p + size;
+    }
+    if (boxEnd <= p || boxEnd > end) break;
+    out.push({ type, dataStart: p + headerSize, end: boxEnd });
+    p = boxEnd;
+  }
+  return out;
+}
+function mp4Child(buf, box, type) {
+  return mp4Boxes(buf, box.dataStart, box.end).find((b) => b.type === type);
+}
+function videoTrackSeconds(buf) {
+  const moov = mp4Boxes(buf, 0, buf.length).find((b) => b.type === 'moov');
+  assert.ok(moov, 'mp4 has no moov box');
+  for (const trak of mp4Boxes(buf, moov.dataStart, moov.end).filter((b) => b.type === 'trak')) {
+    const mdia = mp4Child(buf, trak, 'mdia');
+    if (!mdia) continue;
+    const hdlr = mp4Child(buf, mdia, 'hdlr');
+    const mdhd = mp4Child(buf, mdia, 'mdhd');
+    if (!hdlr || !mdhd) continue;
+    if (buf.toString('latin1', hdlr.dataStart + 8, hdlr.dataStart + 12) !== 'vide') continue;
+    const version = buf[mdhd.dataStart];
+    const timescale = buf.readUInt32BE(mdhd.dataStart + 4 + (version === 1 ? 16 : 8));
+    const stbl = mp4Child(buf, mp4Child(buf, mdia, 'minf') ?? mdia, 'stbl');
+    const stts = stbl && mp4Child(buf, stbl, 'stts');
+    assert.ok(stts, 'video track has no stts box');
+    let p = stts.dataStart + 4; // version + flags
+    const entries = buf.readUInt32BE(p);
+    p += 4;
+    let units = 0;
+    for (let i = 0; i < entries; i += 1) {
+      units += buf.readUInt32BE(p) * buf.readUInt32BE(p + 4);
+      p += 8;
+    }
+    return units / timescale;
+  }
+  throw new Error('mp4 has no video track');
+}
+
+// The regression guard for the high-res hero swap (#1347): the video content
+// was replaced but the captions weren't, leaving the 01-inbox track with a cue
+// at 00:11.2 over an 8.56s clip — invisible, and narrating a keystroke the clip
+// never performs. Cue text can't be checked automatically, but a cue that ends
+// past the clip is an unambiguous, catchable desync.
+test('no caption cue outlives its demo clip', async () => {
+  for (const clip of demoClips) {
+    const mp4 = await readFile(new URL(`../public/demo/${clip}.mp4`, import.meta.url));
+    const duration = videoTrackSeconds(mp4);
+    const vtt = await readFile(new URL(`../public/demo/${clip}.vtt`, import.meta.url), 'utf8');
+    const cues = [...vtt.matchAll(/^(\S+)\s+-->\s+(\S+)/gm)];
+    for (const [, , end] of cues) {
+      assert.ok(
+        cueSeconds(end) <= duration,
+        `${clip}: caption ends at ${end} (${cueSeconds(end)}s) past the ${duration.toFixed(3)}s clip`,
+      );
+    }
+  }
+});
+
 test('the styled caption overlay reads its cues from the same track', () => {
   for (const clip of demoClips) {
     assert.ok(html.includes(`src="/demo/${clip}.mp4"`), `missing demo video: ${clip}`);

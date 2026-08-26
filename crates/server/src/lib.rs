@@ -502,7 +502,7 @@ impl ServerConfig {
             identity_dir,
             keystore,
         ));
-        config.working_claims_enabled = true;
+        config.working_claims_enabled = user_config.server.working_claims_enabled();
         Ok(config)
     }
 

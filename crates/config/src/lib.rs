@@ -2260,6 +2260,17 @@ pub struct ServerSection {
     /// Unset → [`DEFAULT_POLLING_BACKOFF_CAP_SECS`] (120 seconds = 2 minutes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub polling_backoff_cap_secs: Option<u64>,
+
+    /// Whether the daemon maintains "working claim" markers on GitHub — the
+    /// `fbca04` "Claimed by a lazybox agent" labels used so multiple boxes /
+    /// agents don't duplicate work on the same PR/issue. Each claimed
+    /// workspace heartbeats ~6 label writes every 15 minutes; across a large
+    /// fleet (many concurrent agents) that is meaningful GitHub traffic.
+    /// Set to `false` to disable claim synchronization entirely — a relief
+    /// valve when working-claim sync contends for the rate budget (#1218).
+    /// Unset → enabled (true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_claims_enabled: Option<bool>,
 }
 
 impl ServerSection {
@@ -2281,6 +2292,11 @@ impl ServerSection {
     pub fn polling_backoff_cap_secs(&self) -> u64 {
         self.polling_backoff_cap_secs
             .unwrap_or(DEFAULT_POLLING_BACKOFF_CAP_SECS)
+    }
+
+    /// Effective working-claims toggle: unset → enabled.
+    pub fn working_claims_enabled(&self) -> bool {
+        self.working_claims_enabled.unwrap_or(true)
     }
 
     /// Validate configuration ranges. Called at config load time to catch
@@ -5385,6 +5401,15 @@ open_with:
             cfg.server.polling_backoff_cap_secs(),
             DEFAULT_POLLING_BACKOFF_CAP_SECS
         );
+        // Working claims default to ON (#1218 relief valve is opt-out).
+        assert!(cfg.server.working_claims_enabled());
+    }
+
+    #[test]
+    fn server_section_working_claims_can_be_disabled() {
+        let yaml = "server:\n  working_claims_enabled: false";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("valid config");
+        assert!(!cfg.server.working_claims_enabled());
     }
 
     #[test]

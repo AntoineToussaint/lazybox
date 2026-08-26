@@ -1185,6 +1185,7 @@ async fn handle_spawn_inner(
         client_request_id,
         origin,
         force_new,
+        meter,
     } = options;
     let access = if matches!(&kind, TerminalKind::Agent(_)) {
         access
@@ -1540,6 +1541,15 @@ async fn handle_spawn_inner(
     };
     let plan_error_source = format!("spawn:{kind:?}");
     let repo_env = collect_repo_env(config, &session_key);
+    // Per-workspace metering opt-in (the `$ meter` canary): route this spawn
+    // through the metering proxy iff the persisted workspace has metering on.
+    // Read straight from the store so it's the single source of truth across
+    // restarts and needs no IPC plumbing on the spawn command. Effective only
+    // when the proxy is enabled/running (`gateway_env_for_agent` gates it).
+    let meter = meter
+        || load_workspace(config, &WorkspaceKey::new(session_key.as_str()))
+            .map(|ws| ws.metered)
+            .unwrap_or(false);
     let plan = match build_spawn_plan(
         SpawnPlanInput {
             session_key,
@@ -1564,10 +1574,14 @@ async fn handle_spawn_inner(
             composing_buffer,
             access,
             shell_command,
+            meter,
         },
         &cfg,
         &config.agents,
-    ) {
+    )
+    // NOTE: `meter` above is the per-workspace metering opt-in derived from
+    // the persisted workspace, not a field of the incoming Spawn command.
+    {
         Ok(plan) => plan,
         Err(_) => {
             let _ = config.bus.send(Event::provider_error_permanent(
@@ -11117,6 +11131,7 @@ mod tests {
                 composing_buffer: None,
                 access: AgentRunAccess::Default,
                 shell_command: String::new(),
+                meter: false,
             },
             &lazybox_config::Config::default(),
             &config.agents,
@@ -11953,7 +11968,7 @@ mod tests {
 
         let claude = lazybox_agents::agent::builtins::Claude;
         assert_eq!(
-            gateway_env_for_agent(&cfg, Some(&claude), true),
+            gateway_env_for_agent(&cfg, Some(&claude), true, "sess-x"),
             vec![(
                 "ANTHROPIC_BASE_URL".to_string(),
                 "http://gateway.internal".to_string()
@@ -11965,7 +11980,7 @@ mod tests {
             &lazybox_agents::agent::builtins::Cursor,
         ] {
             assert_eq!(
-                gateway_env_for_agent(&cfg, Some(agent), true),
+                gateway_env_for_agent(&cfg, Some(agent), true, "sess-x"),
                 vec![(
                     "OPENAI_BASE_URL".to_string(),
                     "http://gateway.internal".to_string()
@@ -11979,13 +11994,13 @@ mod tests {
         // No gateway configured → nothing for any agent.
         let bare = lazybox_config::Config::default();
         let claude = lazybox_agents::agent::builtins::Claude;
-        assert!(gateway_env_for_agent(&bare, Some(&claude), true).is_empty());
+        assert!(gateway_env_for_agent(&bare, Some(&claude), true, "sess-x").is_empty());
 
         let mut cfg = lazybox_config::Config::default();
         cfg.agent.llm_gateway_url = Some("http://gateway.internal".into());
 
         // Non-agent spawn (shell / log tail) passes `None`.
-        assert!(gateway_env_for_agent(&cfg, None, true).is_empty());
+        assert!(gateway_env_for_agent(&cfg, None, true, "sess-x").is_empty());
 
         // A GenericCli agent has no inferable provider → no injection.
         let generic = lazybox_agents::agent::builtins::GenericCli {
@@ -11995,35 +12010,47 @@ mod tests {
             resume_cmd: None,
             asking_patterns: vec![],
         };
-        assert!(gateway_env_for_agent(&cfg, Some(&generic), true).is_empty());
+        assert!(gateway_env_for_agent(&cfg, Some(&generic), true, "sess-x").is_empty());
 
         // A whitespace-only URL is treated as unset.
         let mut blank = lazybox_config::Config::default();
         blank.agent.llm_gateway_url = Some("   ".into());
-        assert!(gateway_env_for_agent(&blank, Some(&claude), true).is_empty());
+        assert!(gateway_env_for_agent(&blank, Some(&claude), true, "sess-x").is_empty());
     }
 
     #[test]
     fn metering_proxy_routes_only_metered_spawns() {
-        // With the proxy enabled and bound, an interactive (metered) spawn
-        // is pointed at the per-agent proxy URL. A structured run passes
-        // `meter = false` and keeps the direct routing, so its usage isn't
-        // counted twice — once via the proxy, once via its stream-json
-        // (#1109).
+        // With the proxy enabled and bound, a spawn that opted in (metered) is
+        // pointed at the per-session proxy URL. A spawn that did NOT opt in
+        // (meter = false) keeps direct routing even though the proxy is
+        // running — so turning the proxy on never redirects a session that
+        // didn't ask, and a structured run isn't counted twice (#1109).
         crate::proxy::set_port(45999);
         let mut cfg = lazybox_config::Config::default();
         cfg.agent.metering_proxy = true;
         let claude = lazybox_agents::agent::builtins::Claude;
 
         assert_eq!(
-            gateway_env_for_agent(&cfg, Some(&claude), true),
+            gateway_env_for_agent(&cfg, Some(&claude), true, "github-acme-widget-7"),
             vec![(
                 "ANTHROPIC_BASE_URL".to_string(),
-                "http://127.0.0.1:45999/anthropic/claude".to_string()
+                "http://127.0.0.1:45999/anthropic/claude/github-acme-widget-7".to_string()
             )]
         );
-        // Structured run opts out: no proxy URL, and no gateway configured.
-        assert!(gateway_env_for_agent(&cfg, Some(&claude), false).is_empty());
+        // Opted out: no proxy URL, and no gateway configured.
+        assert!(
+            gateway_env_for_agent(&cfg, Some(&claude), false, "github-acme-widget-7").is_empty()
+        );
+
+        // `meter_all` overrides the per-session opt-in: every spawn routes.
+        cfg.agent.meter_all = true;
+        assert_eq!(
+            gateway_env_for_agent(&cfg, Some(&claude), false, "github-acme-widget-7"),
+            vec![(
+                "ANTHROPIC_BASE_URL".to_string(),
+                "http://127.0.0.1:45999/anthropic/claude/github-acme-widget-7".to_string()
+            )]
+        );
     }
 
     #[test]

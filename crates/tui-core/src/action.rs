@@ -174,6 +174,10 @@ pub enum Action {
     /// `origin/<default>` while the tree is clean — a persistent scratch
     /// workspace stays based on main without a manual rebase each session.
     ToggleTrackMain,
+    /// Toggle the workspace's metering opt-in (the `$ meter` canary): route
+    /// its agent spawns through the local metering proxy so cost/tokens/rate
+    /// accrue per session, without affecting any other workspace.
+    ToggleMetering,
     /// Open the unified automation-policies menu for the focused
     /// PR/issue (issue #363): one surface listing every policy
     /// (merge-on-green, per-session auto-fix arm/disarm, GitHub-native
@@ -540,6 +544,7 @@ pub enum ActionKind {
     ToggleAutoMerge,
     ToggleAutoFix,
     ToggleTrackMain,
+    ToggleMetering,
     ManagePolicies,
     AdoptSessions,
     SendToSession,
@@ -702,6 +707,7 @@ impl ActionKind {
         Self::ToggleAutoMerge,
         Self::ToggleAutoFix,
         Self::ToggleTrackMain,
+        Self::ToggleMetering,
         Self::ManagePolicies,
         Self::RequestReviewers,
         Self::AddAssignees,
@@ -827,6 +833,7 @@ impl Action {
             Action::ToggleAutoMerge => ActionKind::ToggleAutoMerge,
             Action::ToggleAutoFix => ActionKind::ToggleAutoFix,
             Action::ToggleTrackMain => ActionKind::ToggleTrackMain,
+            Action::ToggleMetering => ActionKind::ToggleMetering,
             Action::ManagePolicies => ActionKind::ManagePolicies,
             Action::AdoptSessions => ActionKind::AdoptSessions,
             Action::SendToSession => ActionKind::SendToSession,
@@ -1383,6 +1390,13 @@ impl ActionDef {
                 default_keys: "g t",
                 label: "track main",
                 describe: "Toggle \"track main\": keep this workspace's worktree fast-forwarded to the repo's default branch while it's clean, so a persistent scratch workspace stays based on main. Fast-forward only — a dirty or diverged tree is skipped, never reset.",
+                section: Section::Workspace,
+            },
+            ActionKind::ToggleMetering => &Self {
+                kind: ActionKind::ToggleMetering,
+                default_keys: "x $",
+                label: "meter",
+                describe: "Toggle metering ($ meter) for this workspace: route its agent spawns through lazybox's local metering proxy so cost, tokens, and rate-limit headroom accrue per session — a safe canary you can turn on for one workspace without affecting any other. Requires agent.metering_proxy enabled.",
                 section: Section::Workspace,
             },
             ActionKind::ManagePolicies => &Self {
@@ -2209,6 +2223,7 @@ impl ActionKind {
             ActionKind::ToggleAutoMerge => "toggle_auto_merge",
             ActionKind::ToggleAutoFix => "toggle_auto_fix",
             ActionKind::ToggleTrackMain => "toggle_track_main",
+            ActionKind::ToggleMetering => "toggle_metering",
             ActionKind::ManagePolicies => "manage_policies",
             ActionKind::AdoptSessions => "adopt_sessions",
             ActionKind::SendToSession => "send_to_session",
@@ -2503,6 +2518,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::OpenViews
         | ActionKind::AddRepo
         | ActionKind::ResetAgentContext
+        | ActionKind::ToggleMetering
         | ActionKind::CollapseIntoPr => Some("workspace"),
         _ => None,
     }
@@ -3013,6 +3029,14 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // same predicate the resolver Notices on, so `g t` only surfaces
         // where the sweep could actually fast-forward something.
         ActionKind::ToggleTrackMain => workspace.map(|w| w.supports_track_main()).unwrap_or(false),
+        // Metering is a per-workspace preference — available on any workspace
+        // that can host an agent (a repo/project scope to spawn into). Whether
+        // it actually routes is a daemon-side gate (metering_proxy + proxy
+        // running), so the toggle stays available even when the proxy is off:
+        // it records the intent for when it's enabled.
+        ActionKind::ToggleMetering => workspace
+            .map(|w| w.project_key.is_some() || w.pr.is_some() || !w.gh_issues.is_empty())
+            .unwrap_or(false),
         // The policies menu surfaces on any workspace carrying a PR or a
         // GitHub issue — the "tag this PR/issue" surface (issue #363).
         // The menu itself marks which policies apply to PRs vs issues.

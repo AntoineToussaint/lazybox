@@ -299,7 +299,10 @@ pub enum CleanupPrompt {
 ///   and `Workspace::woke_at` (the announced-re-entry stamp). Both
 ///   optional with `#[serde(default)]`, so older records read back
 ///   cleanly.
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 8;
+/// - 9: `Workspace::metered` (per-workspace metering-proxy opt-in, the
+///   `$ meter` canary). Optional with `#[serde(default)]`, so older
+///   records read back cleanly (defaulting to unmetered).
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 9;
 
 /// How long a workspace counts as "recently woken" after an
 /// event-conditional snooze fires (#scale): within this window the row
@@ -495,6 +498,15 @@ pub struct Workspace {
     /// reset, so in-progress work is never destroyed.
     #[serde(default)]
     pub track_main: bool,
+    /// Route this workspace's agent LLM traffic through the local metering
+    /// proxy (the per-workspace `$ meter` canary, #per-session cost). Sticky:
+    /// every spawn here — fresh, restart, or re-spawn — is metered while this
+    /// is set, so cost/tokens/rate accrue per workspace without affecting any
+    /// other session. User-toggled, persisted in the workspace JSON blob.
+    /// Effective only when `agent.metering_proxy` is enabled and the proxy is
+    /// running; otherwise inert.
+    #[serde(default)]
+    pub metered: bool,
     /// The resolved default branch this workspace is based on
     /// (`main` / `master` / …), persisted so "track main" doesn't
     /// re-derive it every sweep and so the exact branch survives a
@@ -556,6 +568,7 @@ impl Workspace {
         let branch = branch.into();
         Self {
             schema: WORKSPACE_SCHEMA_VERSION,
+            metered: false,
             name: key.as_str().to_string(),
             key,
             project_key: None,
@@ -1063,6 +1076,11 @@ impl Workspace {
             // Remote placement belongs to the destination row's own
             // identity — a transfer never inherits the source's box.
             remote: _,
+            // Metering is a per-workspace debugging/canary opt-in, not
+            // portable content: a transfer keeps the destination's own
+            // choice rather than silently metering it because the folded
+            // source was metered.
+            metered: _,
             // ── user-owned state: one explicit merge rule each ──
             snoozed_until,
             // The wake condition rides the snooze it belongs to (below);

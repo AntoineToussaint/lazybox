@@ -631,6 +631,24 @@ impl Sidebar {
                 (false, false) => None,
             }
         });
+        // Metering canary: the focused workspace is routed through the
+        // metering proxy (`$ meter`), so show it plus its accrued per-session
+        // cost the moment any priced usage lands. `$ METER` alone until the
+        // first response is priced (proxy off / unknown model → no cost).
+        let focused_meter = focused_workspace.and_then(|workspace| {
+            if !workspace.metered {
+                return None;
+            }
+            let cost = self.usage.cost_micros_for_session(workspace.key.as_str());
+            Some(if cost > 0 {
+                format!(
+                    " $ METER · {} ",
+                    lazybox_tui_core::usage::format_cost_micros(cost)
+                )
+            } else {
+                " $ METER ".to_string()
+            })
+        });
 
         // Append `group` (with a 2-cell separator once the line is
         // non-empty) only when the whole group still fits `budget`, so a
@@ -682,6 +700,20 @@ impl Sidebar {
                     label,
                     Style::default()
                         .bg(theme.warn)
+                        .fg(ratatui::style::Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                )],
+            );
+        }
+        if let Some(label) = focused_meter {
+            try_append(
+                &mut stats_spans,
+                &mut used,
+                budget,
+                vec![Span::styled(
+                    label,
+                    Style::default()
+                        .bg(theme.accent)
                         .fg(ratatui::style::Color::Black)
                         .add_modifier(Modifier::BOLD),
                 )],

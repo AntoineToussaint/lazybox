@@ -359,6 +359,7 @@ impl<T: TerminalAdapter> Model<T> {
             | Intent::OpenEditor
             | Intent::SetAutoMergeOnGreen { .. }
             | Intent::SetTrackMain { .. }
+            | Intent::SetMetered { .. }
             | Intent::KillWorkspace { .. }
             | Intent::Unsnooze { .. } => Vec::new(),
         }
@@ -1607,6 +1608,7 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::UpdateBranch { .. }
                     | Intent::SetAutoMergeOnGreen { .. }
                     | Intent::SetTrackMain { .. }
+                    | Intent::SetMetered { .. }
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }
@@ -1716,6 +1718,7 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::UpdateBranch { .. }
                     | Intent::SetAutoMergeOnGreen { .. }
                     | Intent::SetTrackMain { .. }
+                    | Intent::SetMetered { .. }
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }
@@ -2000,6 +2003,7 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::MergePr { .. }
                     | Intent::UpdateBranch { .. }
                     | Intent::SetTrackMain { .. }
+                    | Intent::SetMetered { .. }
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }
@@ -2040,6 +2044,32 @@ impl<T: TerminalAdapter> Model<T> {
                     conflict: arm,
                 });
             }
+            Action::ToggleMetering => {
+                let workspace = self.sidebar.selected_workspace().cloned();
+                use crate::intent::Intent;
+                match crate::intent::resolve_toggle_metering(workspace.as_ref()) {
+                    Intent::SetMetered {
+                        workspace_key,
+                        enabled,
+                    } => {
+                        let name = workspace
+                            .as_ref()
+                            .map(|w| crate::util::notice_slug(&w.name).into_owned())
+                            .unwrap_or_default();
+                        if enabled {
+                            self.flash_info(format!("$ meter: on for {name}"));
+                        } else {
+                            self.flash_info(format!("$ meter: off for {name}"));
+                        }
+                        cmds.push(IpcCommand::SetMetered {
+                            session_key: lazybox_core::SessionKey::from(&workspace_key),
+                            enabled,
+                        });
+                    }
+                    Intent::Notice(msg) => self.flash_info(msg),
+                    _ => {}
+                }
+            }
             Action::ToggleTrackMain => {
                 let workspace = self.sidebar.selected_workspace().cloned();
                 // Explicit variant list (no `_`): a new Intent variant is
@@ -2075,6 +2105,7 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::MergePr { .. }
                     | Intent::UpdateBranch { .. }
                     | Intent::SetAutoMergeOnGreen { .. }
+                    | Intent::SetMetered { .. }
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }

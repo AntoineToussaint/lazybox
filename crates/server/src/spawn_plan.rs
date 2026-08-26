@@ -28,6 +28,11 @@ pub struct SpawnOptions {
     /// reuse only — the concurrent-race collapse and the issue→PR
     /// managed-branch-owner transfer still apply.
     pub force_new: bool,
+    /// Route this spawn's LLM traffic through the metering proxy (the
+    /// per-session/per-workspace opt-in). Effective only when the proxy is
+    /// enabled (`agent.metering_proxy`) and running; ignored otherwise. The
+    /// global `agent.meter_all` overrides this to route every spawn.
+    pub meter: bool,
 }
 
 #[derive(Debug)]
@@ -54,6 +59,8 @@ pub(crate) struct SpawnPlanInput {
     pub composing_buffer: Option<String>,
     pub access: AgentRunAccess,
     pub shell_command: String,
+    /// Per-session metering opt-in for this spawn (see [`SpawnOptions::meter`]).
+    pub meter: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +128,7 @@ pub(crate) fn build_spawn_plan(
         composing_buffer,
         access,
         shell_command,
+        meter,
     } = input;
     let no_permission = access != AgentRunAccess::ReadOnly
         && no_permission_override.unwrap_or_else(|| skip_permissions_for(autonomous, cfg));
@@ -186,7 +194,7 @@ pub(crate) fn build_spawn_plan(
         .zip(hook_command.as_deref())
         .is_some_and(|(agent, command)| !agent.hook_command_args(command).is_empty());
     let mut env = repo_env;
-    for (key, value) in gateway_env_for_agent(cfg, agent.as_deref(), true) {
+    for (key, value) in gateway_env_for_agent(cfg, agent.as_deref(), meter, session_key.as_str()) {
         if !env.iter().any(|(existing, _)| existing == &key) {
             env.push((key, value));
         }
@@ -288,16 +296,21 @@ pub(crate) fn argv_for(
     }
 }
 
-/// Base-URL env for an agent spawn. `meter` routes the agent through the
-/// local metering proxy when it is enabled and running; pass it only for
-/// interactive PTY spawns, whose usage has no other source. Structured
-/// runs must pass `false`: they already report token usage by parsing
-/// their own stream-json, so proxying them too would count every turn
-/// twice in the header summary (#1109).
+/// Base-URL env for an agent spawn. `meter` is this spawn's per-session
+/// opt-in (the workspace meter toggle); the agent is routed through the local
+/// metering proxy when `meter` — OR the global `agent.meter_all` — is set and
+/// the proxy is enabled and running. `session` attributes the proxied usage to
+/// a workspace (#per-session cost). Pass metering only for interactive PTY
+/// spawns, whose usage has no other source: structured runs pass `meter: false`
+/// because they already report token usage by parsing their own stream-json,
+/// so proxying them too would count every turn twice in the header summary
+/// (#1109). `agent.metering_proxy` alone only makes the proxy *run* — a session
+/// that didn't opt in is never redirected.
 pub(crate) fn gateway_env_for_agent(
     cfg: &lazybox_config::Config,
     agent: Option<&dyn Agent>,
     meter: bool,
+    session: &str,
 ) -> Vec<(String, String)> {
     let Some(agent) = agent else {
         return Vec::new();
@@ -307,15 +320,17 @@ pub(crate) fn gateway_env_for_agent(
     };
     let env_var = provider.base_url_env().to_string();
 
-    // Metering proxy on and serving: point this provider's traffic at its
-    // per-agent proxy URL so the response's token usage is captured
-    // (#1109). The proxy forwards to the real upstream (or the configured
-    // gateway), so this supersedes the plain gateway injection below.
-    if meter
+    // Metering proxy on and serving, and this spawn opted in (per-session
+    // toggle) or blanket metering is configured: point this provider's traffic
+    // at its per-session proxy URL so the response's token usage is captured
+    // and priced (#1109). The proxy forwards to the real upstream (or the
+    // configured gateway), so this supersedes the plain gateway injection
+    // below.
+    if (meter || cfg.agent.meter_all)
         && cfg.agent.metering_proxy
         && let Some(port) = crate::proxy::port()
     {
-        let url = crate::proxy::injected_base_url(port, provider, agent.id());
+        let url = crate::proxy::injected_base_url(port, provider, agent.id(), session);
         return vec![(env_var, url)];
     }
 
@@ -484,6 +499,7 @@ mod tests {
             composing_buffer: None,
             access: AgentRunAccess::Default,
             shell_command: String::new(),
+            meter: false,
         }
     }
 

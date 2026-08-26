@@ -56,14 +56,16 @@ pub fn port() -> Option<u16> {
     PROXY_PORT.get().copied()
 }
 
-/// Callback invoked once per upstream response that carried usage, with
-/// the agent id parsed from the request path.
-pub type UsageSink = Arc<dyn Fn(&str, AgentUsage) + Send + Sync>;
+/// Callback invoked once per upstream response that carried usage, with the
+/// agent id and session key parsed from the request path (session is `""`
+/// when the spawn opted in without a resolvable key).
+pub type UsageSink = Arc<dyn Fn(&str, &str, AgentUsage) + Send + Sync>;
 
 /// Callback invoked when a response carried provider plan-quota (Anthropic's
-/// unified rate-limit headers), with the agent id from the request path — the
-/// "can I keep working?" signal, distinct from [`UsageSink`]'s token counts.
-pub type QuotaSink = Arc<dyn Fn(&str, ProviderQuota) + Send + Sync>;
+/// unified rate-limit headers), with the agent id and session key from the
+/// request path — the "can I keep working?" signal, distinct from
+/// [`UsageSink`]'s token counts.
+pub type QuotaSink = Arc<dyn Fn(&str, &str, ProviderQuota) + Send + Sync>;
 
 type BoxErr = Box<dyn std::error::Error + Send + Sync>;
 type ProxyBody = BoxBody<Bytes, BoxErr>;
@@ -109,11 +111,17 @@ fn provider_segment(provider: LlmProvider) -> &'static str {
 /// The base URL to hand an agent so its traffic routes through the proxy
 /// and is attributed to `agent_id`. The agent CLI appends its own path
 /// (`/v1/messages`, `/v1/responses`, …) to this.
-pub fn injected_base_url(port: u16, provider: LlmProvider, agent_id: &str) -> String {
+pub fn injected_base_url(
+    port: u16,
+    provider: LlmProvider,
+    agent_id: &str,
+    session: &str,
+) -> String {
     format!(
-        "http://127.0.0.1:{port}/{}/{}",
+        "http://127.0.0.1:{port}/{}/{}/{}",
         provider_segment(provider),
-        agent_id
+        agent_id,
+        session,
     )
 }
 
@@ -122,6 +130,9 @@ struct ProxyState {
     upstreams: Upstreams,
     sink: UsageSink,
     quota_sink: QuotaSink,
+    /// Per-model price overrides (`agent.pricing`), layered over the built-in
+    /// rate card when pricing a response's tokens.
+    prices: usage_parse::PriceOverrides,
 }
 
 /// Start the metering proxy when `agent.metering_proxy` is on: bind a
@@ -163,22 +174,34 @@ pub async fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHand
     };
 
     let bus = config.bus.clone();
-    let sink: UsageSink = Arc::new(move |agent_id: &str, usage| {
+    let sink: UsageSink = Arc::new(move |agent_id: &str, session: &str, usage| {
         let _ = bus.send(lazybox_ipc::Event::AgentSessionUsage {
             agent_id: agent_id.to_string(),
+            session_key: session_key_opt(session),
             usage,
         });
     });
     let quota_bus = config.bus.clone();
-    let quota_sink: QuotaSink = Arc::new(move |agent_id: &str, quota| {
+    let quota_sink: QuotaSink = Arc::new(move |agent_id: &str, session: &str, quota| {
         let _ = quota_bus.send(lazybox_ipc::Event::AgentProviderQuota {
             agent_id: agent_id.to_string(),
+            session_key: session_key_opt(session),
             quota,
         });
     });
 
+    let prices: usage_parse::PriceOverrides = Arc::new(cfg.agent.pricing.clone());
+
     tracing::info!("metering proxy listening on 127.0.0.1:{port}");
-    Some(tokio::spawn(serve(listener, upstreams, sink, quota_sink)))
+    Some(tokio::spawn(serve(
+        listener, upstreams, sink, quota_sink, prices,
+    )))
+}
+
+/// The session key parsed from a proxy path, as an `Option` — an empty
+/// segment (a metered spawn with no resolvable key) becomes `None`.
+fn session_key_opt(session: &str) -> Option<lazybox_core::SessionKey> {
+    (!session.is_empty()).then(|| lazybox_core::SessionKey::new(session))
 }
 
 /// Serve the proxy on an already-bound loopback listener until the process
@@ -188,12 +211,14 @@ pub async fn serve(
     upstreams: Upstreams,
     sink: UsageSink,
     quota_sink: QuotaSink,
+    prices: usage_parse::PriceOverrides,
 ) {
     let state = Arc::new(ProxyState {
         client: reqwest::Client::new(),
         upstreams,
         sink,
         quota_sink,
+        prices,
     });
     loop {
         let (stream, _) = match listener.accept().await {
@@ -226,23 +251,27 @@ async fn serve_connection(state: Arc<ProxyState>, stream: TcpStream) -> Result<(
     Ok(())
 }
 
-/// Split a proxied request path into `(provider, agent_id, upstream_path)`.
-/// The injected base URL contributes the leading `/<provider>/<agent>`;
-/// everything after is the agent CLI's own path, forwarded unchanged.
-fn split_path(path: &str) -> Option<(&str, &str, String)> {
+/// Split a proxied request path into `(provider, agent_id, session, upstream_path)`.
+/// The injected base URL contributes the leading `/<provider>/<agent>/<session>`
+/// (`session` attributes usage to one workspace, #per-session); everything after
+/// is the agent CLI's own path, forwarded unchanged. `session` may be empty
+/// (a spawn that opted in without a resolvable key) but provider and agent
+/// must be present.
+fn split_path(path: &str) -> Option<(&str, &str, &str, String)> {
     let rest = path.strip_prefix('/')?;
     let (provider, rest) = rest.split_once('/')?;
     if provider.is_empty() {
         return None;
     }
-    let (agent, tail) = match rest.split_once('/') {
-        Some((agent, tail)) => (agent, format!("/{tail}")),
-        None => (rest, String::new()),
-    };
+    let (agent, rest) = rest.split_once('/')?;
     if agent.is_empty() {
         return None;
     }
-    Some((provider, agent, tail))
+    let (session, tail) = match rest.split_once('/') {
+        Some((session, tail)) => (session, format!("/{tail}")),
+        None => (rest, String::new()),
+    };
+    Some((provider, agent, session, tail))
 }
 
 /// Headers that describe a single hop and must not be forwarded across the
@@ -300,13 +329,14 @@ fn empty_body() -> ProxyBody {
 async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<ProxyBody> {
     let (parts, body) = request.into_parts();
 
-    let Some((provider, agent_id, upstream_path)) = split_path(parts.uri.path()) else {
+    let Some((provider, agent_id, session, upstream_path)) = split_path(parts.uri.path()) else {
         return error_response(StatusCode::NOT_FOUND, "proxy: malformed metering path");
     };
     let Some(base) = state.upstreams.base_for(provider) else {
         return error_response(StatusCode::NOT_FOUND, "proxy: unknown provider");
     };
     let agent_id = agent_id.to_string();
+    let session = session.to_string();
 
     let mut url = format!("{}{}", base.trim_end_matches('/'), upstream_path);
     if let Some(query) = parts.uri.query() {
@@ -346,7 +376,7 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
     if provider == "anthropic" {
         let quota = quota_parse::parse_anthropic_headers(upstream.headers());
         if !quota.is_empty() {
-            (state.quota_sink)(&agent_id, quota);
+            (state.quota_sink)(&agent_id, &session, quota);
         }
     }
 
@@ -362,8 +392,8 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
     let stream = futures::stream::unfold(
         (
             upstream.bytes_stream(),
-            UsageAccumulator::default(),
-            Some((sink, agent_id)),
+            UsageAccumulator::with_prices(state.prices.clone()),
+            Some((sink, agent_id, session)),
         ),
         |(mut bytes, mut acc, mut pending)| async move {
             match bytes.next().await {
@@ -376,10 +406,10 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
                     Some((Err(BoxErr::from(error)), (bytes, acc, pending)))
                 }
                 None => {
-                    if let Some((sink, agent_id)) = pending.take()
+                    if let Some((sink, agent_id, session)) = pending.take()
                         && let Some(usage) = acc.finish()
                     {
-                        sink(&agent_id, usage);
+                        sink(&agent_id, &session, usage);
                     }
                     None
                 }
@@ -399,35 +429,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn split_path_extracts_provider_agent_and_tail() {
-        let (provider, agent, tail) = split_path("/anthropic/claude/v1/messages").unwrap();
+    fn split_path_extracts_provider_agent_session_and_tail() {
+        let (provider, agent, session, tail) =
+            split_path("/anthropic/claude/github-acme-widget-7/v1/messages").unwrap();
         assert_eq!(provider, "anthropic");
         assert_eq!(agent, "claude");
+        assert_eq!(session, "github-acme-widget-7");
         assert_eq!(tail, "/v1/messages");
     }
 
     #[test]
     fn split_path_handles_a_bare_prefix() {
-        let (provider, agent, tail) = split_path("/openai/codex").unwrap();
+        let (provider, agent, session, tail) = split_path("/openai/codex/sess-1").unwrap();
         assert_eq!(provider, "openai");
         assert_eq!(agent, "codex");
+        assert_eq!(session, "sess-1");
         assert_eq!(tail, "");
     }
 
     #[test]
     fn split_path_rejects_incomplete_prefixes() {
+        // Provider and agent are mandatory; a session-less prefix is malformed.
         assert!(split_path("/anthropic").is_none());
         assert!(split_path("/anthropic/").is_none());
+        assert!(split_path("/anthropic/claude").is_none());
         assert!(split_path("/").is_none());
     }
 
     #[test]
     fn injected_base_url_round_trips_through_split() {
-        let url = injected_base_url(7777, LlmProvider::OpenAI, "codex");
-        assert_eq!(url, "http://127.0.0.1:7777/openai/codex");
+        let url = injected_base_url(7777, LlmProvider::OpenAI, "codex", "github-acme-widget-7");
+        assert_eq!(
+            url,
+            "http://127.0.0.1:7777/openai/codex/github-acme-widget-7"
+        );
         let path = url.strip_prefix("http://127.0.0.1:7777").unwrap();
-        let (provider, agent, _) = split_path(path).unwrap();
-        assert_eq!((provider, agent), ("openai", "codex"));
+        let (provider, agent, session, _) = split_path(path).unwrap();
+        assert_eq!(
+            (provider, agent, session),
+            ("openai", "codex", "github-acme-widget-7")
+        );
     }
 
     #[test]

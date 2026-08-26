@@ -182,6 +182,7 @@
           "linear_issues": [],
           "linked_checkout": null,
           "local": false,
+          "metered": false,
           "name": "PR o/r#42",
           "notes": "",
           "policies": {
@@ -236,7 +237,7 @@
           "project_key": "github-o-r",
           "read_indices": [],
           "remote": null,
-          "schema": 8,
+          "schema": 9,
           "seen_count": 0,
           "sent_snippets": {
             "recent": [],

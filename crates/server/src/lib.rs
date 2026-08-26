@@ -1033,6 +1033,7 @@ impl Server {
                         lazybox_ipc::Command::Unsnooze { .. } => "Unsnooze",
                         lazybox_ipc::Command::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
                         lazybox_ipc::Command::SetTrackMain { .. } => "SetTrackMain",
+                        lazybox_ipc::Command::SetMetered { .. } => "SetMetered",
                         lazybox_ipc::Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
                         lazybox_ipc::Command::SetAutoFixPolicies { .. } => "SetAutoFixPolicies",
                         lazybox_ipc::Command::Kill { .. } => "Kill",
@@ -2058,6 +2059,13 @@ pub async fn dispatch_command(
         } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             workspace::set_track_main(config, &key, enabled).await;
+        }
+        lazybox_ipc::Command::SetMetered {
+            session_key,
+            enabled,
+        } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            workspace::set_metered(config, &key, enabled).await;
         }
         lazybox_ipc::Command::SetAutoFixPolicy {
             session_key,

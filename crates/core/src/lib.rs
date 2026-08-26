@@ -12,6 +12,7 @@ pub mod error_class;
 pub mod issue_links;
 pub mod paths;
 pub mod policy;
+pub mod pricing;
 pub mod priority;
 pub mod project;
 pub mod prompts;
@@ -41,6 +42,7 @@ pub use policy::{
     approval_policy_blocks, author_gate_blocks, auto_fix_permitted, auto_merge_block_reason,
     merge_block_reason, should_auto_merge, toggled_arm,
 };
+pub use pricing::{ModelPrice, TokenCounts, cost_micros as pricing_cost_micros, price_for};
 pub use priority::{PriorityTier, resolve_priority_tier};
 pub use project::{Project, ProjectKey, github_owner_repo_from_url};
 pub use provider::{

@@ -341,6 +341,10 @@ fn all_commands() -> Vec<Command> {
             session_key: key.clone(),
             enabled: true,
         },
+        Command::SetMetered {
+            session_key: key.clone(),
+            enabled: true,
+        },
         Command::SetAutoFixPolicy {
             session_key: key.clone(),
             kind: lazybox_core::AutoFixKind::CiFailure,
@@ -859,6 +863,7 @@ fn all_events() -> Vec<Event> {
         },
         Event::AgentSessionUsage {
             agent_id: "codex".into(),
+            session_key: Some(lazybox_core::SessionKey::new("github-acme-widget-7")),
             usage: AgentUsage {
                 input_tokens: Some(1000),
                 output_tokens: Some(200),
@@ -869,6 +874,7 @@ fn all_events() -> Vec<Event> {
         },
         Event::AgentProviderQuota {
             agent_id: "claude".into(),
+            session_key: None,
             quota: ProviderQuota {
                 five_hour: Some(QuotaWindow {
                     utilization_bp: 4512,
@@ -1192,6 +1198,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::Unsnooze { .. } => "Unsnooze",
         Command::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
         Command::SetTrackMain { .. } => "SetTrackMain",
+        Command::SetMetered { .. } => "SetMetered",
         Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
         Command::SetAutoFixPolicies { .. } => "SetAutoFixPolicies",
         Command::PostReply { .. } => "PostReply",
@@ -1366,7 +1373,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        87,
+        88,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(

@@ -123,6 +123,16 @@ auto_merge_on_green: boolean,
  */
 track_main: boolean,
 /**
+ * Route this workspace's agent LLM traffic through the local metering
+ * proxy (the per-workspace `$ meter` canary, #per-session cost). Sticky:
+ * every spawn here — fresh, restart, or re-spawn — is metered while this
+ * is set, so cost/tokens/rate accrue per workspace without affecting any
+ * other session. User-toggled, persisted in the workspace JSON blob.
+ * Effective only when `agent.metering_proxy` is enabled and the proxy is
+ * running; otherwise inert.
+ */
+metered: boolean,
+/**
  * The resolved default branch this workspace is based on
  * (`main` / `master` / …), persisted so "track main" doesn't
  * re-derive it every sweep and so the exact branch survives a

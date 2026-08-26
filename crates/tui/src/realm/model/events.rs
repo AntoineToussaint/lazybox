@@ -433,11 +433,21 @@ impl<T: TerminalAdapter> Model<T> {
             IpcEvent::AgentUsage { run_id, usage } => {
                 self.sidebar.add_agent_usage(*run_id, usage);
             }
-            IpcEvent::AgentSessionUsage { agent_id, usage } => {
-                self.sidebar.add_agent_session_usage(agent_id, usage);
+            IpcEvent::AgentSessionUsage {
+                agent_id,
+                session_key,
+                usage,
+            } => {
+                self.sidebar
+                    .add_agent_session_usage(agent_id, session_key.as_ref(), usage);
             }
-            IpcEvent::AgentProviderQuota { agent_id, quota } => {
-                self.sidebar.note_provider_quota(agent_id, *quota);
+            IpcEvent::AgentProviderQuota {
+                agent_id,
+                session_key,
+                quota,
+            } => {
+                self.sidebar
+                    .note_provider_quota(agent_id, session_key.as_ref(), *quota);
             }
             IpcEvent::AgentTurnFinished { run_id, .. } => {
                 self.sidebar.commit_agent_turn(*run_id);

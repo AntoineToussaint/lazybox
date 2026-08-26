@@ -926,6 +926,28 @@ fn request_profile(
         | "watched-repo"
         | "watched-repo issues"
         | "round-robin-repo" => (ApiResource::Graphql, RequestPriority::Recent),
+        // Working-claim label sync (#1218 storm fix). These are REST label
+        // reads/writes (`fbca04` "Claimed by a lazybox agent" markers), fired
+        // ~6 per agent heartbeat every 15 min plus a burst at each spawn. They
+        // MUST be:
+        //   - accounted to the REST `core` bucket (the write ops previously
+        //     fell through to the `_` arm and were mis-charged to GraphQL), and
+        //   - `Cold` (scheduled), NOT `Interactive` — as Interactive they
+        //     bypassed the reserve, per-tick allowance, AND local-bucket gates,
+        //     so N concurrent agents fanned N×6 unbudgeted writes into the
+        //     concurrency gate, backing it up (the "GitHub did not respond
+        //     within 20s" timeouts) and tripping GitHub's secondary limit,
+        //     which opened the shared circuit and stalled ALL polling.
+        // As `Cold` they yield to the actual PR poll under budget pressure and
+        // are refused locally (fast, no GitHub call) instead of storming — a
+        // refused heartbeat simply retries next cycle, and the 15-min heartbeat
+        // vs 60-min claim TTL leaves ample slack for transient refusals.
+        "list issue working labels"
+        | "list issue working labels next page"
+        | "renew working claim label"
+        | "create working claim label"
+        | "add working claim label"
+        | "delete working claim label" => (ApiResource::rest("core"), RequestPriority::Cold),
         operation if operation.starts_with("list ") || operation == "post issue comment" => {
             (ApiResource::rest("core"), RequestPriority::Interactive)
         }
@@ -6446,6 +6468,44 @@ mod tests {
             prefetch_priority,
             crate::rate_budget::RequestPriority::Recent
         );
+    }
+
+    /// #1218 storm regression: every working-claim label op must be
+    /// charged to the REST `core` bucket and admitted at a SCHEDULED
+    /// priority (`Cold`), never `Interactive`. As `Interactive` they
+    /// bypassed the reserve/tick-allowance/local-bucket gates and
+    /// (for the write ops) were mis-charged to GraphQL, so a fleet of
+    /// agents storming ~6 label writes each tripped GitHub's secondary
+    /// limit and stalled all polling.
+    #[test]
+    fn working_claim_ops_are_scheduled_rest_core() {
+        use crate::rate_budget::{ApiResource, RequestPriority};
+        for op in [
+            "list issue working labels",
+            "list issue working labels next page",
+            "renew working claim label",
+            "create working claim label",
+            "add working claim label",
+            "delete working claim label",
+        ] {
+            let (resource, priority) = request_profile(op);
+            assert_eq!(
+                resource,
+                ApiResource::rest("core"),
+                "{op} must be charged to the REST core bucket, not GraphQL"
+            );
+            assert_eq!(
+                priority,
+                RequestPriority::Cold,
+                "{op} must be scheduled (Cold), never Interactive — Interactive \
+                 bypasses every budget gate and re-creates the #1218 storm"
+            );
+            assert_ne!(
+                priority,
+                RequestPriority::Interactive,
+                "{op} must not bypass the budget gates"
+            );
+        }
     }
 
     #[test]

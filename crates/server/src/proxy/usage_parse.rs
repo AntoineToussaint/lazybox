@@ -330,9 +330,7 @@ mod tests {
 
     #[test]
     fn unknown_model_leaves_cost_absent() {
-        let stream = concat!(
-            "data: {\"model\":\"mystery-model-9\",\"usage\":{\"input_tokens\":1000000,\"output_tokens\":0}}\n\n",
-        );
+        let stream = "data: {\"model\":\"mystery-model-9\",\"usage\":{\"input_tokens\":1000000,\"output_tokens\":0}}\n\n";
         let u = feed(&[stream]).expect("usage");
         assert_eq!(u.input_tokens, Some(1_000_000));
         assert_eq!(u.cost_usd_micros, None);

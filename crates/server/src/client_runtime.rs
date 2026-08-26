@@ -116,4 +116,71 @@ mod tests {
 
         assert!(tasks.iter().all(tokio::task::AbortHandle::is_finished));
     }
+
+    /// Regression: startup recovery must never block the daemon launch, and
+    /// must never be abandoned by a wall-clock deadline. It previously ran
+    /// inline under a 5s timeout that, on a busy box, expired MID-LOOP and
+    /// orphaned every still-live session (neither reattached nor re-spawned).
+    ///
+    /// Here a survivor is alive in the backend but `list()` is parked for 30s.
+    /// `start()` must still return promptly (survivor not yet reattached), and
+    /// once the inventory resolves the background recovery task must reattach
+    /// the survivor with no deadline to drop it.
+    #[tokio::test(start_paused = true)]
+    async fn start_backgrounds_recovery_and_never_drops_survivors() {
+        use crate::backend::SessionBackend;
+
+        let (config, backend) = ServerConfig::in_memory_with_mock();
+        // A session that survived the previous run: known to the backend,
+        // absent from this fresh config.
+        let survivor = backend
+            .spawn(&["echo".into(), "hi".into()], None, &[], "survivor")
+            .await
+            .expect("spawn survivor");
+        // Make the backend inventory slow so recovery parks at its very first
+        // step — longer than the retired 5s recovery timeout.
+        backend.set_list_delay(Duration::from_secs(30)).await;
+
+        let runtime = ClientRuntime::start(
+            config.clone(),
+            ClientRuntimeOptions {
+                poll_interval: Duration::from_secs(60),
+                restore_persisted_sessions: false,
+                slack: None,
+            },
+        )
+        .await;
+
+        // The discriminating assertion: the survivor is reattached even though
+        // `list()` is parked far past the retired 5s recovery timeout. Under
+        // the old inline-with-timeout path the paused clock would auto-advance
+        // to 5s, fire the timeout, abandon recovery, and the survivor would
+        // stay orphaned — this loop would then spin out and fail. Idling sleeps
+        // let the paused clock auto-advance through the delayed inventory so the
+        // background recovery task can run to completion.
+        let mut reattached = false;
+        for _ in 0..200 {
+            if !config.terminal.is_empty().await {
+                reattached = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        assert!(
+            reattached,
+            "survivor was never reattached — recovery was blocked or abandoned",
+        );
+        let ids = config.terminal.terminal_ids().await;
+        assert_eq!(
+            ids.len(),
+            1,
+            "expected one reattached survivor, got {ids:?}"
+        );
+        assert_eq!(
+            config.terminal.backend_key_for(ids[0]).await.as_deref(),
+            Some(survivor.as_str()),
+        );
+
+        runtime.shutdown().await;
+    }
 }

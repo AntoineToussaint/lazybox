@@ -59,6 +59,10 @@ struct MockInner {
     /// tests hold a spawn "mid-provision" to exercise the in-flight
     /// spawn races (duplicate collapse, Kill serialization).
     spawn_delay: Mutex<Option<std::time::Duration>>,
+    /// Artificial delay applied at the start of every `list()`. Lets tests
+    /// park startup recovery on the backend inventory to prove recovery no
+    /// longer blocks the daemon launch (client_runtime background-recovery).
+    list_delay: Mutex<Option<std::time::Duration>>,
     /// Per-key kill failure injected by lifecycle tests. Real backends keep
     /// their slot on a transport/timeout failure so callers can retry; the
     /// mock must be able to exercise that contract too.
@@ -261,6 +265,13 @@ impl MockBackend {
     /// provisioning / agent boot in race tests.
     pub async fn set_spawn_delay(&self, delay: std::time::Duration) {
         *self.inner.spawn_delay.lock().await = Some(delay);
+    }
+
+    /// Make every subsequent `list()` sleep for `delay` before returning —
+    /// a stand-in for a slow/loaded backend inventory in startup-recovery
+    /// tests.
+    pub async fn set_list_delay(&self, delay: std::time::Duration) {
+        *self.inner.list_delay.lock().await = Some(delay);
     }
 
     /// Make `kill(key)` fail without closing or removing the session.
@@ -536,6 +547,10 @@ impl SessionBackend for MockBackend {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, BackendError>> + Send + 'a>> {
         Box::pin(async move {
+            let delay = *self.inner.list_delay.lock().await;
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
             let map = self.inner.sessions.lock().await;
             Ok(map
                 .iter()

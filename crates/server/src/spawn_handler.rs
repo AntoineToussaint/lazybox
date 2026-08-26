@@ -6851,18 +6851,31 @@ async fn write_prompt_sequence(
         )
         .await
         .map_err(PromptWriteError::Submit)?;
-        if submit {
-            mark_done_agent_working(config, terminal_id, backend_key).await;
-        }
         drop(interaction);
-        return Ok(confirm_prompt_submission(
+        // Confirm submission BEFORE any optimistic badge flip. The
+        // confirmation loop treats a `Done→Working` transition as proof the
+        // Enter landed (`await_submit_evidence`), so flipping the badge here —
+        // as we used to, right after the submit write — manufactures that very
+        // evidence on the same bus the loop is listening to. On an agent that
+        // was `Done` (the normal state of a finished workspace you bulk-select
+        // for new work) the loop then self-confirms and skips the Enter resend
+        // that exists to recover a swallowed soft-newline (issue #122). That is
+        // why multi-select broadcasts so often pasted the prompt but never
+        // submitted it: the recovery net was disarmed by our own flip. Flip only
+        // once submission is genuinely confirmed; an unconfirmed prompt keeps
+        // its honest `Done` badge and the loud "parked in the composer" error.
+        let confirmed = confirm_prompt_submission(
             confirm,
             config,
             backend_key,
             &submit_bytes,
             SUBMIT_CONFIRM_DEADLINE,
         )
-        .await);
+        .await;
+        if submit && confirmed {
+            mark_done_agent_working(config, terminal_id, backend_key).await;
+        }
+        return Ok(confirmed);
     }
     if submit {
         mark_done_agent_working(config, terminal_id, backend_key).await;
@@ -14498,6 +14511,75 @@ mod tests {
         assert!(
             gave_up_loudly,
             "exhausting the resends must surface a user-visible error"
+        );
+    }
+
+    /// Regression (multi-select broadcast, issue #122 follow-up): injecting
+    /// into a *Done* agent must NOT self-confirm the submit.
+    /// `write_prompt_sequence` used to flip the badge `Done→Working`
+    /// (`mark_done_agent_working`) immediately after the submit write, which
+    /// broadcasts a `Working` transition on the very bus
+    /// `confirm_prompt_submission` treats as proof-of-submission. On the common
+    /// bulk case — fanning new work out to finished (Done) agents — that
+    /// synthetic evidence made the confirm loop return "submitted" and skip the
+    /// Enter resend, so a swallowed soft-newline left the prompt pasted but
+    /// unsent. The optimistic flip now runs only AFTER a genuine confirmation,
+    /// so a Done agent that never actually starts working still gets its Enter
+    /// resent and keeps its honest Done badge meanwhile.
+    #[tokio::test]
+    async fn inject_into_done_agent_does_not_self_confirm_and_resends_enter() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&["claude".into()], None, &[], "done-agent-inject")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(122);
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            SessionKey::new("done-agent-inject"),
+            "claude",
+            Some(lazybox_ipc::AgentState::Done),
+            None,
+        )
+        .await;
+
+        // The agent never emits a genuine `Working` transition — the mock
+        // produces no output, standing in for a swallowed Enter. The only path
+        // to a second `\r` is a real resend firing.
+        handle_inject_prompt(&config, id, "bulk work item", None, true).await;
+
+        // Wait for the initial submit `\r` plus at least one resend `\r`.
+        // Before the fix the self-inflicted Done→Working flip confirmed
+        // immediately and exactly one `\r` (the initial submit) was ever
+        // written.
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let cr_writes = mock
+                    .writes_for(&backend_key)
+                    .await
+                    .into_iter()
+                    .filter(|w| w.as_slice() == b"\r")
+                    .count();
+                if cr_writes >= 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect(
+            "a Done agent whose Enter is swallowed must get the Enter RESENT — \
+             the optimistic Done→Working flip must not self-confirm the submit",
+        );
+
+        // The badge must NOT have been optimistically flipped to Working:
+        // submission was never confirmed, so the honest Done state stands.
+        assert_eq!(
+            config.terminal.agent_state_for(id).await,
+            Some(lazybox_ipc::AgentState::Done),
+            "an unconfirmed submit must not manufacture a Working badge",
         );
     }
 

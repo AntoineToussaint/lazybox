@@ -11723,6 +11723,60 @@ mod merge_focus_follow_tests {
         );
     }
 
+    /// #1351: the which-key leader popup is workspace-aware. The `g`
+    /// github group must drop its PR-only rows on an issue workspace,
+    /// and the `x` workspace group must drop its issue-only rows on a
+    /// PR — the same `availability` gate the dispatcher and the
+    /// right-click context menu already consult.
+    #[test]
+    fn leader_popup_continuations_are_workspace_contextual() {
+        use super::super::helpers::seq_continuations_available;
+        use lazybox_tui_core::action::{ActionKind, KeyStroke};
+
+        let model = build_model();
+        let g = KeyStroke::parse("g").expect("`g` parses");
+        let x = KeyStroke::parse("x").expect("`x` parses");
+
+        let kinds = |prefix: &KeyStroke, ws: &Workspace| -> Vec<ActionKind> {
+            seq_continuations_available(prefix, PaneFocus::Sidebar, &model.catalog, Some(ws))
+                .into_iter()
+                .map(|(_, e)| e.kind)
+                .collect()
+        };
+
+        let issue = workspace("owner/repo#1", false, Duration::hours(1));
+        let issue_g = kinds(&g, &issue);
+        for pr_only in [
+            ActionKind::MergePr,
+            ActionKind::ClosePr,
+            ActionKind::UpdateBranch,
+            ActionKind::ConvertToDraft,
+            ActionKind::MarkReady,
+            ActionKind::RequestReviewers,
+        ] {
+            assert!(
+                !issue_g.contains(&pr_only),
+                "issue workspace must not advertise {pr_only:?} under `g`",
+            );
+        }
+        // Rows that DO apply to an issue keep the leader alive.
+        assert!(issue_g.contains(&ActionKind::DeleteOrClose));
+        assert!(issue_g.contains(&ActionKind::OpenInBrowser));
+
+        let pr = workspace("owner/repo#2", true, Duration::hours(1));
+        let pr_x = kinds(&x, &pr);
+        for issue_only in [ActionKind::CloseIssue, ActionKind::CollapseIntoPr] {
+            assert!(
+                !pr_x.contains(&issue_only),
+                "PR workspace must not advertise {issue_only:?} under `x`",
+            );
+        }
+        // The PR-only `g` rows show on a PR.
+        let pr_g = kinds(&g, &pr);
+        assert!(pr_g.contains(&ActionKind::MergePr));
+        assert!(pr_g.contains(&ActionKind::ClosePr));
+    }
+
     /// #1243: the bulk `g d` confirm renders the mixed close/delete
     /// split — PRs are closed, issues deleted, and ineligible targets
     /// counted as skipped — so Yes is never a blind guess.

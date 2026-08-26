@@ -54,7 +54,8 @@ pub fn terminal_leader_reference_rows() -> Vec<(String, String)> {
 // the helpers moved out of mod.rs.
 pub(crate) use helpers::{
     emit_clipboard_copy, find_action_for_seq, find_action_for_stroke, key_event_to_stroke,
-    paint_selection, rect_contains, section_rank, seq_continuations, split_for_footer,
+    paint_selection, rect_contains, section_rank, seq_continuations, seq_continuations_available,
+    split_for_footer,
 };
 
 use crate::PaneId;
@@ -6164,7 +6165,12 @@ impl<T: TerminalAdapter> Model<T> {
         let (leader_rows, leader_group): (Vec<(String, String)>, Option<&'static str>) =
             if let Some(prefix) = self.leader.pending() {
                 let rfocus = self.resolve_focus_for_keys().unwrap_or(self.focus);
-                let conts = seq_continuations(prefix, rfocus, &self.catalog);
+                let conts = seq_continuations_available(
+                    prefix,
+                    rfocus,
+                    &self.catalog,
+                    self.sidebar.selected_workspace(),
+                );
                 let group = conts
                     .iter()
                     .find_map(|(_, e)| lazybox_tui_core::action::leader_group_label(e.kind));

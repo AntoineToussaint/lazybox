@@ -16,6 +16,7 @@
 use super::{
     Id, Model, PaneFocus, TerminalDrag, emit_clipboard_copy, find_action_for_seq,
     find_action_for_stroke, key_event_to_stroke, rect_contains, section_rank, seq_continuations,
+    seq_continuations_available,
 };
 use crate::realm::keymap::realm_key_to_crossterm;
 use lazybox_ipc::Command as IpcCommand;
@@ -110,7 +111,13 @@ impl<T: TerminalAdapter> Model<T> {
                 // above found no in-group binding for them.
                 if let Some(delta) = popup_nav_delta(&key) {
                     if let Some(rf) = rfocus {
-                        let len = seq_continuations(&prefix, rf, &self.catalog).len();
+                        let len = seq_continuations_available(
+                            &prefix,
+                            rf,
+                            &self.catalog,
+                            self.sidebar.selected_workspace(),
+                        )
+                        .len();
                         if len > 0 {
                             self.leader_highlight =
                                 Some(advance_highlight(self.leader_highlight, delta, len));
@@ -121,9 +128,14 @@ impl<T: TerminalAdapter> Model<T> {
                 if key.code == Key::Enter
                     && let Some(idx) = self.leader_highlight
                     && let Some(rf) = rfocus
-                    && let Some(action) = seq_continuations(&prefix, rf, &self.catalog)
-                        .get(idx)
-                        .and_then(|(_, entry)| action_from_entry(entry))
+                    && let Some(action) = seq_continuations_available(
+                        &prefix,
+                        rf,
+                        &self.catalog,
+                        self.sidebar.selected_workspace(),
+                    )
+                    .get(idx)
+                    .and_then(|(_, entry)| action_from_entry(entry))
                 {
                     self.leader.take();
                     self.leader_highlight = None;

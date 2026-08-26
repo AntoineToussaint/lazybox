@@ -1868,7 +1868,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// snapshot that arrives after the window was closed is dropped. The
     /// daemon re-pushes after every accumulator flush (#1344), so this can
     /// fire repeatedly while the window is open — carry the current
-    /// Today⇄Week selection across the rebuild rather than resetting it.
+    /// Today⇄Week selection *and* scroll offset across the rebuild rather
+    /// than resetting them (else a scrolled deep-dive snaps to the top on
+    /// every flush, #1345).
     pub(super) fn update_stats(&mut self, buckets: Vec<lazybox_ipc::StatBucket>) {
         use crate::realm::components::stats::Stats;
         use tuirealm::state::{State, StateValue};
@@ -1876,12 +1878,20 @@ impl<T: TerminalAdapter> Model<T> {
         if self.modal_stack.last() != Some(&Id::Stats) {
             return;
         }
-        let week = matches!(
-            self.app.state(&Id::Stats),
-            Ok(State::Single(StateValue::Bool(true)))
-        );
+        let (week, scroll) = match self.app.state(&Id::Stats) {
+            Ok(State::Vec(v)) => {
+                let week = matches!(v.first(), Some(StateValue::Bool(true)));
+                let scroll = match v.get(1) {
+                    Some(StateValue::U16(n)) => *n,
+                    _ => 0,
+                };
+                (week, scroll)
+            }
+            _ => (false, 0),
+        };
         let mut stats = Stats::new(buckets, chrono::Local::now().date_naive(), false);
         stats.set_week(week);
+        stats.set_scroll(scroll);
         self.mount_modal(Id::Stats, stats);
     }
 

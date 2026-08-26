@@ -2133,51 +2133,63 @@ mod effects_tests {
         }
     }
 
-    /// #1344: the daemon re-pushes the rollup after every accumulator
+    /// #1344/#1345: the daemon re-pushes the rollup after every accumulator
     /// flush, which repaints an open Usage Stats window. A push must NOT
-    /// reset the user's Today⇄Week selection — before the fix each rebuild
-    /// snapped the view back to Today, so an active agent's usage pushes
-    /// made Week unusable.
+    /// reset the user's Today⇄Week selection *or* their scroll offset —
+    /// before the fix each rebuild snapped the view back to Today and to the
+    /// top, so an active agent's usage pushes made the Week tab and
+    /// scrolling unusable.
     #[test]
-    fn stats_push_preserves_the_week_toggle() {
+    fn stats_push_preserves_the_week_toggle_and_scroll() {
         use lazybox_ipc::{StatBucket, stats};
         use tuirealm::event::{Key, KeyEvent, KeyModifiers};
         use tuirealm::state::{State, StateValue};
 
-        // Keep the server end alive so the mount's GetStats send succeeds.
+        // A short terminal so the deep-dive scrolls (body < content), making
+        // a preserved scroll offset observable rather than clamped to 0.
         let (client, _server) = lazybox_ipc::channel::pair();
-        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model");
+        let mut m = Model::new_for_test(client, Size::new(80, 14)).expect("model");
 
         let bucket = |metric: &str, value: i64| StatBucket {
             day: chrono::Local::now().format("%Y-%m-%d").to_string(),
             metric: metric.into(),
             value,
         };
-        let on_week = |m: &Model<tuirealm::terminal::TestTerminalAdapter>| {
-            matches!(
-                m.app.state(&Id::Stats),
-                Ok(State::Single(StateValue::Bool(true)))
-            )
-        };
+        // (week, scroll) as the mounted Stats window reports them.
+        let view_state =
+            |m: &Model<tuirealm::terminal::TestTerminalAdapter>| match m.app.state(&Id::Stats) {
+                Ok(State::Vec(v)) => {
+                    let week = matches!(v.first(), Some(StateValue::Bool(true)));
+                    let scroll = match v.get(1) {
+                        Some(StateValue::U16(n)) => *n,
+                        _ => 0,
+                    };
+                    (week, scroll)
+                }
+                other => panic!("expected a Vec state, got {other:?}"),
+            };
 
-        // Open the window and load an initial snapshot (Today by default).
+        // Open the window and load an initial snapshot (Today, top of scroll).
         m.mount_stats();
         m.handle_daemon_event(lazybox_ipc::Event::Stats {
             buckets: vec![bucket(stats::SESSIONS, 3)],
         });
-        assert!(!on_week(&m), "loads on Today");
+        assert_eq!(view_state(&m), (false, 0), "loads on Today at the top");
 
-        // User switches to Week.
+        // User switches to Week and scrolls down two rows.
         m.dispatch_modal_key(KeyEvent::new(Key::Tab, KeyModifiers::NONE));
-        assert!(on_week(&m), "Tab switches to Week");
+        m.dispatch_modal_key(KeyEvent::new(Key::Down, KeyModifiers::NONE));
+        m.dispatch_modal_key(KeyEvent::new(Key::Down, KeyModifiers::NONE));
+        assert_eq!(view_state(&m), (true, 2), "Week + scrolled down two rows");
 
-        // A daemon push (post-flush) repaints the window — must stay on Week.
+        // A daemon push (post-flush) repaints the window — must keep BOTH.
         m.handle_daemon_event(lazybox_ipc::Event::Stats {
             buckets: vec![bucket(stats::SESSIONS, 4)],
         });
-        assert!(
-            on_week(&m),
-            "the post-flush push preserved the Week selection"
+        assert_eq!(
+            view_state(&m),
+            (true, 2),
+            "the post-flush push preserved Week and the scroll offset"
         );
     }
 

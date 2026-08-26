@@ -68,6 +68,59 @@ fn spans_visual_width(spans: &[Span<'_>]) -> usize {
         .sum()
 }
 
+/// USD micros (millionths of a dollar) → `$1.23`.
+fn fmt_cost_micros(micros: i64) -> String {
+    format!("${:.2}", micros as f64 / 1_000_000.0)
+}
+
+/// Style + width-gate the always-visible "today" stats strip (#1344): a
+/// terse `today  3 sessions · 4 merged · $2.14` of the persisted daily
+/// rollup. Like [`usage_line_spans`], whole groups drop rather than clip
+/// when the sidebar is narrow — priority high→low is sessions, merged,
+/// cost, so a tight header keeps the headline accomplishment count and
+/// sheds cost first. Empty when no group fits, which the caller reads as
+/// "no today row" (so the bare `today` label never renders alone).
+fn today_line_spans(
+    stats: &TodayStats,
+    inner_width: usize,
+    theme: &crate::theme::Theme,
+) -> Vec<Span<'static>> {
+    let dim = Style::default().fg(theme.text_dim);
+    let figure = Style::default().add_modifier(Modifier::BOLD);
+    let groups: [Vec<Span<'static>>; 3] = [
+        vec![
+            Span::styled(stats.sessions.to_string(), figure),
+            Span::styled(" sessions", dim),
+        ],
+        vec![
+            Span::styled(stats.merged.to_string(), figure),
+            Span::styled(" merged", dim),
+        ],
+        vec![Span::styled(fmt_cost_micros(stats.cost_micros), figure)],
+    ];
+    let mut out: Vec<Span<'static>> = vec![Span::styled("today", dim)];
+    let mut used = spans_visual_width(&out);
+    let mut any = false;
+    for group in groups {
+        // Two spaces after the label so it reads as a heading; a dim
+        // ` · ` between groups.
+        let sep = if any { 3 } else { 2 };
+        let group_width = spans_visual_width(&group);
+        if used + sep + group_width > inner_width {
+            continue;
+        }
+        out.push(if any {
+            Span::styled(" · ", dim)
+        } else {
+            Span::raw("  ")
+        });
+        out.extend(group);
+        used += sep + group_width;
+        any = true;
+    }
+    if any { out } else { Vec::new() }
+}
+
 /// Extend a cursor row's highlight to the right edge: pad with blank
 /// cells in the row-background `style` so the selection fill spans the
 /// full `row_budget` instead of hugging the text. Width is measured
@@ -148,6 +201,42 @@ impl Sidebar {
         } else {
             1
         }
+    }
+
+    /// The "today" strip's spans, or empty when the row is disabled
+    /// (`ui.today_summary` off), no snapshot has landed yet, or nothing
+    /// fits `inner_width`. Mirrors `usage_summaries` as the single
+    /// gate the render + hit-test both read.
+    fn today_spans(&self, inner_width: usize, theme: &crate::theme::Theme) -> Vec<Span<'static>> {
+        if !self.today_summary {
+            return Vec::new();
+        }
+        let Some(stats) = self.today_stats else {
+            return Vec::new();
+        };
+        today_line_spans(&stats, inner_width, theme)
+    }
+
+    /// Height the always-visible "today" strip adds to the header for a
+    /// pane of this width — `1` when it renders, `0` otherwise (#1344).
+    /// The click hit-tests fold this into their header offset, alongside
+    /// the usage row, so a click still lands on the row actually drawn.
+    pub(super) fn today_row_height(&self, area: Rect) -> u16 {
+        let inner_width = area.width.saturating_sub(2) as usize;
+        let theme = crate::theme::current();
+        if self.today_spans(inner_width, theme).is_empty() {
+            0
+        } else {
+            1
+        }
+    }
+
+    /// Total header rows above the content: the fixed 5 (brand, filter,
+    /// stats, divider, blank) plus the two optional strips. The click
+    /// hit-tests read this so a click resolves to the row actually drawn
+    /// once the usage / today rows shift content down.
+    pub(super) fn header_height(&self, area: Rect) -> u16 {
+        5 + self.usage_row_height(area) + self.today_row_height(area)
     }
 
     pub fn render(&mut self, area: Rect, frame: &mut Frame, focused: bool) {
@@ -642,11 +731,25 @@ impl Sidebar {
             frame.render_widget(Paragraph::new(Line::from(usage_spans)), usage_area);
         }
 
+        // Row 4 (when present) — the always-visible "today" stats strip
+        // (#1344). A terse `today  3 sessions · 4 merged · $2.14` of the
+        // persisted daily rollup (#1339), width-gated the same way as the
+        // usage row: a group that can't fit whole is dropped rather than
+        // sliced. Sits just below the usage row (or row 2 when there is
+        // none) and above the divider, so it reads as header chrome; absent
+        // (`ui.today_summary` off, or no snapshot yet) it takes no space.
+        let today_spans = self.today_spans(inner_width as usize, theme);
+        let today_h: u16 = if today_spans.is_empty() { 0 } else { 1 };
+        if today_h == 1 && area.height >= 4 + usage_h {
+            let today_area = Rect::new(area.x + l_pad, area.y + 3 + usage_h, inner_width, 1);
+            frame.render_widget(Paragraph::new(Line::from(today_spans)), today_area);
+        }
+
         // Divider — thin, accent-tinted while this pane has focus so the
-        // active pane reads at a glance (#286). Sits just under the usage
-        // row (or row 2 when there is none).
-        let divider_y = 3 + usage_h;
-        if area.height >= 4 + usage_h {
+        // active pane reads at a glance (#286). Sits just under the usage /
+        // today rows (or row 2 when there is neither).
+        let divider_y = 3 + usage_h + today_h;
+        if area.height >= 4 + usage_h + today_h {
             let div_area = Rect::new(area.x + l_pad, area.y + divider_y, inner_width, 1);
             let divider = "─".repeat(div_area.width as usize);
             frame.render_widget(
@@ -663,7 +766,7 @@ impl Sidebar {
         // the bottom row, so the list loses one line — the bar is pinned to
         // the bottom (fzf-style) so the repo tree doesn't shift as the user
         // types.
-        let header_height: u16 = 5 + usage_h;
+        let header_height: u16 = 5 + usage_h + today_h;
         let search_bar = self.search.is_some() && area.height > header_height;
         let inner = Rect {
             x: area.x + l_pad,

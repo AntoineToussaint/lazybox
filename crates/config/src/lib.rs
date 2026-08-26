@@ -1289,6 +1289,13 @@ pub struct UiSection {
     /// from. Opt-out — set `false` to hide the row. Defaults to `true`.
     #[serde(default = "default_true")]
     pub usage_summary: bool,
+    /// Show the always-visible "today" stats strip in the sidebar header
+    /// (#1344): a terse `today  3 sessions · 4 merged · $2.14` line of the
+    /// persisted daily rollup (#1339), so the day's accomplishment count is
+    /// visible without opening the Usage Stats window. Opt-out — set `false`
+    /// to hide the row. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub today_summary: bool,
     /// Plan-window token budget per agent id (`claude: 200000000`), the
     /// denominator for the usage summary's percentage. OAuth/plan agents
     /// expose no usage API, so the window size can't be inferred — set it
@@ -1342,6 +1349,7 @@ impl Default for UiSection {
             show_agent_model: true,
             usage_limit_alerts: true,
             usage_summary: true,
+            today_summary: true,
             usage_budgets: std::collections::BTreeMap::new(),
         }
     }
@@ -1396,6 +1404,9 @@ pub struct UiDefaults {
     /// Show the always-visible per-provider usage summary. See
     /// [`UiSection::usage_summary`].
     pub usage_summary: bool,
+    /// Show the always-visible "today" stats strip. See
+    /// [`UiSection::today_summary`].
+    pub today_summary: bool,
     /// Per-agent plan-window token budgets. See
     /// [`UiSection::usage_budgets`].
     pub usage_budgets: std::collections::BTreeMap<String, u64>,
@@ -1430,6 +1441,7 @@ impl Default for UiDefaults {
             usage_limit_alerts: true,
             credit_recovery_prompt: default_credit_recovery_prompt(),
             usage_summary: true,
+            today_summary: true,
             usage_budgets: std::collections::BTreeMap::new(),
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
         }
@@ -1477,6 +1489,7 @@ impl UiSection {
             usage_limit_alerts: self.usage_limit_alerts,
             credit_recovery_prompt,
             usage_summary: self.usage_summary,
+            today_summary: self.today_summary,
             usage_budgets: self.usage_budgets.clone(),
             // Sourced from the `terminal` section (see
             // `Config::resolved_ui`); the default stands until that

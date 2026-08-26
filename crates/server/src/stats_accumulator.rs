@@ -38,7 +38,11 @@ const STATS_WINDOW_DAYS: i64 = 34;
 pub fn spawn(config: &ServerConfig) -> tokio::task::JoinHandle<()> {
     let rx = config.bus.subscribe();
     let store = config.store.clone();
-    tokio::spawn(async move { run(rx, store).await })
+    // A WeakSender for the post-flush push, so holding it doesn't keep the
+    // bus alive — the receive loop still observes `Closed` on teardown and
+    // exits, rather than blocking forever on a channel only it references.
+    let bus = config.bus.downgrade();
+    tokio::spawn(async move { run(rx, store, bus).await })
 }
 
 /// The local calendar day (`YYYY-MM-DD`) an event is stamped with. Local,
@@ -52,9 +56,13 @@ fn local_day() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
-async fn run(mut rx: broadcast::Receiver<Event>, store: Arc<dyn Store>) {
+async fn run(
+    mut rx: broadcast::Receiver<Event>,
+    store: Arc<dyn Store>,
+    bus: broadcast::WeakSender<Event>,
+) {
     let (tx, wx) = mpsc::unbounded_channel::<StatEvent>();
-    let writer = tokio::spawn(writer_loop(wx, store));
+    let writer = tokio::spawn(writer_loop(wx, store, bus));
     loop {
         match rx.recv().await {
             Ok(event) => {
@@ -87,29 +95,46 @@ async fn run(mut rx: broadcast::Receiver<Event>, store: Arc<dyn Store>) {
 /// batched transaction so the retention prune runs per-flush, not
 /// per-event. `record_stats` is a blocking SQLite write under a
 /// parking_lot mutex — offloaded off the runtime worker (issue #34).
-async fn writer_loop(mut wx: mpsc::UnboundedReceiver<StatEvent>, store: Arc<dyn Store>) {
+///
+/// After each committed flush, re-broadcast the recent rollup so any
+/// subscribed client (the always-visible "today" header strip #1344, and
+/// an open Usage Stats window) reflects the write without polling. The
+/// push carries the just-written totals — deterministic where a
+/// client-side re-request would race the write.
+async fn writer_loop(
+    mut wx: mpsc::UnboundedReceiver<StatEvent>,
+    store: Arc<dyn Store>,
+    bus: broadcast::WeakSender<Event>,
+) {
     while let Some(first) = wx.recv().await {
         let mut batch = vec![first];
         while let Ok(next) = wx.try_recv() {
             batch.push(next);
         }
-        let store = store.clone();
-        match tokio::task::spawn_blocking(move || store.record_stats(&batch)).await {
-            Ok(Ok(())) => {}
+        let write_store = store.clone();
+        match tokio::task::spawn_blocking(move || write_store.record_stats(&batch)).await {
+            // Upgrade lazily: a `None` means the bus is gone (teardown),
+            // so there is no one to push to and nothing to do.
+            Ok(Ok(())) => {
+                if let Some(bus) = bus.upgrade() {
+                    broadcast_window(&store, &bus).await;
+                }
+            }
             Ok(Err(e)) => tracing::warn!("stats: failed to persist: {e}"),
             Err(e) => tracing::warn!("stats: writer task panicked: {e}"),
         }
     }
 }
 
-/// Reply to `Command::GetStats` by broadcasting the recent daily rollup.
-pub async fn handle_get(config: &ServerConfig) {
-    let store = config.store.clone();
+/// Read the recent daily rollup and broadcast it as [`Event::Stats`]. The
+/// shared body behind both the `GetStats` reply and the post-flush push.
+/// A SQLite scan under a parking_lot mutex — offloaded off the runtime
+/// worker, matching the `error_inbox` list path.
+async fn broadcast_window(store: &Arc<dyn Store>, bus: &broadcast::Sender<Event>) {
     let since = (chrono::Local::now().date_naive() - chrono::Duration::days(STATS_WINDOW_DAYS))
         .format("%Y-%m-%d")
         .to_string();
-    // A SQLite scan under a parking_lot mutex — offload it off the
-    // runtime worker, matching the `error_inbox` list path.
+    let store = store.clone();
     let buckets = match tokio::task::spawn_blocking(move || store.list_stats_since(&since)).await {
         Ok(Ok(rows)) => rows,
         Ok(Err(e)) => {
@@ -130,7 +155,12 @@ pub async fn handle_get(config: &ServerConfig) {
         })
         .collect();
     // No receivers (no subscribed clients) is fine — nothing to refresh.
-    let _ = config.bus.send(Event::Stats { buckets });
+    let _ = bus.send(Event::Stats { buckets });
+}
+
+/// Reply to `Command::GetStats` by broadcasting the recent daily rollup.
+pub async fn handle_get(config: &ServerConfig) {
+    broadcast_window(&config.store, &config.bus).await;
 }
 
 /// Map one broadcast [`Event`] to the daily stats it contributes, or an
@@ -276,7 +306,7 @@ mod tests {
     async fn run_persists_fresh_sessions_and_ignores_reattach() {
         let (tx, rx) = broadcast::channel(64);
         let store: Arc<dyn Store> = Arc::new(lazybox_store::SqliteStore::in_memory().unwrap());
-        let task = tokio::spawn(run(rx, store.clone()));
+        let task = tokio::spawn(run(rx, store.clone(), tx.downgrade()));
 
         tx.send(Event::AgentSessionStarted {
             session_key: SessionKey::from("github:o/r#1"),
@@ -302,6 +332,44 @@ mod tests {
         let sessions = wait_for_metric(&store, stats::SESSIONS, 1).await;
         assert_eq!(sessions, 1, "one fresh session, reattach not counted");
         assert_eq!(metric_total(&store, stats::MERGED), 1);
+
+        drop(tx);
+        let _ = task.await;
+    }
+
+    /// A committed flush re-broadcasts the rollup as `Event::Stats`, so the
+    /// always-visible "today" strip (#1344) reflects the write without
+    /// polling — and the pushed totals already include the just-written
+    /// event (no client-side round-trip race).
+    #[tokio::test]
+    async fn a_flush_pushes_a_fresh_stats_event() {
+        let (tx, rx) = broadcast::channel(64);
+        let store: Arc<dyn Store> = Arc::new(lazybox_store::SqliteStore::in_memory().unwrap());
+        // Subscribe BEFORE the run loop broadcasts, so the push queues.
+        let mut client = tx.subscribe();
+        let task = tokio::spawn(run(rx, store.clone(), tx.downgrade()));
+
+        tx.send(Event::PrMerged {
+            workspace_key: WorkspaceKey::new("github:o/r#1"),
+            pr_label: "o/r#1".into(),
+        })
+        .unwrap();
+
+        // Drain until the post-flush Stats push carrying the merge lands.
+        let buckets = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(Event::Stats { buckets }) = client.recv().await
+                    && buckets
+                        .iter()
+                        .any(|b| b.metric == stats::MERGED && b.value >= 1)
+                {
+                    return buckets;
+                }
+            }
+        })
+        .await
+        .expect("a Stats push with the merge should arrive after the flush");
+        assert!(buckets.iter().any(|b| b.metric == stats::MERGED));
 
         drop(tx);
         let _ = task.await;

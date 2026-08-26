@@ -2624,6 +2624,10 @@ impl Model<AsyncCrosstermAdapter> {
         // (no polling has run yet) so nothing flickers in behind the
         // wizard. Subscribe is idempotent on the daemon side.
         let _ = model.client.send(IpcCommand::Subscribe);
+        // Seed the always-visible "today" header strip (#1344) once at
+        // startup; the daemon keeps it live thereafter by pushing a fresh
+        // snapshot after each accumulator flush.
+        let _ = model.client.send(IpcCommand::GetStats);
         model.set_focus_attr();
         Ok(model)
     }
@@ -3158,6 +3162,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.sidebar.set_show_agent_model(ui.show_agent_model);
         self.sidebar.set_usage_summary(ui.usage_summary);
         self.sidebar.set_usage_budgets(ui.usage_budgets.clone());
+        self.sidebar.set_today_summary(ui.today_summary);
         // Stash resolved defaults for model-level knobs (`q-q`
         // window, terminal-escape char, split step) that used to be
         // hardcoded consts.

@@ -255,6 +255,18 @@ impl Sidebar {
         self.inner.set_usage_budgets(budgets);
     }
 
+    /// Record whether `ui.today_summary` is on — gates the always-visible
+    /// "today" stats strip in the header (#1344).
+    pub fn set_today_summary(&mut self, show: bool) {
+        self.inner.set_today_summary(show);
+    }
+
+    /// Install the latest today rollup (`Event::Stats`) the header strip
+    /// renders (#1344).
+    pub fn set_today_stats(&mut self, stats: crate::components::sidebar::TodayStats) {
+        self.inner.set_today_stats(stats);
+    }
+
     /// Bind a structured run to its agent for usage accounting
     /// (`AgentRunStarted`).
     pub fn note_agent_run(&mut self, run_id: lazybox_ipc::AgentRunId, agent_id: &str) {

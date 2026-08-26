@@ -2562,6 +2562,118 @@ mod search_tests {
         assert!(!usage_row(&mut sb).contains("Claude"));
     }
 
+    /// The "today" strip (#1344) sits just below the usage row (or row 2
+    /// when there is none) — render at `width` and read whichever row it
+    /// lands on for this sidebar's header layout.
+    fn today_row(sb: &mut Sidebar, width: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let area = Rect::new(0, 0, width, 14);
+        let backend = TestBackend::new(width, 14);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(area, frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let y = 3 + sb.usage_row_height(area);
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    }
+
+    /// A landed stats snapshot paints the terse today strip: sessions,
+    /// merged, and cost of the day's persisted rollup (#1344).
+    #[test]
+    fn header_renders_today_strip() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.set_today_stats(TodayStats {
+            sessions: 3,
+            merged: 4,
+            cost_micros: 2_140_000,
+        });
+
+        let area = Rect::new(0, 0, 60, 14);
+        assert_eq!(sb.today_row_height(area), 1);
+        let row = today_row(&mut sb, 60);
+        assert!(row.contains("today"), "{row:?}");
+        assert!(row.contains("3 sessions"), "{row:?}");
+        assert!(row.contains("4 merged"), "{row:?}");
+        assert!(row.contains("$2.14"), "{row:?}");
+    }
+
+    /// Before the first `Event::Stats` lands the strip stays hidden rather
+    /// than flashing zeros, and reclaims its line.
+    #[test]
+    fn today_strip_hidden_until_a_snapshot_lands() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        let area = Rect::new(0, 0, 60, 14);
+        assert_eq!(sb.today_row_height(area), 0);
+        assert!(!today_row(&mut sb, 60).contains("today"), "no strip yet");
+    }
+
+    /// `ui.today_summary = false` hides the strip entirely and reclaims its
+    /// line even after a snapshot has landed.
+    #[test]
+    fn today_strip_can_be_disabled() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.set_today_stats(TodayStats {
+            sessions: 3,
+            merged: 4,
+            cost_micros: 2_140_000,
+        });
+        let area = Rect::new(0, 0, 60, 14);
+        assert_eq!(sb.today_row_height(area), 1);
+
+        sb.set_today_summary(false);
+        assert_eq!(sb.today_row_height(area), 0);
+        assert!(!today_row(&mut sb, 60).contains("today"));
+    }
+
+    /// A narrow sidebar sheds whole groups lowest-priority-first — cost
+    /// drops before the merged/sessions accomplishment counts, never a
+    /// mid-word clip.
+    #[test]
+    fn today_strip_drops_cost_before_the_counts_when_narrow() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.set_today_stats(TodayStats {
+            sessions: 3,
+            merged: 4,
+            cost_micros: 2_140_000,
+        });
+
+        // Wide enough for `today  3 sessions · 4 merged` (28 cells) but not
+        // the trailing ` · $2.14` (+8) — inner width 30, pane width 32.
+        let row = today_row(&mut sb, 32);
+        assert!(row.contains("3 sessions"), "{row:?}");
+        assert!(row.contains("4 merged"), "{row:?}");
+        assert!(!row.contains("$2.14"), "{row:?}");
+    }
+
+    /// `TodayStats::from_buckets` sums only today's buckets for the metrics
+    /// the strip shows, ignoring other days and unrelated metrics.
+    #[test]
+    fn today_stats_from_buckets_sums_only_today() {
+        use lazybox_ipc::{StatBucket, stats};
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 25).unwrap();
+        let b = |day: &str, metric: &str, value: i64| StatBucket {
+            day: day.into(),
+            metric: metric.into(),
+            value,
+        };
+        let buckets = vec![
+            b("2026-08-25", stats::SESSIONS, 2),
+            b("2026-08-25", stats::SESSIONS, 1),
+            b("2026-08-24", stats::SESSIONS, 9),
+            b("2026-08-25", stats::MERGED, 4),
+            b("2026-08-25", stats::COST_MICROS, 2_140_000),
+            b("2026-08-25", stats::PROMPTS, 50),
+        ];
+        let stats = TodayStats::from_buckets(&buckets, today);
+        assert_eq!(stats.sessions, 3, "today's two session buckets sum");
+        assert_eq!(stats.merged, 4);
+        assert_eq!(stats.cost_micros, 2_140_000);
+    }
+
     /// The bottom `/` search bar records its rect so a click on the
     /// input itself is distinguishable from a click that should dismiss
     /// the search (#780).

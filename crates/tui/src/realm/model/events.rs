@@ -1879,9 +1879,18 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
-        // Usage-stats snapshot (#1339) — repaint the open stats window. A
-        // snapshot that lands while it's closed is dropped by `update_stats`.
+        // Usage-stats snapshot (#1339) — repaint the open stats window and
+        // feed the always-visible "today" header strip (#1344). A snapshot
+        // that lands while the window is closed is dropped by
+        // `update_stats`, but the header strip always consumes it. The
+        // daemon pushes a fresh snapshot after each accumulator flush, so
+        // the strip stays live without polling.
         if let IpcEvent::Stats { buckets } = &event {
+            let today = chrono::Local::now().date_naive();
+            self.sidebar
+                .set_today_stats(crate::components::sidebar::TodayStats::from_buckets(
+                    buckets, today,
+                ));
             self.update_stats(buckets.clone());
             self.redraw = true;
             return;

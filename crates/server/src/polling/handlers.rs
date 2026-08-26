@@ -745,6 +745,13 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
     if let Some(cleanup) = merged_pr_cleanup(&ws) {
         on_terminal_transition(config, &workspace_key, cleanup).await;
     }
+
+    // Reflect the MERGED state now instead of waiting for a poll to
+    // happen to re-select this PR (a merged PR drops out of the open-PR
+    // search — otherwise minutes stale; #1355). The upsert's own
+    // terminal detection is collapsed by the reprompt throttle + the
+    // TUI's per-key dedupe against the cleanup fired above.
+    refresh_pr_after_mutation(config, &ws).await;
 }
 
 /// Handle `Command::UpdateBranch`: load the workspace, recover the PR's
@@ -810,6 +817,11 @@ async fn update_branch_task(config: &ServerConfig, workspace_key: WorkspaceKey) 
     // Wake the poll loop so the refreshed state lands in <5s instead of
     // waiting out the full interval.
     config.poll.wake(true);
+
+    // Reflect the cleared BEHIND / recomputed mergeStateStatus now via a
+    // targeted re-fetch, rather than relying on the generic wake to
+    // re-select this PR on its next tick (#1355).
+    refresh_pr_after_mutation(config, &ws).await;
 }
 
 /// Handle `Command::CloseIssue`: load the workspace, recover the
@@ -1543,6 +1555,42 @@ pub(super) fn github_target(task: &lazybox_core::Task) -> Option<(String, String
         .rsplit_once('#')
         .and_then(|(_, n)| n.parse::<u64>().ok())?;
     Some((owner.to_string(), name.to_string(), number))
+}
+
+/// Post-mutation freshness (#1355): after a `merge` / `update-branch`
+/// succeeds, targeted-refetch THIS workspace's PR so the row reflects the
+/// new terminal / mergeability state within one API round-trip.
+///
+/// The mutation handlers already `poll.wake(true)`, but that only
+/// *schedules* a tick — whether the next tick re-fetches this specific PR
+/// still depends on notifications / round-robin / hot scheduling. A
+/// just-merged PR is the worst case: it drops out of the incremental
+/// open-PR search, so its MERGED state is otherwise only re-observed by
+/// the periodic `is:merged` sweep, minutes later. This closes that window
+/// with the same `fetch_single_pr_interactive` machinery `g s` uses.
+///
+/// Best-effort: on a missing PR / unresolvable target / fetch failure it
+/// simply returns, leaving the row's prior state in place with the
+/// poll-loop wake as the backstop. Failures are logged, not surfaced as
+/// interactive errors — the user-visible mutation already succeeded.
+async fn refresh_pr_after_mutation(config: &ServerConfig, ws: &Workspace) {
+    let Some(pr) = ws.pr.as_ref() else {
+        return;
+    };
+    let Some((owner, repo, number)) = github_target(pr) else {
+        return;
+    };
+    let Some(client) = resolve_gh_client(config).await else {
+        return;
+    };
+    match client
+        .fetch_single_pr_interactive(&owner, &repo, number)
+        .await
+    {
+        Ok(Some(task)) => super::upsert(config, task).await,
+        Ok(None) => {}
+        Err(e) => tracing::warn!("refresh {owner}/{repo}#{number} after mutation: {e}"),
+    }
 }
 
 /// Handle `Command::SyncWorkspace`: a targeted re-poll of one
@@ -5884,5 +5932,171 @@ mod mutation_retry_tests {
             !delete_should_fall_back_to_close(&rate_limited),
             "an exhausted rate limit must not downgrade a delete into a close"
         );
+    }
+}
+
+#[cfg(test)]
+mod post_mutation_refresh_tests {
+    //! `refresh_pr_after_mutation` (#1355): after a merge / update-branch
+    //! succeeds, a targeted single-PR re-fetch must reflect the fresh
+    //! upstream state onto the stored row within one round-trip, instead
+    //! of leaving it stale until the poll scheduler happens to re-select
+    //! this PR. Driven against a canned GraphQL response over a real
+    //! socket — the boundary under test is fetch → upsert.
+
+    use super::*;
+    use crate::ServerConfig;
+    use lazybox_core::{Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey};
+
+    /// Minimal recording HTTP server: replies to every request with the
+    /// same canned JSON body. Mirrors the harness in `working_claims`.
+    async fn spawn_single_response_server(body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    continue;
+                };
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                );
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn open_pr_task() -> Task {
+        Task {
+            author: "me".into(),
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#42".into(),
+            },
+            title: "test".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/pull/42".into(),
+            repo: Some("o/r".into()),
+            branch: Some("feat".into()),
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            merge_blocked: false,
+            approval_policy: Default::default(),
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            kind: None,
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            parent: None,
+            priority: None,
+            state_label: None,
+        }
+    }
+
+    /// A `SINGLE_PR_QUERY` response for `o/r#42` in its post-merge state.
+    const MERGED_PR_RESPONSE: &str = r#"{
+      "data": {
+        "repository": {
+          "pullRequest": {
+            "number": 42,
+            "title": "test",
+            "body": null,
+            "url": "https://github.com/o/r/pull/42",
+            "updatedAt": "2026-08-26T12:00:00Z",
+            "isDraft": false,
+            "state": "MERGED",
+            "merged": true,
+            "headRefName": "feat",
+            "baseRefName": "main",
+            "reviewDecision": null,
+            "autoMergeRequest": null,
+            "author": {"login": "me"},
+            "labels": {"nodes": []},
+            "assignees": {"nodes": []},
+            "reviewRequests": {"nodes": []},
+            "comments": {"nodes": []},
+            "commits": {"nodes": []}
+          }
+        }
+      }
+    }"#;
+
+    #[tokio::test]
+    async fn refresh_reflects_the_merged_state_onto_the_stored_row() {
+        let config = ServerConfig::in_memory();
+        let base_uri = spawn_single_response_server(MERGED_PR_RESPONSE).await;
+        config
+            .poll
+            .cache_gh_client(GhClient::stub_with_base_uri_for_tests(&base_uri).unwrap());
+
+        let task = open_pr_task();
+        let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
+        super::super::upsert(&config, task).await;
+        assert_eq!(
+            load_workspace(&config, &key)
+                .and_then(|w| w.pr)
+                .map(|p| p.state),
+            Some(TaskState::Open),
+            "precondition: row starts Open"
+        );
+
+        let ws = load_workspace(&config, &key).unwrap();
+        refresh_pr_after_mutation(&config, &ws).await;
+
+        assert_eq!(
+            load_workspace(&config, &key)
+                .and_then(|w| w.pr)
+                .map(|p| p.state),
+            Some(TaskState::Merged),
+            "targeted re-fetch must land MERGED without a poll cycle"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_is_a_noop_for_a_workspace_without_a_pr() {
+        let config = ServerConfig::in_memory();
+        // No gh client cached: if the helper tried to fetch it would
+        // resolve credentials and fail loudly. A PR-less workspace must
+        // short-circuit before any of that.
+        let ws = Workspace::from_task(
+            {
+                let mut issue = open_pr_task();
+                issue.id.key = "o/r#7".into();
+                issue.url = "https://github.com/o/r/issues/7".into();
+                issue.kind = Some(lazybox_core::TaskKind::Issue);
+                issue
+            },
+            chrono::Utc::now(),
+        );
+        assert!(ws.pr.is_none(), "precondition: issue workspace has no pr");
+        refresh_pr_after_mutation(&config, &ws).await;
     }
 }

@@ -255,6 +255,18 @@ impl Sidebar {
         self.inner.set_usage_budgets(budgets);
     }
 
+    /// Record whether `ui.today_summary` is on — gates the always-visible
+    /// "today" stats strip in the header (#1344).
+    pub fn set_today_summary(&mut self, show: bool) {
+        self.inner.set_today_summary(show);
+    }
+
+    /// Install the latest daily rollup (`Event::Stats`) the header strip
+    /// re-sums today's slice from (#1344).
+    pub fn set_today_buckets(&mut self, buckets: Vec<lazybox_ipc::StatBucket>) {
+        self.inner.set_today_buckets(buckets);
+    }
+
     /// Bind a structured run to its agent for usage accounting
     /// (`AgentRunStarted`).
     pub fn note_agent_run(&mut self, run_id: lazybox_ipc::AgentRunId, agent_id: &str) {

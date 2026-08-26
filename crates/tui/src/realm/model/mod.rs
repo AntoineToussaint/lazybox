@@ -3158,6 +3158,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.sidebar.set_show_agent_model(ui.show_agent_model);
         self.sidebar.set_usage_summary(ui.usage_summary);
         self.sidebar.set_usage_budgets(ui.usage_budgets.clone());
+        self.sidebar.set_today_summary(ui.today_summary);
         // Stash resolved defaults for model-level knobs (`q-q`
         // window, terminal-escape char, split step) that used to be
         // hardcoded consts.

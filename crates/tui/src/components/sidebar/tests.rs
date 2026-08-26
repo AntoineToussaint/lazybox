@@ -2562,6 +2562,184 @@ mod search_tests {
         assert!(!usage_row(&mut sb).contains("Claude"));
     }
 
+    /// The "today" strip (#1344) sits just below the usage row (or row 2
+    /// when there is none) — render at `width` and read whichever row it
+    /// lands on for this sidebar's header layout.
+    fn today_row(sb: &mut Sidebar, width: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let area = Rect::new(0, 0, width, 14);
+        let backend = TestBackend::new(width, 14);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(area, frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let y = 3 + sb.usage_row_height(area);
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    }
+
+    /// Pin the sidebar clock and feed a rollup whose buckets are stamped
+    /// with that same local day, so the strip's day math is deterministic
+    /// regardless of the runner's timezone. The strip re-sums "today" from
+    /// these buckets against the sidebar's clock at render.
+    fn set_today(sb: &mut Sidebar, sessions: i64, merged: i64, cost_micros: i64) {
+        use lazybox_ipc::{StatBucket, stats};
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        sb.set_now_override(now);
+        let day = now
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        let b = |metric: &str, value: i64| StatBucket {
+            day: day.clone(),
+            metric: metric.into(),
+            value,
+        };
+        sb.set_today_buckets(vec![
+            b(stats::SESSIONS, sessions),
+            b(stats::MERGED, merged),
+            b(stats::COST_MICROS, cost_micros),
+        ]);
+    }
+
+    /// A landed stats snapshot paints the terse today strip: sessions,
+    /// merged, and cost of the day's persisted rollup (#1344).
+    #[test]
+    fn header_renders_today_strip() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        set_today(&mut sb, 3, 4, 2_140_000);
+
+        let area = Rect::new(0, 0, 60, 14);
+        assert_eq!(sb.today_row_height(area), 1);
+        let row = today_row(&mut sb, 60);
+        assert!(row.contains("today"), "{row:?}");
+        assert!(row.contains("3 sessions"), "{row:?}");
+        assert!(row.contains("4 merged"), "{row:?}");
+        assert!(row.contains("$2.14"), "{row:?}");
+    }
+
+    /// Before the first `Event::Stats` lands the strip stays hidden rather
+    /// than flashing zeros, and reclaims its line.
+    #[test]
+    fn today_strip_hidden_until_a_snapshot_lands() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        let area = Rect::new(0, 0, 60, 14);
+        assert_eq!(sb.today_row_height(area), 0);
+        assert!(!today_row(&mut sb, 60).contains("today"), "no strip yet");
+    }
+
+    /// `ui.today_summary = false` hides the strip entirely and reclaims its
+    /// line even after a snapshot has landed.
+    #[test]
+    fn today_strip_can_be_disabled() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        set_today(&mut sb, 3, 4, 2_140_000);
+        let area = Rect::new(0, 0, 60, 14);
+        assert_eq!(sb.today_row_height(area), 1);
+
+        sb.set_today_summary(false);
+        assert_eq!(sb.today_row_height(area), 0);
+        assert!(!today_row(&mut sb, 60).contains("today"));
+    }
+
+    /// A narrow sidebar sheds whole groups lowest-priority-first — cost
+    /// drops before the merged/sessions accomplishment counts, never a
+    /// mid-word clip.
+    #[test]
+    fn today_strip_drops_cost_before_the_counts_when_narrow() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        set_today(&mut sb, 3, 4, 2_140_000);
+
+        // Wide enough for `today  3 sessions · 4 merged` (28 cells) but not
+        // the trailing ` · $2.14` (+8) — inner width 30, pane width 32.
+        let row = today_row(&mut sb, 32);
+        assert!(row.contains("3 sessions"), "{row:?}");
+        assert!(row.contains("4 merged"), "{row:?}");
+        assert!(!row.contains("$2.14"), "{row:?}");
+    }
+
+    /// Priority is contiguous: once a higher-priority group doesn't fit,
+    /// nothing lower is smuggled in behind it. At pane width 27 (inner 25)
+    /// `merged` (needs 28) doesn't fit after `sessions`, so the narrower
+    /// `cost` must NOT appear in its place — the `continue`-style gate this
+    /// replaced rendered `today  3 sessions · $2.14`, inverting the stated
+    /// sessions > merged > cost priority.
+    #[test]
+    fn today_strip_never_smuggles_cost_past_a_dropped_count() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        set_today(&mut sb, 3, 4, 2_140_000);
+
+        let row = today_row(&mut sb, 27);
+        assert!(
+            row.contains("3 sessions"),
+            "keeps the headline count: {row:?}"
+        );
+        assert!(
+            !row.contains("$2.14"),
+            "cost must not jump the dropped merged: {row:?}"
+        );
+        assert!(!row.contains("merged"), "merged did not fit: {row:?}");
+    }
+
+    /// `TodayStats::from_buckets` sums only today's buckets for the metrics
+    /// the strip shows, ignoring other days and unrelated metrics.
+    #[test]
+    fn today_stats_from_buckets_sums_only_today() {
+        use lazybox_ipc::{StatBucket, stats};
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 25).unwrap();
+        let b = |day: &str, metric: &str, value: i64| StatBucket {
+            day: day.into(),
+            metric: metric.into(),
+            value,
+        };
+        let buckets = vec![
+            b("2026-08-25", stats::SESSIONS, 2),
+            b("2026-08-25", stats::SESSIONS, 1),
+            b("2026-08-24", stats::SESSIONS, 9),
+            b("2026-08-25", stats::MERGED, 4),
+            b("2026-08-25", stats::COST_MICROS, 2_140_000),
+            b("2026-08-25", stats::PROMPTS, 50),
+        ];
+        let stats = TodayStats::from_buckets(&buckets, today);
+        assert_eq!(stats.sessions, 3, "today's two session buckets sum");
+        assert_eq!(stats.merged, 4);
+        assert_eq!(stats.cost_micros, 2_140_000);
+    }
+
+    /// #1344: "today" is re-summed against the current calendar day at
+    /// render, not frozen when the rollup lands. A window left open across
+    /// local midnight must read the new day's zero, not yesterday's counts,
+    /// even with no fresh push — the buckets are unchanged, only the clock
+    /// advances.
+    #[test]
+    fn today_strip_rolls_over_at_local_midnight() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        // `set_today` pins the clock at 2026-08-25T12:00Z and stamps the
+        // rollup for that local day.
+        set_today(&mut sb, 3, 4, 2_140_000);
+        assert!(
+            today_row(&mut sb, 60).contains("3 sessions"),
+            "shows today's work"
+        );
+
+        // Advance a full day with no new push. Same buckets, new day → 0.
+        let next_day = chrono::DateTime::parse_from_rfc3339("2026-08-26T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        sb.set_now_override(next_day);
+        let row = today_row(&mut sb, 60);
+        assert!(row.contains("0 sessions"), "rolled to the new day: {row:?}");
+        assert!(
+            !row.contains("3 sessions"),
+            "yesterday's count is gone: {row:?}"
+        );
+    }
+
     /// The bottom `/` search bar records its rect so a click on the
     /// input itself is distinguishable from a click that should dismiss
     /// the search (#780).

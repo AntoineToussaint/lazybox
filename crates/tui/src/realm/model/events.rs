@@ -1393,6 +1393,12 @@ impl<T: TerminalAdapter> Model<T> {
             self.seed_recent_snippets_from_snapshot(recent_snippets.clone());
             self.snapshot_seen = true;
             self.maybe_show_pending_update();
+            // Seed the always-visible "today" header strip (#1344) on every
+            // (re)connect — the initial snapshot, a `--connect` reconnect,
+            // and a broadcast-lag-recovery snapshot all land here. The
+            // daemon keeps it live between snapshots by pushing a fresh
+            // rollup after each accumulator flush.
+            self.send_cmd(IpcCommand::GetStats);
         }
 
         // Snippet-override keep-mine acknowledgements ride their own event
@@ -1879,9 +1885,14 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
-        // Usage-stats snapshot (#1339) — repaint the open stats window. A
-        // snapshot that lands while it's closed is dropped by `update_stats`.
+        // Usage-stats snapshot (#1339) — repaint the open stats window and
+        // feed the always-visible "today" header strip (#1344). A snapshot
+        // that lands while the window is closed is dropped by
+        // `update_stats`, but the header strip always consumes it. The
+        // daemon pushes a fresh snapshot after each accumulator flush, so
+        // the strip stays live without polling.
         if let IpcEvent::Stats { buckets } = &event {
+            self.sidebar.set_today_buckets(buckets.clone());
             self.update_stats(buckets.clone());
             self.redraw = true;
             return;

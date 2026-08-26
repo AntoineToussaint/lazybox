@@ -1865,17 +1865,24 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Repaint a live usage-stats window with a fresh daemon snapshot. A
-    /// snapshot that arrives after the window was closed is dropped.
+    /// snapshot that arrives after the window was closed is dropped. The
+    /// daemon re-pushes after every accumulator flush (#1344), so this can
+    /// fire repeatedly while the window is open — carry the current
+    /// Today⇄Week selection across the rebuild rather than resetting it.
     pub(super) fn update_stats(&mut self, buckets: Vec<lazybox_ipc::StatBucket>) {
         use crate::realm::components::stats::Stats;
+        use tuirealm::state::{State, StateValue};
 
         if self.modal_stack.last() != Some(&Id::Stats) {
             return;
         }
-        self.mount_modal(
-            Id::Stats,
-            Stats::new(buckets, chrono::Local::now().date_naive(), false),
+        let week = matches!(
+            self.app.state(&Id::Stats),
+            Ok(State::Single(StateValue::Bool(true)))
         );
+        let mut stats = Stats::new(buckets, chrono::Local::now().date_naive(), false);
+        stats.set_week(week);
+        self.mount_modal(Id::Stats, stats);
     }
 
     /// `i` in the Error Inbox — open a pre-filled GitHub *new issue*

@@ -25,7 +25,7 @@ use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::prelude::*;
 use tuirealm::ratatui::widgets::Paragraph;
-use tuirealm::state::State;
+use tuirealm::state::{State, StateValue};
 
 /// Days rendered in the sparkline (this day + the six before it).
 const SPARK_DAYS: i64 = 7;
@@ -58,6 +58,14 @@ impl Stats {
             week: false,
             loading,
         }
+    }
+
+    /// Preserve the Today⇄Week selection across a data refresh. The daemon
+    /// re-pushes the rollup after each accumulator flush (#1344), and the
+    /// model repaints an open window by rebuilding it — without this the
+    /// user's Week view would snap back to Today on every push.
+    pub(crate) fn set_week(&mut self, week: bool) {
+        self.week = week;
     }
 
     /// `YYYY-MM-DD` for `n` days before today (0 = today).
@@ -248,8 +256,10 @@ impl Component for Stats {
         None
     }
     fn attr(&mut self, _: Attribute, _: AttrValue) {}
+    /// Expose the Today⇄Week selection so the model can carry it across a
+    /// data-refresh rebuild (see [`Stats::set_week`]).
     fn state(&self) -> State {
-        State::None
+        State::Single(StateValue::Bool(self.week))
     }
     fn perform(&mut self, _: Cmd) -> CmdResult {
         CmdResult::NoChange
@@ -382,6 +392,18 @@ mod tests {
         assert_eq!(comp.on(&key(Key::Char('d'))), None);
         assert!(!comp.week, "d returns to today");
         assert_eq!(comp.on(&key(Key::Esc)), Some(Msg::ModalDismissed));
+    }
+
+    /// `state()` exposes the Week selection and `set_week` restores it —
+    /// the contract the model uses to carry the toggle across a #1344
+    /// post-flush rebuild.
+    #[test]
+    fn state_reports_week_and_set_week_restores_it() {
+        use tuirealm::state::{State, StateValue};
+        let mut comp = Stats::new(vec![], today(), false);
+        assert_eq!(comp.state(), State::Single(StateValue::Bool(false)));
+        comp.set_week(true);
+        assert_eq!(comp.state(), State::Single(StateValue::Bool(true)));
     }
 
     #[test]

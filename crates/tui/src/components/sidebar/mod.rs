@@ -52,6 +52,39 @@ pub use lazybox_tui_core::inbox::{
     role_rank,
 };
 
+/// The persisted "today" rollup counts surfaced by the always-visible
+/// header strip (#1344). Built from the daemon's daily stat buckets
+/// (#1339) filtered to the local calendar day. Held as `Option` on the
+/// sidebar: `None` until the first `Event::Stats` lands, so the strip
+/// stays hidden rather than flashing zeros before the real counts arrive.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TodayStats {
+    pub sessions: i64,
+    pub merged: i64,
+    pub cost_micros: i64,
+}
+
+impl TodayStats {
+    /// Sum today's buckets into the header counts. `today` is the local
+    /// calendar day, matching the daemon's local-day bucketing so "today"
+    /// is the user's day, not UTC.
+    pub fn from_buckets(buckets: &[lazybox_ipc::StatBucket], today: chrono::NaiveDate) -> Self {
+        let day = today.format("%Y-%m-%d").to_string();
+        let sum = |metric: &str| {
+            buckets
+                .iter()
+                .filter(|b| b.day == day && b.metric == metric)
+                .map(|b| b.value)
+                .sum()
+        };
+        Self {
+            sessions: sum(lazybox_ipc::stats::SESSIONS),
+            merged: sum(lazybox_ipc::stats::MERGED),
+            cost_micros: sum(lazybox_ipc::stats::COST_MICROS),
+        }
+    }
+}
+
 /// At-a-glance attention tallies across the visible mailbox, surfaced
 /// by the focus-mode event header so a heads-down user stays aware of
 /// incoming work without the full sidebar. Each count reuses the same
@@ -430,6 +463,16 @@ pub struct Sidebar {
     /// Mirror of `ui.usage_budgets`: agent id → plan-window token budget,
     /// the denominator for the summary's percentage.
     usage_budgets: BTreeMap<String, u64>,
+    /// Mirror of `ui.today_summary` (default on) — gates the "today"
+    /// stats strip in the header (#1344).
+    today_summary: bool,
+    /// The latest daily rollup from the daemon (`Event::Stats`), or `None`
+    /// before the first snapshot lands — the strip stays hidden until then
+    /// rather than flashing zeros. Stored raw (not pre-summed) so "today"
+    /// is re-evaluated against the current calendar day at render time; a
+    /// window left open across local midnight then reads 0 for the new day
+    /// instead of freezing yesterday's counts until the next push.
+    today_buckets: Option<Vec<lazybox_ipc::StatBucket>>,
 }
 
 /// A queued user-facing notification that the outer (IO-aware) layer
@@ -510,6 +553,8 @@ impl Sidebar {
             usage_reset: HashMap::new(),
             usage_summary: true,
             usage_budgets: BTreeMap::new(),
+            today_summary: true,
+            today_buckets: None,
         }
     }
 
@@ -563,6 +608,26 @@ impl Sidebar {
     /// the denominator for the usage summary's percentage.
     pub fn set_usage_budgets(&mut self, budgets: BTreeMap<String, u64>) {
         self.usage_budgets = budgets;
+    }
+
+    /// Record whether `ui.today_summary` is on — gates the always-visible
+    /// "today" stats strip in the header (#1344).
+    pub fn set_today_summary(&mut self, show: bool) {
+        self.today_summary = show;
+    }
+
+    /// Install the latest daily rollup (`Event::Stats`); the header strip
+    /// re-sums today's slice from it each render. The first call flips the
+    /// strip from hidden to shown.
+    pub fn set_today_buckets(&mut self, buckets: Vec<lazybox_ipc::StatBucket>) {
+        self.today_buckets = Some(buckets);
+    }
+
+    /// The current local calendar day, matching the daemon's local-day
+    /// bucketing (#1344) so the strip's "today" is the user's day. Derived
+    /// through [`Self::now`] so a test clock override drives it.
+    fn local_today(&self) -> chrono::NaiveDate {
+        self.now().with_timezone(&chrono::Local).date_naive()
     }
 
     /// Bind a structured run to its agent so the run's later usage events
@@ -1270,7 +1335,7 @@ impl Sidebar {
     /// Additive, like [`extend_selection`](Self::extend_selection).
     /// Returns whether the click landed on a real row (#932).
     pub fn extend_selection_to(&mut self, area: Rect, click_row: u16) -> bool {
-        let header_height = 5 + self.usage_row_height(area);
+        let header_height = self.header_height(area);
         if click_row < area.y + header_height {
             return false;
         }
@@ -1483,9 +1548,9 @@ impl Sidebar {
 
     pub fn click_to_select(&mut self, area: Rect, click_row: u16) -> bool {
         // Mirror the header layout from `render` — including the
-        // always-visible usage row, which shifts content down by one when
-        // present (#1059).
-        let header_height = 5 + self.usage_row_height(area);
+        // always-visible usage row (#1059) and today strip (#1344), each
+        // of which shifts content down by one when present.
+        let header_height = self.header_height(area);
         if click_row < area.y + header_height {
             return false;
         }

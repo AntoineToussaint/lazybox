@@ -87,6 +87,15 @@ impl Stats {
         self.week = week;
     }
 
+    /// Preserve the scroll offset across that same rebuild. The deep-dive
+    /// scrolls (#1345), and the post-flush push fires repeatedly while the
+    /// window is open — without carrying `scroll`, a reader parked on the
+    /// Streaks/Totals rows snaps back to the top on every flush. The next
+    /// `view` re-clamps a now-too-large offset, so a shrunk rollup is safe.
+    pub(crate) fn set_scroll(&mut self, scroll: u16) {
+        self.scroll = scroll;
+    }
+
     /// `YYYY-MM-DD` for `n` days before today (0 = today).
     fn day_offset(&self, n: usize) -> &str {
         &self.days[n]
@@ -248,9 +257,11 @@ impl Stats {
         lines.push(Line::from(""));
 
         // ── Streaks — always over the shipped window, not the tab, since
-        // a streak is inherently a multi-day fact. ────────────────────
+        // a streak is inherently a multi-day fact. Labelled "recent"
+        // because the rollup only ships a bounded window, so a streak
+        // older than that is truthfully capped, not silently wrong.
         let active = self.active_days();
-        lines.push(header("Streaks"));
+        lines.push(header("Streaks · recent"));
         lines.push(row("Current", fmt_days(self.current_streak(&active))));
         lines.push(row("Longest", fmt_days(self.longest_streak(&active))));
         lines.push(row("Active days", fmt_int(active.len() as i64)));
@@ -260,7 +271,7 @@ impl Stats {
         // of the active tab — the trend context the single-number tabs lack.
         let series = self.session_series();
         lines.push(Line::from(vec![
-            Span::styled(format!("  {:<13}", "Sessions · 7d"), dim),
+            Span::styled(format!("  {:<14}", "Sessions · 7d"), dim),
             Span::styled(sparkline(&series), accent),
             Span::styled(format!("  ({} total)", series.iter().sum::<i64>()), dim),
         ]));
@@ -278,6 +289,22 @@ impl Stats {
 
         lines
     }
+}
+
+/// Modal height for `content_lines` of body: content + chrome (two borders
+/// and one hint row), floored so small content still clears the
+/// `inner.height < 3` guard, then capped by the available height so the
+/// modal can never exceed the terminal. The cap MUST come last — the
+/// original `…min(area).max(6)` applied the floor after the cap and so
+/// overflowed a terminal shorter than the floor; flipping the order keeps
+/// the floor useful while holding the fits-the-area invariant (the sibling
+/// readers hold it too). Above the cap a too-short terminal collapses into
+/// the `inner.height < 3` guard, which renders nothing rather than a
+/// clipped frame.
+fn fit_height(content_lines: usize, area_height: u16) -> u16 {
+    (content_lines as u16 + 3)
+        .max(6)
+        .min(area_height.saturating_sub(2))
 }
 
 /// A day count with singular/plural: `1 day`, `3 days`.
@@ -338,12 +365,8 @@ impl Component for Stats {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
         let theme = crate::theme::current();
         let lines = self.body_lines(theme);
-        // Size to fit the content — borders (2) + one hint row + the body —
-        // so a tall terminal shows the whole deep-dive without scrolling,
-        // while a short one clamps and scrolls.
         let modal_w = 48u16.min(area.width.saturating_sub(4));
-        let wanted_h = lines.len() as u16 + 3;
-        let modal_h = wanted_h.min(area.height.saturating_sub(2)).max(6);
+        let modal_h = fit_height(lines.len(), area.height);
         let modal = centered_rect(area, modal_w, modal_h);
         let inner = draw_frame(frame, modal, " Usage Stats ", theme);
         if inner.height < 3 {
@@ -382,10 +405,14 @@ impl Component for Stats {
         None
     }
     fn attr(&mut self, _: Attribute, _: AttrValue) {}
-    /// Expose the Today⇄Week selection so the model can carry it across a
-    /// data-refresh rebuild (see [`Stats::set_week`]).
+    /// Expose the Today⇄Week selection *and* the scroll offset so the model
+    /// can carry both across a data-refresh rebuild (see [`Stats::set_week`]
+    /// / [`Stats::set_scroll`]).
     fn state(&self) -> State {
-        State::Single(StateValue::Bool(self.week))
+        State::Vec(vec![
+            StateValue::Bool(self.week),
+            StateValue::U16(self.scroll),
+        ])
     }
     fn perform(&mut self, _: Cmd) -> CmdResult {
         CmdResult::NoChange
@@ -500,11 +527,12 @@ mod tests {
         // Tall enough to show every section without scrolling.
         let out = render(&mut comp, 50, 40);
         assert!(out.contains("Usage Stats"), "{out}");
-        // The four deep-dive sections.
+        // The four deep-dive sections — the window-scoped ones labelled
+        // "recent" so their numbers don't read as all-time.
         assert!(out.contains("Activity"), "{out}");
         assert!(out.contains("Output"), "{out}");
-        assert!(out.contains("Streaks"), "{out}");
-        assert!(out.contains("Totals"), "{out}");
+        assert!(out.contains("Streaks · recent"), "{out}");
+        assert!(out.contains("Totals · recent"), "{out}");
         assert!(out.contains("PRs merged"), "{out}");
         // Tokens split in/out in the active window…
         assert!(out.contains("Tokens in"), "{out}");
@@ -512,6 +540,9 @@ mod tests {
         // …and recombined (1.2k + 800 = 2.0k) in the recent-totals footer.
         assert!(out.contains("2.0k"), "{out}");
         assert!(out.contains("$1.25"), "{out}");
+        // The sparkline bars keep a gap from their label rather than
+        // butting straight against the "7d".
+        assert!(out.contains("Sessions · 7d ▁"), "{out}");
     }
 
     #[test]
@@ -589,16 +620,39 @@ mod tests {
         assert_eq!(comp.on(&key(Key::Esc)), Some(Msg::ModalDismissed));
     }
 
-    /// `state()` exposes the Week selection and `set_week` restores it —
-    /// the contract the model uses to carry the toggle across a #1344
-    /// post-flush rebuild.
+    /// `state()` exposes both the Week selection and the scroll offset, and
+    /// `set_week`/`set_scroll` restore them — the contract `update_stats`
+    /// uses to carry the view across a post-flush rebuild (#1344/#1345).
+    /// Without the scroll half, a scrolled deep-dive snaps to the top on
+    /// every accumulator flush.
     #[test]
-    fn state_reports_week_and_set_week_restores_it() {
+    fn state_carries_week_and_scroll_across_a_refresh() {
         use tuirealm::state::{State, StateValue};
-        let mut comp = Stats::new(vec![], today(), false);
-        assert_eq!(comp.state(), State::Single(StateValue::Bool(false)));
-        comp.set_week(true);
-        assert_eq!(comp.state(), State::Single(StateValue::Bool(true)));
+
+        // A live window the user has toggled to Week and scrolled down.
+        let mut live = Stats::new(
+            vec![bucket("2026-08-25", stats::SESSIONS, 1)],
+            today(),
+            false,
+        );
+        let _ = render(&mut live, 50, 16);
+        live.on(&key(Key::Char('w')));
+        live.on(&key(Key::Down));
+        live.on(&key(Key::Down));
+        assert_eq!(live.scroll, 2);
+        assert_eq!(
+            live.state(),
+            State::Vec(vec![StateValue::Bool(true), StateValue::U16(2)]),
+            "state() must report the tab AND the scroll offset",
+        );
+
+        // A post-flush rebuild restores both from that reported state —
+        // the exact round-trip update_stats performs.
+        let mut rebuilt = Stats::new(vec![], today(), false);
+        rebuilt.set_week(true);
+        rebuilt.set_scroll(2);
+        assert!(rebuilt.week, "week survives the rebuild");
+        assert_eq!(rebuilt.scroll, 2, "scroll survives the rebuild");
     }
 
     #[test]
@@ -612,5 +666,32 @@ mod tests {
         assert_eq!(fmt_days(0), "0 days");
         assert_eq!(fmt_days(1), "1 day");
         assert_eq!(fmt_days(5), "5 days");
+    }
+
+    /// The modal height is always capped by the terminal — the floor is
+    /// applied *before* the cap so it can't push the modal past the buffer
+    /// on a short window, yet small content still clears the chrome guard.
+    #[test]
+    fn fit_height_floors_then_caps_and_never_exceeds_the_terminal() {
+        // A tall terminal shows all 26 content lines + chrome, no scroll.
+        assert_eq!(fit_height(26, 40), 29);
+        // Content taller than the terminal clamps to the available height.
+        assert_eq!(fit_height(26, 20), 18);
+        // Tiny content is floored to 6 (so `inner.height` ≥ 3 and the body
+        // actually renders) when the terminal has room — the loading state.
+        assert_eq!(fit_height(1, 16), 6);
+        // But on a terminal shorter than the floor, the CAP wins: the old
+        // `.min(area).max(6)` returned 6 into a 2-row budget and overflowed;
+        // floor-then-cap collapses toward the `inner.height < 3` guard.
+        assert_eq!(fit_height(26, 4), 2);
+        assert_eq!(fit_height(26, 3), 1);
+        assert_eq!(fit_height(1, 4), 2);
+        // The invariant, stated directly: modal_h ≤ area_height for every
+        // content size / terminal height.
+        for area_h in 0u16..60 {
+            for lines in [1usize, 5, 26, 100] {
+                assert!(fit_height(lines, area_h) <= area_h, "area_h={area_h}");
+            }
+        }
     }
 }

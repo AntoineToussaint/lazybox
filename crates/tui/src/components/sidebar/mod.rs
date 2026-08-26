@@ -466,10 +466,13 @@ pub struct Sidebar {
     /// Mirror of `ui.today_summary` (default on) — gates the "today"
     /// stats strip in the header (#1344).
     today_summary: bool,
-    /// The latest today rollup from the daemon (`Event::Stats`), or `None`
+    /// The latest daily rollup from the daemon (`Event::Stats`), or `None`
     /// before the first snapshot lands — the strip stays hidden until then
-    /// rather than flashing zeros.
-    today_stats: Option<TodayStats>,
+    /// rather than flashing zeros. Stored raw (not pre-summed) so "today"
+    /// is re-evaluated against the current calendar day at render time; a
+    /// window left open across local midnight then reads 0 for the new day
+    /// instead of freezing yesterday's counts until the next push.
+    today_buckets: Option<Vec<lazybox_ipc::StatBucket>>,
 }
 
 /// A queued user-facing notification that the outer (IO-aware) layer
@@ -551,7 +554,7 @@ impl Sidebar {
             usage_summary: true,
             usage_budgets: BTreeMap::new(),
             today_summary: true,
-            today_stats: None,
+            today_buckets: None,
         }
     }
 
@@ -613,10 +616,18 @@ impl Sidebar {
         self.today_summary = show;
     }
 
-    /// Install the latest today rollup (`Event::Stats`), which the header
-    /// strip renders. The first call flips the strip from hidden to shown.
-    pub fn set_today_stats(&mut self, stats: TodayStats) {
-        self.today_stats = Some(stats);
+    /// Install the latest daily rollup (`Event::Stats`); the header strip
+    /// re-sums today's slice from it each render. The first call flips the
+    /// strip from hidden to shown.
+    pub fn set_today_buckets(&mut self, buckets: Vec<lazybox_ipc::StatBucket>) {
+        self.today_buckets = Some(buckets);
+    }
+
+    /// The current local calendar day, matching the daemon's local-day
+    /// bucketing (#1344) so the strip's "today" is the user's day. Derived
+    /// through [`Self::now`] so a test clock override drives it.
+    fn local_today(&self) -> chrono::NaiveDate {
+        self.now().with_timezone(&chrono::Local).date_naive()
     }
 
     /// Bind a structured run to its agent so the run's later usage events

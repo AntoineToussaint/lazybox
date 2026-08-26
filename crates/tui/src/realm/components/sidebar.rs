@@ -261,10 +261,10 @@ impl Sidebar {
         self.inner.set_today_summary(show);
     }
 
-    /// Install the latest today rollup (`Event::Stats`) the header strip
-    /// renders (#1344).
-    pub fn set_today_stats(&mut self, stats: crate::components::sidebar::TodayStats) {
-        self.inner.set_today_stats(stats);
+    /// Install the latest daily rollup (`Event::Stats`) the header strip
+    /// re-sums today's slice from (#1344).
+    pub fn set_today_buckets(&mut self, buckets: Vec<lazybox_ipc::StatBucket>) {
+        self.inner.set_today_buckets(buckets);
     }
 
     /// Bind a structured run to its agent for usage accounting

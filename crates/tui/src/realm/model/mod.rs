@@ -2624,10 +2624,6 @@ impl Model<AsyncCrosstermAdapter> {
         // (no polling has run yet) so nothing flickers in behind the
         // wizard. Subscribe is idempotent on the daemon side.
         let _ = model.client.send(IpcCommand::Subscribe);
-        // Seed the always-visible "today" header strip (#1344) once at
-        // startup; the daemon keeps it live thereafter by pushing a fresh
-        // snapshot after each accumulator flush.
-        let _ = model.client.send(IpcCommand::GetStats);
         model.set_focus_attr();
         Ok(model)
     }

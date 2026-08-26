@@ -106,8 +106,12 @@ fn today_line_spans(
         // ` · ` between groups.
         let sep = if any { 3 } else { 2 };
         let group_width = spans_visual_width(&group);
+        // The groups are priority-ordered, so stop at the first that
+        // doesn't fit rather than skipping it for a narrower lower-priority
+        // one — a tight header sheds cost before merged before sessions,
+        // never the reverse (unlike the equal-priority `usage_line_spans`).
         if used + sep + group_width > inner_width {
-            continue;
+            break;
         }
         out.push(if any {
             Span::styled(" · ", dim)
@@ -206,14 +210,17 @@ impl Sidebar {
     /// The "today" strip's spans, or empty when the row is disabled
     /// (`ui.today_summary` off), no snapshot has landed yet, or nothing
     /// fits `inner_width`. Mirrors `usage_summaries` as the single
-    /// gate the render + hit-test both read.
+    /// gate the render + hit-test both read. Today's slice is re-summed
+    /// against the current calendar day here, not cached, so the row
+    /// rolls over at local midnight (#1344).
     fn today_spans(&self, inner_width: usize, theme: &crate::theme::Theme) -> Vec<Span<'static>> {
         if !self.today_summary {
             return Vec::new();
         }
-        let Some(stats) = self.today_stats else {
+        let Some(buckets) = &self.today_buckets else {
             return Vec::new();
         };
+        let stats = TodayStats::from_buckets(buckets, self.local_today());
         today_line_spans(&stats, inner_width, theme)
     }
 

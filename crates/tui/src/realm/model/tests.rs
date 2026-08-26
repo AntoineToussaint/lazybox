@@ -2133,6 +2133,54 @@ mod effects_tests {
         }
     }
 
+    /// #1344: the daemon re-pushes the rollup after every accumulator
+    /// flush, which repaints an open Usage Stats window. A push must NOT
+    /// reset the user's Today⇄Week selection — before the fix each rebuild
+    /// snapped the view back to Today, so an active agent's usage pushes
+    /// made Week unusable.
+    #[test]
+    fn stats_push_preserves_the_week_toggle() {
+        use lazybox_ipc::{StatBucket, stats};
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+        use tuirealm::state::{State, StateValue};
+
+        // Keep the server end alive so the mount's GetStats send succeeds.
+        let (client, _server) = lazybox_ipc::channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model");
+
+        let bucket = |metric: &str, value: i64| StatBucket {
+            day: chrono::Local::now().format("%Y-%m-%d").to_string(),
+            metric: metric.into(),
+            value,
+        };
+        let on_week = |m: &Model<tuirealm::terminal::TestTerminalAdapter>| {
+            matches!(
+                m.app.state(&Id::Stats),
+                Ok(State::Single(StateValue::Bool(true)))
+            )
+        };
+
+        // Open the window and load an initial snapshot (Today by default).
+        m.mount_stats();
+        m.handle_daemon_event(lazybox_ipc::Event::Stats {
+            buckets: vec![bucket(stats::SESSIONS, 3)],
+        });
+        assert!(!on_week(&m), "loads on Today");
+
+        // User switches to Week.
+        m.dispatch_modal_key(KeyEvent::new(Key::Tab, KeyModifiers::NONE));
+        assert!(on_week(&m), "Tab switches to Week");
+
+        // A daemon push (post-flush) repaints the window — must stay on Week.
+        m.handle_daemon_event(lazybox_ipc::Event::Stats {
+            buckets: vec![bucket(stats::SESSIONS, 4)],
+        });
+        assert!(
+            on_week(&m),
+            "the post-flush push preserved the Week selection"
+        );
+    }
+
     /// Issue #312: the issue→PR session-merge prompt now defaults Enter
     /// to Yes — accepting is the expected, non-destructive path (the
     /// prompt only appears because a closing PR was detected).
@@ -7065,16 +7113,21 @@ mod coalesce_tests {
             dismissed_updates: Vec::new(),
         });
 
+        // A Snapshot also re-seeds the usage-stats strip (#1344); ignore
+        // that GetStats and assert exactly one resync repair command.
+        let resyncs: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok())
+            .filter(|cmd| matches!(cmd, IpcCommand::RequestTerminalResync { .. }))
+            .collect();
+        assert_eq!(resyncs.len(), 1, "exactly one repair request");
         assert!(matches!(
-            server.rx.try_recv(),
-            Ok(IpcCommand::RequestTerminalResync {
+            &resyncs[0],
+            IpcCommand::RequestTerminalResync {
                 requests,
-            }) if requests == vec![lazybox_ipc::TerminalResyncRequest {
+            } if *requests == vec![lazybox_ipc::TerminalResyncRequest {
                 terminal_id: TerminalId(9),
                 required_seq: 17,
             }]
         ));
-        assert!(server.rx.try_recv().is_err(), "exactly one repair request");
     }
 
     /// #1171: a replay-budgeted reconnect snapshot can omit dozens of quiet
@@ -7121,7 +7174,13 @@ mod coalesce_tests {
         let mut commands = 0;
         while let Ok(command) = server.rx.try_recv() {
             let IpcCommand::RequestTerminalResync { requests } = command else {
-                panic!("expected resync batch, got {command:?}");
+                // A Snapshot also re-seeds the usage-stats strip (#1344);
+                // ignore that GetStats, only the resync batches matter here.
+                assert!(
+                    matches!(command, IpcCommand::GetStats),
+                    "expected resync batch or GetStats, got {command:?}"
+                );
+                continue;
             };
             assert!(requests.len() <= lazybox_ipc::FlowControl::MAX_RESYNC_REQUESTS_PER_BATCH);
             total += requests.len();

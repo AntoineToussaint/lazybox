@@ -1393,6 +1393,12 @@ impl<T: TerminalAdapter> Model<T> {
             self.seed_recent_snippets_from_snapshot(recent_snippets.clone());
             self.snapshot_seen = true;
             self.maybe_show_pending_update();
+            // Seed the always-visible "today" header strip (#1344) on every
+            // (re)connect — the initial snapshot, a `--connect` reconnect,
+            // and a broadcast-lag-recovery snapshot all land here. The
+            // daemon keeps it live between snapshots by pushing a fresh
+            // rollup after each accumulator flush.
+            self.send_cmd(IpcCommand::GetStats);
         }
 
         // Snippet-override keep-mine acknowledgements ride their own event
@@ -1886,11 +1892,7 @@ impl<T: TerminalAdapter> Model<T> {
         // daemon pushes a fresh snapshot after each accumulator flush, so
         // the strip stays live without polling.
         if let IpcEvent::Stats { buckets } = &event {
-            let today = chrono::Local::now().date_naive();
-            self.sidebar
-                .set_today_stats(crate::components::sidebar::TodayStats::from_buckets(
-                    buckets, today,
-                ));
+            self.sidebar.set_today_buckets(buckets.clone());
             self.update_stats(buckets.clone());
             self.redraw = true;
             return;

@@ -25,8 +25,17 @@
 //! long stream: complete `\n`-terminated lines are parsed as they arrive
 //! and dropped; only a partial trailing line is retained.
 
+use lazybox_core::ModelPrice;
+use lazybox_core::pricing::{self, TokenCounts};
 use lazybox_ipc::AgentUsage;
 use serde_json::Value;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+/// A shared, immutable set of per-model price overrides (from
+/// `agent.pricing`). Built once when the proxy starts and cloned into every
+/// [`UsageAccumulator`]; empty means "built-in rate card only".
+pub type PriceOverrides = Arc<BTreeMap<String, ModelPrice>>;
 
 /// Running high-water totals for one response, merged across every
 /// `usage` object seen. `None` fields mean "not yet observed".
@@ -73,6 +82,11 @@ pub struct UsageAccumulator {
     /// until `finish`.
     residual: Vec<u8>,
     merged: Merged,
+    /// The model id seen in the stream (`message.model` / `response.model`),
+    /// last non-empty wins. Needed to price the tokens in [`finish`].
+    model: Option<String>,
+    /// Per-model price overrides; empty → built-in rate card only.
+    prices: PriceOverrides,
 }
 
 /// A partial line longer than this without a newline is parsed and
@@ -81,6 +95,16 @@ pub struct UsageAccumulator {
 const MAX_RESIDUAL: usize = 8 * 1024 * 1024;
 
 impl UsageAccumulator {
+    /// An accumulator that prices its result with `prices` layered over the
+    /// built-in rate card. [`UsageAccumulator::default`] uses the built-ins
+    /// alone.
+    pub fn with_prices(prices: PriceOverrides) -> Self {
+        Self {
+            prices,
+            ..Self::default()
+        }
+    }
+
     /// Feed one response chunk. Complete lines are parsed and dropped;
     /// the trailing partial line is retained for the next chunk.
     pub fn push(&mut self, chunk: &[u8]) {
@@ -105,12 +129,26 @@ impl UsageAccumulator {
         if self.merged.is_empty() {
             return None;
         }
+        // Price the tokens when the stream named a model we recognize; an
+        // unknown model leaves cost absent rather than guessing.
+        let cost_usd_micros = self.model.as_deref().and_then(|model| {
+            pricing::cost_micros(
+                model,
+                &TokenCounts {
+                    input: self.merged.input.unwrap_or(0),
+                    output: self.merged.output.unwrap_or(0),
+                    cache_creation: self.merged.cache_creation.unwrap_or(0),
+                    cache_read: self.merged.cache_read.unwrap_or(0),
+                },
+                &self.prices,
+            )
+        });
         Some(AgentUsage {
             input_tokens: self.merged.input,
             output_tokens: self.merged.output,
             cache_creation_input_tokens: self.merged.cache_creation,
             cache_read_input_tokens: self.merged.cache_read,
-            cost_usd_micros: None,
+            cost_usd_micros,
         })
     }
 
@@ -128,7 +166,7 @@ impl UsageAccumulator {
         let Ok(value) = serde_json::from_str::<Value>(json) else {
             return;
         };
-        collect_usage(&value, &mut self.merged);
+        collect_usage(&value, &mut self.merged, &mut self.model);
     }
 }
 
@@ -137,19 +175,28 @@ impl UsageAccumulator {
 /// objects) keeps it precise: it catches the top-level `usage`,
 /// Anthropic's `message.usage`, and Codex's `response.usage` without ever
 /// mistaking an unrelated object for a usage report.
-fn collect_usage(value: &Value, merged: &mut Merged) {
+fn collect_usage(value: &Value, merged: &mut Merged, model: &mut Option<String>) {
     match value {
         Value::Object(map) => {
             if let Some(Value::Object(usage)) = map.get("usage") {
                 merged.merge(extract(usage));
             }
+            // The model id rides `message.model` (Anthropic) / `response.model`
+            // (Codex) / the top-level `model` (non-streaming, OpenAI chunks).
+            // Capture any non-empty `model` string; last seen wins, which is
+            // fine since a turn reports one model. Needed to price the tokens.
+            if let Some(Value::String(name)) = map.get("model")
+                && !name.is_empty()
+            {
+                *model = Some(name.clone());
+            }
             for child in map.values() {
-                collect_usage(child, merged);
+                collect_usage(child, merged, model);
             }
         }
         Value::Array(items) => {
             for item in items {
-                collect_usage(item, merged);
+                collect_usage(item, merged, model);
             }
         }
         _ => {}
@@ -264,6 +311,51 @@ mod tests {
     fn no_usage_object_yields_none() {
         let stream = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
         assert!(feed(&[stream]).is_none());
+    }
+
+    #[test]
+    fn prices_a_known_model_from_the_stream() {
+        // `message_start` carries both `message.model` and `message.usage`;
+        // the model lets `finish` price the tokens off the built-in card.
+        let stream = concat!(
+            "event: message_start\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":1000000,\"output_tokens\":0}}}\n",
+            "\n",
+        );
+        let u = feed(&[stream]).expect("usage");
+        assert_eq!(u.input_tokens, Some(1_000_000));
+        // 1M Sonnet input == $3.00 == 3_000_000 micros.
+        assert_eq!(u.cost_usd_micros, Some(3_000_000));
+    }
+
+    #[test]
+    fn unknown_model_leaves_cost_absent() {
+        let stream = concat!(
+            "data: {\"model\":\"mystery-model-9\",\"usage\":{\"input_tokens\":1000000,\"output_tokens\":0}}\n\n",
+        );
+        let u = feed(&[stream]).expect("usage");
+        assert_eq!(u.input_tokens, Some(1_000_000));
+        assert_eq!(u.cost_usd_micros, None);
+    }
+
+    #[test]
+    fn overrides_price_an_otherwise_unknown_model() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "mystery-model".to_string(),
+            ModelPrice {
+                input: 10.0,
+                output: 10.0,
+                cache_write: 0.0,
+                cache_read: 0.0,
+            },
+        );
+        let mut acc = UsageAccumulator::with_prices(Arc::new(map));
+        acc.push(
+            b"data: {\"model\":\"mystery-model-9\",\"usage\":{\"input_tokens\":1000000,\"output_tokens\":0}}\n\n",
+        );
+        let u = acc.finish().expect("usage");
+        assert_eq!(u.cost_usd_micros, Some(10_000_000));
     }
 
     #[test]

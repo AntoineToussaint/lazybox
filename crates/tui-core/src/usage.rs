@@ -27,6 +27,18 @@ use lazybox_ipc::{AgentRunId, AgentUsage, ProviderQuota};
 /// Cells in the `▓▓▓░░` progress bar.
 const BAR_WIDTH: usize = 5;
 
+/// Render a micro-USD cost as a compact dollar string: `$1.23`, and finer
+/// precision (`$0.0042`) below a cent so a small metered session still shows
+/// a non-zero figure instead of `$0.00`.
+pub fn format_cost_micros(micros: u64) -> String {
+    let dollars = micros as f64 / 1_000_000.0;
+    if micros == 0 || dollars >= 0.01 {
+        format!("${dollars:.2}")
+    } else {
+        format!("${dollars:.4}")
+    }
+}
+
 /// Every token field a usage event reports, summed. A running proxy for
 /// "tokens processed against the plan window" — input, output, and both
 /// cache legs all draw down the same allowance.
@@ -63,6 +75,17 @@ pub struct UsageTracker {
     /// the window(s) it carries, so a partial report (one window observed)
     /// keeps the other window's last value.
     quotas: HashMap<String, ProviderQuota>,
+    /// `agent id → accumulated cost (micro-USD)`, from priced proxy usage.
+    /// Only the metering proxy prices tokens, so this fills for metered
+    /// sessions; `0`/absent means "not priced" (unknown model or unmetered).
+    agent_cost_micros: BTreeMap<String, u64>,
+    /// `session key → accumulated tokens`, the per-workspace half of
+    /// `tokens`. Fed only by proxy-metered `AgentSessionUsage` that carried a
+    /// session key, so a workspace shows its own draw independent of agent id.
+    session_tokens: BTreeMap<String, u64>,
+    /// `session key → accumulated cost (micro-USD)` — per-workspace cost,
+    /// the headline number of the canary meter.
+    session_cost_micros: BTreeMap<String, u64>,
 }
 
 impl UsageTracker {
@@ -117,16 +140,64 @@ impl UsageTracker {
     /// makes — interactive terminal turns included — and none is a repeat
     /// of another. A zero-token report contributes nothing (and so never
     /// promotes the agent into [`Self::agents_with_usage`]).
-    pub fn observe_session_usage(&mut self, agent_id: &str, usage: &AgentUsage) {
+    pub fn observe_session_usage(
+        &mut self,
+        agent_id: &str,
+        session_key: Option<&str>,
+        usage: &AgentUsage,
+    ) {
         let tokens = event_tokens(usage);
+        let cost = usage.cost_usd_micros.unwrap_or(0);
         if tokens > 0 {
             *self.tokens.entry(agent_id.to_string()).or_default() += tokens;
+        }
+        if cost > 0 {
+            *self
+                .agent_cost_micros
+                .entry(agent_id.to_string())
+                .or_default() += cost;
+        }
+        // Per-workspace attribution, when the proxy path carried a session
+        // key (#per-session). The canary meter reads these.
+        if let Some(key) = session_key {
+            if tokens > 0 {
+                *self.session_tokens.entry(key.to_string()).or_default() += tokens;
+            }
+            if cost > 0 {
+                *self.session_cost_micros.entry(key.to_string()).or_default() += cost;
+            }
         }
     }
 
     /// Tokens committed for `agent_id` this window (`0` when none).
     pub fn tokens_for(&self, agent_id: &str) -> u64 {
         self.tokens.get(agent_id).copied().unwrap_or(0)
+    }
+
+    /// Accumulated cost for `agent_id` this window in micro-USD (`0` when
+    /// unpriced — no metered, model-known usage yet).
+    pub fn cost_micros_for(&self, agent_id: &str) -> u64 {
+        self.agent_cost_micros.get(agent_id).copied().unwrap_or(0)
+    }
+
+    /// Tokens metered for one workspace/session (`0` when none).
+    pub fn tokens_for_session(&self, session_key: &str) -> u64 {
+        self.session_tokens.get(session_key).copied().unwrap_or(0)
+    }
+
+    /// Accumulated cost for one workspace/session in micro-USD (`0` when
+    /// unpriced or unmetered) — the per-session headline.
+    pub fn cost_micros_for_session(&self, session_key: &str) -> u64 {
+        self.session_cost_micros
+            .get(session_key)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Whether any workspace has metered cost — gates showing the per-session
+    /// column at all.
+    pub fn has_session_cost(&self) -> bool {
+        self.session_cost_micros.values().any(|c| *c > 0)
     }
 
     /// Agent ids that have accrued any committed usage this window — the
@@ -447,8 +518,8 @@ mod tests {
         // distinct upstream response, so they accumulate rather than
         // collapsing to a turn high-water mark.
         let mut tracker = UsageTracker::default();
-        tracker.observe_session_usage("codex", &usage(1_000, 200));
-        tracker.observe_session_usage("codex", &usage(500, 100));
+        tracker.observe_session_usage("codex", None, &usage(1_000, 200));
+        tracker.observe_session_usage("codex", None, &usage(500, 100));
         assert_eq!(tracker.tokens_for("codex"), 1_800);
         let agents: Vec<&str> = tracker.agents_with_usage().collect();
         assert_eq!(agents, vec!["codex"]);
@@ -457,9 +528,36 @@ mod tests {
     #[test]
     fn proxy_zero_token_report_is_ignored() {
         let mut tracker = UsageTracker::default();
-        tracker.observe_session_usage("claude", &usage(0, 0));
+        tracker.observe_session_usage("claude", None, &usage(0, 0));
         assert_eq!(tracker.tokens_for("claude"), 0);
         assert_eq!(tracker.agents_with_usage().count(), 0);
+    }
+
+    #[test]
+    fn session_usage_accrues_cost_and_tokens_per_workspace() {
+        let mut tracker = UsageTracker::default();
+        let mut priced = usage(1_000, 200);
+        priced.cost_usd_micros = Some(1_500_000); // $1.50
+        tracker.observe_session_usage("claude", Some("ws-a"), &priced);
+
+        let mut priced2 = usage(500, 100);
+        priced2.cost_usd_micros = Some(500_000); // $0.50
+        tracker.observe_session_usage("claude", Some("ws-a"), &priced2);
+
+        // A second workspace stays independent.
+        let mut priced3 = usage(200, 50);
+        priced3.cost_usd_micros = Some(250_000);
+        tracker.observe_session_usage("claude", Some("ws-b"), &priced3);
+
+        assert_eq!(tracker.tokens_for_session("ws-a"), 1_800);
+        assert_eq!(tracker.cost_micros_for_session("ws-a"), 2_000_000);
+        assert_eq!(tracker.cost_micros_for_session("ws-b"), 250_000);
+        // The agent-level roll-up spans both workspaces.
+        assert_eq!(tracker.cost_micros_for("claude"), 2_250_000);
+        assert!(tracker.has_session_cost());
+        assert_eq!(format_cost_micros(2_000_000), "$2.00");
+        assert_eq!(format_cost_micros(250_000), "$0.25");
+        assert_eq!(format_cost_micros(4_200), "$0.0042");
     }
 
     #[test]

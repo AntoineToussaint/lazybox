@@ -2443,6 +2443,7 @@ mod search_tests {
         // Reset far in the future so the window is unambiguously current.
         sb.note_provider_quota(
             "codex",
+            None,
             lazybox_ipc::ProviderQuota {
                 five_hour: Some(lazybox_ipc::QuotaWindow {
                     utilization_bp: 4500,
@@ -2466,6 +2467,7 @@ mod search_tests {
         // Both resets in 1970 — unambiguously in the past for any real clock.
         sb.note_provider_quota(
             "codex",
+            None,
             lazybox_ipc::ProviderQuota {
                 five_hour: Some(lazybox_ipc::QuotaWindow {
                     utilization_bp: 9000,

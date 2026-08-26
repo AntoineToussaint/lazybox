@@ -186,7 +186,12 @@ fn stat_events_from_event(event: &Event, day: &str) -> Vec<StatEvent> {
         // Per-response metering (the only usage source for interactive
         // agents): each event carries one response's tokens/cost, so
         // summing across a day is the day's total. Zero/absent fields
-        // don't mint an empty bucket.
+        // don't mint an empty bucket. `cost_usd_micros` is now populated
+        // by the priced proxy (#per-session), so the day/week view shows
+        // real cost instead of always-zero. (The event also carries a
+        // `session_key`; per-workspace durable breakdown would add a scope
+        // dimension to the rollup table — deferred to a fast-follow. The
+        // live sidebar tracker already attributes cost per workspace.)
         Event::AgentSessionUsage { usage, .. } => {
             let mut out = Vec::new();
             let mut push = |metric: &str, value: Option<u64>| {
@@ -244,6 +249,7 @@ mod tests {
     fn usage_expands_to_tokens_and_cost_skipping_empties() {
         let ev = Event::AgentSessionUsage {
             agent_id: "claude".into(),
+            session_key: Some(SessionKey::from("github:o/r#1")),
             usage: AgentUsage {
                 input_tokens: Some(1000),
                 output_tokens: Some(0),

@@ -294,15 +294,27 @@ impl Sidebar {
     }
 
     /// Observe proxy-metered usage attributed straight to an agent
-    /// (`AgentSessionUsage`).
-    pub fn add_agent_session_usage(&mut self, agent_id: &str, usage: &lazybox_ipc::AgentUsage) {
-        self.inner.add_agent_session_usage(agent_id, usage);
+    /// (`AgentSessionUsage`), with the workspace/session it belongs to when
+    /// the proxy path carried one (#per-session cost).
+    pub fn add_agent_session_usage(
+        &mut self,
+        agent_id: &str,
+        session_key: Option<&lazybox_core::SessionKey>,
+        usage: &lazybox_ipc::AgentUsage,
+    ) {
+        self.inner
+            .add_agent_session_usage(agent_id, session_key, usage);
     }
 
     /// Record a provider plan-quota report (`AgentProviderQuota`) — the
     /// 5h/weekly "can I keep working?" headroom.
-    pub fn note_provider_quota(&mut self, agent_id: &str, quota: lazybox_ipc::ProviderQuota) {
-        self.inner.note_provider_quota(agent_id, quota);
+    pub fn note_provider_quota(
+        &mut self,
+        agent_id: &str,
+        session_key: Option<&lazybox_core::SessionKey>,
+        quota: lazybox_ipc::ProviderQuota,
+    ) {
+        self.inner.note_provider_quota(agent_id, session_key, quota);
     }
 
     /// Attribute a usage-limit reset hint to a terminal's agent

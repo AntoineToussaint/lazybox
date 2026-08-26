@@ -800,6 +800,19 @@ pub async fn set_track_main(config: &ServerConfig, key: &WorkspaceKey, enabled: 
     commit_upsert_offloaded_reported(config, key, workspace, "set track-main preference").await;
 }
 
+/// Persist the workspace's metering opt-in (the `$ meter` canary). Mirrors
+/// [`set_track_main`]: load, set the flag, commit (persists + broadcasts
+/// `WorkspaceUpserted` so the sidebar badge refreshes). The spawn path reads
+/// it back to route the next spawn through the metering proxy.
+pub async fn set_metered(config: &ServerConfig, key: &WorkspaceKey, enabled: bool) {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return;
+    };
+    workspace.metered = enabled;
+    commit_upsert_offloaded_reported(config, key, workspace, "set metering preference").await;
+}
+
 /// Persist the workspace's per-session auto-fix arm for one
 /// [`lazybox_core::AutoFixKind`] (issue #363). Mirrors
 /// [`set_auto_merge_on_green`]: load, set the policy, commit (persists +

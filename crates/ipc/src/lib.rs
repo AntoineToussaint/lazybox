@@ -1102,6 +1102,16 @@ pub enum Command {
         session_key: SessionKey,
         enabled: bool,
     },
+    /// Set the workspace's metering opt-in (the `$ meter` canary). When
+    /// enabled, every agent spawn in this workspace is routed through the
+    /// local metering proxy so its cost/tokens/rate are captured per session,
+    /// without affecting any other workspace. The daemon persists the flag on
+    /// the `Workspace` (like `SetTrackMain`) and re-broadcasts. Effective only
+    /// when `agent.metering_proxy` is enabled and the proxy is running.
+    SetMetered {
+        session_key: SessionKey,
+        enabled: bool,
+    },
     /// Set the per-session auto-fix arm for one [`lazybox_core::AutoFixKind`]
     /// on the workspace (issue #363). `Arm` overrides a label opt-out, `Disarm`
     /// forces auto-fix off for this workspace, `Default` follows the
@@ -2407,6 +2417,13 @@ pub enum Event {
     /// per agent for the header's quota widget.
     AgentSessionUsage {
         agent_id: String,
+        /// The workspace/session this usage is attributed to, parsed from the
+        /// proxy request path. `None` for a metered spawn without a resolvable
+        /// key (e.g. blanket `meter_all` on an ad-hoc spawn). Lets the tracker
+        /// and the durable stats roll cost up per workspace, not just per
+        /// agent type.
+        #[serde(default)]
+        session_key: Option<SessionKey>,
         usage: AgentUsage,
     },
     /// Provider plan-quota utilization (5h + weekly windows) read off live
@@ -2417,6 +2434,10 @@ pub enum Event {
     /// request; absent an active agent it simply holds its last value.
     AgentProviderQuota {
         agent_id: String,
+        /// The workspace/session whose request surfaced this quota, parsed
+        /// from the proxy request path. `None` when no key was resolvable.
+        #[serde(default)]
+        session_key: Option<SessionKey>,
         quota: ProviderQuota,
     },
     AgentTurnFinished {

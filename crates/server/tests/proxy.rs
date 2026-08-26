@@ -44,8 +44,9 @@ async fn start_proxy(upstream: String, sink: proxy::UsageSink) -> u16 {
         anthropic: upstream.clone(),
         openai: upstream,
     };
-    let quota_sink: proxy::QuotaSink = std::sync::Arc::new(|_, _| {});
-    tokio::spawn(proxy::serve(listener, upstreams, sink, quota_sink));
+    let quota_sink: proxy::QuotaSink = std::sync::Arc::new(|_, _, _| {});
+    let prices = std::sync::Arc::new(std::collections::BTreeMap::new());
+    tokio::spawn(proxy::serve(listener, upstreams, sink, quota_sink, prices));
     port
 }
 
@@ -59,13 +60,13 @@ async fn proxy_forwards_and_captures_usage() {
         data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":88}}\n\n\
         data: [DONE]\n\n";
 
-    let captured: Arc<Mutex<Vec<(String, AgentUsage)>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured: Arc<Mutex<Vec<(String, String, AgentUsage)>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder = captured.clone();
-    let sink: proxy::UsageSink = Arc::new(move |agent_id: &str, usage| {
+    let sink: proxy::UsageSink = Arc::new(move |agent_id: &str, session: &str, usage| {
         recorder
             .lock()
             .expect("lock")
-            .push((agent_id.to_string(), usage));
+            .push((agent_id.to_string(), session.to_string(), usage));
     });
 
     let upstream = mock_upstream(body).await;
@@ -74,7 +75,7 @@ async fn proxy_forwards_and_captures_usage() {
     let client = reqwest::Client::new();
     let response = client
         .post(format!(
-            "http://127.0.0.1:{port}/anthropic/claude/v1/messages"
+            "http://127.0.0.1:{port}/anthropic/claude/github-acme-widget-7/v1/messages"
         ))
         .header("authorization", "Bearer test-secret")
         .body("{\"model\":\"claude\"}")
@@ -87,11 +88,12 @@ async fn proxy_forwards_and_captures_usage() {
     // The response streamed back byte-for-byte.
     assert_eq!(returned, body);
 
-    // Usage was parsed and attributed to the agent named in the path.
+    // Usage was parsed and attributed to the agent AND session in the path.
     let captured = captured.lock().expect("lock");
     assert_eq!(captured.len(), 1, "one metered response");
-    let (agent, usage) = &captured[0];
+    let (agent, session, usage) = &captured[0];
     assert_eq!(agent, "claude");
+    assert_eq!(session, "github-acme-widget-7");
     assert_eq!(usage.input_tokens, Some(1200));
     assert_eq!(usage.cache_read_input_tokens, Some(300));
     assert_eq!(usage.output_tokens, Some(88));
@@ -99,13 +101,13 @@ async fn proxy_forwards_and_captures_usage() {
 
 #[tokio::test]
 async fn proxy_rejects_a_pathless_request_without_metering() {
-    let captured: Arc<Mutex<Vec<(String, AgentUsage)>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured: Arc<Mutex<Vec<(String, String, AgentUsage)>>> = Arc::new(Mutex::new(Vec::new()));
     let recorder = captured.clone();
-    let sink: proxy::UsageSink = Arc::new(move |agent_id: &str, usage| {
+    let sink: proxy::UsageSink = Arc::new(move |agent_id: &str, session: &str, usage| {
         recorder
             .lock()
             .expect("lock")
-            .push((agent_id.to_string(), usage));
+            .push((agent_id.to_string(), session.to_string(), usage));
     });
 
     // Upstream never gets hit — the request lacks the `/provider/agent`

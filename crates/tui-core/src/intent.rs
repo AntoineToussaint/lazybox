@@ -89,6 +89,13 @@ pub enum Intent {
         workspace_key: WorkspaceKey,
         enabled: bool,
     },
+    /// Flip the workspace's metering opt-in (the `$ meter` canary) and
+    /// persist it. `enabled` is the new state (the resolver reads the current
+    /// flag and inverts it). The model ships `Command::SetMetered`.
+    SetMetered {
+        workspace_key: WorkspaceKey,
+        enabled: bool,
+    },
     /// Kill every running terminal under the workspace + remove
     /// the row. Two-press confirm at the model layer.
     KillWorkspace { session_key: SessionKey },
@@ -634,6 +641,20 @@ pub fn resolve_toggle_track_main(workspace: Option<&Workspace>) -> Intent {
     Intent::SetTrackMain {
         workspace_key: ws.key.clone(),
         enabled: !ws.track_main,
+    }
+}
+
+/// Resolve the metering toggle (the `$ meter` canary). Applies to any
+/// workspace — metering is a per-workspace preference; whether it actually
+/// routes depends on the daemon (`agent.metering_proxy` + proxy running),
+/// which the spawn path gates. Inverts the persisted flag.
+pub fn resolve_toggle_metering(workspace: Option<&Workspace>) -> Intent {
+    let Some(ws) = workspace else {
+        return Intent::NoOp;
+    };
+    Intent::SetMetered {
+        workspace_key: ws.key.clone(),
+        enabled: !ws.metered,
     }
 }
 

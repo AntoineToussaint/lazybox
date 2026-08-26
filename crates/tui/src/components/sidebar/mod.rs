@@ -660,14 +660,27 @@ impl Sidebar {
     /// Observe usage the metering proxy attributed to an agent directly
     /// (`AgentSessionUsage`) — the data source for interactive terminals
     /// and for Codex, which emit no structured `AgentUsage` (#1109).
-    pub fn add_agent_session_usage(&mut self, agent_id: &str, usage: &lazybox_ipc::AgentUsage) {
-        self.usage.observe_session_usage(agent_id, usage);
+    pub fn add_agent_session_usage(
+        &mut self,
+        agent_id: &str,
+        session_key: Option<&lazybox_core::SessionKey>,
+        usage: &lazybox_ipc::AgentUsage,
+    ) {
+        self.usage
+            .observe_session_usage(agent_id, session_key.map(|k| k.as_str()), usage);
     }
 
     /// Record a provider plan-quota report (`AgentProviderQuota`) — the
     /// "can I keep working?" 5h/weekly headroom that mirrors Claude's
     /// `/usage` and Codex's `/status`. Merged per window by the tracker.
-    pub fn note_provider_quota(&mut self, agent_id: &str, quota: lazybox_ipc::ProviderQuota) {
+    /// Quota is a provider-global signal, so the session key (if any) is not
+    /// used here — it rides the event only for symmetry with usage.
+    pub fn note_provider_quota(
+        &mut self,
+        agent_id: &str,
+        _session_key: Option<&lazybox_core::SessionKey>,
+        quota: lazybox_ipc::ProviderQuota,
+    ) {
         self.usage.note_quota(agent_id, quota);
     }
 

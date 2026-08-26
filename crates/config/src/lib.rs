@@ -1954,6 +1954,24 @@ pub struct AgentSection {
     /// until you want live usage. Set `true` to enable.
     #[serde(default)]
     pub metering_proxy: bool,
+    /// Route EVERY interactive agent spawn through the metering proxy when
+    /// `metering_proxy` is on. Off by default: metering is opt-in
+    /// **per session** — a spawn is proxied only when it explicitly asks
+    /// (the per-workspace meter toggle, `$ meter`), so `metering_proxy: true`
+    /// alone just makes the proxy *run* and never redirects a session that
+    /// didn't opt in. Set this `true` to restore blanket metering once you
+    /// trust the proxy (e.g. for fleet-wide cost), accepting that a proxy
+    /// fault then affects every session rather than one canary.
+    #[serde(default)]
+    pub meter_all: bool,
+    /// Per-model price overrides for cost attribution, keyed by **model-id
+    /// prefix** (`claude-opus`, `gpt-4o`, …), longest prefix wins. Values are
+    /// USD per million tokens (`input` / `output` / `cache_write` /
+    /// `cache_read`). Merged over lazybox's built-in rate card, so this is
+    /// only needed for a brand-new model or a negotiated rate — a matching
+    /// entry here always beats the built-in. See `lazybox_core::pricing`.
+    #[serde(default)]
+    pub pricing: std::collections::BTreeMap<String, lazybox_core::ModelPrice>,
     /// Apply EVERY updatable agent's CLI updates automatically when the
     /// scheduled out-of-band check finds a newer version — the global
     /// switch over the per-agent `agents.<id>.auto_update` opt-in. Off by
@@ -2039,6 +2057,8 @@ impl Default for AgentSection {
             skip_permissions: false,
             llm_gateway_url: None,
             metering_proxy: false,
+            meter_all: false,
+            pricing: std::collections::BTreeMap::new(),
             auto_update: false,
             auto_update_except: Vec::new(),
             working_watchdog_secs: None,

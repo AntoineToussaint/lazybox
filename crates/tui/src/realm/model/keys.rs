@@ -2547,6 +2547,7 @@ pub(super) fn action_from_kind(
         ActionKind::ToggleAutoMerge => Action::ToggleAutoMerge,
         ActionKind::ToggleAutoFix => Action::ToggleAutoFix,
         ActionKind::ToggleTrackMain => Action::ToggleTrackMain,
+        ActionKind::ToggleMetering => Action::ToggleMetering,
         ActionKind::ManagePolicies => Action::ManagePolicies,
         ActionKind::Archive => Action::Archive,
         ActionKind::CloseIssue => Action::CloseIssue,

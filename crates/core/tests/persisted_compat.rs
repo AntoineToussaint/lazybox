@@ -177,6 +177,7 @@ fn maximal_workspace() -> Workspace {
     ws.woke_at = Some(at(12, 30));
     ws.auto_merge_on_green = true;
     ws.track_main = true;
+    ws.metered = true;
     ws.base_branch = Some("main".into());
     ws.track_main_behind = true;
     ws.policies.set(AutoFixKind::CiFailure, PolicyArm::Arm);

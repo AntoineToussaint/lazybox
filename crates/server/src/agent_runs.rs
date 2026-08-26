@@ -162,7 +162,12 @@ pub async fn handle_start_agent_run(
     // run already reports its token usage by parsing its own stream-json,
     // so routing it through the proxy too would count every turn twice in
     // the header summary (#1109).
-    let env = crate::spawn_plan::gateway_env_for_agent(&yaml, Some(agent_impl.as_ref()), false);
+    let env = crate::spawn_plan::gateway_env_for_agent(
+        &yaml,
+        Some(agent_impl.as_ref()),
+        false,
+        resolved_session_key.as_str(),
+    );
     let env = crate::spawn_plan::with_agent_spawn_defaults(env, Some(agent_impl.as_ref()));
 
     let mut stream_config = AgentStreamConfig::new(protocol, program.clone());

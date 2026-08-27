@@ -2619,6 +2619,58 @@ mod auto_fix_dispatch_tests {
         (terminal_id, backend_key)
     }
 
+    /// Aborts its background task when dropped, so a simulator can't leak
+    /// past the test that spawned it.
+    struct AbortGuard(tokio::task::JoinHandle<()>);
+    impl Drop for AbortGuard {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    /// Stand in for a real agent that actually starts working once the
+    /// submit lands. With the self-confirming optimistic `Done→Working`
+    /// flip removed (issue #122 follow-up), `confirm_prompt_submission`
+    /// waits for GENUINE evidence — a real `Working` transition on the bus.
+    /// A silent mock emits none, so the auto-fix dispatch (which awaits
+    /// `write_prompt_sequence` inline on the poll loop) would otherwise run
+    /// the full ~30s Enter-resend/backoff cycle before giving up. This
+    /// emits that honest evidence as soon as the paste reaches the PTY,
+    /// mirroring how a live agent confirms — the mock's replacement for the
+    /// flip it used to (wrongly) rely on.
+    fn simulate_working_after_submit(
+        config: &ServerConfig,
+        mock: &crate::backend::MockBackend,
+        session_key: SessionKey,
+        terminal_id: TerminalId,
+        backend_key: String,
+    ) -> AbortGuard {
+        let config = config.clone();
+        let mock = mock.clone();
+        AbortGuard(tokio::spawn(async move {
+            // Wait for the prompt to reach the PTY, then confirm as a real
+            // agent would by transitioning to Working. Re-emit on a short
+            // cadence: the first frames may predate the confirm loop's
+            // subscription, and only a fresh transition (not a resting
+            // cached state) counts as evidence.
+            while mock.writes_for(&backend_key).await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+            loop {
+                config
+                    .terminal
+                    .record_agent_state(terminal_id, AgentState::Working)
+                    .await;
+                let _ = config.bus.send(Event::AgentState {
+                    session_key: session_key.clone(),
+                    terminal_id,
+                    state: AgentState::Working,
+                });
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }))
+    }
+
     #[tokio::test]
     async fn working_agent_is_not_interrupted_or_charged_an_attempt() {
         let (config, mock) = ServerConfig::in_memory_with_mock();
@@ -2665,6 +2717,13 @@ mod auto_fix_dispatch_tests {
         )
         .await;
 
+        let _agent = simulate_working_after_submit(
+            &config,
+            &mock,
+            session_key.clone(),
+            TerminalId(705),
+            backend_key.clone(),
+        );
         dispatch_action(&config, "github", None, action(session_key.clone())).await;
 
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -2732,6 +2791,13 @@ mod auto_fix_dispatch_tests {
         )
         .await;
 
+        let _agent = simulate_working_after_submit(
+            &config,
+            &mock,
+            session_key.clone(),
+            TerminalId(707),
+            backend_key.clone(),
+        );
         dispatch_action(&config, "github", None, action(session_key)).await;
 
         assert!(

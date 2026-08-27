@@ -35,6 +35,17 @@ impl ClientRuntime {
         // wedged tmux cannot hang it: every tmux call carries its own per-op
         // timeout, so a stuck session errors and the loop moves on rather than
         // the whole pass being cancelled.
+        // Re-key legacy per-backend_key prompt-history / draft rows onto the
+        // stable workspace scheme BEFORE recovery, so both the reattach
+        // (`recover_sessions`) and the respawn (`restore_persisted_sessions`)
+        // passes read the migrated rows. One-time, guarded by a KV flag (a
+        // no-op single `get_kv` after the first run). Awaited inline — like the
+        // sibling `migrate_legacy_sandbox` — rather than prepended to the
+        // background recovery task, so it can't push `recover_sessions`'
+        // `backend.list()` past a spawn racing in during startup (which would
+        // reattach that fresh session as a duplicate terminal).
+        crate::spawn_handler::migrate_prompt_history_to_workspace_keys(&config).await;
+
         let recovery_config = config.clone();
         let restore_persisted = options.restore_persisted_sessions;
         tasks.push(tokio::spawn(async move {

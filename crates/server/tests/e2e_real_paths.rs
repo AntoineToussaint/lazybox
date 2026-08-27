@@ -1390,16 +1390,23 @@ async fn e2e_pr_spawn_transfers_its_live_managed_branch_owner() {
             timestamp_ms: 42,
             source: lazybox_ipc::PromptSource::Typed,
         };
+        // History/draft are workspace-scoped (keyed by the stable session_key),
+        // and the issue→PR transfer must carry them onto the PR badge. Seed them
+        // under the issue's workspace key so the rebadge can move them.
+        let issue_seed_key: lazybox_core::SessionKey = (&issue_key).into();
         config
             .store
             .set_kv(
-                &format!("terminal-msgs:{backend}"),
+                &format!("workspace-msgs:{}", issue_seed_key.as_str()),
                 &serde_json::to_string(&vec![remembered_prompt.clone()]).unwrap(),
             )
             .unwrap();
         config
             .store
-            .set_kv(&format!("terminal-draft:{backend}"), "half-typed draft")
+            .set_kv(
+                &format!("workspace-draft:{}", issue_seed_key.as_str()),
+                "half-typed draft",
+            )
             .unwrap();
 
         // Two PRs claim #647, matching the production ambiguity that routed

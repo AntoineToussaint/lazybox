@@ -4,17 +4,17 @@ NOTE
 Cues narrate the silent inbox demo. A "⌨ <chord> — <text>" line renders as
 a keycap chip plus description in the on-video overlay; plain lines are
 context. Same file drives the native <track> captions and the overlay, so
-they can't drift. Cues must fit inside the clip's runtime (~8.5s) — the
+they can't drift. Cues must fit inside the clip's runtime (~9.7s) — the
 homepage-install caption test fails a cue that ends past the video.
 
 1
-00:00.500 --> 00:03.200
+00:00.500 --> 00:03.400
 One inbox for every repo — PRs, issues, CI and reviews together
 
 2
-00:03.600 --> 00:06.000
-Agents working, asking, done, rate-limited — all in one view
+00:03.700 --> 00:06.400
+Agents working, asking, done, rate-limited — the whole fleet at a glance
 
 3
-00:06.400 --> 00:08.400
-A PR's CI flips red→green on its own — no manual refresh
+00:06.700 --> 00:09.400
+An agent finishes and a PR's CI flips green on its own — no manual refresh

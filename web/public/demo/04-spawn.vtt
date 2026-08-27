@@ -3,20 +3,16 @@ WEBVTT
 NOTE
 "⌨ <chord> — <text>" lines render as a keycap chip + description in the
 overlay; plain lines are context. Drives both the native <track> and the
-styled overlay from one source.
+styled overlay from one source. Cues must fit the clip runtime (~7.6s).
 
 1
-00:00.400 --> 00:02.400
-⌨ a x — start Codex on this task
+00:00.400 --> 00:02.600
+Every task gets its own git worktree and a live agent
 
 2
-00:02.600 --> 00:05.600
-lazybox provisions a dedicated git worktree for it
+00:02.800 --> 00:05.000
+Here, Codex refreshes the landing page on its own branch
 
 3
-00:05.800 --> 00:08.400
-The agent starts working in its own isolated checkout
-
-4
-00:08.600 --> 00:11.000
-One task, one worktree, one agent
+00:05.200 --> 00:07.350
+Edit, build, verify — isolated from every other agent

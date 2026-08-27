@@ -2873,6 +2873,61 @@ mod auto_fix_dispatch_tests {
         );
     }
 
+    /// Regression (issue #122 follow-up): auto-fix dispatch runs INLINE on
+    /// the serial poll loop (`for action in actions { dispatch_action().await }`).
+    /// Once the self-confirming optimistic `Done→Working` flip was removed, a
+    /// `Done` agent whose Enter is swallowed no longer manufactures its own
+    /// confirmation, so `confirm_prompt_submission` runs its full ~30s
+    /// Enter-resend/backoff cycle. Awaited inline, that would stall every other
+    /// queued provider action for 30s. The recovery is now handed to a detached
+    /// task: the paste + attempt are delivered synchronously and the dispatch
+    /// returns promptly, while the resend safety net runs in the background.
+    /// The mock here never emits a genuine `Working` transition — the exact
+    /// never-confirmed case — yet dispatch must still return fast.
+    #[tokio::test]
+    async fn auto_fix_into_unconfirmed_done_agent_does_not_block_the_poll_loop() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let session_key = SessionKey::new("github:o/r#7");
+        seed_workspace(&config, &session_key);
+        let (_, backend_key) = seed_agent(
+            &config,
+            &session_key,
+            TerminalId(709),
+            "codex",
+            AgentState::Done,
+            false,
+        )
+        .await;
+
+        // Well under the ~30s inline resend/backoff cycle, but generous enough
+        // to absorb the bounded paste-settle wait under CI load.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            dispatch_action(&config, "github", None, action(session_key.clone())),
+        )
+        .await
+        .expect(
+            "auto-fix dispatch must not block the serial poll loop on the \
+             submit-confirm/resend cycle",
+        );
+
+        // The prompt still landed (paste written synchronously) and the attempt
+        // was recorded — only the confirm/resend recovery was deferred.
+        assert!(
+            String::from_utf8_lossy(&mock.writes_for(&backend_key).await.concat())
+                .contains("Fix the failed CI checks."),
+            "the paste must be delivered synchronously even though confirm is deferred"
+        );
+        assert!(
+            config
+                .store
+                .get_kv(&format!("autofix:{session_key}:ci"))
+                .expect("read attempt record")
+                .is_some(),
+            "a delivered repair consumes one attempt regardless of deferred confirmation"
+        );
+    }
+
     #[tokio::test]
     async fn working_agent_of_another_kind_blocks_auto_fix() {
         let (config, mock) = ServerConfig::in_memory_with_mock();

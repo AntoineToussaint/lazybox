@@ -18,7 +18,7 @@ use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{RwLock, watch};
 
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 32;
@@ -46,7 +46,15 @@ pub struct RawPtyBackend {
     /// `Arc` so the kill-escalation task can remove the slot once the
     /// child's exit is actually observed (the slot must survive until
     /// then so a second `kill` can retry a stuck child).
-    sessions: Arc<Mutex<HashMap<String, Slot>>>,
+    ///
+    /// `RwLock` rather than `Mutex` (#data-loss): every per-terminal op
+    /// (`write`, `resize`, `output_seq`, `is_alive`, `subscribe`, …) only
+    /// clones an `Arc<DaemonPty>` out of the map, and several of them are
+    /// per-frame hot paths. Under load a `Mutex` serialized every
+    /// terminal's ops behind one guard even though the lookups don't
+    /// mutate the map. A read guard lets those lookups run concurrently;
+    /// only insert/remove take the write guard.
+    sessions: Arc<RwLock<HashMap<String, Slot>>>,
     next_key: AtomicU64,
     /// SIGTERM → SIGKILL escalation window. [`KILL_ESCALATION_GRACE`]
     /// in production; tests shrink it so a trap-TERM child escalates
@@ -63,7 +71,7 @@ impl RawPtyBackend {
     /// hook — production callers use `new()`.
     pub fn with_kill_grace(kill_grace: std::time::Duration) -> Self {
         Self {
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            sessions: Arc::new(RwLock::new(HashMap::new())),
             next_key: AtomicU64::new(1),
             kill_grace,
         }
@@ -111,7 +119,7 @@ impl RawPtyBackend {
                 let code = pty_for_exit.wait_exit().await;
                 let _ = exit_tx.send(Some(code));
             });
-            self.sessions.lock().await.insert(key.clone(), slot);
+            self.sessions.write().await.insert(key.clone(), slot);
             Ok(key)
         })
     }
@@ -179,7 +187,7 @@ impl SessionBackend for RawPtyBackend {
     ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
         Box::pin(async move {
             let pty = {
-                let map = self.sessions.lock().await;
+                let map = self.sessions.read().await;
                 map.get(key)
                     .map(|s| s.pty.clone())
                     .ok_or_else(|| BackendError::NotFound(key.into()))?
@@ -196,7 +204,7 @@ impl SessionBackend for RawPtyBackend {
     ) -> Pin<Box<dyn Future<Output = Result<u64, BackendError>> + Send + 'a>> {
         Box::pin(async move {
             let pty = {
-                let map = self.sessions.lock().await;
+                let map = self.sessions.read().await;
                 map.get(key)
                     .map(|s| s.pty.clone())
                     .ok_or_else(|| BackendError::NotFound(key.into()))?
@@ -213,7 +221,7 @@ impl SessionBackend for RawPtyBackend {
     ) -> Pin<Box<dyn Future<Output = Result<(), BackendError>> + Send + 'a>> {
         Box::pin(async move {
             let pty = {
-                let map = self.sessions.lock().await;
+                let map = self.sessions.read().await;
                 map.get(key)
                     .map(|s| s.pty.clone())
                     .ok_or_else(|| BackendError::NotFound(key.into()))?
@@ -241,7 +249,7 @@ impl SessionBackend for RawPtyBackend {
             // was the only shot, and a second Close found no slot and
             // no-op'd while the terminal wedged forever.
             let pty = {
-                let map = self.sessions.lock().await;
+                let map = self.sessions.read().await;
                 map.get(key).map(|s| s.pty.clone())
             };
             let Some(pty) = pty else {
@@ -251,7 +259,7 @@ impl SessionBackend for RawPtyBackend {
                 // Exit already observed (self-exited child whose slot
                 // hasn't been released yet) — just drop the slot; no
                 // signal, the pid may already be recycled.
-                self.sessions.lock().await.remove(key);
+                self.sessions.write().await.remove(key);
                 return Ok(());
             }
             // SIGTERM first so the agent can save state; the output
@@ -276,7 +284,7 @@ impl SessionBackend for RawPtyBackend {
                     pty.force_kill();
                 }
                 if tokio::time::timeout(grace, pty.wait_exit()).await.is_ok() {
-                    sessions.lock().await.remove(&key);
+                    sessions.write().await.remove(&key);
                 } else {
                     tracing::warn!(
                         key = %key,
@@ -295,7 +303,7 @@ impl SessionBackend for RawPtyBackend {
             // `Arc<DaemonPty>` reference once the subscribe bridges
             // unwind, which closes the master fd and ends the writer
             // thread (its queue sender is dropped with the DaemonPty).
-            self.sessions.lock().await.remove(key);
+            self.sessions.write().await.remove(key);
         })
     }
 
@@ -303,7 +311,7 @@ impl SessionBackend for RawPtyBackend {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, BackendError>> + Send + 'a>> {
         Box::pin(async move {
-            let map = self.sessions.lock().await;
+            let map = self.sessions.read().await;
             Ok(map.keys().cloned().collect())
         })
     }
@@ -319,7 +327,7 @@ impl SessionBackend for RawPtyBackend {
         Box::pin(async move {
             const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
             let ptys: Vec<(String, std::sync::Arc<crate::pty::DaemonPty>)> = {
-                let map = self.sessions.lock().await;
+                let map = self.sessions.read().await;
                 map.iter()
                     .filter(|(_, s)| !s.pty.is_finished())
                     .map(|(k, s)| (k.clone(), s.pty.clone()))
@@ -366,7 +374,7 @@ impl SessionBackend for RawPtyBackend {
         key: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<bool, BackendError>> + Send + 'a>> {
         Box::pin(async move {
-            let map = self.sessions.lock().await;
+            let map = self.sessions.read().await;
             Ok(map.get(key).is_some_and(|slot| !slot.pty.is_finished()))
         })
     }
@@ -379,7 +387,7 @@ impl SessionBackend for RawPtyBackend {
     > {
         Box::pin(async move {
             let pty = {
-                let map = self.sessions.lock().await;
+                let map = self.sessions.read().await;
                 map.get(key)
                     .map(|s| s.pty.clone())
                     .ok_or_else(|| BackendError::NotFound(key.into()))?
@@ -401,7 +409,7 @@ impl SessionBackend for RawPtyBackend {
     > {
         Box::pin(async move {
             let pty = {
-                let map = self.sessions.lock().await;
+                let map = self.sessions.read().await;
                 map.get(key)
                     .map(|s| s.pty.clone())
                     .ok_or_else(|| BackendError::NotFound(key.into()))?
@@ -419,7 +427,7 @@ impl SessionBackend for RawPtyBackend {
     ) -> Pin<Box<dyn Future<Output = Result<Subscription, BackendError>> + Send + 'a>> {
         Box::pin(async move {
             let pty = {
-                let map = self.sessions.lock().await;
+                let map = self.sessions.read().await;
                 map.get(key)
                     .map(|s| s.pty.clone())
                     .ok_or_else(|| BackendError::NotFound(key.into()))?
@@ -495,7 +503,7 @@ impl SessionBackend for RawPtyBackend {
     ) -> Pin<Box<dyn Future<Output = Option<i32>> + Send + 'a>> {
         Box::pin(async move {
             let mut exit = {
-                let map = self.sessions.lock().await;
+                let map = self.sessions.read().await;
                 map.get(key).map(|s| s.exit.clone())?
             };
             // Await the published exit code — no polling. The watch
@@ -531,7 +539,7 @@ mod tests {
     async fn sessions_drained(b: &RawPtyBackend, deadline: Duration) -> bool {
         let end = tokio::time::Instant::now() + deadline;
         while tokio::time::Instant::now() < end {
-            if b.sessions.lock().await.is_empty() {
+            if b.sessions.read().await.is_empty() {
                 return true;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -592,7 +600,7 @@ mod tests {
             // leaves the map when the exit is observed) so a retry has
             // something to act on.
             assert!(
-                !b.sessions.lock().await.is_empty(),
+                !b.sessions.read().await.is_empty(),
                 "slot is not removed before the exit is observed"
             );
             assert!(
@@ -678,5 +686,36 @@ mod tests {
     async fn kill_unknown_key_is_ok() {
         let b = RawPtyBackend::new();
         b.kill("raw-nope-1").await.expect("idempotent");
+    }
+
+    /// #data-loss: the session map is an `RwLock`, so per-terminal ops
+    /// that only clone an `Arc<DaemonPty>` out (write/output_seq/…) take a
+    /// read guard and can run concurrently across different keys instead
+    /// of serializing behind one mutex. Two live sessions written to
+    /// concurrently must both succeed; this also guards the refactor from
+    /// a read/write-guard mixup that would deadlock or reject a live key.
+    #[tokio::test]
+    async fn concurrent_writes_to_distinct_keys_both_succeed() {
+        timeout(Duration::from_secs(10), async {
+            let b = RawPtyBackend::new();
+            let a = b.spawn(&sh("cat"), None, &[], "a").await.expect("spawn a");
+            let c = b.spawn(&sh("cat"), None, &[], "c").await.expect("spawn c");
+
+            // Read-guard lookups on two different keys, concurrently.
+            let (ra, rc) = tokio::join!(b.write(&a, b"hello\n"), b.write(&c, b"world\n"));
+            ra.expect("write to session a");
+            rc.expect("write to session c");
+
+            // And a concurrent read-only lookup (output_seq) alongside a
+            // write must not deadlock under the read guard.
+            let (rs, rw) = tokio::join!(b.output_seq(&a), b.write(&c, b"again\n"));
+            rs.expect("output_seq under read guard");
+            rw.expect("concurrent write under read guard");
+
+            b.kill(&a).await.expect("kill a");
+            b.kill(&c).await.expect("kill c");
+        })
+        .await
+        .expect("test deadline exceeded");
     }
 }

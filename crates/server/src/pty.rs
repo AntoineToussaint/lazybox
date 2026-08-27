@@ -83,12 +83,36 @@ pub const BROADCAST_CAPACITY: usize = 1024;
 /// Capacity of the per-PTY write queue feeding the dedicated writer
 /// thread. Generous for keystrokes + prompt injections; only a child
 /// that stops draining its stdin (full kernel PTY buffer) can fill it.
-pub const WRITE_QUEUE_CAPACITY: usize = 256;
+///
+/// Raised from 256 to 1024 (#data-loss): under CPU starvation a burst
+/// of injected input across many multi-selected workspaces plus the
+/// terminal's own echo can back the queue up before the descheduled
+/// writer thread drains it. The extra headroom absorbs that burst.
+/// Memory is bounded — each entry is a `Vec<u8>` of one write's bytes
+/// (keystrokes/paste chunks), so the worst case is ~1024 small buffers.
+pub const WRITE_QUEUE_CAPACITY: usize = 1024;
 
-/// How long `write()` is willing to wait for queue space before
-/// reporting the PTY as stalled. Short — the caller is usually the
-/// daemon serve path and must never wedge on a dead child.
-const WRITE_ENQUEUE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+/// How long a single `writer_tx.send` attempt waits for queue space
+/// before being treated as a (possibly transient) stall and retried.
+/// Raised from 500ms so a briefly-descheduled writer thread doesn't
+/// trip it on the first attempt under a CPU-starved scheduler.
+const WRITE_ENQUEUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Total patience `write()` spends retrying a stalled enqueue before it
+/// finally surfaces `WriteStalled`. A timed-out `send` definitively did
+/// NOT enqueue the bytes (the future is cancelled), so retrying cannot
+/// double-write; we keep the payload and retry across short backoff
+/// steps. Only a terminal wedged for this many seconds (child truly not
+/// draining stdin) surfaces the loud error — a transient spike lands
+/// once the writer thread is scheduled again. Must stay <= the
+/// `terminal_io::OPERATION_TIMEOUT` that wraps this call so the retries
+/// actually run before the outer deadline cancels them.
+const WRITE_ENQUEUE_TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Backoff between enqueue retries. Short so a spike that clears quickly
+/// is picked up promptly, but non-zero so we don't busy-spin the runtime
+/// while the writer thread is descheduled.
+const WRITE_ENQUEUE_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Signal numbers, spelled as plain i32s so the non-unix stub build
 /// (where the `libc` constants aren't referenced) still compiles.
@@ -111,11 +135,61 @@ pub enum PtyError {
     Write(#[from] std::io::Error),
     #[error("PTY already closed")]
     Closed,
-    /// The write queue stayed full past the enqueue timeout — the
-    /// child has stopped draining stdin (wedged process, full kernel
-    /// buffer). The write is dropped rather than blocking the caller.
+    /// The write queue stayed full past the whole enqueue-retry budget —
+    /// the child has stopped draining stdin (wedged process, full kernel
+    /// buffer). The write is dropped rather than blocking the caller
+    /// indefinitely. A transient stall (e.g. a CPU-starved writer thread)
+    /// is retried and does NOT surface this — only a genuinely wedged
+    /// terminal does.
     #[error("PTY write queue full — child not draining stdin")]
     WriteStalled,
+}
+
+/// Enqueue `bytes` into the writer-thread channel, retrying a transient
+/// stall so a CPU spike doesn't silently drop injected user input.
+///
+/// A `send` wrapped in `timeout` that elapses means the queue was full
+/// for `WRITE_ENQUEUE_TIMEOUT` AND the bytes were NOT enqueued — the
+/// cancelled `send` future never handed them off (`tokio::sync::mpsc`
+/// only takes ownership on a completed send). So retrying across short
+/// backoff steps cannot double-write. We keep retrying for up to
+/// `WRITE_ENQUEUE_TOTAL_BUDGET`, and only surface `WriteStalled` if the
+/// terminal stays wedged for the whole budget. A closed channel (writer
+/// thread gone) is terminal, not transient, and returns `Closed` at
+/// once. Extracted from `DaemonPty::write` so the retry/give-up
+/// behavior is unit-testable against a controllable consumer.
+async fn enqueue_with_retry(
+    writer_tx: &tokio::sync::mpsc::Sender<Vec<u8>>,
+    bytes: &[u8],
+) -> Result<(), PtyError> {
+    let deadline = tokio::time::Instant::now() + WRITE_ENQUEUE_TOTAL_BUDGET;
+    let mut attempt: u32 = 0;
+    loop {
+        match tokio::time::timeout(WRITE_ENQUEUE_TIMEOUT, writer_tx.send(bytes.to_vec())).await {
+            Ok(Ok(())) => return Ok(()),
+            // Writer thread gone (write error or PTY torn down) —
+            // terminal, not a transient stall. Don't retry.
+            Ok(Err(_)) => return Err(PtyError::Closed),
+            Err(_) => {
+                attempt += 1;
+                if tokio::time::Instant::now() >= deadline {
+                    tracing::warn!(
+                        "PTY write queue full for {}s ({} attempts) — dropping {} byte write",
+                        WRITE_ENQUEUE_TOTAL_BUDGET.as_secs(),
+                        attempt,
+                        bytes.len()
+                    );
+                    return Err(PtyError::WriteStalled);
+                }
+                tracing::debug!(
+                    "PTY write enqueue stalled (attempt {}, {} bytes) — retrying after backoff",
+                    attempt,
+                    bytes.len()
+                );
+                tokio::time::sleep(WRITE_ENQUEUE_RETRY_BACKOFF).await;
+            }
+        }
+    }
 }
 
 /// One chunk of PTY output with its monotonic sequence number.
@@ -1122,29 +1196,26 @@ impl DaemonPty {
         }
     }
 
-    /// Queue bytes for the writer thread. Returns promptly in every
-    /// case: a healthy PTY enqueues immediately; a wedged child (write
-    /// queue full past `WRITE_ENQUEUE_TIMEOUT`) gets a `WriteStalled`
-    /// error and the bytes are dropped — never an indefinite block on
-    /// the runtime.
+    /// Queue bytes for the writer thread. Returns promptly for a healthy
+    /// PTY (immediate enqueue) and stays bounded for a wedged one — never
+    /// an indefinite block on the runtime.
+    ///
+    /// A single `send` that times out means the queue is momentarily full
+    /// AND the bytes were definitively NOT enqueued (the cancelled future
+    /// never handed them off), so retrying cannot double-write. Under CPU
+    /// starvation the dedicated writer thread can be descheduled long
+    /// enough for the queue to back up on a spike; dropping the write
+    /// there silently loses injected user input (paste text or the Enter
+    /// that submits it). So we retry the enqueue across short backoff
+    /// steps for up to `WRITE_ENQUEUE_TOTAL_BUDGET`, keeping the payload,
+    /// and only surface the loud `WriteStalled` if the terminal stays
+    /// wedged for the whole budget. A closed channel (writer thread gone)
+    /// is terminal, not transient, and returns `Closed` immediately.
     pub async fn write(&self, bytes: &[u8]) -> Result<(), PtyError> {
         if self.finished.load(Ordering::Acquire) {
             return Err(PtyError::Closed);
         }
-        match tokio::time::timeout(WRITE_ENQUEUE_TIMEOUT, self.writer_tx.send(bytes.to_vec())).await
-        {
-            Ok(Ok(())) => Ok(()),
-            // Writer thread gone (write error or PTY torn down).
-            Ok(Err(_)) => Err(PtyError::Closed),
-            Err(_) => {
-                tracing::warn!(
-                    "PTY write queue full for {}ms — dropping {} byte write",
-                    WRITE_ENQUEUE_TIMEOUT.as_millis(),
-                    bytes.len()
-                );
-                Err(PtyError::WriteStalled)
-            }
-        }
+        enqueue_with_retry(&self.writer_tx, bytes).await
     }
 
     pub(crate) fn output_seq(&self) -> u64 {
@@ -2320,5 +2391,111 @@ mod exit_tests {
         };
         assert_eq!(a.await.unwrap(), Some(3));
         assert_eq!(b.await.unwrap(), Some(3));
+    }
+}
+
+/// Enqueue-retry regression tests (#data-loss): a transient CPU-starved
+/// stall on the writer-thread channel must NOT silently drop injected
+/// user input; the bytes must land once the consumer drains again. Only
+/// a genuinely wedged consumer (whole retry budget elapsed) may surface
+/// the loud `WriteStalled`, and a closed channel is terminal at once.
+///
+/// The tests drive [`enqueue_with_retry`] against a hand-built bounded
+/// channel whose consumer we control, under a paused clock so the
+/// second-scale deadlines advance deterministically and instantly
+/// instead of burning real wall-clock.
+#[cfg(test)]
+mod enqueue_retry_tests {
+    use super::*;
+
+    /// A consumer that is briefly blocked (so the first enqueue attempt
+    /// times out) then drains must NOT lose the write: the retry lands
+    /// the bytes and no `WriteStalled` is returned. Mirrors a CPU spike
+    /// descheduling the writer thread past one `WRITE_ENQUEUE_TIMEOUT`.
+    #[tokio::test(start_paused = true)]
+    async fn transient_stall_is_retried_and_write_lands() {
+        // Capacity 1 so a single prefill saturates the queue and the
+        // next enqueue must wait for the consumer to drain.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        // Occupy the only slot: now the injected write can't enqueue
+        // until the consumer takes this off.
+        tx.send(vec![0xAA])
+            .await
+            .expect("prefill occupies the slot");
+
+        // Consumer stays blocked past the first per-attempt timeout,
+        // then drains both the prefill and the retried injection.
+        let consumer = tokio::spawn(async move {
+            tokio::time::sleep(WRITE_ENQUEUE_TIMEOUT + std::time::Duration::from_millis(500)).await;
+            let first = rx.recv().await;
+            let second = rx.recv().await;
+            (first, second)
+        });
+
+        let result = enqueue_with_retry(&tx, b"inject").await;
+        assert!(
+            result.is_ok(),
+            "a transient stall must be retried, not dropped: {result:?}"
+        );
+
+        let (first, second) = consumer.await.expect("consumer task");
+        assert_eq!(first.as_deref(), Some(&[0xAA][..]), "prefill drained first");
+        assert_eq!(
+            second.as_deref(),
+            Some(&b"inject"[..]),
+            "the injected write ultimately lands after the retry"
+        );
+    }
+
+    /// A permanently wedged consumer (never drains) must still return the
+    /// loud `WriteStalled` — bounded by the total budget, not an infinite
+    /// hang. The `rx` is held (channel stays open) so the failure is a
+    /// genuine stall, not a `Closed`.
+    #[tokio::test(start_paused = true)]
+    async fn permanently_wedged_consumer_eventually_gives_up() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        // Saturate the queue and never drain it.
+        tx.send(vec![0xAA])
+            .await
+            .expect("prefill occupies the slot");
+
+        let started = tokio::time::Instant::now();
+        let result = enqueue_with_retry(&tx, b"inject").await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            matches!(result, Err(PtyError::WriteStalled)),
+            "a wedged consumer must surface the loud error: {result:?}"
+        );
+        assert!(
+            elapsed >= WRITE_ENQUEUE_TOTAL_BUDGET,
+            "give-up must span the full retry budget (was {elapsed:?})"
+        );
+        // Bounded: the loop can't run forever. A handful of attempts
+        // (budget / per-attempt) is the ceiling; assert we didn't wildly
+        // overshoot it.
+        assert!(
+            elapsed < WRITE_ENQUEUE_TOTAL_BUDGET + WRITE_ENQUEUE_TIMEOUT * 2,
+            "give-up must stay bounded near the budget (was {elapsed:?})"
+        );
+    }
+
+    /// A closed channel (writer thread gone) is terminal, not transient:
+    /// return `Closed` at once without spending the retry budget.
+    #[tokio::test(start_paused = true)]
+    async fn closed_channel_returns_closed_without_retrying() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+        drop(rx); // writer thread gone
+
+        let started = tokio::time::Instant::now();
+        let result = enqueue_with_retry(&tx, b"inject").await;
+        assert!(
+            matches!(result, Err(PtyError::Closed)),
+            "a closed channel is terminal: {result:?}"
+        );
+        assert!(
+            started.elapsed() < WRITE_ENQUEUE_TIMEOUT,
+            "Closed must return immediately, not after the retry budget"
+        );
     }
 }

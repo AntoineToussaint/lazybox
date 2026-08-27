@@ -16,7 +16,14 @@ use std::time::Duration;
 /// Defense-in-depth deadline around a backend write/resize future. Raw PTY
 /// writes already bound their internal queue, but the backend trait permits
 /// other implementations and cancellation must remain possible.
-pub(crate) const OPERATION_TIMEOUT: Duration = Duration::from_millis(750);
+///
+/// Must be >= the raw-PTY write path's internal enqueue-retry budget
+/// (`pty::WRITE_ENQUEUE_TOTAL_BUDGET`, 5s) so those retries actually get to
+/// run before this outer deadline cancels the future — otherwise a CPU
+/// spike would trip this 750ms bound and drop injected input before the
+/// inner retry loop could land it. Raised from 750ms to 6s: still finite,
+/// so cancellation stays possible, but tolerant of a CPU-starved scheduler.
+pub(crate) const OPERATION_TIMEOUT: Duration = Duration::from_secs(6);
 // SIGWINCH and mouse-driven repaints begin immediately. An epoch that has
 // observed no output within this bound must not capture unrelated later work.
 const VIEW_OUTPUT_START_TIMEOUT: Duration = Duration::from_secs(2);

@@ -5823,21 +5823,7 @@ async fn finish_terminal(
         .remove(&terminal_id);
     config.terminal.finish_teardown(terminal_id).await;
     let agent_state_generation = claim.agent_state_generation;
-    for field in TerminalPersistedField::ALL {
-        if field == TerminalPersistedField::WorkingClaim {
-            continue;
-        }
-        let key = field.key(backend_key);
-        if let Err(error) = config.store.delete_kv(&key) {
-            tracing::warn!(?terminal_id, %key, %error, "terminal teardown: kv cleanup failed");
-        }
-    }
-    if let Some(generation) = agent_state_generation {
-        let key = agent_state_key(backend_key, generation);
-        if let Err(error) = config.store.delete_kv(&key) {
-            tracing::warn!(?terminal_id, %key, %error, "terminal teardown: agent state cleanup failed");
-        }
-    }
+    sweep_terminal_persisted_fields(config, backend_key, agent_state_generation).await;
     // Release the backend's per-session slot (PTY fds, writer thread,
     // replay ring). The exit has been observed by the time we're here,
     // so this is a pure handle drop — for a self-exited session it's
@@ -8812,6 +8798,25 @@ pub async fn recover_sessions(config: &ServerConfig) {
     let live_keys: std::collections::HashSet<_> = keys.iter().cloned().collect();
     let total_live = keys.len();
     tracing::info!("recovering {total_live} surviving session(s)");
+    // The archived set is the durable, authoritative record of "the user got
+    // rid of this workspace" (`x x`). A surviving backend session whose owning
+    // workspace is archived is an orphan the delete couldn't reach — the agent
+    // process had already exited, tearing down its terminal, so the detached
+    // tmux session had no live registry entry to kill. Reattaching it here
+    // would resurrect the deleted workspace from its persisted meta (the
+    // workspace-resurrection bug). Read the set ONCE, strictly: an unreadable
+    // set falls back to reattaching every survivor rather than risk nuking live
+    // work off a transient read failure.
+    let archived_keys = match crate::workspace::load_archived_set_strict(config) {
+        Ok(set) => Some(set),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "recover: archived set unreadable — reattaching all survivors without the archive guard"
+            );
+            None
+        }
+    };
     let attach_permits =
         std::sync::Arc::new(tokio::sync::Semaphore::new(RECOVERY_ATTACH_CONCURRENCY));
     let resource_warning_emitted = std::sync::Arc::new(AtomicBool::new(false));
@@ -8819,6 +8824,27 @@ pub async fn recover_sessions(config: &ServerConfig) {
         let (session_key, kind) = load_terminal_meta(config, &key)
             .await
             .unwrap_or_else(|| (SessionKey::from(""), TerminalKind::Shell));
+        // Honor the archived set before doing any reattach work: if this
+        // survivor's workspace was deleted, kill the orphan backend session and
+        // sweep its persisted per-terminal rows so it can't be reconstructed on
+        // the next restart either.
+        if archived_keys
+            .as_ref()
+            .is_some_and(|archived| archived.contains(session_key.as_str()))
+        {
+            tracing::info!("recover: killing orphan session for archived workspace {session_key}");
+            if let Err(error) = config.backend.kill(&key).await {
+                tracing::warn!(
+                    backend_key = %key,
+                    %session_key,
+                    %error,
+                    "recover: killing orphan session for archived workspace failed"
+                );
+            }
+            let generation = load_agent_state_generation(config, &key).await;
+            sweep_terminal_persisted_fields(config, &key, generation).await;
+            continue;
+        }
         let access = load_terminal_access(config, &key).await;
         let no_permission = load_no_permission(config, &key).await;
         let mut resume_context = match &kind {
@@ -9231,7 +9257,7 @@ pub(crate) fn encode_terminal_meta_record(
 
 /// Inverse of `persist_terminal_meta`. Returns None when nothing was
 /// previously stored — caller falls back to a placeholder.
-async fn load_terminal_meta(
+pub(crate) async fn load_terminal_meta(
     config: &ServerConfig,
     backend_key: &str,
 ) -> Option<(SessionKey, TerminalKind)> {
@@ -9411,6 +9437,51 @@ async fn load_pty_launch_generation(config: &ServerConfig, backend_key: &str) ->
         .ok()??
         .parse()
         .ok()
+}
+
+/// Read the persisted agent-state generation for `backend_key`, used to
+/// address the generation-scoped `terminal-agent-state:*` row when sweeping a
+/// session's durable metadata outside the normal teardown path.
+pub(crate) async fn load_agent_state_generation(
+    config: &ServerConfig,
+    backend_key: &str,
+) -> Option<u64> {
+    let store = config.store.clone();
+    let kv_key = TerminalPersistedField::AgentStateGeneration.key(backend_key);
+    tokio::task::spawn_blocking(move || store.get_kv(&kv_key))
+        .await
+        .ok()?
+        .ok()??
+        .parse()
+        .ok()
+}
+
+/// Delete every persisted per-terminal kv row owned by `backend_key`: the whole
+/// [`TerminalPersistedField`] inventory (minus `WorkingClaim`, whose teardown is
+/// remote-identity-aware and handled separately) plus the generation-scoped
+/// agent-state row. Shared by terminal teardown and orphan-session recovery so
+/// neither can leave a `terminal-*` row that reconstructs a dead session on the
+/// next restart. Best-effort: a failed delete is logged, not fatal.
+pub(crate) async fn sweep_terminal_persisted_fields(
+    config: &ServerConfig,
+    backend_key: &str,
+    agent_state_generation: Option<u64>,
+) {
+    for field in TerminalPersistedField::ALL {
+        if field == TerminalPersistedField::WorkingClaim {
+            continue;
+        }
+        let key = field.key(backend_key);
+        if let Err(error) = config.store.delete_kv(&key) {
+            tracing::warn!(%backend_key, %key, %error, "terminal meta sweep: kv cleanup failed");
+        }
+    }
+    if let Some(generation) = agent_state_generation {
+        let key = agent_state_key(backend_key, generation);
+        if let Err(error) = config.store.delete_kv(&key) {
+            tracing::warn!(%backend_key, %key, %error, "terminal meta sweep: agent state cleanup failed");
+        }
+    }
 }
 
 async fn initialize_agent_state_generation(
@@ -11718,6 +11789,108 @@ mod tests {
                 .iter()
                 .all(|t| !t.session_key.as_str().contains("#dead")),
             "dead persisted terminals must not surface as live recovered sessions"
+        );
+    }
+
+    // Regression (workspace resurrection): the user archives a workspace
+    // (`x x`), quits, and restarts — the deleted workspace must NOT come back.
+    // The failure mode: a tmux session lingered with no live terminal entry
+    // (its agent had exited, tearing down the terminal, but the detached
+    // session survived), so `delete_workspace`'s registry sweep never killed
+    // it. Recovery must consult the persisted archived set, refuse to reattach
+    // the orphan, kill its backend session, and sweep its persisted meta — while
+    // still reattaching a NON-archived survivor (guard against over-killing).
+    #[tokio::test]
+    async fn recovery_kills_orphan_session_for_archived_workspace_but_reattaches_the_rest() {
+        let backend = crate::backend::MockBackend::new();
+        // The orphan: a detached session whose owning workspace the user
+        // archived. On the real box its terminal was already torn down.
+        let archived_key = backend
+            .spawn(
+                &["claude".into()],
+                Some(std::path::Path::new("/tmp")),
+                &[],
+                "archived-agent",
+            )
+            .await
+            .expect("spawn archived backend");
+        // The survivor: a live session for a workspace that is still present.
+        let live_key = backend
+            .spawn(
+                &["claude".into()],
+                Some(std::path::Path::new("/tmp")),
+                &[],
+                "live-agent",
+            )
+            .await
+            .expect("spawn live backend");
+        let store: std::sync::Arc<dyn lazybox_store::Store> =
+            std::sync::Arc::new(lazybox_store::MemoryStore::new());
+        let seed = ServerConfig::with_store_and_backend(store.clone(), backend.as_backend());
+        let archived_session = SessionKey::new("github:owner/repo#archived");
+        let live_session = SessionKey::new("github:owner/repo#live");
+        let kind = TerminalKind::Agent("claude".into());
+        persist_terminal_meta(&seed, &archived_key, &archived_session, &kind).await;
+        persist_terminal_meta(&seed, &live_key, &live_session, &kind).await;
+        // The durable record of "the user got rid of this".
+        assert!(crate::workspace::archive_workspace_key(
+            &seed,
+            archived_session.as_str()
+        ));
+
+        let restarted = ServerConfig::with_store_and_backend(store.clone(), backend.as_backend());
+        recover_sessions(&restarted).await;
+
+        let snapshot = snapshot_terminals(&restarted).await;
+        assert!(
+            snapshot.iter().all(|t| t.session_key != archived_session),
+            "an archived workspace's orphan session must not be reattached"
+        );
+        assert_eq!(
+            snapshot
+                .iter()
+                .filter(|t| t.session_key == live_session)
+                .count(),
+            1,
+            "a non-archived survivor must still be reattached (no over-killing)"
+        );
+
+        // The orphan backend session was killed — it no longer lists as live.
+        assert!(
+            !restarted
+                .backend
+                .list()
+                .await
+                .expect("backend list")
+                .contains(&archived_key),
+            "the orphan backend session for the archived workspace must be killed"
+        );
+        // ...and the live survivor's session remains.
+        assert!(
+            restarted
+                .backend
+                .list()
+                .await
+                .expect("backend list")
+                .contains(&live_key),
+            "the live survivor's backend session must be preserved"
+        );
+
+        // The orphan's persisted per-terminal rows are swept so it cannot be
+        // reconstructed on the NEXT restart either.
+        assert!(
+            store
+                .get_kv(&TerminalPersistedField::Metadata.key(&archived_key))
+                .expect("read archived meta")
+                .is_none(),
+            "the orphan's persisted terminal meta must be swept"
+        );
+        assert!(
+            store
+                .get_kv(&TerminalPersistedField::Metadata.key(&live_key))
+                .expect("read live meta")
+                .is_some(),
+            "the live survivor's persisted terminal meta must be preserved"
         );
     }
 

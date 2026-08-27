@@ -2044,6 +2044,18 @@ impl<T: TerminalAdapter> Model<T> {
                     conflict: arm,
                 });
             }
+            Action::ToggleMetering if self.sidebar.cursor_on_space_header() => {
+                // Space-tier toggle (approach C): `x $` on a Space header meters
+                // every workspace under it via `agent.metered_spaces`, persisted
+                // client-side and read by the daemon at spawn. Distinct from the
+                // per-workspace canary below, which the same key drives on a
+                // workspace row.
+                if let Some((space, enabled)) = self.sidebar.toggle_space_metering_at_cursor() {
+                    let space = crate::util::notice_slug(&space).into_owned();
+                    let verb = if enabled { "on" } else { "off" };
+                    self.flash_info(format!("$ meter: {verb} for {space} (space)"));
+                }
+            }
             Action::ToggleMetering => {
                 let workspace = self.sidebar.selected_workspace().cloned();
                 use crate::intent::Intent;

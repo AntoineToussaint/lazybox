@@ -151,6 +151,12 @@ pub struct Sidebar {
     /// Spaces the user collapsed. Mirrors `collapsed_repos` one tier up;
     /// persisted to `ui.collapsed_spaces`.
     collapsed_spaces: BTreeSet<String>,
+    /// Spaces the user metered (approach C): every workspace under one of
+    /// these Spaces routes through the metering proxy. Persisted to
+    /// `agent.metered_spaces`, toggled by `x $` on a Space header, read by the
+    /// header render for the `$` badge. The daemon derives the same set at
+    /// spawn (`Config::source_is_metered`) — this copy only drives the UI.
+    metered_spaces: BTreeSet<String>,
     /// Per-source attention ladder (#scale): group label / `space:…`
     /// keys → level + optional snooze. Seeded from
     /// `ui.source_attention`, mutated by the header `z` / `x ,`
@@ -496,6 +502,7 @@ impl Sidebar {
             focused_workspaces: Vec::new(),
             spaces: Vec::new(),
             collapsed_spaces: BTreeSet::new(),
+            metered_spaces: BTreeSet::new(),
             source_attention: BTreeMap::new(),
             config_seeded: false,
             snapshot_prune: true,
@@ -1114,6 +1121,7 @@ impl Sidebar {
         focused_workspaces: Vec<SessionKey>,
         spaces: Vec<lazybox_config::SpaceConfig>,
         collapsed_spaces: BTreeSet<String>,
+        metered_spaces: BTreeSet<String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
     ) {
@@ -1132,6 +1140,7 @@ impl Sidebar {
             .collect();
         self.spaces = spaces;
         self.collapsed_spaces = collapsed_spaces;
+        self.metered_spaces = metered_spaces;
         if let Some(agent) = default_agent.filter(|s| !s.is_empty()) {
             self.default_agent = agent;
         }
@@ -3080,6 +3089,34 @@ impl Sidebar {
     /// render to pick `▾` vs `▸`).
     pub fn is_space_collapsed(&self, name: &str) -> bool {
         self.collapsed_spaces.contains(name)
+    }
+
+    /// Toggle metering for the Space at or above the cursor (approach C):
+    /// add/remove its name in `agent.metered_spaces` so every workspace under
+    /// it routes through the metering proxy on the next spawn. Persists the
+    /// targeted add/remove like the collapse toggle above, and returns
+    /// `(space_name, now_metered)` for the caller's notice — or `None` when the
+    /// cursor isn't on a Space header. The daemon reads the same set at spawn,
+    /// so this write is the single user-facing control; nothing is redirected
+    /// until `agent.metering_proxy` is on.
+    pub fn toggle_space_metering_at_cursor(&mut self) -> Option<(String, bool)> {
+        let space = self.cursor_space()?;
+        let was_metered = self.metered_spaces.contains(&space);
+        let op = if was_metered {
+            self.metered_spaces.remove(&space);
+            lazybox_config::UiListOp::Remove(space.clone())
+        } else {
+            self.metered_spaces.insert(space.clone());
+            lazybox_config::UiListOp::Add(space.clone())
+        };
+        lazybox_config::Config::mutate_ui_list(|c| &mut c.agent.metered_spaces, op);
+        Some((space, !was_metered))
+    }
+
+    /// True when the Space is metered (`agent.metered_spaces`) — drives the
+    /// `$` badge on its header row.
+    pub fn is_space_metered(&self, name: &str) -> bool {
+        self.metered_spaces.contains(name)
     }
 
     /// Test-only: park the cursor on the named Space / repo header —

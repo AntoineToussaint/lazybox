@@ -3029,14 +3029,16 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // same predicate the resolver Notices on, so `g t` only surfaces
         // where the sweep could actually fast-forward something.
         ActionKind::ToggleTrackMain => workspace.map(|w| w.supports_track_main()).unwrap_or(false),
-        // Metering is a per-workspace preference — available on any workspace
-        // that can host an agent (a repo/project scope to spawn into). Whether
-        // it actually routes is a daemon-side gate (metering_proxy + proxy
-        // running), so the toggle stays available even when the proxy is off:
-        // it records the intent for when it's enabled.
+        // Metering is available on any workspace that can host an agent (a
+        // repo/project scope to spawn into). With NO workspace it stays
+        // available too — the `x $` chord doubles as the Space-tier toggle on a
+        // Space header (approach C), which the dispatch path routes by cursor
+        // position (a header has no selected workspace). Whether either actually
+        // routes is a daemon-side gate (metering_proxy + proxy running), so the
+        // toggle stays available even when the proxy is off: it records intent.
         ActionKind::ToggleMetering => workspace
             .map(|w| w.project_key.is_some() || w.pr.is_some() || !w.gh_issues.is_empty())
-            .unwrap_or(false),
+            .unwrap_or(true),
         // The policies menu surfaces on any workspace carrying a PR or a
         // GitHub issue — the "tag this PR/issue" surface (issue #363).
         // The menu itself marks which policies apply to PRs vs issues.

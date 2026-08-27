@@ -1572,14 +1572,17 @@ async fn handle_spawn_inner(
     };
     let plan_error_source = format!("spawn:{kind:?}");
     let repo_env = collect_repo_env(config, &session_key);
-    // Per-workspace metering opt-in (the `$ meter` canary): route this spawn
-    // through the metering proxy iff the persisted workspace has metering on.
-    // Read straight from the store so it's the single source of truth across
-    // restarts and needs no IPC plumbing on the spawn command. Effective only
-    // when the proxy is enabled/running (`gateway_env_for_agent` gates it).
+    // Metering opt-in: route this spawn through the metering proxy iff the
+    // per-workspace `$ meter` canary is set OR the workspace's source sits in a
+    // metered Space (`agent.metered_spaces`, approach C). The per-workspace flag
+    // is read straight from the store (single source of truth across restarts);
+    // the Space check resolves the workspace's source through `ui.spaces`. Both
+    // are folded into `meter` here, so `gateway_env_for_agent` — which still
+    // gates on the proxy being enabled/running — needs no change and every
+    // safety property of the canary is preserved.
     let meter = meter
         || load_workspace(config, &WorkspaceKey::new(session_key.as_str()))
-            .map(|ws| ws.metered)
+            .map(|ws| ws.metered || workspace_in_metered_space(&cfg, &ws))
             .unwrap_or(false);
     let plan = match build_spawn_plan(
         SpawnPlanInput {
@@ -5208,6 +5211,19 @@ fn session_kind_from_terminal(kind: &TerminalKind) -> SessionKind {
         TerminalKind::Shell => SessionKind::Shell,
         TerminalKind::LogTail { path } => SessionKind::LogTail { path: path.clone() },
     }
+}
+
+/// True when `workspace`'s source group (`owner/repo` for GitHub, the project
+/// label for Linear/local) sits in a metered Space (`agent.metered_spaces`,
+/// approach C). Delegates the grouping resolution to
+/// [`lazybox_config::Config::source_is_metered`]. A workspace with no resolvable
+/// source (repo-less, project-less scratch) is never Space-metered — there's
+/// nothing to group.
+fn workspace_in_metered_space(cfg: &lazybox_config::Config, workspace: &Workspace) -> bool {
+    workspace
+        .repo_slug()
+        .map(|label| cfg.source_is_metered(label.as_ref()))
+        .unwrap_or(false)
 }
 
 fn load_workspace(
@@ -12451,6 +12467,39 @@ mod tests {
                 "ANTHROPIC_BASE_URL".to_string(),
                 "http://127.0.0.1:45999/anthropic/claude/github-acme-widget-7".to_string()
             )]
+        );
+    }
+
+    #[test]
+    fn space_metering_meters_every_workspace_in_the_space() {
+        // Approach C: a workspace whose source sits in a metered Space is
+        // routed even without its own `$ meter` flag. Here `obin-ai/platform`
+        // auto-seeds into the "obin-ai" Space (owner segment); metering that
+        // Space name meters the workspace. An unlisted source is untouched, and
+        // an empty set never meters — the same non-redirect guarantee as the
+        // per-workspace canary.
+        let mut task = task_for("github", "obin-ai/platform#1");
+        task.repo = Some("obin-ai/platform".into());
+        let ws = Workspace::from_task(task, chrono::Utc::now());
+
+        let mut cfg = lazybox_config::Config::default();
+        assert!(
+            !workspace_in_metered_space(&cfg, &ws),
+            "empty metered_spaces never meters",
+        );
+
+        cfg.agent.metered_spaces.insert("obin-ai".into());
+        assert!(
+            workspace_in_metered_space(&cfg, &ws),
+            "source in a metered Space is metered",
+        );
+
+        let mut other = task_for("github", "acme/widget#1");
+        other.repo = Some("acme/widget".into());
+        let other_ws = Workspace::from_task(other, chrono::Utc::now());
+        assert!(
+            !workspace_in_metered_space(&cfg, &other_ws),
+            "a source outside the metered Space stays direct",
         );
     }
 

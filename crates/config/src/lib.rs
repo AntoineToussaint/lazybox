@@ -1972,6 +1972,19 @@ pub struct AgentSection {
     /// entry here always beats the built-in. See `lazybox_core::pricing`.
     #[serde(default)]
     pub pricing: std::collections::BTreeMap<String, lazybox_core::ModelPrice>,
+    /// Space names (see [`SpaceConfig`]) whose every workspace is metered —
+    /// the Space-tier canary (approach C). A spawn is routed through the
+    /// metering proxy when its source sits in one of these Spaces, computed
+    /// with [`space_of`] over `ui.spaces`. Independent of the visual grouping:
+    /// a name here only means "meter this Space", so a repo can be *both*
+    /// grouped under a Space *and* metered by it. Composes (OR) with the
+    /// per-workspace [`Workspace::metered`](lazybox_core::Workspace) canary and
+    /// the blanket `meter_all`; like both, it only actually routes when
+    /// `metering_proxy` is on and the proxy is running, so listing a Space here
+    /// with the proxy off records intent without redirecting anything. Toggled
+    /// live from the sidebar with `x $` on a Space header.
+    #[serde(default)]
+    pub metered_spaces: std::collections::BTreeSet<String>,
     /// Apply EVERY updatable agent's CLI updates automatically when the
     /// scheduled out-of-band check finds a newer version — the global
     /// switch over the per-agent `agents.<id>.auto_update` opt-in. Off by
@@ -2059,6 +2072,7 @@ impl Default for AgentSection {
             metering_proxy: false,
             meter_all: false,
             pricing: std::collections::BTreeMap::new(),
+            metered_spaces: std::collections::BTreeSet::new(),
             auto_update: false,
             auto_update_except: Vec::new(),
             working_watchdog_secs: None,
@@ -2410,6 +2424,22 @@ impl Default for TerminalSection {
 }
 
 impl Config {
+    /// True when `source_label` — a source group label (`owner/repo` for
+    /// GitHub, the project display name for Linear/local) — sits in a Space
+    /// listed in `agent.metered_spaces`, the Space-tier metering canary
+    /// (approach C). Resolves the label's Space with [`space_of`] over
+    /// `ui.spaces`, then checks membership. One call for the server spawn path
+    /// so the grouping tier and the metered set can't drift. An empty set short
+    /// -circuits to `false` (the common case), so this is cheap on every spawn.
+    pub fn source_is_metered(&self, source_label: &str) -> bool {
+        if self.agent.metered_spaces.is_empty() {
+            return false;
+        }
+        self.agent
+            .metered_spaces
+            .contains(&space_of(source_label, &self.ui.spaces))
+    }
+
     /// Repos that opt out of the global `sandbox:` box (`repos.<key>.sandbox:
     /// false`, #1066). Their workspaces get no remote box, so the `r`-spawn
     /// is refused there even while the box is configured for other projects.
@@ -4714,6 +4744,50 @@ repos:
             "space + source order preserved across a round-trip",
         );
         assert!(reparsed.ui.collapsed_spaces.contains("Personal"));
+    }
+
+    /// `agent.metered_spaces` is empty on a fresh config and survives a
+    /// round-trip — the persistence half of the Space-tier metering canary
+    /// (approach C).
+    #[test]
+    fn metered_spaces_default_empty_and_round_trip() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(
+            cfg.agent.metered_spaces.is_empty(),
+            "no metered spaces on a fresh config"
+        );
+
+        let mut cfg = Config::default();
+        cfg.agent.metered_spaces.insert("Obin".into());
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert!(reparsed.agent.metered_spaces.contains("Obin"));
+    }
+
+    /// `source_is_metered` resolves a source label through `ui.spaces` and
+    /// checks `agent.metered_spaces`: an explicit Space assignment, the
+    /// owner-segment auto-seed, and the empty-set fast path.
+    #[test]
+    fn source_is_metered_resolves_through_space_of() {
+        let mut cfg = Config::default();
+        // Empty set: never metered, whatever the source.
+        assert!(!cfg.source_is_metered("obin-ai/platform"));
+
+        // Auto-seeded Space = the `owner` segment: metering the "obin-ai"
+        // Space meters every `obin-ai/*` source without an explicit assignment.
+        cfg.agent.metered_spaces.insert("obin-ai".into());
+        assert!(cfg.source_is_metered("obin-ai/platform"));
+        assert!(cfg.source_is_metered("obin-ai/studio"));
+        assert!(!cfg.source_is_metered("other/repo"));
+
+        // An explicit `ui.spaces` assignment wins over the owner auto-seed:
+        // move `me/dotfiles` into a named "Obin" Space and meter that name.
+        cfg.ui.spaces = vec![SpaceConfig {
+            name: "Obin".into(),
+            sources: vec!["me/dotfiles".into()],
+        }];
+        cfg.agent.metered_spaces.insert("Obin".into());
+        assert!(cfg.source_is_metered("me/dotfiles"));
     }
 
     /// The theme is unset on a fresh config (so the default palette

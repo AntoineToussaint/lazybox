@@ -618,6 +618,9 @@ enum StateSource {
     Exit,
     /// A fully confirmed provider-credit recovery leaving its blocked state.
     Recovery,
+    /// The auto-wait policy relabeling a `LimitReached` block to the calm
+    /// `AwaitingReset` after it pressed "Wait" on the agent's behalf.
+    AutoWait,
 }
 
 /// Result of offering a direct (hook / input / exit) transition. The
@@ -918,6 +921,7 @@ async fn transition_and_broadcast_agent_state(
         StateSource::Exit => "process-exit",
         StateSource::Pty => "pty",
         StateSource::Recovery => "credit-recovery-confirmed",
+        StateSource::AutoWait => "auto-wait-parked",
     };
     let folded = fold_and_broadcast_agent_state(
         terminals,
@@ -972,6 +976,45 @@ fn wake_poll_for_terminal_kind(config: &ServerConfig, kind: &TerminalKind) {
     if matches!(kind, TerminalKind::Agent(_)) {
         config.poll.wake(false);
     }
+}
+
+/// Relabel a `LimitReached` block to the calm `AwaitingReset` after the
+/// auto-wait policy has pressed "Wait" on the agent's behalf, so the
+/// sidebar/tab surface a quiet 💤 "parked, will resume" badge instead of
+/// the alerting `⏳` (which reads as "needs you"). Daemon-asserted — the
+/// screen scraper never produces `AwaitingReset`, and the state machine
+/// holds it against the lingering limit banner (see
+/// `AgentStateMachine::on_reading`). A no-op unless the terminal is still
+/// exactly `LimitReached` (the candidate guard), so a race that already
+/// moved it on (auto-resumed, exited) can't be clobbered. Returns whether
+/// the calm state was committed.
+pub async fn park_limit_reached_as_awaiting_reset(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+) -> bool {
+    let Some(backend_key) = config.terminal.backend_key_for(terminal_id).await else {
+        return false;
+    };
+    let Some((session_key, _kind)) = config.terminal.terminal_meta_for(terminal_id).await else {
+        return false;
+    };
+    let Some(durability) = agent_state_durability(config, terminal_id, &backend_key).await else {
+        return false;
+    };
+    transition_and_broadcast_agent_state(
+        &config.terminal,
+        &config.bus,
+        &durability,
+        terminal_id,
+        &session_key,
+        StateSource::AutoWait,
+        |current| {
+            (current == Some(lazybox_ipc::AgentState::LimitReached))
+                .then_some(lazybox_ipc::AgentState::AwaitingReset)
+        },
+    )
+    .await
+    .committed
 }
 
 struct CorrelatedCommandOutcome {

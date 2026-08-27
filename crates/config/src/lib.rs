@@ -1253,11 +1253,14 @@ pub struct UiSection {
     /// monthly limit (issue #847). When `true`, the daemon accepts the
     /// limit prompt's default (Wait) option the moment an agent enters
     /// the `LimitReached` state, so N agents all hitting the cap at once
-    /// don't each need a manual visit — you re-auth with another account
-    /// and then `Shift-K` (resume all rate-limited) to continue them.
-    /// The daemon re-reads this on every transition, so editing it takes
-    /// effect without a restart. Defaults to `false`: lazybox only
-    /// detects + surfaces the block unless you opt in.
+    /// don't each need a manual visit. Then, once that terminal's wait
+    /// clears to a resting screen (the reset happened and the turn
+    /// settled), the daemon injects the `credit_recovery_prompt`
+    /// continuation nudge so the agent picks the interrupted work back up
+    /// instead of idling at an empty composer — closing the loop the bare
+    /// keystroke left open. The daemon re-reads this on every transition,
+    /// so editing it takes effect without a restart. Defaults to `false`:
+    /// lazybox only detects + surfaces the block unless you opt in.
     #[serde(default)]
     pub auto_wait_on_limit: bool,
     /// Prompt submitted after a credit chooser has cleared and the provider

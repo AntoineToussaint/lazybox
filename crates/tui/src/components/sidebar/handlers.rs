@@ -617,10 +617,15 @@ fn aggregate_agent_state(
         // A usage-limit block outranks even `InputNeeded`: it's the most
         // urgent "you must act (externally) before this agent moves" state
         // across a workspace's terminals (#847).
-        lazybox_ipc::AgentState::CreditExhausted => 7,
-        lazybox_ipc::AgentState::LimitReached => 6,
-        lazybox_ipc::AgentState::InputNeeded => 5,
-        lazybox_ipc::AgentState::Working => 4,
+        lazybox_ipc::AgentState::CreditExhausted => 8,
+        lazybox_ipc::AgentState::LimitReached => 7,
+        lazybox_ipc::AgentState::InputNeeded => 6,
+        lazybox_ipc::AgentState::Working => 5,
+        // The calm auto-waiting block: notable enough to surface over a
+        // resting `Done` (one agent is still parked on its reset), but it
+        // yields to an actively `Working` sibling — real work is the more
+        // representative glyph, and the parked agent self-resumes.
+        lazybox_ipc::AgentState::AwaitingReset => 4,
         lazybox_ipc::AgentState::Done => 3,
         lazybox_ipc::AgentState::Exited { .. } => 2,
         lazybox_ipc::AgentState::Idle => 1,

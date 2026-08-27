@@ -178,6 +178,7 @@ fn agent_state_code(s: &lazybox_ipc::AgentState) -> u64 {
         Exited { code } => 5u64 ^ hash_one(code).rotate_left(8),
         LimitReached => 6,
         CreditExhausted => 7,
+        AwaitingReset => 8,
     }
 }
 
@@ -1800,6 +1801,9 @@ impl Sidebar {
                     .is_some_and(|w| crate::agent_attention::workspace_is_asking(w, &self.agents)),
                 limit_reached: workspace.is_some_and(|w| {
                     crate::agent_attention::workspace_is_limit_reached(w, &self.agents)
+                }),
+                awaiting_reset: workspace.is_some_and(|w| {
+                    crate::agent_attention::workspace_is_awaiting_reset(w, &self.agents)
                 }),
                 credit_exhausted: workspace.is_some_and(|w| {
                     crate::agent_attention::workspace_is_credit_exhausted(w, &self.agents)

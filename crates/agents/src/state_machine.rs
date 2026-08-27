@@ -246,19 +246,24 @@ pub(crate) fn transition_allowed(from: AgentState, to: AgentState) -> bool {
         )
 }
 
-/// The two states in which the agent is parked waiting on the user with
-/// no output flowing: a structural prompt (`InputNeeded`) or a provider
-/// usage-limit block (`LimitReached`, #847). They share the same
-/// stickiness contract — a parked prompt emits nothing, so an ambiguous
+/// The states in which the agent is parked with no output flowing: a
+/// structural prompt (`InputNeeded`), a provider usage-limit block
+/// (`LimitReached`, #847), a credit block (`CreditExhausted`), or the
+/// calm auto-waiting sibling of the limit block (`AwaitingReset` — the
+/// daemon pressed Wait and is holding until reset). They share the same
+/// stickiness contract — a parked agent emits nothing, so an ambiguous
 /// byte-flow reading is an incidental repaint, never evidence the block
-/// resolved — and both are PTY corrections a fresh lifecycle hook can't
-/// see (the block freezes the hook stream), so the gate lets either
+/// resolved — and all are PTY corrections a fresh lifecycle hook can't
+/// see (the block freezes the hook stream), so the gate lets them
 /// through. Grouping them here keeps every "blocked, sticky" rule in one
 /// predicate rather than duplicated per variant.
 pub(crate) fn is_blocked(state: AgentState) -> bool {
     matches!(
         state,
-        AgentState::InputNeeded | AgentState::LimitReached | AgentState::CreditExhausted
+        AgentState::InputNeeded
+            | AgentState::LimitReached
+            | AgentState::CreditExhausted
+            | AgentState::AwaitingReset
     )
 }
 
@@ -491,6 +496,18 @@ impl AgentStateMachine {
             && current.is_none()
             && !self.booted
         {
+            return Outcome::Damped;
+        }
+        // Calm-block hold: once auto-wait has moved a usage-limit block to
+        // the calm `AwaitingReset` (it pressed Wait and is holding until
+        // reset), the limit banner lingers on screen and keeps
+        // classifying as `LimitReached`. That re-read is not new evidence —
+        // downgrading back to the alerting `LimitReached` would undo the
+        // whole point — so hold `AwaitingReset` against it. Only the same
+        // affirmative clear that leaves `LimitReached` (the agent visibly
+        // `Working` again, or coming to rest → `Done`) is allowed to leave,
+        // and those readings fall through to the normal machinery below.
+        if current == Some(AgentState::AwaitingReset) && reading.state == AgentState::LimitReached {
             return Outcome::Damped;
         }
         // Any clear reading is an affirmative on-screen classification —
@@ -1092,6 +1109,75 @@ mod tests {
             m.on_reading(Some(AgentState::CreditExhausted), clear(Working)),
             Outcome::Committed(Working),
         );
+    }
+
+    // ── AwaitingReset: the calm, auto-waiting sibling of LimitReached ─
+
+    #[test]
+    fn awaiting_reset_holds_against_a_lingering_limit_banner() {
+        // After auto-wait presses Wait we've moved to AwaitingReset, but the
+        // limit banner lingers on screen and keeps classifying as
+        // LimitReached. That re-read must NOT downgrade back to the alerting
+        // state — hold AwaitingReset, whether the banner reads clear or
+        // ambiguous.
+        let mut m = machine();
+        assert_eq!(
+            m.on_reading(
+                Some(AgentState::AwaitingReset),
+                clear(AgentState::LimitReached)
+            ),
+            Outcome::Damped,
+        );
+        assert_eq!(
+            m.on_reading(
+                Some(AgentState::AwaitingReset),
+                ambiguous(AgentState::LimitReached)
+            ),
+            Outcome::Damped,
+        );
+    }
+
+    #[test]
+    fn ambiguous_working_never_clears_awaiting_reset() {
+        // Blocked-state stickiness: an incidental byte-flow repaint during
+        // the wait can't clear the calm block any more than it clears a
+        // parked `?`.
+        let mut m = machine();
+        assert_eq!(
+            m.on_reading(Some(AgentState::AwaitingReset), ambiguous(Working)),
+            Outcome::Damped,
+        );
+    }
+
+    #[test]
+    fn awaiting_reset_clears_on_the_same_evidence_as_limit_reached() {
+        // The reset landed: the agent either visibly resumes (a clear
+        // Working) or comes to rest (a clear Done from a Working turn). Both
+        // leave the calm block, exactly as they leave LimitReached — this is
+        // the transition auto-wait's continuation nudge rides.
+        let mut m = machine();
+        assert_eq!(
+            m.on_reading(Some(AgentState::AwaitingReset), clear(Working)),
+            Outcome::Committed(Working),
+        );
+        // A resting screen: Working first (the reset resumed the turn), then
+        // a quiet clear settles it to Done.
+        let mut m = machine();
+        assert_eq!(
+            m.on_reading(Some(AgentState::AwaitingReset), clear(Working)),
+            Outcome::Committed(Working),
+        );
+        assert_eq!(
+            m.on_reading(Some(Working), clear(Idle)),
+            Outcome::Committed(Done),
+        );
+    }
+
+    #[test]
+    fn awaiting_reset_is_blocked() {
+        // It shares the blocked/sticky contract (pill treatment, hooks gate,
+        // exit damping) with the other parked states.
+        assert!(is_blocked(AgentState::AwaitingReset));
     }
 
     // ── Done stickiness ───────────────────────────────────────────

@@ -198,6 +198,22 @@ pub fn workspace_is_credit_exhausted(
     )
 }
 
+/// True iff the workspace's agent is in the calm auto-waiting block:
+/// lazybox pressed "Wait" on a usage-limit prompt and it is now parked,
+/// sleeping until the limit resets. Distinct from
+/// [`workspace_is_limit_reached`] on purpose — this state is *handled*, so
+/// it drives only the quiet 💤 row glyph and never the alert count, jump,
+/// resume-all, or the "rate-limited" filter axis.
+pub fn workspace_is_awaiting_reset(
+    workspace: &Workspace,
+    states: &HashMap<SessionKey, AgentState>,
+) -> bool {
+    matches!(
+        workspace_agent_state(workspace, states),
+        Some(AgentState::AwaitingReset)
+    )
+}
+
 /// True iff the workspace's agent process has exited (clean or crash;
 /// drives the `✗` indicator). Kept distinct from a blank/`Idle` row so a
 /// dead agent reads as "the process ended, restart it" rather than

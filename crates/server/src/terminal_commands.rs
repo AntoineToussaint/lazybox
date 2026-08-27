@@ -49,16 +49,6 @@ const DRAFT_COALESCE_WINDOW: Duration = Duration::from_millis(25);
 /// stays open for days. Active idle terminals keep their worker.
 const LANE_IDLE_RECHECK: Duration = Duration::from_secs(60);
 
-/// Grace the I/O router gives its lane workers to finish naturally at
-/// shutdown before it aborts the stragglers. Once the lane senders are
-/// dropped an idle or mid-command worker drains and exits in
-/// microseconds; only a worker wedged inside a backend op — bounded just
-/// by `terminal_io::OPERATION_TIMEOUT` (up to ~6s) — needs this window.
-/// Short so a wedged terminal cannot hold the daemon's shutdown hostage
-/// for the whole per-op deadline, but non-zero so a healthy in-flight
-/// write still completes rather than being cancelled mid-flight.
-const IO_ROUTER_SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
-
 /// Route connection-ordered terminal I/O into independent per-terminal FIFO
 /// workers. The outer channel is drained without backend awaits, so one
 /// wedged terminal cannot block another terminal or the connection event bus.
@@ -158,29 +148,10 @@ pub(crate) async fn run_io_router(
     }
 
     drop(lanes);
-    // Dropping the lane senders closes each lane's receiver, so an idle
-    // or mid-command worker drains and exits promptly. A worker wedged
-    // inside a backend op (a stalled resize/write bounded only by
-    // `terminal_io::OPERATION_TIMEOUT`, up to ~6s) would otherwise hold
-    // shutdown hostage for that whole deadline — the serve loop's own
-    // mutation-drain bound abandons this task, but only after 5s. Give
-    // the healthy workers a brief grace to finish, then abort any
-    // straggler so a wedged terminal can't stall the daemon's shutdown.
-    let drain = async {
-        while let Some(result) = workers.join_next().await {
-            if let Err(error) = result {
-                tracing::warn!("terminal I/O worker failed: {error}");
-            }
+    while let Some(result) = workers.join_next().await {
+        if let Err(error) = result {
+            tracing::warn!("terminal I/O worker failed: {error}");
         }
-    };
-    if tokio::time::timeout(IO_ROUTER_SHUTDOWN_GRACE, drain)
-        .await
-        .is_err()
-    {
-        tracing::warn!(
-            "terminal I/O router: aborting lane worker(s) still wedged in a backend op at shutdown"
-        );
-        workers.shutdown().await;
     }
 }
 

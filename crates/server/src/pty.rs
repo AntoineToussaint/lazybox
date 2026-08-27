@@ -88,41 +88,33 @@ pub const BROADCAST_CAPACITY: usize = 1024;
 /// of injected input across many multi-selected workspaces plus the
 /// terminal's own echo can back the queue up before the descheduled
 /// writer thread drains it. The extra headroom absorbs that burst.
-///
-/// Memory is bounded, but not by "1024 small buffers": each entry is a
-/// `Vec<u8>` of one `write()` call, and the I/O lane coalesces
-/// consecutive same-intent writes into up to `WRITE_BATCH_BYTES` (256
-/// KiB) per call, so a single entry can be large. The theoretical
-/// ceiling is therefore ~1024 × 256 KiB, but it is not reachable in
-/// practice: the queue only backs up while the writer thread is
-/// descheduled, and a genuinely wedged child's writes hit
-/// `WriteStalled` and never enqueue, so the transient burst that does
-/// queue is bounded by how much the lane admits before the stall
-/// surfaces.
+/// Memory is bounded — each entry is a `Vec<u8>` of one write's bytes
+/// (keystrokes/paste chunks), so the worst case is ~1024 small buffers.
 pub const WRITE_QUEUE_CAPACITY: usize = 1024;
 
 /// How long a single `writer_tx.send` attempt waits for queue space
 /// before being treated as a (possibly transient) stall and retried.
-/// Raised from 500ms so a briefly-descheduled writer thread doesn't
-/// trip it on the first attempt under a CPU-starved scheduler.
-const WRITE_ENQUEUE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+const WRITE_ENQUEUE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Total patience `write()` spends retrying a stalled enqueue before it
 /// finally surfaces `WriteStalled`. A timed-out `send` definitively did
 /// NOT enqueue the bytes (the future is cancelled), so retrying cannot
 /// double-write; we keep the payload and retry across short backoff
-/// steps. Only a terminal wedged for this many seconds (child truly not
-/// draining stdin) surfaces the loud error — a transient spike lands
-/// once the writer thread is scheduled again.
+/// steps, so a transient spike lands once the writer thread is scheduled
+/// again instead of dropping injected input. Only a terminal wedged for
+/// the whole budget (child truly not draining stdin) surfaces the loud
+/// error.
 ///
-/// This is a HARD ceiling on the loop's total wall-clock: each attempt's
-/// per-try timeout and each backoff are clamped to the budget remaining,
-/// so the loop returns at or before this deadline rather than
-/// overshooting by a trailing `WRITE_ENQUEUE_TIMEOUT` + backoff. That
-/// keeps it strictly under the `terminal_io::OPERATION_TIMEOUT` (6s) that
-/// wraps this call, so the inner retry loop — not the outer deadline —
-/// owns the give-up decision and the write can't be cancelled mid-attempt.
-const WRITE_ENQUEUE_TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+/// Deliberately SUB-SECOND and kept `<` the `terminal_io::OPERATION_TIMEOUT`
+/// (750ms) that wraps this call: the retries must run before the outer
+/// deadline cancels them, AND — the reason it isn't multi-second — a wedged
+/// write must not hold the serve loop / shutdown behind it any longer than
+/// the anti-wedge bound (`serve_loop`'s
+/// `a_wedged_terminal_resize_does_not_block_other_terminals`). Transient CPU
+/// spikes deschedule the writer thread on the order of tens–hundreds of ms;
+/// the real burst headroom comes from `WRITE_QUEUE_CAPACITY`, not from a long
+/// stall here.
+const WRITE_ENQUEUE_TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Backoff between enqueue retries. Short so a spike that clears quickly
 /// is picked up promptly, but non-zero so we don't busy-spin the runtime
@@ -180,44 +172,28 @@ async fn enqueue_with_retry(
     let deadline = tokio::time::Instant::now() + WRITE_ENQUEUE_TOTAL_BUDGET;
     let mut attempt: u32 = 0;
     loop {
-        // Clamp the per-attempt timeout to the budget remaining so the
-        // loop never starts a wait it can't finish before `deadline`.
-        // Without this the final attempt could run a full
-        // `WRITE_ENQUEUE_TIMEOUT` past the deadline (budget + backoff +
-        // one timeout ≈ 6.05s), overshooting `OPERATION_TIMEOUT` and
-        // letting the outer deadline cancel the write mid-attempt.
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            tracing::warn!(
-                "PTY write queue full for {}s ({} attempts) — dropping {} byte write",
-                WRITE_ENQUEUE_TOTAL_BUDGET.as_secs(),
-                attempt,
-                bytes.len()
-            );
-            return Err(PtyError::WriteStalled);
-        }
-        let attempt_timeout = remaining.min(WRITE_ENQUEUE_TIMEOUT);
-        match tokio::time::timeout(attempt_timeout, writer_tx.send(bytes.to_vec())).await {
+        match tokio::time::timeout(WRITE_ENQUEUE_TIMEOUT, writer_tx.send(bytes.to_vec())).await {
             Ok(Ok(())) => return Ok(()),
             // Writer thread gone (write error or PTY torn down) —
             // terminal, not a transient stall. Don't retry.
             Ok(Err(_)) => return Err(PtyError::Closed),
             Err(_) => {
                 attempt += 1;
-                // Back off before the next attempt, but never sleep past
-                // the deadline — the remaining-budget check at the loop
-                // top then converts an exhausted budget into WriteStalled.
-                let backoff = deadline
-                    .saturating_duration_since(tokio::time::Instant::now())
-                    .min(WRITE_ENQUEUE_RETRY_BACKOFF);
-                if !backoff.is_zero() {
-                    tracing::debug!(
-                        "PTY write enqueue stalled (attempt {}, {} bytes) — retrying after backoff",
+                if tokio::time::Instant::now() >= deadline {
+                    tracing::warn!(
+                        "PTY write queue full for {}ms ({} attempts) — dropping {} byte write",
+                        WRITE_ENQUEUE_TOTAL_BUDGET.as_millis(),
                         attempt,
                         bytes.len()
                     );
-                    tokio::time::sleep(backoff).await;
+                    return Err(PtyError::WriteStalled);
                 }
+                tracing::debug!(
+                    "PTY write enqueue stalled (attempt {}, {} bytes) — retrying after backoff",
+                    attempt,
+                    bytes.len()
+                );
+                tokio::time::sleep(WRITE_ENQUEUE_RETRY_BACKOFF).await;
             }
         }
     }
@@ -2454,10 +2430,11 @@ mod enqueue_retry_tests {
             .await
             .expect("prefill occupies the slot");
 
-        // Consumer stays blocked past the first per-attempt timeout,
-        // then drains both the prefill and the retried injection.
+        // Consumer stays blocked past the first per-attempt timeout (but
+        // well within the total retry budget), then drains both the prefill
+        // and the retried injection.
         let consumer = tokio::spawn(async move {
-            tokio::time::sleep(WRITE_ENQUEUE_TIMEOUT + std::time::Duration::from_millis(500)).await;
+            tokio::time::sleep(WRITE_ENQUEUE_TIMEOUT + WRITE_ENQUEUE_RETRY_BACKOFF).await;
             let first = rx.recv().await;
             let second = rx.recv().await;
             (first, second)
@@ -2502,17 +2479,12 @@ mod enqueue_retry_tests {
             elapsed >= WRITE_ENQUEUE_TOTAL_BUDGET,
             "give-up must span the full retry budget (was {elapsed:?})"
         );
-        // `WRITE_ENQUEUE_TOTAL_BUDGET` is a HARD ceiling, not "near" it:
-        // the per-attempt timeout and the backoff are clamped to the
-        // budget remaining, so the loop returns essentially AT the
-        // deadline instead of a trailing `WRITE_ENQUEUE_TIMEOUT` (up to
-        // ~1s) past it. The tight bound is what keeps the whole loop under
-        // the outer `terminal_io::OPERATION_TIMEOUT` so it can't be
-        // cancelled mid-attempt; the pre-clamp loop overshot to
-        // ~budget + backoff + one timeout and would fail this assert.
+        // Bounded: the loop can't run forever. A handful of attempts
+        // (budget / per-attempt) is the ceiling; assert we didn't wildly
+        // overshoot it.
         assert!(
-            elapsed <= WRITE_ENQUEUE_TOTAL_BUDGET + WRITE_ENQUEUE_RETRY_BACKOFF,
-            "give-up must not overshoot the budget ceiling (was {elapsed:?})"
+            elapsed < WRITE_ENQUEUE_TOTAL_BUDGET + WRITE_ENQUEUE_TIMEOUT * 2,
+            "give-up must stay bounded near the budget (was {elapsed:?})"
         );
     }
 

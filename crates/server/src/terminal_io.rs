@@ -17,13 +17,17 @@ use std::time::Duration;
 /// writes already bound their internal queue, but the backend trait permits
 /// other implementations and cancellation must remain possible.
 ///
-/// Must be >= the raw-PTY write path's internal enqueue-retry budget
-/// (`pty::WRITE_ENQUEUE_TOTAL_BUDGET`, 5s) so those retries actually get to
-/// run before this outer deadline cancels the future — otherwise a CPU
-/// spike would trip this 750ms bound and drop injected input before the
-/// inner retry loop could land it. Raised from 750ms to 6s: still finite,
-/// so cancellation stays possible, but tolerant of a CPU-starved scheduler.
-pub(crate) const OPERATION_TIMEOUT: Duration = Duration::from_secs(6);
+/// Kept short on purpose: a wedged terminal — a resize into a stuck backend,
+/// or a write to a child that has stopped draining its stdin — must never
+/// hold the serve loop or shutdown behind it (the property `serve_loop`'s
+/// `a_wedged_terminal_resize_does_not_block_other_terminals` guards; shutdown
+/// there must complete well under 2s). The raw-PTY write path's own
+/// enqueue-retry (`pty::WRITE_ENQUEUE_TOTAL_BUDGET`) is deliberately sized
+/// `<` this bound so a transient-stall retry lands the write before this
+/// outer deadline cancels it, without extending how long a genuinely wedged
+/// op can stall. Transient-spike resilience comes from queue headroom +
+/// reduced lock contention, not from lengthening this deadline.
+pub(crate) const OPERATION_TIMEOUT: Duration = Duration::from_millis(750);
 // SIGWINCH and mouse-driven repaints begin immediately. An epoch that has
 // observed no output within this bound must not capture unrelated later work.
 const VIEW_OUTPUT_START_TIMEOUT: Duration = Duration::from_secs(2);

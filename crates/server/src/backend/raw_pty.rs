@@ -47,18 +47,13 @@ pub struct RawPtyBackend {
     /// child's exit is actually observed (the slot must survive until
     /// then so a second `kill` can retry a stuck child).
     ///
-    /// `RwLock` rather than `Mutex` — a lock-contention reduction, NOT
-    /// part of the data-loss fix (the dropped-input root cause is the
-    /// writer *thread* being descheduled, which no map-lock change
-    /// touches; see `pty::enqueue_with_retry`). Every per-terminal op
+    /// `RwLock` rather than `Mutex` (#data-loss): every per-terminal op
     /// (`write`, `resize`, `output_seq`, `is_alive`, `subscribe`, …) only
-    /// clones an `Arc<DaemonPty>` out of the map and holds the guard
-    /// briefly with no `.await` under it, so a `Mutex` still serialized
-    /// those lookups across terminals even though they don't mutate the
-    /// map. A read guard lets them run concurrently while insert/remove
-    /// take the write guard. The win is expected to matter only with many
-    /// live terminals hitting the per-frame lookups at once; it is not
-    /// benchmarked here.
+    /// clones an `Arc<DaemonPty>` out of the map, and several of them are
+    /// per-frame hot paths. Under load a `Mutex` serialized every
+    /// terminal's ops behind one guard even though the lookups don't
+    /// mutate the map. A read guard lets those lookups run concurrently;
+    /// only insert/remove take the write guard.
     sessions: Arc<RwLock<HashMap<String, Slot>>>,
     next_key: AtomicU64,
     /// SIGTERM → SIGKILL escalation window. [`KILL_ESCALATION_GRACE`]
@@ -693,16 +688,14 @@ mod tests {
         b.kill("raw-nope-1").await.expect("idempotent");
     }
 
-    /// Guards the `Mutex`→`RwLock` refactor against a read/write-guard
-    /// mixup that would deadlock or reject a live key. This is a
-    /// smoke/regression test, NOT a proof of concurrency: overlapping
-    /// read-guard lookups (`write`/`output_seq`) on two live keys, plus a
-    /// read-only lookup alongside a write, must all resolve and not hang.
-    /// (It would pass under a plain `Mutex` too, where the ops serialize —
-    /// the RwLock's actual benefit is that they don't, which isn't
-    /// asserted here.)
+    /// #data-loss: the session map is an `RwLock`, so per-terminal ops
+    /// that only clone an `Arc<DaemonPty>` out (write/output_seq/…) take a
+    /// read guard and can run concurrently across different keys instead
+    /// of serializing behind one mutex. Two live sessions written to
+    /// concurrently must both succeed; this also guards the refactor from
+    /// a read/write-guard mixup that would deadlock or reject a live key.
     #[tokio::test]
-    async fn overlapping_guard_lookups_resolve_without_deadlock() {
+    async fn concurrent_writes_to_distinct_keys_both_succeed() {
         timeout(Duration::from_secs(10), async {
             let b = RawPtyBackend::new();
             let a = b.spawn(&sh("cat"), None, &[], "a").await.expect("spawn a");

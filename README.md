@@ -33,7 +33,7 @@ workspace — built for developers juggling many PRs and AI coding agents at onc
 
 </div>
 
-<sub>Video not playing? Here's the [animated GIF](demo/hero.gif) and a [static screenshot](demo/hero.png). There's also a fully reproducible `--test` demo — code, not a recording — driven by [`demo/lazybox.tape`](demo/lazybox.tape).</sub>
+<sub>Video not playing? Here's the [animated GIF](demo/hero.gif) and a [static screenshot](demo/hero.png). There's also a fully reproducible `--demo` fleet demo — code, not a recording — driven by [`demo/lazybox.tape`](demo/lazybox.tape).</sub>
 
 ## ✨ Highlights
 

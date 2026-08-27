@@ -3,16 +3,16 @@ WEBVTT
 NOTE
 "⌨ <chord> — <text>" lines render as a keycap chip + description in the
 overlay; plain lines are context. Drives both the native <track> and the
-styled overlay from one source.
+styled overlay from one source. Cues must fit the clip runtime (~5.5s).
 
 1
-00:00.400 --> 00:02.300
+00:00.400 --> 00:02.100
 ⌨ g — the GitHub menu: merge, reviewers, labels, policies
 
 2
-00:02.500 --> 00:04.800
-⌨ g m — merge the focused pull request
+00:02.300 --> 00:03.900
+⌨ g p — automation policies for the focused PR
 
 3
-00:05.000 --> 00:08.100
-Guarded first — lazybox won't merge over branch conflicts
+00:04.100 --> 00:05.300
+Merge on green, auto-fix CI, GitHub auto-merge — one surface

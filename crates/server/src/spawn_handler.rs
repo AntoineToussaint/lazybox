@@ -137,6 +137,37 @@ fn agent_state_key(backend_key: &str, generation: u64) -> String {
     format!("terminal-agent-state:{backend_key}:{generation}")
 }
 
+/// Store-key prefixes for the WORKSPACE-scoped prompt history + composer
+/// draft. Unlike the `terminal-*` rows above (keyed by the per-process,
+/// per-spawn tmux `backend_key`, which changes on every daemon restart), these
+/// are keyed by the STABLE [`SessionKey`] string so the `]]h` history, the
+/// `]]r` recall, and the "you ▸" recap survive a restart that RE-SPAWNS a
+/// dropped session under a brand-new backend_key — not only a reattach that
+/// keeps the old key. The durable PTY scrollback already survives respawn by
+/// keying on the stable session identity; this brings the input side into line
+/// (root cause of the history-orphaned-on-respawn bug).
+const WORKSPACE_MSGS_PREFIX: &str = "workspace-msgs:";
+const WORKSPACE_DRAFT_PREFIX: &str = "workspace-draft:";
+/// KV flag marking the one-time `terminal-*` → `workspace-*` re-key migration
+/// as done, so it never re-runs (and never re-folds already-swept legacy rows).
+const HISTORY_REKEY_FLAG_KEY: &str = "history_rekey_v1_done";
+/// Legacy per-`backend_key` prefixes the one-time migration folds into the
+/// workspace scheme. They mirror `TerminalPersistedField::{UserMessageHistory,
+/// UserMessage, Draft}` with the `:` separator so `strip_prefix` yields the
+/// bare backend_key. `terminal-msg:` never matches a `terminal-msgs:` key (the
+/// char after `terminal-msg` is `s`, not `:`).
+const WORKSPACE_MSGS_LEGACY_PREFIX: &str = "terminal-msgs:";
+const WORKSPACE_DRAFT_LEGACY_PREFIX: &str = "terminal-draft:";
+const LEGACY_SINGLE_MSG_PREFIX: &str = "terminal-msg:";
+
+fn workspace_prompt_history_key(session_key: &str) -> String {
+    format!("{WORKSPACE_MSGS_PREFIX}{session_key}")
+}
+
+fn workspace_draft_key(session_key: &str) -> String {
+    format!("{WORKSPACE_DRAFT_PREFIX}{session_key}")
+}
+
 /// Serializes the seed → allocate → persist sequence of
 /// [`alloc_terminal_id`]. Without it two concurrent spawns could
 /// interleave as: A allocates 5, B allocates 6, B persists 6, A
@@ -5695,10 +5726,15 @@ async fn finish_terminal(
     {
         crate::agent_auth::detect_required(config, terminal_id, failure.reason).await;
     }
-    if matches!(kind, Some(TerminalKind::Agent(_))) {
+    if matches!(kind, Some(TerminalKind::Agent(_)))
+        && let Some(session_key) = session
+    {
+        // History/draft are keyed by the stable workspace session_key now, so
+        // the exit snapshot the recovery cache seeds reads the same rows a
+        // fresh reconnect would.
         let (prompt_history, composing_buffer) = tokio::join!(
-            load_prompt_history(config, backend_key),
-            load_composing_buffer(config, backend_key),
+            load_prompt_history(config, session_key),
+            load_composing_buffer(config, session_key),
         );
         config
             .agent_recovery
@@ -8801,8 +8837,8 @@ pub async fn recover_sessions(config: &ServerConfig) {
         }
         if let Some(context) = &mut resume_context {
             let (prompt_history, composing_buffer) = tokio::join!(
-                load_prompt_history(config, &key),
-                load_composing_buffer(config, &key),
+                load_prompt_history(config, session_key.as_str()),
+                load_composing_buffer(config, session_key.as_str()),
             );
             context.terminal_id = terminal_id;
             context.session_key = session_key.clone();
@@ -9486,40 +9522,34 @@ pub async fn handle_record_user_message(
     terminal_id: TerminalId,
     prompt: &UserPrompt,
 ) {
-    let Some(backend_key) = config.terminal.backend_key_for(terminal_id).await else {
+    // History belongs to the WORKSPACE, not the individual backend terminal, so
+    // resolve the stable session_key and key/serialize on it. A terminal whose
+    // session_key can't be resolved (torn down, never registered) has nowhere
+    // to belong — skip rather than mint an orphan row.
+    let Some((session_key, _)) = config.terminal.terminal_meta_for(terminal_id).await else {
         tracing::trace!("record user message for unknown terminal {terminal_id:?}");
         return;
     };
+    let session_key = session_key.as_str().to_string();
+    // Serialize concurrent writers to the SAME workspace history (two live
+    // terminals in one workspace share the row) so a read-modify-write can't
+    // lose an append. Locking on the session_key rather than the backend_key is
+    // what makes that serialization workspace-wide.
     let _guard = config
         .terminal
-        .lock_terminal_persistence(&backend_key)
+        .lock_terminal_persistence(&session_key)
         .await;
-    if config
-        .terminal
-        .backend_key_for(terminal_id)
-        .await
-        .as_deref()
-        != Some(backend_key.as_str())
-    {
-        tracing::debug!(
-            ?terminal_id,
-            %backend_key,
-            "skip user-message persistence after terminal teardown"
-        );
-        return;
-    }
     let store = config.store.clone();
-    let history_key = TerminalPersistedField::UserMessageHistory.key(&backend_key);
-    let legacy_key = TerminalPersistedField::UserMessage.key(&backend_key);
+    let history_key = workspace_prompt_history_key(&session_key);
     let prompt = prompt.clone();
     let write = tokio::task::spawn_blocking(move || {
-        let mut history = load_prompt_history_blocking(&*store, &history_key, &legacy_key);
+        let mut history = load_prompt_history_blocking(&*store, &history_key);
         history.push(prompt);
         cap_prompt_history(&mut history);
         match serde_json::to_string(&history) {
             Ok(json) => store.set_kv(&history_key, &json),
             Err(e) => {
-                tracing::warn!("persist terminal user message: serialize failed: {e}");
+                tracing::warn!("persist workspace user message: serialize failed: {e}");
                 Ok(())
             }
         }
@@ -9552,14 +9582,14 @@ fn cap_prompt_history(history: &mut Vec<UserPrompt>) {
     }
 }
 
-/// Read the persisted history JSON, falling back to migrating the legacy
-/// single-value `terminal-msg` row into a one-entry `Typed` history when
-/// the new key doesn't exist yet (issue #523). Sync — runs inside the
-/// caller's `spawn_blocking`.
+/// Read the persisted workspace history JSON at `history_key`
+/// (`workspace-msgs:{session_key}`), oldest-first. Sync — runs inside the
+/// caller's `spawn_blocking`. Legacy `terminal-msgs`/`terminal-msg` rows are
+/// folded into the workspace row by the one-time startup migration
+/// (`migrate_prompt_history_to_workspace_keys`), so nothing to migrate here.
 fn load_prompt_history_blocking(
     store: &dyn lazybox_store::Store,
     history_key: &str,
-    legacy_key: &str,
 ) -> Vec<UserPrompt> {
     if let Ok(Some(json)) = store.get_kv(history_key) {
         match serde_json::from_str::<Vec<UserPrompt>>(&json) {
@@ -9567,75 +9597,43 @@ fn load_prompt_history_blocking(
             Err(e) => tracing::warn!("prompt history decode failed, resetting: {e}"),
         }
     }
-    // Migrate the legacy last-prompt row as the first Typed entry. Its
-    // original submit time is gone, so timestamp 0 marks it as "before
-    // history tracking existed" rather than inventing a plausible one.
-    match store.get_kv(legacy_key) {
-        Ok(Some(text)) if !text.trim().is_empty() => vec![UserPrompt {
-            text,
-            timestamp_ms: 0,
-            source: PromptSource::Typed,
-        }],
-        _ => Vec::new(),
-    }
+    Vec::new()
 }
 
-/// Read back the persisted prompt history (migrating the legacy row if
-/// needed), oldest-first. Async since the sync-rusqlite offload (issue
-/// #34's spawn_blocking convention).
-async fn load_prompt_history(config: &ServerConfig, backend_key: &str) -> Vec<UserPrompt> {
+/// Read back the persisted workspace prompt history for `session_key`,
+/// oldest-first. Async since the sync-rusqlite offload (issue #34's
+/// spawn_blocking convention).
+async fn load_prompt_history(config: &ServerConfig, session_key: &str) -> Vec<UserPrompt> {
     let store = config.store.clone();
-    let history_key = TerminalPersistedField::UserMessageHistory.key(backend_key);
-    let legacy_key = TerminalPersistedField::UserMessage.key(backend_key);
-    tokio::task::spawn_blocking(move || {
-        load_prompt_history_blocking(&*store, &history_key, &legacy_key)
-    })
-    .await
-    .unwrap_or_default()
+    let history_key = workspace_prompt_history_key(session_key);
+    tokio::task::spawn_blocking(move || load_prompt_history_blocking(&*store, &history_key))
+        .await
+        .unwrap_or_default()
 }
 
 /// Persist the in-flight composer buffer (typed but not submitted) for
-/// an agent terminal, keyed by backend session key so a half-typed
-/// prompt survives a daemon restart (which reassigns `TerminalId`s but
-/// keeps backend keys). An empty buffer clears the stored draft — the
-/// composer emptied out, so there's nothing to recall. Replayed to
-/// clients in `snapshot_terminals` as `composing_buffer` and recalled
-/// into the composer with `]]r`.
+/// an agent terminal, keyed by the STABLE workspace session_key so a
+/// half-typed prompt survives a daemon restart — including one that
+/// RE-SPAWNS the session under a fresh backend_key, not only a reattach.
+/// An empty buffer clears the stored draft — the composer emptied out, so
+/// there's nothing to recall. Replayed to clients in `snapshot_terminals`
+/// as `composing_buffer` and recalled into the composer with `]]r`.
 pub async fn handle_record_composing_buffer(
     config: &ServerConfig,
     terminal_id: TerminalId,
     buffer: &str,
 ) {
-    let backend_key = match config.terminal.live_backend_key(terminal_id) {
-        Some(key) => key.to_string(),
-        None => match config.terminal.backend_key_for(terminal_id).await {
-            Some(key) => key,
-            None => {
-                tracing::trace!("record composing buffer for unknown terminal {terminal_id:?}");
-                return;
-            }
-        },
+    let Some((session_key, _)) = config.terminal.terminal_meta_for(terminal_id).await else {
+        tracing::trace!("record composing buffer for unknown terminal {terminal_id:?}");
+        return;
     };
+    let session_key = session_key.as_str().to_string();
     let _guard = config
         .terminal
-        .lock_terminal_persistence(&backend_key)
+        .lock_terminal_persistence(&session_key)
         .await;
-    if config
-        .terminal
-        .backend_key_for(terminal_id)
-        .await
-        .as_deref()
-        != Some(backend_key.as_str())
-    {
-        tracing::debug!(
-            ?terminal_id,
-            %backend_key,
-            "skip draft persistence after terminal teardown"
-        );
-        return;
-    }
     let store = config.store.clone();
-    let kv_key = TerminalPersistedField::Draft.key(&backend_key);
+    let kv_key = workspace_draft_key(&session_key);
     let buffer = buffer.to_string();
     let write = tokio::task::spawn_blocking(move || {
         if buffer.is_empty() {
@@ -9647,21 +9645,239 @@ pub async fn handle_record_composing_buffer(
     .await;
     match write {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => tracing::warn!("persist terminal composing buffer: store write failed: {e}"),
-        Err(e) => tracing::warn!("persist terminal composing buffer: store task failed: {e}"),
+        Ok(Err(e)) => tracing::warn!("persist workspace composing buffer: store write failed: {e}"),
+        Err(e) => tracing::warn!("persist workspace composing buffer: store task failed: {e}"),
     }
 }
 
-/// Read back the value `handle_record_composing_buffer` stored, or
-/// `None` when the terminal has no pending draft.
-async fn load_composing_buffer(config: &ServerConfig, backend_key: &str) -> Option<String> {
+/// Read back the value `handle_record_composing_buffer` stored for
+/// `session_key`, or `None` when the workspace has no pending draft.
+async fn load_composing_buffer(config: &ServerConfig, session_key: &str) -> Option<String> {
     let store = config.store.clone();
-    let kv_key = TerminalPersistedField::Draft.key(backend_key);
+    let kv_key = workspace_draft_key(session_key);
     tokio::task::spawn_blocking(move || store.get_kv(&kv_key))
         .await
         .ok()?
         .ok()
         .flatten()
+}
+
+/// One-time re-key of the legacy per-`backend_key` prompt-history / draft rows
+/// (`terminal-msgs:{bk}`, the pre-#523 single `terminal-msg:{bk}`, and
+/// `terminal-draft:{bk}`) onto the STABLE workspace scheme
+/// (`workspace-msgs:{session_key}` / `workspace-draft:{session_key}`).
+///
+/// The backend_key embeds the daemon PID + a per-process counter, so it changed
+/// on every restart; a restart that RE-SPAWNED (rather than reattached) a
+/// session minted a fresh key and orphaned the old rows, blanking the `]]h`
+/// history / "you ▸" recap / `]]r` draft. This folds every legacy row into its
+/// owning workspace (resolved through the `terminal:{bk}` meta row that records
+/// the session_key), so the data lands on a key that survives respawn.
+///
+/// Guarded by a KV flag so it runs exactly once, and resilient: an unparseable
+/// row or an unresolvable backend_key is skipped, never fatal. Multiple
+/// backend_keys can map to one workspace — their entries are concatenated,
+/// sorted by `timestamp_ms` ascending, and capped like a live append. Runs
+/// before recovery so the reattach / respawn passes read the migrated rows.
+pub(crate) async fn migrate_prompt_history_to_workspace_keys(config: &ServerConfig) {
+    let store = config.store.clone();
+    let outcome = tokio::task::spawn_blocking(move || migrate_history_blocking(&*store)).await;
+    match outcome {
+        Ok(Ok(0)) => {}
+        Ok(Ok(migrated)) => {
+            tracing::info!(
+                migrated,
+                "history re-key migration: folded legacy rows into workspaces"
+            )
+        }
+        Ok(Err(e)) => tracing::warn!("history re-key migration: store error: {e}"),
+        Err(e) => tracing::warn!("history re-key migration: task failed: {e}"),
+    }
+}
+
+/// Sync core of [`migrate_prompt_history_to_workspace_keys`]. Returns the number
+/// of legacy rows folded (0 when the guard flag was already set). Broken out so
+/// it can be unit-tested against a `MemoryStore` without a runtime.
+fn migrate_history_blocking(
+    store: &dyn lazybox_store::Store,
+) -> Result<usize, lazybox_store::StoreError> {
+    if store.get_kv(HISTORY_REKEY_FLAG_KEY)?.is_some() {
+        return Ok(0);
+    }
+
+    // Resolve every backend_key → session_key up front from the `terminal:{bk}`
+    // metadata rows (`["<session_key>", <kind>]`). A legacy row whose meta is
+    // gone can't be placed in a workspace, so it's left untouched.
+    let mut backend_to_session: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for (key, value) in store.list_kv_prefix("terminal:")? {
+        let Some(backend_key) = key.strip_prefix("terminal:") else {
+            continue;
+        };
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&value)
+            && let Some(session_key) = parsed.get(0).and_then(serde_json::Value::as_str)
+        {
+            backend_to_session.insert(backend_key.to_string(), session_key.to_string());
+        }
+    }
+
+    #[derive(Default)]
+    struct Folded {
+        history: Vec<UserPrompt>,
+        draft: Option<String>,
+    }
+    let mut folded: std::collections::HashMap<String, Folded> = std::collections::HashMap::new();
+    let mut legacy_keys_to_delete: Vec<String> = Vec::new();
+    let mut migrated_rows = 0usize;
+
+    // `terminal-msgs:{bk}` — the JSON array history (#523).
+    for (key, value) in store.list_kv_prefix(WORKSPACE_MSGS_LEGACY_PREFIX)? {
+        let Some(backend_key) = key.strip_prefix(WORKSPACE_MSGS_LEGACY_PREFIX) else {
+            continue;
+        };
+        let Some(session_key) = backend_to_session.get(backend_key) else {
+            continue;
+        };
+        if let Ok(mut entries) = serde_json::from_str::<Vec<UserPrompt>>(&value) {
+            folded
+                .entry(session_key.clone())
+                .or_default()
+                .history
+                .append(&mut entries);
+        }
+        legacy_keys_to_delete.push(key);
+        migrated_rows += 1;
+    }
+
+    // `terminal-msg:{bk}` — the pre-#523 single last-prompt string. Its submit
+    // time is gone, so timestamp 0 sorts it before any tracked entry.
+    for (key, value) in store.list_kv_prefix(LEGACY_SINGLE_MSG_PREFIX)? {
+        let Some(backend_key) = key.strip_prefix(LEGACY_SINGLE_MSG_PREFIX) else {
+            continue;
+        };
+        let Some(session_key) = backend_to_session.get(backend_key) else {
+            continue;
+        };
+        if !value.trim().is_empty() {
+            folded
+                .entry(session_key.clone())
+                .or_default()
+                .history
+                .push(UserPrompt {
+                    text: value,
+                    timestamp_ms: 0,
+                    source: PromptSource::Typed,
+                });
+        }
+        legacy_keys_to_delete.push(key);
+        migrated_rows += 1;
+    }
+
+    // `terminal-draft:{bk}` — the composer draft. Prefer the first non-empty
+    // draft seen for a workspace (concurrent live drafts for one workspace are
+    // rare, and this only matters until the next composer write overwrites it).
+    for (key, value) in store.list_kv_prefix(WORKSPACE_DRAFT_LEGACY_PREFIX)? {
+        let Some(backend_key) = key.strip_prefix(WORKSPACE_DRAFT_LEGACY_PREFIX) else {
+            continue;
+        };
+        let Some(session_key) = backend_to_session.get(backend_key) else {
+            continue;
+        };
+        if !value.is_empty() {
+            let slot = &mut folded.entry(session_key.clone()).or_default().draft;
+            if slot.is_none() {
+                *slot = Some(value);
+            }
+        }
+        legacy_keys_to_delete.push(key);
+        migrated_rows += 1;
+    }
+
+    let mut mutations: Vec<StoreMutation> = Vec::new();
+    for (session_key, Folded { mut history, draft }) in folded {
+        // Fold onto any workspace row that already exists (idempotency / a prior
+        // partial run) before sorting + capping.
+        let history_key = workspace_prompt_history_key(&session_key);
+        let mut merged = load_prompt_history_blocking(store, &history_key);
+        merged.append(&mut history);
+        merged.sort_by_key(|prompt| prompt.timestamp_ms);
+        cap_prompt_history(&mut merged);
+        if let Ok(json) = serde_json::to_string(&merged) {
+            mutations.push(StoreMutation::SetKv {
+                key: history_key,
+                value: json,
+            });
+        }
+        if let Some(draft) = draft {
+            let draft_key = workspace_draft_key(&session_key);
+            if store.get_kv(&draft_key)?.is_none() {
+                mutations.push(StoreMutation::SetKv {
+                    key: draft_key,
+                    value: draft,
+                });
+            }
+        }
+    }
+    for key in legacy_keys_to_delete {
+        mutations.push(StoreMutation::DeleteKv { key });
+    }
+    mutations.push(StoreMutation::SetKv {
+        key: HISTORY_REKEY_FLAG_KEY.to_string(),
+        value: "1".to_string(),
+    });
+    store.apply_batch(&mutations)?;
+    Ok(migrated_rows)
+}
+
+/// Store mutations that move a workspace's prompt history + draft from one
+/// session_key to another when a live terminal is rebadged (the issue→PR
+/// managed-branch-owner transfer, #upsert). History is now WORKSPACE-scoped, so
+/// unlike the old backend_key scheme — where the key was stable across a
+/// rebadge — the row has to follow the terminal onto its new workspace or the
+/// `]]h` history / recap / draft would blank the moment the PR badge takes over.
+/// Emitted into the SAME `apply_batch` as the workspace + terminal-meta move so
+/// the relabel is atomic; entries merge (concat → time-sort → cap) onto any row
+/// the target already has, and the draft moves only when the target has none.
+pub(crate) fn rebadge_workspace_history_mutations(
+    store: &dyn lazybox_store::Store,
+    from: &str,
+    to: &str,
+) -> Vec<StoreMutation> {
+    if from == to {
+        return Vec::new();
+    }
+    let mut mutations: Vec<StoreMutation> = Vec::new();
+
+    let from_msgs = workspace_prompt_history_key(from);
+    let mut from_history = load_prompt_history_blocking(store, &from_msgs);
+    if !from_history.is_empty() {
+        let to_msgs = workspace_prompt_history_key(to);
+        let mut merged = load_prompt_history_blocking(store, &to_msgs);
+        merged.append(&mut from_history);
+        merged.sort_by_key(|prompt| prompt.timestamp_ms);
+        cap_prompt_history(&mut merged);
+        if let Ok(json) = serde_json::to_string(&merged) {
+            mutations.push(StoreMutation::SetKv {
+                key: to_msgs,
+                value: json,
+            });
+        }
+        mutations.push(StoreMutation::DeleteKv { key: from_msgs });
+    }
+
+    let from_draft = workspace_draft_key(from);
+    if let Ok(Some(draft)) = store.get_kv(&from_draft) {
+        let to_draft = workspace_draft_key(to);
+        if !draft.is_empty() && store.get_kv(&to_draft).ok().flatten().is_none() {
+            mutations.push(StoreMutation::SetKv {
+                key: to_draft,
+                value: draft,
+            });
+        }
+        mutations.push(StoreMutation::DeleteKv { key: from_draft });
+    }
+
+    mutations
 }
 
 #[cfg(test)]
@@ -9671,48 +9887,45 @@ pub(crate) async fn restore_terminal_conversation_state(
     prompt_history: &[UserPrompt],
     composing_buffer: Option<&str>,
 ) {
-    let Some(backend_key) = config.terminal.backend_key_for(terminal_id).await else {
+    let Some((session_key, _)) = config.terminal.terminal_meta_for(terminal_id).await else {
         return;
     };
-    restore_backend_conversation_state(config, &backend_key, prompt_history, composing_buffer)
-        .await;
+    restore_workspace_conversation_state(
+        config,
+        session_key.as_str(),
+        prompt_history,
+        composing_buffer,
+    )
+    .await;
 }
 
 pub(crate) async fn capture_terminal_conversation_state(
     config: &ServerConfig,
     terminal_id: TerminalId,
 ) -> Option<(Vec<UserPrompt>, Option<String>)> {
-    let Some(backend_key) = config.terminal.backend_key_for(terminal_id).await else {
+    let Some((session_key, _)) = config.terminal.terminal_meta_for(terminal_id).await else {
         return None;
     };
+    let session_key = session_key.as_str().to_string();
     let _guard = config
         .terminal
-        .lock_terminal_persistence(&backend_key)
+        .lock_terminal_persistence(&session_key)
         .await;
-    if config
-        .terminal
-        .backend_key_for(terminal_id)
-        .await
-        .as_deref()
-        != Some(backend_key.as_str())
-    {
-        return None;
-    }
     Some(tokio::join!(
-        load_prompt_history(config, &backend_key),
-        load_composing_buffer(config, &backend_key),
+        load_prompt_history(config, &session_key),
+        load_composing_buffer(config, &session_key),
     ))
 }
 
-pub(crate) async fn restore_backend_conversation_state(
+pub(crate) async fn restore_workspace_conversation_state(
     config: &ServerConfig,
-    backend_key: &str,
+    session_key: &str,
     prompt_history: &[UserPrompt],
     composing_buffer: Option<&str>,
 ) {
     let store = config.store.clone();
-    let history_key = TerminalPersistedField::UserMessageHistory.key(backend_key);
-    let draft_key = TerminalPersistedField::Draft.key(backend_key);
+    let history_key = workspace_prompt_history_key(session_key);
+    let draft_key = workspace_draft_key(session_key);
     let prompt_history = prompt_history.to_vec();
     let composing_buffer = composing_buffer.map(str::to_string);
     let _ = tokio::task::spawn_blocking(move || {
@@ -9821,8 +10034,8 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                     )
                 }
             };
-            let history_fut = load_prompt_history(config, &key);
-            let composing_fut = load_composing_buffer(config, &key);
+            let history_fut = load_prompt_history(config, session_key.as_str());
+            let composing_fut = load_composing_buffer(config, session_key.as_str());
             let (snapshot, prompt_history, composing_buffer) =
                 tokio::join!(snapshot_fut, history_fut, composing_fut);
             // `replay_available` reflects whether the snapshot SUCCEEDED, not
@@ -9970,7 +10183,7 @@ pub async fn agent_runtime_snapshot(config: &ServerConfig) -> Vec<AgentTerminalR
     let mut runtimes = Vec::with_capacity(entries.len());
     for (
         terminal_id,
-        backend_key,
+        _backend_key,
         session_key,
         agent_id,
         agent_state,
@@ -9980,7 +10193,9 @@ pub async fn agent_runtime_snapshot(config: &ServerConfig) -> Vec<AgentTerminalR
         model_label,
     ) in entries
     {
-        let last_prompt = load_prompt_history(config, &backend_key).await.pop();
+        let last_prompt = load_prompt_history(config, session_key.as_str())
+            .await
+            .pop();
         runtimes.push(AgentTerminalRuntime {
             terminal_id,
             session_key,
@@ -10253,6 +10468,16 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                 kind,
                 workspace.key
             );
+            // The re-spawn mints a BRAND-NEW backend_key, so unlike a reattach
+            // it can't inherit history from the old key. Seed the workspace's
+            // stable prompt history + draft into the spawn so the restored
+            // agent's client snapshot carries the `]]h` view / "you ▸" recap /
+            // `]]r` draft the user had before the restart (root cause of the
+            // history-orphaned-on-respawn bug).
+            let (prompt_history, composing_buffer) = tokio::join!(
+                load_prompt_history(config, session_key.as_str()),
+                load_composing_buffer(config, session_key.as_str()),
+            );
             handle_spawn(
                 config,
                 session_key.clone(),
@@ -10262,6 +10487,8 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                     resume: true,
                     provider_session_id,
                     access,
+                    prompt_history,
+                    composing_buffer,
                     origin: lazybox_ipc::SpawnOrigin::Autonomous(
                         lazybox_ipc::AutonomousTrigger::Restore,
                     ),
@@ -14139,9 +14366,10 @@ mod tests {
         );
     }
 
-    /// The legacy single-value `terminal-msg` row migrates into the new
-    /// history as one `Typed` entry the first time the history is read,
-    /// so a prompt recorded before #523 isn't lost on upgrade.
+    /// The legacy single-value `terminal-msg` row is folded into the stable
+    /// `workspace-msgs` row by the one-time startup migration as one `Typed`
+    /// entry (timestamp 0), so a prompt recorded before #523 isn't lost on
+    /// upgrade, and a later live submit appends after it.
     #[tokio::test]
     async fn legacy_last_message_migrates_into_history() {
         let (config, _mock) = ServerConfig::in_memory_with_mock();
@@ -14151,32 +14379,281 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(9);
+        let session_key: SessionKey = "acme/widget#2".into();
+        let kind = TerminalKind::Agent("claude".into());
         config
             .terminal
-            .register_terminal(
-                id,
-                key.clone(),
-                "acme/widget#2".into(),
-                TerminalKind::Agent("claude".into()),
-            )
+            .register_terminal(id, key.clone(), session_key.clone(), kind.clone())
             .await;
+        // The migration resolves backend_key → session_key through the durable
+        // `terminal:{bk}` meta row, so seed it alongside the legacy prompt.
+        let (meta_key, meta_payload) =
+            encode_terminal_meta_record(&key, &session_key, &kind).unwrap();
+        config.store.set_kv(&meta_key, &meta_payload).unwrap();
         config
             .store
             .set_kv(&TerminalPersistedField::UserMessage.key(&key), "old prompt")
             .unwrap();
 
-        let migrated = load_prompt_history(&config, &key).await;
+        migrate_prompt_history_to_workspace_keys(&config).await;
+
+        let migrated = load_prompt_history(&config, session_key.as_str()).await;
         assert_eq!(migrated.len(), 1);
         assert_eq!(migrated[0].text, "old prompt");
         assert_eq!(migrated[0].source, PromptSource::Typed);
+        // The legacy row is swept once folded.
+        assert_eq!(
+            config
+                .store
+                .get_kv(&TerminalPersistedField::UserMessage.key(&key))
+                .unwrap(),
+            None,
+        );
 
         // A new submit appends after the migrated entry.
         handle_record_user_message(&config, id, &typed("new prompt")).await;
-        let history = load_prompt_history(&config, &key).await;
+        let history = load_prompt_history(&config, session_key.as_str()).await;
         assert_eq!(
             history.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
             vec!["old prompt", "new prompt"],
         );
+    }
+
+    /// Regression (history-orphaned-on-respawn): a restart that RE-SPAWNS a
+    /// dropped session mints a BRAND-NEW backend_key. Because history is keyed
+    /// by the stable workspace session_key (not the backend_key), the prior
+    /// `]]h` history / "you ▸" recap / `]]r` draft still surface on the fresh
+    /// terminal — the durable scrollback's respawn survival extended to the
+    /// input side.
+    #[tokio::test]
+    async fn history_survives_respawn_under_a_new_backend_key() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let session_key: SessionKey = "acme/widget#7".into();
+        let kind = TerminalKind::Agent("claude".into());
+
+        // First run: a live terminal records history + a draft.
+        let old_key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        let old_id = TerminalId(1);
+        config
+            .terminal
+            .register_terminal(old_id, old_key.clone(), session_key.clone(), kind.clone())
+            .await;
+        handle_record_user_message(&config, old_id, &typed("rebase onto main")).await;
+        handle_record_user_message(&config, old_id, &typed("run the tests")).await;
+        handle_record_composing_buffer(&config, old_id, "half-typed follow up").await;
+
+        // Simulate the session being GONE: the old terminal is forgotten and its
+        // backend_key vanishes (no reattach). No `workspace-*` row is deleted.
+        config.terminal.remove_terminal(old_id).await;
+
+        // Restore-style re-spawn: the SAME workspace comes back under a brand-new
+        // backend_key + terminal id, seeded from the persisted workspace state
+        // exactly as `restore_persisted_sessions` does.
+        let (prompt_history, composing_buffer) = tokio::join!(
+            load_prompt_history(&config, session_key.as_str()),
+            load_composing_buffer(&config, session_key.as_str()),
+        );
+        assert_eq!(
+            prompt_history.len(),
+            2,
+            "history must outlive the old terminal"
+        );
+        assert_eq!(composing_buffer.as_deref(), Some("half-typed follow up"));
+
+        let new_key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        assert_ne!(new_key, old_key, "respawn must mint a fresh backend_key");
+        let new_id = TerminalId(2);
+        config
+            .terminal
+            .register_terminal(new_id, new_key, session_key.clone(), kind.clone())
+            .await;
+
+        // The fresh terminal's client snapshot carries the prior history + draft.
+        let snapshot = snapshot_terminals(&config).await;
+        let restored = snapshot
+            .iter()
+            .find(|s| s.terminal_id == new_id)
+            .expect("respawned terminal in snapshot");
+        assert_eq!(
+            restored
+                .prompt_history
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["rebase onto main", "run the tests"],
+        );
+        assert_eq!(
+            restored.composing_buffer.as_deref(),
+            Some("half-typed follow up")
+        );
+    }
+
+    /// The one-time re-key migration folds legacy `terminal-msgs`/`terminal-draft`
+    /// rows (keyed by backend_key) into the stable `workspace-*` scheme: entries
+    /// from multiple backend_keys in the SAME workspace are merged, time-sorted,
+    /// and capped; legacy rows are swept; the guard flag is set; and a second run
+    /// is a no-op.
+    #[tokio::test]
+    async fn history_rekey_migration_folds_merges_and_is_idempotent() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let session_key: SessionKey = "acme/widget#9".into();
+        let kind = TerminalKind::Agent("claude".into());
+        let store = &config.store;
+
+        // Two backend_keys that both belong to ONE workspace (an old survivor and
+        // a later respawn), each with its own persisted meta + history slice, and
+        // one draft.
+        for (bk, entries, draft) in [
+            (
+                "lazybox-widget-100-1",
+                vec![("first", 10u64), ("third", 30)],
+                Some("stale draft"),
+            ),
+            (
+                "lazybox-widget-200-1",
+                vec![("second", 20u64)],
+                None::<&str>,
+            ),
+        ] {
+            let (meta_key, meta_payload) =
+                encode_terminal_meta_record(bk, &session_key, &kind).unwrap();
+            store.set_kv(&meta_key, &meta_payload).unwrap();
+            let history: Vec<UserPrompt> = entries
+                .into_iter()
+                .map(|(text, ts)| UserPrompt {
+                    text: text.to_string(),
+                    timestamp_ms: ts,
+                    source: PromptSource::Typed,
+                })
+                .collect();
+            store
+                .set_kv(
+                    &TerminalPersistedField::UserMessageHistory.key(bk),
+                    &serde_json::to_string(&history).unwrap(),
+                )
+                .unwrap();
+            if let Some(draft) = draft {
+                store
+                    .set_kv(&TerminalPersistedField::Draft.key(bk), draft)
+                    .unwrap();
+            }
+        }
+
+        migrate_prompt_history_to_workspace_keys(&config).await;
+
+        // Merged across both backend_keys and sorted by timestamp.
+        let history = load_prompt_history(&config, session_key.as_str()).await;
+        assert_eq!(
+            history.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
+            vec!["first", "second", "third"],
+        );
+        assert_eq!(
+            load_composing_buffer(&config, session_key.as_str())
+                .await
+                .as_deref(),
+            Some("stale draft"),
+        );
+        // Legacy rows swept, guard flag set.
+        assert_eq!(
+            store
+                .get_kv(&TerminalPersistedField::UserMessageHistory.key("lazybox-widget-100-1"))
+                .unwrap(),
+            None,
+        );
+        assert_eq!(
+            store
+                .get_kv(&TerminalPersistedField::Draft.key("lazybox-widget-100-1"))
+                .unwrap(),
+            None,
+        );
+        assert_eq!(
+            store.get_kv(HISTORY_REKEY_FLAG_KEY).unwrap().as_deref(),
+            Some("1")
+        );
+
+        // Idempotent: a second run touches nothing (and doesn't duplicate).
+        migrate_prompt_history_to_workspace_keys(&config).await;
+        let after = load_prompt_history(&config, session_key.as_str()).await;
+        assert_eq!(
+            after.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
+            vec!["first", "second", "third"],
+        );
+    }
+
+    /// The issue→PR rebadge relabels a workspace's history + draft onto the new
+    /// session_key (merging + time-sorting onto anything the target already has,
+    /// and moving the draft only when the target has none), and clears the source
+    /// rows — so the `]]h`/recap/draft follow the terminal onto its PR badge.
+    #[test]
+    fn rebadge_moves_and_merges_workspace_history_and_draft() {
+        use lazybox_store::Store;
+        let store = lazybox_store::MemoryStore::new();
+        let from = "acme/issue#1";
+        let to = "acme/pr#2";
+
+        let seed = |sk: &str, prompts: &[(&str, u64)], draft: Option<&str>| {
+            let history: Vec<UserPrompt> = prompts
+                .iter()
+                .map(|(text, ts)| UserPrompt {
+                    text: (*text).to_string(),
+                    timestamp_ms: *ts,
+                    source: PromptSource::Typed,
+                })
+                .collect();
+            store
+                .set_kv(
+                    &workspace_prompt_history_key(sk),
+                    &serde_json::to_string(&history).unwrap(),
+                )
+                .unwrap();
+            if let Some(draft) = draft {
+                store.set_kv(&workspace_draft_key(sk), draft).unwrap();
+            }
+        };
+        // Source (issue) has history + a draft; the PR already carries an earlier
+        // prompt and no draft.
+        seed(
+            from,
+            &[("issue-early", 10), ("issue-late", 30)],
+            Some("wip"),
+        );
+        seed(to, &[("pr-mid", 20)], None);
+
+        let mutations = rebadge_workspace_history_mutations(&store, from, to);
+        store.apply_batch(&mutations).unwrap();
+
+        // Target row is the time-sorted merge of both; source is cleared.
+        assert_eq!(
+            load_prompt_history_blocking(&store, &workspace_prompt_history_key(to))
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["issue-early", "pr-mid", "issue-late"],
+        );
+        assert!(
+            load_prompt_history_blocking(&store, &workspace_prompt_history_key(from)).is_empty()
+        );
+        assert_eq!(
+            store.get_kv(&workspace_draft_key(to)).unwrap().as_deref(),
+            Some("wip"),
+        );
+        assert_eq!(store.get_kv(&workspace_draft_key(from)).unwrap(), None);
+    }
+
+    /// A rebadge to the same key is a no-op (no self-delete that would drop the
+    /// history).
+    #[test]
+    fn rebadge_to_same_key_is_a_noop() {
+        let store = lazybox_store::MemoryStore::new();
+        assert!(rebadge_workspace_history_mutations(&store, "acme/x#1", "acme/x#1").is_empty());
     }
 
     /// Count-based eviction keeps the history bounded, dropping oldest.

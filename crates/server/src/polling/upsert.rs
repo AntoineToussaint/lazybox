@@ -899,10 +899,21 @@ pub(super) async fn commit_workspace_move(
     let config_owned = config.clone();
     tokio::task::spawn_blocking(move || {
         let mut terminal_guard = terminal_guard;
-        let (terminal_mutations, rebadge_plans) = match terminal_guard.as_ref() {
+        let (mut terminal_mutations, rebadge_plans) = match terminal_guard.as_ref() {
             Some(entries) => prepare_terminal_rebadges(entries, terminal_moves)?,
             None => (Vec::new(), Vec::new()),
         };
+        // History/draft are workspace-scoped (keyed by session_key), so a rebadge
+        // must relabel them onto the new workspace in the SAME transaction as the
+        // workspace + terminal-meta move — otherwise the `]]h` history / recap /
+        // draft would blank the instant the terminal wears the PR badge.
+        for plan in &rebadge_plans {
+            terminal_mutations.extend(crate::spawn_handler::rebadge_workspace_history_mutations(
+                &*config_owned.store,
+                plan.from.as_str(),
+                plan.to.as_str(),
+            ));
+        }
         let committed =
             persist_workspace_batch(&config_owned, upserts, deletes, terminal_mutations)?;
         let outcome = committed.outcome;

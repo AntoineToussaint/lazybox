@@ -2,7 +2,7 @@ use super::{
     AgentStateDurability, cancel_spawn_for_deleted_workspace, hook_backend_key_path, hook_command,
     hook_exe, initialize_agent_state_generation, persist_agent_access,
     persist_agent_resume_context, persist_no_permission, persist_pty_launch_generation,
-    persist_terminal_meta, restore_backend_conversation_state, wake_poll_for_terminal_kind,
+    persist_terminal_meta, restore_workspace_conversation_state, wake_poll_for_terminal_kind,
     write_hook_backend_key, write_hook_settings,
 };
 use crate::{ServerConfig, spawn_plan::SpawnPlan};
@@ -203,9 +203,9 @@ pub(super) async fn execute_spawn_plan(
         .map(|durability| durability.generation);
 
     if !prompt_history.is_empty() || composing_buffer.is_some() {
-        restore_backend_conversation_state(
+        restore_workspace_conversation_state(
             config,
-            &backend_key,
+            session_key.as_str(),
             &prompt_history,
             composing_buffer.as_deref(),
         )

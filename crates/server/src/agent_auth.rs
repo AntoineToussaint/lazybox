@@ -859,9 +859,12 @@ async fn run_reauthentication(
         .unwrap_or(context);
     let auth_terminal_id = crate::spawn_handler::alloc_terminal_id(&*config.store);
     let model_label = model_label_for(&latest_context);
-    crate::spawn_handler::restore_backend_conversation_state(
+    // History/draft are workspace-scoped now (keyed by the stable session_key,
+    // not the login terminal's fresh backend_key), so the re-auth login terminal
+    // reads the same rows the blocked agent wrote — this keeps them populated.
+    crate::spawn_handler::restore_workspace_conversation_state(
         &config,
-        &login_key,
+        latest_context.session_key.as_str(),
         &latest_context.prompt_history,
         latest_context.composing_buffer.as_deref(),
     )

@@ -1385,9 +1385,18 @@ async fn failed_terminal_close_keeps_the_io_lane_alive() {
 async fn composing_burst_persists_the_latest_ordered_revision() {
     let (config, mock) = ServerConfig::in_memory_with_mock();
     let key = mock.spawn(&[], None, &[], "draft").await.expect("spawn");
+    // Draft persistence is keyed by the stable workspace session_key, so the
+    // terminal needs its owning-workspace metadata registered (not just a bound
+    // backend_key) for the composer write to resolve where to land.
+    let session_key: lazybox_core::SessionKey = "acme/widget#61".into();
     config
         .terminal
-        .bind_backend(TerminalId(61), key.clone())
+        .register_terminal(
+            TerminalId(61),
+            key.clone(),
+            session_key.clone(),
+            TerminalKind::Agent("claude".into()),
+        )
         .await;
     let (client, server) = channel::pair();
     let handle = tokio::spawn({
@@ -1413,7 +1422,7 @@ async fn composing_burst_persists_the_latest_ordered_revision() {
     assert_eq!(
         config
             .store
-            .get_kv(&format!("terminal-draft:{key}"))
+            .get_kv(&format!("workspace-draft:{}", session_key.as_str()))
             .expect("store read")
             .as_deref(),
         Some("draft-24")

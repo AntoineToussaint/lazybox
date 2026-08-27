@@ -2619,58 +2619,6 @@ mod auto_fix_dispatch_tests {
         (terminal_id, backend_key)
     }
 
-    /// Aborts its background task when dropped, so a simulator can't leak
-    /// past the test that spawned it.
-    struct AbortGuard(tokio::task::JoinHandle<()>);
-    impl Drop for AbortGuard {
-        fn drop(&mut self) {
-            self.0.abort();
-        }
-    }
-
-    /// Stand in for a real agent that actually starts working once the
-    /// submit lands. With the self-confirming optimistic `Done→Working`
-    /// flip removed (issue #122 follow-up), `confirm_prompt_submission`
-    /// waits for GENUINE evidence — a real `Working` transition on the bus.
-    /// A silent mock emits none, so the auto-fix dispatch (which awaits
-    /// `write_prompt_sequence` inline on the poll loop) would otherwise run
-    /// the full ~30s Enter-resend/backoff cycle before giving up. This
-    /// emits that honest evidence as soon as the paste reaches the PTY,
-    /// mirroring how a live agent confirms — the mock's replacement for the
-    /// flip it used to (wrongly) rely on.
-    fn simulate_working_after_submit(
-        config: &ServerConfig,
-        mock: &crate::backend::MockBackend,
-        session_key: SessionKey,
-        terminal_id: TerminalId,
-        backend_key: String,
-    ) -> AbortGuard {
-        let config = config.clone();
-        let mock = mock.clone();
-        AbortGuard(tokio::spawn(async move {
-            // Wait for the prompt to reach the PTY, then confirm as a real
-            // agent would by transitioning to Working. Re-emit on a short
-            // cadence: the first frames may predate the confirm loop's
-            // subscription, and only a fresh transition (not a resting
-            // cached state) counts as evidence.
-            while mock.writes_for(&backend_key).await.is_empty() {
-                tokio::task::yield_now().await;
-            }
-            loop {
-                config
-                    .terminal
-                    .record_agent_state(terminal_id, AgentState::Working)
-                    .await;
-                let _ = config.bus.send(Event::AgentState {
-                    session_key: session_key.clone(),
-                    terminal_id,
-                    state: AgentState::Working,
-                });
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        }))
-    }
-
     #[tokio::test]
     async fn working_agent_is_not_interrupted_or_charged_an_attempt() {
         let (config, mock) = ServerConfig::in_memory_with_mock();
@@ -2717,13 +2665,6 @@ mod auto_fix_dispatch_tests {
         )
         .await;
 
-        let _agent = simulate_working_after_submit(
-            &config,
-            &mock,
-            session_key.clone(),
-            TerminalId(705),
-            backend_key.clone(),
-        );
         dispatch_action(&config, "github", None, action(session_key.clone())).await;
 
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -2745,6 +2686,61 @@ mod auto_fix_dispatch_tests {
                 .expect("read attempt record")
                 .is_some(),
             "a delivered Done-gated repair consumes one attempt"
+        );
+    }
+
+    /// Regression (issue #122 follow-up): auto-fix dispatch runs INLINE on
+    /// the serial poll loop (`for action in actions { dispatch_action().await }`).
+    /// Once the self-confirming optimistic `Done→Working` flip was removed, a
+    /// `Done` agent whose Enter is swallowed no longer manufactures its own
+    /// confirmation, so `confirm_prompt_submission` runs its full ~30s
+    /// Enter-resend/backoff cycle. Awaited inline, that would stall every other
+    /// queued provider action for 30s. The recovery is now handed to a detached
+    /// task: the paste + attempt are delivered synchronously and the dispatch
+    /// returns promptly, while the resend safety net runs in the background.
+    /// The mock here never emits a genuine `Working` transition — the exact
+    /// never-confirmed case — yet dispatch must still return fast.
+    #[tokio::test]
+    async fn auto_fix_into_unconfirmed_done_agent_does_not_block_the_poll_loop() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let session_key = SessionKey::new("github:o/r#7");
+        seed_workspace(&config, &session_key);
+        let (_, backend_key) = seed_agent(
+            &config,
+            &session_key,
+            TerminalId(709),
+            "codex",
+            AgentState::Done,
+            false,
+        )
+        .await;
+
+        // Well under the ~30s inline resend/backoff cycle, but generous enough
+        // to absorb the bounded paste-settle wait under CI load.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            dispatch_action(&config, "github", None, action(session_key.clone())),
+        )
+        .await
+        .expect(
+            "auto-fix dispatch must not block the serial poll loop on the \
+             submit-confirm/resend cycle",
+        );
+
+        // The prompt still landed (paste written synchronously) and the attempt
+        // was recorded — only the confirm/resend recovery was deferred.
+        assert!(
+            String::from_utf8_lossy(&mock.writes_for(&backend_key).await.concat())
+                .contains("Fix the failed CI checks."),
+            "the paste must be delivered synchronously even though confirm is deferred"
+        );
+        assert!(
+            config
+                .store
+                .get_kv(&format!("autofix:{session_key}:ci"))
+                .expect("read attempt record")
+                .is_some(),
+            "a delivered repair consumes one attempt regardless of deferred confirmation"
         );
     }
 
@@ -2791,13 +2787,6 @@ mod auto_fix_dispatch_tests {
         )
         .await;
 
-        let _agent = simulate_working_after_submit(
-            &config,
-            &mock,
-            session_key.clone(),
-            TerminalId(707),
-            backend_key.clone(),
-        );
         dispatch_action(&config, "github", None, action(session_key)).await;
 
         assert!(

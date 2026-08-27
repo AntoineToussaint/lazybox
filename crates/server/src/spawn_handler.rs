@@ -2429,7 +2429,17 @@ async fn run_spawn_inject(
         return InjectOutcome::Failed;
     };
 
-    match write_prompt_sequence(config, id, backend_key, encoded_prompt, true, interaction).await {
+    match write_prompt_sequence(
+        config,
+        id,
+        backend_key,
+        encoded_prompt,
+        true,
+        interaction,
+        false,
+    )
+    .await
+    {
         Ok(true) => InjectOutcome::Submitted,
         Ok(false) => InjectOutcome::NeedsHuman,
         Err(PromptWriteError::Initial(error)) => {
@@ -4568,6 +4578,13 @@ pub(crate) async fn deliver_auto_fix_prompt(
     let (_, interaction) = interactions.swap_remove(position);
     drop(interactions);
     let encoded = agent.encode_prompt(&prompt, lazybox_agents::PromptIntent::Submit);
+    // Background the submit-confirm/resend tail (see `write_prompt_sequence`):
+    // this runs INLINE on the serial poll loop, and after the self-confirming
+    // flip was removed (issue #122) a Done agent whose Enter is swallowed would
+    // otherwise stall the loop for the full ~30s resend/backoff. The paste has
+    // landed by the time this returns, so `Delivered` (and the attempt it
+    // records) is still decided synchronously; only the recovery net is
+    // detached.
     match write_prompt_sequence(
         config,
         target.terminal_id,
@@ -4575,6 +4592,7 @@ pub(crate) async fn deliver_auto_fix_prompt(
         encoded,
         true,
         interaction,
+        true,
     )
     .await
     {
@@ -6804,6 +6822,7 @@ async fn write_prompt_sequence(
     encoded: lazybox_agents::EncodedPrompt,
     submit: bool,
     interaction: tokio::sync::OwnedMutexGuard<()>,
+    background_confirm: bool,
 ) -> Result<bool, PromptWriteError> {
     let echo_probes = encoded.echo_probes().to_vec();
     let (initial_write, submit_write) = encoded.into_writes();
@@ -6825,62 +6844,126 @@ async fn write_prompt_sequence(
     .await
     .map_err(PromptWriteError::Initial)?;
 
-    if let (Some(submit_bytes), Some(mut output_events)) = (submit_write, output_events) {
-        let settle_t0 = std::time::Instant::now();
-        let settle = await_paste_settled(
-            &mut output_events,
-            terminal_id,
-            &echo_probes,
-            PASTE_QUIET_WINDOW,
-            PASTE_SETTLE_CAP,
-        )
-        .await;
-        tracing::info!(
-            terminal_id = ?terminal_id,
-            trigger = ?settle,
-            settle_ms = settle_t0.elapsed().as_millis(),
-            "prompt paste settled — sending submit keystroke",
-        );
-        let confirm = prepare_submit_confirmation(config, terminal_id).await;
-        terminal_io::write_locked(
-            config,
-            terminal_id,
-            backend_key,
-            &submit_bytes,
-            TerminalInputIntent::Submit,
-        )
-        .await
-        .map_err(PromptWriteError::Submit)?;
-        drop(interaction);
-        // Confirm submission BEFORE any optimistic badge flip. The
-        // confirmation loop treats a `Done→Working` transition as proof the
-        // Enter landed (`await_submit_evidence`), so flipping the badge here —
-        // as we used to, right after the submit write — manufactures that very
-        // evidence on the same bus the loop is listening to. On an agent that
-        // was `Done` (the normal state of a finished workspace you bulk-select
-        // for new work) the loop then self-confirms and skips the Enter resend
-        // that exists to recover a swallowed soft-newline (issue #122). That is
-        // why multi-select broadcasts so often pasted the prompt but never
-        // submitted it: the recovery net was disarmed by our own flip. Flip only
-        // once submission is genuinely confirmed; an unconfirmed prompt keeps
-        // its honest `Done` badge and the loud "parked in the composer" error.
-        let confirmed = confirm_prompt_submission(
-            confirm,
-            config,
-            backend_key,
-            &submit_bytes,
-            SUBMIT_CONFIRM_DEADLINE,
-        )
-        .await;
-        if submit && confirmed {
-            mark_done_agent_working(config, terminal_id, backend_key).await;
+    if let (Some(submit_bytes), Some(output_events)) = (submit_write, output_events) {
+        // The initial paste has landed, so the caller's delivery decision is
+        // already settled (only an `Initial` write failure — handled above —
+        // means "not delivered"). What remains is the submit keystroke and its
+        // confirm/resend recovery, which can run the FULL ~30s
+        // resend/backoff window when an Enter is genuinely swallowed (issue
+        // #122). A caller awaiting this inline on a latency-sensitive serial
+        // loop — the poll loop's auto-fix dispatch (`deliver_auto_fix_prompt`)
+        // — would stall every other queued action for that window. Hand the
+        // tail to a detached task there; every other caller already runs in its
+        // own task and awaits the result to gate follow-up work (snippet
+        // recording, credit-recovery success reporting).
+        if background_confirm {
+            let config = config.clone();
+            let backend_key = backend_key.to_string();
+            tokio::spawn(async move {
+                if let Err(error) = settle_submit_and_confirm(
+                    &config,
+                    terminal_id,
+                    &backend_key,
+                    submit,
+                    submit_bytes,
+                    output_events,
+                    echo_probes,
+                    interaction,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        terminal_id = ?terminal_id,
+                        %error,
+                        "backgrounded prompt submit failed after the paste landed",
+                    );
+                }
+            });
+            return Ok(true);
         }
-        return Ok(confirmed);
+        return settle_submit_and_confirm(
+            config,
+            terminal_id,
+            backend_key,
+            submit,
+            submit_bytes,
+            output_events,
+            echo_probes,
+            interaction,
+        )
+        .await;
     }
     if submit {
         mark_done_agent_working(config, terminal_id, backend_key).await;
     }
     Ok(true)
+}
+
+/// Second half of [`write_prompt_sequence`] for guarded composers: wait for
+/// the paste to settle, send the Enter, confirm submission (resending the
+/// Enter to recover a swallowed soft-newline, issue #122), and flip a
+/// genuinely-confirmed `Done→Working`. Split out so the poll loop's auto-fix
+/// dispatch can run it detached instead of stalling on the ~30s
+/// resend/backoff window; the `interaction` lock moves in and is released
+/// after the submit write, exactly as when this ran inline.
+///
+/// The optimistic badge flip runs only AFTER confirmation. The confirm loop
+/// treats a `Done→Working` transition as proof the Enter landed
+/// (`await_submit_evidence`), so flipping the badge before it would
+/// manufacture that very evidence on the same bus the loop is listening to —
+/// on a `Done` agent (the normal state of a finished workspace bulk-selected
+/// for new work) the loop then self-confirms and skips the Enter resend that
+/// recovers a swallowed soft-newline. That is why multi-select broadcasts so
+/// often pasted the prompt but never submitted it (issue #122): the recovery
+/// net was disarmed by our own flip.
+async fn settle_submit_and_confirm(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    backend_key: &str,
+    submit: bool,
+    submit_bytes: Vec<u8>,
+    mut output_events: tokio::sync::broadcast::Receiver<Event>,
+    echo_probes: Vec<String>,
+    interaction: tokio::sync::OwnedMutexGuard<()>,
+) -> Result<bool, PromptWriteError> {
+    let settle_t0 = std::time::Instant::now();
+    let settle = await_paste_settled(
+        &mut output_events,
+        terminal_id,
+        &echo_probes,
+        PASTE_QUIET_WINDOW,
+        PASTE_SETTLE_CAP,
+    )
+    .await;
+    tracing::info!(
+        terminal_id = ?terminal_id,
+        trigger = ?settle,
+        settle_ms = settle_t0.elapsed().as_millis(),
+        "prompt paste settled — sending submit keystroke",
+    );
+    let confirm = prepare_submit_confirmation(config, terminal_id).await;
+    terminal_io::write_locked(
+        config,
+        terminal_id,
+        backend_key,
+        &submit_bytes,
+        TerminalInputIntent::Submit,
+    )
+    .await
+    .map_err(PromptWriteError::Submit)?;
+    drop(interaction);
+    let confirmed = confirm_prompt_submission(
+        confirm,
+        config,
+        backend_key,
+        &submit_bytes,
+        SUBMIT_CONFIRM_DEADLINE,
+    )
+    .await;
+    if submit && confirmed {
+        mark_done_agent_working(config, terminal_id, backend_key).await;
+    }
+    Ok(confirmed)
 }
 
 async fn mark_done_agent_working(
@@ -7533,6 +7616,7 @@ pub async fn handle_recover_agent_credit(
             agent.encode_prompt(&continuation_prompt, lazybox_agents::PromptIntent::Submit),
             true,
             interaction,
+            false,
         )
         .await
         {
@@ -7825,6 +7909,7 @@ async fn handle_inject_prompt_inner(
             encoded_prompt,
             submit,
             interaction,
+            false,
         )
         .await
         {

@@ -125,7 +125,11 @@ async fn resumed_clone_is_blobless_keeps_progress_and_sets_head() {
     // Triggers `ensure_bare_clone` without a worktree checkout, so the
     // bare clone can be inspected before any blobs are demanded.
     let default = wm
-        .default_branch("acme", "widgets")
+        .default_branch(
+            "acme",
+            "widgets",
+            lazybox_git_ops::LockPriority::Interactive,
+        )
         .await
         .expect("default_branch clones via the resumed partial");
     assert_eq!(default, "trunk");
@@ -259,9 +263,13 @@ async fn blobless_checkout_fails_clearly_when_origin_unreachable() {
 
     let wm = WorktreeManager::new(base.path().to_path_buf());
     // Materialize the blobless bare clone while origin is reachable …
-    wm.default_branch("acme", "offline")
-        .await
-        .expect("cold clone succeeds");
+    wm.default_branch(
+        "acme",
+        "offline",
+        lazybox_git_ops::LockPriority::Interactive,
+    )
+    .await
+    .expect("cold clone succeeds");
     assert!(bare.exists());
 
     // … then lose the origin before the first checkout.
@@ -314,7 +322,7 @@ async fn failed_resume_keeps_partial_when_origin_matches() {
     std::fs::write(partial.join("resume-marker"), "kept\n").unwrap();
 
     let wm = WorktreeManager::new(base.path().to_path_buf());
-    wm.default_branch("acme", "dead")
+    wm.default_branch("acme", "dead", lazybox_git_ops::LockPriority::Interactive)
         .await
         .expect_err("fetch from a dead origin fails");
 
@@ -480,7 +488,12 @@ async fn legacy_bare_clone_is_repaired_and_head_follows_rename() {
 
     let wm = WorktreeManager::new(base.path().to_path_buf());
     // Any provision runs the health gate on the existing clone.
-    assert_eq!(wm.default_branch("acme", "legacy").await.unwrap(), "trunk");
+    assert_eq!(
+        wm.default_branch("acme", "legacy", lazybox_git_ops::LockPriority::Interactive)
+            .await
+            .unwrap(),
+        "trunk"
+    );
     assert_eq!(
         git_out(&bare, &["config", "--get", "remote.origin.fetch"]),
         "+refs/heads/*:refs/remotes/origin/*",
@@ -490,7 +503,9 @@ async fn legacy_bare_clone_is_repaired_and_head_follows_rename() {
     // Upstream renames its default branch.
     git(upstream.path(), &["branch", "-m", "trunk", "main"]);
     assert_eq!(
-        wm.default_branch("acme", "legacy").await.unwrap(),
+        wm.default_branch("acme", "legacy", lazybox_git_ops::LockPriority::Interactive)
+            .await
+            .unwrap(),
         "main",
         "origin/HEAD follows the upstream rename"
     );
@@ -521,7 +536,7 @@ async fn failed_resume_with_divergent_origin_discards_partial() {
     git(&partial, &["config", "remote.origin.url", &dead_origin]);
 
     let wm = WorktreeManager::new(base.path().to_path_buf());
-    wm.default_branch("acme", "moved")
+    wm.default_branch("acme", "moved", lazybox_git_ops::LockPriority::Interactive)
         .await
         .expect_err("fetch from the adopted dead origin fails");
 

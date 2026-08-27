@@ -2253,7 +2253,12 @@ impl<'a> WorkspaceLifecycle<'a> {
             {
                 match config
                     .worktree_manager()
-                    .managed_worktrees_for_branch(owner, repo, &workspace.branch)
+                    .managed_worktrees_for_branch(
+                        owner,
+                        repo,
+                        &workspace.branch,
+                        lazybox_git_ops::LockPriority::Background,
+                    )
                     .await
                 {
                     Ok(worktrees) if worktrees.is_empty() => {}

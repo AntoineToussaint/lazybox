@@ -804,7 +804,13 @@ async fn reclaim_managed_holder_removes_only_safe_sessionless_checkout() {
 
     assert_eq!(
         manager
-            .reclaim_managed_worktree_if_safe("o", "r", "feature", &safe)
+            .reclaim_managed_worktree_if_safe(
+                "o",
+                "r",
+                "feature",
+                &safe,
+                lazybox_git_ops::LockPriority::Interactive
+            )
             .await
             .unwrap(),
         WorktreeReclaimOutcome::Reclaimed,
@@ -820,7 +826,13 @@ async fn reclaim_managed_holder_removes_only_safe_sessionless_checkout() {
     std::fs::write(dirty.join("wip.txt"), "preserve me").unwrap();
     assert_eq!(
         manager
-            .reclaim_managed_worktree_if_safe("o", "r", "dirty", &dirty)
+            .reclaim_managed_worktree_if_safe(
+                "o",
+                "r",
+                "dirty",
+                &dirty,
+                lazybox_git_ops::LockPriority::Interactive
+            )
             .await
             .unwrap(),
         WorktreeReclaimOutcome::Blocked(WorktreeReclaimBlocker::UncommittedChanges),
@@ -840,7 +852,13 @@ async fn reclaim_managed_holder_removes_only_safe_sessionless_checkout() {
     std::fs::write(ignored.join("local/state.db"), "keep ignored state").unwrap();
     assert_eq!(
         manager
-            .reclaim_managed_worktree_if_safe("o", "r", "ignored", &ignored)
+            .reclaim_managed_worktree_if_safe(
+                "o",
+                "r",
+                "ignored",
+                &ignored,
+                lazybox_git_ops::LockPriority::Interactive
+            )
             .await
             .unwrap(),
         WorktreeReclaimOutcome::Blocked(WorktreeReclaimBlocker::IgnoredFiles),

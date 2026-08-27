@@ -1022,7 +1022,7 @@ mod rename_workspace_tests {
 /// treating one SQLITE_BUSY (or a corrupt payload) as an empty set and
 /// then rewriting the row would replace the user's entire archive
 /// history with a single element.
-fn load_archived_set_strict(
+pub(crate) fn load_archived_set_strict(
     config: &ServerConfig,
 ) -> Result<std::collections::HashSet<String>, String> {
     let raw = config
@@ -2306,6 +2306,11 @@ impl<'a> WorkspaceLifecycle<'a> {
             .filter_map(|(tid, entry)| entry.backend_key.clone().map(|key| (*tid, key)))
             .collect();
 
+        // Backend sessions we handle through the registry path below, so the
+        // post-deletion orphan sweep doesn't re-kill them.
+        let registry_backend_keys: std::collections::HashSet<String> =
+            to_kill.iter().map(|(_, key)| key.clone()).collect();
+
         if !to_kill.is_empty() {
             tracing::info!(
                 "delete_workspace {key}: killing {} backing terminal(s)",
@@ -2424,6 +2429,61 @@ impl<'a> WorkspaceLifecycle<'a> {
             return None;
         }
         let _ = config.bus.send(Event::WorkspaceRemoved(key.clone()));
+
+        // Belt-and-suspenders: the registry sweep above only
+        // reaches terminals with a live entry. A tmux session can linger with
+        // NO registry entry — its agent process exited, tearing down the
+        // terminal, but the detached backend session survived. Left alone, the
+        // next restart's `recover_sessions` would list it and resurrect this
+        // now-deleted workspace from its persisted meta. Kill such orphans now
+        // too. Runs only after the row is deleted and the key archived, so it
+        // can't affect the safety gates above; the archived-set recovery guard
+        // remains the durable backstop. Best-effort: a `backend.list()` failure
+        // must not undo a delete that already committed.
+        match config.backend.list().await {
+            Ok(backend_keys) => {
+                for backend_key in backend_keys {
+                    if registry_backend_keys.contains(&backend_key) {
+                        continue;
+                    }
+                    let Some((meta_session_key, _)) =
+                        crate::spawn_handler::load_terminal_meta(config, &backend_key).await
+                    else {
+                        continue;
+                    };
+                    if meta_session_key.as_str() != key_str {
+                        continue;
+                    }
+                    tracing::info!(
+                        workspace = %key,
+                        %backend_key,
+                        "delete_workspace: killing orphan backend session with no live terminal"
+                    );
+                    if let Err(e) = config.backend.kill(&backend_key).await {
+                        tracing::warn!(
+                            workspace = %key,
+                            %backend_key,
+                            "delete_workspace: killing orphan backend session failed: {e}"
+                        );
+                    }
+                    let generation =
+                        crate::spawn_handler::load_agent_state_generation(config, &backend_key)
+                            .await;
+                    crate::spawn_handler::sweep_terminal_persisted_fields(
+                        config,
+                        &backend_key,
+                        generation,
+                    )
+                    .await;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    workspace = %key,
+                    "delete_workspace: backend.list for orphan sweep failed: {e}"
+                );
+            }
+        }
 
         // The row (and its terminals) are gone — reclaim the worktree
         // directories on disk. Without this every teardown that routes
@@ -3015,6 +3075,78 @@ mod set_auto_merge_on_green_tests {
         assert!(
             !stored_arm(&config, &key),
             "the guard only gates enabling, never disarming"
+        );
+    }
+}
+
+#[cfg(test)]
+mod orphan_backend_session_tests {
+    use super::*;
+
+    // Item 2 of the workspace-resurrection fix: `delete_workspace` must kill a
+    // lingering backend session that owns the workspace but has NO live
+    // terminal registry entry (its agent had exited, tearing down the terminal,
+    // while the detached tmux session survived). Without this, only the durable
+    // archived-set guard in `recover_sessions` catches it on the next restart;
+    // this kills the orphan at delete time and sweeps its persisted meta so it
+    // is never listed again.
+    #[tokio::test]
+    async fn delete_workspace_kills_orphan_backend_session_with_no_live_terminal() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let key = WorkspaceKey::new("github:o/r#orphan");
+        let ws = Workspace::empty(key.clone(), "main", Utc::now());
+        config
+            .store
+            .save_workspace(&WorkspaceRecord {
+                key: key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).expect("serialize workspace")),
+            })
+            .expect("save workspace");
+
+        // A detached backend session for this workspace, with persisted meta but
+        // no live terminal in the registry.
+        let backend_key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "orphan")
+            .await
+            .expect("spawn orphan backend");
+        let session_key = lazybox_core::SessionKey::from(key.as_str());
+        crate::spawn_handler::persist_terminal_meta(
+            &config,
+            &backend_key,
+            &session_key,
+            &lazybox_ipc::TerminalKind::Agent("claude".into()),
+        )
+        .await;
+        assert!(
+            config.terminal.bookkeeping_is_empty().await,
+            "precondition: the orphan has no live terminal registry entry"
+        );
+
+        assert!(
+            delete_workspace(&config, &key).await.is_some(),
+            "the workspace deletes even though its only session is a registry-less orphan"
+        );
+
+        // The orphan backend session was killed — it no longer lists as live.
+        assert!(
+            !config
+                .backend
+                .list()
+                .await
+                .expect("backend list")
+                .contains(&backend_key),
+            "the orphan backend session must be killed at delete time"
+        );
+        // And its persisted terminal meta was swept.
+        assert!(
+            config
+                .store
+                .get_kv(&format!("terminal:{backend_key}"))
+                .expect("read terminal meta")
+                .is_none(),
+            "the orphan's persisted terminal meta must be swept"
         );
     }
 }

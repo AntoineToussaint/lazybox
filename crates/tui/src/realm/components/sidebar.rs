@@ -537,6 +537,7 @@ impl Sidebar {
         focused_workspaces: Vec<lazybox_core::SessionKey>,
         spaces: Vec<lazybox_config::SpaceConfig>,
         collapsed_spaces: std::collections::BTreeSet<String>,
+        metered_spaces: std::collections::BTreeSet<String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
     ) {
@@ -547,6 +548,7 @@ impl Sidebar {
             focused_workspaces,
             spaces,
             collapsed_spaces,
+            metered_spaces,
             default_agent,
             display,
         );
@@ -837,6 +839,13 @@ impl Sidebar {
     /// on a Space header row (#860).
     pub fn toggle_space_at_cursor(&mut self) -> bool {
         self.inner.toggle_space_at_cursor()
+    }
+
+    /// Toggle Space-tier metering for the Space under the cursor (`x $`,
+    /// approach C). Returns `(space_name, now_metered)`, or `None` off a
+    /// Space header. Delegates to the domain `Sidebar` method of the same name.
+    pub fn toggle_space_metering_at_cursor(&mut self) -> Option<(String, bool)> {
+        self.inner.toggle_space_metering_at_cursor()
     }
 
     /// The Space a source currently resolves to — prefills the

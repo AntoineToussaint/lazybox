@@ -1598,6 +1598,7 @@ fn show_inactive_in_inbox_surfaces_merged_and_closed() {
         Vec::new(),
         Vec::new(),
         BTreeSet::new(),
+        BTreeSet::new(),
         None,
         &display,
     );
@@ -1955,6 +1956,7 @@ fn desktop_notify_off_suppresses_os_banner_but_keeps_footer_notice() {
         Vec::new(),
         Vec::new(),
         BTreeSet::new(),
+        BTreeSet::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
     );
@@ -2055,6 +2057,7 @@ fn ci_failure_transition_respects_desktop_notify_off() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        BTreeSet::new(),
         BTreeSet::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
@@ -2220,6 +2223,7 @@ fn pinned_repo_config_floats_group_to_top() {
         vec!["owner/charlie".to_string()],
         Vec::new(),
         Vec::new(),
+        BTreeSet::new(),
         BTreeSet::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
@@ -2436,6 +2440,7 @@ fn apply_config_dedups_focused_workspaces() {
         vec![key.clone(), key.clone()],
         Vec::new(),
         BTreeSet::new(),
+        BTreeSet::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
     );
@@ -2475,6 +2480,7 @@ fn focused_header_honors_ascii_glyphs() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        BTreeSet::new(),
         BTreeSet::new(),
         None,
         &ascii,
@@ -2580,6 +2586,7 @@ fn apply_persisted(s: &mut Sidebar, focused: Vec<SessionKey>, pinned: Vec<String
         pinned,
         focused,
         Vec::new(),
+        std::collections::BTreeSet::new(),
         std::collections::BTreeSet::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
@@ -2813,6 +2820,57 @@ fn workspace_removal_forgets_only_the_removed_star() {
         cfg.ui.focused_workspaces,
         vec![kept_key.as_str().to_string()],
         "only the removed workspace's key left the config"
+    );
+}
+
+/// Space-tier metering (approach C): `x $` on a Space header adds the Space
+/// name to `agent.metered_spaces`, persists it, and a second toggle removes
+/// it. Two owners auto-seed two Spaces so the tier renders and the header is
+/// reachable.
+#[test]
+fn space_metering_toggle_persists_and_reverses() {
+    let home = ConfigHome::sandbox();
+    let now = Utc::now();
+    let a = make_workspace("obin-ai/platform", "obin-ai/platform#1", now);
+    let b = make_workspace("acme/widget", "acme/widget#1", now - Duration::minutes(1));
+
+    let mut s = Sidebar::new(PaneId::new(1));
+    apply_persisted(&mut s, Vec::new(), Vec::new());
+    s.on_event(&snapshot_of(vec![a, b]));
+
+    assert!(s.focus_header_row("obin-ai"), "park on the Space header");
+    assert!(s.cursor_on_space_header());
+
+    // Turn metering on for the Space.
+    assert_eq!(
+        s.toggle_space_metering_at_cursor(),
+        Some(("obin-ai".to_string(), true)),
+    );
+    assert!(s.is_space_metered("obin-ai"));
+    assert!(
+        !s.is_space_metered("acme"),
+        "only the toggled Space is metered"
+    );
+
+    let cfg = home.reload();
+    assert!(
+        cfg.agent.metered_spaces.contains("obin-ai"),
+        "the metered Space persisted to agent.metered_spaces"
+    );
+    // The daemon derives the spawn-time flag from the same persisted set.
+    assert!(cfg.source_is_metered("obin-ai/platform"));
+    assert!(!cfg.source_is_metered("acme/widget"));
+
+    // A second toggle removes it — the same-key off switch.
+    assert!(s.focus_header_row("obin-ai"));
+    assert_eq!(
+        s.toggle_space_metering_at_cursor(),
+        Some(("obin-ai".to_string(), false)),
+    );
+    assert!(!s.is_space_metered("obin-ai"));
+    assert!(
+        !home.reload().agent.metered_spaces.contains("obin-ai"),
+        "the metered Space was removed on the second toggle"
     );
 }
 

@@ -972,6 +972,14 @@ impl Sidebar {
                                 .add_modifier(Modifier::BOLD),
                         ),
                     ];
+                    // Space-tier metering badge (approach C): a `$` marks every
+                    // workspace under this Space as metered (`x $` toggles it).
+                    if self.metered_spaces.contains(name) {
+                        spans.push(Span::styled(
+                            " $",
+                            row_bg.unwrap_or_default().fg(theme.accent),
+                        ));
+                    }
                     if let Some(bg) = row_bg {
                         extend_cursor_fill(&mut spans, row_budget, bg);
                     }

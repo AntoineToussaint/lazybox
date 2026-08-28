@@ -102,7 +102,10 @@ async fn seed_persisted_state(
                 .expect("persist agent state");
             return (backend_key, session_key);
         }
-        AgentState::Idle | AgentState::Exited { .. } | AgentState::LimitReached => {
+        AgentState::Idle
+        | AgentState::Exited { .. }
+        | AgentState::LimitReached
+        | AgentState::AwaitingReset => {
             panic!("test helper only seeds hook-driven live-turn states")
         }
     }

@@ -348,7 +348,26 @@ pub enum AgentState {
     /// state remains visible until the complete recovery transaction has
     /// selected the provider-owned wait option, reached a ready composer,
     /// and submitted the continuation prompt.
+    ///
+    /// Appended last: the socket transport encodes this enum by bincode
+    /// ordinal, so it must never be reordered ahead of `LimitReached`.
     CreditExhausted,
+    /// The calm sibling of `LimitReached`: the daemon has auto-pressed
+    /// "Wait" on a usage-limit block (`ui.auto_wait_on_limit`) and the
+    /// agent is now parked, sleeping until its limit resets — the block is
+    /// being handled automatically, so unlike `LimitReached` it needs
+    /// nothing from the user. Purely daemon-asserted (the screen scraper
+    /// never produces it); set right after the Wait keystroke and held
+    /// against a still-visible limit banner, it leaves only on the same
+    /// affirmative evidence that clears `LimitReached` — the agent visibly
+    /// working again or coming to rest once the reset lands (where
+    /// auto-wait injects its continuation nudge). **Not** an alert: no
+    /// desktop/Slack notification, no `⏳ N limited` count, no resume-all
+    /// target — it renders a distinct 💤 badge and otherwise stays quiet.
+    ///
+    /// Appended last: the socket transport encodes this enum by bincode
+    /// ordinal, so it must never be reordered ahead of `CreditExhausted`.
+    AwaitingReset,
 }
 
 impl AgentState {
@@ -366,6 +385,7 @@ impl AgentState {
         AgentState::Exited { code: None },
         AgentState::LimitReached,
         AgentState::CreditExhausted,
+        AgentState::AwaitingReset,
     ];
 }
 
@@ -4459,9 +4479,10 @@ mod agent_state_tests {
                 | AgentState::Done
                 | AgentState::Exited { .. }
                 | AgentState::LimitReached
-                | AgentState::CreditExhausted => {}
+                | AgentState::CreditExhausted
+                | AgentState::AwaitingReset => {}
             }
         }
-        assert_eq!(AgentState::ALL.len(), 7);
+        assert_eq!(AgentState::ALL.len(), 8);
     }
 }

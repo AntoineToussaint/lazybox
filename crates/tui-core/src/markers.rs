@@ -188,6 +188,11 @@ fn agent_state_doc(state: &AgentState) -> MarkerDoc {
             "The provider account is out of credit and the agent is waiting for recovery.",
             "Shows until Wait for credit and the continuation prompt both succeed.",
         ),
+        AgentState::AwaitingReset => doc(
+            "💤 AwaitingReset",
+            "The agent hit its usage limit and lazybox auto-pressed Wait — it's now parked, sleeping until the limit resets, then picks the work back up on its own. Nothing for you to do.",
+            "Shows while auto-wait holds a rate-limited agent through its reset.",
+        ),
     }
 }
 

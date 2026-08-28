@@ -232,6 +232,12 @@ impl Sidebar {
         self.inner.set_keep_awake(keep_awake);
     }
 
+    /// Record whether `ui.auto_wait_on_limit` is on so the rising-edge
+    /// rate-limit alert stays quiet for a block the daemon auto-handles.
+    pub fn set_auto_wait_on_limit(&mut self, auto_wait_on_limit: bool) {
+        self.inner.set_auto_wait_on_limit(auto_wait_on_limit);
+    }
+
     /// Record whether `ui.show_agent_model` is on — gates the per-agent
     /// model + effort label beside each runner badge.
     pub fn set_show_agent_model(&mut self, show: bool) {

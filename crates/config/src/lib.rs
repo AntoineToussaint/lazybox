@@ -1253,11 +1253,14 @@ pub struct UiSection {
     /// monthly limit (issue #847). When `true`, the daemon accepts the
     /// limit prompt's default (Wait) option the moment an agent enters
     /// the `LimitReached` state, so N agents all hitting the cap at once
-    /// don't each need a manual visit — you re-auth with another account
-    /// and then `Shift-K` (resume all rate-limited) to continue them.
-    /// The daemon re-reads this on every transition, so editing it takes
-    /// effect without a restart. Defaults to `false`: lazybox only
-    /// detects + surfaces the block unless you opt in.
+    /// don't each need a manual visit. Then, once that terminal's wait
+    /// clears to a resting screen (the reset happened and the turn
+    /// settled), the daemon injects the `credit_recovery_prompt`
+    /// continuation nudge so the agent picks the interrupted work back up
+    /// instead of idling at an empty composer — closing the loop the bare
+    /// keystroke left open. The daemon re-reads this on every transition,
+    /// so editing it takes effect without a restart. Defaults to `false`:
+    /// lazybox only detects + surfaces the block unless you opt in.
     #[serde(default)]
     pub auto_wait_on_limit: bool,
     /// Prompt submitted after a credit chooser has cleared and the provider
@@ -1400,6 +1403,12 @@ pub struct UiDefaults {
     /// Escalate a footer alert as agents hit their usage limit. See
     /// [`UiSection::usage_limit_alerts`].
     pub usage_limit_alerts: bool,
+    /// Auto-press "Wait" on a usage-limit block. See
+    /// [`UiSection::auto_wait_on_limit`]. Mirrored into the resolved UI so
+    /// the client can stay quiet on the transient `LimitReached` the daemon
+    /// is about to park to the calm `AwaitingReset` — a handled block is not
+    /// an alert.
+    pub auto_wait_on_limit: bool,
     pub credit_recovery_prompt: String,
     /// Show the always-visible per-provider usage summary. See
     /// [`UiSection::usage_summary`].
@@ -1439,6 +1448,7 @@ impl Default for UiDefaults {
             keep_awake: false,
             show_agent_model: true,
             usage_limit_alerts: true,
+            auto_wait_on_limit: false,
             credit_recovery_prompt: default_credit_recovery_prompt(),
             usage_summary: true,
             today_summary: true,
@@ -1487,6 +1497,7 @@ impl UiSection {
             keep_awake: self.keep_awake,
             show_agent_model: self.show_agent_model,
             usage_limit_alerts: self.usage_limit_alerts,
+            auto_wait_on_limit: self.auto_wait_on_limit,
             credit_recovery_prompt,
             usage_summary: self.usage_summary,
             today_summary: self.today_summary,

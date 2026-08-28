@@ -50,6 +50,12 @@ pub struct WorkspaceRowCtx<'a> {
     /// the shared state slot. Highest precedence: it's the most urgent
     /// "act (externally) before this moves" signal.
     pub limit_reached: bool,
+    /// Any agent in this workspace is in `AgentState::AwaitingReset` — the
+    /// calm auto-waiting block (lazybox pressed Wait; it's parked until the
+    /// limit resets). Renders the quiet `💤` glyph. Lower precedence than
+    /// the alerting states and than `working`: it's handled, nothing to act
+    /// on, so an actively working sibling wins the slot.
+    pub awaiting_reset: bool,
     /// Any agent in this workspace is waiting on a provider credit chooser.
     pub credit_exhausted: bool,
     /// Any agent in this workspace is in `AgentState::Working`
@@ -505,9 +511,12 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 ///     ended (clean or crash; #356/#357). Not an alert color — a dead
 ///     agent is a fact to notice, not an emergency.
 ///   - `Idle`        → blank.
+///   - `AwaitingReset` → ` 💤 ` (dim) — a static glyph: lazybox pressed
+///     Wait and the agent is parked, sleeping until its limit resets. Calm,
+///     not an alert — nothing for you to do.
 /// Reserved width either way so the kind/title to the right don't
 /// jitter as a row moves between states. Precedence credit-exhausted >
-/// limit-reached > asking > working > done > spawning > exited. `spawning` yields to
+/// limit-reached > asking > working > awaiting-reset > done > spawning > exited. `spawning` yields to
 /// every *live* signal and outranks only the terminal `exited` marker.
 /// That split is exact, not defensive: a terminal's `Working` / `Done` /
 /// `InputNeeded` / `LimitReached` / `CreditExhausted` entry is dropped when it exits (only
@@ -527,6 +536,12 @@ fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         ("?", ctx.theme.warn)
     } else if ctx.working {
         (ctx.working_glyph, ctx.theme.accent)
+    } else if ctx.awaiting_reset {
+        // The calm auto-waiting block: parked until reset, handled — a quiet
+        // 💤 in the dim text color, NOT an alert. Below `working` so a live
+        // sibling's spinner wins; above `done` so a still-parked agent shows
+        // over a merely-finished one.
+        ("💤", ctx.theme.text_dim)
     } else if ctx.done {
         ("✓", ctx.theme.success)
     } else if ctx.spawning {
@@ -1498,6 +1513,7 @@ mod tests {
             max_pr_num_width: 4,
             asking: false,
             limit_reached: false,
+            awaiting_reset: false,
             credit_exhausted: false,
             working: false,
             done: false,
@@ -1927,6 +1943,7 @@ mod tests {
             max_pr_num_width: 2,
             asking: false,
             limit_reached: false,
+            awaiting_reset: false,
             credit_exhausted: false,
             working: false,
             done: false,
@@ -2421,6 +2438,7 @@ mod tests {
             max_pr_num_width: 3,
             asking: false,
             limit_reached: false,
+            awaiting_reset: false,
             credit_exhausted: false,
             working: false,
             done: false,
@@ -3786,6 +3804,7 @@ mod tests {
             max_pr_num_width: 4,
             asking: false,
             limit_reached: false,
+            awaiting_reset: false,
             credit_exhausted: false,
             working: false,
             done: false,

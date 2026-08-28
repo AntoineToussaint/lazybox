@@ -22,31 +22,39 @@ pub use inspect::{
 /// Which lane a per-repo lock acquisition belongs to.
 ///
 /// User-initiated work (spawn provisioning: fetch + `worktree add`) takes
-/// [`LockPriority::Interactive`] and is granted ahead of any *waiting*
-/// background acquirer on the same repo. Poll-driven sweeps (fast-forward,
-/// cleanup, rescope, reclaim) take [`LockPriority::Background`] and yield to
-/// interactive work. The current holder is never preempted — a background
-/// git fetch already in flight still runs to completion — so this bounds a
-/// spawn's wait to the single in-flight sweep op rather than a whole queue
-/// of them.
+/// [`LockPriority::Interactive`]; poll-driven sweeps (fast-forward, cleanup,
+/// rescope, reclaim) take [`LockPriority::Background`]. The guarantee is
+/// bounded, not strict: an interactive acquirer waits behind at most one
+/// in-flight background op on the same repo, never behind a *queue* of them —
+/// which is what a spawn did on the old single FIFO lock when a sweep had
+/// several git-ops stacked ahead of it. Background ops are not starved. The
+/// `RepoLock` implementation documents exactly how the bound is enforced.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LockPriority {
     /// User-initiated, latency-sensitive git work.
     Interactive,
-    /// Best-effort background sweeps that must not delay a spawn.
+    /// Best-effort background sweeps that must not stack up ahead of a spawn.
     Background,
 }
 
 /// Two-lane per-repo serialization primitive backing [`repo_lock`].
 ///
-/// `data` is the real critical section. Background acquirers pass through
-/// `bg_turnstile` first, so at most one background acquirer is ever queued on
-/// `data`; every other background acquirer waits on the turnstile instead.
-/// A held [`RepoGuard`] releases `data` *before* `bg_turnstile` (drop order),
-/// so at the instant `data` frees only interactive waiters are queued on it —
-/// an interactive acquirer is therefore always granted ahead of a waiting
-/// background one. Under a continuous spawn storm the sweeps can starve; that
-/// is the intended trade — they are best-effort and resume once spawns quiesce.
+/// `data` is the real critical section; every acquisition in either lane holds
+/// it, so mutual exclusion on the bare clone is unchanged. Background acquirers
+/// additionally pass through `bg_turnstile` first, so at most one background
+/// acquirer is ever queued on `data`; the rest wait on the turnstile. A held
+/// [`RepoGuard`] releases `data` *before* `bg_turnstile` (drop order), so an
+/// interactive acquirer that is already waiting when a background holder
+/// releases is handed `data` before any turnstile-blocked background acquirer
+/// can re-enter the `data` queue.
+///
+/// The resulting guarantee is bounded, not strict priority: `data` is itself
+/// FIFO, so a background op that has *already* passed the turnstile and parked
+/// on `data` is served ahead of a later-arriving interactive op. The turnstile
+/// caps that to one background op at a time, so an interactive acquirer waits
+/// behind at most one in-flight background op — never a queue. A background op
+/// is never starved: it holds the turnstile only for its own git work, and
+/// once on the `data` queue it is served in FIFO order.
 struct RepoLock {
     data: Arc<tokio::sync::Mutex<()>>,
     bg_turnstile: Arc<tokio::sync::Mutex<()>>,
@@ -54,7 +62,8 @@ struct RepoLock {
 
 /// Guard returned by [`RepoLock::lock`]. Field order is load-bearing: `_data`
 /// must drop before `_turnstile` so releasing the critical section hands the
-/// lock to a waiting interactive acquirer before any background one.
+/// lock to a waiting interactive acquirer before any turnstile-blocked
+/// background one can re-enter the `data` queue.
 #[allow(dead_code)] // guards are held for their Drop side-effect, never read.
 struct RepoGuard {
     _data: tokio::sync::OwnedMutexGuard<()>,
@@ -4277,35 +4286,47 @@ mod repo_lock_tests {
     use super::*;
     use std::sync::Mutex as StdMutex;
 
+    type Order = Arc<StdMutex<Vec<&'static str>>>;
+
+    fn spawn_waiter(
+        lock: &Arc<RepoLock>,
+        order: &Order,
+        name: &'static str,
+        priority: LockPriority,
+    ) -> tokio::task::JoinHandle<()> {
+        let lock = lock.clone();
+        let order = order.clone();
+        tokio::spawn(async move {
+            let _guard = lock.lock(priority).await;
+            order.lock().unwrap_or_else(|e| e.into_inner()).push(name);
+        })
+    }
+
     /// The fast lane: with a background sweep already holding a repo's lock,
     /// several *more* background acquirers queued behind it, and one
     /// interactive acquirer arriving last, the interactive one is granted
     /// first when the holder releases — it jumps the whole background queue.
-    #[tokio::test]
+    ///
+    /// Pinned to the current-thread runtime: [`park_spawned_tasks`] relies on
+    /// cooperative single-threaded scheduling to know every spawned task has
+    /// reached its `.await` before the holder releases.
+    #[tokio::test(flavor = "current_thread")]
     async fn interactive_acquirer_jumps_the_background_queue() {
         let lock = Arc::new(RepoLock::new());
-        let order: Arc<StdMutex<Vec<&'static str>>> = Arc::new(StdMutex::new(Vec::new()));
+        let order: Order = Arc::new(StdMutex::new(Vec::new()));
 
-        // A background sweep is mid-flight, holding the lock.
+        // A background sweep is mid-flight, holding the lock (so it holds the
+        // turnstile too — every other background acquirer blocks on it).
         let held = lock.lock(LockPriority::Background).await;
 
-        let spawn_waiter = |name: &'static str, priority: LockPriority| {
-            let lock = lock.clone();
-            let order = order.clone();
-            tokio::spawn(async move {
-                let _guard = lock.lock(priority).await;
-                order.lock().unwrap_or_else(|e| e.into_inner()).push(name);
-            })
-        };
-
         // Three background acquirers queue up *first*...
-        let bg1 = spawn_waiter("bg1", LockPriority::Background);
-        let bg2 = spawn_waiter("bg2", LockPriority::Background);
-        let bg3 = spawn_waiter("bg3", LockPriority::Background);
+        let bg1 = spawn_waiter(&lock, &order, "bg1", LockPriority::Background);
+        let bg2 = spawn_waiter(&lock, &order, "bg2", LockPriority::Background);
+        let bg3 = spawn_waiter(&lock, &order, "bg3", LockPriority::Background);
         park_spawned_tasks().await;
 
         // ...then the interactive acquirer arrives last.
-        let interactive = spawn_waiter("interactive", LockPriority::Interactive);
+        let interactive = spawn_waiter(&lock, &order, "interactive", LockPriority::Interactive);
         park_spawned_tasks().await;
 
         // Release the sweep's lock; drain the queue.
@@ -4326,9 +4347,47 @@ mod repo_lock_tests {
         );
     }
 
-    /// Let every already-spawned task run until it parks on the lock. On the
-    /// single-threaded test runtime, yielding hands control to the queued
-    /// tasks; they each poll once, block on the held mutex, and park.
+    /// The bound the fast lane deliberately does *not* cross. `data` is FIFO,
+    /// so a background op that has already passed the turnstile and parked on
+    /// `data` is served ahead of a *later*-arriving interactive op — priority
+    /// reorders turnstile-blocked waiters, it does not preempt one already in
+    /// the `data` queue. This is what caps an interactive op's wait at one
+    /// in-flight background op rather than making it strictly first.
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_background_op_is_served_before_a_later_interactive() {
+        let lock = Arc::new(RepoLock::new());
+        let order: Order = Arc::new(StdMutex::new(Vec::new()));
+
+        // An interactive op holds the lock; the turnstile is free.
+        let held = lock.lock(LockPriority::Interactive).await;
+
+        // A background op arrives and parks on `data` (turnstile was free).
+        let bg = spawn_waiter(&lock, &order, "bg", LockPriority::Background);
+        park_spawned_tasks().await;
+
+        // A second interactive op arrives *after* the background op is queued.
+        let interactive = spawn_waiter(&lock, &order, "interactive", LockPriority::Interactive);
+        park_spawned_tasks().await;
+
+        drop(held);
+        for handle in [bg, interactive] {
+            handle.await.expect("waiter task");
+        }
+
+        let order = order.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            order.as_slice(),
+            ["bg", "interactive"],
+            "a background op already queued on `data` is served FIFO, ahead of a later interactive: {order:?}"
+        );
+    }
+
+    /// Let every already-spawned task run until it parks on the lock. Relies on
+    /// the current-thread runtime (`flavor = "current_thread"` on the callers):
+    /// yielding hands control to the queued tasks, which each poll once, block
+    /// on the held mutex, and park. On a multi-threaded runtime a task could
+    /// still be unscheduled when the count runs out, so do not change the
+    /// flavor without replacing this with a real readiness barrier.
     async fn park_spawned_tasks() {
         for _ in 0..16 {
             tokio::task::yield_now().await;

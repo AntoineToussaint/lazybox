@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::{
-    GitError, GitRunner, WorktreeManager, WorktreeReclaimBlocker, WorktreeReclaimOutcome,
-    default_git_runner,
+    GitError, GitRunner, LockPriority, WorktreeManager, WorktreeReclaimBlocker,
+    WorktreeReclaimOutcome, default_git_runner,
 };
 
 // `base_dir` is reachable via a crate-private accessor on
@@ -218,6 +218,7 @@ impl WorktreeManager {
         owner: &str,
         repo: &str,
         branch: &str,
+        priority: LockPriority,
     ) -> Result<Vec<PathBuf>, GitError> {
         let bare = self.bare_path(owner, repo);
         if !bare.exists() {
@@ -225,7 +226,7 @@ impl WorktreeManager {
         }
 
         let lock = crate::repo_lock(&bare);
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(priority).await;
         let managed_root = canonical_or_self(&self.base_dir().join("worktrees"));
         let mut paths = Vec::new();
         for entry in list_porcelain(self.git_runner(), &bare).await? {
@@ -256,6 +257,7 @@ impl WorktreeManager {
         repo: &str,
         branch: &str,
         path: &Path,
+        priority: LockPriority,
     ) -> Result<WorktreeReclaimOutcome, GitError> {
         let bare = self.bare_path(owner, repo);
         if !bare.exists() {
@@ -263,7 +265,7 @@ impl WorktreeManager {
         }
 
         let lock = crate::repo_lock(&bare);
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(priority).await;
         let managed_root = canonical_or_self(&self.base_dir().join("worktrees"));
         let key = canonical_or_self(path);
         if !key.starts_with(&managed_root) {
@@ -505,7 +507,7 @@ impl WorktreeManager {
         // per-repo lock as the removal. The earlier inspection is evidence
         // for UI copy only; it is never the final delete authority.
         let lock = crate::repo_lock(bare);
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(LockPriority::Background).await;
         if !still_removable() {
             return Ok(false);
         }

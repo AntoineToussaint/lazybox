@@ -19,24 +19,100 @@ pub use inspect::{
     scan_external_checkouts, worktree_is_pristine,
 };
 
+/// Which lane a per-repo lock acquisition belongs to.
+///
+/// User-initiated work (spawn provisioning: fetch + `worktree add`) takes
+/// [`LockPriority::Interactive`]; poll-driven sweeps (fast-forward, cleanup,
+/// rescope, reclaim) take [`LockPriority::Background`]. The guarantee is
+/// bounded, not strict: an interactive acquirer waits behind at most one
+/// in-flight background op on the same repo, never behind a *queue* of them —
+/// which is what a spawn did on the old single FIFO lock when a sweep had
+/// several git-ops stacked ahead of it. Background ops are not starved. The
+/// `RepoLock` implementation documents exactly how the bound is enforced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LockPriority {
+    /// User-initiated, latency-sensitive git work.
+    Interactive,
+    /// Best-effort background sweeps that must not stack up ahead of a spawn.
+    Background,
+}
+
+/// Two-lane per-repo serialization primitive backing [`repo_lock`].
+///
+/// `data` is the real critical section; every acquisition in either lane holds
+/// it, so mutual exclusion on the bare clone is unchanged. Background acquirers
+/// additionally pass through `bg_turnstile` first, so at most one background
+/// acquirer is ever queued on `data`; the rest wait on the turnstile. A held
+/// [`RepoGuard`] releases `data` *before* `bg_turnstile` (drop order), so an
+/// interactive acquirer that is already waiting when a background holder
+/// releases is handed `data` before any turnstile-blocked background acquirer
+/// can re-enter the `data` queue.
+///
+/// The resulting guarantee is bounded, not strict priority: `data` is itself
+/// FIFO, so a background op that has *already* passed the turnstile and parked
+/// on `data` is served ahead of a later-arriving interactive op. The turnstile
+/// caps that to one background op at a time, so an interactive acquirer waits
+/// behind at most one in-flight background op — never a queue. A background op
+/// is never starved: it holds the turnstile only for its own git work, and
+/// once on the `data` queue it is served in FIFO order.
+struct RepoLock {
+    data: Arc<tokio::sync::Mutex<()>>,
+    bg_turnstile: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// Guard returned by [`RepoLock::lock`]. Field order is load-bearing: `_data`
+/// must drop before `_turnstile` so releasing the critical section hands the
+/// lock to a waiting interactive acquirer before any turnstile-blocked
+/// background one can re-enter the `data` queue.
+#[allow(dead_code)] // guards are held for their Drop side-effect, never read.
+struct RepoGuard {
+    _data: tokio::sync::OwnedMutexGuard<()>,
+    _turnstile: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl RepoLock {
+    fn new() -> Self {
+        Self {
+            data: Arc::new(tokio::sync::Mutex::new(())),
+            bg_turnstile: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    async fn lock(&self, priority: LockPriority) -> RepoGuard {
+        match priority {
+            LockPriority::Interactive => RepoGuard {
+                _data: self.data.clone().lock_owned().await,
+                _turnstile: None,
+            },
+            LockPriority::Background => {
+                let turnstile = self.bg_turnstile.clone().lock_owned().await;
+                let data = self.data.clone().lock_owned().await;
+                RepoGuard {
+                    _data: data,
+                    _turnstile: Some(turnstile),
+                }
+            }
+        }
+    }
+}
+
 /// Process-wide per-repo serialization. Keyed by the bare-clone path:
 /// two concurrent cold spawns for the same repo would otherwise race
 /// `git clone --bare` into one directory, and concurrent fetch /
 /// `worktree add` invocations can collide on ref locks inside the
 /// shared bare clone. Every mutating `WorktreeManager` operation
-/// acquires the repo's async mutex first; distinct repos proceed in
-/// parallel.
+/// acquires the repo's lock first; distinct repos proceed in parallel.
 ///
 /// The outer `std::sync::Mutex` only guards the map lookup/insert —
-/// never held across an `.await`. The returned `Arc<tokio::Mutex>`
-/// is what callers hold for the duration of the git work.
-fn repo_lock(bare_path: &Path) -> Arc<tokio::sync::Mutex<()>> {
-    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+/// never held across an `.await`. The returned [`RepoLock`] is what
+/// callers hold (via [`RepoLock::lock`]) for the duration of the git work.
+fn repo_lock(bare_path: &Path) -> Arc<RepoLock> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<RepoLock>>>> = OnceLock::new();
     let map = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
     guard
         .entry(bare_path.to_path_buf())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .or_insert_with(|| Arc::new(RepoLock::new()))
         .clone()
 }
 
@@ -761,7 +837,7 @@ impl WorktreeManager {
     ) -> Result<Worktree, GitError> {
         let bare_path = self.bare_clone_path(owner, repo);
         let lock = repo_lock(&bare_path);
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(LockPriority::Interactive).await;
 
         // Return early if a *valid* worktree already exists.
         // Idempotent — lazybox calls this on every session bring-up.
@@ -994,7 +1070,7 @@ impl WorktreeManager {
     ) -> Result<Worktree, GitError> {
         let bare_path = self.bare_clone_path(owner, repo);
         let lock = repo_lock(&bare_path);
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(LockPriority::Interactive).await;
 
         // Same validation as `checkout_at`: only a real worktree of
         // this bare clone short-circuits; an empty leftover dir is
@@ -1173,7 +1249,7 @@ impl WorktreeManager {
         // racing one workspace, but the per-path lock keeps this method
         // correct on its own.
         let lock = repo_lock(wt_path);
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(LockPriority::Interactive).await;
 
         let name = wt_path
             .file_name()
@@ -1226,9 +1302,14 @@ impl WorktreeManager {
     /// present locally yet. Used by the "spawn from issue" path
     /// where the task has no PR branch — we cut a fresh branch
     /// off the default.
-    pub async fn default_branch(&self, owner: &str, repo: &str) -> Result<String, GitError> {
+    pub async fn default_branch(
+        &self,
+        owner: &str,
+        repo: &str,
+        priority: LockPriority,
+    ) -> Result<String, GitError> {
         let lock = repo_lock(&self.bare_clone_path(owner, repo));
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(priority).await;
         let bare_path = self.ensure_bare_clone(owner, repo).await?;
 
         // Pull origin/HEAD if we don't already have it. Tolerate
@@ -1315,7 +1396,7 @@ impl WorktreeManager {
     ) -> Result<TrackSyncOutcome, GitError> {
         let bare_path = self.bare_clone_path(owner, repo);
         let lock = repo_lock(&bare_path);
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(LockPriority::Background).await;
         let bare_path = self.ensure_bare_clone(owner, repo).await?;
 
         // Refresh origin/<base>. Tolerate failure — fall back to the
@@ -1564,7 +1645,7 @@ impl WorktreeManager {
     pub async fn remove(&self, owner: &str, repo: &str, branch: &str) -> Result<(), GitError> {
         let bare_path = self.bare_clone_path(owner, repo);
         let lock = repo_lock(&bare_path);
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(LockPriority::Interactive).await;
         let wt_path = self.worktree_path(owner, repo, branch);
         if wt_path.exists() {
             run_git_in(
@@ -1622,7 +1703,7 @@ impl WorktreeManager {
         F: FnOnce() -> bool + Send,
     {
         let lock = repo_lock(bare_path);
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(LockPriority::Interactive).await;
         if !still_removable() {
             // Re-claimed under the lock — the path now belongs to a live
             // or in-flight session. Leaving it is correct; the new owner's
@@ -1676,7 +1757,7 @@ impl WorktreeManager {
         }
         let bare_path = self.bare_clone_path(owner, repo);
         let lock = repo_lock(&bare_path);
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(LockPriority::Interactive).await;
         if validate_worktree_dir(self.git_runner(), wt_path, &bare_path).await?
             != WorktreeDirState::Valid
         {
@@ -1698,7 +1779,7 @@ impl WorktreeManager {
         worktree_path: &Path,
     ) -> Result<Option<PathBuf>, GitError> {
         let lock = repo_lock(bare_path);
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(LockPriority::Interactive).await;
         if !worktree_path.exists() {
             let _ = run_git_in(self.git_runner(), bare_path, &["worktree", "prune"]).await;
             return Ok(None);
@@ -4201,6 +4282,120 @@ mod auth_env_tests {
 }
 
 #[cfg(test)]
+mod repo_lock_tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    type Order = Arc<StdMutex<Vec<&'static str>>>;
+
+    fn spawn_waiter(
+        lock: &Arc<RepoLock>,
+        order: &Order,
+        name: &'static str,
+        priority: LockPriority,
+    ) -> tokio::task::JoinHandle<()> {
+        let lock = lock.clone();
+        let order = order.clone();
+        tokio::spawn(async move {
+            let _guard = lock.lock(priority).await;
+            order.lock().unwrap_or_else(|e| e.into_inner()).push(name);
+        })
+    }
+
+    /// The fast lane: with a background sweep already holding a repo's lock,
+    /// several *more* background acquirers queued behind it, and one
+    /// interactive acquirer arriving last, the interactive one is granted
+    /// first when the holder releases — it jumps the whole background queue.
+    ///
+    /// Pinned to the current-thread runtime: [`park_spawned_tasks`] relies on
+    /// cooperative single-threaded scheduling to know every spawned task has
+    /// reached its `.await` before the holder releases.
+    #[tokio::test(flavor = "current_thread")]
+    async fn interactive_acquirer_jumps_the_background_queue() {
+        let lock = Arc::new(RepoLock::new());
+        let order: Order = Arc::new(StdMutex::new(Vec::new()));
+
+        // A background sweep is mid-flight, holding the lock (so it holds the
+        // turnstile too — every other background acquirer blocks on it).
+        let held = lock.lock(LockPriority::Background).await;
+
+        // Three background acquirers queue up *first*...
+        let bg1 = spawn_waiter(&lock, &order, "bg1", LockPriority::Background);
+        let bg2 = spawn_waiter(&lock, &order, "bg2", LockPriority::Background);
+        let bg3 = spawn_waiter(&lock, &order, "bg3", LockPriority::Background);
+        park_spawned_tasks().await;
+
+        // ...then the interactive acquirer arrives last.
+        let interactive = spawn_waiter(&lock, &order, "interactive", LockPriority::Interactive);
+        park_spawned_tasks().await;
+
+        // Release the sweep's lock; drain the queue.
+        drop(held);
+        for handle in [bg1, bg2, bg3, interactive] {
+            handle.await.expect("waiter task");
+        }
+
+        let order = order.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(order.len(), 4, "every waiter acquired once: {order:?}");
+        assert_eq!(
+            order[0], "interactive",
+            "interactive must win despite queuing last: {order:?}"
+        );
+        assert!(
+            order[1..].iter().all(|n| n.starts_with("bg")),
+            "the three background acquirers follow: {order:?}"
+        );
+    }
+
+    /// The bound the fast lane deliberately does *not* cross. `data` is FIFO,
+    /// so a background op that has already passed the turnstile and parked on
+    /// `data` is served ahead of a *later*-arriving interactive op — priority
+    /// reorders turnstile-blocked waiters, it does not preempt one already in
+    /// the `data` queue. This is what caps an interactive op's wait at one
+    /// in-flight background op rather than making it strictly first.
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_background_op_is_served_before_a_later_interactive() {
+        let lock = Arc::new(RepoLock::new());
+        let order: Order = Arc::new(StdMutex::new(Vec::new()));
+
+        // An interactive op holds the lock; the turnstile is free.
+        let held = lock.lock(LockPriority::Interactive).await;
+
+        // A background op arrives and parks on `data` (turnstile was free).
+        let bg = spawn_waiter(&lock, &order, "bg", LockPriority::Background);
+        park_spawned_tasks().await;
+
+        // A second interactive op arrives *after* the background op is queued.
+        let interactive = spawn_waiter(&lock, &order, "interactive", LockPriority::Interactive);
+        park_spawned_tasks().await;
+
+        drop(held);
+        for handle in [bg, interactive] {
+            handle.await.expect("waiter task");
+        }
+
+        let order = order.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            order.as_slice(),
+            ["bg", "interactive"],
+            "a background op already queued on `data` is served FIFO, ahead of a later interactive: {order:?}"
+        );
+    }
+
+    /// Let every already-spawned task run until it parks on the lock. Relies on
+    /// the current-thread runtime (`flavor = "current_thread"` on the callers):
+    /// yielding hands control to the queued tasks, which each poll once, block
+    /// on the held mutex, and park. On a multi-threaded runtime a task could
+    /// still be unscheduled when the count runs out, so do not change the
+    /// flavor without replacing this with a real readiness barrier.
+    async fn park_spawned_tasks() {
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+#[cfg(test)]
 #[cfg(unix)]
 mod stalled_clone_tests {
     use super::*;
@@ -4488,7 +4683,7 @@ mod health_probe_tests {
         git(&bare, &["remote", "remove", "origin"]);
 
         let got = mgr
-            .default_branch("acme", "widget")
+            .default_branch("acme", "widget", LockPriority::Interactive)
             .await
             .expect("develop must resolve via the fallback probe");
         assert_eq!(got, "develop");
@@ -4525,7 +4720,7 @@ mod health_probe_tests {
         git(&bare, &["remote", "remove", "origin"]);
 
         let err = mgr
-            .default_branch("acme", "widget")
+            .default_branch("acme", "widget", LockPriority::Interactive)
             .await
             .expect_err("no branch can resolve");
         let msg = err.to_string();

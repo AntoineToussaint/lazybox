@@ -3225,7 +3225,10 @@ async fn sync_one_tracked_workspace(
     // whether we resolved it fresh so the commit phase persists it.
     let (base, base_resolved) = match base_branch {
         Some(b) => (b, false),
-        None => match mgr.default_branch(owner, name).await {
+        None => match mgr
+            .default_branch(owner, name, lazybox_git_ops::LockPriority::Background)
+            .await
+        {
             Ok(b) => (b, true),
             Err(e) => {
                 tracing::debug!(workspace = %key, error = %e, "track-main: default branch unresolved");
@@ -3878,8 +3881,14 @@ async fn retire_pr_stub_sessions(
         if on_disk {
             let removed = match repo.as_ref() {
                 Some((owner, name)) => matches!(
-                    mgr.reclaim_managed_worktree_if_safe(owner, name, &pr_ws.branch, &path,)
-                        .await,
+                    mgr.reclaim_managed_worktree_if_safe(
+                        owner,
+                        name,
+                        &pr_ws.branch,
+                        &path,
+                        lazybox_git_ops::LockPriority::Background
+                    )
+                    .await,
                     Ok(lazybox_git_ops::WorktreeReclaimOutcome::Reclaimed)
                 ),
                 // A provisioning fallback can only be retired by an

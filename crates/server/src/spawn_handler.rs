@@ -2903,7 +2903,12 @@ async fn recover_untracked_pr_worktree_locked(
 
     let candidates = match config
         .worktree_manager()
-        .managed_worktrees_for_branch(owner, name, &branch)
+        .managed_worktrees_for_branch(
+            owner,
+            name,
+            &branch,
+            lazybox_git_ops::LockPriority::Interactive,
+        )
         .await
     {
         Ok(candidates) => candidates,
@@ -3201,7 +3206,13 @@ async fn reclaim_non_live_managed_holder_locked(
     // Lock released here; expensive reclaim operation follows.
 
     match mgr
-        .reclaim_managed_worktree_if_safe(owner, repo, branch, holder)
+        .reclaim_managed_worktree_if_safe(
+            owner,
+            repo,
+            branch,
+            holder,
+            lazybox_git_ops::LockPriority::Interactive,
+        )
         .await
     {
         Ok(lazybox_git_ops::WorktreeReclaimOutcome::Reclaimed) => {
@@ -3713,7 +3724,7 @@ async fn provision_worktree(
             // reuse the one worktree rather than fighting over the branch.
             let on_main_branch = if on_main {
                 Some(
-                    mgr.default_branch(owner, name)
+                    mgr.default_branch(owner, name, lazybox_git_ops::LockPriority::Interactive)
                         .await
                         .map_err(|e| ServerError::Worktree(format!("default_branch: {e}")))?,
                 )
@@ -3816,9 +3827,12 @@ async fn provision_worktree(
                             )));
                         }
                     };
-                    let base = mgr.default_branch(owner, name).await.map_err(|e| {
-                        ServerError::Worktree(format!("default_branch lookup: {e}"))
-                    })?;
+                    let base = mgr
+                        .default_branch(owner, name, lazybox_git_ops::LockPriority::Interactive)
+                        .await
+                        .map_err(|e| {
+                            ServerError::Worktree(format!("default_branch lookup: {e}"))
+                        })?;
                     let mut checkout = mgr
                         .checkout_new_branch_at(target, owner, name, &new_branch, &base)
                         .await;

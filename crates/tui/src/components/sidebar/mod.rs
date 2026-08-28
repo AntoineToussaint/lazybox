@@ -481,6 +481,22 @@ pub struct Sidebar {
     today_buckets: Option<Vec<lazybox_ipc::StatBucket>>,
 }
 
+/// The category of a queued notification. Drives burst coalescing:
+/// a flurry of same-kind banners collapses into one summary
+/// ("N agents need input") rather than N separate popups (#1370).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NotificationKind {
+    /// An agent transitioned into `InputNeeded`.
+    Asking,
+    /// An agent finished its turn (`Done`).
+    Done,
+    /// An agent hit a usage / rate limit.
+    LimitReached,
+    /// A workspace gained a non-agent attention signal (CI failing,
+    /// review requested, new activity, mention).
+    Activity,
+}
+
 /// A queued user-facing notification that the outer (IO-aware) layer
 /// will translate into an OS-level banner. Pure data so the sidebar
 /// is fully testable without involving any subprocess.
@@ -489,6 +505,10 @@ pub struct PendingNotification {
     pub title: String,
     pub body: String,
     pub workspace_key: SessionKey,
+    /// Workspace display name — used to build a summary body when a
+    /// burst of same-kind notifications is coalesced.
+    pub name: String,
+    pub kind: NotificationKind,
 }
 
 impl Sidebar {

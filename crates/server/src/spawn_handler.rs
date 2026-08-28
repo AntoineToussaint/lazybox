@@ -8828,9 +8828,21 @@ pub async fn recover_sessions(config: &ServerConfig) {
         // survivor's workspace was deleted, kill the orphan backend session and
         // sweep its persisted per-terminal rows so it can't be reconstructed on
         // the next restart either.
+        //
+        // Archived-set membership alone is NOT enough: the set is permanent
+        // (nothing but delete-rollback removes a key) and workspace keys are
+        // reused — `allocate_workspace_key` hands a slug key back as soon as the
+        // store row is gone, so a workspace archived and later recreated under
+        // the same name carries a key that still lingers in the set while being
+        // fully live. Killing it here would destroy that live workspace's
+        // session on every restart. The resurrection risk exists only when the
+        // row is actually gone, so confirm the row is absent before killing —
+        // the same "is the row still there?" test that already filters
+        // `restore_persisted_sessions`.
         if archived_keys
             .as_ref()
             .is_some_and(|archived| archived.contains(session_key.as_str()))
+            && workspace_row_is_absent(config, &session_key).await
         {
             tracing::info!("recover: killing orphan session for archived workspace {session_key}");
             if let Err(error) = config.backend.kill(&key).await {
@@ -9454,6 +9466,22 @@ pub(crate) async fn load_agent_state_generation(
         .ok()??
         .parse()
         .ok()
+}
+
+/// Whether the workspace row for `session_key` is definitively gone — deleted,
+/// or a stub carrying no json. That is the only state in which a surviving
+/// backend session is a resurrection risk: a present row means the workspace
+/// still (or again) exists, so its session must be reattached even if the key
+/// lingers in the permanent archived set. A store read error returns `false`
+/// (treat as present): recovery never kills a session on an ambiguous read.
+async fn workspace_row_is_absent(config: &ServerConfig, session_key: &SessionKey) -> bool {
+    let store = config.store.clone();
+    let key = WorkspaceKey::new(session_key.as_str());
+    match tokio::task::spawn_blocking(move || store.get_workspace(&key)).await {
+        Ok(Ok(Some(record))) => record.workspace_json.is_none(),
+        Ok(Ok(None)) => true,
+        Ok(Err(_)) | Err(_) => false,
+    }
 }
 
 /// Delete every persisted per-terminal kv row owned by `backend_key`: the whole
@@ -11891,6 +11919,81 @@ mod tests {
                 .expect("read live meta")
                 .is_some(),
             "the live survivor's persisted terminal meta must be preserved"
+        );
+    }
+
+    // Regression (recreate under an archived key): archiving is permanent
+    // (`archive_workspace_key` only ever inserts) and workspace keys are reused
+    // (`allocate_workspace_key` hands a slug key back once the store row is
+    // gone). So a workspace archived, then recreated under the same name,
+    // carries a key that still lives in the archived set while being fully
+    // live. Recovery must NOT confuse that live session for a deleted-workspace
+    // orphan: with a present workspace row it reattaches, even though the key is
+    // archived. (Without the row-presence check, recovery silently killed the
+    // recreated workspace's session and swept its meta on every restart.)
+    #[tokio::test]
+    async fn recovery_reattaches_recreated_workspace_whose_key_lingers_in_archived_set() {
+        let backend = crate::backend::MockBackend::new();
+        let backend_key = backend
+            .spawn(
+                &["claude".into()],
+                Some(std::path::Path::new("/tmp")),
+                &[],
+                "recreated-agent",
+            )
+            .await
+            .expect("spawn recreated backend");
+        let store: std::sync::Arc<dyn lazybox_store::Store> =
+            std::sync::Arc::new(lazybox_store::MemoryStore::new());
+        let seed = ServerConfig::with_store_and_backend(store.clone(), backend.as_backend());
+        let session_key = SessionKey::new("notes");
+        let kind = TerminalKind::Agent("claude".into());
+        persist_terminal_meta(&seed, &backend_key, &session_key, &kind).await;
+        // The key was archived in a past life...
+        assert!(crate::workspace::archive_workspace_key(
+            &seed,
+            session_key.as_str()
+        ));
+        // ...but a workspace under the same key exists again (recreated by
+        // `x n`, which reused the freed slug key).
+        let workspace = Workspace::empty(WorkspaceKey::new("notes"), "main", Utc::now());
+        seed.store
+            .save_workspace(&WorkspaceRecord {
+                key: workspace.key.as_str().into(),
+                created_at: workspace.created_at,
+                workspace_json: Some(
+                    serde_json::to_string(&workspace).expect("serialize workspace"),
+                ),
+            })
+            .expect("save recreated workspace");
+
+        let restarted = ServerConfig::with_store_and_backend(store.clone(), backend.as_backend());
+        recover_sessions(&restarted).await;
+
+        let snapshot = snapshot_terminals(&restarted).await;
+        assert_eq!(
+            snapshot
+                .iter()
+                .filter(|t| t.session_key == session_key)
+                .count(),
+            1,
+            "a live workspace recreated under a still-archived key must be reattached"
+        );
+        assert!(
+            restarted
+                .backend
+                .list()
+                .await
+                .expect("backend list")
+                .contains(&backend_key),
+            "the recreated workspace's backend session must not be killed"
+        );
+        assert!(
+            store
+                .get_kv(&TerminalPersistedField::Metadata.key(&backend_key))
+                .expect("read recreated meta")
+                .is_some(),
+            "the recreated workspace's persisted terminal meta must be preserved"
         );
     }
 

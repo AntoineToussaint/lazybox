@@ -38,8 +38,9 @@
 //! back up, so the toil re-appears at the far end (visit each terminal,
 //! type "continue"). So auto-wait remembers every terminal it pressed Wait
 //! on and, the moment that terminal transitions *out* of `LimitReached` to
-//! a resting screen (`Done` — the reset happened and the turn settled),
-//! injects the same continuation nudge the credit-recovery flow uses
+//! a resting screen (`Idle` — the reset happened and the agent parked at an
+//! empty composer; also `Done` for a hook-driven settle), injects the same
+//! continuation nudge the credit-recovery flow uses
 //! (`ui.credit_recovery_prompt`, "Continue the work you were doing.")
 //! through the settle-gated inject path, so it waits for the composer and
 //! confirms submission rather than blind-firing a keystroke. A clear to
@@ -128,13 +129,22 @@ fn resume_prompt() -> String {
 }
 
 /// After the wait clears, only a settled screen needs the continuation
-/// nudge. `Done` is "the reset happened and the turn came to rest at an
-/// empty composer" — exactly the case that would otherwise idle forever. A
-/// clear to `Working` means the agent auto-resumed (re-auth / auto-continue),
-/// so nudging it would inject a stray prompt mid-turn; every other clear (a
+/// nudge. The reset landing and the agent coming to rest at an empty ready
+/// composer is the case that would otherwise idle forever — and that screen
+/// classifies as **`Idle`**, not `Done`: `detect::claude_state` reads a
+/// resting composer as `Idle`, and from `AwaitingReset` (not `Working`) the
+/// state machine's settle-promotion does NOT rewrite it to `Done` (a `Done`
+/// reading is in fact *rejected* from a blocked state, see
+/// `AgentStateMachine::on_reading`). So gating on `Done` alone — the
+/// original bug — never fired for the exact case the resume exists to
+/// handle. `Done` is kept for the one path that still produces it: a
+/// hook-driven settle from `AwaitingReset` (a `Stop` hook delivered after
+/// the reset). A clear to `Working` means the agent auto-resumed (re-auth /
+/// auto-continue) and is dropped before it ever settles here, so nudging
+/// would only ever inject a stray prompt mid-turn; every other clear (a
 /// fresh permission prompt, a new credit block, an exit) is left alone.
 fn wants_resume_nudge(state: &AgentState) -> bool {
-    matches!(state, AgentState::Done)
+    matches!(state, AgentState::Idle | AgentState::Done)
 }
 
 /// Watch the event bus and, for each agent that enters `LimitReached`,
@@ -191,6 +201,16 @@ async fn run<F, P, PFut, R, RFut>(
                 if pending_resume.remove(&terminal_id) && enabled() && wants_resume_nudge(&state) {
                     resume(config.clone(), terminal_id).await;
                 }
+            }
+            // The terminal died (process exit, forced removal, archive). An
+            // agent exit normally also broadcasts `AgentState::Exited`, which
+            // the arm above already drains — but a forced teardown can emit
+            // `TerminalExited` alone (the `AgentState::Exited` broadcast is
+            // guarded on the terminal still being a live agent with a backend
+            // key). Drop the tracked id unconditionally so a dead terminal can
+            // never linger in the set forever, and can never be nudged.
+            Ok(Event::TerminalExited { terminal_id, .. }) => {
+                pending_resume.remove(&terminal_id);
             }
             Ok(_) => continue,
             // Best-effort: a lagged receiver may have dropped a
@@ -317,6 +337,77 @@ mod tests {
         );
     }
 
+    /// The REAL production path (regression for the original bug): a resting
+    /// Claude composer after the reset classifies as `Idle`, not `Done` — the
+    /// state machine commits `Idle` from `AwaitingReset` (see the state-machine
+    /// test `awaiting_reset_settles_to_idle_at_an_empty_composer`). So the
+    /// nudge must fire on `Idle` too, otherwise the feature never resumes the
+    /// interrupted work in its own headline case.
+    #[tokio::test]
+    async fn resumes_when_a_pressed_terminals_wait_clears_to_idle() {
+        let config = ServerConfig::in_memory();
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(limit_event(7)).unwrap();
+        tx.send(state_event(7, AgentState::Idle)).unwrap();
+        drop(tx);
+
+        let resumed = RefCell::new(Vec::new());
+        run(
+            rx,
+            config,
+            || true,
+            |_cfg, _tid| async {},
+            |_cfg, tid| {
+                resumed.borrow_mut().push(tid);
+                async {}
+            },
+        )
+        .await;
+        assert_eq!(
+            resumed.into_inner(),
+            vec![TerminalId(7)],
+            "the wait clearing to a resting Idle composer injects the continuation nudge",
+        );
+    }
+
+    /// A `TerminalExited` for a tracked terminal drains it from the pending set
+    /// WITHOUT nudging — a dead terminal can't be resumed, and the entry must
+    /// not linger. Covers the forced-teardown path that emits `TerminalExited`
+    /// without an accompanying `AgentState::Exited`.
+    #[tokio::test]
+    async fn terminal_exit_drops_tracking_without_resuming() {
+        let config = ServerConfig::in_memory();
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(limit_event(3)).unwrap();
+        tx.send(Event::TerminalExited {
+            terminal_id: TerminalId(3),
+            exit_code: Some(0),
+            last_output: None,
+        })
+        .unwrap();
+        // A later resting clear for the same id must NOT resume — it was
+        // already dropped by the exit.
+        tx.send(state_event(3, AgentState::Idle)).unwrap();
+        drop(tx);
+
+        let resumed = RefCell::new(Vec::new());
+        run(
+            rx,
+            config,
+            || true,
+            |_cfg, _tid| async {},
+            |_cfg, tid| {
+                resumed.borrow_mut().push(tid);
+                async {}
+            },
+        )
+        .await;
+        assert!(
+            resumed.into_inner().is_empty(),
+            "a terminal that exited is dropped from tracking and never nudged",
+        );
+    }
+
     /// The production shape: after pressing Wait we relabel the block to
     /// `AwaitingReset` (an `AgentState` event auto-wait receives back).
     /// That event must NOT drop the terminal from tracking — the block is
@@ -420,14 +511,19 @@ mod tests {
     }
 
     #[test]
-    fn only_done_wants_a_resume_nudge() {
+    fn only_a_resting_clear_wants_a_resume_nudge() {
+        // `Idle` is the real park-at-composer state after a reset; `Done`
+        // covers a hook-driven settle from `AwaitingReset`. Nothing else does
+        // — a `Working` clear means the agent auto-resumed, and the blocked /
+        // exited states are not a resting screen.
+        assert!(wants_resume_nudge(&AgentState::Idle));
         assert!(wants_resume_nudge(&AgentState::Done));
         for state in [
             AgentState::Working,
             AgentState::InputNeeded,
-            AgentState::Idle,
             AgentState::LimitReached,
             AgentState::CreditExhausted,
+            AgentState::AwaitingReset,
             AgentState::Exited { code: Some(0) },
         ] {
             assert!(

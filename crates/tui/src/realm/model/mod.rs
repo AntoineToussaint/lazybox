@@ -3159,6 +3159,7 @@ impl<T: TerminalAdapter> Model<T> {
             display,
         );
         self.sidebar.set_keep_awake(ui.keep_awake);
+        self.sidebar.set_auto_wait_on_limit(ui.auto_wait_on_limit);
         self.sidebar.set_show_agent_model(ui.show_agent_model);
         self.sidebar.set_usage_summary(ui.usage_summary);
         self.sidebar.set_usage_budgets(ui.usage_budgets.clone());

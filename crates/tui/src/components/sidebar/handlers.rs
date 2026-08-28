@@ -466,7 +466,17 @@ impl Sidebar {
                 // the same path as asking/done so N agents all hitting the
                 // cap at once surface without visiting each terminal. The
                 // footer notice names the bulk-resume key.
+                //
+                // Suppressed when `ui.auto_wait_on_limit` is on: the daemon
+                // auto-presses Wait and immediately relabels this block to the
+                // calm `AwaitingReset`, so the `LimitReached` we see here is a
+                // *handled* transient, not a "needs you" alert. Alerting on it
+                // (a desktop push naming Shift-K/Shift-L manual sweeps the
+                // policy exists to eliminate) defeats the point. A block the
+                // policy can't handle — the agent already moved on, so the
+                // park no-ops — was transient anyway and needs no alert.
                 if change.now_limit_reached
+                    && !self.auto_wait_on_limit
                     && let Some(workspace) = self.workspaces.get(session_key)
                 {
                     if self.attention.desktop_notify {

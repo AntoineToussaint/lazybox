@@ -1403,6 +1403,12 @@ pub struct UiDefaults {
     /// Escalate a footer alert as agents hit their usage limit. See
     /// [`UiSection::usage_limit_alerts`].
     pub usage_limit_alerts: bool,
+    /// Auto-press "Wait" on a usage-limit block. See
+    /// [`UiSection::auto_wait_on_limit`]. Mirrored into the resolved UI so
+    /// the client can stay quiet on the transient `LimitReached` the daemon
+    /// is about to park to the calm `AwaitingReset` — a handled block is not
+    /// an alert.
+    pub auto_wait_on_limit: bool,
     pub credit_recovery_prompt: String,
     /// Show the always-visible per-provider usage summary. See
     /// [`UiSection::usage_summary`].
@@ -1442,6 +1448,7 @@ impl Default for UiDefaults {
             keep_awake: false,
             show_agent_model: true,
             usage_limit_alerts: true,
+            auto_wait_on_limit: false,
             credit_recovery_prompt: default_credit_recovery_prompt(),
             usage_summary: true,
             today_summary: true,
@@ -1490,6 +1497,7 @@ impl UiSection {
             keep_awake: self.keep_awake,
             show_agent_model: self.show_agent_model,
             usage_limit_alerts: self.usage_limit_alerts,
+            auto_wait_on_limit: self.auto_wait_on_limit,
             credit_recovery_prompt,
             usage_summary: self.usage_summary,
             today_summary: self.today_summary,

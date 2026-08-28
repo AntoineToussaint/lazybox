@@ -450,6 +450,14 @@ pub struct Sidebar {
     /// being kept awake and why. The daemon re-reads the flag live;
     /// this client-side mirror refreshes on restart.
     keep_awake: bool,
+    /// Mirror of `ui.auto_wait_on_limit` as loaded at startup. When set, the
+    /// daemon auto-presses "Wait" on a usage-limit block and immediately
+    /// relabels it to the calm `AwaitingReset`, so the transient
+    /// `LimitReached` the client sees first is a *handled* block — not an
+    /// alert. Gates the rising-edge rate-limit desktop notification + footer
+    /// notice so an auto-waited agent stays quiet (the whole point of the
+    /// policy). Refreshes on restart, mirroring the daemon's live re-read.
+    auto_wait_on_limit: bool,
     /// Mirror of `ui.show_agent_model` (default on). When set, each agent
     /// runner badge is followed by its model + effort label
     /// ([`terminal_models`](Self::terminal_models)); off keeps the sidebar
@@ -555,6 +563,7 @@ impl Sidebar {
             broadcast_selected: std::collections::HashSet::new(),
             sweep: None,
             keep_awake: false,
+            auto_wait_on_limit: false,
             show_agent_model: true,
             usage: lazybox_tui_core::usage::UsageTracker::default(),
             usage_reset: HashMap::new(),
@@ -590,6 +599,14 @@ impl Sidebar {
     /// actual inhibitor.
     pub fn set_keep_awake(&mut self, keep_awake: bool) {
         self.keep_awake = keep_awake;
+    }
+
+    /// Record whether `ui.auto_wait_on_limit` is on. When set, the rising-edge
+    /// rate-limit alert (desktop notification + footer notice) is suppressed:
+    /// the daemon parks the block to the calm `AwaitingReset`, so a handled
+    /// limit must not ping the user like an unhandled one.
+    pub fn set_auto_wait_on_limit(&mut self, auto_wait_on_limit: bool) {
+        self.auto_wait_on_limit = auto_wait_on_limit;
     }
 
     /// Record whether `ui.show_agent_model` is on — gates the per-agent

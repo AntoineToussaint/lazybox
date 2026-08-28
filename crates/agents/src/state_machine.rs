@@ -1180,6 +1180,23 @@ mod tests {
         assert!(is_blocked(AgentState::AwaitingReset));
     }
 
+    #[test]
+    fn awaiting_reset_settles_to_idle_at_an_empty_composer() {
+        // The reset lands and the agent parks at an empty ready composer.
+        // `detect::claude_state` classifies that screen as `Idle`, and from
+        // `AwaitingReset` (not `Working`) the settle-promotion does NOT rewrite
+        // it to `Done`. So the state auto-wait actually observes when the wait
+        // clears to a resting screen is `Idle` — which is why the resume nudge
+        // must fire on `Idle`, not only `Done`. (A `Done` *reading* here would
+        // instead be rejected, since `Done` is only ever a settled `Working`
+        // turn.)
+        let mut m = machine();
+        assert_eq!(
+            m.on_reading(Some(AgentState::AwaitingReset), clear(Idle)),
+            Outcome::Committed(Idle),
+        );
+    }
+
     // ── Done stickiness ───────────────────────────────────────────
 
     #[test]

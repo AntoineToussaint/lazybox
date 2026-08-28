@@ -4769,6 +4769,56 @@ mod done_alert_tests {
         );
     }
 
+    /// A usage-limit block alerts the user on its rising edge — an OS
+    /// notification + a footer notice naming the manual resume keys — exactly
+    /// like `Done` (#847). This is the default (auto-wait off).
+    #[test]
+    fn reaching_limit_reached_alerts_by_default() {
+        let (mut sb, key) = sidebar_with_one_workspace();
+        sb.on_event(&agent_state(&key, AgentState::Working));
+        sb.drain_pending_notifications();
+        sb.drain_pending_asking_notices();
+
+        sb.on_event(&agent_state(&key, AgentState::LimitReached));
+        let notifs = sb.drain_pending_notifications();
+        assert_eq!(notifs.len(), 1);
+        assert!(
+            notifs[0].title.contains("rate-limited"),
+            "OS banner on the limit rising edge",
+        );
+        assert!(
+            sb.drain_pending_asking_notices()
+                .iter()
+                .any(|n| n.contains("hit its usage limit")),
+            "footer notice on the limit rising edge",
+        );
+    }
+
+    /// Regression (F2): with `ui.auto_wait_on_limit` on, the daemon
+    /// auto-presses Wait and immediately relabels the block to the calm
+    /// `AwaitingReset`, so the transient `LimitReached` the client sees first
+    /// is *handled* — it must fire NO OS push and NO footer notice (which
+    /// would name the Shift-K/Shift-L manual sweeps the policy exists to
+    /// eliminate). The whole point of the policy is that the agent stays quiet.
+    #[test]
+    fn auto_wait_on_limit_suppresses_the_rate_limit_alert() {
+        let (mut sb, key) = sidebar_with_one_workspace();
+        sb.set_auto_wait_on_limit(true);
+        sb.on_event(&agent_state(&key, AgentState::Working));
+        sb.drain_pending_notifications();
+        sb.drain_pending_asking_notices();
+
+        sb.on_event(&agent_state(&key, AgentState::LimitReached));
+        assert!(
+            sb.drain_pending_notifications().is_empty(),
+            "an auto-waited limit fires no OS notification",
+        );
+        assert!(
+            sb.drain_pending_asking_notices().is_empty(),
+            "an auto-waited limit fires no footer notice",
+        );
+    }
+
     /// The daemon re-emits `Done` on follow-up chunks; the alert must
     /// fire once (rising edge only), not on every repeat.
     #[test]

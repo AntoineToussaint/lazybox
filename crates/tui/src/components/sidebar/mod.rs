@@ -851,7 +851,7 @@ impl Sidebar {
         self.spawning.contains_key(session_key)
     }
 
-    /// Drop any "spawning" arc older than [`SIDEBAR_SPAWN_GUARD`]. A
+    /// Drop any "spawning" arc older than `SIDEBAR_SPAWN_GUARD`. A
     /// terminating event (live state, `TerminalSpawned`, `Failed` step,
     /// `spawn*` `ProviderError`) normally clears the arc; this is the
     /// backstop for a spawn that produced none — a dropped bus event, or a

@@ -41,6 +41,10 @@ struct MockInner {
     /// an error. Lets retry-contract tests fail once without sleeping
     /// through the timeout path.
     snapshot_failures: Mutex<HashMap<String, usize>>,
+    /// Count of upcoming `list()` calls that should return an error. Lets
+    /// tests exercise a transient inventory failure (e.g. the delete-time
+    /// orphan sweep) without a live tmux backend.
+    list_failures: Mutex<usize>,
     /// Per-key count of upcoming `subscribe()` calls that should fail.
     subscribe_failures: Mutex<HashMap<String, usize>>,
     /// Keys whose `snapshot()` should report `complete: false` — a ring
@@ -272,6 +276,13 @@ impl MockBackend {
     /// tests.
     pub async fn set_list_delay(&self, delay: std::time::Duration) {
         *self.inner.list_delay.lock().await = Some(delay);
+    }
+
+    /// Fail the next `count` `list()` calls, then resume normally. Models a
+    /// transient backend inventory failure — e.g. the delete-time orphan
+    /// sweep whose `backend.list()` fails, leaving a survivor session.
+    pub async fn fail_next_lists(&self, count: usize) {
+        *self.inner.list_failures.lock().await = count;
     }
 
     /// Make `kill(key)` fail without closing or removing the session.
@@ -550,6 +561,13 @@ impl SessionBackend for MockBackend {
             let delay = *self.inner.list_delay.lock().await;
             if let Some(delay) = delay {
                 tokio::time::sleep(delay).await;
+            }
+            {
+                let mut remaining = self.inner.list_failures.lock().await;
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    return Err(BackendError::Other("injected list failure".into()));
+                }
             }
             let map = self.inner.sessions.lock().await;
             Ok(map

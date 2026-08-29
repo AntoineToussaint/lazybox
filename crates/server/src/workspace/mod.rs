@@ -1129,6 +1129,102 @@ pub fn unarchive_workspace_key(config: &ServerConfig, key: &str) -> bool {
     true
 }
 
+/// Strict read of the persisted session-tombstone set, with the same
+/// "no set stored" (`Ok(empty)`) vs "stored but unreadable" (`Err`)
+/// distinction as [`load_archived_set_strict`] — the read-modify-write
+/// callers must not truncate the stored history off a transient
+/// SQLITE_BUSY or a corrupt payload.
+pub(crate) fn load_session_tombstones_strict(
+    config: &ServerConfig,
+) -> Result<std::collections::HashSet<String>, String> {
+    let raw = config
+        .store
+        .get_kv(lazybox_core::KV_KEY_SESSION_TOMBSTONES)
+        .map_err(|e| format!("read failed: {e}"))?;
+    let Some(json) = raw else {
+        return Ok(Default::default());
+    };
+    if json.trim().is_empty() {
+        return Ok(Default::default());
+    }
+    serde_json::from_str::<Vec<String>>(&json)
+        .map(|v| v.into_iter().collect())
+        .map_err(|e| format!("parse failed: {e}"))
+}
+
+/// Record `key` in the session-tombstone set so recovery kills — never
+/// reattaches — any surviving backend session for it. Written on every
+/// removal reason (see `WorkspaceRemovalReason`). Idempotent; returns
+/// false when persistence (or a degraded read) fails, so the caller can
+/// abort the delete rather than commit a removal whose orphan session
+/// would be reattached on the next restart.
+#[must_use]
+pub fn tombstone_session_key(config: &ServerConfig, key: &str) -> bool {
+    let _update_guard = config.archive_updates.lock();
+    let mut set = match load_session_tombstones_strict(config) {
+        Ok(set) => set,
+        Err(e) => {
+            tracing::error!(
+                "tombstone_session_key: existing tombstone set unreadable ({e}) — \
+                 refusing to rewrite it; tombstone of {key} aborted"
+            );
+            return false;
+        }
+    };
+    if !set.insert(key.to_string()) {
+        return true;
+    }
+    let vec: Vec<&String> = set.iter().collect();
+    let Ok(json) = serde_json::to_string(&vec) else {
+        tracing::error!("tombstone_session_key: serialize failed");
+        return false;
+    };
+    if let Err(e) = config
+        .store
+        .set_kv(lazybox_core::KV_KEY_SESSION_TOMBSTONES, &json)
+    {
+        tracing::warn!("tombstone_session_key: set_kv failed: {e}");
+        return false;
+    }
+    true
+}
+
+/// Remove `key` from the session-tombstone set. Called only when a
+/// committed delete is being rolled back, so an aborted removal doesn't
+/// leave a tombstone that would kill the still-present workspace's
+/// session on restart. Same degraded-read contract as
+/// [`tombstone_session_key`].
+#[must_use]
+pub fn untombstone_session_key(config: &ServerConfig, key: &str) -> bool {
+    let _update_guard = config.archive_updates.lock();
+    let mut set = match load_session_tombstones_strict(config) {
+        Ok(set) => set,
+        Err(e) => {
+            tracing::error!(
+                "untombstone_session_key: existing tombstone set unreadable ({e}) — \
+                 refusing to rewrite it; untombstone of {key} aborted"
+            );
+            return false;
+        }
+    };
+    if !set.remove(key) {
+        return true;
+    }
+    let vec: Vec<&String> = set.iter().collect();
+    let Ok(json) = serde_json::to_string(&vec) else {
+        tracing::error!("untombstone_session_key: serialize failed");
+        return false;
+    };
+    if let Err(e) = config
+        .store
+        .set_kv(lazybox_core::KV_KEY_SESSION_TOMBSTONES, &json)
+    {
+        tracing::warn!("untombstone_session_key: set_kv failed: {e}");
+        return false;
+    }
+    true
+}
+
 /// Recursively sum the byte size of a directory tree. Best-effort: any
 /// entry it can't stat is skipped, and symlinks are counted as their own
 /// (near-zero) size rather than followed — so a symlinked directory can't
@@ -2405,11 +2501,38 @@ impl<'a> WorkspaceLifecycle<'a> {
 
         // Record the archive only after every requested terminal kill succeeded.
         // Otherwise a transient backend failure both keeps the workspace alive
-        // and blocks the next poll from repairing/re-presenting it.
+        // and blocks the next poll from repairing/re-presenting it. Only the
+        // archiving reasons suppress re-polling; the session tombstone below is
+        // written for every reason.
         if archive && !archive_workspace_key(config, key_str) {
             let _ = config.bus.send(Event::provider_error_retryable(
                 "store",
                 format!("could not archive workspace {key}; it was not deleted"),
+            ));
+            config.deleted_workspaces.lock().remove(key_str);
+            return None;
+        }
+
+        // The session tombstone is the durable kill-on-recovery record for
+        // *every* removal reason — including the non-archiving ClosedAuto /
+        // Rescope, whose only other orphan protection is the best-effort
+        // delete-time sweep below. Written before the row is dropped so a
+        // survivor tmux session is guaranteed a backstop even if that sweep's
+        // `backend.list()` transiently fails (#1377). Failing to persist it
+        // aborts the delete for the same reason a failed archive does.
+        if !tombstone_session_key(config, key_str) {
+            if archive && !unarchive_workspace_key(config, key_str) {
+                tracing::error!(
+                    workspace = %key,
+                    "tombstone abort rollback: could not remove archive record — \
+                     workspace left archived but not deleted",
+                );
+            }
+            let _ = config.bus.send(Event::provider_error_retryable(
+                "store",
+                format!(
+                    "could not record session tombstone for workspace {key}; it was not deleted"
+                ),
             ));
             config.deleted_workspaces.lock().remove(key_str);
             return None;
@@ -2421,7 +2544,21 @@ impl<'a> WorkspaceLifecycle<'a> {
             if !rollback_ok {
                 tracing::error!(
                     workspace = %key,
-                    "delete_workspace rollback: could not remove archive tombstone",
+                    "delete_workspace rollback: could not remove archive record",
+                );
+            }
+            // A session tombstone left behind is inert while the row still
+            // exists: recovery kills a survivor only when its row is ALSO
+            // absent (`recover_sessions`'s row-presence guard), and nothing
+            // else reads the set. So this rollback is best-effort and must not
+            // gate `deleted_workspaces` cleanup — otherwise a store still
+            // rejecting writes here would strand the key in `deleted_workspaces`
+            // and silently kill every later spawn into a workspace that, after
+            // the failed delete, is still present and usable.
+            if !untombstone_session_key(config, key_str) {
+                tracing::error!(
+                    workspace = %key,
+                    "delete_workspace rollback: could not remove session tombstone (inert while the row survives)",
                 );
             }
             let _ = config.bus.send(Event::provider_error_retryable(
@@ -3152,6 +3289,91 @@ mod orphan_backend_session_tests {
                 .expect("read terminal meta")
                 .is_none(),
             "the orphan's persisted terminal meta must be swept"
+        );
+    }
+
+    // Fails `delete_workspace`, and — once a delete has been attempted — also
+    // fails the tombstone-set write. Models a store that keeps rejecting writes
+    // through the delete-failure rollback (e.g. a persistent SQLITE_BUSY), so
+    // the session-tombstone rollback set_kv can't succeed.
+    struct WedgeStore {
+        inner: lazybox_store::MemoryStore,
+        delete_attempted: std::sync::atomic::AtomicBool,
+    }
+
+    impl lazybox_store::Store for WedgeStore {
+        fn apply_batch(&self, mutations: &[StoreMutation]) -> Result<(), StoreError> {
+            self.inner.apply_batch(mutations)
+        }
+        fn get_kv(&self, key: &str) -> Result<Option<String>, StoreError> {
+            self.inner.get_kv(key)
+        }
+        fn set_kv(&self, key: &str, value: &str) -> Result<(), StoreError> {
+            if key == lazybox_core::KV_KEY_SESSION_TOMBSTONES
+                && self
+                    .delete_attempted
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(StoreError::Backend("database is locked".into()));
+            }
+            self.inner.set_kv(key, value)
+        }
+        fn delete_kv(&self, key: &str) -> Result<(), StoreError> {
+            self.inner.delete_kv(key)
+        }
+        fn delete_workspace(&self, _key: &WorkspaceKey) -> Result<(), StoreError> {
+            self.delete_attempted
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Err(StoreError::Backend("delete failed".into()))
+        }
+        fn list_workspaces(&self) -> Result<Vec<WorkspaceRecord>, StoreError> {
+            self.inner.list_workspaces()
+        }
+        fn list_projects(&self) -> Result<Vec<lazybox_store::ProjectRecord>, StoreError> {
+            self.inner.list_projects()
+        }
+    }
+
+    // Regression (#1377 review, finding A): a non-archiving removal whose store
+    // delete fails must not strand its key in `deleted_workspaces`. The session
+    // tombstone was written before the (failing) delete; its rollback set_kv
+    // then also fails. A tombstone left behind is inert while the row survives
+    // (recovery kills a survivor only when its row is ALSO absent), so that
+    // rollback must be best-effort — coupling it into the cleanup decision left
+    // the key in `deleted_workspaces`, which makes `cancel_spawn_for_deleted_
+    // workspace` silently kill every later spawn into a workspace that, after
+    // the failed delete, is still present and usable.
+    #[tokio::test]
+    async fn failed_closed_auto_delete_still_clears_the_deleted_workspaces_guard() {
+        let store = std::sync::Arc::new(WedgeStore {
+            inner: lazybox_store::MemoryStore::new(),
+            delete_attempted: std::sync::atomic::AtomicBool::new(false),
+        });
+        let config = ServerConfig::with_store(store.clone());
+        let key = WorkspaceKey::new("github:o/r#123");
+        let ws = Workspace::empty(key.clone(), "main", Utc::now());
+        config
+            .store
+            .save_workspace(&WorkspaceRecord {
+                key: key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).expect("serialize workspace")),
+            })
+            .expect("save workspace");
+
+        let reclaimed = WorkspaceLifecycle::new(&config)
+            .remove(&key, WorkspaceRemovalReason::ClosedAuto)
+            .await;
+        assert!(
+            reclaimed.is_none(),
+            "the removal aborts because the store delete failed"
+        );
+        // The workspace is still present (the delete failed), so it must remain
+        // spawnable — its key must not linger in the in-process delete guard.
+        assert!(
+            !config.deleted_workspaces.lock().contains(key.as_str()),
+            "a failed non-archiving delete must clear the deleted_workspaces guard \
+             even when the tombstone rollback write also fails"
         );
     }
 }

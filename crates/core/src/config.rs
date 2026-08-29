@@ -289,6 +289,18 @@ pub const KV_KEY_LAYOUT: &str = "layout_v2";
 /// just dismissed. Persistence is per-machine, not synced.
 pub const KV_KEY_ARCHIVED: &str = "archived_workspaces_v1";
 
+/// Set of workspace keys whose backing session must be killed —
+/// never reattached — on the next recovery pass. Written on *every*
+/// workspace removal (all `WorkspaceRemovalReason`s), unlike
+/// [`KV_KEY_ARCHIVED`], which additionally suppresses re-polling and so
+/// is deliberately skipped by non-archiving removals (`ClosedAuto`,
+/// `Rescope`). Splitting the two lets those removals keep their
+/// resurrection backstop — a survivor tmux session that the delete-time
+/// sweep failed to reach is still killed on restart — without also
+/// suppressing a reopened issue from resurfacing. Stored as a
+/// JSON-encoded `Vec<String>`; per-machine, not synced.
+pub const KV_KEY_SESSION_TOMBSTONES: &str = "session_tombstones_v1";
+
 /// Pane layout knobs. Two splitters today: the sidebar's right edge
 /// (left/right split, **as a percentage of the total width**) and the
 /// right column's horizontal split (top/bottom, also a percentage).

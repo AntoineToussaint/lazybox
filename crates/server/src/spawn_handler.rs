@@ -8883,6 +8883,21 @@ pub async fn recover_sessions(config: &ServerConfig) {
             None
         }
     };
+    // The session-tombstone set is the kill-on-recovery record for *every*
+    // removal reason, including the non-archiving ClosedAuto / Rescope that
+    // deliberately stay out of the archived set (#1377). Read it with the
+    // same fail-open contract: an unreadable set drops only its own guard,
+    // never nukes live work.
+    let tombstoned_keys = match crate::workspace::load_session_tombstones_strict(config) {
+        Ok(set) => Some(set),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "recover: session-tombstone set unreadable — reattaching survivors without the tombstone guard"
+            );
+            None
+        }
+    };
     let attach_permits =
         std::sync::Arc::new(tokio::sync::Semaphore::new(RECOVERY_ATTACH_CONCURRENCY));
     let resource_warning_emitted = std::sync::Arc::new(AtomicBool::new(false));
@@ -8895,8 +8910,15 @@ pub async fn recover_sessions(config: &ServerConfig) {
         // sweep its persisted per-terminal rows so it can't be reconstructed on
         // the next restart either. `workspace_is_tombstoned` is the shared
         // authority — see its doc for why membership alone is insufficient.
-        if workspace_is_tombstoned(config, archived_keys.as_ref(), &session_key).await {
-            tracing::info!("recover: killing orphan session for archived workspace {session_key}");
+        if workspace_is_tombstoned(
+            config,
+            archived_keys.as_ref(),
+            tombstoned_keys.as_ref(),
+            &session_key,
+        )
+        .await
+        {
+            tracing::info!("recover: killing orphan session for removed workspace {session_key}");
             if let Err(error) = config.backend.kill(&key).await {
                 tracing::warn!(
                     backend_key = %key,
@@ -9195,7 +9217,13 @@ pub async fn recover_sessions(config: &ServerConfig) {
     // what this skips), so ordering the cleanup last only delays it, never
     // double-registers. Survivors now come back immediately on restart; dead
     // rows are swept a moment later.
-    reconcile_missing_recovered_sessions(config, &live_keys, archived_keys.as_ref()).await;
+    reconcile_missing_recovered_sessions(
+        config,
+        &live_keys,
+        archived_keys.as_ref(),
+        tombstoned_keys.as_ref(),
+    )
+    .await;
     // Registration ran to completion — this pass is no longer cancelled by a
     // launch-time wall-clock, so every live tmux session above is reattached
     // (the detached pumps then bind their I/O conduits). Logged so a restart's
@@ -9207,6 +9235,7 @@ async fn reconcile_missing_recovered_sessions(
     config: &ServerConfig,
     live_keys: &std::collections::HashSet<String>,
     archived_keys: Option<&std::collections::HashSet<String>>,
+    tombstoned_keys: Option<&std::collections::HashSet<String>>,
 ) {
     let store = config.store.clone();
     let rows = match tokio::task::spawn_blocking(move || store.list_kv_prefix("terminal:")).await {
@@ -9241,14 +9270,15 @@ async fn reconcile_missing_recovered_sessions(
         };
         let session_key = SessionKey::from(parsed.0.as_str());
         let kind = parsed.1;
-        // A dead row whose owning workspace the user archived (`x x`) is an
-        // orphan the delete couldn't reach — its agent had already exited, so
+        // A dead row whose owning workspace was removed (archived via `x x`, or
+        // collapsed/rescoped — the session-tombstone set covers every reason) is
+        // an orphan the delete couldn't reach — its agent had already exited, so
         // the row hit neither the live registry nor the delete-time sweep.
         // Registering it to commit `Exited` here would broadcast a ghost
         // lifecycle event for a workspace that is already gone. Sweep it
         // silently instead — no registration, no broadcast. Same
         // `workspace_is_tombstoned` authority `recover_sessions` uses.
-        if workspace_is_tombstoned(config, archived_keys, &session_key).await {
+        if workspace_is_tombstoned(config, archived_keys, tombstoned_keys, &session_key).await {
             let generation = load_agent_state_generation(config, backend_key).await;
             sweep_terminal_persisted_fields(config, backend_key, generation).await;
             continue;
@@ -9534,22 +9564,28 @@ pub(crate) async fn load_agent_state_generation(
 }
 
 /// The single authority both recovery passes consult before acting on a
-/// persisted session: is `session_key`'s workspace a tombstone the user got rid
-/// of? True only when the key is in the permanent archived set (`x x`) AND its
-/// workspace row is definitively gone. Membership alone is insufficient — keys
-/// are reused (`allocate_workspace_key` hands a slug back once the row drops),
-/// so a workspace archived and later recreated under the same name is fully
-/// live while its key still lingers in the set; only an absent row confirms the
-/// deletion actually took. `recover_sessions` uses this to kill a surviving
-/// orphan; `reconcile_missing_recovered_sessions` uses it to sweep a dead row
-/// silently instead of broadcasting a ghost `Exited`.
+/// persisted session: is `session_key`'s workspace a tombstone the user (or an
+/// automatic removal) got rid of? True only when the key is in a removal
+/// record — the permanent archived set (`x x`) OR the session-tombstone set
+/// (written for *every* removal reason, so it also covers the non-archiving
+/// ClosedAuto / Rescope, #1377) — AND its workspace row is definitively gone.
+/// Membership alone is insufficient — keys are reused (`allocate_workspace_key`
+/// hands a slug back once the row drops), so a workspace removed and later
+/// recreated under the same name is fully live while its key still lingers in a
+/// set; only an absent row confirms the deletion actually took. The archived
+/// set stays in the check so keys tombstoned before the tombstone set existed
+/// are still guarded. `recover_sessions` uses this to kill a surviving orphan;
+/// `reconcile_missing_recovered_sessions` uses it to sweep a dead row silently
+/// instead of broadcasting a ghost `Exited`.
 async fn workspace_is_tombstoned(
     config: &ServerConfig,
     archived_keys: Option<&std::collections::HashSet<String>>,
+    tombstoned_keys: Option<&std::collections::HashSet<String>>,
     session_key: &SessionKey,
 ) -> bool {
-    archived_keys.is_some_and(|archived| archived.contains(session_key.as_str()))
-        && workspace_row_is_absent(config, session_key).await
+    let removed = archived_keys.is_some_and(|archived| archived.contains(session_key.as_str()))
+        || tombstoned_keys.is_some_and(|tombstoned| tombstoned.contains(session_key.as_str()));
+    removed && workspace_row_is_absent(config, session_key).await
 }
 
 /// Whether the workspace row for `session_key` is definitively gone — deleted,
@@ -11942,14 +11978,16 @@ mod tests {
         let live_session = SessionKey::new("github:owner/repo#dead");
         persist_terminal_meta(&config, &live_key, &live_session, &TerminalKind::Shell).await;
 
-        // Thread the archived set the way `recover_sessions` does — the pass no
-        // longer re-reads it.
+        // Thread the archived + tombstone sets the way `recover_sessions` does —
+        // the pass no longer re-reads them.
         let archived_keys = crate::workspace::load_archived_set_strict(&config).ok();
+        let tombstoned_keys = crate::workspace::load_session_tombstones_strict(&config).ok();
         let mut events = config.bus.subscribe();
         reconcile_missing_recovered_sessions(
             &config,
             &std::collections::HashSet::new(),
             archived_keys.as_ref(),
+            tombstoned_keys.as_ref(),
         )
         .await;
 
@@ -12158,6 +12196,110 @@ mod tests {
                 .expect("read recreated meta")
                 .is_some(),
             "the recreated workspace's persisted terminal meta must be preserved"
+        );
+    }
+
+    // Regression (D2, #1377): a non-archiving removal keeps its resurrection
+    // backstop even when the delete-time orphan sweep fails. An issue collapses
+    // into its PR (`ClosedAuto`), which deletes the row but — unlike `x x` —
+    // does NOT archive it, so a reopened issue can resurface. Its only orphan
+    // protection is the best-effort delete-time `backend.list()` sweep; if that
+    // transiently fails, the detached tmux session survives with no live
+    // terminal. Without the session tombstone, recovery (which keyed only on the
+    // archived set) would reattach it and resurrect the collapsed issue row. The
+    // tombstone is written for every removal reason, so recovery kills the
+    // orphan instead.
+    #[tokio::test]
+    async fn closed_auto_orphan_session_is_not_resurrected_when_delete_time_sweep_failed() {
+        let backend = crate::backend::MockBackend::new();
+        // The orphan: a detached session for the issue that collapsed into its
+        // PR. On the real box its agent had already exited, so there is no live
+        // registry entry for the delete's registry sweep to kill.
+        let orphan_key = backend
+            .spawn(
+                &["claude".into()],
+                Some(std::path::Path::new("/tmp")),
+                &[],
+                "collapsed-issue-agent",
+            )
+            .await
+            .expect("spawn collapsed-issue backend");
+        let store: std::sync::Arc<dyn lazybox_store::Store> =
+            std::sync::Arc::new(lazybox_store::MemoryStore::new());
+        let seed = ServerConfig::with_store_and_backend(store.clone(), backend.as_backend());
+        let key = WorkspaceKey::new("github:owner/repo#123");
+        let session_key = SessionKey::from(key.as_str());
+        let kind = TerminalKind::Agent("claude".into());
+        persist_terminal_meta(&seed, &orphan_key, &session_key, &kind).await;
+        let workspace = Workspace::empty(key.clone(), "main", Utc::now());
+        seed.store
+            .save_workspace(&WorkspaceRecord {
+                key: key.as_str().into(),
+                created_at: workspace.created_at,
+                workspace_json: Some(
+                    serde_json::to_string(&workspace).expect("serialize workspace"),
+                ),
+            })
+            .expect("save collapsed-issue workspace");
+
+        // Fail the very next `backend.list()` — the delete-time orphan sweep —
+        // so it can't reach the survivor. Recovery's later `list()` succeeds.
+        backend.fail_next_lists(1).await;
+        let reclaimed = crate::workspace::WorkspaceLifecycle::new(&seed)
+            .remove(&key, crate::workspace::WorkspaceRemovalReason::ClosedAuto)
+            .await;
+        assert!(
+            reclaimed.is_some(),
+            "the ClosedAuto removal commits even though the orphan sweep's list() failed"
+        );
+
+        // ClosedAuto must NOT archive (a reopened issue has to resurface), yet
+        // the session tombstone was recorded so recovery still guards the orphan.
+        assert!(
+            !crate::workspace::load_archived_set(&seed).contains(session_key.as_str()),
+            "ClosedAuto must not add the key to the inbox-suppression archived set"
+        );
+        assert!(
+            crate::workspace::load_session_tombstones_strict(&seed)
+                .expect("read tombstones")
+                .contains(session_key.as_str()),
+            "every removal reason must record a session tombstone"
+        );
+        // The sweep failed, so the orphan session is still alive going into the
+        // restart — exactly the state that used to resurrect the row.
+        assert!(
+            seed.backend
+                .list()
+                .await
+                .expect("backend list")
+                .contains(&orphan_key),
+            "precondition: the orphan session survived the failed delete-time sweep"
+        );
+
+        let restarted = ServerConfig::with_store_and_backend(store.clone(), backend.as_backend());
+        recover_sessions(&restarted).await;
+
+        // The orphan is killed, not reattached — no resurrected terminal.
+        let snapshot = snapshot_terminals(&restarted).await;
+        assert!(
+            snapshot.iter().all(|t| t.session_key != session_key),
+            "the collapsed issue's orphan session must not be reattached"
+        );
+        assert!(
+            !restarted
+                .backend
+                .list()
+                .await
+                .expect("backend list")
+                .contains(&orphan_key),
+            "recovery must kill the tombstoned orphan session"
+        );
+        assert!(
+            store
+                .get_kv(&TerminalPersistedField::Metadata.key(&orphan_key))
+                .expect("read orphan meta")
+                .is_none(),
+            "the orphan's persisted terminal meta must be swept"
         );
     }
 

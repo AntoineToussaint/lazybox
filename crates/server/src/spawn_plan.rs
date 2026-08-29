@@ -23,6 +23,13 @@ pub struct SpawnOptions {
     pub access: AgentRunAccess,
     pub client_request_id: Option<String>,
     pub origin: SpawnOrigin,
+    /// A *foreign* actor triggered this autonomous spawn — a mention from
+    /// someone other than the viewer, or a label on an issue the viewer
+    /// didn't author — so its prompt derives from attacker-influenceable
+    /// issue text. Defaults `false` (your own work); the auto-spawn
+    /// dispatch sets it from the trigger. Consulted only for autonomous
+    /// spawns with no explicit `autonomous_skip_permissions` (#1392).
+    pub untrusted: bool,
     /// Deliberately start a new agent even when an idle singleton of the
     /// same kind is already running (#1310). Suppresses idle-singleton
     /// reuse only — the concurrent-race collapse and the issue→PR
@@ -49,6 +56,13 @@ pub(crate) struct SpawnPlanInput {
     pub repo_env: Vec<(String, String)>,
     pub priority_model_alias: Option<String>,
     pub autonomous: bool,
+    /// Whether a *foreign* actor triggered this autonomous spawn (a
+    /// mention from someone other than the viewer, or a label on an
+    /// issue the viewer didn't author) — its prompt derives from issue
+    /// text that actor controls. Only consulted for autonomous spawns
+    /// with no explicit `autonomous_skip_permissions`, where it forces
+    /// permission prompts back on (#1392).
+    pub autonomous_untrusted: bool,
     pub landed_on_main: bool,
     pub model_alias: Option<String>,
     pub resume: bool,
@@ -118,6 +132,7 @@ pub(crate) fn build_spawn_plan(
         repo_env,
         priority_model_alias,
         autonomous,
+        autonomous_untrusted,
         landed_on_main,
         model_alias,
         resume,
@@ -131,7 +146,8 @@ pub(crate) fn build_spawn_plan(
         meter,
     } = input;
     let no_permission = access != AgentRunAccess::ReadOnly
-        && no_permission_override.unwrap_or_else(|| skip_permissions_for(autonomous, cfg));
+        && no_permission_override
+            .unwrap_or_else(|| skip_permissions_for(autonomous, cfg, autonomous_untrusted));
     let agent = match &kind {
         TerminalKind::Agent(id) => Some(
             agents
@@ -463,9 +479,13 @@ pub(crate) fn with_worktree_cargo_target(
     env
 }
 
-pub(crate) fn skip_permissions_for(autonomous: bool, cfg: &lazybox_config::Config) -> bool {
+pub(crate) fn skip_permissions_for(
+    autonomous: bool,
+    cfg: &lazybox_config::Config,
+    untrusted_trigger: bool,
+) -> bool {
     if autonomous {
-        cfg.agent.autonomous_skip_permissions
+        cfg.agent.autonomous_skip(untrusted_trigger)
     } else {
         cfg.agent.skip_permissions
     }
@@ -489,6 +509,7 @@ mod tests {
             repo_env: Vec::new(),
             priority_model_alias: None,
             autonomous: false,
+            autonomous_untrusted: false,
             landed_on_main: false,
             model_alias: None,
             resume: false,
@@ -733,7 +754,7 @@ mod tests {
     #[test]
     fn read_only_agent_plan_never_enables_unattended_bypass() {
         let mut cfg = lazybox_config::Config::default();
-        cfg.agent.autonomous_skip_permissions = true;
+        cfg.agent.autonomous_skip_permissions = Some(true);
         let mut input = input(TerminalKind::Agent("codex".into()));
         input.autonomous = true;
         input.access = AgentRunAccess::ReadOnly;
@@ -747,6 +768,64 @@ mod tests {
             plan.argv
                 .windows(2)
                 .any(|args| args == ["--sandbox", "read-only"])
+        );
+    }
+
+    /// A foreign-triggered autonomous spawn (a mention from someone else,
+    /// or a label on an issue you didn't author) must NOT run unattended
+    /// with `--dangerously-skip-permissions` under the default (unset)
+    /// config — its prompt is attacker-influenceable issue text (#1392).
+    #[test]
+    fn autonomous_untrusted_spawn_keeps_permission_prompts_by_default() {
+        let cfg = lazybox_config::Config::default();
+        assert_eq!(cfg.agent.autonomous_skip_permissions, None);
+        let mut input = input(TerminalKind::Agent("claude".into()));
+        input.autonomous = true;
+        input.autonomous_untrusted = true;
+
+        let plan =
+            build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("valid plan");
+
+        assert!(
+            !plan.flags.no_permission,
+            "a foreign-triggered spawn keeps its permission prompts on the unset default"
+        );
+    }
+
+    /// Your own autonomous work (`w`, your own mention/label) keeps the
+    /// frictionless unattended bypass on the default config.
+    #[test]
+    fn autonomous_trusted_spawn_keeps_bypass_by_default() {
+        let cfg = lazybox_config::Config::default();
+        let mut input = input(TerminalKind::Agent("claude".into()));
+        input.autonomous = true;
+        input.autonomous_untrusted = false;
+
+        let plan =
+            build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("valid plan");
+
+        assert!(
+            plan.flags.no_permission,
+            "your own autonomous work still runs unattended by default"
+        );
+    }
+
+    /// An explicit `autonomous_skip_permissions = true` wins even for a
+    /// foreign trigger — the override is a conscious opt-in.
+    #[test]
+    fn pinned_skip_permissions_overrides_untrusted_trigger() {
+        let mut cfg = lazybox_config::Config::default();
+        cfg.agent.autonomous_skip_permissions = Some(true);
+        let mut input = input(TerminalKind::Agent("claude".into()));
+        input.autonomous = true;
+        input.autonomous_untrusted = true;
+
+        let plan =
+            build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("valid plan");
+
+        assert!(
+            plan.flags.no_permission,
+            "an explicit opt-in keeps the bypass even for a foreign trigger"
         );
     }
 }

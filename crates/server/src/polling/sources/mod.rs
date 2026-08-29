@@ -195,6 +195,14 @@ pub struct GhSource {
     /// viewer's login added as a default when the YAML list is
     /// empty. Empty here disables the feature entirely.
     mention_allowed_logins: std::collections::BTreeSet<String>,
+    /// The authenticated viewer's own login, resolved by `sources_for`.
+    /// Distinguishes a `@lazybox` mention *you* wrote (trusted, keeps the
+    /// unattended bypass) from one a collaborator wrote (untrusted, keeps
+    /// permission prompts) — see the `untrusted` flag on
+    /// [`ProviderAction::AutoSpawnAgent`] (#1392). Empty until the first
+    /// viewer resolve, which fails safe (any configured allowlist login
+    /// then reads as foreign).
+    viewer_login: String,
     /// Auto-fix-on-failure settings, resolved by `sources_for` from
     /// `config.yaml::auto_fix`. When `enabled` is false (the default)
     /// the auto-fix scan is skipped entirely. See
@@ -309,6 +317,13 @@ pub enum ProviderAction {
         /// sweep would re-focus the live agent and re-inject the prompt.
         /// `None` for `@lazybox` mentions, which dedupe via the reaction.
         dedup_key: Option<String>,
+        /// A *foreign* actor triggered this spawn — a mention from a
+        /// login other than the viewer, or a label on an issue the
+        /// viewer didn't author (so its prompt derives from that actor's
+        /// issue text). Withholds the unattended
+        /// `--dangerously-skip-permissions` bypass unless the user pinned
+        /// `agent.autonomous_skip_permissions` (#1392).
+        untrusted: bool,
     },
     /// Auto-fix a PR that's failing CI or conflicting with its base.
     /// Surfaced by the auto-fix scan (`evaluate_auto_fix`) during a
@@ -852,6 +867,10 @@ impl GhSource {
                     reason,
                     // Mentions dedupe via the 👀 reaction, not a store key.
                     dedup_key: None,
+                    // A mention you wrote yourself is trusted; one a
+                    // collaborator wrote builds the prompt from their
+                    // issue text, so it keeps permission prompts (#1392).
+                    untrusted: mention.triggered_by_login != self.viewer_login,
                 });
                 react_targets.push(mention.target_node_id);
             }
@@ -1246,6 +1265,7 @@ pub(super) async fn dispatch_action(
             prompt,
             reason,
             dedup_key,
+            untrusted,
         } => {
             // Label-triggered spawns carry a store-backed marker (labels
             // persist with no reaction to skip on). If we've already
@@ -1298,6 +1318,7 @@ pub(super) async fn dispatch_action(
                     autonomous: true,
                     model_alias,
                     origin: lazybox_ipc::SpawnOrigin::Autonomous(trigger),
+                    untrusted,
                     ..Default::default()
                 },
             )
@@ -2304,6 +2325,11 @@ pub fn label_spawn_actions(
         ));
         let reason = format!("{label_name} label on {}", task.id.key);
         let dedup_key = Some(format!("autospawn-label:{session_key}:{label_name}"));
+        // A label on an issue *you authored* builds the prompt from your
+        // own text (trusted). One where you're only the assignee may have
+        // a foreign author, and the labeller is unknowable — treat it as
+        // untrusted so its prompt can't drive an unattended agent (#1392).
+        let untrusted = !matches!(task.role, lazybox_core::TaskRole::Author);
         out.push((
             task.clone(),
             ProviderAction::AutoSpawnAgent {
@@ -2313,6 +2339,7 @@ pub fn label_spawn_actions(
                 prompt,
                 reason,
                 dedup_key,
+                untrusted,
             },
         ));
     }
@@ -2703,6 +2730,7 @@ mod auto_spawn_dedup_tests {
                 prompt: Some("Implement issue".into()),
                 reason: "lazybox:codex/xhigh label on o/r#1".into(),
                 dedup_key: Some(key),
+                untrusted: false,
             },
         )
         .await;
@@ -3535,6 +3563,7 @@ async fn push_github_source(
         detect_needs_reply,
         bus: bus.clone(),
         mention_allowed_logins: mention_allowed,
+        viewer_login: viewer.clone(),
         auto_fix,
         conventions,
         pending_actions: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),

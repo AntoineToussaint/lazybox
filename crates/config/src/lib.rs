@@ -1931,7 +1931,7 @@ impl AgentEntry {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentSection {
     #[serde(flatten)]
@@ -1941,9 +1941,22 @@ pub struct AgentSection {
     /// --dangerously-skip-permissions` — so the agent runs unattended
     /// instead of blocking on every tool-use approval. Only affects
     /// autonomous spawns; interactive sessions the user opens are
-    /// governed by `skip_permissions` instead. Default on; flip to
-    /// `false` to force prompts on every autonomous session.
-    pub autonomous_skip_permissions: bool,
+    /// governed by `skip_permissions` instead.
+    ///
+    /// Unset (the default) resolves per spawn from *who* triggered it:
+    /// the bypass stays **on** for work you drive yourself (`w`, and your
+    /// own `@lazybox` mentions / `lazybox:` labels), but is withheld —
+    /// prompts stay **on** — for a spawn a *foreign* actor triggered: a
+    /// mention from someone other than you, or a label on an issue you
+    /// didn't author. Those build their prompt from issue text that
+    /// actor controls, so an unattended `--dangerously-skip-permissions`
+    /// agent with full `git`/`gh` and the host's credentials would be
+    /// arbitrary command execution driven by attacker-influenceable text
+    /// (#1392). Set it explicitly to `true`/`false` to override this
+    /// trust-aware default in either direction. See
+    /// [`AgentSection::autonomous_skip`].
+    #[serde(default)]
+    pub autonomous_skip_permissions: Option<bool>,
     /// Launch interactive sessions the user opens themselves (the `c`
     /// spawn) with permission prompts disabled too — `claude
     /// --dangerously-skip-permissions`. Off by default: the prompt is
@@ -2073,29 +2086,6 @@ pub struct AgentSection {
     pub nice: Option<i32>,
 }
 
-impl Default for AgentSection {
-    fn default() -> Self {
-        Self {
-            config: lazybox_core::AgentConfig::default(),
-            autonomous_skip_permissions: true,
-            skip_permissions: false,
-            llm_gateway_url: None,
-            metering_proxy: false,
-            meter_all: false,
-            pricing: std::collections::BTreeMap::new(),
-            metered_spaces: std::collections::BTreeSet::new(),
-            auto_update: false,
-            auto_update_except: Vec::new(),
-            working_watchdog_secs: None,
-            quiet_classify_secs: None,
-            max_live_agents: None,
-            strict_mcp: None,
-            reap_closed_after: None,
-            nice: None,
-        }
-    }
-}
-
 /// Default for [`AgentSection::max_live_agents`] when unset.
 pub const DEFAULT_MAX_LIVE_AGENTS: usize = 32;
 
@@ -2146,6 +2136,20 @@ impl AgentSection {
     /// Unset → `false` (inherit the user's MCP servers).
     pub fn strict_mcp(&self) -> bool {
         self.strict_mcp.unwrap_or(false)
+    }
+
+    /// Effective skip-permissions posture for autonomous (unattended)
+    /// spawns. An explicit `autonomous_skip_permissions` wins in either
+    /// direction; when unset it falls back to a safe-by-default rule
+    /// keyed on `untrusted_trigger` — whether a *foreign* actor triggered
+    /// this spawn (a mention from someone other than the viewer, or a
+    /// label on an issue the viewer didn't author). Your own work keeps
+    /// the frictionless bypass; a foreign trigger forces prompts back on
+    /// so attacker-influenceable issue text can't drive an unattended,
+    /// permission-skipping agent on the host (#1392).
+    pub fn autonomous_skip(&self, untrusted_trigger: bool) -> bool {
+        self.autonomous_skip_permissions
+            .unwrap_or(!untrusted_trigger)
     }
 
     /// Effective spawn niceness: unset → 10, clamped to 0..=20; 0
@@ -2946,6 +2950,19 @@ fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
 /// mention:
 ///   allowed_logins: [alice, bob]
 /// ```
+///
+/// # Security
+///
+/// Widening this list is a **trust decision**, not just a convenience.
+/// An allowed login can, by writing `@lazybox` in an issue or comment,
+/// cause lazybox to spawn an autonomous agent whose prompt is built from
+/// that issue's title/body — text the triggering user controls. That
+/// agent runs in a worktree with full `git`/`gh` and the host's GitHub
+/// credentials. Unless you set `agent.autonomous_skip_permissions`
+/// explicitly, a mention from a login *other than you* keeps its
+/// permission prompts on rather than running unattended (see
+/// [`AgentSection::autonomous_skip`]). Only add logins you would trust
+/// to run commands on your machine.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct MentionConfig {
@@ -4563,24 +4580,38 @@ repos:
         Config::invalidate_cache();
     }
 
-    /// Autonomous sessions launch in no-permission mode by default,
-    /// and the toggle round-trips so a paranoid user can flip it off.
+    /// Autonomous skip-permissions is unset by default and resolves from
+    /// who triggered the spawn: the bypass stays for your own work, but
+    /// a foreign trigger keeps prompts on. An explicit toggle overrides
+    /// that and round-trips so a paranoid (or trusting) user can pin it.
     #[test]
-    fn autonomous_skip_permissions_defaults_on_and_round_trips() {
+    fn autonomous_skip_permissions_default_is_trust_aware_and_round_trips() {
         let cfg: Config = serde_yaml::from_str("{}").expect("parse");
-        assert!(
-            cfg.agent.autonomous_skip_permissions,
-            "default is on for autonomous sessions"
+        assert_eq!(
+            cfg.agent.autonomous_skip_permissions, None,
+            "the toggle is unset by default so the trigger's trust can drive it"
         );
+        // Trusted trigger (your own work) → bypass, as before.
+        assert!(cfg.agent.autonomous_skip(false));
+        // Foreign trigger → prompts back on unless pinned.
+        assert!(!cfg.agent.autonomous_skip(true));
 
         let mut paranoid = Config::default();
-        paranoid.agent.autonomous_skip_permissions = false;
+        paranoid.agent.autonomous_skip_permissions = Some(false);
         let written = serde_yaml::to_string(&paranoid).expect("serialize");
         let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
-        assert!(
-            !reparsed.agent.autonomous_skip_permissions,
+        assert_eq!(
+            reparsed.agent.autonomous_skip_permissions,
+            Some(false),
             "flipping the toggle off survives a save/load round-trip"
         );
+        // A pinned `false` wins even for your own trusted work.
+        assert!(!reparsed.agent.autonomous_skip(false));
+
+        let mut pinned_on = Config::default();
+        pinned_on.agent.autonomous_skip_permissions = Some(true);
+        // A pinned `true` keeps the bypass even for a foreign trigger.
+        assert!(pinned_on.agent.autonomous_skip(true));
     }
 
     /// Interactive skip-permissions is off by default and round-trips

@@ -1260,6 +1260,7 @@ async fn handle_spawn_inner(
         origin,
         force_new,
         meter,
+        untrusted,
     } = options;
     let access = if matches!(&kind, TerminalKind::Agent(_)) {
         access
@@ -1641,6 +1642,7 @@ async fn handle_spawn_inner(
             repo_env,
             priority_model_alias,
             autonomous,
+            autonomous_untrusted: untrusted,
             landed_on_main,
             model_alias,
             resume,
@@ -1668,6 +1670,16 @@ async fn handle_spawn_inner(
             return None;
         }
     };
+    // The trust-aware default (#1392) withholds the unattended bypass for
+    // a foreign-triggered spawn. Log it so a mention/label spawn sitting
+    // at a permission prompt is explicable rather than a silent hang.
+    if untrusted && plan.flags.autonomous && !plan.flags.no_permission {
+        tracing::info!(
+            session_key = %plan.session_key,
+            "autonomous spawn kept permission prompts: foreign-triggered and \
+             agent.autonomous_skip_permissions is unset (#1392)"
+        );
+    }
     let executed = match execute_spawn_plan(config, plan, workspace_registration_guard, t0).await {
         Ok(SpawnExecutionOutcome::Spawned(executed)) => executed,
         Ok(SpawnExecutionOutcome::Cancelled) => return None,
@@ -11652,6 +11664,7 @@ mod tests {
                 repo_env: vec![("PROJECT_ENV".into(), "test".into())],
                 priority_model_alias: None,
                 autonomous: false,
+                autonomous_untrusted: false,
                 landed_on_main: true,
                 model_alias: None,
                 resume: false,
@@ -16159,26 +16172,33 @@ mod tests {
     #[test]
     fn skip_permissions_follows_per_kind_toggles() {
         let mut cfg = lazybox_config::Config::default();
-        // Defaults: autonomous on, interactive off.
-        assert!(cfg.agent.autonomous_skip_permissions);
+        // Defaults: autonomous unset (trigger-trust-driven), interactive off.
+        assert_eq!(cfg.agent.autonomous_skip_permissions, None);
         assert!(!cfg.agent.skip_permissions);
 
-        // Autonomous + autonomous-toggle on → bypass.
-        assert!(skip_permissions_for(true, &cfg));
-        // Interactive defaults off → keep the prompt.
-        assert!(!skip_permissions_for(false, &cfg));
+        // Autonomous, trusted trigger (your own work) → bypass (frictionless).
+        assert!(skip_permissions_for(true, &cfg, false));
+        // Autonomous, foreign trigger → prompts back on (#1392).
+        assert!(!skip_permissions_for(true, &cfg, true));
+        // Interactive defaults off → keep the prompt (trust irrelevant).
+        assert!(!skip_permissions_for(false, &cfg, false));
+        assert!(!skip_permissions_for(false, &cfg, true));
 
         // User opts interactive sessions into skip mode.
         cfg.agent.skip_permissions = true;
-        assert!(skip_permissions_for(false, &cfg));
+        assert!(skip_permissions_for(false, &cfg, false));
         // ...and that's independent of the autonomous toggle.
-        assert!(skip_permissions_for(true, &cfg));
+        assert!(skip_permissions_for(true, &cfg, false));
 
-        // Paranoid user flips the autonomous toggle off; interactive
-        // skip is unaffected by it.
-        cfg.agent.autonomous_skip_permissions = false;
-        assert!(!skip_permissions_for(true, &cfg));
-        assert!(skip_permissions_for(false, &cfg));
+        // Paranoid user pins the autonomous toggle off; it wins over the
+        // trusted default and interactive skip is unaffected by it.
+        cfg.agent.autonomous_skip_permissions = Some(false);
+        assert!(!skip_permissions_for(true, &cfg, false));
+        assert!(skip_permissions_for(false, &cfg, false));
+
+        // Trusting user pins it on; it wins even for a foreign trigger.
+        cfg.agent.autonomous_skip_permissions = Some(true);
+        assert!(skip_permissions_for(true, &cfg, true));
     }
 
     #[test]

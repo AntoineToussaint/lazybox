@@ -1674,6 +1674,37 @@ fn label_spawn_actions_bare_label_uses_agent_default_model() {
     assert_eq!(model, None);
 }
 
+/// A label spawn's trust flag follows issue authorship: a label on an
+/// issue you authored builds the prompt from your own text (trusted), but
+/// one where you're only the assignee may carry a foreign author's text
+/// and — since the labeller is unknowable — must default to keeping
+/// permission prompts (#1392).
+#[test]
+fn label_spawn_untrusted_flag_follows_issue_authorship() {
+    fn untrusted_of(role: TaskRole) -> bool {
+        let issue = labeled_issue("1", role, "lazybox:codex");
+        let acts = polling::label_spawn_actions(
+            &[issue],
+            &std::collections::HashSet::new(),
+            &lazybox_core::Conventions::default(),
+        );
+        assert_eq!(acts.len(), 1);
+        match &acts[0].1 {
+            polling::ProviderAction::AutoSpawnAgent { untrusted, .. } => *untrusted,
+            _ => panic!("expected AutoSpawnAgent"),
+        }
+    }
+
+    assert!(
+        !untrusted_of(TaskRole::Author),
+        "your own authored issue is trusted"
+    );
+    assert!(
+        untrusted_of(TaskRole::Assignee),
+        "an assigned issue may be foreign-authored — untrusted"
+    );
+}
+
 #[test]
 fn label_spawn_actions_injects_configured_conventions_into_the_prompt() {
     // The `conventions:` config must reach the autonomous-spawn brief:
@@ -6612,6 +6643,7 @@ async fn tick_dispatches_auto_spawn_action_after_upsert() {
         prompt: Some("Implement issue".to_string()),
         reason: "@lazybox mention by alice on o/r#101 (issue body)".to_string(),
         dedup_key: None,
+        untrusted: false,
     };
 
     let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
@@ -6666,6 +6698,7 @@ async fn tick_auto_spawn_honors_requested_agent_and_model() {
         prompt: None,
         reason: "@lazybox mention by alice on o/r#202 (issue body)".to_string(),
         dedup_key: None,
+        untrusted: false,
     };
 
     let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
@@ -6718,6 +6751,7 @@ async fn tick_auto_spawn_falls_back_to_default_for_unknown_agent() {
         prompt: None,
         reason: "@lazybox mention by alice on o/r#203 (issue body)".to_string(),
         dedup_key: None,
+        untrusted: false,
     };
 
     let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {

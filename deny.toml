@@ -21,7 +21,12 @@ feature-depth = 1
 # can't fix it here and what would unblock removal.
 [advisories]
 version = 2
-yanked = "deny"
+# A crate yank is a registry event, not a vulnerability: it lands on our
+# pinned `Cargo.lock` from upstream and hard-fails `deny` on every open PR
+# and main at once, even PRs that touch no dependencies. Surface it as a
+# warning so it stays visible without blocking unrelated work; a real
+# security advisory still errors via the RustSec database above.
+yanked = "warn"
 ignore = [
     # bincode's maintainers ended development for every release line. We use
     # 2.0.1 only for size-bounded, length-prefixed local IPC and preserve the

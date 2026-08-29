@@ -525,7 +525,13 @@ impl Sidebar {
                 match status {
                     lazybox_ipc::WorktreeStepStatus::Started
                     | lazybox_ipc::WorktreeStepStatus::Progress(_) => {
-                        self.spawning.insert(session_key.clone());
+                        // Preserve the original start time across the burst of
+                        // `Progress` events for the same spawn, so the stale
+                        // guard measures the whole provision, not the gap since
+                        // the last step (#1372).
+                        self.spawning
+                            .entry(session_key.clone())
+                            .or_insert_with(std::time::Instant::now);
                     }
                     // Setup failed (or was cancelled — a `Failed` carrying
                     // `SPAWN_CANCELLED_NOTE`): stop spinning. The failure

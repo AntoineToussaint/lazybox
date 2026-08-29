@@ -260,6 +260,12 @@ const STILL_WORKING_HINT_AFTER: Duration = Duration::from_secs(30);
 /// outlast a realistic worst-case provision.
 const SPAWN_SPINNER_GUARD: Duration = Duration::from_secs(120);
 
+/// How long a spawn must have been in flight before `Esc` treats it as
+/// "stuck" and cancels it (#1372). Short enough to be a real escape from
+/// a wedged spawn, long enough that an `Esc` during a normal fast spawn
+/// (dismissing a notice, clearing a search) doesn't abandon it.
+const STUCK_SPAWN_ESC_AFTER: Duration = Duration::from_secs(5);
+
 /// Lightweight footer indicator for poll cycles AFTER the initial
 /// blocking modal has been dismissed. Lit up on any `PollProgress`,
 /// cleared on `PollCompleted` or after the guard timeout.
@@ -643,6 +649,17 @@ impl StatusCtx {
     /// Returns true if there was one to clear so the caller can redraw.
     pub fn clear_spawning(&mut self) -> bool {
         self.spawning.take().is_some()
+    }
+
+    /// The workspace of a spawn that has been in flight long enough to be
+    /// considered stuck, if any — the target `Esc` cancels (#1372). `None`
+    /// while nothing is spawning or a fresh spawn is still plausibly
+    /// provisioning, so `Esc` keeps its normal meaning then.
+    pub fn stuck_spawn_session(&self) -> Option<&SessionKey> {
+        self.spawning
+            .as_ref()
+            .filter(|sp| sp.started_at.elapsed() >= STUCK_SPAWN_ESC_AFTER)
+            .map(|sp| &sp.session_key)
     }
 
     /// Record a poll-progress event from the daemon. Lights up the

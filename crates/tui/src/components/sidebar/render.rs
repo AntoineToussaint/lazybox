@@ -1514,7 +1514,7 @@ impl Sidebar {
         }
         fold.hash(&mut h);
         let mut fold: u64 = 0;
-        for k in &self.spawning {
+        for k in self.spawning.keys() {
             fold = fold.wrapping_add(hash_one(k));
         }
         fold.hash(&mut h);

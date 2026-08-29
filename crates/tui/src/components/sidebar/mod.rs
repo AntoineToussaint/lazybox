@@ -34,6 +34,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// animation only nudges the render loop a few times a second while
 /// an agent is busy (and never when nothing is working).
 const WORKING_SPIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
+/// Backstop for the per-row "spawning" arc: if no terminating event
+/// (a live `AgentState`, `TerminalSpawned`, a `Failed` step, or a
+/// `spawn*` `ProviderError`) clears it within this window, the arc
+/// self-cancels so a stranded spawn can never spin forever (#1372).
+/// Matches the footer spinner's `SPAWN_SPINNER_GUARD` — a cold clone
+/// legitimately runs for tens of seconds, so the cap sits well past it.
+const SIDEBAR_SPAWN_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
 use crate::util::{truncate_ellipsis, visual_width};
 use lazybox_core::{SessionId, SessionKey, TaskId, Workspace};
 use lazybox_ipc::{Command, Event, TerminalId, TerminalKind};
@@ -377,7 +384,13 @@ pub struct Sidebar {
     /// spawn reads as *coming up* instead of a blank row until the agent
     /// is live. Independent of `agents` above, which only gains an entry
     /// once a terminal reports state.
-    spawning: std::collections::HashSet<SessionKey>,
+    ///
+    /// The value is the moment the arc was first shown, so
+    /// [`Sidebar::prune_stale_spawning`] can drop an entry no terminating
+    /// event ever cleared — a spawn that failed without a `Failed` step or
+    /// a `spawn*` `ProviderError` (a dropped bus event, a remote box that
+    /// erred before provisioning began) must never spin forever (#1372).
+    spawning: std::collections::HashMap<SessionKey, std::time::Instant>,
     /// Current frame of the shared "working" spinner, mirrored from
     /// the free-running wall clock by [`Sidebar::tick_working`] so the
     /// render path stays a cheap field read and every working row shows
@@ -569,7 +582,7 @@ impl Sidebar {
             pending_notifications: Vec::new(),
             pending_asking_notices: Vec::new(),
             agents: std::collections::HashMap::new(),
-            spawning: std::collections::HashSet::new(),
+            spawning: std::collections::HashMap::new(),
             agent_terminal_states: std::collections::HashMap::new(),
             working_spinner_frame: 0,
             spinner_epoch: std::time::Instant::now(),
@@ -835,7 +848,26 @@ impl Sidebar {
     /// spawn and no terminal has reported an `AgentState` yet — drives
     /// the row's "spawning" arc (#1069). Reads the private `spawning` set.
     pub fn is_spawning(&self, session_key: &SessionKey) -> bool {
-        self.spawning.contains(session_key)
+        self.spawning.contains_key(session_key)
+    }
+
+    /// Drop any "spawning" arc older than [`SIDEBAR_SPAWN_GUARD`]. A
+    /// terminating event (live state, `TerminalSpawned`, `Failed` step,
+    /// `spawn*` `ProviderError`) normally clears the arc; this is the
+    /// backstop for a spawn that produced none — a dropped bus event, or a
+    /// remote box that erred before it emitted any progress. Returns `true`
+    /// when it cleared at least one so the caller can redraw (#1372).
+    pub fn prune_stale_spawning(&mut self) -> bool {
+        let before = self.spawning.len();
+        self.spawning
+            .retain(|_, started| started.elapsed() < SIDEBAR_SPAWN_GUARD);
+        self.spawning.len() != before
+    }
+
+    /// Cancel one workspace's "spawning" arc now — the `Esc` escape from a
+    /// stuck spinner (#1372). Returns `true` when there was one to clear.
+    pub fn clear_spawning(&mut self, session_key: &SessionKey) -> bool {
+        self.spawning.remove(session_key).is_some()
     }
     /// Sync the "working" spinner to the wall clock. Returns `true`
     /// when the displayed frame changed, so the caller knows a
@@ -903,7 +935,7 @@ impl Sidebar {
         // A live sibling session (`Working`/`Done`/`InputNeeded`/
         // `LimitReached`) owns the slot instead, so its repeated pings must
         // still dedup here rather than force a needless repaint every tick.
-        if self.spawning.contains(session_key)
+        if self.spawning.contains_key(session_key)
             && matches!(
                 self.agents.get(session_key),
                 None | Some(lazybox_ipc::AgentState::Idle)
@@ -956,6 +988,9 @@ impl Sidebar {
             if sk != workspace_key {
                 continue;
             }
+            if self.terminal_agent_exited(*tid) {
+                continue;
+            }
             if let TerminalKind::Agent(id) = kind
                 && id == agent_id
             {
@@ -965,12 +1000,29 @@ impl Sidebar {
         None
     }
 
+    /// True when this terminal's agent has exited (killed, or crashed and
+    /// awaiting `r restart`). Such a terminal lingers in `running_terminals`
+    /// after a reconnect `Snapshot` even though its PTY is dead, so the
+    /// reuse paths must skip it — bare `w` / `w w` reuse only a LIVE agent
+    /// and otherwise spawn fresh (#1310, #1372); collapsing onto a dead
+    /// terminal would stall with no agent ever starting.
+    fn terminal_agent_exited(&self, terminal_id: TerminalId) -> bool {
+        matches!(
+            self.agent_terminal_states.get(&terminal_id),
+            Some((_, lazybox_ipc::AgentState::Exited { .. }))
+        )
+    }
+
     /// Exact running agent terminals in `workspace_key`, sorted by agent
-    /// id and then terminal id for stable chooser order.
+    /// id and then terminal id for stable chooser order. Excludes exited
+    /// agents so `w` never offers to continue a dead conversation (#1372).
     pub fn running_work_targets(&self, workspace_key: &SessionKey) -> Vec<RunningWorkTarget> {
         let mut targets = Vec::new();
         for (terminal_id, (sk, kind)) in &self.running_terminals {
             if sk != workspace_key {
+                continue;
+            }
+            if self.terminal_agent_exited(*terminal_id) {
                 continue;
             }
             if let TerminalKind::Agent(agent_id) = kind {

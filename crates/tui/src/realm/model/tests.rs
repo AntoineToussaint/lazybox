@@ -1057,6 +1057,94 @@ mod effects_tests {
         );
     }
 
+    /// #1372: a spawn wedged past the stuck threshold must have a way out.
+    /// `Esc` cancels the footer spinner and the target row's arc so the UI
+    /// is never left un-dismissably "spawning".
+    #[test]
+    fn esc_cancels_a_stuck_spawn_spinner() {
+        use std::time::{Duration, Instant};
+        use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+
+        let mut m = build_model();
+        m.status.polling = None;
+        let key: lazybox_core::SessionKey =
+            (&lazybox_core::WorkspaceKey::new("github:o/r#1")).into();
+        m.status.note_spawning(
+            "claude",
+            key.clone(),
+            lazybox_ipc::TerminalKind::Agent("claude".into()),
+            0,
+        );
+        // Age it past the stuck threshold.
+        m.status.spawning.as_mut().unwrap().started_at = Instant::now() - Duration::from_secs(6);
+
+        m.dispatch_key(RealmKey::new(Key::Esc, RealmMods::NONE));
+        assert!(
+            m.status.spawning.is_none(),
+            "Esc must cancel a stuck spawn spinner",
+        );
+        assert!(
+            m.spawn_follow_to.is_none(),
+            "the spawn-follow pin is dropped"
+        );
+    }
+
+    /// A fresh spawn (still plausibly provisioning) keeps `Esc` for its
+    /// normal meaning — only a *stuck* spinner is cancellable, so a quick
+    /// spawn isn't abandoned by an unrelated Esc.
+    #[test]
+    fn esc_leaves_a_fresh_spawn_spinner_alone() {
+        use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+
+        let mut m = build_model();
+        m.status.polling = None;
+        let key: lazybox_core::SessionKey =
+            (&lazybox_core::WorkspaceKey::new("github:o/r#1")).into();
+        m.status.note_spawning(
+            "claude",
+            key,
+            lazybox_ipc::TerminalKind::Agent("claude".into()),
+            0,
+        );
+
+        m.dispatch_key(RealmKey::new(Key::Esc, RealmMods::NONE));
+        assert!(
+            m.status.spawning.is_some(),
+            "a fresh spawn keeps spinning — Esc doesn't abandon it",
+        );
+    }
+
+    /// #1372: `r c` on a box already known to be erroring (bad gcp creds)
+    /// must fail fast with the box error surfaced, never present as
+    /// "spawning" while the spawn sinks into a dead box.
+    #[test]
+    fn remote_spawn_aborts_fast_when_the_box_errored() {
+        use lazybox_tui_core::action::Action;
+        use lazybox_tui_core::remote::RemoteConnState;
+
+        let mut m = build_model()
+            .with_remote_clients(std::collections::BTreeMap::new(), Some("box".into()));
+        m.status.polling = None;
+        m.status.note_remote_state(RemoteConnState::Error {
+            reason: "gcp creds expired".into(),
+        });
+
+        let cmds = m.dispatch_action(&Action::SpawnAgentRemote("claude".into()));
+        assert!(cmds.is_empty(), "a dead box must not receive a spawn");
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("gcp creds expired")),
+            "the box error is surfaced instead of a spinner: {:?}",
+            m.status.notice.as_ref().map(|n| &n.message),
+        );
+        assert!(
+            m.status.spawning.is_none(),
+            "no spawn spinner is lit for an aborted remote spawn",
+        );
+    }
+
     /// Letting an action-error toast auto-fade (its 45s elapses, no Esc)
     /// is the same acknowledgment as dismissing it: an identical re-fire
     /// afterwards must stay quiet, not resurrect the banner on the next

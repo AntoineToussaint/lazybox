@@ -95,6 +95,17 @@ impl RemoteConnState {
         !matches!(self, Self::NotConfigured)
     }
 
+    /// The one-line reason when the last bring-up failed, else `None`. A
+    /// remote spawn reads this to fail fast — a box stuck in `Error` (bad
+    /// creds, provider unreachable) must surface that immediately rather
+    /// than present as "spawning" (#1372).
+    pub fn error_reason(&self) -> Option<&str> {
+        match self {
+            Self::Error { reason } => Some(reason),
+            _ => None,
+        }
+    }
+
     /// A static glyph for the non-busy steady states. Busy states animate
     /// with a spinner instead, so this is unused for them.
     pub fn glyph(&self) -> &'static str {
@@ -180,5 +191,24 @@ mod tests {
         assert_eq!(s.glyph(), "⚠");
         assert_eq!(s.label(), "box error: auth expired");
         assert!(!s.is_connected());
+    }
+
+    #[test]
+    fn error_reason_reads_only_the_error_state() {
+        assert_eq!(
+            RemoteConnState::Error {
+                reason: "gcp creds".into(),
+            }
+            .error_reason(),
+            Some("gcp creds")
+        );
+        for ok in [
+            RemoteConnState::NotConfigured,
+            RemoteConnState::Connecting,
+            RemoteConnState::Disconnected,
+            RemoteConnState::Connected { name: "b".into() },
+        ] {
+            assert_eq!(ok.error_reason(), None, "{ok:?} is not an error state");
+        }
     }
 }

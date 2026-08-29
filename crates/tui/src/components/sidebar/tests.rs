@@ -4488,6 +4488,151 @@ mod spawning_tests {
             "spawning arc cleared once live: {working:?}"
         );
     }
+
+    /// #1372 watchdog: an arc no terminating event ever cleared (a dropped
+    /// bus event, a remote box that erred before provisioning began) must
+    /// self-cancel once it ages past the guard, so a spawn never spins
+    /// forever. A fresh arc is left alone.
+    #[test]
+    fn stale_spawning_arc_is_pruned() {
+        use std::time::{Duration, Instant};
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(sb.is_spawning(&key));
+        // A fresh arc is within the window — the watchdog leaves it.
+        assert!(!sb.prune_stale_spawning());
+        assert!(sb.is_spawning(&key));
+        // Backdate past the guard: now it self-cancels.
+        *sb.spawning.get_mut(&key).unwrap() = Instant::now() - Duration::from_secs(121);
+        assert!(sb.prune_stale_spawning(), "a stranded arc must be pruned");
+        assert!(!sb.is_spawning(&key), "a spawn must never spin forever");
+    }
+
+    /// A burst of `Progress` events keeps the original start time, so the
+    /// guard measures the whole provision — not the gap since the last step.
+    #[test]
+    fn progress_bursts_do_not_reset_the_guard_clock() {
+        use std::time::{Duration, Instant};
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        *sb.spawning.get_mut(&key).unwrap() = Instant::now() - Duration::from_secs(121);
+        // A later step must NOT refresh the clock, or a slow-but-doomed
+        // provision could dodge the guard indefinitely.
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::WorktreeAdd,
+            WorktreeStepStatus::Progress("42%".into()),
+        ));
+        assert!(sb.prune_stale_spawning());
+        assert!(!sb.is_spawning(&key));
+    }
+
+    /// `Esc` escape: `clear_spawning` cancels one workspace's arc on demand.
+    #[test]
+    fn clear_spawning_cancels_one_arc() {
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(sb.is_spawning(&key));
+        assert!(sb.clear_spawning(&key));
+        assert!(!sb.is_spawning(&key));
+        assert!(!sb.clear_spawning(&key), "nothing left to clear");
+    }
+}
+
+#[cfg(test)]
+mod work_target_kill_tests {
+    use super::super::*;
+    use super::status_pill_tests::base_task;
+    use lazybox_core::Workspace;
+    use lazybox_ipc::{AgentState, Event, TerminalId, TerminalKind};
+
+    fn one_workspace() -> (Sidebar, SessionKey) {
+        let mut t = base_task();
+        t.title = "Ship it".into();
+        let w = Workspace::from_task(t, chrono::Utc::now());
+        let key = SessionKey::from(&w.key);
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(key.clone(), w);
+        sb.recompute_visible();
+        (sb, key)
+    }
+
+    /// #1372 / #1310: `w w` on a workspace whose agent was killed (its
+    /// terminal lingers in the snapshot with an `Exited` state) must spawn a
+    /// FRESH agent, never collapse onto the dead conversation.
+    #[test]
+    fn work_target_spawns_fresh_when_the_only_agent_exited() {
+        let (mut sb, key) = one_workspace();
+        // A reconnect snapshot re-seeds the dead terminal (running, but its
+        // last reported state is Exited).
+        sb.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(1),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+        });
+        sb.on_event(&Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Exited { code: Some(137) },
+        });
+        assert_eq!(
+            sb.work_target(&key, "claude"),
+            WorkTarget::Spawn("claude".into()),
+            "a killed agent must not be reused — w spawns fresh"
+        );
+        assert!(sb.running_work_targets(&key).is_empty());
+        assert_eq!(sb.find_agent_terminal(&key, "claude"), None);
+    }
+
+    /// A live agent beside the dead one is still the reuse target — only the
+    /// exited terminal is filtered out.
+    #[test]
+    fn work_target_reuses_the_live_agent_next_to_a_dead_one() {
+        let (mut sb, key) = one_workspace();
+        for tid in [1u64, 2] {
+            sb.on_event(&Event::TerminalSpawned {
+                terminal_id: TerminalId(tid),
+                session_key: key.clone(),
+                kind: TerminalKind::Agent("claude".into()),
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+            });
+        }
+        sb.on_event(&Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Exited { code: Some(0) },
+        });
+        sb.on_event(&Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(2),
+            state: AgentState::Working,
+        });
+        assert_eq!(
+            sb.work_target(&key, "claude"),
+            WorkTarget::Running(RunningWorkTarget {
+                terminal_id: TerminalId(2),
+                agent_id: "claude".into(),
+            }),
+            "the live agent is reused; the dead one is skipped"
+        );
+    }
 }
 
 #[cfg(test)]

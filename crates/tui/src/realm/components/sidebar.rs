@@ -181,6 +181,19 @@ impl Sidebar {
         self.inner.tick_working()
     }
 
+    /// Drop any per-row "spawning" arc a spawn stranded past the guard
+    /// window (#1372). Returns `true` when it cleared one so the run loop
+    /// can redraw.
+    pub fn prune_stale_spawning(&mut self) -> bool {
+        self.inner.prune_stale_spawning()
+    }
+
+    /// Cancel one workspace's "spawning" arc — the `Esc` escape from a
+    /// stuck spinner (#1372). Returns `true` when there was one to clear.
+    pub fn clear_spawning(&mut self, session_key: &lazybox_core::SessionKey) -> bool {
+        self.inner.clear_spawning(session_key)
+    }
+
     /// Drain `g m` "Merge PR #N?" requests. The orchestrator mounts
     /// a Confirm modal per entry.
 

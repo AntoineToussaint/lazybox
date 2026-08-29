@@ -1154,7 +1154,7 @@ pub(crate) fn load_session_tombstones_strict(
 
 /// Record `key` in the session-tombstone set so recovery kills — never
 /// reattaches — any surviving backend session for it. Written on every
-/// removal reason (see [`WorkspaceRemovalReason`]). Idempotent; returns
+/// removal reason (see `WorkspaceRemovalReason`). Idempotent; returns
 /// false when persistence (or a degraded read) fails, so the caller can
 /// abort the delete rather than commit a removal whose orphan session
 /// would be reattached on the next restart.

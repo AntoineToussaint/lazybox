@@ -17,6 +17,7 @@
 
 use crate::PaneId;
 use crate::components::sidebar::Sidebar as LazyboxSidebar;
+use crate::notify_coalesce::NotificationCoalescer;
 use crate::realm::keymap::realm_key_to_crossterm;
 use crate::realm::{Msg, UserEvent};
 use lazybox_ipc::Command as IpcCommand;
@@ -40,6 +41,11 @@ pub struct Sidebar {
     /// `Model::update` arm for `Msg::SidebarCmds(...)` and forward
     /// them to the daemon.
     pending_cmds: Vec<IpcCommand>,
+    /// Debounces desktop-notification bursts so N agents changing state
+    /// at once collapse into one summary banner instead of N popups
+    /// (#1370). Fed by `on_daemon_event`, drained by
+    /// `flush_due_notifications` from the run loop.
+    coalescer: NotificationCoalescer,
 }
 
 impl Sidebar {
@@ -50,6 +56,7 @@ impl Sidebar {
             inner: LazyboxSidebar::new(id),
             focused: true, // sidebar is the default-focused pane
             pending_cmds: Vec::new(),
+            coalescer: NotificationCoalescer::default(),
         }
     }
 
@@ -77,7 +84,21 @@ impl Sidebar {
     /// `platform::set_notifier_backend` at startup.
     pub fn on_daemon_event(&mut self, evt: &IpcEvent) {
         self.inner.on_event(evt);
+        // Buffer rather than fire immediately: a state storm across many
+        // agents would otherwise emit one banner per workspace. The
+        // coalescer collapses a same-kind burst into a single summary
+        // once its debounce window elapses (#1370).
+        let now = std::time::Instant::now();
         for notif in self.inner.drain_pending_notifications() {
+            self.coalescer.push(now, notif);
+        }
+    }
+
+    /// Fire any coalesced desktop notifications whose debounce window
+    /// has elapsed, collapsing a same-kind burst into one summary
+    /// banner. Called each run-loop iteration (#1370).
+    pub fn flush_due_notifications(&mut self) {
+        for notif in self.coalescer.flush_due(std::time::Instant::now()) {
             crate::platform::notify_user(&notif.title, &notif.body, &notif.workspace_key);
         }
     }
@@ -997,10 +1018,7 @@ impl AppComponent<Msg, UserEvent> for Sidebar {
             // `on_event` so its `workspaces` map + `running_terminals`
             // stay current.
             Event::User(UserEvent::Daemon(evt)) => {
-                self.inner.on_event(evt);
-                for notif in self.inner.drain_pending_notifications() {
-                    crate::platform::notify_user(&notif.title, &notif.body, &notif.workspace_key);
-                }
+                self.on_daemon_event(evt);
                 None
             }
             Event::Keyboard(key) if self.focused => {

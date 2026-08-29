@@ -28,6 +28,7 @@
 pub mod build_guard;
 pub mod components;
 pub mod lazybox_theme;
+pub mod notify_coalesce;
 pub mod pane;
 pub mod perf;
 pub mod realm;

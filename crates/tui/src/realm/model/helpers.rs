@@ -1580,6 +1580,11 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
             &mut timings,
         );
 
+        // Fire any coalesced desktop notifications whose debounce window
+        // has now elapsed. Runs before the OSC drain below so a summary
+        // banner it queues is emitted this same iteration (#1370).
+        model.sidebar.flush_due_notifications();
+
         // Emit any OSC desktop notifications queued during this iteration's
         // drain. Routed through the render writer (not stdout directly) so
         // the escape bytes are serialized behind this iteration's frame on

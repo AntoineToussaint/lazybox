@@ -424,6 +424,8 @@ impl Sidebar {
                                 title,
                                 body,
                                 workspace_key: session_key.clone(),
+                                name: workspace.name.clone(),
+                                kind: NotificationKind::Asking,
                             });
                         }
                         // Inline footer notice in addition to the OS
@@ -455,6 +457,8 @@ impl Sidebar {
                             title,
                             body,
                             workspace_key: session_key.clone(),
+                            name: workspace.name.clone(),
+                            kind: NotificationKind::Done,
                         });
                     }
                     self.pending_asking_notices.push(format!(
@@ -489,6 +493,8 @@ impl Sidebar {
                             title,
                             body,
                             workspace_key: session_key.clone(),
+                            name: workspace.name.clone(),
+                            kind: NotificationKind::LimitReached,
                         });
                     }
                     self.pending_asking_notices.push(format!(
@@ -663,5 +669,7 @@ fn attention_notification(signal: AttentionSignal, w: &Workspace) -> Option<Pend
         title,
         body,
         workspace_key: (&w.key).into(),
+        name: w.name.clone(),
+        kind: NotificationKind::Activity,
     })
 }

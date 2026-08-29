@@ -1129,6 +1129,102 @@ pub fn unarchive_workspace_key(config: &ServerConfig, key: &str) -> bool {
     true
 }
 
+/// Strict read of the persisted session-tombstone set, with the same
+/// "no set stored" (`Ok(empty)`) vs "stored but unreadable" (`Err`)
+/// distinction as [`load_archived_set_strict`] — the read-modify-write
+/// callers must not truncate the stored history off a transient
+/// SQLITE_BUSY or a corrupt payload.
+pub(crate) fn load_session_tombstones_strict(
+    config: &ServerConfig,
+) -> Result<std::collections::HashSet<String>, String> {
+    let raw = config
+        .store
+        .get_kv(lazybox_core::KV_KEY_SESSION_TOMBSTONES)
+        .map_err(|e| format!("read failed: {e}"))?;
+    let Some(json) = raw else {
+        return Ok(Default::default());
+    };
+    if json.trim().is_empty() {
+        return Ok(Default::default());
+    }
+    serde_json::from_str::<Vec<String>>(&json)
+        .map(|v| v.into_iter().collect())
+        .map_err(|e| format!("parse failed: {e}"))
+}
+
+/// Record `key` in the session-tombstone set so recovery kills — never
+/// reattaches — any surviving backend session for it. Written on every
+/// removal reason (see [`WorkspaceRemovalReason`]). Idempotent; returns
+/// false when persistence (or a degraded read) fails, so the caller can
+/// abort the delete rather than commit a removal whose orphan session
+/// would be reattached on the next restart.
+#[must_use]
+pub fn tombstone_session_key(config: &ServerConfig, key: &str) -> bool {
+    let _update_guard = config.archive_updates.lock();
+    let mut set = match load_session_tombstones_strict(config) {
+        Ok(set) => set,
+        Err(e) => {
+            tracing::error!(
+                "tombstone_session_key: existing tombstone set unreadable ({e}) — \
+                 refusing to rewrite it; tombstone of {key} aborted"
+            );
+            return false;
+        }
+    };
+    if !set.insert(key.to_string()) {
+        return true;
+    }
+    let vec: Vec<&String> = set.iter().collect();
+    let Ok(json) = serde_json::to_string(&vec) else {
+        tracing::error!("tombstone_session_key: serialize failed");
+        return false;
+    };
+    if let Err(e) = config
+        .store
+        .set_kv(lazybox_core::KV_KEY_SESSION_TOMBSTONES, &json)
+    {
+        tracing::warn!("tombstone_session_key: set_kv failed: {e}");
+        return false;
+    }
+    true
+}
+
+/// Remove `key` from the session-tombstone set. Called only when a
+/// committed delete is being rolled back, so an aborted removal doesn't
+/// leave a tombstone that would kill the still-present workspace's
+/// session on restart. Same degraded-read contract as
+/// [`tombstone_session_key`].
+#[must_use]
+pub fn untombstone_session_key(config: &ServerConfig, key: &str) -> bool {
+    let _update_guard = config.archive_updates.lock();
+    let mut set = match load_session_tombstones_strict(config) {
+        Ok(set) => set,
+        Err(e) => {
+            tracing::error!(
+                "untombstone_session_key: existing tombstone set unreadable ({e}) — \
+                 refusing to rewrite it; untombstone of {key} aborted"
+            );
+            return false;
+        }
+    };
+    if !set.remove(key) {
+        return true;
+    }
+    let vec: Vec<&String> = set.iter().collect();
+    let Ok(json) = serde_json::to_string(&vec) else {
+        tracing::error!("untombstone_session_key: serialize failed");
+        return false;
+    };
+    if let Err(e) = config
+        .store
+        .set_kv(lazybox_core::KV_KEY_SESSION_TOMBSTONES, &json)
+    {
+        tracing::warn!("untombstone_session_key: set_kv failed: {e}");
+        return false;
+    }
+    true
+}
+
 /// Recursively sum the byte size of a directory tree. Best-effort: any
 /// entry it can't stat is skipped, and symlinks are counted as their own
 /// (near-zero) size rather than followed — so a symlinked directory can't
@@ -2405,7 +2501,9 @@ impl<'a> WorkspaceLifecycle<'a> {
 
         // Record the archive only after every requested terminal kill succeeded.
         // Otherwise a transient backend failure both keeps the workspace alive
-        // and blocks the next poll from repairing/re-presenting it.
+        // and blocks the next poll from repairing/re-presenting it. Only the
+        // archiving reasons suppress re-polling; the session tombstone below is
+        // written for every reason.
         if archive && !archive_workspace_key(config, key_str) {
             let _ = config.bus.send(Event::provider_error_retryable(
                 "store",
@@ -2415,13 +2513,36 @@ impl<'a> WorkspaceLifecycle<'a> {
             return None;
         }
 
+        // The session tombstone is the durable kill-on-recovery record for
+        // *every* removal reason — including the non-archiving ClosedAuto /
+        // Rescope, whose only other orphan protection is the best-effort
+        // delete-time sweep below. Written before the row is dropped so a
+        // survivor tmux session is guaranteed a backstop even if that sweep's
+        // `backend.list()` transiently fails (#1377). Failing to persist it
+        // aborts the delete for the same reason a failed archive does.
+        if !tombstone_session_key(config, key_str) {
+            if archive {
+                let _ = unarchive_workspace_key(config, key_str);
+            }
+            let _ = config.bus.send(Event::provider_error_retryable(
+                "store",
+                format!(
+                    "could not record session tombstone for workspace {key}; it was not deleted"
+                ),
+            ));
+            config.deleted_workspaces.lock().remove(key_str);
+            return None;
+        }
+
         if let Err(e) = config.store.delete_workspace(key) {
             tracing::warn!("delete_workspace failed: {e}");
-            let rollback_ok = !archive || unarchive_workspace_key(config, key_str);
+            let archive_rollback_ok = !archive || unarchive_workspace_key(config, key_str);
+            let tombstone_rollback_ok = untombstone_session_key(config, key_str);
+            let rollback_ok = archive_rollback_ok && tombstone_rollback_ok;
             if !rollback_ok {
                 tracing::error!(
                     workspace = %key,
-                    "delete_workspace rollback: could not remove archive tombstone",
+                    "delete_workspace rollback: could not remove archive/tombstone record",
                 );
             }
             let _ = config.bus.send(Event::provider_error_retryable(

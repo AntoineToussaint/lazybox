@@ -23,6 +23,16 @@ now a library-only crate — see Architecture).
 
 Logs go to `/tmp/lazybox.log`. State persisted in `~/.lazybox/v2/state.db`.
 
+### Before you compile or test — check shared resources
+
+Lazybox routinely runs many agents on one box. **Before** `cargo build`,
+`cargo test`, or `cargo clippy`, check for available resources — sample the
+system load (`uptime` vs. `nproc`) and back off, throttle the job count
+(`CARGO_BUILD_JOBS`), or scope to the crate you touched (`cargo test -p
+<crate>`) when the machine is already busy. Blindly grabbing every core when
+fifteen other agents are doing the same is what drives the box to 100% CPU.
+Full guidance: [`docs/agent-resource-awareness.md`](docs/agent-resource-awareness.md).
+
 ### Staying current (outdated-build guard)
 
 A uniformly-stale build — daemon *and* client compiled from the same

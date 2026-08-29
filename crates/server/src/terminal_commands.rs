@@ -99,6 +99,16 @@ pub(crate) async fn run_io_router(
             // terminal ids. Prompt injection with a fallback is the one
             // exception: its documented contract can legitimately spawn a
             // replacement after the target exited.
+            //
+            // A no-fallback InjectPrompt still carries user text, so dropping
+            // it here would lose it with no feedback. Surface the rejection so
+            // the user knows to reopen the agent (#1384).
+            if matches!(command, Command::InjectPrompt { .. }) {
+                let _ = event_tx.send(Event::TerminalInputRejected {
+                    terminal_id,
+                    message: "the agent terminal is no longer running — reopen it and retry".into(),
+                });
+            }
             continue;
         }
 

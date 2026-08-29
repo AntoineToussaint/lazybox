@@ -7865,7 +7865,15 @@ async fn handle_inject_prompt_inner(
                 .await;
                 return;
             }
+            // No fallback to rewrite into a Spawn. The prompt would
+            // otherwise vanish with only a debug log; surface it so the
+            // user knows to reopen the agent (invariant: user input must
+            // never disappear silently — #1384).
             tracing::debug!("inject_prompt to unknown terminal {terminal_id:?}");
+            let _ = config.bus.send(Event::TerminalInputRejected {
+                terminal_id,
+                message: "the agent terminal is no longer running — reopen it and retry".into(),
+            });
             return;
         }
     };
@@ -7873,6 +7881,10 @@ async fn handle_inject_prompt_inner(
         Some((_session_key, kind)) => kind,
         None => {
             tracing::debug!("inject_prompt: no terminal_meta for {terminal_id:?} — skipping");
+            let _ = config.bus.send(Event::TerminalInputRejected {
+                terminal_id,
+                message: "the agent terminal is no longer running — reopen it and retry".into(),
+            });
             return;
         }
     };
@@ -7883,11 +7895,21 @@ async fn handle_inject_prompt_inner(
                 tracing::warn!(
                     "inject_prompt: unknown agent id `{id}` for terminal {terminal_id:?}"
                 );
+                let _ = config.bus.send(Event::TerminalInputRejected {
+                    terminal_id,
+                    message: format!(
+                        "the prompt could not be delivered — agent `{id}` is not available"
+                    ),
+                });
                 return;
             }
         },
         _ => {
             tracing::debug!("inject_prompt: terminal {terminal_id:?} is not an agent — skipping");
+            let _ = config.bus.send(Event::TerminalInputRejected {
+                terminal_id,
+                message: "the prompt could not be delivered — this terminal is not an agent".into(),
+            });
             return;
         }
     };

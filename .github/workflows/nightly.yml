@@ -51,6 +51,21 @@ jobs:
       - name: Ignored integration tier (real backends / live agents)
         run: cargo nextest run --workspace --profile nightly --run-ignored only -E 'test(/^e2e_/)'
 
+  # PR CI treats a yanked crate as a warning (deny.toml `yanked = "warn"`)
+  # so one upstream yank can't hard-block every open PR at once. That trade
+  # removes the forcing function, so re-run the advisories lens here with
+  # yanked escalated back to an error: a yank standing in Cargo.lock reddens
+  # the nightly loudly and out-of-band, without gating unrelated PRs.
+  deny-yanked:
+    name: deny (yanked, escalated)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+          command-arguments: "-D yanked"
+
   desktop:
     name: desktop (browser + packaged app)
     runs-on: macos-14

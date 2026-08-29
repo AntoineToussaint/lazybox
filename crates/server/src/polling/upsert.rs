@@ -232,6 +232,27 @@ pub(super) async fn upsert_into_workspace_key(
     // tail, which prompts/cleans through its own paths and must not
     // nest under this guard.
     let ws_guards = lock_workspace_with_closing_issues(config, key, Some(&task)).await;
+
+    // TOCTOU RE-CHECK (issue #1385): the archived-set gate in
+    // `upsert_with_context` runs BEFORE this lock. An `x x` on an open
+    // PR/issue archives + deletes the row under its own workspace lock; if
+    // that lands in the window between the pre-lock check and here, this
+    // in-flight upsert would reacquire the freed lock, load `Absent`, and
+    // rebuild the just-deleted row — resurrecting it for a tick. Re-read the
+    // archived set and the delete tombstone now that we hold the lock so we
+    // observe any archive/delete that committed while we waited. The
+    // tombstone (`deleted_workspaces`) covers a non-archiving delete, whose
+    // key never enters the archived set.
+    if crate::workspace::load_archived_set(config).contains(key.as_str())
+        || config.deleted_workspaces.lock().contains(key.as_str())
+    {
+        tracing::debug!(
+            workspace_key = %key.as_str(),
+            "upsert: skipping archived/deleted workspace (re-checked under lock)"
+        );
+        return CommitOutcome::Unchanged;
+    }
+
     // 0. TERMINAL-STATE DETECTION: cheap pre-check (no IO) gates the
     //    store read — only a PR observed Merged or an issue observed
     //    Closed can trigger cleanup. We snapshot the previous state

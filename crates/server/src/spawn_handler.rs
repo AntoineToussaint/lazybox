@@ -76,6 +76,14 @@ static NEXT_TERMINAL_ID: AtomicU64 = AtomicU64::new(1);
 /// silently reuse a surviving session's id.
 const TERMINAL_ID_HIGH_WATER_KEY: &str = "terminal-id-high-water";
 const SESSION_AGENT_ACCESS_PREFIX: &str = "session-agent-access:";
+/// Session-keyed twin of [`TerminalPersistedField::AgentResume`]. The
+/// backend_key-keyed row survives only a reattach (the tmux session, and thus
+/// its key, outlives the daemon); a respawn under a fresh backend_key — killed
+/// tmux server, reboot, recovery timeout — orphans it exactly as history/draft
+/// orphaned before #1362. Keying the same payload by the stable `SessionId`
+/// lets `restore_persisted_sessions` recover the user's model tier and
+/// no-permission mode when it re-spawns the session.
+const SESSION_AGENT_RESUME_PREFIX: &str = "session-agent-resume:";
 
 /// Every persisted value owned by one backend terminal. Keeping the key
 /// namespace and cleanup inventory in one type prevents a restart feature
@@ -9363,8 +9371,21 @@ pub(crate) async fn persist_agent_resume_context(
         }
     };
     let store = config.store.clone();
-    let key = TerminalPersistedField::AgentResume.key(backend_key);
-    match tokio::task::spawn_blocking(move || store.set_kv(&key, &payload)).await {
+    let backend_scoped = TerminalPersistedField::AgentResume.key(backend_key);
+    // Mirror the payload under the stable session identity so a respawn under a
+    // fresh backend_key can recover it (see `SESSION_AGENT_RESUME_PREFIX`). Only
+    // sessions with an owning id are restorable, so a context without one has no
+    // session-keyed twin to write.
+    let session_scoped = context.session_id.map(session_agent_resume_key);
+    match tokio::task::spawn_blocking(move || {
+        store.set_kv(&backend_scoped, &payload)?;
+        if let Some(session_scoped) = session_scoped {
+            store.set_kv(&session_scoped, &payload)?;
+        }
+        Ok::<(), lazybox_store::StoreError>(())
+    })
+    .await
+    {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             tracing::warn!(%error, "persist agent resume context: store write failed")
@@ -9377,8 +9398,29 @@ async fn load_agent_resume_context(
     config: &ServerConfig,
     backend_key: &str,
 ) -> Option<crate::agent_auth::AgentResumeContext> {
-    let store = config.store.clone();
     let key = TerminalPersistedField::AgentResume.key(backend_key);
+    load_resume_context_at(config, key).await
+}
+
+fn session_agent_resume_key(session_id: SessionId) -> String {
+    format!("{SESSION_AGENT_RESUME_PREFIX}{session_id}")
+}
+
+/// Session-keyed counterpart of [`load_agent_resume_context`], consulted by the
+/// respawn path where the old backend_key is gone (see
+/// [`SESSION_AGENT_RESUME_PREFIX`]).
+async fn load_session_agent_resume_context(
+    config: &ServerConfig,
+    session_id: SessionId,
+) -> Option<crate::agent_auth::AgentResumeContext> {
+    load_resume_context_at(config, session_agent_resume_key(session_id)).await
+}
+
+async fn load_resume_context_at(
+    config: &ServerConfig,
+    key: String,
+) -> Option<crate::agent_auth::AgentResumeContext> {
+    let store = config.store.clone();
     let raw = tokio::task::spawn_blocking(move || store.get_kv(&key))
         .await
         .ok()?
@@ -10563,7 +10605,7 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
     // workspace archived via `x x`, a session removed) before restoring —
     // the durable history has no other GC hook (#468).
     gc_scrollback_files(&workspaces, &lazybox_core::paths::scrollback_dir());
-    gc_session_access_policies(config, &workspaces);
+    gc_session_scoped_terminal_state(config, &workspaces);
 
     // Snapshot live (session_key, kind) pairs so we can dedupe.
     let mut live: std::collections::HashSet<(String, String)> = {
@@ -10647,6 +10689,24 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                 continue;
             }
             let access = load_session_access(config, session.id).await;
+            // The re-spawn mints a fresh backend_key, so the model tier and
+            // no-permission mode the user chose are recovered from the
+            // session-keyed resume twin, not the orphaned backend_key row
+            // (#1386). Access already survives via `load_session_access`;
+            // provider_session_id comes from the workspace below; on-main
+            // sessions never take this path (they persist no session).
+            let resume_twin = match &kind {
+                TerminalKind::Agent(_) => {
+                    load_session_agent_resume_context(config, session.id).await
+                }
+                _ => None,
+            };
+            let model_alias = resume_twin
+                .as_ref()
+                .and_then(|context| context.model_alias.clone());
+            let no_permission_override = resume_twin
+                .as_ref()
+                .and_then(|context| context.no_permission.then_some(true));
             let provider_session_id = match &kind {
                 TerminalKind::Agent(agent_id) => {
                     session.provider_session_ids.get(agent_id).cloned()
@@ -10677,6 +10737,8 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                     resume: true,
                     provider_session_id,
                     access,
+                    model_alias,
+                    no_permission_override,
                     prompt_history,
                     composing_buffer,
                     origin: lazybox_ipc::SpawnOrigin::Autonomous(
@@ -10713,7 +10775,12 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
     }
 }
 
-fn gc_session_access_policies(
+/// Sweep the session-keyed durable rows — the access policy and the resume
+/// twin (#1386) — whose owning session no longer appears in any persisted
+/// workspace. Conservative: an unreadable record leaves the keep-set
+/// incomplete, so the sweep bails rather than risk deleting a live session's
+/// state.
+fn gc_session_scoped_terminal_state(
     config: &ServerConfig,
     workspaces: &[lazybox_store::WorkspaceRecord],
 ) {
@@ -10732,17 +10799,19 @@ fn gc_session_access_policies(
                 .map(|session| session.id.to_string()),
         );
     }
-    let Ok(rows) = config.store.list_kv_prefix(SESSION_AGENT_ACCESS_PREFIX) else {
-        return;
-    };
-    for (key, _) in rows {
-        let Some(session_id) = key.strip_prefix(SESSION_AGENT_ACCESS_PREFIX) else {
+    for prefix in [SESSION_AGENT_ACCESS_PREFIX, SESSION_AGENT_RESUME_PREFIX] {
+        let Ok(rows) = config.store.list_kv_prefix(prefix) else {
             continue;
         };
-        if !keep.contains(session_id)
-            && let Err(error) = config.store.delete_kv(&key)
-        {
-            tracing::warn!(%key, %error, "session access-policy cleanup failed");
+        for (key, _) in rows {
+            let Some(session_id) = key.strip_prefix(prefix) else {
+                continue;
+            };
+            if !keep.contains(session_id)
+                && let Err(error) = config.store.delete_kv(&key)
+            {
+                tracing::warn!(%key, %error, "session-scoped terminal-state cleanup failed");
+            }
         }
     }
 }

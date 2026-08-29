@@ -1065,6 +1065,172 @@ async fn restored_critic_session_keeps_read_only_access() {
     .expect("deadline");
 }
 
+/// #1386: the no-permission mode is keyed to the tmux backend_key, which a
+/// respawn (killed tmux server, reboot, recovery timeout) replaces. Keyed only
+/// there it would orphan and the restored agent would come back with
+/// permission prompts. The session-keyed resume twin must carry it across.
+#[tokio::test]
+async fn restored_agent_keeps_no_permission_across_respawn() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        let first_backend = MockBackend::new();
+        let first_config =
+            ServerConfig::with_store_and_backend(store.clone(), Arc::new(first_backend));
+        let workspace_key = lazybox_core::WorkspaceKey::new("test:noperm-restore");
+        let worktree = tempfile::TempDir::new().unwrap();
+        let mut workspace =
+            lazybox_core::Workspace::empty(workspace_key.clone(), "noperm", chrono::Utc::now());
+        let session = lazybox_core::WorkspaceSession::new(
+            workspace_key.clone(),
+            lazybox_core::SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            worktree.path().to_path_buf(),
+            chrono::Utc::now(),
+        );
+        let session_id = session.id;
+        workspace.add_session(session);
+        store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: workspace_key.as_str().into(),
+                created_at: workspace.created_at,
+                workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+            })
+            .unwrap();
+
+        lazybox_server::spawn_handler::handle_spawn(
+            &first_config,
+            workspace_key.as_str().into(),
+            Some(session_id),
+            TerminalKind::Agent("claude".into()),
+            SpawnOptions {
+                no_permission_override: Some(true),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let restored_backend = MockBackend::new();
+        let restored_config =
+            ServerConfig::with_store_and_backend(store, Arc::new(restored_backend.clone()));
+        lazybox_server::spawn_handler::restore_persisted_sessions(&restored_config).await;
+
+        let argv = restored_backend
+            .all_argv()
+            .await
+            .into_iter()
+            .next()
+            .expect("restored agent");
+        assert!(
+            argv.iter()
+                .any(|arg| arg == "--dangerously-skip-permissions"),
+            "a restored no-permission agent must stay unattended: {argv:?}"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// #1386: the user's explicit model tier lives in the backend_key-keyed resume
+/// row, so a respawn under a fresh key would fall back to the default model.
+/// The session-keyed twin must preserve the chosen tier.
+#[tokio::test]
+async fn restored_agent_keeps_model_tier_across_respawn() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        let first_backend = MockBackend::new();
+        let first_config =
+            ServerConfig::with_store_and_backend(store.clone(), Arc::new(first_backend));
+        let workspace_key = lazybox_core::WorkspaceKey::new("test:model-restore");
+        let worktree = tempfile::TempDir::new().unwrap();
+        let mut workspace =
+            lazybox_core::Workspace::empty(workspace_key.clone(), "model", chrono::Utc::now());
+        let session = lazybox_core::WorkspaceSession::new(
+            workspace_key.clone(),
+            lazybox_core::SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            worktree.path().to_path_buf(),
+            chrono::Utc::now(),
+        );
+        let session_id = session.id;
+        workspace.add_session(session);
+        store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: workspace_key.as_str().into(),
+                created_at: workspace.created_at,
+                workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+            })
+            .unwrap();
+
+        // `M` is Claude's Sonnet tier — distinct from the default `L` (Opus) so
+        // a lost alias would surface as `claude-opus-4-8` in the restored argv.
+        lazybox_server::spawn_handler::handle_spawn(
+            &first_config,
+            workspace_key.as_str().into(),
+            Some(session_id),
+            TerminalKind::Agent("claude".into()),
+            SpawnOptions {
+                model_alias: Some("M".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let restored_backend = MockBackend::new();
+        let restored_config =
+            ServerConfig::with_store_and_backend(store, Arc::new(restored_backend.clone()));
+        lazybox_server::spawn_handler::restore_persisted_sessions(&restored_config).await;
+
+        let argv = restored_backend
+            .all_argv()
+            .await
+            .into_iter()
+            .next()
+            .expect("restored agent");
+        assert!(
+            argv.iter().any(|arg| arg == "claude-sonnet-5"),
+            "a restored agent must keep its chosen model tier: {argv:?}"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// #1386: `Workspace.metered` is a field of the persisted workspace, so it must
+/// survive a store round-trip untouched — the metering opt-in is re-derived
+/// from it at every spawn (`handle_spawn`), never from the ephemeral
+/// backend_key.
+#[tokio::test]
+async fn metered_flag_survives_workspace_round_trip() {
+    let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+    let workspace_key = lazybox_core::WorkspaceKey::new("test:metered-roundtrip");
+    let mut workspace =
+        lazybox_core::Workspace::empty(workspace_key.clone(), "metered", chrono::Utc::now());
+    workspace.metered = true;
+    store
+        .save_workspace(&lazybox_store::WorkspaceRecord {
+            key: workspace_key.as_str().into(),
+            created_at: workspace.created_at,
+            workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+        })
+        .unwrap();
+
+    let reloaded: lazybox_core::Workspace = serde_json::from_str(
+        store
+            .get_workspace(&workspace_key)
+            .unwrap()
+            .expect("workspace record")
+            .workspace_json
+            .as_deref()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(reloaded.metered, "metered opt-in must persist");
+}
+
 #[tokio::test]
 async fn hook_session_identity_is_persisted_and_used_for_restore() {
     timeout(TEST_DEADLINE, async {

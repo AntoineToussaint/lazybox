@@ -159,29 +159,54 @@ conflate:
   into the inbox" (wanted only by user-facing archive; `ClosedAuto` must
   *not* set it, so a reopened issue resurfaces).
 
-With the split, the recovery decision for a tmux survivor collapses to
-one uniform rule, keyed on the authority (row presence) rather than a
-proxy:
+**The workspace row stays the authority; the tombstone only narrows the
+kill.** Rows are durable — `restore_persisted_sessions` reads them from
+the store via `list_workspaces()` (`crates/server/src/spawn_handler.rs:10536`),
+so at startup, before any poll, every workspace that existed at shutdown
+still has its row and every removed one does not. Row-presence is
+therefore the authority for "should this exist," exactly as
+`recover_sessions` already treats it (`workspace_row_is_absent`,
+`spawn_handler.rs:8899`–`8916`). The tombstone must **not** replace that
+gate: it is permanent and workspace keys are reused
+(`allocate_workspace_key`), so an archived-then-recreated workspace is
+`row_present` yet still tombstoned — killing on the tombstone alone
+destroys that live workspace on every restart, which is the precise
+`#1368` regression. The rule keeps row-absence as the kill trigger and
+adds the tombstone only as a *disambiguator for the row-absent case*:
 
 ```
 for each live tmux session S with meta (session_key, kind):
     row_present = store.get_workspace(session_key).is_some()
-    tombstoned  = session_tombstones.contains(session_key)   # any removal reason
-    if row_present and not tombstoned:  reattach(S)           # survivor of a clean restart
-    else:                               kill(S); sweep(session_key)   # removed, or crashed mid-remove
+    if row_present:  reattach(S)                    # authority says it exists → survivor
+    else:            kill(S); sweep(session_key)     # row gone → removed or crashed mid-remove; orphan
 ```
 
-`row_present` alone is ambiguous at startup only because the first poll
-has not run — the tombstone set is exactly what disambiguates
-"absent because removed" from "absent because not-yet-polled," so no
-`recover_sessions`-style two-condition special-case is needed. The
-`unreadable → fail open (reattach)` rule stays.
+A row-present survivor is always reattached — recreation after archive is
+covered for free, with no `recover_sessions`-style two-condition
+special-case, because the row (not the permanent tombstone) decides. The
+tombstone earns its keep in the *silent-sweep* refinement below, not in
+the reattach-vs-kill choice; the `unreadable → fail open (reattach)` rule
+stays.
 
-**One pass, not two.** `reconcile_missing_recovered_sessions` should be
-folded into the same authority check: a persisted `terminal:` row whose
-session is tombstoned is swept **silently** (no `Exited` broadcast for a
-workspace the user already removed), everything else commits `Exited` as
-today.
+**One pass, not two — and this is where the tombstone earns its keep.**
+`reconcile_missing_recovered_sessions` handles persisted `terminal:` rows
+whose tmux session is *gone*. Row-absence alone can't tell "the user
+removed this" from "the agent crashed": both leave a dead row. The
+tombstone disambiguates — a dead row whose session is tombstoned is swept
+**silently** (no `Exited` broadcast for a workspace the user already
+removed); a dead row that is *not* tombstoned commits `Exited` as today
+(a real crash the UI should reflect). This is the tombstone's only
+load-bearing use; the reattach-vs-kill choice above never consults it.
+
+**Rebadge caveat.** Issue→PR collapse re-points terminals from the issue
+key onto the PR key (`TerminalsRebadged`), so the surviving session's
+meta already names the PR — tombstoning the *issue* key is correctly
+inert for it (the PR row is present, the terminal reattaches under the PR
+key). The tombstone therefore covers only sessions that were *not*
+rebadged: an issue-keyed tmux session whose agent had already exited
+(lingering, no registry entry, never moved). That narrow set is exactly
+what the delete-time `backend.list()` sweep can miss on failure, which is
+why the tombstone is the durable backstop for it (see D2).
 
 **Caches rebuild, never patch.** The registry (S5) is populated purely
 by the reconcile result; the client (S6) rebuilds purely from the
@@ -224,15 +249,31 @@ path emits a workspace-targeted terminal event. **Test:**
 
 ### D2 — Non-archiving removals have no resurrection backstop (#1377)
 
-**Severity: medium · Confidence: high.** `ClosedAuto` (issue→PR collapse)
+**Severity: medium. Confidence: high that the orphan survives; medium on
+the resurrection mechanism (see below).** `ClosedAuto` (issue→PR collapse)
 and `Rescope` delete the row but skip the archived set
 (`WorkspaceRemovalReason::archives`, `workspace/mod.rs:2122`). Their only
 orphan protection is the best-effort delete-time `backend.list()` sweep
 (`2448`), which does not undo the delete on failure.
-**Failure scenario:** an issue collapses into its PR while `backend.list()`
-transiently fails at delete time; the orphan tmux session survives, and on
-restart `recover_sessions` reattaches it (not archived → not guarded),
-resurrecting the collapsed issue row.
+
+The orphan surface is narrower than "any collapsed issue": collapse
+rebadges the issue's terminals onto the PR key (`TerminalsRebadged`), so
+a live agent moves rather than orphans. What remains is the issue-keyed
+tmux session whose agent had **already exited** — lingering, no registry
+entry, never rebadged — which the registry sweep can't see and the
+`backend.list()` sweep is the sole killer of.
+
+**Failure scenario:** an issue with such a lingering exited-agent session
+collapses into its PR while the delete-time `backend.list()` transiently
+fails. The orphan tmux session survives. On restart `recover_sessions`
+lists it and — because the workspace was never archived — reattaches it
+instead of killing it. Note the resurrected artifact is a *terminal*, not
+a store row: `restore_persisted_sessions` is row-driven (`list_workspaces()`)
+and never recreates a deleted row, so the reattached orphan surfaces as a
+**ghost workspace synthesized client-side from a terminal with no backing
+row** (the same client synthesis behind the empty-ghost-repo-group class),
+not as a resurrected `workspace:{key}` row. Same user-visible symptom as
+`#1365`; different mechanism from a poll re-adding the row.
 **Fix:** the session-tombstone split in §5 — tombstone *all* removal
 reasons for kill-on-recovery while leaving `ClosedAuto` out of the
 inbox-suppression flag so reopen still resurfaces. **Test:**

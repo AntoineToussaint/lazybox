@@ -2753,6 +2753,27 @@ pub enum Event {
     AgentSessionStarted {
         session_key: SessionKey,
     },
+    /// New-item discovery is behind (#1391): a due GitHub full sweep has
+    /// been deferred by the background rate governor for several
+    /// consecutive ticks, so new-issue/PR reconcile discovery has stalled
+    /// (past ~25 `watch:` repos the forecast permanently exceeds the
+    /// per-tick GraphQL allowance). A **standing, self-clearing** signal —
+    /// `behind: true` when the stall sets in, `behind: false` when a sweep
+    /// is finally admitted (or stops being due) — so the client shows a
+    /// persistent indicator that retracts itself, not a one-shot toast that
+    /// can be missed. This is an advisory, never a sync failure: the cheap
+    /// issue-discovery probe keeps surfacing new issues meanwhile, so it
+    /// must NOT flow through the `ProviderError` error channel (which would
+    /// register a phantom failing provider and, cross-client, a bare error).
+    /// The `watched_repos` / `required_points` / `allowance` figures name
+    /// the lever; they are `0` on the clearing (`behind: false`) event.
+    /// Appended last (bincode is ordinal-sensitive).
+    GithubDiscoveryBehind {
+        behind: bool,
+        watched_repos: u32,
+        required_points: u32,
+        allowance: u32,
+    },
 }
 
 /// Daemon resource posture for the Shift-D sync-status screen.

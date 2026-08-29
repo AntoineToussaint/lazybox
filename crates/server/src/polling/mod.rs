@@ -1076,6 +1076,19 @@ pub struct TickState {
     /// Linear cadence is actually due — Linear tickets change far less
     /// often than GitHub CI/PR state (#1032).
     pub(crate) linear_schedule: sources::LinearSchedule,
+    /// Consecutive ticks on which a GitHub full sweep was DUE but the rate
+    /// governor refused to admit it (needs more GraphQL points than the
+    /// per-tick allowance covers). Past ~25 watched repos this can hold
+    /// forever, silently stalling new-issue/PR reconcile discovery (#1391).
+    /// Once the streak crosses [`sources::DISCOVERY_BEHIND_TICKS`] the
+    /// daemon raises one user-visible "discovery behind" advisory; a manual
+    /// refresh or a tick that finally admits the sweep resets it.
+    pub(crate) full_sweep_deferral_streak: u32,
+    /// Whether the "discovery behind" advisory has already been broadcast
+    /// for the current deferral episode, so the notice fires once when the
+    /// stall sets in rather than every tick. Cleared when a sweep is
+    /// admitted (or isn't due), re-arming the notice for a later re-stall.
+    pub(crate) discovery_behind_notified: bool,
 }
 
 impl TickState {

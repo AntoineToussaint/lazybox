@@ -2325,6 +2325,16 @@ impl GhClient {
     /// count, so it stays well within the rate budget.
     pub const AUTHORED_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(90);
 
+    /// Cadence for the cheap `involves:USER is:issue` discovery probe
+    /// ([`fetch_recently_involved_issues`](Self::fetch_recently_involved_issues)).
+    /// Sibling of the authored-PR probe, on its own light clock: a brand-new
+    /// issue that involves the user surfaces within this cadence even when
+    /// the heavy full `involves:` sweep is deferred by the rate governor at
+    /// scale (#1391), instead of waiting out the 30-min sweep or a manual
+    /// `Shift-R`. One small windowed search per interval, independent of
+    /// watched-repo count.
+    pub const ISSUE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(90);
+
     /// Should the next sync cycle run a heavy full sweep, or is the
     /// notifications-driven incremental path safe to use? Returns true
     /// when no sweep has run yet (first tick after daemon start) or
@@ -2372,6 +2382,20 @@ impl GhClient {
     /// Stamp the discovery probe as just-run so it re-arms on its cadence.
     pub fn mark_authored_probe_done(&self) {
         self.notifications_state.lock().mark_authored_probe_done();
+    }
+
+    /// Whether the cheap `involves:USER is:issue` discovery probe is due
+    /// this tick.
+    pub fn issue_probe_due(&self) -> bool {
+        self.notifications_state
+            .lock()
+            .is_issue_probe_due(Self::ISSUE_PROBE_INTERVAL)
+    }
+
+    /// Stamp the issue-discovery probe as just-run so it re-arms on its
+    /// cadence.
+    pub fn mark_issue_probe_done(&self) {
+        self.notifications_state.lock().mark_issue_probe_done();
     }
 
     /// Decide the `updated:>=` floor for the next GLOBAL `involves:` PR
@@ -3187,6 +3211,67 @@ impl GhClient {
         quals.push(format!("author:{user}"));
         quals.push(graphql::updated_since_qualifier(since));
         graphql::build_query(&quals)
+    }
+
+    /// Cheap windowed issue-discovery probe (#1391): a SINGLE
+    /// `involves:USER is:issue updated:>=since` search that honors the same
+    /// role/scope filters as the full issue sweep. Sibling of
+    /// [`fetch_recently_authored_prs`](Self::fetch_recently_authored_prs) —
+    /// a near-empty page on a steady inbox, independent of how many repos
+    /// you watch.
+    ///
+    /// New-issue discovery otherwise only happens on the heavy full
+    /// `involves:` sweep, which the rate governor perpetually DEFERS past
+    /// ~25 watched repos (its forecast exceeds the per-tick GraphQL
+    /// allowance). Running this on the fast tick surfaces a brand-new
+    /// involved issue within one probe cadence even while the full sweep is
+    /// deferred, so discovery no longer silently stalls until a manual
+    /// `Shift-R`. Priced as its own light budget class so it isn't charged
+    /// like the full sweep.
+    pub async fn fetch_recently_involved_issues(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Task>, GhError> {
+        let query = Self::issue_probe_query(&self.issue_filters, &self.user, since);
+        tracing::debug!("involved-issue discovery probe: {query}");
+        self.acquire_paced("issue-probe").await?;
+        let body = graphql::issues_query_body(&query, None);
+        let response: graphql::GqlIssueResponse =
+            self.post_graphql_with_retry("issue-probe", &body).await?;
+        if let Some(errors) = &response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.message.clone())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(GhError::Graphql(joined));
+        }
+        let mut tasks = Vec::new();
+        if let Some(data) = response.data {
+            for issue in &data.search.nodes {
+                tasks.push(graphql::issue_to_task(issue, &self.user));
+            }
+        }
+        Ok(tasks)
+    }
+
+    /// Build the `involves:USER is:issue … updated:>=since` search string
+    /// for the issue-discovery probe. Mirrors [`issue_search_query`](Self::issue_search_query)
+    /// (same role/scope narrowing) plus the incremental window, split out
+    /// so the query shape is unit-testable without a live GraphQL round-trip.
+    pub(crate) fn issue_probe_query(
+        issue_filters: &[String],
+        user: &str,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> String {
+        let mut quals = graphql::default_issues_qualifiers();
+        if issue_filters.is_empty() {
+            quals.push(format!("involves:{user}"));
+        } else {
+            quals.extend(issue_filters.iter().cloned());
+        }
+        quals.push(graphql::updated_since_qualifier(since));
+        graphql::build_issues_query(&quals)
     }
 
     /// `since` narrows the main `involves:` paginated search to PRs
@@ -5888,6 +5973,45 @@ mod tests {
             "{query}"
         );
         assert!(!query.contains("involves:"), "{query}");
+    }
+
+    #[test]
+    fn issue_probe_query_is_windowed_involves_issue_search() {
+        let since = chrono::DateTime::parse_from_rfc3339("2026-08-25T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // Default (no explicit issue filters) → `involves:USER`, so a
+        // newly-assigned/mentioned issue surfaces, and windowed so it stays
+        // a near-empty page rather than the heavy full issue sweep.
+        let query = GhClient::issue_probe_query(&[], "octo-agent", since);
+        assert!(query.contains("is:issue"), "{query}");
+        assert!(query.contains("is:open"), "{query}");
+        assert!(query.contains("archived:false"), "{query}");
+        assert!(query.contains("involves:octo-agent"), "{query}");
+        assert!(!query.contains("is:pr"), "{query}");
+        assert!(
+            query.contains("updated:>=2026-08-25T10:00:00+00:00"),
+            "{query}"
+        );
+    }
+
+    #[test]
+    fn issue_probe_query_honors_explicit_filters() {
+        let since = chrono::DateTime::parse_from_rfc3339("2026-08-25T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // Explicit role/scope filters replace the `involves:` default,
+        // matching `issue_search_query`, so the probe surfaces the same set
+        // the full sweep would — just windowed.
+        let filters = vec!["assignee:octo-agent".to_string()];
+        let query = GhClient::issue_probe_query(&filters, "octo-agent", since);
+        assert!(query.contains("assignee:octo-agent"), "{query}");
+        assert!(!query.contains("involves:"), "{query}");
+        assert!(query.contains("is:issue"), "{query}");
+        assert!(
+            query.contains("updated:>=2026-08-25T10:00:00+00:00"),
+            "{query}"
+        );
     }
 
     /// Pagination + owner handling for `accessible_scopes`, against a

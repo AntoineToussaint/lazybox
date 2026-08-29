@@ -6046,6 +6046,14 @@ impl<T: TerminalAdapter> Model<T> {
                 Some((sp.spinner_glyph(), sp.label()))
             } else if let Some(wait) = self.status.github_rate_limit_wait.as_ref() {
                 Some(("◷", wait.label()))
+            } else if let Some(behind) = self.status.discovery_behind.as_ref() {
+                // Standing advisory (#1391): outranks the ambient
+                // background-poll spinner and the steady box state so a
+                // budget-deferred discovery stall is visible whenever
+                // nothing more urgent (active poll, rate-limit wait) holds
+                // the slot — and it stays until the daemon retracts it,
+                // rather than fading like a toast.
+                Some(("⚠", behind.label()))
             } else if let Some(box_status) = self.status.remote_status_busy() {
                 Some(box_status)
             } else if let Some(bg) = self.status.bg_poll.as_ref() {

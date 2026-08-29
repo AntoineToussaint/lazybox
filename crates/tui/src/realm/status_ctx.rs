@@ -302,6 +302,37 @@ pub(crate) struct GithubRateLimitWait {
     last_tick: Instant,
 }
 
+/// Standing "new-item discovery is behind" advisory (#1391). Held while the
+/// daemon reports the full sweep budget-deferred; the figures name the lever
+/// so the footer/inspect text can spell out why and what to do.
+#[derive(Debug, Clone)]
+pub(crate) struct DiscoveryBehind {
+    pub watched_repos: u32,
+    pub required_points: u32,
+    pub allowance: u32,
+}
+
+impl DiscoveryBehind {
+    /// Compact footer-slot label — narrow, names the primary lever.
+    pub fn label(&self) -> String {
+        format!(
+            "new-issue discovery behind · {} watched repos over budget · Shift-R to force",
+            self.watched_repos
+        )
+    }
+
+    /// Fuller one-shot flash raised the moment the stall sets in, so the
+    /// user gets an immediate nudge on top of the standing indicator.
+    pub fn flash_message(&self) -> String {
+        format!(
+            "New-issue discovery is behind — {} watched repos exceed the poll budget \
+             (needs {} GraphQL pts, tick allowance {}). Press Shift-R to force a full sync, \
+             or reduce `watch:` filters.",
+            self.watched_repos, self.required_points, self.allowance
+        )
+    }
+}
+
 impl GithubRateLimitWait {
     pub fn label(&self) -> String {
         rate_limit_wait_label(self.remaining, self.limit, self.reset_at, Utc::now())
@@ -422,6 +453,13 @@ pub(crate) struct StatusCtx {
     /// GitHub is not syncing or failed: it is deliberately sleeping
     /// until the observed API window resets.
     pub github_rate_limit_wait: Option<GithubRateLimitWait>,
+    /// New-item discovery is behind (#1391): the daemon's full sweep has
+    /// been budget-deferred by the rate governor for several ticks running.
+    /// A STANDING signal — set on the daemon's `behind: true` edge, cleared
+    /// on its `behind: false` edge — so the footer holds a persistent
+    /// indicator that can't be missed like a one-shot toast, rather than
+    /// leaving the stall silent until the user opens Shift-D.
+    pub discovery_behind: Option<DiscoveryBehind>,
     /// Latest compact budget-governor snapshot received through the
     /// GitHub poll progress stream. Shift-D renders it above history.
     pub github_governor: Option<String>,
@@ -487,6 +525,7 @@ impl StatusCtx {
             polling_last_tick: Instant::now(),
             bg_poll: None,
             github_rate_limit_wait: None,
+            discovery_behind: None,
             github_governor: None,
             spawning: None,
             sync: SyncLog::default(),

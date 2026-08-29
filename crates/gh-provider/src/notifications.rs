@@ -200,6 +200,11 @@ pub(crate) struct NotificationsState {
     /// never (probe on the first eligible tick). Ephemeral — not
     /// persisted; a restart just probes immediately, which is fine.
     pub(crate) last_authored_probe_at: Option<std::time::Instant>,
+    /// When the cheap `involves:USER is:issue` discovery probe last ran.
+    /// `None` = never. Ephemeral, same as `last_authored_probe_at`. This
+    /// is the sibling probe that surfaces a brand-new involved issue while
+    /// the heavy full sweep is budget-deferred by the governor (#1391).
+    pub(crate) last_issue_probe_at: Option<std::time::Instant>,
     /// "Skip the cheap heartbeat round-trip and go straight to full
     /// sweep" deadline. Armed by `note_heartbeat_failed` when the
     /// notifications endpoint errors (auth scope missing, REST
@@ -281,6 +286,20 @@ impl NotificationsState {
     /// Stamp the discovery probe as just-run.
     pub fn mark_authored_probe_done(&mut self) {
         self.last_authored_probe_at = Some(std::time::Instant::now());
+    }
+
+    /// Whether the cheap `involves:USER is:issue` discovery probe is due
+    /// (never run, or last run at least `threshold` ago).
+    pub fn is_issue_probe_due(&self, threshold: std::time::Duration) -> bool {
+        match self.last_issue_probe_at {
+            None => true,
+            Some(t) => t.elapsed() >= threshold,
+        }
+    }
+
+    /// Stamp the issue-discovery probe as just-run.
+    pub fn mark_issue_probe_done(&mut self) {
+        self.last_issue_probe_at = Some(std::time::Instant::now());
     }
 
     fn is_full_sweep_due_at(&self, threshold: std::time::Duration, now: DateTime<Utc>) -> bool {
@@ -544,6 +563,29 @@ mod tests {
         assert!(!state.is_authored_probe_due(interval));
         // A zero threshold is always due regardless of the stamp.
         assert!(state.is_authored_probe_due(std::time::Duration::ZERO));
+    }
+
+    #[test]
+    fn issue_probe_gating_fires_once_per_interval() {
+        let mut state = NotificationsState::default();
+        let interval = std::time::Duration::from_secs(90);
+        // Never run → due immediately.
+        assert!(state.is_issue_probe_due(interval));
+        state.mark_issue_probe_done();
+        // Just ran → not due until the interval elapses.
+        assert!(!state.is_issue_probe_due(interval));
+        // A zero threshold is always due regardless of the stamp.
+        assert!(state.is_issue_probe_due(std::time::Duration::ZERO));
+    }
+
+    #[test]
+    fn issue_and_authored_probes_track_independent_clocks() {
+        let mut state = NotificationsState::default();
+        let interval = std::time::Duration::from_secs(90);
+        // Stamping one probe must not silence the other.
+        state.mark_authored_probe_done();
+        assert!(!state.is_authored_probe_due(interval));
+        assert!(state.is_issue_probe_due(interval));
     }
 
     #[test]

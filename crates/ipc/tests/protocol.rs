@@ -1166,6 +1166,12 @@ fn all_events() -> Vec<Event> {
         Event::AgentSessionStarted {
             session_key: key.clone(),
         },
+        Event::GithubDiscoveryBehind {
+            behind: true,
+            watched_repos: 30,
+            required_points: 900,
+            allowance: 120,
+        },
     ]
 }
 
@@ -1367,6 +1373,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::SnippetKeepMine { .. } => "SnippetKeepMine",
         Event::Stats { .. } => "Stats",
         Event::AgentSessionStarted { .. } => "AgentSessionStarted",
+        Event::GithubDiscoveryBehind { .. } => "GithubDiscoveryBehind",
     }
 }
 
@@ -1383,7 +1390,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        95,
+        96,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

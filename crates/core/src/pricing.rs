@@ -68,13 +68,18 @@ impl ModelPrice {
 fn builtin_prices() -> &'static [(&'static str, ModelPrice)] {
     &[
         // ── Anthropic (Claude) ─────────────────────────────────────────
+        // Current-generation list prices (Opus 4.5/4.6/4.7/4.8/5 all share the
+        // Opus-tier rate; Sonnet 4.6/5; Haiku 4.5). Cache-write is Anthropic's
+        // 1.25× input premium, cache-read the 0.1× discount. The retired
+        // dotted models (Opus 3, Haiku 3.5) keep their historical rates below,
+        // reachable via their longer `claude-3-*` prefixes.
         (
             "claude-opus",
             ModelPrice {
-                input: 15.0,
-                output: 75.0,
-                cache_write: 18.75,
-                cache_read: 1.50,
+                input: 5.0,
+                output: 25.0,
+                cache_write: 6.25,
+                cache_read: 0.50,
             },
         ),
         (
@@ -89,14 +94,15 @@ fn builtin_prices() -> &'static [(&'static str, ModelPrice)] {
         (
             "claude-haiku",
             ModelPrice {
-                input: 0.80,
-                output: 4.0,
-                cache_write: 1.0,
-                cache_read: 0.08,
+                input: 1.0,
+                output: 5.0,
+                cache_write: 1.25,
+                cache_read: 0.10,
             },
         ),
-        // Older dotted ids (`claude-3-5-haiku…`, `claude-3-opus…`) so a
-        // pinned legacy model still prices.
+        // Older dotted ids (`claude-3-opus…`, `claude-3-5-haiku…`) so a pinned
+        // legacy model still prices at its own historical list rate — the
+        // longer prefix wins over the generic family key above.
         (
             "claude-3-opus",
             ModelPrice {
@@ -204,17 +210,61 @@ mod tests {
 
     #[test]
     fn sums_every_token_bucket() {
-        // Opus: 15 in / 75 out / 18.75 write / 1.50 read, 1M of each.
+        // Opus: 5 in / 25 out / 6.25 write / 0.50 read, 1M of each.
         let counts = TokenCounts {
             input: 1_000_000,
             output: 1_000_000,
             cache_creation: 1_000_000,
             cache_read: 1_000_000,
         };
-        // (15 + 75 + 18.75 + 1.50) == $110.25 == 110_250_000 micros.
+        // (5 + 25 + 6.25 + 0.50) == $36.75 == 36_750_000 micros.
         assert_eq!(
             cost_micros("claude-opus-4-8", &counts, &no_overrides()),
-            Some(110_250_000)
+            Some(36_750_000)
+        );
+    }
+
+    #[test]
+    fn current_opus_prices_at_5_and_25_not_15_and_75() {
+        // Regression for #1388: the default agent model `claude-opus-4-8` was
+        // metered at the retired Opus-3 rate ($15/$75), a 3× overcount. It must
+        // price at the current Opus-tier list rate.
+        let input = TokenCounts {
+            input: 1_000_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            cost_micros("claude-opus-4-8", &input, &no_overrides()),
+            Some(5_000_000),
+            "1M Opus input tokens must cost $5.00, not $15.00"
+        );
+        let output = TokenCounts {
+            output: 1_000_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            cost_micros("claude-opus-4-8", &output, &no_overrides()),
+            Some(25_000_000),
+            "1M Opus output tokens must cost $25.00, not $75.00"
+        );
+        // Opus 5 (undated id) shares the same current rate.
+        assert_eq!(
+            cost_micros("claude-opus-5", &input, &no_overrides()),
+            Some(5_000_000)
+        );
+    }
+
+    #[test]
+    fn retired_dotted_opus_keeps_its_historical_rate() {
+        // `claude-3-opus-*` was genuinely $15/$75; its longer prefix must still
+        // win over the corrected generic `claude-opus` family key.
+        let input = TokenCounts {
+            input: 1_000_000,
+            ..Default::default()
+        };
+        assert_eq!(
+            cost_micros("claude-3-opus-20240229", &input, &no_overrides()),
+            Some(15_000_000)
         );
     }
 

@@ -29,12 +29,15 @@ narrow the scope before you add to the pile.
 ## Throttle the job count
 
 Prefer bounding parallelism over grabbing every core — N agents each grabbing
-every core *is* the failure mode. Cap the codegen jobs and, on a busy box,
-de-prioritize the process:
+every core *is* the failure mode. `CARGO_BUILD_JOBS` (or `--jobs`) is the lever
+that actually reduces the load: it caps how many crates compile at once. `nice`
+does something different and complementary — it only lowers scheduling
+priority, so the build still uses the same job count and thrashes the same
+`target/`, but the kernel lets interactive work jump ahead of it. Use both:
 
 ```bash
-CARGO_BUILD_JOBS=4 cargo build        # or: cargo build --jobs 4
-nice -n 10 cargo test -p <crate>      # yield to interactive work
+CARGO_BUILD_JOBS=4 cargo build        # or: cargo build --jobs 4 — caps the jobs
+nice -n 10 cargo test -p <crate>      # only de-prioritizes; pair with -j to cut load
 ```
 
 A build that uses half the cores and finishes is worth far more than one that
@@ -42,20 +45,35 @@ grabs them all and thrashes.
 
 ## Prefer scoped builds and tests
 
-Build and test only the crate you touched instead of the whole workspace:
+While you iterate, build and test only the crate you touched instead of the
+whole workspace:
 
 ```bash
-cargo test -p <crate>                 # not: cargo test --workspace
+cargo test -p <crate>                 # tight edit/compile loop
 cargo clippy -p <crate>
 ```
 
 Scoped runs compile a fraction of the graph, so they finish faster and leave
-headroom for everyone else. Reach for `--workspace` only when a change
-genuinely spans crates.
+headroom for everyone else.
+
+**But scope narrowing is for the loop, not for the final green-before-push
+check.** This workspace has cross-crate gates that a scoped run never compiles
+and so silently passes: editing `crates/tui-core/src/action.rs` breaks
+`crates/tui/tests/keymap_docs.rs`; touching `crates/ipc/src` bumps the desktop
+protocol fingerprint; install-copy edits break `crates/tui/tests/web_docs.rs`;
+`dep_rules.rs` polices layering. `cargo test -p <the-crate-you-edited>` is
+green in every one of those cases while CI goes red. So before you push, run
+the **full** gate suite (`cargo test --workspace`, `cargo clippy --workspace`,
+`typos`, plus any `make` regen the change touches) — throttled with
+`CARGO_BUILD_JOBS`/`nice` if the box is busy, but run, not skipped. The
+resource rules above govern *how hard* you compile, never *whether* the final
+validation happens.
 
 ## Coordinate, don't collide
 
 Multiple agents compiling the same workspace at the same instant thrash both
-the CPU and the shared `target/` directory. If a heavy build is already
-running, wait for a slot rather than piling on — a queued build that starts
-30 seconds later still beats two builds fighting for the same cores.
+the CPU and the shared `target/` directory. There is no shared build queue to
+join — "wait for a slot" just means re-sample the load yourself: if `uptime`
+shows the box already saturated, sleep and check again before you start,
+rather than piling on. A build that starts 30 seconds later still beats two
+builds fighting for the same cores.

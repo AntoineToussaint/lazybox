@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::components::sidebar::{NotificationKind, PendingNotification};
+use lazybox_core::SessionKey;
 
 /// How long to hold a notification before firing, giving a burst time
 /// to accumulate so it can be collapsed. A tumbling window from the
@@ -75,6 +76,11 @@ fn summarize(notifs: Vec<PendingNotification>) -> Vec<PendingNotification> {
         let Some(group) = groups.remove(&kind) else {
             continue;
         };
+        // Count distinct workspaces, not raw edges: one agent that flaps
+        // in and out of a state within the window (plausible under an
+        // event storm) must count once — otherwise a single workspace is
+        // mislabeled as an "N agents" summary.
+        let group = dedupe_by_workspace(group);
         if group.len() == 1 {
             out.extend(group);
         } else if let Some(summary) = summarize_group(kind, group) {
@@ -82,6 +88,23 @@ fn summarize(notifs: Vec<PendingNotification>) -> Vec<PendingNotification> {
         }
     }
     out
+}
+
+/// Collapse repeated notifications for the same workspace to a single
+/// entry — the freshest one — while preserving first-seen order.
+fn dedupe_by_workspace(group: Vec<PendingNotification>) -> Vec<PendingNotification> {
+    let mut order: Vec<SessionKey> = Vec::new();
+    let mut latest: HashMap<SessionKey, PendingNotification> = HashMap::new();
+    for n in group {
+        if !latest.contains_key(&n.workspace_key) {
+            order.push(n.workspace_key.clone());
+        }
+        latest.insert(n.workspace_key.clone(), n);
+    }
+    order
+        .into_iter()
+        .filter_map(|k| latest.remove(&k))
+        .collect()
 }
 
 /// Build one summary banner for a burst of same-kind notifications.
@@ -124,13 +147,18 @@ fn summarize_names(group: &[PendingNotification]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lazybox_core::SessionKey;
 
     fn notif(name: &str, kind: NotificationKind) -> PendingNotification {
+        notif_keyed(name, name, kind)
+    }
+
+    /// Build a notification with an explicit workspace key, so a test
+    /// can push several edges for the *same* workspace.
+    fn notif_keyed(key: &str, name: &str, kind: NotificationKind) -> PendingNotification {
         PendingNotification {
             title: format!("lazybox — {name} needs input"),
             body: name.to_string(),
-            workspace_key: SessionKey::from(name.to_string()),
+            workspace_key: SessionKey::from(key.to_string()),
             name: name.to_string(),
             kind,
         }
@@ -195,6 +223,37 @@ mod tests {
                 "lazybox — 2 agents rate-limited",
             ]
         );
+    }
+
+    #[test]
+    fn same_workspace_flapping_counts_once() {
+        // One workspace that flaps in and out of asking within the
+        // window pushes two same-key edges. It must collapse to a single
+        // passthrough banner, not a bogus "2 agents need input" summary.
+        let mut c = NotificationCoalescer::default();
+        let t0 = Instant::now();
+        c.push(t0, notif_keyed("alpha", "alpha", NotificationKind::Asking));
+        c.push(t0, notif_keyed("alpha", "alpha", NotificationKind::Asking));
+
+        let out = c.flush_due(t0 + COALESCE_WINDOW);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, "lazybox — alpha needs input");
+    }
+
+    #[test]
+    fn summary_counts_distinct_workspaces_not_edges() {
+        // Two distinct workspaces plus a duplicate edge for one of them
+        // is still a two-agent burst.
+        let mut c = NotificationCoalescer::default();
+        let t0 = Instant::now();
+        c.push(t0, notif_keyed("alpha", "alpha", NotificationKind::Asking));
+        c.push(t0, notif_keyed("bravo", "bravo", NotificationKind::Asking));
+        c.push(t0, notif_keyed("alpha", "alpha", NotificationKind::Asking));
+
+        let out = c.flush_due(t0 + COALESCE_WINDOW);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].title, "lazybox — 2 agents need input");
+        assert_eq!(out[0].body, "alpha, bravo");
     }
 
     #[test]

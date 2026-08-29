@@ -701,6 +701,19 @@ impl TerminalRegistry {
             .unwrap_or_default()
     }
 
+    /// Whether the live terminal `id` was launched with permission prompts
+    /// disabled (`--dangerously-skip-permissions`). A running process's
+    /// permission posture is fixed at spawn, so a caller about to inject a
+    /// foreign prompt into an existing agent must consult this before it
+    /// hands attacker-influenceable text to an unattended bypass (#1392).
+    pub(crate) async fn no_permission_for(&self, id: TerminalId) -> bool {
+        self.lock_entries()
+            .await
+            .get(&id)
+            .map(|entry| entry.no_permission)
+            .unwrap_or(false)
+    }
+
     pub(crate) async fn record_access(&self, id: TerminalId, access: AgentRunAccess) {
         if access != AgentRunAccess::Default {
             self.lock_entries().await.entry(id).or_default().access = access;

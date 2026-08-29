@@ -102,7 +102,9 @@ desktop:
 # ── agent ────────────────────────────────────────────────────────────
 agent:
   # Autonomous @lazybox work runs Claude with --dangerously-skip-permissions.
-  autonomous_skip_permissions: true
+  # Leave unset to let the trigger decide: on for your own work, off for a
+  # mention/label from someone other than you. Set true/false to pin it.
+  # autonomous_skip_permissions: true
   # Skip permission prompts for interactively spawned agents too.
   skip_permissions: false
   # Point every spawned agent at your own LLM gateway (injected as
@@ -300,7 +302,7 @@ hand.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `autonomous_skip_permissions` | bool | `true` | Autonomous `@lazybox` work runs Claude with `--dangerously-skip-permissions` (blast radius bounded to the worktree) |
+| `autonomous_skip_permissions` | bool | unset | Whether autonomous `@lazybox` work runs Claude with `--dangerously-skip-permissions`. **Unset** resolves per spawn from *who* triggered it: `true` for your own work (`w`, your own mentions/labels), but `false` for a spawn a foreign actor triggered — a mention from someone other than you, or a `lazybox:` label on an issue you didn't author — so their attacker-influenceable issue text can't drive an unattended skip-permissions agent on your host. Set `true`/`false` to pin it either way. |
 | `skip_permissions` | bool | `false` | Skip permission prompts for interactively spawned agents too |
 | `llm_gateway_url` | string | unset | Global LLM-gateway base URL. When set, every spawned agent gets it injected as the base-URL env var its CLI reads (`ANTHROPIC_BASE_URL` for Claude, `OPENAI_BASE_URL` for Codex / Cursor). A per-repo `env` entry for the same var wins. Auth keys are deliberately not managed here. |
 | `working_watchdog_secs` | int | `15` | Fail-safe window: seconds a `Working` agent terminal may sit with no meaningful screen change before the daemon classifies the screen and forces the turn out of `Working`. `0` disables the watchdog. |
@@ -599,6 +601,13 @@ Auto-spawn settings for `@lazybox` mentions in issues / comments.
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `allowed_logins` | list of string | `[]` | GitHub logins whose `@lazybox [agent] [model-alias]` directives can auto-spawn an agent. Empty = just the authenticated viewer. |
+
+Adding **any login other than your own** is a trust decision: that person can
+turn an issue comment into an autonomous agent run — built from
+attacker-influenceable issue text — with full `git`/`gh` and your machine's
+credentials. A mention from a non-viewer login therefore keeps its permission
+prompts on ([`agent.autonomous_skip_permissions`](#agent) resolves to `false`)
+unless you set that flag explicitly. See [Trigger agents with @lazybox mentions](/docs/how-to/lazybox-mentions/#allow-other-people-to-trigger-mentions).
 
 ## `auto_fix`
 

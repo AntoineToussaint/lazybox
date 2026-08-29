@@ -974,10 +974,19 @@ impl Sidebar {
                         ),
                     ];
                     // Space-tier metering badge (approach C): a `$` marks every
-                    // workspace under this Space as metered (`x $` toggles it).
+                    // workspace under this Space as metered (`x $` toggles it),
+                    // trailed by the Space's accrued cost once any priced usage
+                    // lands (#1389) — the legible per-Space figure, summed over
+                    // its workspaces and durable across restarts.
                     if self.metered_spaces.contains(name) {
+                        let cost = self.space_cost_micros(name);
+                        let badge = if cost > 0 {
+                            format!(" $ {}", lazybox_tui_core::usage::format_cost_micros(cost))
+                        } else {
+                            " $".to_string()
+                        };
                         spans.push(Span::styled(
-                            " $",
+                            badge,
                             row_bg.unwrap_or_default().fg(theme.accent),
                         ));
                     }

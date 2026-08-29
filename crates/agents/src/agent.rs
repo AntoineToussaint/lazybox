@@ -227,6 +227,21 @@ pub trait Agent: Send + Sync {
         None
     }
 
+    /// Whether the metering proxy can actually meter this agent's traffic.
+    ///
+    /// Metering works by pointing the provider's base-URL env
+    /// (`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`) at the local proxy. That
+    /// only captures usage if the agent (a) speaks a known provider and (b)
+    /// honors that env var. The default ties meterability to
+    /// [`Agent::llm_provider`] — a provider-less `GenericCli` can't be
+    /// metered. An agent that speaks a provider but ignores the base-URL env
+    /// overrides this to `false` so a metered spawn is never a silent bypass
+    /// (the caller surfaces a "metered-but-not" notice instead of pointing
+    /// the agent at a proxy URL it won't use).
+    fn meterable(&self) -> bool {
+        self.llm_provider().is_some()
+    }
+
     /// Machine-readable runtime supported by this agent, if any.
     ///
     /// This is deliberately separate from [`Agent::spawn`]: a CLI can
@@ -1142,6 +1157,14 @@ pub mod builtins {
         fn llm_provider(&self) -> Option<LlmProvider> {
             Some(LlmProvider::OpenAI)
         }
+        /// `cursor-agent` talks to Cursor's own backend and ignores
+        /// `OPENAI_BASE_URL`, so routing it through the metering proxy
+        /// captures nothing — it would show metered while it isn't. Exclude
+        /// it from metering (it still gets plain gateway injection via
+        /// [`Agent::llm_provider`]).
+        fn meterable(&self) -> bool {
+            false
+        }
         fn spawn(&self, _ctx: &SpawnCtx) -> Vec<String> {
             vec!["cursor-agent".into()]
         }
@@ -1235,6 +1258,27 @@ mod tests {
             super::builtins::Cursor.llm_provider(),
             Some(LlmProvider::OpenAI)
         );
+    }
+
+    #[test]
+    fn meterable_excludes_agents_that_ignore_the_base_url_env() {
+        // Claude/Codex honor their base-URL env → meterable. Cursor speaks a
+        // provider but ignores it → not meterable (would show metered while
+        // it isn't). GenericCli has no provider → not meterable.
+        assert!(Claude.meterable());
+        assert!(super::builtins::Codex.meterable());
+        assert!(
+            !super::builtins::Cursor.meterable(),
+            "cursor-agent ignores OPENAI_BASE_URL, so it can't be metered",
+        );
+        let generic = super::builtins::GenericCli {
+            id: "custom".into(),
+            display_name: "Custom".into(),
+            spawn_cmd: vec!["custom".into()],
+            resume_cmd: None,
+            asking_patterns: vec![],
+        };
+        assert!(!generic.meterable(), "no provider → not meterable");
     }
 
     #[test]

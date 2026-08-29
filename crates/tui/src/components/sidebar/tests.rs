@@ -2104,6 +2104,37 @@ mod search_tests {
         w
     }
 
+    /// #1389: the per-Space meter figure sums the hydrated per-workspace
+    /// costs of every workspace under that Space, so a Space-metered header
+    /// shows a legible total that survives a restart (hydrated via
+    /// `Event::SessionCosts`).
+    #[test]
+    fn space_cost_sums_hydrated_workspace_costs_under_the_owner_space() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let a = issue_ws_in_repo("obin-ai/platform", "1", "one");
+        let b = issue_ws_in_repo("obin-ai/service", "2", "two");
+        let other = issue_ws_in_repo("acme/widget", "3", "three");
+        let a_key = SessionKey::from(&a.key);
+        let b_key = SessionKey::from(&b.key);
+        let other_key = SessionKey::from(&other.key);
+        sb.workspaces.insert(a_key.clone(), a);
+        sb.workspaces.insert(b_key.clone(), b);
+        sb.workspaces.insert(other_key.clone(), other);
+
+        // Durable per-session totals replayed on connect (Event::SessionCosts).
+        sb.hydrate_session_costs(&[
+            (a_key.as_str().to_string(), 1_500_000),
+            (b_key.as_str().to_string(), 500_000),
+            (other_key.as_str().to_string(), 250_000),
+        ]);
+
+        // Both obin-ai repos auto-seed into the "obin-ai" owner Space, so the
+        // per-Space figure sums them; acme/widget stays under its own owner.
+        assert_eq!(sb.space_cost_micros("obin-ai"), 2_000_000);
+        assert_eq!(sb.space_cost_micros("acme"), 250_000);
+        assert_eq!(sb.space_cost_micros("nonexistent"), 0);
+    }
+
     /// Frame-budget regression gate (#1090, acceptance #4): the sidebar's
     /// per-frame widget build must stay cheap at scale.
     /// `prebuild_workspace_lines` rebuilds every visible row every frame

@@ -441,6 +441,12 @@ impl<T: TerminalAdapter> Model<T> {
                 self.sidebar
                     .add_agent_session_usage(agent_id, session_key.as_ref(), usage);
             }
+            // Durable per-session cost replay on connect (#1389): seed the
+            // live tracker so the per-workspace `$ METER · $cost` figure comes
+            // back after a restart instead of resetting to bare `$ METER`.
+            IpcEvent::SessionCosts { costs } => {
+                self.sidebar.hydrate_session_costs(costs);
+            }
             IpcEvent::AgentProviderQuota {
                 agent_id,
                 session_key,
@@ -1234,6 +1240,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentSessionStarted { .. }
                 | IpcEvent::SnippetKeepMine { .. }
                 | IpcEvent::GithubDiscoveryBehind { .. }
+                | IpcEvent::SessionCosts { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -2115,6 +2122,7 @@ impl<T: TerminalAdapter> Model<T> {
             // Exhaustive on purpose — a new Event variant must be
             // classified here before this compiles.
             IpcEvent::Snapshot { .. }
+            | IpcEvent::SessionCosts { .. }
             | IpcEvent::ViewerIdentities { .. }
             | IpcEvent::AutoFixPolicyConfig { .. }
             | IpcEvent::ShellCommandConfig { .. }
@@ -2527,6 +2535,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::Stats { .. }
                 | IpcEvent::AgentSessionStarted { .. }
                 | IpcEvent::SnippetKeepMine { .. }
+                | IpcEvent::SessionCosts { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }

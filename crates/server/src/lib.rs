@@ -67,6 +67,7 @@ pub mod proxy;
 pub mod pty;
 pub mod registries;
 mod resource_limits;
+pub mod session_cost;
 pub mod session_reaper;
 pub mod slack;
 pub mod socket_service;
@@ -1582,6 +1583,7 @@ pub async fn dispatch_command(
                     .collect::<Vec<_>>()
             };
             let snippet_keepmine = client_kv.snippet_keepmine;
+            let session_costs = client_kv.session_costs;
             let _ = tx.send(Event::Snapshot {
                 workspaces: workspaces.values,
                 terminals,
@@ -1659,6 +1661,13 @@ pub async fn dispatch_command(
             // AutoFixPolicyConfig so that stays the end-of-replay marker (#1312).
             let _ = tx.send(Event::SnippetKeepMine {
                 targets: snippet_keepmine,
+            });
+            // Durable per-session meter totals (#1389): replay them as the same
+            // kind of post-snapshot scaffolding so the per-workspace
+            // `$ METER · $cost` figure survives a restart. Kept before
+            // AutoFixPolicyConfig so that stays the end-of-replay marker.
+            let _ = tx.send(Event::SessionCosts {
+                costs: session_costs,
             });
             // Keep the auto-fix policy as the last post-subscribe push so
             // existing consumers can use it as the end-of-replay marker.

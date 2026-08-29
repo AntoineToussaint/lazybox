@@ -61,6 +61,7 @@ impl ClientRuntime {
         tasks.push(crate::working_watchdog::spawn(&config));
         tasks.push(crate::error_inbox::spawn(&config));
         tasks.push(crate::stats_accumulator::spawn(&config));
+        tasks.push(crate::session_cost::spawn(&config));
         tasks.push(crate::box_liveness::spawn(&config));
         if let Some(task) = crate::keep_awake::spawn(&config) {
             tasks.push(task);

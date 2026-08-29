@@ -150,6 +150,7 @@ async fn recv_workspace_upsert(client: &mut lazybox_ipc::Client) -> Event {
                 | Event::ShellCommandConfig { .. }
                 | Event::AgentAvailabilityConfig { .. }
                 | Event::SnippetKeepMine { .. }
+                | Event::SessionCosts { .. }
         ) {
             return evt;
         }

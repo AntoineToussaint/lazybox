@@ -1083,11 +1083,11 @@ impl Workspace {
             // Remote placement belongs to the destination row's own
             // identity — a transfer never inherits the source's box.
             remote: _,
-            // Metering is a per-workspace debugging/canary opt-in, not
-            // portable content: a transfer keeps the destination's own
-            // choice rather than silently metering it because the folded
-            // source was metered.
-            metered: _,
+            // Metering follows the line of work: an issue metered while it
+            // was worked must keep metering after it collapses into its PR.
+            // Carried below (OR'd) so an issue→PR rebadge doesn't silently
+            // stop the meter mid-line-of-work.
+            metered,
             // ── user-owned state: one explicit merge rule each ──
             snoozed_until,
             // The wake condition rides the snooze it belongs to (below);
@@ -1118,6 +1118,10 @@ impl Workspace {
                 self.snooze_wake = *snooze_wake;
             }
         }
+        // Metering follows the work: OR so a metered source keeps the
+        // destination metered across a rebadge/transfer, but never turns a
+        // metered destination off.
+        self.metered |= *metered;
         // merge-on-green is a consequential daemon arm; carry it only
         // where there's actually a PR to merge. Mirrors the UI, which
         // refuses to arm it on a PR-less workspace, so a stray arm can't
@@ -3801,7 +3805,34 @@ mod tests {
         w.record_snippet_delivery("plan".into());
         w.cleanup_prompt = CleanupPrompt::Declined;
         w.last_viewed_at = Some(now() + chrono::Duration::hours(2));
+        w.metered = true;
         w
+    }
+
+    /// #1389: a workspace metered while worked as an issue must keep
+    /// metering after it collapses into its PR — the meter follows the
+    /// line of work, so an issue→PR rebadge can't silently stop it.
+    #[test]
+    fn absorb_user_state_carries_metered_across_a_rebadge() {
+        let mut source = Workspace::empty(WorkspaceKey::new("issue-src"), "scratch", now());
+        source.metered = true;
+
+        let mut pr_target = Workspace::from_task(pr("o/r#1"), now());
+        assert!(!pr_target.metered, "destination starts unmetered");
+        pr_target.absorb_user_state_from(&source);
+        assert!(pr_target.metered, "metered source keeps the PR metered");
+
+        // OR, never turn-off: an unmetered source leaves a metered
+        // destination metered.
+        let mut unmetered_source = Workspace::empty(WorkspaceKey::new("src2"), "scratch", now());
+        unmetered_source.metered = false;
+        let mut metered_target = Workspace::from_task(pr("o/r#2"), now());
+        metered_target.metered = true;
+        metered_target.absorb_user_state_from(&unmetered_source);
+        assert!(
+            metered_target.metered,
+            "a transfer never turns a metered destination off",
+        );
     }
 
     /// The core #554 guarantee for the always-portable fields: notes,
@@ -3837,6 +3868,7 @@ mod tests {
             target.last_viewed_at, source.last_viewed_at,
             "later last-viewed carried",
         );
+        assert!(target.metered, "metered opt-in carried across the transfer");
         // Eligible destination → track-main trio carries.
         assert!(
             target.track_main,

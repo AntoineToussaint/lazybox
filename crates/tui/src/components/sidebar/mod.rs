@@ -727,6 +727,16 @@ impl Sidebar {
             .observe_session_usage(agent_id, session_key.map(|k| k.as_str()), usage);
     }
 
+    /// Hydrate the live cost tracker from the daemon's persisted per-session
+    /// totals (`Event::SessionCosts`, #1389), so the per-workspace
+    /// `$ METER · $cost` figure survives a restart. Each entry overwrites its
+    /// baseline (idempotent across reconnects).
+    pub fn hydrate_session_costs(&mut self, costs: &[(String, u64)]) {
+        for (session_key, micros) in costs {
+            self.usage.hydrate_session_cost(session_key, *micros);
+        }
+    }
+
     /// Record a provider plan-quota report (`AgentProviderQuota`) — the
     /// "can I keep working?" 5h/weekly headroom that mirrors Claude's
     /// `/usage` and Codex's `/status`. Merged per window by the tracker.
@@ -3402,6 +3412,26 @@ impl Sidebar {
     /// move-to-Space prompt.
     pub fn space_of_source(&self, source: &str) -> String {
         lazybox_tui_core::inbox::space_of(source, &self.spaces)
+    }
+
+    /// Total metered cost (micro-USD) accrued by every workspace under
+    /// `space`, summed from the live/hydrated per-session figures — the
+    /// per-Space headline for the metered-Space badge (#1389). Only called
+    /// for a metered Space (rare), so the per-frame scan over workspaces is
+    /// bounded.
+    pub fn space_cost_micros(&self, space: &str) -> u64 {
+        self.workspaces
+            .values()
+            .filter(|w| {
+                let group = crate::components::visible_rows::group_label(
+                    w,
+                    &self.projects,
+                    &self.workspaces,
+                );
+                self.space_of_source(&group) == space
+            })
+            .map(|w| self.usage.cost_micros_for_session(w.key.as_str()))
+            .sum()
     }
 
     /// The hand-created Spaces, in display order. Exactly the

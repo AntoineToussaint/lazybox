@@ -388,6 +388,13 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
     // Tee the response to the client while feeding the usage parser. The
     // sink fires exactly once, when the upstream stream ends cleanly —
     // partial/aborted responses (an error frame) never report a total.
+    //
+    // Known small under-count (#1389): a response the client aborts, or that
+    // errors mid-stream, drops the tokens it did consume. Capturing those
+    // partials would mean pricing an incomplete `usage` block the upstream
+    // never finalized (and often never sent) — deliberately not done, since a
+    // wrong partial is worse than a missing one for a cost meter. The gap is
+    // bounded to interrupted turns and documented rather than guessed.
     let sink = state.sink.clone();
     let stream = futures::stream::unfold(
         (

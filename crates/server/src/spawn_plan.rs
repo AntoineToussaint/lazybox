@@ -75,6 +75,10 @@ pub(crate) struct SpawnPlanInput {
     pub shell_command: String,
     /// Per-session metering opt-in for this spawn (see [`SpawnOptions::meter`]).
     pub meter: bool,
+    /// This workspace's sessions run on a remote box. Its loopback isn't
+    /// this host's, so the local metering proxy can't reach it — never
+    /// inject the proxy URL for a remote spawn (overrides `meter_all` too).
+    pub remote: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,6 +148,7 @@ pub(crate) fn build_spawn_plan(
         access,
         shell_command,
         meter,
+        remote,
     } = input;
     let no_permission = access != AgentRunAccess::ReadOnly
         && no_permission_override
@@ -210,7 +215,9 @@ pub(crate) fn build_spawn_plan(
         .zip(hook_command.as_deref())
         .is_some_and(|(agent, command)| !agent.hook_command_args(command).is_empty());
     let mut env = repo_env;
-    for (key, value) in gateway_env_for_agent(cfg, agent.as_deref(), meter, session_key.as_str()) {
+    for (key, value) in
+        gateway_env_for_agent(cfg, agent.as_deref(), meter, remote, session_key.as_str())
+    {
         if !env.iter().any(|(existing, _)| existing == &key) {
             env.push((key, value));
         }
@@ -321,11 +328,16 @@ pub(crate) fn argv_for(
 /// because they already report token usage by parsing their own stream-json,
 /// so proxying them too would count every turn twice in the header summary
 /// (#1109). `agent.metering_proxy` alone only makes the proxy *run* — a session
-/// that didn't opt in is never redirected.
+/// that didn't opt in is never redirected. Two coverage guards keep a metered
+/// spawn from being a silent bypass: `remote` skips a workspace whose sessions
+/// run on a box (its loopback isn't this host's — the proxy URL would be dead),
+/// and [`Agent::meterable`] skips an agent that ignores the base-URL env
+/// (`cursor-agent`) so it never shows metered while it isn't.
 pub(crate) fn gateway_env_for_agent(
     cfg: &lazybox_config::Config,
     agent: Option<&dyn Agent>,
     meter: bool,
+    remote: bool,
     session: &str,
 ) -> Vec<(String, String)> {
     let Some(agent) = agent else {
@@ -343,6 +355,8 @@ pub(crate) fn gateway_env_for_agent(
     // configured gateway), so this supersedes the plain gateway injection
     // below.
     if (meter || cfg.agent.meter_all)
+        && !remote
+        && agent.meterable()
         && cfg.agent.metering_proxy
         && let Some(port) = crate::proxy::port()
     {
@@ -521,6 +535,7 @@ mod tests {
             access: AgentRunAccess::Default,
             shell_command: String::new(),
             meter: false,
+            remote: false,
         }
     }
 

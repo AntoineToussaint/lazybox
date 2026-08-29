@@ -297,6 +297,10 @@ async fn subscribe_is_admitted_only_once_per_connection() {
     ));
     assert!(matches!(
         client.recv().await,
+        Some(Event::SessionCosts { .. })
+    ));
+    assert!(matches!(
+        client.recv().await,
         Some(Event::AutoFixPolicyConfig { .. })
     ));
     client

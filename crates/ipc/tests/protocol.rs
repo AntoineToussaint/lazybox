@@ -566,6 +566,12 @@ fn all_events() -> Vec<Event> {
             recent_snippets: vec!["rev".into(), "pr".into()],
             dismissed_updates: vec!["release:v0.2.0".into()],
         },
+        Event::SessionCosts {
+            costs: vec![
+                ("github:o/r#1".into(), 2_000_000),
+                ("github:o/r#2".into(), 250_000),
+            ],
+        },
         Event::ViewerIdentities {
             logins: vec![("github".into(), "octocat".into())],
         },
@@ -1283,6 +1289,7 @@ fn command_tag(command: &Command) -> &'static str {
 fn event_tag(event: &Event) -> &'static str {
     match event {
         Event::Snapshot { .. } => "Snapshot",
+        Event::SessionCosts { .. } => "SessionCosts",
         Event::ViewerIdentities { .. } => "ViewerIdentities",
         Event::AutoFixPolicyConfig { .. } => "AutoFixPolicyConfig",
         Event::ShellCommandConfig { .. } => "ShellCommandConfig",
@@ -1395,7 +1402,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        96,
+        97,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

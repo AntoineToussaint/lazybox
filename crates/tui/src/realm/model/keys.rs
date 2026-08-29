@@ -287,29 +287,6 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
-        // ── Cancel a stuck spawn (#1372) ────────────────────────────
-        // A spawn that has been in flight past `STUCK_SPAWN_ESC_AFTER`
-        // without landing a terminal or failing loudly is wedged — the
-        // invariant is that no spawn leaves the UI stuck forever, so `Esc`
-        // must be a way out. Clears the footer spinner and the target row's
-        // "spawning" arc and drops the spawn-follow pin so a later spawn
-        // doesn't inherit it. Sequenced before the notice-dismiss so a
-        // wedged spawn — the un-dismissable state this issue is about — is
-        // what `Esc` resolves first; the stuck gate keeps a normal fast
-        // spawn from swallowing an `Esc` meant for a notice or search. It
-        // still yields to a live terminal (`resolve_focus_for_keys` is None
-        // there) and uses the same `DismissNotice` binding as the notice.
-        if self.resolve_focus_for_keys().is_some()
-            && self.matches_dismiss_notice(&key)
-            && let Some(session_key) = self.status.stuck_spawn_session().cloned()
-        {
-            self.status.clear_spawning();
-            self.sidebar.clear_spawning(&session_key);
-            self.spawn_follow_to = None;
-            self.flash_hint("spawn cancelled — press w to retry");
-            self.redraw = true;
-            return;
-        }
         // ── Dismiss the current footer notice (#309) ────────────────
         // One key clears whatever notice is up, regardless of severity —
         // the merge false-error (#305) that sat red with no way to swat
@@ -363,6 +340,37 @@ impl<T: TerminalAdapter> Model<T> {
             && self.matches_inspect_notice(&key)
         {
             self.inspect_notice();
+            return;
+        }
+        // ── Cancel an in-flight spawn (#1372) ───────────────────────
+        // The invariant is that no spawn leaves the UI stuck forever, so
+        // `Esc` must be a way out. Sequenced HERE — after the multi-select
+        // clear, notice-dismiss, and error-inspect above — so it only fires
+        // when `Esc` has nothing else to claim; it never shadows those
+        // meanings, which is why it needs no age threshold (a fixed "stuck"
+        // time would misread a legitimately-slow cold clone as wedged). The
+        // worktree-progress checklist owns its own Esc→cancel (#403); this
+        // covers the spinner with no checklist up (dismissed, a fast spawn,
+        // or a post-provision launch hang). It sends a REAL `CancelSpawn`
+        // so a wedged provision is actually aborted daemon-side (a UI-only
+        // clear would let a slow-but-live spawn strand a phantom terminal
+        // moments later); the daemon's own `Failed(SPAWN_CANCELLED_NOTE)`
+        // for a still-provisioning op is absorbed idempotently. The local
+        // clear gives instant feedback, and the follow pin is dropped so a
+        // later spawn can't inherit it. Yields to a live terminal
+        // (`resolve_focus_for_keys` is None there) and reuses `DismissNotice`.
+        if self.resolve_focus_for_keys().is_some()
+            && self.matches_dismiss_notice(&key)
+            && let Some(session_key) = self.status.spawning_session().cloned()
+        {
+            self.status.clear_spawning();
+            self.sidebar.clear_spawning(&session_key);
+            self.spawn_follow_to = None;
+            self.send_cmd(IpcCommand::CancelSpawn {
+                session_key: session_key.clone(),
+            });
+            self.flash_hint("spawn cancelled");
+            self.redraw = true;
             return;
         }
         match key.code {

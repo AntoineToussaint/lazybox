@@ -1057,15 +1057,18 @@ mod effects_tests {
         );
     }
 
-    /// #1372: a spawn wedged past the stuck threshold must have a way out.
-    /// `Esc` cancels the footer spinner and the target row's arc so the UI
-    /// is never left un-dismissably "spawning".
+    /// #1372: an in-flight spawn must always have a way out. `Esc` (when it
+    /// has nothing else to claim) clears the footer spinner + the row's arc
+    /// AND sends a real `CancelSpawn` so a wedged provision is aborted
+    /// daemon-side, not merely hidden (which would strand a phantom
+    /// terminal). No age threshold — a legitimately-slow cold clone is
+    /// cancellable from its first frame.
     #[test]
-    fn esc_cancels_a_stuck_spawn_spinner() {
-        use std::time::{Duration, Instant};
+    fn esc_cancels_an_in_flight_spawn() {
         use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
 
-        let mut m = build_model();
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(100, 30)).expect("model init");
         m.status.polling = None;
         let key: lazybox_core::SessionKey =
             (&lazybox_core::WorkspaceKey::new("github:o/r#1")).into();
@@ -1075,25 +1078,31 @@ mod effects_tests {
             lazybox_ipc::TerminalKind::Agent("claude".into()),
             0,
         );
-        // Age it past the stuck threshold.
-        m.status.spawning.as_mut().unwrap().started_at = Instant::now() - Duration::from_secs(6);
 
         m.dispatch_key(RealmKey::new(Key::Esc, RealmMods::NONE));
-        assert!(
-            m.status.spawning.is_none(),
-            "Esc must cancel a stuck spawn spinner",
-        );
+        assert!(m.status.spawning.is_none(), "Esc clears the spinner");
         assert!(
             m.spawn_follow_to.is_none(),
             "the spawn-follow pin is dropped"
         );
+        let mut sent = Vec::new();
+        while let Ok(cmd) = server.rx.try_recv() {
+            sent.push(cmd);
+        }
+        assert!(
+            sent.iter().any(|c| matches!(
+                c,
+                lazybox_ipc::Command::CancelSpawn { session_key } if *session_key == key
+            )),
+            "Esc must send a real CancelSpawn, not just hide the spinner: {sent:?}",
+        );
     }
 
-    /// A fresh spawn (still plausibly provisioning) keeps `Esc` for its
-    /// normal meaning — only a *stuck* spinner is cancellable, so a quick
-    /// spawn isn't abandoned by an unrelated Esc.
+    /// #1372 ordering (finding #3): `Esc` must not steal from a live notice.
+    /// With a notice up AND a spawn in flight, the first `Esc` dismisses the
+    /// notice and leaves the spawn spinning; a second `Esc` cancels the spawn.
     #[test]
-    fn esc_leaves_a_fresh_spawn_spinner_alone() {
+    fn esc_dismisses_a_notice_before_cancelling_the_spawn() {
         use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
 
         let mut m = build_model();
@@ -1106,12 +1115,20 @@ mod effects_tests {
             lazybox_ipc::TerminalKind::Agent("claude".into()),
             0,
         );
+        m.flash_error("something went wrong");
+        assert!(m.status.notice.is_some());
 
+        // First Esc: dismiss the notice, spawn keeps spinning.
         m.dispatch_key(RealmKey::new(Key::Esc, RealmMods::NONE));
+        assert!(m.status.notice.is_none(), "first Esc clears the notice");
         assert!(
             m.status.spawning.is_some(),
-            "a fresh spawn keeps spinning — Esc doesn't abandon it",
+            "the spawn must not be cancelled while a notice was there to dismiss",
         );
+
+        // Second Esc: now cancel the spawn.
+        m.dispatch_key(RealmKey::new(Key::Esc, RealmMods::NONE));
+        assert!(m.status.spawning.is_none(), "second Esc cancels the spawn");
     }
 
     /// #1372: `r c` on a box already known to be erroring (bad gcp creds)

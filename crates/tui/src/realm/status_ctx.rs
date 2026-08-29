@@ -645,6 +645,18 @@ impl StatusCtx {
         self.spawning.take().is_some()
     }
 
+    /// The workspace of the spawn currently in flight, if any — the target
+    /// `Esc` cancels (#1372). No age threshold: `Esc` is sequenced so it
+    /// reaches this only when nothing else claims it (no live terminal, no
+    /// notice, no inspectable error), so it can't shadow `Esc`'s other
+    /// meanings, and a spawn is worth cancelling from its first frame — an
+    /// age gate would misread a legitimately-slow cold clone (which can run
+    /// past a minute) as "stuck" and, being UI-only, would strand a phantom
+    /// terminal. Here it drives a real `CancelSpawn`.
+    pub fn spawning_session(&self) -> Option<&SessionKey> {
+        self.spawning.as_ref().map(|sp| &sp.session_key)
+    }
+
     /// Record a poll-progress event from the daemon. Lights up the
     /// background spinner if the initial modal is gone. Updates
     /// `last_event` so the idle-guard timer resets — a slow poll

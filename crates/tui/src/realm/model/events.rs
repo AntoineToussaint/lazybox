@@ -3060,6 +3060,12 @@ impl<T: TerminalAdapter> Model<T> {
         if self.sidebar.tick_working() {
             self.redraw = true;
         }
+        // Watchdog: self-cancel a per-row "spawning" arc no terminating
+        // event ever cleared, mirroring the footer spinner's guard so a
+        // stranded spawn can't spin forever (#1372).
+        if self.sidebar.prune_stale_spawning() {
+            self.redraw = true;
+        }
     }
 
     /// Fire the armed lazy PR-details fetch once the cursor has dwelled

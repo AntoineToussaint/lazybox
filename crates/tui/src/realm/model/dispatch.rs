@@ -1369,6 +1369,18 @@ impl<T: TerminalAdapter> Model<T> {
                     );
                     return cmds;
                 };
+                // Fail fast when the box is already known to be erroring
+                // (bad gcp creds, provider unreachable). Sending the spawn
+                // into a dead box would leave the row's optimistic `⇅` tag
+                // spinning with no terminal ever coming — the exact
+                // "spawn forever" this issue forbids (#1372). Surface the
+                // box error instead; `Shift-C` retries the bring-up.
+                if let Some(reason) = self.status.remote_conn.error_reason() {
+                    self.flash_error(format!(
+                        "box error: {reason} — press Shift-C to reconnect before spawning"
+                    ));
+                    return cmds;
+                }
                 // Under a live multi-select the r-spawn fans out like every
                 // other bulk-appropriate spawn (#932) — same plan, each target
                 // routed to (or skipped by) its repo's box per the per-project

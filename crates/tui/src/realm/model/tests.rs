@@ -1057,6 +1057,111 @@ mod effects_tests {
         );
     }
 
+    /// #1372: an in-flight spawn must always have a way out. `Esc` (when it
+    /// has nothing else to claim) clears the footer spinner + the row's arc
+    /// AND sends a real `CancelSpawn` so a wedged provision is aborted
+    /// daemon-side, not merely hidden (which would strand a phantom
+    /// terminal). No age threshold — a legitimately-slow cold clone is
+    /// cancellable from its first frame.
+    #[test]
+    fn esc_cancels_an_in_flight_spawn() {
+        use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(100, 30)).expect("model init");
+        m.status.polling = None;
+        let key: lazybox_core::SessionKey =
+            (&lazybox_core::WorkspaceKey::new("github:o/r#1")).into();
+        m.status.note_spawning(
+            "claude",
+            key.clone(),
+            lazybox_ipc::TerminalKind::Agent("claude".into()),
+            0,
+        );
+
+        m.dispatch_key(RealmKey::new(Key::Esc, RealmMods::NONE));
+        assert!(m.status.spawning.is_none(), "Esc clears the spinner");
+        assert!(
+            m.spawn_follow_to.is_none(),
+            "the spawn-follow pin is dropped"
+        );
+        let mut sent = Vec::new();
+        while let Ok(cmd) = server.rx.try_recv() {
+            sent.push(cmd);
+        }
+        assert!(
+            sent.iter().any(|c| matches!(
+                c,
+                lazybox_ipc::Command::CancelSpawn { session_key } if *session_key == key
+            )),
+            "Esc must send a real CancelSpawn, not just hide the spinner: {sent:?}",
+        );
+    }
+
+    /// #1372 ordering (finding #3): `Esc` must not steal from a live notice.
+    /// With a notice up AND a spawn in flight, the first `Esc` dismisses the
+    /// notice and leaves the spawn spinning; a second `Esc` cancels the spawn.
+    #[test]
+    fn esc_dismisses_a_notice_before_cancelling_the_spawn() {
+        use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+
+        let mut m = build_model();
+        m.status.polling = None;
+        let key: lazybox_core::SessionKey =
+            (&lazybox_core::WorkspaceKey::new("github:o/r#1")).into();
+        m.status.note_spawning(
+            "claude",
+            key,
+            lazybox_ipc::TerminalKind::Agent("claude".into()),
+            0,
+        );
+        m.flash_error("something went wrong");
+        assert!(m.status.notice.is_some());
+
+        // First Esc: dismiss the notice, spawn keeps spinning.
+        m.dispatch_key(RealmKey::new(Key::Esc, RealmMods::NONE));
+        assert!(m.status.notice.is_none(), "first Esc clears the notice");
+        assert!(
+            m.status.spawning.is_some(),
+            "the spawn must not be cancelled while a notice was there to dismiss",
+        );
+
+        // Second Esc: now cancel the spawn.
+        m.dispatch_key(RealmKey::new(Key::Esc, RealmMods::NONE));
+        assert!(m.status.spawning.is_none(), "second Esc cancels the spawn");
+    }
+
+    /// #1372: `r c` on a box already known to be erroring (bad gcp creds)
+    /// must fail fast with the box error surfaced, never present as
+    /// "spawning" while the spawn sinks into a dead box.
+    #[test]
+    fn remote_spawn_aborts_fast_when_the_box_errored() {
+        use lazybox_tui_core::action::Action;
+        use lazybox_tui_core::remote::RemoteConnState;
+
+        let mut m = build_model()
+            .with_remote_clients(std::collections::BTreeMap::new(), Some("box".into()));
+        m.status.polling = None;
+        m.status.note_remote_state(RemoteConnState::Error {
+            reason: "gcp creds expired".into(),
+        });
+
+        let cmds = m.dispatch_action(&Action::SpawnAgentRemote("claude".into()));
+        assert!(cmds.is_empty(), "a dead box must not receive a spawn");
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("gcp creds expired")),
+            "the box error is surfaced instead of a spinner: {:?}",
+            m.status.notice.as_ref().map(|n| &n.message),
+        );
+        assert!(
+            m.status.spawning.is_none(),
+            "no spawn spinner is lit for an aborted remote spawn",
+        );
+    }
+
     /// Letting an action-error toast auto-fade (its 45s elapses, no Esc)
     /// is the same acknowledgment as dismissing it: an identical re-fire
     /// afterwards must stay quiet, not resurrect the banner on the next

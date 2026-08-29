@@ -4516,6 +4516,15 @@ pub(crate) async fn find_existing_singleton(
             t.session_key == *session_key
                 && t.kind.singleton_key().as_deref() == Some(&target)
                 && !t.authenticating
+                // An agent whose process exited is NOT a live singleton: its
+                // terminal can linger (a recovered session whose shell is
+                // alive but whose agent died — `r restart` territory), but
+                // collapsing a bare `w` onto it would inject the prompt into
+                // a dead-agent shell instead of starting the fresh agent the
+                // user asked for (#1310 reuse-only-LIVE, #1372). Skip it so
+                // the daemon and the client's own `work_target` filter agree:
+                // no live agent → spawn fresh.
+                && !matches!(t.agent_state, Some(lazybox_ipc::AgentState::Exited { .. }))
                 && on_main.is_none_or(|want| t.on_main == want)
         })
         .map(|t| t.terminal_id)
@@ -14258,6 +14267,61 @@ mod tests {
             find_existing_singleton(&config, &sk, &kind, None).await,
             Some(tid),
             "the auto-fix `None` lookup finds it on any checkout",
+        );
+    }
+
+    /// #1372: a terminal whose agent has EXITED (killed, or a recovered
+    /// session whose shell survives but whose agent died) is not a live
+    /// singleton. A bare `w` (`force_new: false`) must NOT collapse onto it
+    /// — otherwise the prompt is injected into a dead-agent shell and no
+    /// fresh agent ever starts. The auto-fix `None` lookup must skip it too:
+    /// an exited agent isn't "already working" the PR.
+    #[tokio::test]
+    async fn find_existing_singleton_skips_an_exited_agent() {
+        let config = ServerConfig::in_memory();
+        let sk: SessionKey = "test:ws-exited".into();
+        let kind = TerminalKind::Agent("claude".into());
+        let tid = TerminalId(1);
+
+        config
+            .terminal
+            .register_terminal(
+                tid,
+                "backend-exited-1".to_string(),
+                sk.clone(),
+                kind.clone(),
+            )
+            .await;
+        config
+            .terminal
+            .record_spawn_attributes(tid, None, AgentRunAccess::Default, false, false, None)
+            .await;
+
+        // A live agent is still the reuse target.
+        config
+            .terminal
+            .record_agent_state(tid, lazybox_ipc::AgentState::Working)
+            .await;
+        assert_eq!(
+            find_existing_singleton(&config, &sk, &kind, Some(false)).await,
+            Some(tid),
+            "a live agent is still the reuse target",
+        );
+
+        // Once it exits, the same lookup must NOT find it.
+        config
+            .terminal
+            .record_agent_state(tid, lazybox_ipc::AgentState::Exited { code: Some(137) })
+            .await;
+        assert_eq!(
+            find_existing_singleton(&config, &sk, &kind, Some(false)).await,
+            None,
+            "a dead agent must not be collapsed onto — w spawns fresh",
+        );
+        assert_eq!(
+            find_existing_singleton(&config, &sk, &kind, None).await,
+            None,
+            "the auto-fix lookup treats an exited agent as not working",
         );
     }
 

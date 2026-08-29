@@ -6355,6 +6355,59 @@ mod unreadable_row_preservation_tests {
             "rescope must preserve (not reap) a row it cannot decode"
         );
     }
+
+    /// TOCTOU regression (issue #1385): an `x x` archive that lands AFTER
+    /// the pre-lock archived-set gate but while an upsert is still in flight
+    /// must not resurrect the deleted row. Modeled by seeding the archived
+    /// set (as the under-lock archive would) and driving
+    /// `upsert_into_workspace_key` with no stored row: the re-check under the
+    /// workspace lock must skip rather than rebuild `Workspace::from_task`.
+    #[tokio::test]
+    async fn upsert_skips_a_workspace_archived_after_the_pre_lock_check() {
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        let task = gh_pr_task("o/r#7");
+        let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
+        let kv_key = format!("workspace:{}", key.as_str());
+
+        assert!(
+            crate::workspace::archive_workspace_key(&config, key.as_str()),
+            "seed the archived set"
+        );
+
+        upsert_into_workspace_key(&config, &key, task).await;
+
+        assert_eq!(
+            store.get_kv(&kv_key).unwrap(),
+            None,
+            "an upsert must not resurrect a row archived under the lock"
+        );
+    }
+
+    /// Companion for a non-archiving delete: the `deleted_workspaces`
+    /// tombstone (held across the delete's race window) must also block an
+    /// in-flight upsert, since a plain delete never enters the archived set.
+    #[tokio::test]
+    async fn upsert_skips_a_workspace_with_a_live_delete_tombstone() {
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        let task = gh_pr_task("o/r#8");
+        let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
+        let kv_key = format!("workspace:{}", key.as_str());
+
+        config
+            .deleted_workspaces
+            .lock()
+            .insert(key.as_str().to_string());
+
+        upsert_into_workspace_key(&config, &key, task).await;
+
+        assert_eq!(
+            store.get_kv(&kv_key).unwrap(),
+            None,
+            "an upsert must not resurrect a row with a live delete tombstone"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -2027,12 +2027,12 @@ impl<T: TerminalAdapter> Model<T> {
                 )
             } else if prompt.other_session_count == 0 {
                 format!(
-                    "This changes the machine-wide {} login.",
+                    "This refreshes the machine-wide {} login in place — it won't sign out any other session.",
                     prompt.display_name
                 )
             } else {
                 format!(
-                    "This changes the machine-wide {} login and may affect {} other running {} session{}.",
+                    "This refreshes the shared machine-wide {} login in place — your {} other running {} session{} won't be signed out.",
                     prompt.display_name,
                     prompt.other_session_count,
                     prompt.display_name,

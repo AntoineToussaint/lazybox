@@ -1654,25 +1654,33 @@ pub async fn handle_sync_workspace(config: &ServerConfig, workspace_key: Workspa
             }
         }
 
-        // Repo-level discovery: when this workspace tracks no GitHub PR or
-        // issue of its own but is scoped to a github repo (a taskless /
-        // pre-PR workspace — e.g. one an agent created), `g s` fetches that
-        // repo's OPEN issues + PRs. The background poll only surfaces a
-        // watched repo's *PRs* and issues that *involve* you, so a repo's
-        // plain open issues never reach the inbox on their own — this is the
-        // explicit "sync this repo" the user expects (#NNNN).
-        if workspace.pr.is_none()
-            && workspace.gh_issues.is_empty()
-            && let Some(slug) = workspace
-                .project_key
-                .as_ref()
-                .and_then(|key| key.unambiguous_github_slug())
+        // Repo-level discovery: whenever this workspace is scoped to a
+        // github repo, `g s` fetches that repo's OPEN issues + PRs — even
+        // when the workspace already tracks its own PR/issue. The background
+        // poll only surfaces a watched repo's *PRs* and issues that
+        // *involve* you, so a repo's plain open issues never reach the inbox
+        // on their own; without this pass `g s` on a normal issue/PR
+        // workspace could only ever re-fetch the one item you're looking at
+        // and never surface a newly-filed issue (#1390). This is the
+        // explicit "sync this thing and its repo" the user expects.
+        if let Some(slug) = workspace
+            .project_key
+            .as_ref()
+            .and_then(|key| key.unambiguous_github_slug())
         {
             match client.fetch_repo_open_tasks(&slug).await {
                 Ok(tasks) => {
                     let discovered = tasks.len();
+                    // Build the closes-issue / approval index ONCE and thread
+                    // it through the batch. The one-off `super::upsert`
+                    // rebuilds this index from a full `list_workspaces` scan on
+                    // every call, so upserting a repo's whole open-issue page
+                    // (up to the search node cap) per `g s` was O(discovered ×
+                    // inbox) store deserializations on the interactive path —
+                    // the exact quadratic `UpsertContext` exists to avoid.
+                    let mut ctx = super::UpsertContext::build(config);
                     for task in tasks {
-                        super::upsert(config, task).await;
+                        super::upsert_with_context(config, &mut ctx, task).await;
                     }
                     tracing::info!(
                         workspace = %workspace_key,
@@ -6098,5 +6106,253 @@ mod post_mutation_refresh_tests {
         );
         assert!(ws.pr.is_none(), "precondition: issue workspace has no pr");
         refresh_pr_after_mutation(&config, &ws).await;
+    }
+}
+
+#[cfg(test)]
+mod sync_workspace_discovery_tests {
+    //! `handle_sync_workspace` (#1390): `g s` on a repo-scoped workspace
+    //! that already tracks its own PR must STILL run the repo-level
+    //! open-issue/PR discovery pass, so a newly-filed issue surfaces
+    //! without a full `Shift-R` sweep. Before the fix that pass was gated
+    //! on `pr.is_none() && gh_issues.is_empty()`, so on a normal PR
+    //! workspace `g s` could only re-fetch the one item you were looking
+    //! at. Driven against canned GraphQL responses over a real socket.
+
+    use super::*;
+    use crate::ServerConfig;
+    use lazybox_core::{Task, TaskId, TaskRole, TaskState, WorkspaceKey};
+
+    /// Minimal HTTP server that routes each request to a canned body by
+    /// what the request *asks for*, not by call order. `g s` makes three
+    /// distinct GraphQL calls — a single-PR node fetch, a `is:pr` repo
+    /// search, and a `is:issue` repo search — so matching on the query
+    /// text keeps the test correct no matter what order they arrive in or
+    /// whether the code adds a round-trip (an order-coupled server would
+    /// silently hand back the wrong canned response and mask the change).
+    async fn spawn_routed_response_server(
+        single_pr: &'static str,
+        pr_search: &'static str,
+        issue_search: &'static str,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    continue;
+                };
+                let mut buf = [0u8; 16384];
+                let read = sock.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]);
+                let body = if request.contains("is:issue") {
+                    issue_search
+                } else if request.contains("is:pr") {
+                    pr_search
+                } else {
+                    single_pr
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                );
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn open_pr_task() -> Task {
+        Task {
+            author: "me".into(),
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#42".into(),
+            },
+            title: "existing pr".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/pull/42".into(),
+            repo: Some("o/r".into()),
+            branch: Some("feat".into()),
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            merge_blocked: false,
+            approval_policy: Default::default(),
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            kind: None,
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            parent: None,
+            priority: None,
+            state_label: None,
+        }
+    }
+
+    /// `SINGLE_PR_QUERY` response re-fetching the focused PR `o/r#42`
+    /// (still open) — the first request `g s` makes.
+    const SINGLE_PR_RESPONSE: &str = r#"{
+      "data": {
+        "repository": {
+          "pullRequest": {
+            "number": 42,
+            "title": "existing pr",
+            "body": null,
+            "url": "https://github.com/o/r/pull/42",
+            "updatedAt": "2026-08-29T12:00:00Z",
+            "isDraft": false,
+            "state": "OPEN",
+            "merged": false,
+            "headRefName": "feat",
+            "baseRefName": "main",
+            "reviewDecision": null,
+            "autoMergeRequest": null,
+            "author": {"login": "me"},
+            "labels": {"nodes": []},
+            "assignees": {"nodes": []},
+            "reviewRequests": {"nodes": []},
+            "comments": {"nodes": []},
+            "commits": {"nodes": []}
+          }
+        }
+      }
+    }"#;
+
+    /// The repo-sync PR search (`is:open is:pr repo:o/r`) — no open PRs
+    /// beyond the one already tracked.
+    const EMPTY_PR_SEARCH_RESPONSE: &str = r#"{
+      "data": {
+        "search": {
+          "issueCount": 0,
+          "pageInfo": {"hasNextPage": false, "endCursor": null},
+          "nodes": []
+        },
+        "rateLimit": null
+      }
+    }"#;
+
+    /// The repo-sync issue search — two brand-new open issues (`o/r#99`,
+    /// `o/r#100`) the workspace does not yet track. Returning more than one
+    /// exercises the shared-context discovery loop end to end: every
+    /// discovered task must be upserted, not just the first.
+    const NEW_ISSUE_SEARCH_RESPONSE: &str = r#"{
+      "data": {
+        "search": {
+          "issueCount": 2,
+          "pageInfo": {"hasNextPage": false, "endCursor": null},
+          "nodes": [
+            {
+              "id": "I_99",
+              "number": 99,
+              "title": "freshly filed bug",
+              "body": null,
+              "url": "https://github.com/o/r/issues/99",
+              "updatedAt": "2026-08-29T11:00:00Z",
+              "createdAt": "2026-08-29T11:00:00Z",
+              "closedAt": null,
+              "state": "OPEN",
+              "author": {"login": "someone"},
+              "labels": {"nodes": []},
+              "assignees": {"nodes": []},
+              "reactions": {"viewerHasReacted": false},
+              "comments": {"nodes": []},
+              "repository": {"nameWithOwner": "o/r"}
+            },
+            {
+              "id": "I_100",
+              "number": 100,
+              "title": "another new bug",
+              "body": null,
+              "url": "https://github.com/o/r/issues/100",
+              "updatedAt": "2026-08-29T11:05:00Z",
+              "createdAt": "2026-08-29T11:05:00Z",
+              "closedAt": null,
+              "state": "OPEN",
+              "author": {"login": "someone"},
+              "labels": {"nodes": []},
+              "assignees": {"nodes": []},
+              "reactions": {"viewerHasReacted": false},
+              "comments": {"nodes": []},
+              "repository": {"nameWithOwner": "o/r"}
+            }
+          ]
+        },
+        "rateLimit": null
+      }
+    }"#;
+
+    /// Workspace key GitHub discovery lands issue `o/r#N` under.
+    fn issue_workspace_key(number: u64) -> WorkspaceKey {
+        let mut t = open_pr_task();
+        t.id.key = format!("o/r#{number}");
+        WorkspaceKey::new(lazybox_core::workspace_key_for(&t))
+    }
+
+    #[tokio::test]
+    async fn sync_on_a_pr_workspace_discovers_new_repo_issues() {
+        let config = ServerConfig::in_memory();
+        let base_uri = spawn_routed_response_server(
+            SINGLE_PR_RESPONSE,
+            EMPTY_PR_SEARCH_RESPONSE,
+            NEW_ISSUE_SEARCH_RESPONSE,
+        )
+        .await;
+        config
+            .poll
+            .cache_gh_client(GhClient::stub_with_base_uri_for_tests(&base_uri).unwrap());
+
+        // Seed a repo-scoped workspace that already tracks its own PR — the
+        // case where the old guard skipped discovery entirely.
+        let pr = open_pr_task();
+        let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&pr));
+        super::super::upsert(&config, pr).await;
+        let seeded = load_workspace(&config, &key).unwrap();
+        assert!(seeded.pr.is_some(), "precondition: workspace tracks a PR");
+        assert_eq!(
+            seeded
+                .project_key
+                .as_ref()
+                .and_then(|k| k.unambiguous_github_slug())
+                .as_deref(),
+            Some("o/r"),
+            "precondition: workspace is scoped to a github repo"
+        );
+
+        handle_sync_workspace(&config, key).await;
+
+        // BOTH new issues must now be their own workspace rows, surfaced
+        // purely by `g s` on the PR workspace — no `Shift-R` sweep. Asserting
+        // every discovered task lands (not just the first) guards the
+        // shared-`UpsertContext` discovery loop.
+        for number in [99, 100] {
+            assert!(
+                load_workspace(&config, &issue_workspace_key(number)).is_some(),
+                "g s on a PR workspace must upsert the repo's new open issue #{number}"
+            );
+        }
     }
 }

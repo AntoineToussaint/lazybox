@@ -3844,7 +3844,7 @@ impl GhClient {
         Ok(tasks)
     }
 
-    /// User-initiated repo sync (`g s` on a repo-scoped workspace, #NNNN):
+    /// User-initiated repo sync (`g s` on a repo-scoped workspace, #1390):
     /// fetch a single repo's OPEN issues **and** PRs and return them as
     /// tasks. Deliberately NOT gated on `involves:me` / `is:pr` the way the
     /// background poll is — the poll only surfaces a watched repo's *PRs*

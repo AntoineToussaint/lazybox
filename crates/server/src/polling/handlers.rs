@@ -3431,6 +3431,7 @@ mod inspect_tests {
 
     use super::*;
     use crate::ServerConfig;
+    use crate::backend::SessionBackend;
     use lazybox_core::{SessionId, SessionKind, SessionRunState, WorkspaceSession};
     use lazybox_ipc::{Event, TerminalId, TerminalKind, WorkspaceDiffTarget};
     use lazybox_store::{MemoryStore, Store, WorkspaceRecord};
@@ -5358,6 +5359,101 @@ mod inspect_tests {
         assert!(
             load_workspace(&config, &key).is_some(),
             "row must remain reachable for retry"
+        );
+    }
+
+    /// #1396 lever 1: a squash/rebase merge with the head branch auto-deleted
+    /// leaves the local tip on a SHA no remote ref reaches, so the git-only
+    /// unpushed probe reports the whole feature diff as "unpushed commits".
+    /// Because the provider knows the PR merged, that false positive must not
+    /// block `x x` — the row is removed and the key tombstoned so it stays
+    /// gone across a restart.
+    #[tokio::test]
+    async fn merged_pr_archive_ignores_squash_merge_false_unpushed() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "merged-unpushed", "feat").await;
+        // The squashed local tip: a commit the remote never took.
+        std::fs::write(wt.join("work.txt"), "squashed work\n").unwrap();
+        run(&wt, &["add", "."]).await;
+        run(&wt, &["commit", "-q", "-m", "work"]).await;
+        delete_remote_ref(&fx, "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store,
+            Arc::new(crate::backend::MockBackend::new()),
+            fx.base.path().to_path_buf(),
+        );
+
+        let removed = crate::workspace::delete_workspace(&config, &key).await;
+
+        assert!(
+            removed.is_some(),
+            "a merged PR's false-positive unpushed commits must not block x x"
+        );
+        assert!(load_workspace(&config, &key).is_none(), "row removed");
+        assert!(
+            crate::workspace::load_archived_set(&config).contains(key.as_str()),
+            "archive tombstone written so the row stays gone on restart"
+        );
+    }
+
+    /// #1396 lever 2: even when the worktree-preservation gate refuses to
+    /// delete the row (genuine uncommitted work), an explicit archive must
+    /// still reap a detached orphan tmux session — killing a session loses no
+    /// on-disk work — so the next restart's `recover_sessions` cannot find it
+    /// and resurrect the archived workspace.
+    #[tokio::test]
+    async fn archive_reaps_orphan_session_even_when_gate_refuses() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "refused-archive", "feat").await;
+        // Genuine on-disk work the gate must preserve.
+        std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let backend = crate::backend::MockBackend::new();
+        // A detached orphan tmux for this workspace: a live backend session
+        // with persisted meta but no live terminal registry entry.
+        let orphan_key = backend
+            .spawn(&["sh".into()], Some(wt.as_path()), &[], "orphan")
+            .await
+            .unwrap();
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store,
+            backend.as_backend(),
+            fx.base.path().to_path_buf(),
+        );
+        let session_key: lazybox_core::SessionKey = key.as_str().into();
+        crate::spawn_handler::persist_terminal_meta(
+            &config,
+            &orphan_key,
+            &session_key,
+            &TerminalKind::Shell,
+        )
+        .await;
+
+        let removed = crate::workspace::delete_workspace(&config, &key).await;
+
+        assert!(
+            removed.is_none(),
+            "uncommitted work must refuse the row delete"
+        );
+        assert!(
+            load_workspace(&config, &key).is_some(),
+            "row preserved for retry"
+        );
+        assert!(wt.exists(), "dirty worktree preserved");
+        assert!(
+            !backend.list().await.unwrap().contains(&orphan_key),
+            "the detached orphan session is killed despite the refusal"
+        );
+        assert!(
+            crate::spawn_handler::load_terminal_meta(&config, &orphan_key)
+                .await
+                .is_none(),
+            "the orphan's persisted meta is swept so recovery can't rebuild it"
         );
     }
 

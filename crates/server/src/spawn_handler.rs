@@ -1284,6 +1284,13 @@ async fn handle_spawn_inner(
     // `/tmp/lazybox.log` instead of guessed at (#142).
     let t0 = std::time::Instant::now();
     let cfg = lazybox_config::Config::load().unwrap_or_default();
+    // Whether a *fresh* spawn of this prompt would run unattended
+    // (skip-permissions). Consulted before collapsing a foreign-triggered
+    // prompt onto an existing agent: if a fresh spawn wouldn't bypass but
+    // the live agent already does, injecting would escalate the foreign
+    // text's privileges (#1392).
+    let would_skip_permissions =
+        crate::spawn_plan::skip_permissions_for(autonomous, &cfg, untrusted);
     let priority_model_alias = match &kind {
         TerminalKind::Agent(agent_id) if model_alias.is_none() => {
             priority_alias_for(config, &session_key, &cfg.agent_models(agent_id))
@@ -1361,6 +1368,8 @@ async fn handle_spawn_inner(
                 on_main,
                 access,
                 initial_prompt.as_deref(),
+                untrusted,
+                would_skip_permissions,
             )
             .await
             {
@@ -1404,6 +1413,17 @@ async fn handle_spawn_inner(
         // agent is already running silently drops the instruction and
         // the user just gets focused onto an idle terminal.
         if let Some(prompt) = initial_prompt.as_deref() {
+            if refuse_foreign_inject_into_bypass(
+                config,
+                &session_key,
+                existing,
+                untrusted,
+                would_skip_permissions,
+            )
+            .await
+            {
+                return None;
+            }
             // Boxed: `handle_inject_prompt`'s fallback arm can call back
             // into `handle_spawn`, and a recursive async cycle needs one
             // pointer indirection to keep the futures finitely sized.
@@ -1513,6 +1533,17 @@ async fn handle_spawn_inner(
                 return None;
             }
             if let Some(prompt) = initial_prompt.as_deref() {
+                if refuse_foreign_inject_into_bypass(
+                    config,
+                    &session_key,
+                    existing,
+                    untrusted,
+                    would_skip_permissions,
+                )
+                .await
+                {
+                    return None;
+                }
                 Box::pin(handle_inject_prompt(config, existing, prompt, None, true)).await;
                 record_spawn_snippet(config, existing, &session_key, initial_snippet.as_ref())
                     .await;
@@ -4853,6 +4884,43 @@ const INFLIGHT_COLLAPSE_DEADLINE: Duration = Duration::from_secs(600);
 /// Esc-cancel followed by an immediate re-press can land the retry
 /// while the cancelled claim is still releasing, and a silently
 /// swallowed key press reads as "lazybox ignored me".
+/// Whether to refuse injecting a foreign-triggered (`untrusted`) autonomous
+/// prompt into the live agent `existing` because it is running with
+/// permission prompts disabled while a fresh spawn would NOT bypass. A
+/// running process's `--dangerously-skip-permissions` posture is fixed at
+/// spawn, so collapsing attacker-influenceable text onto it would run
+/// unattended, sidestepping the trust-aware default (#1392). Emits a notice
+/// when it refuses. `false` (proceed) when the prompt is the viewer's own
+/// work, when the user pinned the bypass for foreign work (a fresh spawn
+/// would bypass too), or when the live agent already keeps prompts on.
+async fn refuse_foreign_inject_into_bypass(
+    config: &ServerConfig,
+    session_key: &SessionKey,
+    existing: TerminalId,
+    untrusted: bool,
+    would_skip_permissions: bool,
+) -> bool {
+    if !untrusted || would_skip_permissions {
+        return false;
+    }
+    if !config.terminal.no_permission_for(existing).await {
+        return false;
+    }
+    tracing::warn!(
+        terminal_id = ?existing,
+        %session_key,
+        "refusing to inject a foreign @lazybox prompt into a live \
+         skip-permissions agent (#1392)"
+    );
+    let _ = config.bus.send(Event::provider_error_retryable(
+        "spawn",
+        "declined a foreign @lazybox trigger: its agent is already running \
+         unattended (skip-permissions) and its permission posture can't be \
+         changed on a live process",
+    ));
+    true
+}
+
 async fn collapse_onto_inflight_spawn(
     config: &ServerConfig,
     session_key: &SessionKey,
@@ -4860,6 +4928,8 @@ async fn collapse_onto_inflight_spawn(
     on_main: bool,
     access: AgentRunAccess,
     prompt: Option<&str>,
+    untrusted: bool,
+    would_skip_permissions: bool,
 ) -> bool {
     tracing::info!(
         %session_key,
@@ -4888,6 +4958,17 @@ async fn collapse_onto_inflight_spawn(
         return false;
     }
     if let Some(prompt) = prompt {
+        if refuse_foreign_inject_into_bypass(
+            config,
+            session_key,
+            existing,
+            untrusted,
+            would_skip_permissions,
+        )
+        .await
+        {
+            return false;
+        }
         // Boxed for the same reason as the existing-singleton path in
         // `handle_spawn`: `handle_inject_prompt`'s fallback arm can
         // recurse into `handle_spawn`. (No fallback passed here, so it
@@ -14201,8 +14282,17 @@ mod tests {
         let kind = TerminalKind::Agent("claude".into());
         let mut rx = config.bus.subscribe();
         // No claim, no terminal: the winner is already gone.
-        collapse_onto_inflight_spawn(&config, &key, &kind, false, AgentRunAccess::Default, None)
-            .await;
+        collapse_onto_inflight_spawn(
+            &config,
+            &key,
+            &kind,
+            false,
+            AgentRunAccess::Default,
+            None,
+            false,
+            true,
+        )
+        .await;
         match rx.try_recv().expect("a retry notice is broadcast") {
             Event::ProviderError { source, kind, .. } => {
                 assert_eq!(source, "spawn");

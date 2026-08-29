@@ -1671,8 +1671,16 @@ pub async fn handle_sync_workspace(config: &ServerConfig, workspace_key: Workspa
             match client.fetch_repo_open_tasks(&slug).await {
                 Ok(tasks) => {
                     let discovered = tasks.len();
+                    // Build the closes-issue / approval index ONCE and thread
+                    // it through the batch. The one-off `super::upsert`
+                    // rebuilds this index from a full `list_workspaces` scan on
+                    // every call, so upserting a repo's whole open-issue page
+                    // (up to the search node cap) per `g s` was O(discovered ×
+                    // inbox) store deserializations on the interactive path —
+                    // the exact quadratic `UpsertContext` exists to avoid.
+                    let mut ctx = super::UpsertContext::build(config);
                     for task in tasks {
-                        super::upsert(config, task).await;
+                        super::upsert_with_context(config, &mut ctx, task).await;
                     }
                     tracing::info!(
                         workspace = %workspace_key,
@@ -6115,22 +6123,36 @@ mod sync_workspace_discovery_tests {
     use crate::ServerConfig;
     use lazybox_core::{Task, TaskId, TaskRole, TaskState, WorkspaceKey};
 
-    /// Minimal HTTP server that replies to each request with the next
-    /// canned body in order, holding the last one for any extra requests.
-    async fn spawn_sequenced_response_server(responses: Vec<&'static str>) -> String {
+    /// Minimal HTTP server that routes each request to a canned body by
+    /// what the request *asks for*, not by call order. `g s` makes three
+    /// distinct GraphQL calls — a single-PR node fetch, a `is:pr` repo
+    /// search, and a `is:issue` repo search — so matching on the query
+    /// text keeps the test correct no matter what order they arrive in or
+    /// whether the code adds a round-trip (an order-coupled server would
+    /// silently hand back the wrong canned response and mask the change).
+    async fn spawn_routed_response_server(
+        single_pr: &'static str,
+        pr_search: &'static str,
+        issue_search: &'static str,
+    ) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            let mut served = 0usize;
             loop {
                 let Ok((mut sock, _)) = listener.accept().await else {
                     continue;
                 };
-                let body = responses[served.min(responses.len() - 1)];
-                served += 1;
-                let mut buf = [0u8; 8192];
-                let _ = sock.read(&mut buf).await;
+                let mut buf = [0u8; 16384];
+                let read = sock.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]);
+                let body = if request.contains("is:issue") {
+                    issue_search
+                } else if request.contains("is:pr") {
+                    pr_search
+                } else {
+                    single_pr
+                };
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
                      Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -6233,12 +6255,14 @@ mod sync_workspace_discovery_tests {
       }
     }"#;
 
-    /// The repo-sync issue search — a brand-new open issue `o/r#99` that
-    /// the workspace does not yet track.
+    /// The repo-sync issue search — two brand-new open issues (`o/r#99`,
+    /// `o/r#100`) the workspace does not yet track. Returning more than one
+    /// exercises the shared-context discovery loop end to end: every
+    /// discovered task must be upserted, not just the first.
     const NEW_ISSUE_SEARCH_RESPONSE: &str = r#"{
       "data": {
         "search": {
-          "issueCount": 1,
+          "issueCount": 2,
           "pageInfo": {"hasNextPage": false, "endCursor": null},
           "nodes": [
             {
@@ -6257,6 +6281,23 @@ mod sync_workspace_discovery_tests {
               "reactions": {"viewerHasReacted": false},
               "comments": {"nodes": []},
               "repository": {"nameWithOwner": "o/r"}
+            },
+            {
+              "id": "I_100",
+              "number": 100,
+              "title": "another new bug",
+              "body": null,
+              "url": "https://github.com/o/r/issues/100",
+              "updatedAt": "2026-08-29T11:05:00Z",
+              "createdAt": "2026-08-29T11:05:00Z",
+              "closedAt": null,
+              "state": "OPEN",
+              "author": {"login": "someone"},
+              "labels": {"nodes": []},
+              "assignees": {"nodes": []},
+              "reactions": {"viewerHasReacted": false},
+              "comments": {"nodes": []},
+              "repository": {"nameWithOwner": "o/r"}
             }
           ]
         },
@@ -6264,14 +6305,21 @@ mod sync_workspace_discovery_tests {
       }
     }"#;
 
+    /// Workspace key GitHub discovery lands issue `o/r#N` under.
+    fn issue_workspace_key(number: u64) -> WorkspaceKey {
+        let mut t = open_pr_task();
+        t.id.key = format!("o/r#{number}");
+        WorkspaceKey::new(lazybox_core::workspace_key_for(&t))
+    }
+
     #[tokio::test]
-    async fn sync_on_a_pr_workspace_discovers_a_new_repo_issue() {
+    async fn sync_on_a_pr_workspace_discovers_new_repo_issues() {
         let config = ServerConfig::in_memory();
-        let base_uri = spawn_sequenced_response_server(vec![
+        let base_uri = spawn_routed_response_server(
             SINGLE_PR_RESPONSE,
             EMPTY_PR_SEARCH_RESPONSE,
             NEW_ISSUE_SEARCH_RESPONSE,
-        ])
+        )
         .await;
         config
             .poll
@@ -6296,20 +6344,15 @@ mod sync_workspace_discovery_tests {
 
         handle_sync_workspace(&config, key).await;
 
-        // The new issue must now be its own workspace row, surfaced purely
-        // by `g s` on the PR workspace — no `Shift-R` sweep.
-        let issue_task = {
-            let mut t = open_pr_task();
-            t.id.key = "o/r#99".into();
-            t.url = "https://github.com/o/r/issues/99".into();
-            t.kind = Some(lazybox_core::TaskKind::Issue);
-            t
-        };
-        let issue_key = WorkspaceKey::new(lazybox_core::workspace_key_for(&issue_task));
-        let discovered = load_workspace(&config, &issue_key);
-        assert!(
-            discovered.is_some(),
-            "g s on a PR workspace must upsert the repo's new open issue #99"
-        );
+        // BOTH new issues must now be their own workspace rows, surfaced
+        // purely by `g s` on the PR workspace — no `Shift-R` sweep. Asserting
+        // every discovered task lands (not just the first) guards the
+        // shared-`UpsertContext` discovery loop.
+        for number in [99, 100] {
+            assert!(
+                load_workspace(&config, &issue_workspace_key(number)).is_some(),
+                "g s on a PR workspace must upsert the repo's new open issue #{number}"
+            );
+        }
     }
 }

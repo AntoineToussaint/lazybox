@@ -58,6 +58,7 @@ impl ClientRuntime {
         crate::workspace::migrate_legacy_sandbox(&config);
         tasks.push(crate::polling::spawn(config.clone(), options.poll_interval));
         tasks.push(crate::working_claims::spawn(config.clone()));
+        tasks.push(crate::working_watchdog::spawn(&config));
         tasks.push(crate::error_inbox::spawn(&config));
         tasks.push(crate::stats_accumulator::spawn(&config));
         tasks.push(crate::box_liveness::spawn(&config));

@@ -722,6 +722,67 @@ pub(crate) fn content_end(bytes: &[u8]) -> usize {
     end
 }
 
+/// How many leading bytes of a still-complete ring snapshot reproduce the
+/// trailing bytes of the durable `seed` — the seam a complete ring shares
+/// with the seed when a reattach repaint re-covers already-seeded output.
+///
+/// `snapshot_only` replays `seed` ahead of the ring. While the ring is
+/// still `is_complete()` it holds every byte since spawn, so a tmux attach
+/// client that repaints the captured visible screen puts those lines in
+/// BOTH the seed (`capture_history`) and the ring's head. Feeding the
+/// concatenation to a reconstructing VT then prints the overlap twice; the
+/// live viewport is overwritten by the final screen state but the earlier
+/// copy scrolls off into reconstructed scrollback — the scrollback-only
+/// duplication of #1405. Skipping this many ring bytes emits the seam once.
+///
+/// Only a whole, line-aligned run counts: the match must begin at a `\n`
+/// boundary in the seed (or span the whole seed). A clean continuation —
+/// the persistent-respawn seed whose fresh child output is disjoint from
+/// the prior run's history — shares no such run and reports 0, so no real
+/// output is ever dropped (and a mid-line coincidence at the boundary, e.g.
+/// a shared trailing `\r\n`, never swallows a genuinely-emitted blank line).
+fn complete_ring_seed_overlap(seed: &[u8], ring: &[u8]) -> usize {
+    // The overlap is a prefix of `ring` AND a suffix of `seed`, so it can
+    // be no longer than either; capping the KMP pattern to that bound keeps
+    // the failure table proportional to the smaller stream.
+    let cap = seed.len().min(ring.len());
+    if cap == 0 {
+        return 0;
+    }
+    let pattern = &ring[..cap];
+    // Longest prefix of `pattern` that is also a suffix of `seed`, via the
+    // KMP failure function of `pattern` fed with `seed`.
+    let mut fail = vec![0usize; pattern.len()];
+    let mut k = 0;
+    for i in 1..pattern.len() {
+        while k > 0 && pattern[i] != pattern[k] {
+            k = fail[k - 1];
+        }
+        if pattern[i] == pattern[k] {
+            k += 1;
+        }
+        fail[i] = k;
+    }
+    let mut state = 0;
+    for &b in seed {
+        while state > 0 && (state == pattern.len() || b != pattern[state]) {
+            state = fail[state - 1];
+        }
+        if b == pattern[state] {
+            state += 1;
+        }
+    }
+    if state == 0 {
+        return 0;
+    }
+    let anchor = seed.len() - state;
+    if anchor == 0 || seed[anchor - 1] == b'\n' {
+        state
+    } else {
+        0
+    }
+}
+
 /// Peel a trailing run of blank (grid-padding-like) rows off a raw-PTY
 /// reseed, but keep the single terminator that parks the cursor on a
 /// fresh line. Without the trim, a persisted scrollback that ended in
@@ -1184,6 +1245,13 @@ impl DaemonPty {
     /// emitted since spawn. The seed is that stream's baseline, so
     /// seed + complete ring remains an authoritative VT reset.
     ///
+    /// While the ring is still complete its head can duplicate the seed's
+    /// tail (a reattach repaint re-covers already-seeded output), so
+    /// `complete_ring_seed_overlap` drops that overlapping leading run
+    /// before the ring bytes are appended — the seam is replayed once
+    /// rather than scrolling duplicated lines into reconstructed
+    /// scrollback (#1405).
+    ///
     /// The ring portion goes through [`ReplayRing::replay_snapshot_into`],
     /// so once the ring has wrapped the replay starts on a clean line
     /// boundary rather than in the middle of an evicted escape sequence
@@ -1193,13 +1261,27 @@ impl DaemonPty {
     /// reconstructed rows faithful.
     pub async fn snapshot_only(&self) -> crate::backend::ReplaySnapshot {
         let ring = self.ring.lock().await;
-        let mut replay = Vec::with_capacity(self.seed.len() + ring.len());
+        let complete = ring.is_complete();
+        let mut ring_bytes = Vec::with_capacity(ring.len());
+        ring.replay_snapshot_into(&mut ring_bytes);
+        // A still-complete ring holds every byte since spawn, so a reattach
+        // repaint that re-covers already-seeded output leaves the seed's
+        // tail duplicated at the ring's head. Emit that seam once, or the
+        // duplicated lines scroll into reconstructed scrollback (#1405).
+        // Once the ring has wrapped it no longer begins at the seam, so the
+        // dedup is scoped to the complete window.
+        let skip = if complete {
+            complete_ring_seed_overlap(&self.seed, &ring_bytes)
+        } else {
+            0
+        };
+        let mut replay = Vec::with_capacity(self.seed.len() + ring_bytes.len() - skip);
         replay.extend_from_slice(&self.seed);
-        ring.replay_snapshot_into(&mut replay);
+        replay.extend_from_slice(&ring_bytes[skip..]);
         crate::backend::ReplaySnapshot {
             replay,
             last_seq: self.last_seq.load(Ordering::SeqCst),
-            complete: ring.is_complete(),
+            complete,
         }
     }
 
@@ -1878,6 +1960,111 @@ mod seed_tests {
             "seed is seq 1, live chunks continue from 2 (last_seq={})",
             sub.last_seq
         );
+    }
+
+    /// Regression for #1405: when a still-complete ring re-covers the
+    /// durable seed's tail (a tmux attach client repaints the captured
+    /// visible screen into the fresh ring), `snapshot_only` must emit that
+    /// overlapping seam ONCE. Feeding `seed + ring` verbatim reprinted the
+    /// shared lines, and the earlier copy scrolled off into reconstructed
+    /// scrollback — the same block repeated on reattach.
+    #[tokio::test]
+    async fn complete_ring_dedupes_reattach_repaint_overlap() {
+        // The seed is reconstructed scrollback whose tail is the visible
+        // screen; the child stands in for the attach repaint, re-emitting
+        // that visible screen (LF→CRLF via the PTY, matching the seed's
+        // CRLF) before its own live output.
+        let seed = b"scroll-1\r\nscroll-2\r\nvisible-A\r\nvisible-B\r\n";
+        let pty = DaemonPty::spawn(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf 'visible-A\\nvisible-B\\nlive-new\\n'".to_string(),
+            ],
+            small(),
+            None,
+            Vec::new(),
+            seed,
+        )
+        .expect("spawn");
+        pty.wait_finished().await;
+
+        let snap = pty.snapshot_only().await;
+        assert!(
+            snap.complete,
+            "the ring must still be complete for the overlap scenario"
+        );
+        let replay = String::from_utf8_lossy(&snap.replay).into_owned();
+        assert_eq!(
+            replay.matches("visible-A").count(),
+            1,
+            "the repainted visible line must appear once, not twice: {replay:?}"
+        );
+        assert_eq!(
+            replay.matches("visible-B").count(),
+            1,
+            "the repainted visible line must appear once, not twice: {replay:?}"
+        );
+        // Scrollback above the visible screen and the live tail both
+        // survive — the dedup trims only the duplicated seam.
+        for marker in ["scroll-1", "scroll-2", "live-new"] {
+            assert!(replay.contains(marker), "{marker} missing: {replay:?}");
+        }
+        let scroll_at = replay.find("scroll-1").unwrap();
+        let visible_at = replay.find("visible-A").unwrap();
+        let live_at = replay.find("live-new").unwrap();
+        assert!(
+            scroll_at < visible_at && visible_at < live_at,
+            "order must stay scrollback → visible → live: {replay:?}"
+        );
+    }
+
+    /// A whole, line-aligned run shared between the seed's tail and the
+    /// ring's head is the overlap to skip; the byte count is exactly the
+    /// duplicated lines.
+    #[test]
+    fn overlap_counts_line_aligned_repaint() {
+        let seed = b"a\r\nb\r\nc\r\n";
+        let ring = b"b\r\nc\r\nlive\r\n";
+        assert_eq!(complete_ring_seed_overlap(seed, ring), "b\r\nc\r\n".len());
+    }
+
+    /// A ring whose whole content duplicates the seed's tail collapses
+    /// entirely — the seam is emitted once, from the seed alone.
+    #[test]
+    fn overlap_spans_whole_ring_when_ring_is_a_seed_suffix() {
+        let seed = b"x\r\ny\r\n";
+        let ring = b"y\r\n";
+        assert_eq!(complete_ring_seed_overlap(seed, ring), ring.len());
+    }
+
+    /// The persistent-respawn seam: a fresh child's output is a disjoint
+    /// continuation of the persisted history, so nothing is trimmed and no
+    /// real output is lost (guards #468 at the byte level).
+    #[test]
+    fn overlap_zero_for_disjoint_continuation() {
+        assert_eq!(
+            complete_ring_seed_overlap(b"history-line\n", b"fresh-output"),
+            0
+        );
+    }
+
+    /// A mid-line coincidence at the boundary (the fresh output happens to
+    /// begin with the same `\r\n` the seed ends with) is NOT a duplicated
+    /// line, so it is left intact — a genuinely-emitted leading blank line
+    /// must survive rather than be swallowed.
+    #[test]
+    fn overlap_ignores_midline_boundary_coincidence() {
+        assert_eq!(
+            complete_ring_seed_overlap(b"prompt$ done\r\n", b"\r\nfresh\r\n"),
+            0
+        );
+    }
+
+    /// An empty seed (unseeded spawn) has no tail to overlap.
+    #[test]
+    fn overlap_zero_for_empty_seed() {
+        assert_eq!(complete_ring_seed_overlap(b"", b"anything\r\n"), 0);
     }
 
     /// Regression for #420: the reattach seed must survive ring churn.

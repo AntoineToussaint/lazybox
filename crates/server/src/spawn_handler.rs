@@ -621,6 +621,9 @@ enum StateSource {
     /// The auto-wait policy relabeling a `LimitReached` block to the calm
     /// `AwaitingReset` after it pressed "Wait" on the agent's behalf.
     AutoWait,
+    /// The global working-watchdog sweep force-closing a `Working` terminal
+    /// whose per-terminal pump was starved and never promoted it (#1383).
+    Sweep,
 }
 
 /// Result of offering a direct (hook / input / exit) transition. The
@@ -922,6 +925,7 @@ async fn transition_and_broadcast_agent_state(
         StateSource::Pty => "pty",
         StateSource::Recovery => "credit-recovery-confirmed",
         StateSource::AutoWait => "auto-wait-parked",
+        StateSource::Sweep => "global-sweep-force",
     };
     let folded = fold_and_broadcast_agent_state(
         terminals,
@@ -1011,6 +1015,37 @@ pub async fn park_limit_reached_as_awaiting_reset(
         |current| {
             (current == Some(lazybox_ipc::AgentState::LimitReached))
                 .then_some(lazybox_ipc::AgentState::AwaitingReset)
+        },
+    )
+    .await
+    .committed
+}
+
+/// Force a stalled `Working` terminal to `Done` from outside its PTY pump —
+/// the global working-watchdog sweep's commit, mirroring the hook path so a
+/// starved pump can't pin `Working` forever (#1383). The candidate guard
+/// compare-and-sets on `Working` under the state lock, so a terminal the pump
+/// or a hook resolved between selection and commit is left untouched. Returns
+/// whether the force committed.
+pub(crate) async fn force_stalled_working_to_done(
+    config: &ServerConfig,
+    agent: &crate::registries::StalledWorkingAgent,
+) -> bool {
+    let Some(durability) =
+        agent_state_durability_from(config, agent.id, &agent.backend_key, Some(agent.generation))
+    else {
+        return false;
+    };
+    transition_and_broadcast_agent_state(
+        &config.terminal,
+        &config.bus,
+        &durability,
+        agent.id,
+        &agent.session_key,
+        StateSource::Sweep,
+        |current| {
+            (current == Some(lazybox_ipc::AgentState::Working))
+                .then_some(lazybox_ipc::AgentState::Done)
         },
     )
     .await

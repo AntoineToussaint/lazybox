@@ -155,6 +155,30 @@ impl MockBackend {
         });
     }
 
+    /// Inject synthetic output delivered to live subscribers ONLY — NOT
+    /// appended to the replay ring. Models the real backend's window where the
+    /// PTY reader has pushed a chunk onto the live stream but a concurrent
+    /// snapshot of the ring would not yet see it: a snapshot-after-exit reader
+    /// misses this byte, a live-drain reader captures it.
+    pub async fn emit_live_only(&self, key: &str, bytes: impl AsRef<[u8]>) {
+        let bytes = bytes.as_ref().to_vec();
+        let mut map = self.inner.sessions.lock().await;
+        let Some(session) = map.get_mut(key) else {
+            return;
+        };
+        session.last_seq += 1;
+        let chunk = OutputChunk {
+            seq: session.last_seq,
+            bytes,
+        };
+        session.subscribers.retain(|tx| {
+            !matches!(
+                tx.try_send(chunk.clone()),
+                Err(mpsc::error::TrySendError::Closed(_))
+            )
+        });
+    }
+
     /// Simulate the bounded output ring having scrolled bytes below
     /// `offset` off, so `read_since(since)` with `since < offset` reports
     /// no gap-free delta (returns `None`) — the way the raw-PTY ring

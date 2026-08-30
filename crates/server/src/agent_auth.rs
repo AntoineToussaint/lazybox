@@ -1012,18 +1012,33 @@ async fn run_reauthentication(
             &config,
             recovery_terminal_id,
             &commands.status,
+            commands.signed_out_marker,
             &latest_context.cwd,
             &auth_env,
         )
         .await
     {
+        // The status gate can fail for two reasons: the user cancelled the
+        // re-auth mid-probe (the login itself may have succeeded), or the
+        // login genuinely didn't take. Report the cancel as such — mirroring
+        // the other cancel points — rather than telling a user who just
+        // completed sign-in that they're "still logged out".
+        let error = if config
+            .agent_recovery
+            .is_cancelled(recovery_terminal_id)
+            .await
+        {
+            "authentication was cancelled".to_string()
+        } else {
+            "sign-in did not complete — the agent is still logged out. Please sign in again."
+                .to_string()
+        };
         finish_failure(
             &config,
             recovery_terminal_id,
             auth_terminal_id,
             &display_name,
-            "sign-in did not complete — the agent is still logged out. Please sign in again."
-                .into(),
+            error,
             Some(login_key),
         )
         .await;
@@ -1080,18 +1095,29 @@ fn auth_credential_env(
 
 /// Confirm the agent's login is actually valid before resuming, by running
 /// the provider's own status command. Returns `true` (resume) unless the
-/// status command exits non-zero OR explicitly reports a signed-out session.
+/// status command exits non-zero OR its output contains `signed_out_marker`
+/// (the provider's explicit "not logged in" token).
 ///
-/// Deliberately fails OPEN: an empty status command, a spawn error, or an
-/// output shape we don't recognise all return `true` so a status-probe quirk
-/// can never block an otherwise-successful re-auth. The only signals that stop
-/// a resume are the two unambiguous "not logged in" ones. This gate matters
-/// only on the shared-login path (isolated logins already did a clean
-/// logout+login), so it is called only there.
+/// Deliberately fails OPEN: an empty status command, a spawn error, no marker
+/// configured, or an output that lacks the marker all return `true` so a
+/// status-probe quirk can never block an otherwise-successful re-auth. The
+/// only signals that stop a resume are the two unambiguous "not logged in"
+/// ones. This gate matters only on the shared-login path (isolated logins
+/// already did a clean logout+login), so it is called only there.
+///
+/// Output is collected by draining the live subscription until it CLOSES, not
+/// via a post-exit snapshot. The PTY reader thread and the child-reap exit
+/// watcher are independent (see `pty.rs` reader EOF vs `raw_pty.rs`
+/// `child.wait()`), so `wait_exit` can return while the final status bytes are
+/// still buffered ahead of the ring — a snapshot then would miss the
+/// signed-out marker and wrongly resume into a dead session. The live channel
+/// closes only after the reader observes EOF, which is the one point every
+/// output byte is guaranteed captured.
 async fn verify_authenticated(
     config: &ServerConfig,
     terminal_id: TerminalId,
     status_argv: &[String],
+    signed_out_marker: Option<&str>,
     cwd: &std::path::Path,
     env: &[(String, String)],
 ) -> bool {
@@ -1109,26 +1135,33 @@ async fn verify_authenticated(
         .agent_recovery
         .set_auth_process(terminal_id, Some(key.clone()))
         .await;
+    let output = match config.backend.subscribe(&key).await {
+        Ok(mut subscription) => {
+            let mut bytes = subscription.replay;
+            while let Some(chunk) = subscription.live.recv().await {
+                bytes.extend_from_slice(&chunk.bytes);
+            }
+            bytes
+        }
+        Err(_) => Vec::new(),
+    };
     let code = config.backend.wait_exit(&key).await;
-    let output = config
-        .backend
-        .snapshot(&key)
-        .await
-        .map(|snapshot| snapshot.replay)
-        .unwrap_or_default();
     config
         .agent_recovery
         .set_auth_process(terminal_id, None)
         .await;
     config.backend.release(&key).await;
-    // Whitespace-insensitive, case-folded scan for the provider's explicit
-    // signed-out marker (Claude's `--json` status prints `"loggedIn": false`),
-    // so pretty-printing or casing can't hide it.
-    let compact: String = String::from_utf8_lossy(&output)
-        .split_whitespace()
-        .collect::<String>()
-        .to_ascii_lowercase();
-    let signed_out = compact.contains("\"loggedin\":false");
+    let signed_out = signed_out_marker.is_some_and(|marker| {
+        // Whitespace-insensitive, case-folded scan on both sides so
+        // pretty-printing or casing in the status output can't hide the
+        // provider's signed-out token.
+        let normalize = |s: &str| -> String {
+            s.split_whitespace()
+                .collect::<String>()
+                .to_ascii_lowercase()
+        };
+        normalize(&String::from_utf8_lossy(&output)).contains(&normalize(marker))
+    });
     code == Some(0) && !signed_out
 }
 
@@ -1597,6 +1630,111 @@ mod tests {
                 } if *recovery_terminal_id == terminal_id
             )),
             "the failed re-auth is surfaced, not silently swallowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_output_only_on_the_live_stream_still_blocks_resume() {
+        // Regression guard for the read/exit race: on the real backend the
+        // child-reap exit watcher and the PTY reader are independent, so the
+        // status JSON can still be in flight on the live stream when
+        // `wait_exit` returns — a post-exit ring snapshot would miss it and
+        // wrongly resume. The gate must drain the live subscription, so a
+        // `loggedIn: false` delivered ONLY on the live stream (never appended
+        // to the replay ring) must still block the resume.
+        let (config, mock, terminal_id) =
+            recovery_fixture("claude", Some("claude-conversation-708")).await;
+        start_reauthentication(&config, terminal_id, true, None).await;
+
+        wait_for_argv(&mock, &["claude", "auth", "login"]).await;
+        let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
+        let login_key = config
+            .terminal
+            .backend_key_for(auth_terminal_id)
+            .await
+            .expect("interactive login terminal");
+        mock.finish(&login_key, 0).await;
+
+        wait_for_argv(&mock, &["claude", "auth", "status"]).await;
+        // Wait until the gate has actually subscribed, then deliver the
+        // signed-out marker on the live stream ONLY (bypassing the ring a
+        // snapshot would read) before closing the stream.
+        for _ in 0..10_000 {
+            if mock.subscriber_count("mock-agent-auth-2").await > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        mock.emit_live_only("mock-agent-auth-2", br#"{"loggedIn": false}"#)
+            .await;
+        mock.finish("mock-agent-auth-2", 0).await;
+
+        for _ in 0..10_000 {
+            if !config.agent_recovery.active(terminal_id).await {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!config.agent_recovery.active(terminal_id).await);
+        assert!(
+            mock.all_argv()
+                .await
+                .iter()
+                .all(|argv| argv.as_slice() != ["claude", "--resume", "claude-conversation-708"]),
+            "a signed-out marker seen only on the live stream must still block the resume"
+        );
+        assert!(
+            config.agent_recovery.context(terminal_id).await.is_some(),
+            "the conversation stays recoverable so the user can retry sign-in"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_during_the_status_probe_reports_cancelled_not_logged_out() {
+        // The login may have succeeded; a cancel arriving during the status
+        // probe must be reported as a cancellation, not misattributed as the
+        // agent being "still logged out".
+        let (config, mock, terminal_id) =
+            recovery_fixture("claude", Some("claude-conversation-708")).await;
+        start_reauthentication(&config, terminal_id, true, None).await;
+
+        wait_for_argv(&mock, &["claude", "auth", "login"]).await;
+        let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
+        let login_key = config
+            .terminal
+            .backend_key_for(auth_terminal_id)
+            .await
+            .expect("interactive login terminal");
+        mock.finish(&login_key, 0).await;
+
+        // Let the status probe start and subscribe, then cancel mid-probe.
+        wait_for_argv(&mock, &["claude", "auth", "status"]).await;
+        for _ in 0..10_000 {
+            if mock.subscriber_count("mock-agent-auth-2").await > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        cancel_reauthentication(&config, terminal_id).await;
+
+        for _ in 0..10_000 {
+            if !config.agent_recovery.active(terminal_id).await {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let (replay_events, _) = config.agent_recovery.replay_events(None).await;
+        assert!(
+            replay_events.iter().any(|event| matches!(
+                event,
+                Event::AgentAuthFinished {
+                    recovery_terminal_id,
+                    success: false,
+                    error: Some(error),
+                    ..
+                } if *recovery_terminal_id == terminal_id && error.contains("cancelled")
+            )),
+            "a cancel during the status probe is surfaced as cancelled, not 'still logged out'"
         );
     }
 

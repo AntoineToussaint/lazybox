@@ -92,7 +92,9 @@ mod agent_auth_recovery_tests {
     #[test]
     fn auth_required_warns_about_other_provider_sessions_and_confirms() {
         let mut model = build_model();
-        // A non-isolated provider still warns that re-auth is machine-wide.
+        // A non-isolated provider still tells the user re-auth touches the
+        // machine-wide login and names the other sessions — but reassures
+        // that a single pane's re-auth no longer signs them out (#1376).
         model.handle_daemon_event(Event::AgentAuthRequired {
             terminal_id: TerminalId(7),
             agent_id: "claude".into(),
@@ -103,17 +105,19 @@ mod agent_auth_recovery_tests {
         });
 
         assert_eq!(model.top_modal(), Some(&Id::AgentAuth));
+        // Strip the vertical modal borders before matching so word-wrap can't
+        // fragment a phrase across a line edge (wrapping breaks on whitespace,
+        // so the copy reads continuously once the `│` columns are gone).
         let screen = rendered_auth_modal(&mut model)
+            .replace('│', " ")
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
         assert!(screen.contains("Claude Code authentication is no longer valid"));
-        // Wrapping can insert the modal border between words, so assert on
-        // fragments that each stay on one line.
         assert!(
-            screen.contains("machine-wide Claude Code login")
-                && screen.contains("may affect 2 other running")
-                && screen.contains("sessions."),
+            screen.contains("shared machine-wide Claude Code login in place")
+                && screen.contains("2 other running Claude Code sessions")
+                && screen.contains("won't be signed out"),
             "{screen}"
         );
         assert!(screen.contains("Sign in and continue"));

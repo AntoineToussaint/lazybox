@@ -87,6 +87,14 @@ pub struct AgentAuthCommands {
     pub status: Vec<String>,
     pub logout: Vec<String>,
     pub login: Vec<String>,
+    /// The provider's explicit "not logged in" token as it appears in
+    /// `status` output — the one agent-specific signal a caller may scan for
+    /// to confirm a login actually took (a re-auth on a shared login skips
+    /// logout, so `login` can exit 0 without truly authenticating). Matched
+    /// whitespace-insensitively and case-folded, so store it in a natural
+    /// form (Claude's `--json` prints `"loggedIn": false`). `None` means the
+    /// caller trusts the exit code alone.
+    pub signed_out_marker: Option<&'static str>,
 }
 
 /// How to give an agent a per-session credential home so an expired token
@@ -743,9 +751,19 @@ pub mod builtins {
 
         fn auth_commands(&self) -> Option<AgentAuthCommands> {
             Some(AgentAuthCommands {
-                status: vec!["claude".into(), "auth".into(), "status".into()],
+                // Pin `--json`: it is the current default, but the status gate
+                // scans for the JSON `"loggedIn": false` token, so relying on a
+                // version-dependent default output format would silently
+                // disable the gate if Claude ever flips it to text.
+                status: vec![
+                    "claude".into(),
+                    "auth".into(),
+                    "status".into(),
+                    "--json".into(),
+                ],
                 logout: vec!["claude".into(), "auth".into(), "logout".into()],
                 login: vec!["claude".into(), "auth".into(), "login".into()],
+                signed_out_marker: Some("\"loggedIn\": false"),
             })
         }
 
@@ -970,6 +988,10 @@ pub mod builtins {
                 status: vec!["codex".into(), "login".into(), "status".into()],
                 logout: vec!["codex".into(), "logout".into()],
                 login: vec!["codex".into(), "login".into()],
+                // Codex isolates its login per session (its own CODEX_HOME), so
+                // re-auth does a clean logout+login and never runs the status
+                // gate; exit-code-only would suffice regardless.
+                signed_out_marker: None,
             })
         }
 

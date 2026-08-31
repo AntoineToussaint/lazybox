@@ -1223,6 +1223,19 @@ mod mailbox_membership_tests {
         w.hopper = Some(lazybox_core::HopperMeta {
             position: 0,
             completed_at: Some(Utc::now()),
+            canceled_at: None,
+        });
+        assert!(!mailbox_membership(&w, Mailbox::Inbox, Utc::now(), false));
+        assert!(mailbox_membership(&w, Mailbox::Inactive, Utc::now(), false));
+    }
+
+    #[test]
+    fn canceled_hopper_moves_from_inbox_to_inactive() {
+        let mut w = ws(None);
+        w.hopper = Some(lazybox_core::HopperMeta {
+            position: 0,
+            completed_at: None,
+            canceled_at: Some(Utc::now()),
         });
         assert!(!mailbox_membership(&w, Mailbox::Inbox, Utc::now(), false));
         assert!(mailbox_membership(&w, Mailbox::Inactive, Utc::now(), false));

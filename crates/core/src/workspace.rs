@@ -302,7 +302,9 @@ pub enum CleanupPrompt {
 /// - 9: `Workspace::metered` (per-workspace metering-proxy opt-in, the
 ///   `$ meter` canary). Optional with `#[serde(default)]`, so older
 ///   records read back cleanly (defaulting to unmetered).
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 9;
+/// - 10: `HopperMeta::canceled_at` (reversible cancellation, distinct
+///   from both completion and destructive deletion).
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 10;
 
 /// How long a workspace counts as "recently woken" after an
 /// event-conditional snooze fires (#scale): within this window the row
@@ -367,6 +369,11 @@ pub struct HopperMeta {
     /// sessions or checkout. Clearing it reopens the same workspace.
     #[serde(default)]
     pub completed_at: Option<DateTime<Utc>>,
+    /// Cancellation is a reversible lifecycle outcome distinct from both
+    /// completion and destructive deletion. It removes the item from the
+    /// active Hopper while preserving its workspace and history.
+    #[serde(default)]
+    pub canceled_at: Option<DateTime<Utc>>,
 }
 
 /// Serialize hook for [`Workspace::schema`]: always stamp the CURRENT

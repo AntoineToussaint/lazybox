@@ -1105,6 +1105,10 @@ pub enum Msg {
         workspace_key: lazybox_core::WorkspaceKey,
         completed: bool,
     },
+    HopperCancellationRequested {
+        workspace_key: lazybox_core::WorkspaceKey,
+        canceled: bool,
+    },
     HopperDeleteRequested(lazybox_core::WorkspaceKey),
     /// A picker (`Choice`, jump/snippet picker, settings palette)
     /// resolved. Each entry is the *typed value* of a picked row —
@@ -6092,8 +6096,8 @@ impl<T: TerminalAdapter> Model<T> {
         // available. A live terminal owns its keys, so its command
         // leader above is the only steady-state gateway hint.
         //
-        // Two tiers: `globals` are the escape hatches (`?` help, `q q`
-        // quit) that must stay findable (#100), and `evergreen` is the
+        // Two tiers: `globals` are the persistent navigation affordances
+        // (Hopper, help, quit), and `evergreen` is the
         // low-value tour hint that the footer drops FIRST so
         // context-relevant bindings survive truncation ahead of it
         // (#805). Both honor the terminal availability filter.
@@ -6103,12 +6107,16 @@ impl<T: TerminalAdapter> Model<T> {
         };
         let globals: Vec<crate::pane::Binding> = {
             use lazybox_tui_core::action::{ActionDef, ActionKind};
-            [ActionKind::OpenHelp, ActionKind::Quit]
-                .map(ActionDef::for_kind)
-                .iter()
-                .filter(|def| self.focus != PaneFocus::Terminals || def.available_in_terminal())
-                .map(|def| make_hint(def))
-                .collect()
+            [
+                ActionKind::OpenHopper,
+                ActionKind::OpenHelp,
+                ActionKind::Quit,
+            ]
+            .map(ActionDef::for_kind)
+            .iter()
+            .filter(|def| self.focus != PaneFocus::Terminals || def.available_in_terminal())
+            .map(|def| make_hint(def))
+            .collect()
         };
         let evergreen: Vec<crate::pane::Binding> = {
             use lazybox_tui_core::action::{ActionDef, ActionKind};
@@ -6706,7 +6714,6 @@ impl<T: TerminalAdapter> Model<T> {
                 completed,
             } => {
                 if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
-                    self.pop_modal();
                     self.dispatch_cmds(vec![IpcCommand::SetHopperCompleted {
                         workspace_key,
                         completed,
@@ -6718,28 +6725,29 @@ impl<T: TerminalAdapter> Model<T> {
                     });
                 }
             }
+            Msg::HopperCancellationRequested {
+                workspace_key,
+                canceled,
+            } => {
+                if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
+                    self.dispatch_cmds(vec![IpcCommand::SetHopperCanceled {
+                        workspace_key,
+                        canceled,
+                    }]);
+                    self.flash_info(if canceled {
+                        "Hopper item canceled"
+                    } else {
+                        "Hopper item reopened"
+                    });
+                }
+            }
             Msg::HopperDeleteRequested(workspace_key) => {
                 if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
-                    self.pop_modal();
                     let session_key: lazybox_core::SessionKey = (&workspace_key).into();
-                    if let Some(workspace) = self.sidebar.workspace_by_key(&session_key) {
-                        let prompt = if workspace.sessions.is_empty() {
-                            format!(
-                                "Delete ‘{}’? Its clean managed worktree will be removed; local work is protected.",
-                                workspace.name
-                            )
-                        } else {
-                            format!(
-                                "Delete ‘{}’? {} running session(s) will stop and its clean managed worktree will be removed; local work is protected.",
-                                workspace.name,
-                                workspace.sessions.len()
-                            )
-                        };
-                        self.mount_action_confirm(
-                            lazybox_tui_core::action::Action::Archive,
-                            vec![ActionConfirmTarget::Workspace(session_key)],
-                            Some(prompt),
-                        );
+                    if self.sidebar.workspace_by_key(&session_key).is_some() {
+                        self.optimistic_remove_workspace(&session_key);
+                        self.dispatch_cmds(vec![IpcCommand::Kill { session_key }]);
+                        self.flash_info("Hopper item deleted");
                     } else {
                         self.flash_info("workspace is gone — nothing to delete");
                     }

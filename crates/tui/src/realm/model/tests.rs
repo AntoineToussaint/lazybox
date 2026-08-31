@@ -10417,6 +10417,7 @@ mod merge_focus_follow_tests {
         hopper.hopper = Some(HopperMeta {
             position: 0,
             completed_at: None,
+            canceled_at: None,
         });
         let session_key: SessionKey = (&hopper.key).into();
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(
@@ -10441,6 +10442,61 @@ mod merge_focus_follow_tests {
             "the original work action resumes after the persisted assignment echo",
         );
         assert!(m.pending_hopper_action.is_none());
+    }
+
+    #[test]
+    fn hopper_lifecycle_actions_keep_the_modal_open_for_batching() {
+        use lazybox_core::HopperMeta;
+        use tokio::sync::mpsc;
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(lazybox_ipc::EVENT_CHANNEL_CAPACITY);
+        let client = lazybox_ipc::Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        let mut hopper = Workspace::empty(WorkspaceKey::new("batch-item"), "main", Utc::now());
+        hopper.name = "Batch item".into();
+        hopper.hopper = Some(HopperMeta {
+            position: 0,
+            completed_at: None,
+            canceled_at: None,
+        });
+        let key = hopper.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(hopper)));
+        m.mount_hopper();
+        while cmd_rx.try_recv().is_ok() {}
+
+        m.update(Msg::HopperCompletionRequested {
+            workspace_key: key.clone(),
+            completed: true,
+        });
+        assert_eq!(m.modal_stack.last(), Some(&Id::Hopper));
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(IpcCommand::SetHopperCompleted { workspace_key, completed: true })
+                if workspace_key == key
+        ));
+
+        m.update(Msg::HopperCancellationRequested {
+            workspace_key: key.clone(),
+            canceled: true,
+        });
+        assert_eq!(m.modal_stack.last(), Some(&Id::Hopper));
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(IpcCommand::SetHopperCanceled { workspace_key, canceled: true })
+                if workspace_key == key
+        ));
+
+        m.update(Msg::HopperDeleteRequested(key.clone()));
+        assert_eq!(m.modal_stack.last(), Some(&Id::Hopper));
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(IpcCommand::Kill { session_key }) if session_key.as_str() == key.as_str()
+        ));
     }
 
     /// Issue #224: default work (`w w`) whose only running agent is

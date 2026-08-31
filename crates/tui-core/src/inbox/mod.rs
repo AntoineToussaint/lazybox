@@ -1814,6 +1814,7 @@ mod tests {
             hopper.hopper = Some(lazybox_core::HopperMeta {
                 position,
                 completed_at: None,
+                canceled_at: None,
             });
             ws.insert(SessionKey::from(&hopper.key), hopper);
         }

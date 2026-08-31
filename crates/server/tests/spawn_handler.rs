@@ -2180,13 +2180,12 @@ async fn inject_prompt_falls_back_to_spawn_when_terminal_dead() {
     .expect("deadline");
 }
 
-/// Mirror of the above, but with no `fallback_spawn`. Pre-fix and
-/// post-fix this is a silent no-op — the test exists to lock in
-/// that "InjectPrompt + None + dead id" stays a no-op rather than
-/// drifting into "auto-resurrect any dead terminal" behavior, which
-/// would be very surprising at the API level.
+/// Mirror of the above, but with no `fallback_spawn` (issue #1384).
+/// A dead terminal id must NOT resurrect anything — but the prompt
+/// must not vanish silently either: the daemon emits a loud
+/// `TerminalInputRejected` so the user knows to reopen the agent.
 #[tokio::test]
-async fn inject_prompt_without_fallback_is_silent_noop() {
+async fn inject_prompt_without_fallback_rejects_loudly() {
     timeout(TEST_DEADLINE, async {
         let config = ServerConfig::in_memory();
         let mut client = subscribed(config).await;
@@ -2194,29 +2193,70 @@ async fn inject_prompt_without_fallback_is_silent_noop() {
         client
             .send(Command::InjectPrompt {
                 terminal_id: dead_id,
-                prompt: "should disappear".into(),
+                prompt: "should not disappear".into(),
                 fallback_spawn: None,
                 submit: true,
             })
             .unwrap();
 
-        // A 250ms grace window: any spawn / error event in this
-        // window would mean the daemon resurrected something it
-        // shouldn't have.
-        let unexpected = wait_for(
+        // The rejection is the expected feedback; a spawn would mean the
+        // daemon resurrected a dead terminal it shouldn't have. Match both
+        // so a resurrection can't slip past the assertion.
+        let event = wait_for(
             &mut client,
             |e| {
                 matches!(
                     e,
-                    Event::TerminalSpawned { .. } | Event::ProviderError { .. }
-                )
+                    Event::TerminalInputRejected { terminal_id, .. } if *terminal_id == dead_id
+                ) || matches!(e, Event::TerminalSpawned { .. })
             },
-            Duration::from_millis(250),
+            Duration::from_secs(2),
         )
         .await;
         assert!(
-            unexpected.is_none(),
-            "no event expected for inject_prompt with no fallback, got {unexpected:?}"
+            matches!(event, Some(Event::TerminalInputRejected { .. })),
+            "inject_prompt with no fallback on a dead terminal must emit \
+             TerminalInputRejected (and not resurrect one), got {event:?}"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// A live terminal that is a *shell*, not an agent, cannot accept a prompt
+/// injection. `handle_inject_prompt_inner` must reject it loudly rather than
+/// return on a bare debug log (#1384) — the router forwards it (the terminal
+/// is alive), so only the handler's terminal-kind check catches it.
+#[tokio::test]
+async fn inject_prompt_to_shell_terminal_rejects_loudly() {
+    timeout(TEST_DEADLINE, async {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Shell).await;
+
+        client
+            .send(Command::InjectPrompt {
+                terminal_id,
+                prompt: "this is not for a shell".into(),
+                fallback_spawn: None,
+                submit: true,
+            })
+            .unwrap();
+
+        let event = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::TerminalInputRejected { terminal_id: t, .. } if *t == terminal_id
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(
+            matches!(event, Some(Event::TerminalInputRejected { .. })),
+            "inject_prompt to a shell terminal must emit TerminalInputRejected, got {event:?}"
         );
     })
     .await

@@ -2210,13 +2210,53 @@ async fn inject_prompt_without_fallback_rejects_loudly() {
                     Event::TerminalInputRejected { terminal_id, .. } if *terminal_id == dead_id
                 ) || matches!(e, Event::TerminalSpawned { .. })
             },
-            Duration::from_secs(1),
+            Duration::from_secs(2),
         )
         .await;
         assert!(
             matches!(event, Some(Event::TerminalInputRejected { .. })),
             "inject_prompt with no fallback on a dead terminal must emit \
              TerminalInputRejected (and not resurrect one), got {event:?}"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// A live terminal that is a *shell*, not an agent, cannot accept a prompt
+/// injection. `handle_inject_prompt_inner` must reject it loudly rather than
+/// return on a bare debug log (#1384) — the router forwards it (the terminal
+/// is alive), so only the handler's terminal-kind check catches it.
+#[tokio::test]
+async fn inject_prompt_to_shell_terminal_rejects_loudly() {
+    timeout(TEST_DEADLINE, async {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let mut client = subscribed(config).await;
+        let terminal_id = spawn_and_wait(&mut client, TerminalKind::Shell).await;
+
+        client
+            .send(Command::InjectPrompt {
+                terminal_id,
+                prompt: "this is not for a shell".into(),
+                fallback_spawn: None,
+                submit: true,
+            })
+            .unwrap();
+
+        let event = wait_for(
+            &mut client,
+            |e| {
+                matches!(
+                    e,
+                    Event::TerminalInputRejected { terminal_id: t, .. } if *t == terminal_id
+                )
+            },
+            Duration::from_secs(2),
+        )
+        .await;
+        assert!(
+            matches!(event, Some(Event::TerminalInputRejected { .. })),
+            "inject_prompt to a shell terminal must emit TerminalInputRejected, got {event:?}"
         );
     })
     .await

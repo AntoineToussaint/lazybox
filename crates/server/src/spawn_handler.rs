@@ -7895,12 +7895,6 @@ async fn handle_inject_prompt_inner(
                 tracing::warn!(
                     "inject_prompt: unknown agent id `{id}` for terminal {terminal_id:?}"
                 );
-                let _ = config.bus.send(Event::TerminalInputRejected {
-                    terminal_id,
-                    message: format!(
-                        "the prompt could not be delivered — agent `{id}` is not available"
-                    ),
-                });
                 return;
             }
         },

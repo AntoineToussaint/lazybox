@@ -102,9 +102,13 @@ pub(crate) async fn run_io_router(
             //
             // A no-fallback InjectPrompt still carries user text, so dropping
             // it here would lose it with no feedback. Surface the rejection so
-            // the user knows to reopen the agent (#1384).
+            // the user knows to reopen the agent (#1384). Broadcast on the bus
+            // (not the per-connection `event_tx`) to match the sibling
+            // inject-rejections in `handle_inject_prompt_inner` and the daemon's
+            // terminal-state model — "the terminal is gone" is a terminal fact,
+            // delivered the same way as `TerminalExited`.
             if matches!(command, Command::InjectPrompt { .. }) {
-                let _ = event_tx.send(Event::TerminalInputRejected {
+                let _ = config.bus.send(Event::TerminalInputRejected {
                     terminal_id,
                     message: "the agent terminal is no longer running — reopen it and retry".into(),
                 });

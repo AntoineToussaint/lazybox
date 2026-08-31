@@ -1407,6 +1407,17 @@ async fn inspect_workspace_risks(
         .map(|row| (canonical_or_self(&row.path), row))
         .collect();
 
+    // A squash/rebase merge with the head branch auto-deleted leaves the
+    // local tip on a SHA no remote ref reaches, so the git-only unpushed
+    // probe falls back to `origin/HEAD..HEAD` and reports the whole feature
+    // diff as "unpushed". The provider already knows the PR merged even
+    // though git cannot infer it from the squashed history, so that work is
+    // upstream and the probe is a false positive here.
+    let pr_merged = workspace
+        .pr
+        .as_ref()
+        .is_some_and(|pr| pr.state == lazybox_core::TaskState::Merged);
+
     let mut risks = Vec::new();
     for path in paths {
         let Some(row) = by_path.get(&canonical_or_self(&path)) else {
@@ -1419,7 +1430,7 @@ async fn inspect_workspace_risks(
         if row.is_safe_to_delete {
             continue;
         }
-        let reasons = workspace_removal_reasons(row, require_stopped);
+        let reasons = workspace_removal_reasons(row, require_stopped, pr_merged);
         if !reasons.is_empty() {
             risks.push(WorkspaceRemovalRisk { path, reasons });
         }
@@ -1430,6 +1441,7 @@ async fn inspect_workspace_risks(
 fn workspace_removal_reasons(
     row: &lazybox_git_ops::WorktreeInspection,
     require_stopped: bool,
+    pr_merged: bool,
 ) -> Vec<String> {
     let mut reasons = Vec::new();
     if row.reasons.contains(&lazybox_git_ops::OrphanReason::Locked) {
@@ -1441,10 +1453,21 @@ fn workspace_removal_reasons(
     if row.has_uncommitted_changes {
         reasons.push("uncommitted changes".into());
     }
-    if row.has_unpushed_commits {
+    if row.has_unpushed_commits && !pr_merged {
         reasons.push("unpushed commits".into());
     }
-    if reasons.is_empty() && require_stopped && !row.is_safe_to_delete {
+    // The "still active" fallback keys off `is_safe_to_delete`, which folds
+    // in the unpushed flag. When the merged PR suppressed that flag above, a
+    // clean, unlocked, reapable checkout must not be re-blocked here purely
+    // because it was ahead of the (now-gone) remote branch.
+    let safe_to_delete = row.is_safe_to_delete
+        || (pr_merged
+            && row.has_unpushed_commits
+            && row.status_verified
+            && !row.has_uncommitted_changes
+            && !row.reasons.contains(&lazybox_git_ops::OrphanReason::Locked)
+            && row.has_reapable_reason());
+    if reasons.is_empty() && require_stopped && !safe_to_delete {
         reasons.push("checkout is still active".into());
     }
     reasons
@@ -1570,12 +1593,49 @@ mod removal_classification_tests {
             // local-work probes succeeded.
             is_safe_to_delete: false,
         };
-        assert!(workspace_removal_reasons(&row, false).is_empty());
+        assert!(workspace_removal_reasons(&row, false, false).is_empty());
 
         row.status_verified = false;
         assert_eq!(
-            workspace_removal_reasons(&row, false),
+            workspace_removal_reasons(&row, false, false),
             vec!["cleanliness could not be proven"]
+        );
+    }
+
+    #[test]
+    fn merged_pr_suppresses_false_positive_unpushed_reason() {
+        // The squash/rebase-merge shape: worktree is clean and its session is
+        // reapable (branch deleted upstream), but the git-only unpushed probe
+        // reports the whole feature diff as ahead of the vanished remote.
+        let mut row = lazybox_git_ops::WorktreeInspection {
+            path: "/tmp/lazybox-merged-guard".into(),
+            bare_path: Some("/tmp/lazybox-merged-guard.git".into()),
+            branch: Some("feat".into()),
+            session_id: Some("session".into()),
+            reasons: vec![lazybox_git_ops::OrphanReason::BranchDeletedUpstream],
+            size_bytes: 0,
+            last_modified: None,
+            has_uncommitted_changes: false,
+            status_verified: true,
+            has_unpushed_commits: true,
+            is_safe_to_delete: false,
+        };
+
+        // Without the merged signal, the false positive blocks removal —
+        // even under the final `require_stopped` gate.
+        assert_eq!(
+            workspace_removal_reasons(&row, true, false),
+            vec!["unpushed commits"]
+        );
+        // With it, the checkout is cleared for teardown and the "still
+        // active" fallback does not re-block it.
+        assert!(workspace_removal_reasons(&row, true, true).is_empty());
+
+        // Genuine on-disk work is still protected regardless of merge state.
+        row.has_uncommitted_changes = true;
+        assert_eq!(
+            workspace_removal_reasons(&row, true, true),
+            vec!["uncommitted changes"]
         );
     }
 }
@@ -2481,6 +2541,15 @@ impl<'a> WorkspaceLifecycle<'a> {
                          {detail}. Push, commit/stash, or clean the checkout, then retry"
                         ),
                     ));
+                    // The gate preserves on-disk work, but a detached orphan
+                    // tmux is not on-disk work — killing it loses nothing (the
+                    // worktree files stay). For an explicit archive (whose
+                    // confirm already warns sessions die), reap it now so a
+                    // preserved-but-refused archive can't leave a session that
+                    // the next restart's `recover_sessions` resurrects.
+                    if archive {
+                        kill_orphan_backend_sessions(config, key, &registry_backend_keys).await;
+                    }
                     config.deleted_workspaces.lock().remove(key_str);
                     return None;
                 }
@@ -2493,6 +2562,9 @@ impl<'a> WorkspaceLifecycle<'a> {
                          verified safely: {error}"
                         ),
                     ));
+                    if archive {
+                        kill_orphan_backend_sessions(config, key, &registry_backend_keys).await;
+                    }
                     config.deleted_workspaces.lock().remove(key_str);
                     return None;
                 }
@@ -2572,60 +2644,14 @@ impl<'a> WorkspaceLifecycle<'a> {
         }
         let _ = config.bus.send(Event::WorkspaceRemoved(key.clone()));
 
-        // Belt-and-suspenders: the registry sweep above only
-        // reaches terminals with a live entry. A tmux session can linger with
-        // NO registry entry — its agent process exited, tearing down the
-        // terminal, but the detached backend session survived. Left alone, the
-        // next restart's `recover_sessions` would list it and resurrect this
-        // now-deleted workspace from its persisted meta. Kill such orphans now
-        // too. Runs only after the row is deleted and the key archived, so it
-        // can't affect the safety gates above; the archived-set recovery guard
-        // remains the durable backstop. Best-effort: a `backend.list()` failure
-        // must not undo a delete that already committed.
-        match config.backend.list().await {
-            Ok(backend_keys) => {
-                for backend_key in backend_keys {
-                    if registry_backend_keys.contains(&backend_key) {
-                        continue;
-                    }
-                    let Some((meta_session_key, _)) =
-                        crate::spawn_handler::load_terminal_meta(config, &backend_key).await
-                    else {
-                        continue;
-                    };
-                    if meta_session_key.as_str() != key_str {
-                        continue;
-                    }
-                    tracing::info!(
-                        workspace = %key,
-                        %backend_key,
-                        "delete_workspace: killing orphan backend session with no live terminal"
-                    );
-                    if let Err(e) = config.backend.kill(&backend_key).await {
-                        tracing::warn!(
-                            workspace = %key,
-                            %backend_key,
-                            "delete_workspace: killing orphan backend session failed: {e}"
-                        );
-                    }
-                    let generation =
-                        crate::spawn_handler::load_agent_state_generation(config, &backend_key)
-                            .await;
-                    crate::spawn_handler::sweep_terminal_persisted_fields(
-                        config,
-                        &backend_key,
-                        generation,
-                    )
-                    .await;
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    workspace = %key,
-                    "delete_workspace: backend.list for orphan sweep failed: {e}"
-                );
-            }
-        }
+        // Belt-and-suspenders: the registry sweep above only reaches terminals
+        // with a live entry. A detached tmux session with NO registry entry —
+        // its agent exited, tearing down the terminal, but the backend session
+        // survived — would otherwise be re-listed by the next restart's
+        // `recover_sessions` and resurrect this now-deleted workspace. Runs
+        // only after the row is deleted and the key archived, so it can't
+        // affect the safety gates above.
+        kill_orphan_backend_sessions(config, key, &registry_backend_keys).await;
 
         // The row (and its terminals) are gone — reclaim the worktree
         // directories on disk. Without this every teardown that routes
@@ -2665,6 +2691,63 @@ impl<'a> WorkspaceLifecycle<'a> {
             );
         }
         Some(reclaimed)
+    }
+}
+
+/// Kill every detached backend (tmux) session that belongs to `key` but has
+/// no live terminal registry entry, and sweep its persisted per-terminal
+/// rows so it can't be reconstructed. These orphans survive when the agent
+/// process exited (tearing down its terminal) while the detached backend
+/// session lived on; left alone, the next restart's `recover_sessions` lists
+/// them and resurrects the workspace from persisted meta.
+///
+/// `exclude` names backend keys already handled through the live-terminal
+/// registry path so they aren't re-killed. Best-effort: a `backend.list`
+/// failure is logged, never fatal.
+async fn kill_orphan_backend_sessions(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    exclude: &std::collections::HashSet<String>,
+) {
+    let key_str = key.as_str();
+    let backend_keys = match config.backend.list().await {
+        Ok(keys) => keys,
+        Err(e) => {
+            tracing::warn!(
+                workspace = %key,
+                "delete_workspace: backend.list for orphan sweep failed: {e}"
+            );
+            return;
+        }
+    };
+    for backend_key in backend_keys {
+        if exclude.contains(&backend_key) {
+            continue;
+        }
+        let Some((meta_session_key, _)) =
+            crate::spawn_handler::load_terminal_meta(config, &backend_key).await
+        else {
+            continue;
+        };
+        if meta_session_key.as_str() != key_str {
+            continue;
+        }
+        tracing::info!(
+            workspace = %key,
+            %backend_key,
+            "delete_workspace: killing orphan backend session with no live terminal"
+        );
+        if let Err(e) = config.backend.kill(&backend_key).await {
+            tracing::warn!(
+                workspace = %key,
+                %backend_key,
+                "delete_workspace: killing orphan backend session failed: {e}"
+            );
+        }
+        let generation =
+            crate::spawn_handler::load_agent_state_generation(config, &backend_key).await;
+        crate::spawn_handler::sweep_terminal_persisted_fields(config, &backend_key, generation)
+            .await;
     }
 }
 

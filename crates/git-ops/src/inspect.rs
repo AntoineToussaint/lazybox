@@ -120,6 +120,26 @@ impl WorktreeInspection {
     pub fn is_orphaned(&self) -> bool {
         !self.reasons.is_empty()
     }
+
+    /// Whether any flagged reason marks this worktree as reapable debris —
+    /// its session ended, its branch is gone, or git lists it prunable —
+    /// rather than a live, tracked checkout. [`Self::is_safe_to_delete`]
+    /// requires one of these before a bulk/lifecycle delete will touch the
+    /// directory.
+    pub fn has_reapable_reason(&self) -> bool {
+        self.reasons.iter().any(is_reapable_reason)
+    }
+}
+
+fn is_reapable_reason(reason: &OrphanReason) -> bool {
+    matches!(
+        reason,
+        OrphanReason::Untracked
+            | OrphanReason::SessionStopped
+            | OrphanReason::BranchDeletedUpstream
+            | OrphanReason::BranchMissingLocally
+            | OrphanReason::Prunable
+    )
 }
 
 /// A git checkout discovered on disk by [`scan_external_checkouts`] —
@@ -940,16 +960,7 @@ async fn inspect_one(
     let is_safe_to_delete = !locked
         && uncommitted_state == Some(false)
         && !has_unpushed_commits
-        && reasons.iter().any(|r| {
-            matches!(
-                r,
-                OrphanReason::Untracked
-                    | OrphanReason::SessionStopped
-                    | OrphanReason::BranchDeletedUpstream
-                    | OrphanReason::BranchMissingLocally
-                    | OrphanReason::Prunable
-            )
-        });
+        && reasons.iter().any(is_reapable_reason);
 
     WorktreeInspection {
         path: path.to_path_buf(),

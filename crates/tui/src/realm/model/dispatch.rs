@@ -397,7 +397,7 @@ impl<T: TerminalAdapter> Model<T> {
         &mut self,
         action: &lazybox_tui_core::action::Action,
     ) -> Vec<IpcCommand> {
-        use lazybox_tui_core::action::{Action, ActionDef};
+        use lazybox_tui_core::action::ActionDef;
         if Self::hopper_action_requires_project(action) {
             let repo_less_hopper = self.sidebar.selected_workspace().and_then(|workspace| {
                 (workspace.hopper.is_some() && workspace.project_key.is_none())
@@ -408,24 +408,17 @@ impl<T: TerminalAdapter> Model<T> {
                 return Vec::new();
             }
         }
-        // `g m` on a single PR lazybox already knows is conflicting is a
-        // doomed dispatch — GitHub would only reject it. Skip straight to
-        // the one-key resolve prompt rather than a merge confirm that can
-        // only fail (#947). Only the single-target case: a `v` bulk merge
-        // (#899) falls through to the fan-out, which already reports each
-        // conflicting PR as skipped in its confirm split.
-        if matches!(action, Action::MergePr) && !self.bulk_active() {
-            let conflict_target = self.sidebar.selected_workspace().and_then(|ws| {
-                ws.pr
-                    .as_ref()
-                    .filter(|pr| pr.mergeable.is_conflicting())
-                    .map(|pr| (ws.key.clone(), pr.id.key.clone()))
-            });
-            if let Some((workspace, pr_label)) = conflict_target {
-                self.mount_conflict_resolve(&workspace, &pr_label);
-                return Vec::new();
-            }
-        }
+        // The conflict → resolve divert (#947) used to fire HERE, off the
+        // sidebar's *cached* `pr.mergeable` — but that data is a poll stale,
+        // so a conflict GitHub had already cleared still dead-ended into the
+        // resolve prompt (#1394). The client can't call GitHub, so the divert
+        // moved into the daemon's `merge_pr_task`: `g m` now goes through the
+        // normal confirm→send path, the daemon re-fetches this PR's live
+        // state, and a *fresh* conflict comes back as `PrMergeFailed { conflict
+        // }` — which opens `mount_conflict_resolve` (see events.rs). Bulk `v`
+        // merge (#899) still fans out and reports conflicting PRs as skipped in
+        // its confirm split.
+        //
         // Destructive gate, type-system enforced via the catalog.
         // Every destructive action is routed through the unified
         // Confirm modal first; the pending action lives in

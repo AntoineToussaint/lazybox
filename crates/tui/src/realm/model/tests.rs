@@ -12305,12 +12305,18 @@ mod merge_focus_follow_tests {
         );
     }
 
-    /// Issue #947: `g m` on a PR lazybox already knows is conflicting is
-    /// a doomed dispatch. Instead of a merge confirm that can only fail,
-    /// route straight to the one-key resolve prompt — no `MergePr`
-    /// command leaves.
+    /// Issue #1394: `g m` on a PR whose *cached* mergeable says
+    /// "conflicting" must NOT dead-end into the resolve prompt off stale
+    /// poll data — that conflict may already be cleared on GitHub. The
+    /// client can't re-query GitHub, so `g m` goes through the normal
+    /// merge confirm→send path; the daemon re-checks live state and only
+    /// a *fresh* conflict comes back as `PrMergeFailed { conflict }`,
+    /// which opens the resolve prompt (covered by
+    /// `pr_merge_failed_with_conflict_offers_resolve`). This is the
+    /// successor to the old #947 client short-circuit, which routed off
+    /// stale data.
     #[test]
-    fn g_m_on_a_conflicting_pr_offers_the_resolve_prompt() {
+    fn g_m_on_a_cached_conflicting_pr_does_not_dead_end_into_resolve() {
         use lazybox_tui_core::action::Action;
 
         let mut m = build_model();
@@ -12320,18 +12326,25 @@ mod merge_focus_follow_tests {
         assert!(m.sidebar.focus_workspace_key(&sk));
 
         let cmds = m.dispatch_action(&Action::MergePr);
-        assert!(
-            cmds.is_empty(),
-            "a doomed merge must not dispatch: {cmds:?}",
-        );
+        assert!(cmds.is_empty(), "merge gates on confirm first: {cmds:?}");
+        // The standard destructive merge confirm — NOT the stale-data
+        // conflict-resolve dead-end.
         assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::ActionConfirm),
+            "g m opens the merge confirm even when cached state says conflict",
+        );
+        assert_ne!(
             m.top_modal(),
             Some(&Id::ConflictResolve),
-            "the resolve prompt is offered instead of a merge confirm",
+            "g m must not open the resolve prompt off cached mergeable (#1394)",
         );
         assert!(matches!(
             m.modal_flow,
-            Some(ModalFlow::ConflictResolve { ref workspace }) if *workspace == sk,
+            Some(ModalFlow::ActionConfirm {
+                action: Action::MergePr,
+                ..
+            }),
         ));
     }
 

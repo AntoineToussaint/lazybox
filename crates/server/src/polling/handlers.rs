@@ -657,6 +657,34 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
     detach_mutation(async move { merge_pr_task(&config, workspace_key).await });
 }
 
+/// Where the fresh pre-merge status check (#1394) routes a `g m`: to the
+/// conflict-resolve flow, or on to the merge mutation.
+#[derive(Debug, PartialEq, Eq)]
+enum FreshMergeCheck {
+    /// GitHub's live state reports the branch conflicts — route to the
+    /// resolve prompt (via `PrMergeFailed { conflict }`) instead of firing
+    /// a mutation GitHub will only reject.
+    Conflict,
+    /// No conflict on fresh state — attempt the merge, pinned to `head`
+    /// when the fetch surfaced one so a force-push between the check and
+    /// the mutation can't land the wrong commit.
+    Proceed { head: Option<String> },
+}
+
+/// Decide the merge route from a freshly-fetched PR. Pure so the
+/// stale-vs-fresh routing that is the substance of #1394 is unit-tested
+/// without a live GitHub client. Merge conflict is the one hard block
+/// with a dedicated resolve flow; soft state (red CI / changes-requested)
+/// deliberately still proceeds — GitHub stays the authority at merge time
+/// (#1203).
+fn classify_fresh_pr(fresh: &lazybox_core::Task, head: Option<String>) -> FreshMergeCheck {
+    if fresh.mergeable.is_conflicting() {
+        FreshMergeCheck::Conflict
+    } else {
+        FreshMergeCheck::Proceed { head }
+    }
+}
+
 async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
     let emit_err = |msg: &str| {
         let _ = config
@@ -670,6 +698,61 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
     };
     let pr_label = ws.pr.as_ref().map(|p| p.id.key.clone());
 
+    // Fresh pre-merge status check (#1394): `g m` used to route the
+    // conflict / CI decision off the last poll's cached `Task`. A stale
+    // `Conflicting` sent the user into a dead-end resolve prompt for a
+    // conflict GitHub had already cleared, and a head that had moved
+    // merged blind. Re-fetch THIS PR's current state from GitHub first.
+    // Merge conflict is the one hard block with a dedicated resolve
+    // flow, so route to it off FRESH truth (via `PrMergeFailed { conflict
+    // }`, the same event the post-rejection path emits — the client opens
+    // the resolve prompt on it). The head OID from the same fetch pins
+    // the mutation so a force-push between fetch and merge can't land the
+    // wrong commit. Soft state (red CI / changes-requested) still
+    // proceeds — GitHub stays the authority at merge time (#1203) — but
+    // the stored row is now fresh so the pills the user just saw don't
+    // lie. GitHub-only (Linear has no PRs); a transient fetch failure
+    // falls back to the cached path rather than blocking a user-initiated
+    // merge.
+    let mut merge_ws = ws.clone();
+    let mut expected_head: Option<String> = None;
+    if let Some((owner, repo, number)) = ws.pr.as_ref().and_then(github_target)
+        && let Some(client) = resolve_gh_client(config).await
+    {
+        match client
+            .fetch_single_pr_with_head_interactive(&owner, &repo, number)
+            .await
+        {
+            Ok(Some((fresh, head))) => {
+                // Reflect GitHub truth in the store so the CONFLICT / READY
+                // pills and any next action read fresh state.
+                super::upsert(config, fresh.clone()).await;
+                match classify_fresh_pr(&fresh, head) {
+                    FreshMergeCheck::Conflict => {
+                        let _ = config.bus.send(Event::PrMergeFailed {
+                            workspace_key: workspace_key.clone(),
+                            pr_label: fresh.id.key.clone(),
+                            reason: "the branch has merge conflicts".to_string(),
+                            conflict: true,
+                        });
+                        return;
+                    }
+                    FreshMergeCheck::Proceed { head } => {
+                        merge_ws.pr = Some(fresh);
+                        expected_head = head;
+                    }
+                }
+            }
+            // PR no longer visible (merged out-of-band / transferred /
+            // scope revoked): fall through and let the mutation surface
+            // GitHub's own verdict.
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("merge {workspace_key}: pre-merge status fetch failed: {e}");
+            }
+        }
+    }
+
     // Route through the workspace's matching provider. The handle
     // dispatches `merge` to github / linear / future-provider based
     // on the workspace key's prefix — the server stays provider-
@@ -681,8 +764,10 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
             return;
         }
     };
-    if let Err(e) =
-        run_mutation_with_retry(&config.bus, "merge", || provider.merge(&ws, None)).await
+    if let Err(e) = run_mutation_with_retry(&config.bus, "merge", || {
+        provider.merge(&merge_ws, expected_head.as_deref())
+    })
+    .await
     {
         tracing::warn!("merge {workspace_key}: {e:?}");
         // A user-initiated merge that GitHub rejected is not a
@@ -703,7 +788,7 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
         // failure event — so the CONFLICT pill is accurate and the TUI's
         // resolve flow classifies the conflict prompt off fresh state.
         if conflict
-            && let Some(mut pr) = ws.pr.clone()
+            && let Some(mut pr) = merge_ws.pr.clone()
             && !pr.mergeable.is_conflicting()
         {
             pr.mergeable = lazybox_core::Mergeable::Conflicting;
@@ -3216,7 +3301,7 @@ pub async fn prefetch_top_pr_details(
 
 #[cfg(test)]
 mod github_target_tests {
-    use super::github_target;
+    use super::{FreshMergeCheck, classify_fresh_pr, github_target};
     use lazybox_core::{CiStatus, Mergeable, ReviewStatus, Task, TaskId, TaskRole, TaskState};
 
     fn task(repo: Option<&str>, key: &str) -> Task {
@@ -3265,6 +3350,40 @@ mod github_target_tests {
             priority: None,
             state_label: None,
         }
+    }
+
+    /// #1394: the fresh pre-merge check routes to the resolve flow only
+    /// when GitHub's *live* state reports a conflict — and pins the head
+    /// OID from that same fetch when it doesn't. This is the routing the
+    /// old client short-circuit did off stale poll data.
+    #[test]
+    fn fresh_conflict_routes_to_resolve_clean_proceeds_with_pinned_head() {
+        let mut conflicting = task(Some("o/r"), "o/r#1");
+        conflicting.mergeable = Mergeable::Conflicting;
+        assert_eq!(
+            classify_fresh_pr(&conflicting, Some("deadbeef".into())),
+            FreshMergeCheck::Conflict,
+            "a fresh conflict routes to resolve, not a doomed merge",
+        );
+
+        let clean = task(Some("o/r"), "o/r#2");
+        assert_eq!(
+            classify_fresh_pr(&clean, Some("cafef00d".into())),
+            FreshMergeCheck::Proceed {
+                head: Some("cafef00d".into())
+            },
+            "a clean PR proceeds, pinned to the freshly-fetched head OID",
+        );
+
+        // Soft state (red CI) still proceeds — GitHub is the authority at
+        // merge time (#1203); only conflict is a hard local block.
+        let mut red_ci = task(Some("o/r"), "o/r#3");
+        red_ci.ci = CiStatus::Failure;
+        assert_eq!(
+            classify_fresh_pr(&red_ci, None),
+            FreshMergeCheck::Proceed { head: None },
+            "red CI is advisory, not a block — the merge still reaches GitHub",
+        );
     }
 
     #[test]

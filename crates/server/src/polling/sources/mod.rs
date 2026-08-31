@@ -228,6 +228,29 @@ mod full_sweep_commit_tests {
 }
 
 #[cfg(test)]
+mod heartbeat_promote_tests {
+    use super::*;
+    use lazybox_core::ProviderError;
+
+    #[test]
+    fn transport_outage_promotes_but_rate_limits_do_not() {
+        // A plain transport outage (no retry-after hint) — a full sweep may
+        // recover missed coverage, so promote.
+        let outage = ProviderError::retryable("github", "connection reset by peer");
+        assert!(heartbeat_error_should_promote(&outage));
+
+        // GitHub's secondary/primary limit surfaces as a retryable-with-hint
+        // — promoting would re-trip it, so do NOT.
+        let github_limit = ProviderError::retryable_after("github", "secondary rate limit", 30);
+        assert!(!heartbeat_error_should_promote(&github_limit));
+
+        // Our own governor pacing (self-throttle) — likewise no promote.
+        let self_throttle = ProviderError::self_throttle("github", "tick allowance spent", 20);
+        assert!(!heartbeat_error_should_promote(&self_throttle));
+    }
+}
+
+#[cfg(test)]
 mod discovery_behind_tests {
     use super::*;
 
@@ -579,6 +602,20 @@ fn full_sweep_stages(has_focused_targets: bool) -> Vec<FullSweepStage> {
     } else {
         vec![FullSweepStage::Broad]
     }
+}
+
+/// Whether a failed notifications heartbeat should PROMOTE this tick to a
+/// full sweep. Only a genuine transport outage (network / 5xx — no
+/// retry-after hint, not self-throttled) does: a full sweep may re-establish
+/// coverage the dead channel missed. A **rate-limited** heartbeat — our own
+/// governor pacing, or GitHub's secondary (abuse) / primary limit — must NOT
+/// promote (#1218): firing the heaviest possible request burst into the exact
+/// limiter that just blocked us re-trips GitHub's secondary limit and loops
+/// into a throttle blackout where nothing new ever surfaces. A rate limit
+/// carries a `retry_after` hint (or the self-throttle flag); a transport
+/// outage carries neither.
+fn heartbeat_error_should_promote(error: &lazybox_core::ProviderError) -> bool {
+    !(error.is_self_throttle() || error.retry_after_secs().is_some())
 }
 
 pub(super) fn gh_fetch_plan(full_sweep_due: bool, poll_notifications: bool) -> GhFetchPlan {
@@ -1292,13 +1329,28 @@ impl GhSource {
         let poll = match self.client.fetch_notifications().await {
             Ok(p) => p,
             Err(e) => {
-                // Heartbeat failure isn't fatal: signal "no
-                // incremental data" so the outer `fetch` promotes to
-                // a full sweep this tick. The full sweep also re-arms
-                // the slow-sweep clock so a chronically-broken
-                // heartbeat doesn't trap us in a loop.
-                tracing::warn!("notifications heartbeat failed: {e} — promoting to full sweep");
-                return Ok(None);
+                let error = lazybox_core::ProviderError::from(e);
+                // A genuine transport outage (network / 5xx) signals "no
+                // incremental data" so the outer `fetch` promotes to a full
+                // sweep this tick, which also re-arms the slow-sweep clock so
+                // a chronically-broken heartbeat doesn't trap us.
+                //
+                // A RATE-LIMITED heartbeat, though, must NOT promote (#1218):
+                // a full sweep here fires the heaviest request burst into the
+                // limiter that just blocked us, re-tripping GitHub's secondary
+                // (abuse) limit into a throttle blackout. Surface it as the
+                // retryable wait it is and let the (short) circuit cool; the
+                // next unblocked tick resumes the heartbeat.
+                if heartbeat_error_should_promote(&error) {
+                    tracing::warn!(
+                        "notifications heartbeat failed: {error} — promoting to full sweep"
+                    );
+                    return Ok(None);
+                }
+                tracing::info!(
+                    "notifications heartbeat rate-limited: {error} — deferring, not promoting to a full sweep (would re-trip the limit)"
+                );
+                return Err(error);
             }
         };
         let (entries, pending_cursor, commit_cursor) = match poll {

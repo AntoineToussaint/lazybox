@@ -2551,17 +2551,17 @@ impl GhClient {
     /// `should_full_sweep` honors this and bypasses the heartbeat
     /// round-trip until the deadline passes. Idempotent — re-arming
     /// while already backed off just extends the window.
-    fn note_heartbeat_failed(&self) {
-        let mut state = self.notifications_state.lock();
+    /// `rate_limited` = the heartbeat failed because a request was blocked by
+    /// a rate limit (our governor OR GitHub's secondary/primary limit) rather
+    /// than a transport outage. A rate limit never arms a catch-up sweep —
+    /// see [`NotificationsState::record_heartbeat_failure`] (#1218).
+    fn note_heartbeat_failed(&self, rate_limited: bool) {
         let deadline = std::time::Instant::now() + Self::HEARTBEAT_BACK_OFF;
-        let was_armed = state.heartbeat_back_off_until.is_some();
-        state.heartbeat_back_off_until = Some(deadline);
-        if !was_armed {
-            // One catch-up sweep for whatever the dead heartbeat may
-            // have missed; subsequent backed-off ticks stay hot-only
-            // (#1218 — a full sweep every tick for the whole back-off
-            // window burned the most quota during exhaustion).
-            state.backoff_catchup_sweep_due = true;
+        let armed = self
+            .notifications_state
+            .lock()
+            .record_heartbeat_failure(rate_limited, deadline);
+        if armed {
             tracing::warn!(
                 back_off_secs = Self::HEARTBEAT_BACK_OFF.as_secs(),
                 "notifications heartbeat failed — backing off; one catch-up sweep, then hot-only ticks",
@@ -2603,7 +2603,7 @@ impl GhClient {
         let result = self.fetch_notifications_inner().await;
         match &result {
             Ok(_) => self.note_heartbeat_succeeded(),
-            Err(_) => self.note_heartbeat_failed(),
+            Err(e) => self.note_heartbeat_failed(matches!(e, GhError::RateLimited { .. })),
         }
         result
     }

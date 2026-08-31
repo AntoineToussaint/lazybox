@@ -988,6 +988,25 @@ pub enum HotFetch {
 /// chunk at this bound (#1218).
 const HOT_BATCH_MAX_IDS: usize = 100;
 
+/// Ceiling on concurrent in-flight GitHub requests across ALL client clones
+/// (background sweeps and interactive actions share it). GitHub's secondary
+/// (abuse) limiter is concurrency-sensitive — it keys on burst/concurrency,
+/// not the primary 5000/h budget — so a full sweep fanning many requests out
+/// at once can trip it with thousands of primary points still free (#1218).
+/// Kept deliberately low: interactive work is rarely more than one or two
+/// requests at a time, while a reconcile's fan-out is exactly the burst this
+/// bounds. Paired with the per-request pacing gap (see `rate_budget`), which
+/// widens further while a secondary limit is recent.
+const MAX_CONCURRENT_GITHUB_REQUESTS: usize = 6;
+
+// Guard the ceiling at compile time (#1218): a future bump back toward the old
+// value re-opens the burst that tripped GitHub's abuse limiter. Failing the
+// build is louder than a runtime test and can't be skipped.
+const _: () = assert!(
+    MAX_CONCURRENT_GITHUB_REQUESTS <= 6,
+    "concurrency gate too high for GitHub's secondary (abuse) limiter"
+);
+
 #[derive(Clone)]
 pub struct GhClient {
     inner: Octocrab,
@@ -1017,8 +1036,9 @@ pub struct GhClient {
     /// updated only after a confirmed write so a failed store retries.
     last_persisted_rate_state: std::sync::Arc<parking_lot::Mutex<Option<String>>>,
     /// GitHub's secondary limits apply across REST and GraphQL. All
-    /// client clones therefore share one concurrency gate, and all
-    /// mutations additionally share a serial lane.
+    /// client clones therefore share one concurrency gate
+    /// ([`MAX_CONCURRENT_GITHUB_REQUESTS`]), and all mutations additionally
+    /// share a serial lane.
     request_gate: std::sync::Arc<tokio::sync::Semaphore>,
     mutation_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
     /// Notifications heartbeat state — `Last-Modified` echo + slow-sweep
@@ -1118,7 +1138,9 @@ impl GhClient {
                 crate::rate_budget::RateBudget::default_for_lazybox(),
             )),
             last_persisted_rate_state: std::sync::Arc::new(parking_lot::Mutex::new(None)),
-            request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
+            request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONCURRENT_GITHUB_REQUESTS,
+            )),
             mutation_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             notifications_state: NotificationsState::shared(),
             hot_freshness: std::sync::Arc::new(parking_lot::Mutex::new(
@@ -1148,7 +1170,9 @@ impl GhClient {
                 crate::rate_budget::RateBudget::default_for_lazybox(),
             )),
             last_persisted_rate_state: std::sync::Arc::new(parking_lot::Mutex::new(None)),
-            request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
+            request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONCURRENT_GITHUB_REQUESTS,
+            )),
             mutation_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             notifications_state: NotificationsState::shared(),
             hot_freshness: std::sync::Arc::new(parking_lot::Mutex::new(
@@ -7310,7 +7334,9 @@ mod tests {
                 crate::rate_budget::RateBudget::default_for_lazybox(),
             )),
             last_persisted_rate_state: std::sync::Arc::new(parking_lot::Mutex::new(None)),
-            request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
+            request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONCURRENT_GITHUB_REQUESTS,
+            )),
             mutation_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             notifications_state: NotificationsState::shared(),
             hot_freshness: std::sync::Arc::new(parking_lot::Mutex::new(

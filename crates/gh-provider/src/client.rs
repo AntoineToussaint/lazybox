@@ -8767,9 +8767,11 @@ mod tests {
         let client = GhClient::stub_for_tests("cmd:test", "fp").unwrap();
 
         // Take every concurrency slot and hold them, so the gate acquire
-        // inside `request_permit` can never succeed.
+        // inside `request_permit` can never succeed. Sized to the actual gate
+        // capacity — acquiring more than exist would itself block forever and
+        // hang the test rather than exercising `request_permit`'s timeout.
         let mut held = Vec::new();
-        for _ in 0..8 {
+        for _ in 0..MAX_CONCURRENT_GITHUB_REQUESTS {
             held.push(
                 client
                     .request_gate

@@ -1233,6 +1233,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::Stats { .. }
                 | IpcEvent::AgentSessionStarted { .. }
                 | IpcEvent::SnippetKeepMine { .. }
+                | IpcEvent::GithubDiscoveryBehind { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -1423,6 +1424,13 @@ impl<T: TerminalAdapter> Model<T> {
             self.dismissed_updates = dismissed_updates.clone();
             self.seed_recent_snippets_from_snapshot(recent_snippets.clone());
             self.snapshot_seen = true;
+            // Drop any stale discovery-behind indicator on (re)connect: the
+            // `behind: false` recovery edge may have fired while this client
+            // was disconnected, and the Snapshot doesn't carry the current
+            // deferral state. Because `behind: true` is a re-sent LEVEL, a
+            // still-active stall re-asserts within one tick; clearing here
+            // just prevents a stuck indicator for a stall that already ended.
+            self.status.discovery_behind = None;
             self.maybe_show_pending_update();
             // Seed the always-visible "today" header strip (#1344) on every
             // (re)connect — the initial snapshot, a `--connect` reconnect,
@@ -2198,6 +2206,9 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::Stats { .. }
             | IpcEvent::AgentSessionStarted { .. }
             | IpcEvent::SnippetKeepMine { .. }
+            // Not a sync ATTEMPT — it's a standing advisory about a
+            // deferred sweep, handled (set/clear) in the main event match.
+            | IpcEvent::GithubDiscoveryBehind { .. }
             | IpcEvent::ResourcePosture(..) => {}
         }
         // Background-poll indicator. Lights up whenever the daemon
@@ -2382,6 +2393,42 @@ impl<T: TerminalAdapter> Model<T> {
                                 crate::realm::components::footer::NoticeSeverity::Retryable,
                             );
                         }
+                    }
+                }
+                // New-item discovery is behind (#1391). A STANDING signal,
+                // not a toast: hold it in `status.discovery_behind` so the
+                // footer shows a persistent, self-retracting indicator that
+                // can't be missed. `behind: true` is a LEVEL the daemon
+                // re-sends every deferred tick (so a client subscribing
+                // mid-stall still converges on it), so the one-shot attention
+                // flash is gated to the rising edge — the tick we first see
+                // the level — rather than firing every tick. `behind: false`
+                // retracts it. Never touches poll-health state (this isn't a
+                // failure — the cheap issue-discovery probe keeps surfacing
+                // new issues), so it can't register a phantom failing provider.
+                IpcEvent::GithubDiscoveryBehind {
+                    behind,
+                    watched_repos,
+                    required_points,
+                    allowance,
+                } => {
+                    if *behind {
+                        let state = crate::realm::status_ctx::DiscoveryBehind {
+                            watched_repos: *watched_repos,
+                            required_points: *required_points,
+                            allowance: *allowance,
+                        };
+                        let rising_edge = self.status.discovery_behind.is_none();
+                        if rising_edge {
+                            self.flash(
+                                state.flash_message(),
+                                crate::realm::components::footer::NoticeSeverity::Retryable,
+                            );
+                        }
+                        self.status.discovery_behind = Some(state);
+                        self.redraw = true;
+                    } else if self.status.discovery_behind.take().is_some() {
+                        self.redraw = true;
                     }
                 }
                 // Deliberately ignored: no poll-indicator / mutation-

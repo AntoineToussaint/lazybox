@@ -635,6 +635,90 @@ mod effects_tests {
         m
     }
 
+    /// A budget-deferred discovery stall (#1391) surfaces as a STANDING
+    /// footer indicator that persists until the daemon retracts it — not a
+    /// one-shot toast that fades and is missed. The `behind: true` level is
+    /// re-sent every deferred tick; the attention flash must fire only on
+    /// the rising edge, and `behind: false` must retract the indicator.
+    #[test]
+    fn discovery_behind_is_a_standing_self_clearing_indicator() {
+        use lazybox_ipc::Event as IpcEvent;
+
+        let mut m = build_model();
+        m.status.polling = None;
+
+        // Rising edge: indicator asserted + a one-shot attention flash.
+        m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
+            behind: true,
+            watched_repos: 30,
+            required_points: 900,
+            allowance: 120,
+        });
+        let behind = m
+            .status
+            .discovery_behind
+            .as_ref()
+            .expect("standing indicator asserted");
+        assert_eq!(behind.watched_repos, 30);
+        assert!(
+            m.status.notice.is_some(),
+            "rising edge raises an attention flash"
+        );
+
+        // The daemon re-sends the level every deferred tick. The indicator
+        // must persist, and the flash must NOT re-fire — otherwise the
+        // footer would nag once per tick.
+        m.status.notice = None;
+        m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
+            behind: true,
+            watched_repos: 31,
+            required_points: 930,
+            allowance: 120,
+        });
+        assert!(
+            m.status.discovery_behind.is_some(),
+            "the level keeps the indicator standing"
+        );
+        assert_eq!(
+            m.status.discovery_behind.as_ref().unwrap().watched_repos,
+            31,
+            "the standing figures refresh from the latest level"
+        );
+        assert!(
+            m.status.notice.is_none(),
+            "a re-sent level must not re-flash — only the rising edge does"
+        );
+
+        // Recovery retracts the standing indicator.
+        m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
+            behind: false,
+            watched_repos: 0,
+            required_points: 0,
+            allowance: 0,
+        });
+        assert!(
+            m.status.discovery_behind.is_none(),
+            "the falling edge retracts the indicator"
+        );
+
+        // A (re)connect Snapshot clears a possibly-stale indicator: the
+        // recovery edge may have fired while this client was disconnected,
+        // and the Snapshot carries no deferral state. Safe because the
+        // daemon re-asserts the level within a tick if still behind.
+        m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
+            behind: true,
+            watched_repos: 30,
+            required_points: 900,
+            allowance: 120,
+        });
+        assert!(m.status.discovery_behind.is_some());
+        m.handle_daemon_event(empty_snapshot());
+        assert!(
+            m.status.discovery_behind.is_none(),
+            "a reconnect Snapshot must drop a possibly-stale indicator"
+        );
+    }
+
     /// Connecting to a daemon built from a different commit raises a
     /// sticky banner naming both builds — the stale-daemon skew the
     /// protocol handshake can't see. A matching build stays silent.

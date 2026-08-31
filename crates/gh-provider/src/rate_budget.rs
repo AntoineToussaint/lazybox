@@ -1025,7 +1025,16 @@ impl RateBudget {
             self.request_latencies_ms.pop_front();
         }
         if (200..=399).contains(&status) {
-            self.secondary_failures = 0;
+            // Decay the secondary-abuse backoff one step per clean response
+            // instead of snapping it to zero. A hard reset collapsed the
+            // widened inter-request gap the instant a single request slipped
+            // through, so the very next burst immediately re-tripped GitHub's
+            // secondary (abuse) limit — the token never actually received the
+            // sustained slow-down the limiter demands, and sync churned in a
+            // trip → reset → re-trip loop (#1218). Decaying holds the gap wide
+            // across the recovery and only fully relaxes after several
+            // consecutive clean responses.
+            self.secondary_failures = self.secondary_failures.saturating_sub(1);
         }
 
         tracing::info!(
@@ -2222,6 +2231,10 @@ mod tests {
         let second = budget.observe_secondary_limit(None, wall_now);
         assert!(second >= wall_now + chrono::Duration::seconds(120));
 
+        // A single clean response DECAYS the escalation one step, it does not
+        // clear it (#1218): a limiter that's clearly still hot keeps backing
+        // off harder rather than snapping to the 60s base and re-tripping.
+        // failures: 2 → (decay) 1 → (this hit) 2 ⇒ still the 120s tier.
         budget.record_response(
             "recovered",
             ApiResource::Graphql,
@@ -2231,8 +2244,24 @@ mod tests {
             0,
             Duration::ZERO,
         );
-        let recovered = budget.observe_secondary_limit(None, wall_now);
-        assert!(recovered < wall_now + chrono::Duration::seconds(120));
+        let still_escalated = budget.observe_secondary_limit(None, wall_now);
+        assert!(still_escalated >= wall_now + chrono::Duration::seconds(120));
+
+        // Enough consecutive clean responses DO relax it back to the base:
+        // decay failures 2 → 0, and the next hit is the 60s tier again.
+        for _ in 0..2 {
+            budget.record_response(
+                "recovered",
+                ApiResource::Graphql,
+                Some(1),
+                200,
+                false,
+                0,
+                Duration::ZERO,
+            );
+        }
+        let relaxed = budget.observe_secondary_limit(None, wall_now);
+        assert!(relaxed < wall_now + chrono::Duration::seconds(120));
     }
 
     /// #1218 item 5: a secondary cooldown (usually opened by background
@@ -2653,5 +2682,39 @@ mod tests {
         }
         assert_eq!(budget.reserve_request_slot(now), Duration::ZERO);
         assert_eq!(budget.reserve_request_slot(now), MAX_REQUEST_GAP);
+    }
+
+    #[test]
+    fn a_clean_response_decays_the_secondary_backoff_instead_of_clearing_it() {
+        let mut budget = RateBudget::new(100, 6000.0);
+        // Trip GitHub's secondary (abuse) limit a few times → wide gap.
+        for _ in 0..3 {
+            budget.observe_secondary_limit(None, Utc::now());
+        }
+        assert_eq!(budget.secondary_failures, 3);
+
+        // A single clean 2xx must DECAY the backoff by one step, NOT reset it
+        // to zero — otherwise the widened inter-request gap collapses the
+        // instant one request slips through and the next burst immediately
+        // re-trips the limiter (#1218).
+        budget.record_response(
+            "probe",
+            ApiResource::Graphql,
+            Some(1),
+            200,
+            false,
+            0,
+            Duration::from_millis(1),
+        );
+        assert_eq!(
+            budget.secondary_failures, 2,
+            "one clean response decays by one, not to zero"
+        );
+
+        // The gap is still widened (2× the baseline), so the recovery stays
+        // paced rather than snapping back to a burst.
+        let now = Instant::now();
+        assert_eq!(budget.reserve_request_slot(now), Duration::ZERO);
+        assert!(budget.reserve_request_slot(now) > DEFAULT_MIN_REQUEST_GAP);
     }
 }

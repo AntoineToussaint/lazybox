@@ -12,6 +12,32 @@ use lazybox_core::{Task, Workspace, WorkspaceKey};
 use lazybox_ipc::Event;
 use lazybox_store::{StoreError, StoreMutation, WorkspaceRecord};
 
+/// How long a single poll upsert waits for a workspace's lock before
+/// skipping the row for this tick. Short on purpose: a contended lock means
+/// the workspace is actively busy (agent mutation / git op / user action),
+/// and blocking the serial reconcile loop on it stalls new-item discovery
+/// for the whole batch. Comfortably longer than a normal lock hold
+/// (mark-read, snooze), so only a genuinely-busy workspace is skipped —
+/// and it re-attempts next tick.
+const WORKSPACE_LOCK_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// [`lock_workspace_with_closing_issues`] bounded by
+/// [`WORKSPACE_LOCK_ACQUIRE_TIMEOUT`]. `None` means the workspace (or a
+/// closing-issue workspace it collapses with) is busy and the poll should
+/// skip it this tick rather than block the reconcile batch on it.
+async fn lock_workspace_with_closing_issues_or_skip(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    incoming_pr: Option<&Task>,
+) -> Option<Vec<tokio::sync::OwnedMutexGuard<()>>> {
+    tokio::time::timeout(
+        WORKSPACE_LOCK_ACQUIRE_TIMEOUT,
+        lock_workspace_with_closing_issues(config, key, incoming_pr),
+    )
+    .await
+    .ok()
+}
+
 /// Merge `task` into the existing workspace for its workspace key
 /// (PR + matching issues collapse to one row), persist it, and
 /// broadcast `WorkspaceUpserted`. The store backs this with
@@ -231,7 +257,27 @@ pub(super) async fn upsert_into_workspace_key(
     // until after the commit; released before the terminal-transition
     // tail, which prompts/cleans through its own paths and must not
     // nest under this guard.
-    let ws_guards = lock_workspace_with_closing_issues(config, key, Some(&task)).await;
+    // Acquire the per-workspace lock with a SHORT bound rather than blocking
+    // the poll's serial upsert loop on it. A contended lock means the
+    // workspace is busy — a live agent mutation, a git worktree op, or a user
+    // action holds it. A full reconcile upserts ~130 rows back-to-back; one
+    // busy workspace blocking the old 15s per-task cap froze new-item
+    // discovery for that long PER contended row (minutes across a batch), the
+    // "upsert N/132 TIMED OUT after 15s" stall. Skipping fast and re-attempting
+    // next tick is the SAME skip-and-retry the outer timeout already does — the
+    // fetch succeeded, so the row's data is merely deferred one tick, never
+    // lost — just without burning the batch's wall-clock on a lock we won't get
+    // this instant anyway.
+    let Some(ws_guards) =
+        lock_workspace_with_closing_issues_or_skip(config, key, Some(&task)).await
+    else {
+        tracing::debug!(
+            workspace_key = %key.as_str(),
+            "upsert: workspace busy (lock contended {}s) — skipping this tick, will re-attempt",
+            WORKSPACE_LOCK_ACQUIRE_TIMEOUT.as_secs(),
+        );
+        return CommitOutcome::Unchanged;
+    };
 
     // TOCTOU RE-CHECK (issue #1385): the archived-set gate in
     // `upsert_with_context` runs BEFORE this lock. An `x x` on an open
@@ -252,7 +298,6 @@ pub(super) async fn upsert_into_workspace_key(
         );
         return CommitOutcome::Unchanged;
     }
-
     // 0. TERMINAL-STATE DETECTION: cheap pre-check (no IO) gates the
     //    store read — only a PR observed Merged or an issue observed
     //    Closed can trigger cleanup. We snapshot the previous state
@@ -1202,5 +1247,45 @@ mod approval_lookup_tests {
         )
         .expect("parse repos");
         assert!(approval_map_from_config(&config).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod lock_contention_tests {
+    use super::*;
+
+    /// A poll upsert must NOT block on a workspace whose lock is held by a
+    /// live agent / user action / git op — it fast-skips (returns `None`) so
+    /// the serial reconcile batch keeps moving instead of stalling the full
+    /// per-task timeout on every contended row (#1218). The paused clock lets
+    /// the bounded wait elapse instantly, so the test is fast and
+    /// deterministic rather than sleeping the real timeout.
+    #[tokio::test(start_paused = true)]
+    async fn a_held_workspace_lock_is_skipped_not_awaited() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("github:o/r#1".to_string());
+
+        // Hold the workspace lock, exactly as a concurrent mutation would.
+        let _held = config.lock_workspace(key.as_str()).await;
+
+        // The bounded acquisition gives up and signals "skip this tick"
+        // instead of awaiting the held lock indefinitely.
+        let guards = lock_workspace_with_closing_issues_or_skip(&config, &key, None).await;
+        assert!(
+            guards.is_none(),
+            "a contended workspace lock must be skipped, not awaited"
+        );
+    }
+
+    /// The complement: an UNcontended workspace acquires immediately.
+    #[tokio::test(start_paused = true)]
+    async fn a_free_workspace_lock_is_acquired() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("github:o/r#2".to_string());
+        let guards = lock_workspace_with_closing_issues_or_skip(&config, &key, None).await;
+        assert!(
+            guards.is_some(),
+            "a free workspace lock must be acquired, not skipped"
+        );
     }
 }

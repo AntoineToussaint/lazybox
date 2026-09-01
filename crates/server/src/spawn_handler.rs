@@ -3512,6 +3512,21 @@ fn sanitize_branch_component(raw: &str) -> String {
     sanitized.trim_matches('-').to_string()
 }
 
+/// A collision-free sibling name for the `attempt`th retry of a branch that
+/// hit a directory/file conflict: `release` → `release-2` → `release-3` …
+///
+/// The conflict is that git can't hold both a ref `release` and the directory
+/// `release/` that a `release/*` branch requires. Appending `-<n>` keeps the
+/// candidate a *leaf* ref, so it can't re-collide with that same `<branch>/*`
+/// namespace. This is only ever applied to lazybox-cut branches that aren't
+/// yet pushed to a PR (blank `x n` workspaces, freshly branched issues), so a
+/// renamed sibling is a safe, non-destructive recovery from what would
+/// otherwise be an unrecoverable provisioning dead-end — never a rename of a
+/// branch the user is tracking upstream.
+fn disambiguated_branch(branch: &str, attempt: usize) -> String {
+    format!("{branch}-{}", attempt + 1)
+}
+
 fn isolated_branch_for_workspace(
     workspace: &Workspace,
     cfg: &lazybox_config::Config,
@@ -3949,7 +3964,10 @@ async fn provision_worktree(
                     // provision, when nothing is on disk yet; a probe that
                     // errors is surfaced rather than papered over with a
                     // derive that would then mismatch the branch on disk.
-                    let new_branch = match mgr.existing_worktree_branch(owner, name, target).await {
+                    let mut new_branch = match mgr
+                        .existing_worktree_branch(owner, name, target)
+                        .await
+                    {
                         Ok(Some(branch)) => {
                             tracing::info!(
                                 workspace = workspace.key.as_str(),
@@ -3972,43 +3990,83 @@ async fn provision_worktree(
                         .map_err(|e| {
                             ServerError::Worktree(format!("default_branch lookup: {e}"))
                         })?;
-                    let mut checkout = mgr
-                        .checkout_new_branch_at(target, owner, name, &new_branch, &base)
-                        .await;
-                    let reclaim = match &checkout {
-                        Err(lazybox_git_ops::GitError::BranchHeldLive { holder, .. }) => Some((
-                            holder.clone(),
-                            reclaim_non_live_managed_holder(
-                                config,
-                                &mgr,
-                                owner,
-                                name,
-                                &new_branch,
-                                holder,
-                                target,
-                            )
-                            .await,
-                        )),
-                        _ => None,
-                    };
-                    match reclaim {
-                        Some((_, BranchHolderReclaim::Reclaimed)) => {
-                            checkout = mgr
-                                .checkout_new_branch_at(target, owner, name, &new_branch, &base)
-                                .await;
+                    // Provision on `new_branch`, disambiguating the name when it
+                    // collides with an existing ref *namespace* instead of a
+                    // single branch — a workspace named `release` derives the
+                    // branch `release`, which git can never create while any
+                    // `release/*` branch exists (a ref `release` and a directory
+                    // `release/` can't coexist). Left unhandled this dead-ends
+                    // the whole spawn in an unrecoverable modal: the daemon's
+                    // safe auto-delete (`git branch -d`) can't clear a real,
+                    // unmerged upstream branch, so a bare retry only replays the
+                    // failure. These branches are lazybox-cut and not yet on a
+                    // PR, so retrying on a leaf sibling (`release-2`) is a safe,
+                    // non-destructive recovery. Bounded so a pathological repo
+                    // can't spin.
+                    const MAX_DF_DISAMBIGUATION: usize = 10;
+                    let preferred_branch = new_branch.clone();
+                    let mut df_attempts = 0;
+                    loop {
+                        let mut checkout = mgr
+                            .checkout_new_branch_at(target, owner, name, &new_branch, &base)
+                            .await;
+                        let reclaim = match &checkout {
+                            Err(lazybox_git_ops::GitError::BranchHeldLive { holder, .. }) => {
+                                Some((
+                                    holder.clone(),
+                                    reclaim_non_live_managed_holder(
+                                        config,
+                                        &mgr,
+                                        owner,
+                                        name,
+                                        &new_branch,
+                                        holder,
+                                        target,
+                                    )
+                                    .await,
+                                ))
+                            }
+                            _ => None,
+                        };
+                        match reclaim {
+                            Some((_, BranchHolderReclaim::Reclaimed)) => {
+                                checkout = mgr
+                                    .checkout_new_branch_at(target, owner, name, &new_branch, &base)
+                                    .await;
+                            }
+                            Some((holder, BranchHolderReclaim::Blocked(blocker))) => {
+                                checkout = Err(lazybox_git_ops::GitError::BranchHeldManaged {
+                                    branch: new_branch.clone(),
+                                    holder,
+                                    blocker,
+                                });
+                            }
+                            _ => {}
                         }
-                        Some((holder, BranchHolderReclaim::Blocked(blocker))) => {
-                            checkout = Err(lazybox_git_ops::GitError::BranchHeldManaged {
-                                branch: new_branch.clone(),
-                                holder,
-                                blocker,
-                            });
+                        match checkout {
+                            Err(lazybox_git_ops::GitError::BranchDirFileConflict {
+                                conflicting,
+                                ..
+                            }) if df_attempts < MAX_DF_DISAMBIGUATION => {
+                                df_attempts += 1;
+                                let next = disambiguated_branch(&preferred_branch, df_attempts);
+                                tracing::info!(
+                                    workspace = workspace.key.as_str(),
+                                    preferred = %preferred_branch,
+                                    %conflicting,
+                                    retry = %next,
+                                    "branch name collides with an existing ref namespace; \
+                                     retrying provisioning on a disambiguated branch",
+                                );
+                                new_branch = next;
+                            }
+                            other => {
+                                break other.map_err(|e| {
+                                    ServerError::Worktree(format!("checkout_new_branch_at: {e}"))
+                                })?;
+                            }
                         }
-                        _ => {}
                     }
-                    checkout.map_err(|e| {
-                        ServerError::Worktree(format!("checkout_new_branch_at: {e}"))
-                    })?
                 }
             };
             (worktree, Some(format!("{owner}/{name}")))
@@ -17709,6 +17767,21 @@ mod tests {
     fn derive_branch_for_workspace_uses_workspace_key() {
         let ws = Workspace::empty(WorkspaceKey::new("my-experiment"), "main", Utc::now());
         assert_eq!(derive_branch_for_workspace("", &ws), "my-experiment");
+    }
+
+    /// A directory/file conflict retries on a *leaf* sibling name, counting
+    /// from `-2`. The suffix keeps the candidate out of the `<branch>/*`
+    /// namespace that triggered the conflict, so it can't re-collide the same
+    /// way — the recovery the provisioning loop leans on when a workspace
+    /// named `release` meets an existing `release/*` branch.
+    #[test]
+    fn disambiguated_branch_appends_leaf_suffix() {
+        assert_eq!(disambiguated_branch("release", 1), "release-2");
+        assert_eq!(disambiguated_branch("release", 2), "release-3");
+        assert_eq!(
+            disambiguated_branch("lazybox/issue-42", 1),
+            "lazybox/issue-42-2"
+        );
     }
 
     /// A non-empty prefix namespaces the branch — `lazybox` restores

@@ -9375,14 +9375,23 @@ pub(crate) async fn persist_agent_resume_context(
     // Mirror the payload under the stable session identity so a respawn under a
     // fresh backend_key can recover it (see `SESSION_AGENT_RESUME_PREFIX`). Only
     // sessions with an owning id are restorable, so a context without one has no
-    // session-keyed twin to write.
+    // session-keyed twin to write. One batch so the backend row and its twin
+    // commit atomically — a reader can never see the backend row refreshed while
+    // the twin is stale, and a mid-write failure leaves neither half updated
+    // rather than a backend row pointing at a missing twin.
     let session_scoped = context.session_id.map(session_agent_resume_key);
     match tokio::task::spawn_blocking(move || {
-        store.set_kv(&backend_scoped, &payload)?;
+        let mut mutations = vec![StoreMutation::SetKv {
+            key: backend_scoped,
+            value: payload.clone(),
+        }];
         if let Some(session_scoped) = session_scoped {
-            store.set_kv(&session_scoped, &payload)?;
+            mutations.push(StoreMutation::SetKv {
+                key: session_scoped,
+                value: payload,
+            });
         }
-        Ok::<(), lazybox_store::StoreError>(())
+        store.apply_batch(&mutations)
     })
     .await
     {

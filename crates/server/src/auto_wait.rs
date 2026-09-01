@@ -46,6 +46,23 @@
 //! confirms submission rather than blind-firing a keystroke. A clear to
 //! `Working` means the agent resumed on its own (re-auth / auto-continue) —
 //! that needs no nudge, so the tracked terminal is simply dropped.
+//!
+//! ## Riding through an auth expiry during the wait
+//!
+//! A usage-limit block can coincide with the session's auth expiring: while
+//! parked, the Claude screen repaints to a login prompt instead of resting at
+//! a composer. Two things must not happen — pasting the continuation into a
+//! logged-out screen, and losing the interrupted work once the user re-auths.
+//! The daemon's own auth scanner already routes the login prompt into the
+//! re-auth flow (`agent_auth::detect_required` → an alerting `AgentAuthRequired`
+//! badge), so auto-wait only has to stay out of the way and hold on: while the
+//! terminal is in that auth-required detour (`agent_recovery.auth_pending`) it
+//! is neither nudged nor dropped, and because the re-auth flow swaps the pane
+//! for a fresh resumed terminal, auto-wait follows every `TerminalReplaced` so
+//! the continuation lands on the resumed pane. Once the agent is genuinely
+//! authenticated again and comes to rest, the same `Idle`/`Done` nudge fires —
+//! now against a real composer, so the account change actually continues the
+//! work.
 
 use lazybox_ipc::{AgentState, Event, TerminalId, TerminalInputIntent};
 use std::collections::HashSet;
@@ -71,7 +88,15 @@ pub fn spawn(config: &ServerConfig) -> tokio::task::JoinHandle<()> {
     let rx = config.bus.subscribe();
     let config = config.clone();
     tokio::spawn(async move {
-        run(rx, config, auto_wait_enabled, press_wait, resume_work).await;
+        run(
+            rx,
+            config,
+            auto_wait_enabled,
+            press_wait,
+            resume_work,
+            auth_pending,
+        )
+        .await;
     })
 }
 
@@ -118,6 +143,14 @@ async fn resume_work(config: ServerConfig, terminal_id: TerminalId) {
     crate::spawn_handler::handle_inject_prompt(&config, terminal_id, &prompt, None, true).await;
 }
 
+/// Whether this terminal is currently in the auth-required detour (a login
+/// prompt surfaced during the wait, or an active re-authentication). Owned
+/// clone so the returned future borrows nothing, matching the injectable
+/// shape `run` expects.
+async fn auth_pending(config: ServerConfig, terminal_id: TerminalId) -> bool {
+    config.agent_recovery.auth_pending(terminal_id).await
+}
+
 /// The continuation prompt submitted once the wait clears. Reads
 /// `ui.credit_recovery_prompt` (blank falls back to its default via
 /// `resolved_ui`); an unreadable config falls back to the same default
@@ -154,18 +187,21 @@ fn wants_resume_nudge(state: &AgentState) -> bool {
 /// decision logic is testable without a real terminal. Returns when the bus
 /// closes (production never closes it — the daemon exits by dropping the
 /// runtime).
-async fn run<F, P, PFut, R, RFut>(
+async fn run<F, P, PFut, R, RFut, A, AFut>(
     mut rx: broadcast::Receiver<Event>,
     config: ServerConfig,
     enabled: F,
     press: P,
     resume: R,
+    auth_pending: A,
 ) where
     F: Fn() -> bool,
     P: Fn(ServerConfig, TerminalId) -> PFut,
     PFut: std::future::Future<Output = ()>,
     R: Fn(ServerConfig, TerminalId) -> RFut,
     RFut: std::future::Future<Output = ()>,
+    A: Fn(ServerConfig, TerminalId) -> AFut,
+    AFut: std::future::Future<Output = bool>,
 {
     // Terminals we pressed Wait on and are still holding for their reset.
     // The rising edge into `LimitReached` inserts; the falling edge out of
@@ -195,11 +231,39 @@ async fn run<F, P, PFut, R, RFut>(
             Ok(Event::AgentState {
                 terminal_id, state, ..
             }) => {
+                if !pending_resume.contains(&terminal_id) {
+                    continue;
+                }
+                // The wait coincided with an auth expiry: the screen is a
+                // login prompt (or a re-auth is running), not a resting
+                // composer. Hold the terminal — neither nudge nor drop it —
+                // so we don't paste a continuation into a logged-out screen
+                // and don't lose the interrupted work. The re-auth flow owns
+                // the pane now; we follow its `TerminalReplaced` and resume
+                // once the agent is authenticated and resting again.
+                if auth_pending(config.clone(), terminal_id).await {
+                    continue;
+                }
                 // A tracked terminal left the limit block. Drop it either
                 // way; nudge only when it came to rest (see
                 // `wants_resume_nudge`) and the policy is still enabled.
-                if pending_resume.remove(&terminal_id) && enabled() && wants_resume_nudge(&state) {
+                pending_resume.remove(&terminal_id);
+                if enabled() && wants_resume_nudge(&state) {
                     resume(config.clone(), terminal_id).await;
+                }
+            }
+            // The re-auth flow swaps a blocked pane for a fresh resumed
+            // terminal with a new id. Follow the replacement so a terminal we
+            // parked on the limit block — and are still holding through its
+            // login detour — keeps being tracked onto the pane that will come
+            // to rest, so the continuation lands there.
+            Ok(Event::TerminalReplaced {
+                old_terminal_id,
+                terminal_id,
+                ..
+            }) => {
+                if pending_resume.remove(&old_terminal_id) {
+                    pending_resume.insert(terminal_id);
                 }
             }
             // The terminal died (process exit, forced removal, archive). An
@@ -247,6 +311,12 @@ mod tests {
     /// assertions, which never expect a nudge.
     async fn noop_resume(_cfg: ServerConfig, _tid: TerminalId) {}
 
+    /// No terminal is in an auth detour — the default for tests that don't
+    /// exercise the auth-expiry-during-wait path.
+    async fn no_auth(_cfg: ServerConfig, _tid: TerminalId) -> bool {
+        false
+    }
+
     /// Only a `LimitReached` transition presses Wait — a working / asking /
     /// exited transition must not — and only while the flag is enabled.
     #[tokio::test]
@@ -269,6 +339,7 @@ mod tests {
                 async {}
             },
             noop_resume,
+            no_auth,
         )
         .await;
         assert_eq!(
@@ -297,6 +368,7 @@ mod tests {
                 async {}
             },
             noop_resume,
+            no_auth,
         )
         .await;
         assert_eq!(pressed.into_inner(), 0);
@@ -327,6 +399,7 @@ mod tests {
                 resumed.borrow_mut().push(tid);
                 async {}
             },
+            no_auth,
         )
         .await;
         assert_eq!(pressed.into_inner(), vec![TerminalId(7)]);
@@ -361,6 +434,7 @@ mod tests {
                 resumed.borrow_mut().push(tid);
                 async {}
             },
+            no_auth,
         )
         .await;
         assert_eq!(
@@ -400,6 +474,7 @@ mod tests {
                 resumed.borrow_mut().push(tid);
                 async {}
             },
+            no_auth,
         )
         .await;
         assert!(
@@ -432,6 +507,7 @@ mod tests {
                 resumed.borrow_mut().push(tid);
                 async {}
             },
+            no_auth,
         )
         .await;
         assert_eq!(
@@ -466,6 +542,7 @@ mod tests {
                 resumed.borrow_mut().push(tid);
                 async {}
             },
+            no_auth,
         )
         .await;
         assert!(
@@ -501,12 +578,94 @@ mod tests {
                 *resumed.borrow_mut() += 1;
                 async {}
             },
+            no_auth,
         )
         .await;
         assert_eq!(
             resumed.into_inner(),
             0,
             "a policy disabled before the clear injects no continuation",
+        );
+    }
+
+    /// The headline bug (#1376): the wait coincides with an auth expiry. The
+    /// parked terminal repaints to a login prompt while auth is pending, the
+    /// re-auth flow swaps the pane for a fresh resumed terminal, and only once
+    /// that pane is authenticated and resting does the continuation fire — on
+    /// the new id, never pasted into the logged-out screen.
+    #[tokio::test]
+    async fn holds_through_auth_detour_then_resumes_after_reauth() {
+        let config = ServerConfig::in_memory();
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(limit_event(7)).unwrap();
+        // Auth expired mid-wait: a login prompt, not a resting composer.
+        tx.send(state_event(7, AgentState::InputNeeded)).unwrap();
+        // The re-auth flow replaces the pane with a fresh resumed terminal.
+        tx.send(Event::TerminalReplaced {
+            old_terminal_id: TerminalId(7),
+            terminal_id: TerminalId(8),
+            session_key: "ws:1".into(),
+            kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            authenticating: true,
+        })
+        .unwrap();
+        // The resumed pane comes to rest, now genuinely authenticated.
+        tx.send(state_event(8, AgentState::Idle)).unwrap();
+        drop(tx);
+
+        let resumed = RefCell::new(Vec::new());
+        run(
+            rx,
+            config,
+            || true,
+            |_cfg, _tid| async {},
+            |_cfg, tid| {
+                resumed.borrow_mut().push(tid);
+                async {}
+            },
+            // Auth is pending on the original pane (the login detour) and
+            // clear on the resumed pane.
+            |_cfg, tid| async move { tid == TerminalId(7) },
+        )
+        .await;
+        assert_eq!(
+            resumed.into_inner(),
+            vec![TerminalId(8)],
+            "the continuation fires on the resumed pane once re-auth clears, never on the login screen",
+        );
+    }
+
+    /// A logged-out screen can classify as a resting `Idle` — which alone
+    /// satisfies `wants_resume_nudge`. While auth is pending that must be
+    /// vetoed: the terminal is held for the re-auth flow, not nudged, so no
+    /// continuation is ever pasted into a login prompt.
+    #[tokio::test]
+    async fn does_not_resume_into_a_logged_out_screen() {
+        let config = ServerConfig::in_memory();
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(limit_event(4)).unwrap();
+        tx.send(state_event(4, AgentState::Idle)).unwrap();
+        drop(tx);
+
+        let resumed = RefCell::new(Vec::new());
+        run(
+            rx,
+            config,
+            || true,
+            |_cfg, _tid| async {},
+            |_cfg, tid| {
+                resumed.borrow_mut().push(tid);
+                async {}
+            },
+            |_cfg, _tid| async { true },
+        )
+        .await;
+        assert!(
+            resumed.into_inner().is_empty(),
+            "an auth-pending terminal is never nudged, even at a resting-looking screen",
         );
     }
 

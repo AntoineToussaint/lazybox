@@ -128,6 +128,14 @@ async fn drain_auto_fix_config(client: &mut lazybox_ipc::Client) {
         matches!(keepmine, Event::SnippetKeepMine { .. }),
         "expected SnippetKeepMine, got {keepmine:?}"
     );
+    let costs = timeout(Duration::from_secs(1), client.recv())
+        .await
+        .expect("session costs deadline")
+        .expect("session costs event");
+    assert!(
+        matches!(costs, Event::SessionCosts { .. }),
+        "expected SessionCosts, got {costs:?}"
+    );
     let cfg = timeout(Duration::from_secs(1), client.recv())
         .await
         .expect("auto-fix policy config deadline")

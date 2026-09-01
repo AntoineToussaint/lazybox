@@ -346,6 +346,12 @@ impl Sidebar {
             .add_agent_session_usage(agent_id, session_key, usage);
     }
 
+    /// Hydrate persisted per-session cost on connect (`Event::SessionCosts`,
+    /// #1389) so the `$ METER · $cost` figure survives a restart.
+    pub fn hydrate_session_costs(&mut self, costs: &[(String, u64)]) {
+        self.inner.hydrate_session_costs(costs);
+    }
+
     /// Record a provider plan-quota report (`AgentProviderQuota`) — the
     /// 5h/weekly "can I keep working?" headroom.
     pub fn note_provider_quota(

@@ -1698,10 +1698,19 @@ async fn handle_spawn_inner(
     // are folded into `meter` here, so `gateway_env_for_agent` — which still
     // gates on the proxy being enabled/running — needs no change and every
     // safety property of the canary is preserved.
-    let meter = meter
-        || load_workspace(config, &WorkspaceKey::new(session_key.as_str()))
-            .map(|ws| ws.metered || workspace_in_metered_space(&cfg, &ws))
-            .unwrap_or(false);
+    let spawn_ws = load_workspace(config, &WorkspaceKey::new(session_key.as_str()));
+    // A remote-box session runs on the box; the injected proxy base-URL
+    // (`127.0.0.1:<port>`) points at *this* host's loopback, not the box —
+    // so metering it would hand the box a dead URL, not just miss the count.
+    // Never meter a remote workspace (this also overrides `meter_all`, threaded
+    // into `gateway_env_for_agent`).
+    let remote = spawn_ws.as_ref().is_ok_and(|ws| ws.remote.is_some());
+    let meter = !remote
+        && (meter
+            || spawn_ws
+                .as_ref()
+                .map(|ws| ws.metered || workspace_in_metered_space(&cfg, ws))
+                .unwrap_or(false));
     let plan = match build_spawn_plan(
         SpawnPlanInput {
             session_key,
@@ -1728,6 +1737,7 @@ async fn handle_spawn_inner(
             access,
             shell_command,
             meter,
+            remote,
         },
         &cfg,
         &config.agents,
@@ -11934,6 +11944,7 @@ mod tests {
                 access: AgentRunAccess::Default,
                 shell_command: String::new(),
                 meter: false,
+                remote: false,
             },
             &lazybox_config::Config::default(),
             &config.agents,
@@ -13193,7 +13204,7 @@ mod tests {
 
         let claude = lazybox_agents::agent::builtins::Claude;
         assert_eq!(
-            gateway_env_for_agent(&cfg, Some(&claude), true, "sess-x"),
+            gateway_env_for_agent(&cfg, Some(&claude), true, false, "sess-x"),
             vec![(
                 "ANTHROPIC_BASE_URL".to_string(),
                 "http://gateway.internal".to_string()
@@ -13205,7 +13216,7 @@ mod tests {
             &lazybox_agents::agent::builtins::Cursor,
         ] {
             assert_eq!(
-                gateway_env_for_agent(&cfg, Some(agent), true, "sess-x"),
+                gateway_env_for_agent(&cfg, Some(agent), true, false, "sess-x"),
                 vec![(
                     "OPENAI_BASE_URL".to_string(),
                     "http://gateway.internal".to_string()
@@ -13219,13 +13230,13 @@ mod tests {
         // No gateway configured → nothing for any agent.
         let bare = lazybox_config::Config::default();
         let claude = lazybox_agents::agent::builtins::Claude;
-        assert!(gateway_env_for_agent(&bare, Some(&claude), true, "sess-x").is_empty());
+        assert!(gateway_env_for_agent(&bare, Some(&claude), true, false, "sess-x").is_empty());
 
         let mut cfg = lazybox_config::Config::default();
         cfg.agent.llm_gateway_url = Some("http://gateway.internal".into());
 
         // Non-agent spawn (shell / log tail) passes `None`.
-        assert!(gateway_env_for_agent(&cfg, None, true, "sess-x").is_empty());
+        assert!(gateway_env_for_agent(&cfg, None, true, false, "sess-x").is_empty());
 
         // A GenericCli agent has no inferable provider → no injection.
         let generic = lazybox_agents::agent::builtins::GenericCli {
@@ -13235,12 +13246,12 @@ mod tests {
             resume_cmd: None,
             asking_patterns: vec![],
         };
-        assert!(gateway_env_for_agent(&cfg, Some(&generic), true, "sess-x").is_empty());
+        assert!(gateway_env_for_agent(&cfg, Some(&generic), true, false, "sess-x").is_empty());
 
         // A whitespace-only URL is treated as unset.
         let mut blank = lazybox_config::Config::default();
         blank.agent.llm_gateway_url = Some("   ".into());
-        assert!(gateway_env_for_agent(&blank, Some(&claude), true, "sess-x").is_empty());
+        assert!(gateway_env_for_agent(&blank, Some(&claude), true, false, "sess-x").is_empty());
     }
 
     #[test]
@@ -13256,7 +13267,7 @@ mod tests {
         let claude = lazybox_agents::agent::builtins::Claude;
 
         assert_eq!(
-            gateway_env_for_agent(&cfg, Some(&claude), true, "github-acme-widget-7"),
+            gateway_env_for_agent(&cfg, Some(&claude), true, false, "github-acme-widget-7"),
             vec![(
                 "ANTHROPIC_BASE_URL".to_string(),
                 "http://127.0.0.1:45999/anthropic/claude/github-acme-widget-7".to_string()
@@ -13264,17 +13275,53 @@ mod tests {
         );
         // Opted out: no proxy URL, and no gateway configured.
         assert!(
-            gateway_env_for_agent(&cfg, Some(&claude), false, "github-acme-widget-7").is_empty()
+            gateway_env_for_agent(&cfg, Some(&claude), false, false, "github-acme-widget-7")
+                .is_empty()
         );
 
         // `meter_all` overrides the per-session opt-in: every spawn routes.
         cfg.agent.meter_all = true;
         assert_eq!(
-            gateway_env_for_agent(&cfg, Some(&claude), false, "github-acme-widget-7"),
+            gateway_env_for_agent(&cfg, Some(&claude), false, false, "github-acme-widget-7"),
             vec![(
                 "ANTHROPIC_BASE_URL".to_string(),
                 "http://127.0.0.1:45999/anthropic/claude/github-acme-widget-7".to_string()
             )]
+        );
+        // …but a remote workspace is never routed even under `meter_all`:
+        // the proxy URL is this host's loopback, unreachable from the box.
+        assert!(
+            gateway_env_for_agent(&cfg, Some(&claude), true, true, "github-acme-widget-7")
+                .is_empty(),
+            "remote spawn must not be handed the local proxy URL",
+        );
+    }
+
+    #[test]
+    fn metering_proxy_skips_unmeterable_agents() {
+        // `cursor-agent` speaks OpenAI but ignores `OPENAI_BASE_URL`, so
+        // routing it through the proxy captures nothing — it would show
+        // metered while it isn't. `meterable() == false` keeps it direct even
+        // when metered, so metering is never a silent bypass.
+        // `port()` is a process-global `OnceLock` (first setter wins), so use
+        // the same value the sibling proxy test sets — assertions here only
+        // depend on the port being present, not its exact number.
+        crate::proxy::set_port(45999);
+        let mut cfg = lazybox_config::Config::default();
+        cfg.agent.metering_proxy = true;
+        cfg.agent.meter_all = true;
+        let cursor = lazybox_agents::agent::builtins::Cursor;
+        assert!(
+            gateway_env_for_agent(&cfg, Some(&cursor), true, false, "github-acme-widget-7")
+                .is_empty(),
+            "cursor-agent ignores the base-URL env, so it is never proxy-routed",
+        );
+        // Claude honors it and is routed under the same config.
+        let claude = lazybox_agents::agent::builtins::Claude;
+        assert!(
+            !gateway_env_for_agent(&cfg, Some(&claude), true, false, "github-acme-widget-7")
+                .is_empty(),
+            "a meterable agent is still routed",
         );
     }
 

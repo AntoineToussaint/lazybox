@@ -166,6 +166,7 @@ pub async fn handle_start_agent_run(
         &yaml,
         Some(agent_impl.as_ref()),
         false,
+        false,
         resolved_session_key.as_str(),
     );
     let env = crate::spawn_plan::with_agent_spawn_defaults(env, Some(agent_impl.as_ref()));

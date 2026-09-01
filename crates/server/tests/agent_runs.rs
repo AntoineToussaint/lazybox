@@ -337,6 +337,7 @@ async fn wait_for_started(
             Event::ShellCommandConfig { .. } => {}
             Event::AgentAvailabilityConfig { .. } => {}
             Event::SnippetKeepMine { .. } => {}
+            Event::SessionCosts { .. } => {}
             other => panic!("expected AgentRunStarted, got {other:?}"),
         }
     }

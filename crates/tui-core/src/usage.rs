@@ -180,6 +180,26 @@ impl UsageTracker {
         self.agent_cost_micros.get(agent_id).copied().unwrap_or(0)
     }
 
+    /// Seed a session's accumulated cost from the daemon's persisted total
+    /// on connect (#1389), so the per-workspace `$ METER · $cost` figure
+    /// survives a restart. Takes the **max** of the current value and the
+    /// replayed baseline rather than overwriting: on a fresh process the slot
+    /// is 0 so the baseline wins; on a mid-session `--connect` reconnect a kv
+    /// total that lags the live figure (the persist is async and drops on bus
+    /// lag) can't drag it *down*, while a baseline that's *ahead* — the client
+    /// was disconnected while the agent kept metering — still catches up.
+    /// Never adds, so a replay can't double the figure. A zero baseline mints
+    /// nothing.
+    pub fn hydrate_session_cost(&mut self, session_key: &str, micros: u64) {
+        if micros > 0 {
+            let slot = self
+                .session_cost_micros
+                .entry(session_key.to_string())
+                .or_default();
+            *slot = (*slot).max(micros);
+        }
+    }
+
     /// Tokens metered for one workspace/session (`0` when none).
     pub fn tokens_for_session(&self, session_key: &str) -> u64 {
         self.session_tokens.get(session_key).copied().unwrap_or(0)
@@ -558,6 +578,37 @@ mod tests {
         assert_eq!(format_cost_micros(2_000_000), "$2.00");
         assert_eq!(format_cost_micros(250_000), "$0.25");
         assert_eq!(format_cost_micros(4_200), "$0.0042");
+    }
+
+    #[test]
+    fn hydrate_seeds_session_cost_and_never_regresses() {
+        // A restart replays the daemon's persisted per-session total: it
+        // seeds the figure (not add), and a reconnect replaying a stale
+        // baseline doesn't double it *or* drag it down.
+        let mut tracker = UsageTracker::default();
+        tracker.hydrate_session_cost("ws-a", 2_000_000);
+        assert_eq!(tracker.cost_micros_for_session("ws-a"), 2_000_000);
+        assert!(tracker.has_session_cost());
+        // Live usage after hydration still accrues on top of the baseline.
+        let mut priced = usage(100, 20);
+        priced.cost_usd_micros = Some(500_000);
+        tracker.observe_session_usage("claude", Some("ws-a"), &priced);
+        assert_eq!(tracker.cost_micros_for_session("ws-a"), 2_500_000);
+        // Reconnect: a kv baseline that lags the live figure (async persist /
+        // bus lag) must NOT reduce it — this is the regression the max guards.
+        tracker.hydrate_session_cost("ws-a", 1_000_000);
+        assert_eq!(
+            tracker.cost_micros_for_session("ws-a"),
+            2_500_000,
+            "a behind-baseline reconnect must not regress the figure",
+        );
+        // …but a baseline that's ahead (the client was disconnected while the
+        // agent kept metering) still catches up.
+        tracker.hydrate_session_cost("ws-a", 3_000_000);
+        assert_eq!(tracker.cost_micros_for_session("ws-a"), 3_000_000);
+        // A zero baseline mints nothing.
+        tracker.hydrate_session_cost("ws-b", 0);
+        assert_eq!(tracker.cost_micros_for_session("ws-b"), 0);
     }
 
     #[test]

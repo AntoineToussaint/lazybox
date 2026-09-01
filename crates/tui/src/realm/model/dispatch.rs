@@ -2055,7 +2055,22 @@ impl<T: TerminalAdapter> Model<T> {
                 // client-side and read by the daemon at spawn. Distinct from the
                 // per-workspace canary below, which the same key drives on a
                 // workspace row.
-                if let Some((space, enabled)) = self.sidebar.toggle_space_metering_at_cursor() {
+                //
+                // Space metering lives in the *client's* config, which a
+                // `--connect` daemon never reads — the per-workspace canary
+                // goes over IPC (`SetMetered`), but this doesn't. Rather than
+                // toggle a flag the remote daemon can't see, refuse with a clear
+                // notice so it isn't a silent no-op (#1389).
+                if self.remote {
+                    self.flash_info(
+                        "Space metering isn't available over --connect (it's a client-side \
+                         setting the daemon can't see); meter individual workspaces with x $ \
+                         instead"
+                            .to_string(),
+                    );
+                } else if let Some((space, enabled)) =
+                    self.sidebar.toggle_space_metering_at_cursor()
+                {
                     let space = crate::util::notice_slug(&space).into_owned();
                     let verb = if enabled { "on" } else { "off" };
                     self.flash_info(format!("$ meter: {verb} for {space} (space)"));

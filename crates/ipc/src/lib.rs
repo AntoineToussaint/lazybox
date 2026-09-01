@@ -1838,6 +1838,19 @@ pub enum Event {
         #[serde(default)]
         dismissed_updates: Vec<String>,
     },
+    /// Persisted metered cost per session key (`(session_key, cost_micros)`),
+    /// pushed once right after [`Event::Snapshot`] on subscribe. The
+    /// per-workspace `$ METER · $cost` figure lives only in the client's live
+    /// `UsageTracker`, so a restart would reset it to bare `$ METER`; the
+    /// daemon accumulates the cost durably from priced proxy usage and replays
+    /// it here so the figure survives (#1389). Its own event rather than a
+    /// `Snapshot` field so the ~150 snapshot construction sites stay untouched;
+    /// the client seeds its tracker from it, and a per-Space figure is summed
+    /// client-side over the Space's workspaces. Empty vec is valid (nothing
+    /// metered yet).
+    SessionCosts {
+        costs: Vec<(String, u64)>,
+    },
     /// Authenticated user's login per provider source ("github" →
     /// "AntoineToussaint", etc.). Emitted once after the daemon's
     /// gh/linear client(s) initialize; the TUI uses these logins

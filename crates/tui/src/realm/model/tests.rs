@@ -10543,12 +10543,17 @@ mod merge_focus_follow_tests {
                 if workspace_key == key
         ));
 
+        // Deletion is destructive (kills live sessions, no undo), so unlike
+        // done/cancel it does NOT fire from the bare Msg: it pops the Hopper
+        // and mounts the shared confirm modal. No Kill is dispatched until
+        // the user answers Yes — a reflexive Ctrl-Backspace can't reap a
+        // running agent.
         m.update(Msg::HopperDeleteRequested(key.clone()));
-        assert_eq!(m.modal_stack.last(), Some(&Id::Hopper));
-        assert!(matches!(
-            cmd_rx.try_recv(),
-            Ok(IpcCommand::Kill { session_key }) if session_key.as_str() == key.as_str()
-        ));
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "delete must wait for confirmation before dispatching Kill"
+        );
     }
 
     /// Issue #224: default work (`w w`) whose only running agent is

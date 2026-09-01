@@ -204,8 +204,7 @@ impl HopperEditor {
             return;
         }
         if self.current().key.is_some() {
-            self.error =
-                Some("Use Shift-Backspace to cancel or Ctrl-Backspace to delete this item".into());
+            self.error = Some("Use Ctrl-X to cancel or Ctrl-K to delete this item".into());
             return;
         }
         let removed = self.rows.remove(self.row);
@@ -607,15 +606,9 @@ impl Component for HopperEditor {
                 Line::from(vec![
                     Span::styled("Ctrl-D", Style::default().fg(theme.success).bold()),
                     Span::raw(" done  "),
-                    Span::styled(
-                        "Shift-Del/Backspace",
-                        Style::default().fg(theme.text_dim).bold(),
-                    ),
+                    Span::styled("Ctrl-X", Style::default().fg(theme.text_dim).bold()),
                     Span::raw(" cancel  "),
-                    Span::styled(
-                        "Ctrl-Del/Backspace",
-                        Style::default().fg(theme.error).bold(),
-                    ),
+                    Span::styled("Ctrl-K", Style::default().fg(theme.error).bold()),
                     Span::raw(" delete line"),
                 ]),
                 Line::from(vec![
@@ -727,6 +720,20 @@ impl AppComponent<Msg, UserEvent> for HopperEditor {
         }
         if ctrl && matches!(key.code, Key::Char('d')) {
             return self.move_current_to_history(Outcome::Done);
+        }
+        // Cancel and delete need chords every terminal can deliver.
+        // Ctrl+letter is the only reliable command idiom inside a text
+        // editor (like Ctrl-S / Ctrl-D above): many emulators send plain
+        // 0x7f/0x08 for Backspace with no modifier bit, so a
+        // modifier+Backspace combo is unreachable there. Ctrl-X (cancel)
+        // and Ctrl-K (delete line) are the primary paths; the
+        // modifier+Delete/Backspace combos below are convenience aliases
+        // for terminals that do report them.
+        if ctrl && matches!(key.code, Key::Char('x')) {
+            return self.move_current_to_history(Outcome::Canceled);
+        }
+        if ctrl && matches!(key.code, Key::Char('k')) {
+            return self.delete_current_line();
         }
         if ctrl && matches!(key.code, Key::Delete | Key::Backspace) {
             return self.delete_current_line();
@@ -859,6 +866,40 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_x_cancels_into_history_on_every_terminal() {
+        // Ctrl+letter is the reliable primary; the Shift-Backspace alias
+        // is unreachable on emulators that can't report a Backspace
+        // modifier, so this path must stand on its own.
+        let existing = item("First");
+        let existing_key = existing.key.clone();
+        let mut editor = HopperEditor::new(vec![existing]);
+        editor.on(&key(Key::Up));
+        assert_eq!(
+            editor.on(&modified(Key::Char('x'), KeyModifiers::CONTROL)),
+            Some(Msg::HopperCancellationRequested {
+                workspace_key: existing_key,
+                canceled: true,
+            })
+        );
+        assert_eq!(editor.history.len(), 1);
+        assert_eq!(editor.history[0].outcome, Outcome::Canceled);
+    }
+
+    #[test]
+    fn ctrl_k_deletes_whole_line_on_every_terminal() {
+        let existing = item("First");
+        let existing_key = existing.key.clone();
+        let mut editor = HopperEditor::new(vec![existing]);
+        editor.on(&key(Key::Up));
+        assert_eq!(
+            editor.on(&modified(Key::Char('k'), KeyModifiers::CONTROL)),
+            Some(Msg::HopperDeleteRequested(existing_key))
+        );
+        assert!(editor.history.is_empty());
+        assert_eq!(editor.rows.len(), 1);
+    }
+
+    #[test]
     fn controlled_delete_and_backspace_remove_whole_lines_not_history() {
         for code in [Key::Delete, Key::Backspace] {
             let existing = item("First");
@@ -939,8 +980,11 @@ mod tests {
     fn command_hints_wrap_without_hiding_the_delete_or_save_chords() {
         let mut editor = HopperEditor::new(vec![item("First")]);
         let rendered = render(&mut editor, 60, 24);
-        assert!(rendered.contains("Shift-Del/Backspace"), "{rendered}");
-        assert!(rendered.contains("Ctrl-Del/Backspace"), "{rendered}");
+        // The help leads with the terminal-portable Ctrl+letter chords,
+        // not the modifier+Backspace aliases that emulators may swallow.
+        assert!(rendered.contains("Ctrl-X"), "{rendered}");
+        assert!(rendered.contains("cancel"), "{rendered}");
+        assert!(rendered.contains("Ctrl-K"), "{rendered}");
         assert!(rendered.contains("delete line"), "{rendered}");
         assert!(rendered.contains("Ctrl-S"), "{rendered}");
     }

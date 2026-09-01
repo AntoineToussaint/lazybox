@@ -322,9 +322,15 @@ fn hook_command_keyfile(exe: &Path, key_path: &Path) -> String {
 /// must still resolve, and the backend key is the identity that
 /// survives while terminal ids are reallocated.
 fn hook_command(exe: &Path, backend_key: &str) -> String {
+    // `--emit-session-context` opts this agent's hook into printing the
+    // lazybox capability blurb on `SessionStart` (Claude adds a hook's stdout
+    // to its context). Only the settings-file path — Claude — carries it;
+    // Codex's argv `hook_command_keyfile` omits it, since it is unverified
+    // whether Codex surfaces a hook's stdout as context. TODO(codex): once
+    // confirmed, seed the same text through the CODEX_HOME lazybox already owns.
     guarded_hook_command(
         exe,
-        &format!(" --backend-key \"{backend_key}\""),
+        &format!(" --backend-key \"{backend_key}\" --emit-session-context"),
         &lazybox_core::paths::hook_log_path(),
     )
 }
@@ -17247,6 +17253,23 @@ mod tests {
         assert!(
             cmd.starts_with("[ -x \"/opt/lazy box/lazybox\" ]"),
             "missing existence guard: {cmd}"
+        );
+    }
+
+    #[test]
+    fn claude_hook_command_emits_session_context_but_codex_does_not() {
+        // Claude's settings-file hook carries the marker that turns
+        // `SessionStart` into the lazybox capability blurb; Codex's argv hook
+        // omits it (its stdout-as-context behavior is unverified).
+        let claude = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7");
+        assert!(
+            claude.contains("hook-ingest --backend-key \"lzb-sess-7\" --emit-session-context"),
+            "claude hook must carry the session-context marker: {claude}"
+        );
+        let codex = hook_command_keyfile(Path::new("/opt/lazybox"), Path::new("/run/lzb/key-7"));
+        assert!(
+            !codex.contains("--emit-session-context"),
+            "codex hook must not carry the session-context marker: {codex}"
         );
     }
 

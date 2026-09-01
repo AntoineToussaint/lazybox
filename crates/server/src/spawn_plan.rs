@@ -227,6 +227,16 @@ pub(crate) fn build_spawn_plan(
             env.push((key, value));
         }
     }
+    // Session identity, so a helper the agent (or a shell user) runs — e.g.
+    // `lazybox log` — knows which workspace it sits in and can attach a new
+    // window as a sibling of this terminal. The only carrier of this before
+    // was the hook `backend-key`, which is not visible to a child process.
+    if !env.iter().any(|(key, _)| key == "LAZYBOX_SESSION_KEY") {
+        env.push((
+            "LAZYBOX_SESSION_KEY".to_string(),
+            session_key.as_str().to_string(),
+        ));
+    }
     let env = with_agent_spawn_defaults(env, agent.as_deref());
     let env = with_agent_pty_spawn_env(env, agent.as_deref());
     let env = with_worktree_cargo_target(env, Some(&cwd));
@@ -579,6 +589,10 @@ mod tests {
                     "ANTHROPIC_BASE_URL".into(),
                     "http://gateway.internal".into()
                 ),
+                (
+                    "LAZYBOX_SESSION_KEY".into(),
+                    "github-acme-widget-657".into()
+                ),
                 ("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".into(), "1".into()),
                 (
                     "CARGO_TARGET_DIR".into(),
@@ -730,6 +744,34 @@ mod tests {
             plan.argv
                 .contains(&format!("projects={{{path}={{trust_level=\"trusted\"}}}}"))
         );
+    }
+
+    #[test]
+    fn every_spawn_carries_the_session_key_in_its_env() {
+        // A helper the agent (or a shell user) runs reads LAZYBOX_SESSION_KEY
+        // to learn which workspace it sits in — so it must be present for
+        // agents and shells alike.
+        let cfg = lazybox_config::Config::default();
+        for kind in [
+            TerminalKind::Agent("claude".into()),
+            TerminalKind::Shell,
+            TerminalKind::LogTail {
+                path: "/tmp/x.log".into(),
+            },
+        ] {
+            let mut input = input(kind.clone());
+            input.shell_command = "/bin/sh".into();
+            let plan =
+                build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("valid plan");
+            assert_eq!(
+                plan.env
+                    .iter()
+                    .find(|(k, _)| k == "LAZYBOX_SESSION_KEY")
+                    .map(|(_, v)| v.as_str()),
+                Some("github-acme-widget-657"),
+                "{kind:?} spawn is missing LAZYBOX_SESSION_KEY",
+            );
+        }
     }
 
     #[test]

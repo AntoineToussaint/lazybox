@@ -3563,6 +3563,25 @@ impl TerminalStack {
                     // preserved. A later live overflow while hidden
                     // still trims to the cap tail via `append_output`.
                     if snap.replay_available {
+                        // Parse the deferred replay at the width this
+                        // terminal last rendered at, not the VT's default.
+                        // A cursor-relative redraw in the replay (an agent
+                        // status block redrawn with `ESC[<n>A`) is sized to
+                        // the real pane; parsing it at the default width then
+                        // reflowing to the real one lands those moves on the
+                        // wrong rows and scrolls stale copies into
+                        // reconstructed scrollback — the live viewport is
+                        // re-derived and looks right, so the duplication is
+                        // scrollback-only (#1405). Pane geometry is unchanged
+                        // across a reconnect, so the previous slot's rendered
+                        // size is the width the next render will use.
+                        if let Some(size) = previous
+                            .get(&snap.terminal_id)
+                            .and_then(|prev| prev.last_rendered_size)
+                        {
+                            slot.vt.ensure_size(size.0, size.1);
+                            slot.last_rendered_size = Some(size);
+                        }
                         slot.pending_feed = snap.replay.clone();
                     }
                     self.invalidate_visible();
@@ -3576,8 +3595,16 @@ impl TerminalStack {
                 // state between now and the next render, and it's what
                 // the user is looking at. Everything else parses
                 // lazily on first display.
+                //
+                // Only when its VT is already at the real render width,
+                // though — a fresh slot sits at the VT default, and
+                // flushing there would parse the replay at the wrong width
+                // and reflow it (the scrollback-corrupting path #1405
+                // guards against). Without a carried size we defer to the
+                // render, which sizes the grid before it flushes.
                 if let Some(id) = self.focused_terminal_id()
                     && let Some(slot) = self.terminals.get_mut(&id)
+                    && slot.last_rendered_size.is_some()
                 {
                     slot.flush_pending();
                 }
@@ -8283,12 +8310,20 @@ mod hidden_feed_tests {
     /// terminal synchronously on the UI thread: only the foreground
     /// terminal is fed eagerly; hidden terminals stash their replay in
     /// `pending_feed` and reconstruct the exact grid on first display.
+    /// The foreground terminal is fed eagerly only once its render width
+    /// is known (it rendered before the reconnect) — flushing a fresh
+    /// slot would parse the replay at the VT default and reflow it, the
+    /// scrollback-corrupting path #1405 guards against.
     #[test]
     fn snapshot_defers_hidden_terminal_replays() {
         let sk_a = SessionKey::new("a");
         let sk_b = SessionKey::new("b");
         let mut stack = TerminalStack::new(PaneId::new(0));
         stack.set_active_session(Some(sk_a.clone()));
+        // The foreground terminal already rendered once — the reconnect
+        // precondition that lets its replay flush eagerly at the real width.
+        spawn(&mut stack, TerminalId(1), &sk_a);
+        render(&mut stack);
 
         let snap = |id: u64, sk: &SessionKey, replay: &[u8]| lazybox_ipc::TerminalSnapshot {
             terminal_id: TerminalId(id),

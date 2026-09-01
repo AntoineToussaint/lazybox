@@ -314,6 +314,16 @@ impl AgentRecoveryRegistry {
             })
     }
 
+    /// Whether this terminal is somewhere in the auth-required detour: a
+    /// provider auth failure has been recorded (`require`) and not yet
+    /// cleared, or a re-authentication flow is running for it. Auto-wait
+    /// consults this so a usage-limit park that coincides with an auth expiry
+    /// is held through the login/re-auth rather than having a continuation
+    /// pasted into the logged-out screen.
+    pub(crate) async fn auth_pending(&self, terminal_id: TerminalId) -> bool {
+        self.is_required(terminal_id).await || self.active(terminal_id).await
+    }
+
     pub(crate) async fn replay_events(
         &self,
         reconnect_output: Option<&lazybox_ipc::EventSender>,

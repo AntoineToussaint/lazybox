@@ -47,9 +47,9 @@ pub fn mailbox_membership(
     show_inactive_in_inbox: bool,
 ) -> bool {
     let snoozed = workspace.is_snoozed(now);
-    let hopper_completed = workspace
+    let hopper_inactive = workspace
         .hopper
-        .is_some_and(|hopper| hopper.completed_at.is_some());
+        .is_some_and(|hopper| hopper.completed_at.is_some() || hopper.canceled_at.is_some());
     // "Recently inactivated" = task is Merged/Closed AND it reached
     // that state within the grace window. Such workspaces appear in
     // BOTH Inbox (so the user sees the MERGED/CLOSED transition) and
@@ -77,7 +77,7 @@ pub fn mailbox_membership(
             if snoozed {
                 return false;
             }
-            if hopper_completed {
+            if hopper_inactive {
                 return show_inactive_in_inbox;
             }
             if show_inactive_in_inbox {
@@ -98,7 +98,7 @@ pub fn mailbox_membership(
             if snoozed {
                 return false;
             }
-            if hopper_completed {
+            if hopper_inactive {
                 return true;
             }
             matches!(

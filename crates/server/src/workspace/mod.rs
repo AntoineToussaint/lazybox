@@ -115,14 +115,19 @@ pub fn save_hopper(
             workspace.hopper = Some(HopperMeta {
                 position: position as u32,
                 completed_at: None,
+                canceled_at: None,
             });
             workspace
         };
         workspace.name = name.to_string();
-        let completed_at = workspace.hopper.and_then(|meta| meta.completed_at);
+        let (completed_at, canceled_at) = workspace
+            .hopper
+            .map(|meta| (meta.completed_at, meta.canceled_at))
+            .unwrap_or_default();
         workspace.hopper = Some(HopperMeta {
             position: position as u32,
             completed_at,
+            canceled_at,
         });
         ordered.push(workspace);
     }
@@ -142,10 +147,14 @@ pub fn save_hopper(
         )
     });
     for mut workspace in omitted {
-        let completed_at = workspace.hopper.and_then(|meta| meta.completed_at);
+        let (completed_at, canceled_at) = workspace
+            .hopper
+            .map(|meta| (meta.completed_at, meta.canceled_at))
+            .unwrap_or_default();
         workspace.hopper = Some(HopperMeta {
             position: ordered.len() as u32,
             completed_at,
+            canceled_at,
         });
         ordered.push(workspace);
     }
@@ -346,6 +355,39 @@ mod hopper_tests {
                 .hopper
                 .expect("hopper metadata")
                 .completed_at
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_is_reversible_and_mutually_exclusive_with_completion() {
+        let config = ServerConfig::in_memory();
+        let [key] = save_hopper(
+            &config,
+            vec![HopperEntryDraft {
+                workspace_key: None,
+                name: "Try an experiment".into(),
+            }],
+        )
+        .expect("create hopper")
+        .try_into()
+        .expect("one hopper row");
+
+        set_hopper_completed(&config, &key, true).await;
+        set_hopper_canceled(&config, &key, true).await;
+        let canceled = load(&config, &key);
+        let meta = canceled.hopper.expect("hopper metadata");
+        assert!(meta.canceled_at.is_some());
+        assert!(meta.completed_at.is_none());
+
+        set_hopper_canceled(&config, &key, false).await;
+        let reopened = load(&config, &key);
+        assert_eq!(reopened.key, key);
+        assert!(
+            reopened
+                .hopper
+                .expect("hopper metadata")
+                .canceled_at
                 .is_none()
         );
     }
@@ -699,8 +741,30 @@ pub async fn set_hopper_completed(config: &ServerConfig, key: &WorkspaceKey, com
         return;
     };
     hopper.completed_at = completed.then(Utc::now);
+    if completed {
+        hopper.canceled_at = None;
+    }
     workspace.hopper = Some(hopper);
     commit_upsert_offloaded_reported(config, key, workspace, "set hopper completion").await;
+}
+
+/// Cancel or reopen a Hopper item without deleting its workspace. Cancellation
+/// is mutually exclusive with completion and remains available to the Hopper's
+/// dated history view.
+pub async fn set_hopper_canceled(config: &ServerConfig, key: &WorkspaceKey, canceled: bool) {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return;
+    };
+    let Some(mut hopper) = workspace.hopper else {
+        return;
+    };
+    hopper.canceled_at = canceled.then(Utc::now);
+    if canceled {
+        hopper.completed_at = None;
+    }
+    workspace.hopper = Some(hopper);
+    commit_upsert_offloaded_reported(config, key, workspace, "set hopper cancellation").await;
 }
 
 /// Record a snippet delivery against a workspace (issue #463): the

@@ -424,7 +424,7 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Mount the ordered personal Hopper editor.
     pub(super) fn mount_hopper(&mut self) {
-        use crate::realm::components::hopper::HopperEditor;
+        use crate::realm::components::hopper::{HopperEditor, HopperItem};
 
         if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
             return;
@@ -436,21 +436,21 @@ impl<T: TerminalAdapter> Model<T> {
                 workspace.hopper.map(|meta| {
                     (
                         meta.position,
-                        workspace.key.clone(),
-                        workspace.name.clone(),
-                        meta.completed_at.is_some(),
+                        HopperItem {
+                            key: workspace.key.clone(),
+                            name: workspace.name.clone(),
+                            created_at: workspace.created_at,
+                            completed_at: meta.completed_at,
+                            canceled_at: meta.canceled_at,
+                        },
                     )
                 })
             })
             .collect();
-        rows.sort_by_key(|(position, key, _, _)| (*position, key.as_str().to_string()));
+        rows.sort_by_key(|(position, item)| (*position, item.key.as_str().to_string()));
         self.mount_modal(
             Id::Hopper,
-            HopperEditor::new(
-                rows.into_iter()
-                    .map(|(_, key, name, completed)| (key, name, completed))
-                    .collect(),
-            ),
+            HopperEditor::new(rows.into_iter().map(|(_, item)| item).collect()),
         );
     }
 

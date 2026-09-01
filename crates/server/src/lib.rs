@@ -1014,6 +1014,7 @@ impl Server {
                         lazybox_ipc::Command::SetHopperCompleted { .. } => {
                             "SetHopperCompleted"
                         }
+                        lazybox_ipc::Command::SetHopperCanceled { .. } => "SetHopperCanceled",
                         lazybox_ipc::Command::MarkRead { .. } => "MarkRead",
                         lazybox_ipc::Command::FocusWorkspace { .. } => "FocusWorkspace",
                         lazybox_ipc::Command::ActivateWorkspace { .. } => "ActivateWorkspace",
@@ -1983,6 +1984,12 @@ pub async fn dispatch_command(
             completed,
         } => {
             workspace::set_hopper_completed(config, &workspace_key, completed).await;
+        }
+        lazybox_ipc::Command::SetHopperCanceled {
+            workspace_key,
+            canceled,
+        } => {
+            workspace::set_hopper_canceled(config, &workspace_key, canceled).await;
         }
         lazybox_ipc::Command::Snooze {
             session_key,

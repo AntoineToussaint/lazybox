@@ -1634,6 +1634,14 @@ pub enum Command {
     /// The daemon reads its persisted accumulator and replies with
     /// [`Event::Stats`]. Appended last (bincode is ordinal-sensitive).
     GetStats,
+    /// Reversible Hopper cancellation. Kept distinct from completion so
+    /// the history view can report both outcomes, and from `Kill`, which
+    /// destructively deletes the workspace. Appended last because bincode
+    /// command ordinals are part of the client/daemon wire contract.
+    SetHopperCanceled {
+        workspace_key: lazybox_core::WorkspaceKey,
+        canceled: bool,
+    },
 }
 
 impl Command {

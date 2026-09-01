@@ -1020,7 +1020,7 @@ impl ActionDef {
                 kind: ActionKind::OpenHopper,
                 default_keys: "Shift-H",
                 label: "hopper",
-                describe: "Open the personal Hopper editor. Each line is a persistent workspace; Enter adds the next item and Ctrl-S saves.",
+                describe: "Open the personal Hopper editor. Active items are editable lines; Tab opens dated completion and cancellation history.",
                 section: Section::Global,
             },
             ActionKind::DismissNotice => &Self {

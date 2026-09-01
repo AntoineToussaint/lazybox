@@ -1534,3 +1534,137 @@ async fn capture_seed_trims_grid_padding_below_the_cursor() {
     kill_test_server(&socket);
     result.expect("test timed out");
 }
+
+/// The whole reconstructed grid — scrollback history first, then the
+/// active screen — as trimmed row strings. Unlike [`active_rows`] this
+/// walks `Point::Screen`, so it sees the rows that scrolled out of the
+/// viewport; that is where a reattach replay would deposit duplicated
+/// blocks if the seed/ring seam were replayed twice (#1405).
+fn reconstructed_rows(replay: &[u8], cols: u16) -> Vec<String> {
+    let mut terminal = Terminal::new(TerminalOptions {
+        cols,
+        rows: 32,
+        max_scrollback_lines: 10_000,
+        max_scrollback_bytes: None,
+    })
+    .expect("terminal");
+    terminal.vt_write(replay);
+    let mut rows = Vec::new();
+    for y in 0.. {
+        let mut text = String::new();
+        let mut ok = true;
+        for x in 0..cols {
+            match terminal.grid_ref(Point::Screen(PointCoordinate { x, y })) {
+                Ok(cell) => {
+                    let mut graphemes = ['\0'; 16];
+                    let len = cell.graphemes(&mut graphemes).expect("graphemes");
+                    text.extend(&graphemes[..len]);
+                }
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            break;
+        }
+        rows.push(text.trim_end().to_string());
+    }
+    rows
+}
+
+/// Regression for #1405: reattaching a terminal whose ring is still
+/// complete must reconstruct each output block EXACTLY ONCE — no
+/// duplicated blocks in scrollback. The reattach replay is `seed`
+/// (tmux `capture-pane` history) + `ring` (the fresh attach client's
+/// repaint), and the fear was that the ring re-covering the seed's tail
+/// would replay the visible screen twice, with the earlier copy scrolling
+/// into reconstructed scrollback.
+///
+/// Feeding the real reattach replay to a real libghostty VT proves the
+/// seam reconstructs cleanly: tmux's attach repaint is absolute-positioned
+/// (`ESC[H`, per-line `ESC[K`, scroll-region resets), so it overwrites the
+/// seeded rows in place rather than pushing duplicates below. This is the
+/// authoritative check the byte-level hypothesis in the issue lacked.
+#[tokio::test]
+async fn reattach_reconstructs_each_block_once_in_scrollback() {
+    if modern_tmux_version().is_none() {
+        eprintln!("tmux missing or too old — skipping reattach-dedup test");
+        return;
+    }
+    let socket = format!("lazybox-test-reattach-dedup-{}", std::process::id());
+    let result = timeout(TEST_DEADLINE, async {
+        let backend = TmuxBackend::with_socket(&socket).expect("conf written");
+        // Deep scrollback, then a multi-row status block redrawn in place
+        // with cursor-up (the Claude polling-block shape) so the LIVE
+        // screen shows it once, then park. On reattach the seed carries the
+        // captured screen and the fresh attach client repaints it.
+        let script = r#"for i in $(seq 1 40); do echo scroll-$i; done
+printf 'BLOCK-START\r\n  BLOCK-BODY running\r\n'
+n=0
+while [ $n -lt 5 ]; do
+  printf '\033[2A\033[JBLOCK-START\r\n  BLOCK-BODY running\r\n'
+  n=$((n+1))
+done
+exec sleep 300"#;
+        let key = backend
+            .spawn(
+                &["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
+                None,
+                &[],
+                "reattach-dedup-test",
+            )
+            .await
+            .expect("tmux spawn");
+
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        for attempt in 0.. {
+            ticker.tick().await;
+            let sub = backend.subscribe(&key).await.expect("subscribe");
+            if String::from_utf8_lossy(&sub.replay).contains("BLOCK-BODY") {
+                break;
+            }
+            assert!(attempt < 100, "pane output never reached the attach client");
+        }
+
+        // Simulate a daemon restart: a fresh backend on the same tmux
+        // socket reattaches, seeding from capture-pane history.
+        drop(backend);
+        let backend = TmuxBackend::with_socket(&socket).expect("conf written");
+        backend.subscribe(&key).await.expect("reattach subscribe");
+        // Let the fresh attach client's repaint land in the ring before we
+        // snapshot the seam.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let snapshot = backend.snapshot(&key).await.expect("snapshot");
+        assert!(
+            snapshot.complete,
+            "the freshly reattached ring must still be complete",
+        );
+
+        let rows = reconstructed_rows(&snapshot.replay, 120);
+        let block_rows = rows.iter().filter(|r| r.contains("BLOCK-BODY")).count();
+        assert_eq!(
+            block_rows, 1,
+            "the status block must reconstruct exactly once across screen + \
+             scrollback, not duplicated on reattach; rows: {rows:?}",
+        );
+        // The deep scrollback the seed carries must survive intact, and each
+        // scrollback line appears once (a duplicated seam would repeat these
+        // too). `scroll-40` is the last line before the block.
+        let scroll_40 = rows.iter().filter(|r| r.as_str() == "scroll-40").count();
+        assert_eq!(
+            scroll_40, 1,
+            "the last scrollback line before the block must appear once; rows: {rows:?}",
+        );
+        assert!(
+            rows.iter().any(|r| r.as_str() == "scroll-9"),
+            "deep scrollback above the visible screen must survive reattach; rows: {rows:?}",
+        );
+
+        let _ = backend.kill(&key).await;
+    })
+    .await;
+    kill_test_server(&socket);
+    result.expect("test timed out");
+}

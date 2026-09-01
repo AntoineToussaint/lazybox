@@ -233,6 +233,117 @@ fn fresh_and_reattach_reach_identical_scroll_state() {
     );
 }
 
+// A wider-than-default pane so a default-width (120) parse wraps a long
+// line taller than the real render does — the condition under which a
+// cursor-relative redraw in the replay strands stale rows (#1405).
+const RW: u16 = 160;
+const RH: u16 = 40;
+
+/// Deep scrollback, then an agent-style status block redrawn in place with
+/// a cursor-up sized for `RW`. Parsed at `RW` the redraw lands exactly on
+/// the block and overwrites it; parsed narrower the block wraps taller, the
+/// `ESC[1A` undershoots, and each redraw strands a copy above — duplicated
+/// blocks in reconstructed scrollback.
+fn redraw_block_payload() -> Vec<u8> {
+    let mut p = Vec::new();
+    for i in 0..40 {
+        p.extend_from_slice(format!("scroll-{i}\r\n").as_bytes());
+    }
+    // 130 chars: one row at RW=160, two rows at the 120 default.
+    let block = vec![b'B'; 130];
+    p.extend_from_slice(&block);
+    p.extend_from_slice(b"\r\n");
+    for _ in 0..6 {
+        p.extend_from_slice(b"\x1b[1A\r\x1b[J");
+        p.extend_from_slice(&block);
+        p.extend_from_slice(b"\r\n");
+    }
+    p
+}
+
+fn render_at(stack: &mut TerminalStack, w: u16, h: u16) {
+    let backend = TestBackend::new(w, h);
+    let mut term = Terminal::new(backend).unwrap();
+    term.draw(|f| stack.render(Rect::new(0, 0, w, h), f, true))
+        .unwrap();
+}
+
+fn spawn_focused(stack: &mut TerminalStack, w: u16, h: u16) {
+    stack.on_event(&Event::TerminalSpawned {
+        terminal_id: TerminalId(1),
+        session_key: sk("s"),
+        kind: TerminalKind::Agent("claude".into()),
+        no_permission: false,
+        on_main: false,
+        model_label: None,
+    });
+    stack.set_active_session(Some(sk("s")));
+    render_at(stack, w, h);
+}
+
+fn snapshot_replay(payload: &[u8]) -> Event {
+    Event::Snapshot {
+        workspaces: vec![],
+        projects: vec![],
+        terminals: vec![TerminalSnapshot {
+            terminal_id: TerminalId(1),
+            session_key: sk("s"),
+            kind: TerminalKind::Agent("claude".into()),
+            replay: payload.to_vec(),
+            last_seq: 1,
+            replay_available: true,
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            prompt_history: Vec::new(),
+            composing_buffer: None,
+            agent_state: None,
+            authenticating: false,
+        }],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    }
+}
+
+/// #1405: a FOCUSED terminal reattached via `Snapshot` eagerly flushes its
+/// replay before the first render, so the flush must parse at the pane's
+/// real width — not the VT default. When the pane is wider than the default,
+/// a default-width flush wraps the replayed status block taller, its
+/// cursor-up redraw undershoots, and a copy of the block strands into
+/// scrollback on every redraw (scrollback-only, since the live viewport is
+/// re-derived at the real width). The reattached scroll state must match a
+/// live client fed the same bytes.
+#[test]
+fn focused_reattach_flush_parses_replay_at_render_width() {
+    let payload = redraw_block_payload();
+
+    let mut fresh = TerminalStack::new(PaneId::new(0));
+    spawn_focused(&mut fresh, RW, RH);
+    fresh.on_event(&Event::TerminalOutput {
+        terminal_id: TerminalId(1),
+        bytes: payload.clone(),
+        first_seq: 1,
+        seq: 1,
+    });
+    render_at(&mut fresh, RW, RH);
+
+    // The terminal already exists, focused and rendered once — the real
+    // precondition for the eager pre-render flush — then a Snapshot
+    // reattaches it carrying the full replay.
+    let mut reattached = TerminalStack::new(PaneId::new(0));
+    spawn_focused(&mut reattached, RW, RH);
+    reattached.on_event(&snapshot_replay(&payload));
+    render_at(&mut reattached, RW, RH);
+
+    assert_eq!(
+        fresh.scrollbar_summary(),
+        reattached.scrollbar_summary(),
+        "focused reattach must reconstruct identical scroll state to a live \
+         feed — a default-width eager flush strands duplicate blocks in \
+         scrollback",
+    );
+}
+
 // ── Split tiles (#362) ──────────────────────────────────────────────
 
 /// Two agents side by side in one HSplit, focus on the LEFT leaf, both

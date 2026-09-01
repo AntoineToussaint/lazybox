@@ -237,6 +237,41 @@ pub(crate) fn build_spawn_plan(
             session_key.as_str().to_string(),
         ));
     }
+    // Put lazybox's own stable launcher (`<home>/bin/lazybox`) on the spawn's
+    // PATH so a helper invoked by bare name — `lazybox log`, exactly as the
+    // SessionStart discovery prompt instructs the agent to run — actually
+    // resolves. Claude's non-interactive Bash tool inherits this spawn env
+    // (that is how `LAZYBOX_SESSION_KEY` reaches it) but does NOT source the
+    // user's login shell profile, so `<home>/bin` is otherwise absent and
+    // `lazybox log` fails with "command not found" — silently, because the
+    // recommended `… | lazybox log &` form backgrounds the pipeline and
+    // discards the error. Prepended (not appended) so lazybox's launcher wins
+    // over any stale `lazybox` elsewhere; deduped so repeated segments don't
+    // accrete. Based on the daemon's own PATH, which the PTY child inherits.
+    {
+        let bin_dir = lazybox_core::paths::bin_dir();
+        let bin_dir = bin_dir.to_string_lossy();
+        let slot = env.iter().position(|(key, _)| key == "PATH");
+        let current = match slot {
+            Some(index) => env[index].1.clone(),
+            None => std::env::var("PATH").unwrap_or_default(),
+        };
+        // Prepend the launcher dir, dropping any existing occurrence so it
+        // doesn't accrete across the daemon's own PATH or a re-spawn.
+        let rest: Vec<&str> = current
+            .split(':')
+            .filter(|segment| *segment != bin_dir.as_ref())
+            .collect();
+        let combined = if current.is_empty() || rest.is_empty() {
+            bin_dir.to_string()
+        } else {
+            format!("{bin_dir}:{}", rest.join(":"))
+        };
+        match slot {
+            Some(index) => env[index].1 = combined,
+            None => env.push(("PATH".to_string(), combined)),
+        }
+    }
     let env = with_agent_spawn_defaults(env, agent.as_deref());
     let env = with_agent_pty_spawn_env(env, agent.as_deref());
     let env = with_worktree_cargo_target(env, Some(&cwd));
@@ -581,8 +616,17 @@ mod tests {
                 "claude-sonnet-5",
             ]
         );
+        // PATH is derived from the daemon's own PATH (non-deterministic), so
+        // check it separately (asserted in full by
+        // `every_spawn_puts_lazybox_launcher_on_path`) and compare the rest.
+        let env_without_path: Vec<_> = plan
+            .env
+            .iter()
+            .filter(|(key, _)| key != "PATH")
+            .cloned()
+            .collect();
         assert_eq!(
-            plan.env,
+            env_without_path,
             vec![
                 ("PROJECT_ENV".into(), "test".into()),
                 (
@@ -599,6 +643,10 @@ mod tests {
                     "/worktrees/widget-657/target".into()
                 ),
             ]
+        );
+        assert!(
+            plan.env.iter().any(|(key, _)| key == "PATH"),
+            "the spawn env must carry a PATH with lazybox's launcher dir",
         );
         assert_eq!(plan.hint, "github-acme-widget-657-claude");
         assert!(plan.persist_key.is_some());
@@ -770,6 +818,44 @@ mod tests {
                     .map(|(_, v)| v.as_str()),
                 Some("github-acme-widget-657"),
                 "{kind:?} spawn is missing LAZYBOX_SESSION_KEY",
+            );
+        }
+    }
+
+    #[test]
+    fn every_spawn_puts_lazybox_launcher_on_path() {
+        // The SessionStart discovery prompt tells the agent to run `lazybox
+        // log`; that only works if `<home>/bin` (the stable launcher's dir) is
+        // on the spawn's PATH, since the agent's Bash tool doesn't source a
+        // login profile. Assert every spawn kind gets it, prepended.
+        let cfg = lazybox_config::Config::default();
+        let bin_dir = lazybox_core::paths::bin_dir();
+        let bin_dir = bin_dir.to_string_lossy().into_owned();
+        for kind in [
+            TerminalKind::Agent("claude".into()),
+            TerminalKind::Shell,
+            TerminalKind::LogTail {
+                path: "/tmp/x.log".into(),
+            },
+        ] {
+            let mut input = input(kind.clone());
+            input.shell_command = "/bin/sh".into();
+            let plan =
+                build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("valid plan");
+            let path = plan
+                .env
+                .iter()
+                .find(|(k, _)| k == "PATH")
+                .map(|(_, v)| v.as_str())
+                .unwrap_or_else(|| panic!("{kind:?} spawn has no PATH entry"));
+            assert!(
+                path.split(':').next() == Some(bin_dir.as_str()),
+                "{kind:?} spawn must PREPEND the launcher dir; PATH = {path}",
+            );
+            assert_eq!(
+                path.split(':').filter(|s| *s == bin_dir.as_str()).count(),
+                1,
+                "{kind:?} spawn must not duplicate the launcher dir; PATH = {path}",
             );
         }
     }

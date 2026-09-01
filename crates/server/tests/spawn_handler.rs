@@ -42,6 +42,12 @@ impl IsolatedConfigHome {
         unsafe { std::env::set_var("LAZYBOX_HOME", tmp.path()) };
         Self { _tmp: tmp, prev }
     }
+
+    /// Write a `config.yaml` into the isolated home so a test can exercise a
+    /// non-default config-driven toggle (e.g. `agent.skip_permissions`).
+    fn write_config(&self, yaml: &str) {
+        std::fs::write(self._tmp.path().join("config.yaml"), yaml).unwrap();
+    }
 }
 
 impl Drop for IsolatedConfigHome {
@@ -1126,6 +1132,79 @@ async fn restored_agent_keeps_no_permission_across_respawn() {
             argv.iter()
                 .any(|arg| arg == "--dangerously-skip-permissions"),
             "a restored no-permission agent must stay unattended: {argv:?}"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
+/// #1386: restore must reinstate the session's ACTUAL no-permission decision,
+/// not "unattended if it was unattended, else the current default". When the
+/// global `skip_permissions` default is on but the session ran interactive
+/// (twin records `false`), a respawn must stay interactive — re-deriving from
+/// the default would silently escalate it to `--dangerously-skip-permissions`.
+#[tokio::test]
+async fn restored_interactive_agent_is_not_escalated_by_skip_default() {
+    timeout(TEST_DEADLINE, async {
+        let home = IsolatedConfigHome::new();
+        home.write_config("agent:\n  skip_permissions: true\n");
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        let first_backend = MockBackend::new();
+        let first_config =
+            ServerConfig::with_store_and_backend(store.clone(), Arc::new(first_backend));
+        let workspace_key = lazybox_core::WorkspaceKey::new("test:noperm-escalate");
+        let worktree = tempfile::TempDir::new().unwrap();
+        let mut workspace =
+            lazybox_core::Workspace::empty(workspace_key.clone(), "escalate", chrono::Utc::now());
+        let session = lazybox_core::WorkspaceSession::new(
+            workspace_key.clone(),
+            lazybox_core::SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            worktree.path().to_path_buf(),
+            chrono::Utc::now(),
+        );
+        let session_id = session.id;
+        workspace.add_session(session);
+        store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: workspace_key.as_str().into(),
+                created_at: workspace.created_at,
+                workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+            })
+            .unwrap();
+
+        // Interactive despite the skip-permissions default, so the twin records
+        // `no_permission = false` — the state a config flip after an interactive
+        // spawn leaves behind.
+        lazybox_server::spawn_handler::handle_spawn(
+            &first_config,
+            workspace_key.as_str().into(),
+            Some(session_id),
+            TerminalKind::Agent("claude".into()),
+            SpawnOptions {
+                no_permission_override: Some(false),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let restored_backend = MockBackend::new();
+        let restored_config =
+            ServerConfig::with_store_and_backend(store, Arc::new(restored_backend.clone()));
+        lazybox_server::spawn_handler::restore_persisted_sessions(&restored_config).await;
+
+        let argv = restored_backend
+            .all_argv()
+            .await
+            .into_iter()
+            .next()
+            .expect("restored agent");
+        assert!(
+            !argv
+                .iter()
+                .any(|arg| arg == "--dangerously-skip-permissions"),
+            "an interactive session must not be escalated to unattended on restore: {argv:?}"
         );
     })
     .await

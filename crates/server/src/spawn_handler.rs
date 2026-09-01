@@ -10704,9 +10704,12 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
             let model_alias = resume_twin
                 .as_ref()
                 .and_then(|context| context.model_alias.clone());
-            let no_permission_override = resume_twin
-                .as_ref()
-                .and_then(|context| context.no_permission.then_some(true));
+            // Restore the exact recorded decision, matching the reattach
+            // (`recover_sessions`) and reauth (`agent_auth`) re-spawns — not a
+            // "true-only" restore, which would silently escalate a session that
+            // ran interactive to unattended if the global `skip_permissions`
+            // default flipped on between the original spawn and this restart.
+            let no_permission_override = resume_twin.as_ref().map(|context| context.no_permission);
             let provider_session_id = match &kind {
                 TerminalKind::Agent(agent_id) => {
                     session.provider_session_ids.get(agent_id).cloned()

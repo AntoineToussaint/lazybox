@@ -3460,6 +3460,16 @@ impl TerminalStack {
     pub fn on_event(&mut self, event: &Event) {
         match event {
             Event::Snapshot { terminals, .. } => {
+                // The width the focused pane last rendered at, captured
+                // before the rebuild. It's the fallback size for a focused
+                // terminal that arrives brand new in this snapshot (a
+                // lag-recovery snapshot introducing a not-yet-seen terminal
+                // in the active session), so its eager flush below still
+                // parses at the real pane width rather than the VT default.
+                let prev_focused_size = self
+                    .focused_terminal_id()
+                    .and_then(|id| self.terminals.get(&id))
+                    .and_then(|slot| slot.last_rendered_size);
                 let mut previous = std::mem::take(&mut self.terminals);
                 for snap in terminals {
                     if let Some(replay_fingerprint) = debug_byte_fingerprint(&snap.replay) {
@@ -3563,30 +3573,6 @@ impl TerminalStack {
                     // preserved. A later live overflow while hidden
                     // still trims to the cap tail via `append_output`.
                     if snap.replay_available {
-                        // Parse the deferred replay at the width this
-                        // terminal last rendered at, not the VT's default.
-                        // A cursor-relative redraw in the replay (an agent
-                        // status block redrawn with `ESC[<n>A`) is sized to
-                        // the real pane; parsing it at the default width then
-                        // reflowing to the real one lands those moves on the
-                        // wrong rows and scrolls stale copies into
-                        // reconstructed scrollback — the live viewport is
-                        // re-derived and looks right, so the duplication is
-                        // scrollback-only (#1405). Pane geometry is unchanged
-                        // across a reconnect, so the previous slot's rendered
-                        // size is the width the next render will use.
-                        //
-                        // Only size the VT — leave `last_rendered_size` unset
-                        // so the first render still emits the PTY `Resize`
-                        // (a restarted daemon's fresh PTY needs it); when the
-                        // grid matches, `ensure_size` there is a no-op and the
-                        // eagerly-parsed grid stands.
-                        if let Some(size) = previous
-                            .get(&snap.terminal_id)
-                            .and_then(|prev| prev.last_rendered_size)
-                        {
-                            slot.vt.ensure_size(size.0, size.1);
-                        }
                         slot.pending_feed = snap.replay.clone();
                     }
                     self.invalidate_visible();
@@ -3595,28 +3581,35 @@ impl TerminalStack {
                 self.clamp_active_tab();
                 self.auto_collapse_on_emptiness();
                 // Eagerly parse only the terminal actually in the
-                // foreground: the `&self` readers (mouse-tracking
-                // probe, alt-screen check) consult its live parser
-                // state between now and the next render, and it's what
-                // the user is looking at. Everything else parses
-                // lazily on first display.
+                // foreground: the `&self` readers (mouse-tracking probe,
+                // alt-screen check) consult its live parser state between
+                // now and the next render, and it's what the user is
+                // looking at. Everything else parses lazily on first
+                // display, at which point `render` sizes the grid before it
+                // flushes — so only this eager path can parse at the wrong
+                // width.
                 //
-                // Only when its VT is already at the real render width,
-                // though — a fresh slot sits at the VT default, and
-                // flushing there would parse the replay at the wrong width
-                // and reflow it (the scrollback-corrupting path #1405
-                // guards against). That width was carried above only when
-                // the terminal had rendered before the reconnect, so gate
-                // on the same signal; otherwise defer to the render, which
-                // sizes the grid before it flushes.
-                if let Some(id) = self.focused_terminal_id()
-                    && previous
+                // Size the VT to the width the pane will render at before
+                // flushing, so a cursor-relative redraw in the replay (an
+                // agent status block redrawn with `ESC[<n>A`) lands on the
+                // right rows instead of scrolling stale copies into
+                // reconstructed scrollback (#1405). The width is the
+                // terminal's own last-rendered size, or the pane's if it
+                // arrived brand new this snapshot. With neither known (a
+                // cold client that has never rendered — where `handle_mouse`
+                // early-returns on a zero `last_area`, so the probes can't be
+                // consulted anyway) we defer to the render.
+                if let Some(id) = self.focused_terminal_id() {
+                    let width = previous
                         .get(&id)
                         .and_then(|prev| prev.last_rendered_size)
-                        .is_some()
-                    && let Some(slot) = self.terminals.get_mut(&id)
-                {
-                    slot.flush_pending();
+                        .or(prev_focused_size);
+                    if let Some((cols, rows)) = width
+                        && let Some(slot) = self.terminals.get_mut(&id)
+                    {
+                        slot.vt.ensure_size(cols, rows);
+                        slot.flush_pending();
+                    }
                 }
             }
             Event::TerminalSpawned {
@@ -8395,6 +8388,56 @@ mod hidden_feed_tests {
         // And the eagerly-fed foreground grid was correct all along.
         stack.set_active_session(Some(sk_a));
         assert_eq!(row0(&mut stack), "visible");
+    }
+
+    /// The focused terminal's replay is flushed eagerly so the `&self`
+    /// mouse-tracking / alt-screen probes — which the mouse handler
+    /// consults on input dispatched before the first render — reflect the
+    /// reattached stream's terminal modes immediately. A deferred flush
+    /// would leave those probes reading the VT default (mouse tracking
+    /// off), and a click into a reattached mouse-tracking agent would be
+    /// swallowed as a lazybox selection instead of forwarded.
+    #[test]
+    fn snapshot_eager_flush_exposes_focused_terminal_modes_before_render() {
+        let sk = SessionKey::new("a");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.set_active_session(Some(sk.clone()));
+        // Rendered once before the reconnect, so the pane width is known.
+        spawn(&mut stack, TerminalId(1), &sk);
+        render(&mut stack);
+
+        stack.on_event(&Event::Snapshot {
+            workspaces: vec![],
+            terminals: vec![lazybox_ipc::TerminalSnapshot {
+                terminal_id: TerminalId(1),
+                session_key: sk.clone(),
+                kind: TerminalKind::Agent("claude".into()),
+                // SGR mouse tracking on (`?1002h`/`?1006h`), as vim/Claude do.
+                replay: b"\x1b[?1002h\x1b[?1006hediting\r\n".to_vec(),
+                last_seq: 1,
+                replay_available: true,
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+                prompt_history: Vec::new(),
+                composing_buffer: None,
+                agent_state: None,
+                authenticating: false,
+            }],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+
+        assert!(
+            stack.terminals[&TerminalId(1)].pending_feed.is_empty(),
+            "the focused terminal's replay must flush eagerly, not defer"
+        );
+        assert!(
+            stack.terminal_tracks_mouse(TerminalId(1)),
+            "mouse tracking from the reconnect replay must be visible to the \
+             &self probe before the first render"
+        );
     }
 
     #[test]

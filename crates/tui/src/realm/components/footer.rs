@@ -952,6 +952,65 @@ mod tests {
         }
     }
 
+    /// Finding-4 regression: the Hopper hint is a discoverability
+    /// affordance, not an escape hatch. In `globals` it would outrank
+    /// state-aware contextual bindings (globals survive last), so a
+    /// narrow footer would show `Shift-H hopper` while eliding a
+    /// context-relevant hint. Moving it to `evergreen` (which drops
+    /// FIRST) makes it yield to contextual bindings. This pins the tier
+    /// so Hopper can't drift back into `globals`.
+    #[test]
+    fn hopper_hint_belongs_in_evergreen_not_globals() {
+        let keymap = rich_keymap();
+        let hopper = binding("Shift-H", "hopper");
+        let globals_with_hopper = vec![
+            hopper.clone(),
+            binding("?", "ask lazybox"),
+            binding("q q", "quit"),
+        ];
+        let globals = globals_survivors();
+        let evergreen = vec![hopper.clone(), binding("Shift-T", "tour")];
+        // Scan for the widths where, placed in GLOBALS, hopper survives
+        // while a contextual hint has already been elided — the exact
+        // inversion the fix removes. At each such width, placed in
+        // EVERGREEN it must instead yield to the contextual set.
+        let mut exercised = false;
+        for w in 60u16..=140 {
+            let (as_global, _) =
+                render_row_at_evergreen(w, &keymap, &globals_with_hopper, &[], "?", None, None);
+            // The problematic band: hopper (a global) survives AND the top
+            // contextual hint survives, yet a lower-priority contextual
+            // hint has already been elided — i.e. hopper is holding a slot
+            // a contextual binding would otherwise use. (Widths so narrow
+            // that ALL contextual hints are gone aren't the inversion.)
+            let global_inverts = as_global.contains("hopper")
+                && as_global.contains("work on this")
+                && !as_global.contains("filter by role");
+            if !global_inverts {
+                continue;
+            }
+            exercised = true;
+            let (as_evergreen, _) =
+                render_row_at_evergreen(w, &keymap, &globals, &evergreen, "?", None, None);
+            assert!(
+                !as_evergreen.contains("hopper"),
+                "hopper in evergreen must yield to contextual at {w} cols: {as_evergreen:?}",
+            );
+            assert!(
+                as_evergreen.contains("work on this"),
+                "top contextual hint must survive at {w} cols: {as_evergreen:?}",
+            );
+            assert!(
+                as_evergreen.contains("q q"),
+                "quit must survive at {w} cols: {as_evergreen:?}",
+            );
+        }
+        assert!(
+            exercised,
+            "no width exercised the globals inversion — the test is vacuous",
+        );
+    }
+
     /// For any width from the globals tail on up, the row never ends
     /// in a partial label and always advertises `q q` quit — the
     /// guarantee issue #100 added and unmeasured clipping silently

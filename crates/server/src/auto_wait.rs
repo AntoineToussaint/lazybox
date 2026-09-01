@@ -63,6 +63,15 @@
 //! authenticated again and comes to rest, the same `Idle`/`Done` nudge fires —
 //! now against a real composer, so the account change actually continues the
 //! work.
+//!
+//! This all rests on the auth scanner recognizing the logout: a resting `Idle`
+//! reached directly from the block is genuinely ambiguous between "the reset
+//! landed at an empty composer" (nudge) and "the session logged out" (don't).
+//! `agent_recovery.auth_pending` — driven by `detect_auth_failure` — is the
+//! only discriminator, so a logout phrasing the detector misses is still nudged
+//! into. A *non-resting* reading that slips past (a logout drawn as a chooser)
+//! is the recoverable case: auto-wait holds it rather than dropping it, so the
+//! interrupted work isn't stranded if the re-auth flow later picks it up.
 
 use lazybox_ipc::{AgentState, Event, TerminalId, TerminalInputIntent};
 use std::collections::HashSet;
@@ -244,13 +253,26 @@ async fn run<F, P, PFut, R, RFut, A, AFut>(
                 if auth_pending(config.clone(), terminal_id).await {
                     continue;
                 }
-                // A tracked terminal left the limit block. Drop it either
-                // way; nudge only when it came to rest (see
-                // `wants_resume_nudge`) and the policy is still enabled.
-                pending_resume.remove(&terminal_id);
-                if enabled() && wants_resume_nudge(&state) {
-                    resume(config.clone(), terminal_id).await;
+                if wants_resume_nudge(&state) {
+                    // Came to rest after the reset — fire the continuation
+                    // once (if the policy is still enabled) and stop tracking.
+                    pending_resume.remove(&terminal_id);
+                    if enabled() {
+                        resume(config.clone(), terminal_id).await;
+                    }
+                } else if matches!(state, AgentState::Working | AgentState::Exited { .. }) {
+                    // The agent auto-resumed on its own (re-auth /
+                    // auto-continue), or the process ended: stop tracking, no
+                    // nudge.
+                    pending_resume.remove(&terminal_id);
                 }
+                // Any other reading — an `InputNeeded`/`CreditExhausted` block
+                // that slipped past `auth_pending` (e.g. a logout rendered as
+                // a chooser the auth scanner didn't recognize) — is neither a
+                // confirmed resume nor an exit. Keep holding rather than
+                // dropping, so a detection gap can't silently strand the
+                // interrupted work: it resolves when the pane comes to rest,
+                // exits, or the re-auth flow replaces it.
             }
             // The re-auth flow swaps a blocked pane for a fresh resumed
             // terminal with a new id. Follow the replacement so a terminal we
@@ -635,6 +657,55 @@ mod tests {
             resumed.into_inner(),
             vec![TerminalId(8)],
             "the continuation fires on the resumed pane once re-auth clears, never on the login screen",
+        );
+    }
+
+    /// A non-resting reading that slips past `auth_pending` (a logout the auth
+    /// scanner didn't recognize, drawn as a chooser → `InputNeeded`) must NOT
+    /// drop the terminal from tracking. Otherwise the interrupted work is
+    /// stranded: a later re-auth `TerminalReplaced` has nothing to re-key, so
+    /// the resumed pane never gets its continuation. The terminal is held, the
+    /// replacement re-keys it, and the resumed `Idle` still resumes.
+    #[tokio::test]
+    async fn a_non_resting_reading_that_slips_past_auth_detection_is_held_not_dropped() {
+        let config = ServerConfig::in_memory();
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(limit_event(7)).unwrap();
+        // The auth scanner never fired (a phrasing/rendering it missed), so
+        // auth_pending is false even though this is really a login prompt.
+        tx.send(state_event(7, AgentState::InputNeeded)).unwrap();
+        tx.send(Event::TerminalReplaced {
+            old_terminal_id: TerminalId(7),
+            terminal_id: TerminalId(8),
+            session_key: "ws:1".into(),
+            kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            authenticating: true,
+        })
+        .unwrap();
+        tx.send(state_event(8, AgentState::Idle)).unwrap();
+        drop(tx);
+
+        let resumed = RefCell::new(Vec::new());
+        run(
+            rx,
+            config,
+            || true,
+            |_cfg, _tid| async {},
+            |_cfg, tid| {
+                resumed.borrow_mut().push(tid);
+                async {}
+            },
+            // Auth never registers as pending anywhere — the detection gap.
+            |_cfg, _tid| async { false },
+        )
+        .await;
+        assert_eq!(
+            resumed.into_inner(),
+            vec![TerminalId(8)],
+            "a non-resting reading is held, so the replacement still resumes the resumed pane",
         );
     }
 

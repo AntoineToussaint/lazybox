@@ -3575,12 +3575,17 @@ impl TerminalStack {
                         // scrollback-only (#1405). Pane geometry is unchanged
                         // across a reconnect, so the previous slot's rendered
                         // size is the width the next render will use.
+                        //
+                        // Only size the VT — leave `last_rendered_size` unset
+                        // so the first render still emits the PTY `Resize`
+                        // (a restarted daemon's fresh PTY needs it); when the
+                        // grid matches, `ensure_size` there is a no-op and the
+                        // eagerly-parsed grid stands.
                         if let Some(size) = previous
                             .get(&snap.terminal_id)
                             .and_then(|prev| prev.last_rendered_size)
                         {
                             slot.vt.ensure_size(size.0, size.1);
-                            slot.last_rendered_size = Some(size);
                         }
                         slot.pending_feed = snap.replay.clone();
                     }
@@ -3600,11 +3605,16 @@ impl TerminalStack {
                 // though — a fresh slot sits at the VT default, and
                 // flushing there would parse the replay at the wrong width
                 // and reflow it (the scrollback-corrupting path #1405
-                // guards against). Without a carried size we defer to the
-                // render, which sizes the grid before it flushes.
+                // guards against). That width was carried above only when
+                // the terminal had rendered before the reconnect, so gate
+                // on the same signal; otherwise defer to the render, which
+                // sizes the grid before it flushes.
                 if let Some(id) = self.focused_terminal_id()
+                    && previous
+                        .get(&id)
+                        .and_then(|prev| prev.last_rendered_size)
+                        .is_some()
                     && let Some(slot) = self.terminals.get_mut(&id)
-                    && slot.last_rendered_size.is_some()
                 {
                     slot.flush_pending();
                 }

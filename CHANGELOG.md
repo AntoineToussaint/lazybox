@@ -6,6 +6,76 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-09-01
+
+The cost-visibility, scale, and provider-reach release. Lazybox now *prices*
+the agents it runs — per session and per Space — and surfaces usage as a
+day/week deep-dive, so a fleet is legible instead of a mystery bill. It reaches
+further, too: GitHub Enterprise Server and a read-only Jira provider join the
+inbox. Triage scales to many repos through an attention ladder, search
+qualifiers, and saved views, and the liveness work continues — agents resume
+through auth expiry and context resets, and spawns never dead-end.
+
+### Highlights
+
+- **LLM cost metering.** Per-session cost is priced, attributed, and persisted
+  behind a safe canary opt-in; Space-tier metering meters a whole Space rather
+  than one workspace at a time; and the stale rate card that metered Opus at 3×
+  is corrected. Coverage and persistence gaps from the initial rollout are
+  closed.
+- **Usage stats.** A usage-stats accumulator drives a day/week view, an
+  always-visible "today" header strip, and a sectioned day/week deep-dive — so
+  spend and activity are visible at a glance and on demand.
+- **Provider reach: GitHub Enterprise Server + Jira.** GHES-hosted repos work
+  alongside github.com, and a new read-only Jira provider brings Jira issues
+  into the inbox next to GitHub and Linear.
+- **Scale & triage for many repos.** Phase 1 many-repo relief (perf + triage)
+  lands, followed by Phase 2/2b: an attention ladder, search qualifiers, saved
+  views, and snooze-until-event — so a large roster stays navigable instead of
+  overwhelming.
+- **`lazybox log`.** Stream any command's output into its own live lazybox
+  window — a build, a test run, a tailable log — instead of it scrolling past
+  inside an agent. The launcher is put on the agent's PATH so `lazybox log`
+  resolves from spawned sessions.
+- **Hopper.** History and batch actions come to the Hopper, with a confirmed
+  destructive-delete and reliable cancel/delete chords.
+- **Agent liveness.** Auto-wait now resumes interrupted work through an auth
+  expiry and on a context reset (with a calm `AwaitingReset` status); a
+  starvation-proof global sweep promotes agents stuck at Working; and a spawn
+  never gets left stuck "spawning" forever.
+
+### Also
+
+- Reattach replay is parsed at the real pane width, ending duplicated
+  scrollback on reconnect; a per-repo interactive-spawn fast lane lets a user
+  spawn jump queued poll sweeps; the server retries stalled PTY enqueues so a
+  CPU spike can't drop injected input; and session recovery runs in the
+  background so a slow startup can't orphan live tmux sessions.
+- `g m` re-checks PR status on GitHub before routing conflict/CI; `g s` sync
+  discovers a repo's new issues, not just the focused item; PRs re-fetch on a
+  targeted path after merge/update-branch; and `author:@me` is probed to
+  surface self/agent-created PRs fast.
+- GitHub pressure is reduced: working-claims sync no longer storms the rate
+  budget, deferred discovery at scale is surfaced and unblocked, and
+  weekly-limit / rate-limit-option blocks are detected.
+- A shared-login re-auth no longer signs out every session; autonomous
+  skip-permissions is gated on trigger trust; and inject/snippet delivery to a
+  dead terminal surfaces a rejection instead of silently dropping.
+- Archive and removal are more truthful: `x x` archive no longer resurrects
+  merged-PR sessions, archived/deleted workspaces don't resurrect on restart, a
+  resurrection backstop covers non-archiving removals, and the archived
+  set/tombstone are re-checked under the upsert lock.
+- Agent resume and prompt history re-key to the stable workspace key so they
+  survive respawn; the optimistic Working flip no longer self-confirms submits;
+  `x n` recovers from a branch/namespace conflict instead of dead-ending; and
+  desktop-notification bursts on focus loss are coalesced.
+- PR-lifecycle shortcuts, a worktree `D`/`F` fix, silent agent auto-update, a
+  `designissues` cross-repo snippet, and the github/workspace leader popup gated
+  by PR-vs-Issue.
+- Dependency bumps (web + rust groups), refreshed docs/website and
+  high-resolution demo hero, resource-awareness prompting guidance, and CI no
+  longer hard-blocks on the cargo-deny yanked check.
+
 ## [0.1.13] - 2026-08-24
 
 The rate-limit, liveness, and multi-agent release. GitHub API pressure is now
@@ -353,7 +423,9 @@ Then run `gh auth login` if needed and launch `lazybox`.
   have explicit capacity and shutdown bounds instead of growing or hanging
   indefinitely under load.
 
-[Unreleased]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.11...HEAD
+[Unreleased]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.14...HEAD
+[0.1.14]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.13...v0.1.14
+[0.1.13]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.11...v0.1.13
 [0.1.11]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.10...v0.1.11
 [0.1.10]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.9...v0.1.10
 [0.1.9]: https://github.com/AntoineToussaint/lazybox/compare/v0.1.8...v0.1.9

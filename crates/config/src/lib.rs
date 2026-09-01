@@ -3240,6 +3240,11 @@ pub struct GithubConfig {
     /// narrowing; on = "show my involvement everywhere I'm a member".
     #[serde(default)]
     pub include_accessible_repos: bool,
+    /// GitHub Enterprise Server hostname (bare, e.g. `ghe.example.com`).
+    /// Unset = github.com. On an enterprise host, REST is addressed at
+    /// `https://<host>/api/v3` and GraphQL at `https://<host>/api/graphql`.
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 impl Default for GithubConfig {
@@ -3256,6 +3261,7 @@ impl Default for GithubConfig {
             detect_needs_reply: true,
             background_budget_share: 0.55,
             include_accessible_repos: false,
+            host: None,
         }
     }
 }

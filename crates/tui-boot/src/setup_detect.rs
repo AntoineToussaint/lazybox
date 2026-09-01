@@ -177,9 +177,14 @@ async fn detect_github() -> ToolStatus {
     // Capture the source before `cred` is moved: the fix a rejected token
     // needs depends on where it came from.
     let cred_source = cred.source.clone();
+    let host = lazybox_config::Config::load()
+        .unwrap_or_default()
+        .providers
+        .github
+        .host;
     match tokio::time::timeout(
         Duration::from_secs(5),
-        lazybox_gh::GhClient::from_credential(cred),
+        lazybox_gh::GhClient::from_credential_with_host(cred, host.as_deref()),
     )
     .await
     {

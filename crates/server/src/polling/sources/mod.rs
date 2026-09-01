@@ -18,6 +18,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
+mod jira;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FullSweepCommit {
     pr_window: bool,
@@ -3393,9 +3395,14 @@ pub(super) async fn sources_for_with_engagement(
                 let client_result: Result<GhClient, lazybox_core::ProviderError> = match cached {
                     Some(existing) => Ok(existing),
                     None => {
+                        let host = lazybox_config::Config::load()
+                            .unwrap_or_default()
+                            .providers
+                            .github
+                            .host;
                         match tokio::time::timeout(
                             CLIENT_INIT_TIMEOUT,
-                            GhClient::from_credential(cred),
+                            GhClient::from_credential_with_host(cred, host.as_deref()),
                         )
                         .await
                         {
@@ -3555,6 +3562,15 @@ pub(super) async fn sources_for_with_engagement(
                     tracing::info!("linear not configured: {e}");
                 }
             }
+        }
+    }
+
+    if setup.enabled_providers.contains(lazybox_jira::SOURCE) {
+        match lazybox_jira::JiraClient::from_env() {
+            Ok(client) => sources.push(Box::new(jira::JiraSource::new(client))),
+            // A missing env var is a setup state, not a fault — log
+            // once per tick at info, matching the Linear path above.
+            Err(e) => tracing::info!("{e}"),
         }
     }
 

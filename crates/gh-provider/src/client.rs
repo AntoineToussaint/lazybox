@@ -1010,6 +1010,11 @@ const _: () = assert!(
 #[derive(Clone)]
 pub struct GhClient {
     inner: Octocrab,
+    /// Transport for GraphQL. Identical to `inner` on github.com; on a
+    /// GitHub Enterprise Server host it is based at `https://<host>/api`,
+    /// because GraphQL lives at `/api/graphql` — outside the REST
+    /// `/api/v3` prefix that `inner` carries.
+    gql: Octocrab,
     user: String,
     credential_source: String,
     /// Fingerprint of the token this client was built with — see
@@ -1104,8 +1109,21 @@ impl BranchMetrics {
 
 impl GhClient {
     pub async fn from_credential(cred: Credential) -> Result<Self, GhError> {
+        Self::from_credential_with_host(cred, None).await
+    }
+
+    /// Like [`Self::from_credential`], but targeting a GitHub Enterprise
+    /// Server host (bare hostname, e.g. `ghe.example.com`); `None` means
+    /// github.com. GHES serves REST under `/api/v3` but GraphQL at
+    /// `/api/graphql`, so the enterprise client carries two transports
+    /// with different base URIs (see the `gql` field).
+    pub async fn from_credential_with_host(
+        cred: Credential,
+        host: Option<&str>,
+    ) -> Result<Self, GhError> {
         let source = cred.source.clone();
         let fingerprint = credential_fingerprint(cred.token());
+        let token = cred.into_token();
         // Disable octocrab's built-in retry: its `OctoBody` clone only
         // Arc-clones a single-use body stream, so on a 429/5xx retry the
         // second attempt goes out with an empty `{}` body. GitHub answers
@@ -1118,16 +1136,37 @@ impl GhClient {
         // poll loop's critical path (outside the per-tick timeout),
         // and a dead TCP connection without these waited forever.
         // 30s is far above any healthy GitHub round-trip yet bounded.
-        let inner = Octocrab::builder()
-            .personal_token(cred.into_token())
-            .add_retry_config(octocrab::service::middleware::retry::RetryConfig::None)
-            .set_connect_timeout(Some(std::time::Duration::from_secs(30)))
-            .set_read_timeout(Some(std::time::Duration::from_secs(30)))
-            .build()
-            .map_err(GhError::Api)?;
+        let builder = || {
+            Octocrab::builder()
+                .personal_token(token.clone())
+                .add_retry_config(octocrab::service::middleware::retry::RetryConfig::None)
+                .set_connect_timeout(Some(std::time::Duration::from_secs(30)))
+                .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+        };
+        let (inner, gql) = match host {
+            None => {
+                let inner = builder().build().map_err(GhError::Api)?;
+                let gql = inner.clone();
+                (inner, gql)
+            }
+            Some(h) => {
+                let inner = builder()
+                    .base_uri(format!("https://{h}/api/v3"))
+                    .map_err(GhError::Api)?
+                    .build()
+                    .map_err(GhError::Api)?;
+                let gql = builder()
+                    .base_uri(format!("https://{h}/api"))
+                    .map_err(GhError::Api)?
+                    .build()
+                    .map_err(GhError::Api)?;
+                (inner, gql)
+            }
+        };
         let user = inner.current().user().await.map_err(GhError::Api)?.login;
         Ok(Self {
             inner,
+            gql,
             user,
             credential_source: source,
             credential_fingerprint: fingerprint,
@@ -1158,8 +1197,10 @@ impl GhClient {
         credential_fingerprint: &str,
     ) -> Result<Self, GhError> {
         let inner = Octocrab::builder().build().map_err(GhError::Api)?;
+        let gql = inner.clone();
         Ok(Self {
             inner,
+            gql,
             user: "test-user".to_string(),
             credential_source: credential_source.to_string(),
             credential_fingerprint: credential_fingerprint.to_string(),
@@ -1195,7 +1236,11 @@ impl GhClient {
             .build()
             .map_err(GhError::Api)?;
         let stub = Self::stub_for_tests("test", "fp")?;
-        Ok(Self { inner, ..stub })
+        Ok(Self {
+            gql: inner.clone(),
+            inner,
+            ..stub
+        })
     }
 
     /// Test-only: a stub client whose cached budget already contains a
@@ -1589,7 +1634,7 @@ impl GhClient {
         // recorded request latency measures GitHub's round-trip and not
         // the self-imposed governor waits (#745).
         let started = std::time::Instant::now();
-        let response = match self.inner._post("/graphql", Some(body)).await {
+        let response = match self.gql._post("/graphql", Some(body)).await {
             Ok(response) => response,
             Err(error) => {
                 self.budget.lock().observe_failed_response(
@@ -7323,6 +7368,7 @@ mod tests {
             .build()
             .unwrap();
         GhClient {
+            gql: inner.clone(),
             inner,
             user: "test-user".to_string(),
             credential_source: "test".to_string(),

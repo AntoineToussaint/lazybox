@@ -607,7 +607,10 @@ impl WorktreeManager {
         // its config survived (covers rewritten origins — enterprise
         // hosts, local mirrors); fall back to the canonical GitHub
         // URL otherwise.
-        let mut url = format!("git@github.com:{owner}/{repo}.git");
+        let mut url = match std::env::var("LAZYBOX_GITHUB_HOST") {
+            Ok(host) if !host.is_empty() => format!("git@{host}:{owner}/{repo}.git"),
+            _ => format!("git@github.com:{owner}/{repo}.git"),
+        };
         if bare_path.exists() {
             // Deleting the bare clone orphans EVERY worktree hanging
             // off it (their gitdir metadata lives under
@@ -2453,13 +2456,22 @@ fn canonical_or_self(p: &Path) -> PathBuf {
 /// process listings or lazybox's own command logging.
 fn github_auth_env(token: &str) -> Vec<(String, String)> {
     let basic = base64_std(format!("x-access-token:{token}").as_bytes());
+    let auth = format!("AUTHORIZATION: basic {basic}");
+    // `LAZYBOX_GITHUB_HOST` points the whole scheme at a GitHub
+    // Enterprise Server host instead; the rewrites and the auth header
+    // are then scoped to that host and github.com is untouched.
+    let host = std::env::var("LAZYBOX_GITHUB_HOST")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "github.com".to_string());
+    let instead_of = format!("url.https://{host}/.insteadOf");
+    let ssh_short = format!("git@{host}:");
+    let ssh_long = format!("ssh://git@{host}/");
+    let extraheader = format!("http.https://{host}/.extraheader");
     git_config_env(&[
-        ("url.https://github.com/.insteadOf", "git@github.com:"),
-        ("url.https://github.com/.insteadOf", "ssh://git@github.com/"),
-        (
-            "http.https://github.com/.extraheader",
-            &format!("AUTHORIZATION: basic {basic}"),
-        ),
+        (&instead_of, &ssh_short),
+        (&instead_of, &ssh_long),
+        (&extraheader, &auth),
     ])
 }
 

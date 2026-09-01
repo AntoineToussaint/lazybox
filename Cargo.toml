@@ -19,6 +19,7 @@ members = [
     "crates/server",
     "crates/agents",
     "crates/linear-provider",
+    "crates/jira-provider",
     "crates/tui-core",
     "crates/tui",
     "crates/tui-boot",
@@ -109,6 +110,7 @@ lazybox-sandbox     = { path = "crates/sandbox" }
 lazybox-git-ops     = { path = "crates/git-ops" }
 lazybox-gh          = { path = "crates/gh-provider" }
 lazybox-linear      = { path = "crates/linear-provider" }
+lazybox-jira        = { path = "crates/jira-provider" }
 lazybox-slack       = { path = "crates/slack-provider" }
 lazybox-tui-term    = { path = "crates/tui-term" }
 lazybox-tui-core    = { path = "crates/tui-core" }

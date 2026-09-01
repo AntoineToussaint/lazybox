@@ -16,13 +16,15 @@
 pub fn lazybox_session_context() -> &'static str {
     "You are running inside lazybox, a PR inbox that hosts this session in its own \
 terminal. lazybox can stream a command's output into a separate, live, \
-human-visible window instead of you capturing it inline. When you run a long or \
-noisy command — a dev server, a test watcher, a build, a tailable log — pipe it to \
-`lazybox log` so its output streams in its own tile and never enters your context:\n\
+human-visible window instead of you capturing it inline. Pipe a noisy command — a \
+build, a test run, a tailable log — to `lazybox log`; its output streams in its own \
+tile and never enters your context:\n\
 \n\
-    npm run dev 2>&1 | lazybox log --title dev\n\
+    cargo test 2>&1 | lazybox log --title tests\n\
 \n\
-Close every log window this workspace opened with `lazybox log --close-all`."
+The pipe stays open until the command exits, so background a long-running process \
+(a dev server, a watcher) with a trailing `&` — `npm run dev 2>&1 | lazybox log &` \
+— or it blocks your turn. Close all log windows with `lazybox log --close-all`."
 }
 
 #[cfg(test)]
@@ -36,6 +38,14 @@ mod tests {
         assert!(
             text.contains("lazybox log --close-all"),
             "must name the cleanup path"
+        );
+        // The pipe couples the helper's lifetime to the command: a foreground
+        // pipe of a non-terminating process blocks the agent's turn until it is
+        // killed. The blurb must warn about that and show backgrounding (`&`),
+        // rather than leading with a bare `npm run dev` foreground pipe.
+        assert!(
+            text.contains('&') && text.to_ascii_lowercase().contains("block"),
+            "must warn that a long-running pipe blocks the turn and show backgrounding: {text}"
         );
         // A SessionStart blurb rides in the model's context on every launch;
         // keep it a few lines, not a manual.

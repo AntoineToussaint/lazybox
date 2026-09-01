@@ -731,9 +731,21 @@ async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
 /// lands in the agent's own capture:
 ///
 /// ```text
-/// npm run dev 2>&1 | lazybox log --title dev
+/// cargo test 2>&1 | lazybox log --title tests
 /// ```
+///
+/// Errors are printed to stdout, not stderr: `init_tracing` redirects this
+/// process's stderr into the log file, so an `anyhow` message on stderr would
+/// never reach the agent that invoked us. stdout is the channel it reads.
 async fn log_subcommand(args: &[String]) -> anyhow::Result<()> {
+    if let Err(error) = run_log(args).await {
+        println!("lazybox log: {error:#}");
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn run_log(args: &[String]) -> anyhow::Result<()> {
     let mut args = args.to_vec();
     let close_all = take_flag(&mut args, "--close-all");
     let title = take_value(&mut args, "--title");
@@ -759,41 +771,86 @@ async fn log_subcommand(args: &[String]) -> anyhow::Result<()> {
 }
 
 /// Open one `LogTail` window on a fresh temp file, then stream stdin into that
-/// file until the piped command closes it. Fire-and-forget spawn (the daemon
-/// allocates the terminal id); the window persists for viewing after stdin ends
-/// and is torn down with `--close-all` or `]]x`.
+/// file until the piped command closes it. The window persists for viewing after
+/// stdin ends and is torn down with `--close-all` or `]]x`.
+///
+/// The spawn is *confirmed* before we start draining: a bare fire-and-forget
+/// would drain stdin into a temp file that nothing tails if the daemon accepts
+/// the connection but the spawn fails server-side (no resolvable session, a
+/// worktree error) — the output would then reach neither the window nor the
+/// agent. So we subscribe, correlate the spawn with a request id, and only drain
+/// once the daemon reports the window actually opened.
 async fn log_open(
     socket_path: &std::path::Path,
     session_key: &lazybox_core::SessionKey,
     title: Option<&str>,
 ) -> anyhow::Result<()> {
     let path = create_log_file(title)?;
-    let command = lazybox_ipc::Command::Spawn {
-        session_key: session_key.clone(),
-        session_id: None,
-        client_request_id: None,
-        kind: lazybox_ipc::TerminalKind::LogTail {
-            path: path.to_string_lossy().into_owned(),
-        },
-        cwd: None,
-        initial_prompt: None,
-        on_main: false,
-        model_alias: None,
-        initial_snippet: None,
-        access: Default::default(),
-        force_new: false,
-    };
-    socket::send_command(socket_path, &command)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "connect to daemon at {}: {e} (is lazybox running?)",
-                socket_path.display(),
-            )
-        })?;
+    let (mut client, _peer) = socket::connect(socket_path).await.map_err(|e| {
+        anyhow::anyhow!(
+            "connect to daemon at {}: {e} (is lazybox running?)",
+            socket_path.display(),
+        )
+    })?;
+    client
+        .send(lazybox_ipc::Command::Subscribe)
+        .map_err(|e| anyhow::anyhow!("subscribe to daemon: {e}"))?;
+    await_workspace_snapshot(&mut client).await?;
+    let client_request_id = uuid::Uuid::new_v4().hyphenated().to_string();
+    client
+        .send(lazybox_ipc::Command::Spawn {
+            session_key: session_key.clone(),
+            session_id: None,
+            client_request_id: Some(client_request_id.clone()),
+            kind: lazybox_ipc::TerminalKind::LogTail {
+                path: path.to_string_lossy().into_owned(),
+            },
+            cwd: None,
+            initial_prompt: None,
+            on_main: false,
+            model_alias: None,
+            initial_snippet: None,
+            access: Default::default(),
+            force_new: false,
+        })
+        .map_err(|e| anyhow::anyhow!("send spawn: {e}"))?;
+    // A session-less workspace provisions a worktree first, so allow generously;
+    // the common agent case (session already live) confirms near-instantly.
+    await_command_outcome(&mut client, &client_request_id, Duration::from_secs(60)).await?;
+    drop(client);
     tokio::task::spawn_blocking(move || drain_stdin_to(&path))
         .await
         .map_err(|e| anyhow::anyhow!("log stream task panicked: {e}"))?
+}
+
+/// Wait for the daemon's correlated outcome for a command carrying
+/// `client_request_id`: `CommandCompleted` → `Ok`, `CommandFailed` → the
+/// daemon's message, a dropped connection or timeout → an error. Lets a spawn
+/// confirm it took effect before the caller acts on that assumption.
+async fn await_command_outcome(
+    client: &mut lazybox_ipc::Client,
+    client_request_id: &str,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match tokio::time::timeout_at(deadline, client.recv()).await {
+            Ok(Some(lazybox_ipc::Event::CommandCompleted {
+                client_request_id: id,
+            })) if id == client_request_id => {
+                return Ok(());
+            }
+            Ok(Some(lazybox_ipc::Event::CommandFailed {
+                client_request_id: id,
+                message,
+            })) if id == client_request_id => {
+                anyhow::bail!("daemon rejected the command: {message}")
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => anyhow::bail!("daemon closed the connection before the command completed"),
+            Err(_) => anyhow::bail!("timed out waiting for the daemon to confirm the command"),
+        }
+    }
 }
 
 /// Close every `LogTail` window in `session_key`. Subscribes, reads the
@@ -2551,6 +2608,66 @@ mod argv_tests {
         assert_eq!(
             ids,
             vec![lazybox_ipc::TerminalId(2), lazybox_ipc::TerminalId(3)]
+        );
+    }
+
+    #[tokio::test]
+    async fn await_command_outcome_resolves_success_and_surfaces_failure() {
+        let short = Duration::from_secs(2);
+
+        // A matching CommandCompleted (after unrelated noise) → Ok. This is what
+        // lets `log_open` know the window actually opened before it drains stdin
+        // into the tailed file — the fire-and-forget path could not.
+        let (command_tx, _c) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(4);
+        let mut client = lazybox_ipc::Client::from_channels(command_tx, event_rx);
+        event_tx
+            .send(lazybox_ipc::Event::CommandCompleted {
+                client_request_id: "other".into(),
+            })
+            .await
+            .unwrap();
+        event_tx
+            .send(lazybox_ipc::Event::CommandCompleted {
+                client_request_id: "req-1".into(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            await_command_outcome(&mut client, "req-1", short)
+                .await
+                .is_ok()
+        );
+
+        // A matching CommandFailed → Err carrying the daemon's message, so the
+        // caller aborts instead of streaming output into a window nothing tails.
+        let (command_tx, _c) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(4);
+        let mut client = lazybox_ipc::Client::from_channels(command_tx, event_rx);
+        event_tx
+            .send(lazybox_ipc::Event::CommandFailed {
+                client_request_id: "req-2".into(),
+                message: "no session in workspace".into(),
+            })
+            .await
+            .unwrap();
+        let err = await_command_outcome(&mut client, "req-2", short)
+            .await
+            .expect_err("failed spawn must surface as an error");
+        assert!(
+            err.to_string().contains("no session in workspace"),
+            "must carry the daemon message: {err}"
+        );
+
+        // A closed connection → Err, never a false success.
+        let (command_tx, _c) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(1);
+        let mut client = lazybox_ipc::Client::from_channels(command_tx, event_rx);
+        drop(event_tx);
+        assert!(
+            await_command_outcome(&mut client, "req-3", short)
+                .await
+                .is_err()
         );
     }
 

@@ -2120,6 +2120,8 @@ mod search_tests {
         sb.workspaces.insert(a_key.clone(), a);
         sb.workspaces.insert(b_key.clone(), b);
         sb.workspaces.insert(other_key.clone(), other);
+        // Space membership is cached at recompute (not scanned per frame).
+        sb.recompute_visible();
 
         // Durable per-session totals replayed on connect (Event::SessionCosts).
         sb.hydrate_session_costs(&[

@@ -153,6 +153,18 @@ pub async fn add_session_cost(config: &ServerConfig, session_key: String, delta_
     }
 }
 
+/// Drop the persisted cost row for `session_key` — called when its
+/// workspace is archived/deleted so the total doesn't linger in the store
+/// (and re-ship in every future `Event::SessionCosts`) forever (#1389).
+/// Best-effort: a failed delete just leaves a dead row that renders under no
+/// workspace, never destructible history.
+pub fn clear_session_cost(store: &dyn lazybox_store::Store, session_key: &str) {
+    let kv_key = format!("{SESSION_COST_KV_PREFIX}{session_key}");
+    if let Err(e) = store.delete_kv(&kv_key) {
+        tracing::warn!("clear session cost `{session_key}` failed: {e}");
+    }
+}
+
 /// Every persisted per-session cost as `(session_key, cost_micros)`, for
 /// hydrating a client's live cost tracker on connect. Rows that don't parse
 /// as a `u64` are skipped — a cost total is a rebuildable cache, never

@@ -164,6 +164,13 @@ pub struct Sidebar {
     /// header render for the `$` badge. The daemon derives the same set at
     /// spawn (`Config::source_is_metered`) — this copy only drives the UI.
     metered_spaces: BTreeSet<String>,
+    /// Space name → the session keys of every workspace under it, rebuilt
+    /// once per `recompute_visible` (#1389). The per-Space meter figure sums
+    /// live per-session cost over these keys — keeping the `group_label` +
+    /// allocation work out of the per-frame render path (the #1059/#1090
+    /// hot-path class). Cost changes far more often than membership, so the
+    /// membership is cached and the cheap sum runs per frame.
+    space_members: BTreeMap<String, Vec<SessionKey>>,
     /// Per-source attention ladder (#scale): group label / `space:…`
     /// keys → level + optional snooze. Seeded from
     /// `ui.source_attention`, mutated by the header `z` / `x ,`
@@ -544,6 +551,7 @@ impl Sidebar {
             spaces: Vec::new(),
             collapsed_spaces: BTreeSet::new(),
             metered_spaces: BTreeSet::new(),
+            space_members: BTreeMap::new(),
             source_attention: BTreeMap::new(),
             config_seeded: false,
             snapshot_prune: true,
@@ -3416,21 +3424,16 @@ impl Sidebar {
 
     /// Total metered cost (micro-USD) accrued by every workspace under
     /// `space`, summed from the live/hydrated per-session figures — the
-    /// per-Space headline for the metered-Space badge (#1389). Only called
-    /// for a metered Space (rare), so the per-frame scan over workspaces is
-    /// bounded.
+    /// per-Space headline for the metered-Space badge (#1389). Reads the
+    /// membership cached by `recompute_space_members`, so the per-frame cost
+    /// is only cheap map lookups (no `group_label`, no allocation) — this
+    /// must stay off the render hot path (#1059/#1090).
     pub fn space_cost_micros(&self, space: &str) -> u64 {
-        self.workspaces
-            .values()
-            .filter(|w| {
-                let group = crate::components::visible_rows::group_label(
-                    w,
-                    &self.projects,
-                    &self.workspaces,
-                );
-                self.space_of_source(&group) == space
-            })
-            .map(|w| self.usage.cost_micros_for_session(w.key.as_str()))
+        self.space_members
+            .get(space)
+            .into_iter()
+            .flatten()
+            .map(|key| self.usage.cost_micros_for_session(key.as_str()))
             .sum()
     }
 
@@ -3849,6 +3852,7 @@ impl Sidebar {
         self.ticket_tree = outcome.ticket_tree;
         self.recompute_stacks();
         self.recompute_searched_keys();
+        self.recompute_space_members();
         // Prune multi-select marks the new projection hid (#1243): a
         // hidden mark can't be seen or un-marked, yet it used to linger
         // in the set and silently re-join the target pool when the
@@ -3926,6 +3930,23 @@ impl Sidebar {
     /// highlighted row can never diverge from what the filter kept, and
     /// keeps the per-row `group_label` work here (once per recompute)
     /// rather than in the per-frame render path (#1099).
+    /// Rebuild the Space → member-session-keys map (#1389). Assigning each
+    /// workspace to its Space is the expensive part (`group_label` allocates
+    /// a `String`, and its project-record fallback is O(workspaces)); doing
+    /// it here — once per recompute, exactly when membership can change —
+    /// keeps it off the per-frame render path, where `space_cost_micros`
+    /// then only sums the live per-session costs over the cached keys.
+    fn recompute_space_members(&mut self) {
+        let mut members: BTreeMap<String, Vec<SessionKey>> = BTreeMap::new();
+        for (key, w) in &self.workspaces {
+            let group =
+                crate::components::visible_rows::group_label(w, &self.projects, &self.workspaces);
+            let space = lazybox_tui_core::inbox::space_of(&group, &self.spaces);
+            members.entry(space).or_default().push(key.clone());
+        }
+        self.space_members = members;
+    }
+
     fn recompute_searched_keys(&mut self) {
         let keys: std::collections::HashSet<SessionKey> = self
             .visible

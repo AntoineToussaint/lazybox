@@ -176,6 +176,15 @@ async fn ingest_hook_inner(args: &[String]) {
     let Some(hook) = lazybox_agents::hook::parse_claude_hook(&payload) else {
         return;
     };
+    // Teach the agent what lazybox lets it do, once per session, through the
+    // one channel that is spawn-intrinsic and needs no per-repo file: the
+    // `SessionStart` hook's stdout, which Claude adds to the model's context.
+    // Printed before the daemon send so a stopped daemon still injects it, and
+    // independent of it so the existing state path is untouched.
+    if let Some(text) = session_context_to_emit(args, &hook) {
+        print!("{text}");
+        let _ = std::io::stdout().flush();
+    }
     let command = lazybox_ipc::Command::IngestHook {
         terminal_id: lazybox_ipc::TerminalId(terminal_id.unwrap_or_default()),
         hook,
@@ -222,6 +231,17 @@ pub fn parse_hook_correlation(args: &[String]) -> (Option<String>, Option<u64>) 
     (backend_key, terminal_id)
 }
 
+/// The lazybox session-context blurb to print for this hook, or `None` when
+/// it should stay silent. Emitted only on `SessionStart`, and only when the
+/// `--emit-session-context` marker is present — the marker Claude's hook
+/// command carries and Codex's omits, so Codex's `SessionStart` stays a no-op
+/// until an equivalent stdout-as-context channel is verified for it.
+fn session_context_to_emit(args: &[String], hook: &lazybox_ipc::HookEvent) -> Option<&'static str> {
+    let marked = args.iter().any(|arg| arg == "--emit-session-context");
+    (hook.kind == lazybox_ipc::HookEventKind::SessionStart && marked)
+        .then(lazybox_agents::lazybox_session_context)
+}
+
 fn read_stdin_to_string() -> String {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
@@ -246,6 +266,36 @@ mod hook_tests {
         assert_eq!(
             parse_hook_correlation(&args),
             (Some("lzb-session-7".to_string()), Some(42))
+        );
+    }
+
+    fn hook(name: &str) -> lazybox_ipc::HookEvent {
+        lazybox_agents::hook::parse_claude_hook(&format!(r#"{{"hook_event_name":"{name}"}}"#))
+            .expect("valid hook json")
+    }
+
+    #[test]
+    fn session_context_emitted_only_on_marked_session_start() {
+        let marked = vec![
+            "--backend-key".to_string(),
+            "lzb-1".to_string(),
+            "--emit-session-context".to_string(),
+        ];
+
+        // Marked SessionStart → the capability blurb.
+        assert_eq!(
+            session_context_to_emit(&marked, &hook("SessionStart")),
+            Some(lazybox_agents::lazybox_session_context()),
+        );
+        // Every other event stays silent, even when marked.
+        for other in ["Stop", "UserPromptSubmit", "PreToolUse", "Notification"] {
+            assert_eq!(session_context_to_emit(&marked, &hook(other)), None);
+        }
+        // Codex omits the marker → even SessionStart stays a no-op.
+        let unmarked = vec!["--backend-key".to_string(), "lzb-1".to_string()];
+        assert_eq!(
+            session_context_to_emit(&unmarked, &hook("SessionStart")),
+            None
         );
     }
 

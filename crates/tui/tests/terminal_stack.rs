@@ -594,6 +594,26 @@ fn render_shows_tab_bar_and_content() {
 }
 
 #[test]
+fn render_labels_a_log_window_by_its_file() {
+    // A `lazybox log` window (issue #1414) is an ordinary LogTail terminal;
+    // its tab is labeled by the tailed file's last path segment, so the human
+    // can tell one stream from another.
+    let mut t = TerminalStack::new(PaneId::new(1));
+    t.on_event(&spawned(1, "o/r#1", TerminalKind::Agent("claude".into())));
+    t.on_event(&spawned(
+        2,
+        "o/r#1",
+        TerminalKind::LogTail {
+            path: "/tmp/lazybox-logs/abc/dev".into(),
+        },
+    ));
+    t.set_active_session(Some(sk("o/r#1")));
+
+    let out = render_to_string(&mut t, 60, 10, true);
+    assert!(out.contains("dev"), "log window tab label; got:\n{out}");
+}
+
+#[test]
 fn render_shows_scrollbar_when_terminal_has_scrollback() {
     let mut t = TerminalStack::new(PaneId::new(1));
     t.on_event(&spawned(1, "o/r#1", TerminalKind::Shell));

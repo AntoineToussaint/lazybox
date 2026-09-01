@@ -10,6 +10,7 @@ pub mod detect;
 pub mod hook;
 pub mod hook_settings;
 pub mod pty;
+pub mod session_context;
 pub mod state_machine;
 pub mod update;
 
@@ -22,6 +23,7 @@ pub use pty::{
     CreditRecoveryProtocol, EncodedPrompt, PromptFraming, PromptIntent, PromptShape, PtyProtocol,
     ReadinessPolicy, trim_leading_blank_lines,
 };
+pub use session_context::lazybox_session_context;
 pub use state_machine::{
     AgentStateMachine, HOOK_STALENESS, HookAuthority, Liveness, Outcome, PtyReading, Reading,
 };

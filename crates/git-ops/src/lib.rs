@@ -5385,6 +5385,69 @@ mod resilient_add_tests {
         );
     }
 
+    /// The recovery the provisioning loop relies on: when the preferred name
+    /// (`release`) can't be created because a real, unmergeable `release/*`
+    /// branch owns the namespace, a *leaf sibling* (`release-2`) provisions
+    /// cleanly — and the conflicting branch is left untouched (never deleted
+    /// to make room). This is what turns the old unrecoverable dead-end into
+    /// an automatic retry.
+    #[tokio::test]
+    async fn dir_file_conflict_recovers_on_leaf_sibling_branch() {
+        let (tmp, bare) = local_bare_clone();
+        // An unmergeable `release/v0.2.102` — a commit not reachable from HEAD,
+        // detached so it isn't "checked out" — so `git branch -d` refuses it
+        // (exactly the shape of a real, protected upstream release branch).
+        let holder = tmp.path().join("holder");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                holder.to_str().unwrap(),
+                "-B",
+                "release/v0.2.102",
+                "HEAD",
+            ],
+        );
+        std::fs::write(holder.join("extra.txt"), "unmerged work").expect("write");
+        git(&holder, &["add", "."]);
+        git(&holder, &["commit", "-m", "unmerged commit"]);
+        git(&holder, &["checkout", "--detach", "HEAD"]);
+
+        // The bare `release` add still dead-ends (asserted by the sibling test
+        // above); the recovery is to add on the disambiguated leaf name.
+        let target = tmp.path().join("target");
+        add_worktree_resilient(
+            default_git_runner(),
+            &bare,
+            &target,
+            "release-2",
+            "HEAD",
+            &[],
+        )
+        .await
+        .expect("a leaf sibling name provisions past the namespace conflict");
+
+        let branch_exists = |name: &str| {
+            std::process::Command::new("git")
+                .current_dir(&bare)
+                .args([
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{name}"),
+                ])
+                .status()
+                .expect("run git show-ref")
+                .success()
+        };
+        assert!(branch_exists("release-2"), "the sibling branch was created");
+        assert!(
+            branch_exists("release/v0.2.102"),
+            "the conflicting branch must be preserved, never deleted to free the name"
+        );
+    }
+
     /// A *stale* registration — a worktree whose directory is gone
     /// (leftover lazybox worktree, reaped agent run) — is cleared by
     /// the `prune` + retry step alone, without needing `--force`.

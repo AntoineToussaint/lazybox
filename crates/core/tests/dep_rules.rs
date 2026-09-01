@@ -60,6 +60,10 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
         // registry, and OS keystore, all in terms of plain strings.
         ("lazybox-identity", set(&[])),
         ("lazybox-ipc", set(&["lazybox-core"])),
+        // Read-only Jira Cloud provider. Unlike the other providers it
+        // needs no credential chain (env-var auth resolved in-crate), so
+        // it depends on core alone — the tightest provider edge.
+        ("lazybox-jira", set(&["lazybox-core"])),
         ("lazybox-linear", set(&["lazybox-auth", "lazybox-core"])),
         // The rendezvous relay is a standalone, codefly-hosted deployable
         // and a dumb ciphertext forwarder. Its one production edge is the
@@ -94,6 +98,7 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "lazybox-git-ops",
                 "lazybox-identity",
                 "lazybox-ipc",
+                "lazybox-jira",
                 "lazybox-linear",
                 "lazybox-slack",
                 "lazybox-store",
@@ -144,6 +149,7 @@ fn allowed_graph() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "lazybox-git-ops",
                 "lazybox-identity",
                 "lazybox-ipc",
+                "lazybox-jira",
                 "lazybox-linear",
                 "lazybox-relay",
                 "lazybox-sandbox",

@@ -26,6 +26,7 @@ lazybox-git-ops    = { workspace = true }
 lazybox-ipc       = { workspace = true }
 lazybox-agents    = { workspace = true }
 lazybox-linear       = { workspace = true }
+lazybox-jira         = { workspace = true }
 lazybox-slack        = { workspace = true }
 lazybox-tui-core     = { workspace = true }
 

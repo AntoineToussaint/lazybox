@@ -2625,6 +2625,26 @@ impl Config {
         Ok(loaded)
     }
 
+    /// Bare GitHub Enterprise Server host (e.g. `ghe.example.com`), or
+    /// `None` for github.com. THE single source of truth for the host:
+    /// both the API transports (`GhClient::from_credential_with_host`)
+    /// and git-ops' clone-URL / auth-header rewrites resolve the host
+    /// through here, so the API and git can never end up addressing
+    /// different hosts (the bug where the inbox polled the enterprise
+    /// server but `git clone` still hit github.com with the enterprise
+    /// token). A scheme prefix or trailing slash a user pastes into the
+    /// config is stripped so every caller's `https://{host}/…` stays
+    /// well-formed.
+    pub fn github_host(&self) -> Option<String> {
+        let raw = self.providers.github.host.as_deref()?.trim();
+        let bare = raw
+            .strip_prefix("https://")
+            .or_else(|| raw.strip_prefix("http://"))
+            .unwrap_or(raw)
+            .trim_end_matches('/');
+        (!bare.is_empty()).then(|| bare.to_string())
+    }
+
     /// Drop the `load()` cache so the next call re-reads the file.
     /// Called by the save paths; public for tests and for callers that
     /// know they changed the file out from under the process.
@@ -3240,6 +3260,11 @@ pub struct GithubConfig {
     /// narrowing; on = "show my involvement everywhere I'm a member".
     #[serde(default)]
     pub include_accessible_repos: bool,
+    /// GitHub Enterprise Server hostname (bare, e.g. `ghe.example.com`).
+    /// Unset = github.com. On an enterprise host, REST is addressed at
+    /// `https://<host>/api/v3` and GraphQL at `https://<host>/api/graphql`.
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 impl Default for GithubConfig {
@@ -3256,6 +3281,7 @@ impl Default for GithubConfig {
             detect_needs_reply: true,
             background_budget_share: 0.55,
             include_accessible_repos: false,
+            host: None,
         }
     }
 }
@@ -3470,6 +3496,23 @@ mod duration_human_opt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_host_normalizes_and_defaults() {
+        // Unset → github.com (None).
+        assert_eq!(Config::default().github_host(), None);
+        // A bare host passes through.
+        let bare = Config::parse("providers:\n  github:\n    host: ghe.example.com\n").unwrap();
+        assert_eq!(bare.github_host().as_deref(), Some("ghe.example.com"));
+        // A pasted scheme + trailing slash is stripped so callers'
+        // `https://{host}/api/v3` stays well-formed (no `https://https://`).
+        let messy =
+            Config::parse("providers:\n  github:\n    host: https://ghe.example.com/\n").unwrap();
+        assert_eq!(messy.github_host().as_deref(), Some("ghe.example.com"));
+        // An empty string is not a host.
+        let empty = Config::parse("providers:\n  github:\n    host: \"\"\n").unwrap();
+        assert_eq!(empty.github_host(), None);
+    }
 
     /// #1183: strict MCP is opt-in — unset inherits the user's MCP
     /// servers, `true` restores the #256 always-strict behavior.

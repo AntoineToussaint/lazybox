@@ -1969,6 +1969,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lazybox-jira"
+version = "0.1.13"
+dependencies = [
+ "chrono",
+ "lazybox-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "lazybox-linear"
 version = "0.1.13"
 dependencies = [
@@ -2045,6 +2058,7 @@ dependencies = [
  "lazybox-git-ops",
  "lazybox-identity",
  "lazybox-ipc",
+ "lazybox-jira",
  "lazybox-linear",
  "lazybox-slack",
  "lazybox-store",
@@ -2134,6 +2148,7 @@ dependencies = [
  "lazybox-git-ops",
  "lazybox-identity",
  "lazybox-ipc",
+ "lazybox-jira",
  "lazybox-linear",
  "lazybox-relay",
  "lazybox-sandbox",

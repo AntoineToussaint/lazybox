@@ -619,8 +619,8 @@ impl ServerConfig {
     }
 
     pub(crate) fn worktree_manager(&self) -> lazybox_git_ops::WorktreeManager {
-        lazybox_git_ops::WorktreeManager::new(self.worktree_root.path.clone()).with_github_token(
-            Arc::new(|| {
+        lazybox_git_ops::WorktreeManager::new(self.worktree_root.path.clone())
+            .with_github_token(Arc::new(|| {
                 Box::pin(async {
                     lazybox_gh::credential_chain()
                         .resolve(lazybox_gh::SOURCE)
@@ -628,8 +628,15 @@ impl ServerConfig {
                         .ok()
                         .map(|c| c.into_token())
                 })
-            }),
-        )
+            }))
+            // Same host the API transport is built with (see the four
+            // `from_credential_with_host` sites) so git remotes/auth and
+            // the API never address different hosts. `load()` is cached.
+            .with_github_host(
+                lazybox_config::Config::load()
+                    .unwrap_or_default()
+                    .github_host(),
+            )
     }
 
     /// Serialize a workspace's load-modify-save cycle. Every mutation

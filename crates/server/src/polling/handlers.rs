@@ -1608,7 +1608,10 @@ pub(crate) async fn resolve_gh_client_result(config: &ServerConfig) -> Result<Gh
         .resolve(lazybox_gh::SOURCE)
         .await
         .map_err(|error| format!("github credentials: {error}"))?;
-    let client = GhClient::from_credential(cred)
+    let host = lazybox_config::Config::load()
+        .unwrap_or_default()
+        .github_host();
+    let client = GhClient::from_credential_with_host(cred, host.as_deref())
         .await
         .map_err(|error| format!("github client init: {error}"))?;
     config.poll.cache_gh_client(client.clone());

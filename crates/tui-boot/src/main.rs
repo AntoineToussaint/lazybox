@@ -2000,7 +2000,14 @@ async fn build_scope_sources() -> Vec<Box<dyn lazybox_core::ScopeSource>> {
     if let Ok(cred) = lazybox_gh::credential_chain()
         .resolve(lazybox_gh::SOURCE)
         .await
-        && let Ok(client) = lazybox_gh::GhClient::from_credential(cred).await
+        && let Ok(client) = lazybox_gh::GhClient::from_credential_with_host(
+            cred,
+            lazybox_config::Config::load()
+                .unwrap_or_default()
+                .github_host()
+                .as_deref(),
+        )
+        .await
     {
         sources.push(Box::new(lazybox_gh::GhScopes::new(std::sync::Arc::new(
             client,

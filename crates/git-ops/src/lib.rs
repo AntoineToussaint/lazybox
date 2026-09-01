@@ -486,6 +486,7 @@ pub struct WorktreeManager {
     base_dir: PathBuf,
     progress: Option<Arc<ProgressSink>>,
     github_token: Option<GithubTokenSource>,
+    github_host: Option<String>,
     git: Arc<dyn GitRunner>,
 }
 
@@ -495,6 +496,7 @@ impl WorktreeManager {
             base_dir: base_dir.into(),
             progress: None,
             github_token: None,
+            github_host: None,
             git: Arc::new(BoundedGitRunner),
         }
     }
@@ -518,10 +520,42 @@ impl WorktreeManager {
         self
     }
 
+    /// Point clone URLs and the SSH→HTTPS auth rewrites at a GitHub
+    /// Enterprise Server host (bare hostname, e.g. `ghe.example.com`)
+    /// instead of github.com. `None` keeps github.com.
+    ///
+    /// This is the SAME value the API transport is built with — both the
+    /// daemon and this manager resolve it from
+    /// `lazybox_config::Config::github_host` — so git and the API can
+    /// never target different hosts. Without config threading, a user who
+    /// set only `providers.github.host` polled the enterprise inbox but
+    /// had every worktree clone fall back to `git@github.com:…` and leak
+    /// the enterprise token in a header addressed to github.com.
+    pub fn with_github_host(mut self, host: Option<String>) -> Self {
+        self.github_host = host.filter(|h| !h.is_empty());
+        self
+    }
+
     /// Replace the git command executor.
     pub fn with_git_runner(mut self, runner: Arc<dyn GitRunner>) -> Self {
         self.git = runner;
         self
+    }
+
+    /// The GitHub host to address for clone URLs and auth rewrites:
+    /// the config-threaded value first, then the `LAZYBOX_GITHUB_HOST`
+    /// env var as a fallback for external callers with no config layer
+    /// (and back-compat), else github.com. Both the clone URL and the
+    /// auth header read through here so they cannot disagree.
+    fn github_host(&self) -> String {
+        self.github_host
+            .clone()
+            .or_else(|| {
+                std::env::var("LAZYBOX_GITHUB_HOST")
+                    .ok()
+                    .filter(|h| !h.is_empty())
+            })
+            .unwrap_or_else(|| "github.com".to_string())
     }
 
     /// Extra child-process env for network git operations: the
@@ -530,7 +564,7 @@ impl WorktreeManager {
     async fn network_env(&self) -> Vec<(String, String)> {
         match &self.github_token {
             Some(source) => match source().await {
-                Some(token) if !token.is_empty() => github_auth_env(&token),
+                Some(token) if !token.is_empty() => github_auth_env(&token, &self.github_host()),
                 _ => Vec::new(),
             },
             None => Vec::new(),
@@ -607,7 +641,7 @@ impl WorktreeManager {
         // its config survived (covers rewritten origins — enterprise
         // hosts, local mirrors); fall back to the canonical GitHub
         // URL otherwise.
-        let mut url = format!("git@github.com:{owner}/{repo}.git");
+        let mut url = format!("git@{}:{owner}/{repo}.git", self.github_host());
         if bare_path.exists() {
             // Deleting the bare clone orphans EVERY worktree hanging
             // off it (their gitdir metadata lives under
@@ -2447,19 +2481,25 @@ fn canonical_or_self(p: &Path) -> PathBuf {
 /// - `http.<https>.extraheader` carries the token as a Basic auth
 ///   header, the same scheme `gh` and Actions use.
 ///
-/// Everything is scoped to `github.com` — enterprise hosts, local
-/// mirrors and `file://` origins are untouched. The token rides in
-/// the child environment only, never argv, so it can't leak through
-/// process listings or lazybox's own command logging.
-fn github_auth_env(token: &str) -> Vec<(String, String)> {
+/// The rewrites and auth header are scoped to `host` (github.com unless
+/// a GitHub Enterprise Server host was threaded in via
+/// [`WorktreeManager::with_github_host`]); every other origin — local
+/// mirrors, `file://`, a different host — is untouched. The token rides
+/// in the child environment only, never argv, so it can't leak through
+/// process listings or lazybox's own command logging. Taking the host as
+/// an argument (rather than re-reading the env here) keeps it identical
+/// to the clone URL's host, which the same manager resolves.
+fn github_auth_env(token: &str, host: &str) -> Vec<(String, String)> {
     let basic = base64_std(format!("x-access-token:{token}").as_bytes());
+    let auth = format!("AUTHORIZATION: basic {basic}");
+    let instead_of = format!("url.https://{host}/.insteadOf");
+    let ssh_short = format!("git@{host}:");
+    let ssh_long = format!("ssh://git@{host}/");
+    let extraheader = format!("http.https://{host}/.extraheader");
     git_config_env(&[
-        ("url.https://github.com/.insteadOf", "git@github.com:"),
-        ("url.https://github.com/.insteadOf", "ssh://git@github.com/"),
-        (
-            "http.https://github.com/.extraheader",
-            &format!("AUTHORIZATION: basic {basic}"),
-        ),
+        (&instead_of, &ssh_short),
+        (&instead_of, &ssh_long),
+        (&extraheader, &auth),
     ])
 }
 
@@ -4131,26 +4171,65 @@ mod auth_env_tests {
     /// in plaintext anywhere in the environment.
     #[test]
     fn github_auth_env_shape() {
-        let env = github_auth_env("sekret-token");
-        let lookup = |key: &str| -> Vec<&str> {
+        let env = github_auth_env("sekret-token", "github.com");
+        let lookup = |env: &[(String, String)], key: &str| -> Vec<String> {
             env.iter()
                 .enumerate()
                 .filter(|(i, (k, _))| {
                     k.starts_with("GIT_CONFIG_KEY_") && env[*i].1 == key && *i % 2 == 1 // keys sit at odd indices after COUNT
                 })
-                .map(|(i, _)| env[i + 1].1.as_str())
+                .map(|(i, _)| env[i + 1].1.clone())
                 .collect()
         };
         assert_eq!(env[0], ("GIT_CONFIG_COUNT".to_string(), "3".to_string()));
-        let instead_of = lookup("url.https://github.com/.insteadOf");
+        let instead_of = lookup(&env, "url.https://github.com/.insteadOf");
         assert_eq!(instead_of, ["git@github.com:", "ssh://git@github.com/"]);
-        let headers = lookup("http.https://github.com/.extraheader");
+        let headers = lookup(&env, "http.https://github.com/.extraheader");
         assert_eq!(headers.len(), 1);
         assert!(headers[0].starts_with("AUTHORIZATION: basic "));
         assert!(
             !env.iter().any(|(_, v)| v.contains("sekret-token")),
             "raw token must never appear in the env values: {env:?}"
         );
+
+        // On an enterprise host the rewrites and the auth header must be
+        // scoped to THAT host — and github.com must be left alone, so a
+        // github.com token can never ride to the enterprise server (or
+        // vice-versa). This is the git half of the config/API host
+        // consistency fix.
+        let ghe = github_auth_env("sekret-token", "ghe.example.com");
+        assert_eq!(
+            lookup(&ghe, "url.https://ghe.example.com/.insteadOf"),
+            ["git@ghe.example.com:", "ssh://git@ghe.example.com/"]
+        );
+        assert_eq!(
+            lookup(&ghe, "http.https://ghe.example.com/.extraheader").len(),
+            1
+        );
+        assert!(
+            lookup(&ghe, "url.https://github.com/.insteadOf").is_empty(),
+            "enterprise auth env must not rewrite github.com: {ghe:?}"
+        );
+    }
+
+    /// The clone URL and the auth-header host resolve through the same
+    /// [`WorktreeManager::github_host`], so a config-threaded enterprise
+    /// host reaches both. Without a host they stay on github.com.
+    #[test]
+    fn github_host_resolves_from_config_thread() {
+        let default_mgr = WorktreeManager::new("/tmp/x");
+        // No config host and (in a clean test env) no LAZYBOX_GITHUB_HOST.
+        if std::env::var("LAZYBOX_GITHUB_HOST").is_err() {
+            assert_eq!(default_mgr.github_host(), "github.com");
+        }
+        let ghe =
+            WorktreeManager::new("/tmp/x").with_github_host(Some("ghe.example.com".to_string()));
+        assert_eq!(ghe.github_host(), "ghe.example.com");
+        // An empty threaded host is treated as unset.
+        let empty = WorktreeManager::new("/tmp/x").with_github_host(Some(String::new()));
+        if std::env::var("LAZYBOX_GITHUB_HOST").is_err() {
+            assert_eq!(empty.github_host(), "github.com");
+        }
     }
 
     /// The env pairs must actually reach the spawned git process:

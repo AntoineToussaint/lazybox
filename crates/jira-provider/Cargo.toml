@@ -1,0 +1,20 @@
+[package]
+name = "lazybox-jira"
+description = "Jira Cloud issues provider for lazybox via the REST search API."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lazybox-core = { workspace = true }
+serde      = { workspace = true }
+serde_json = "1"
+reqwest    = { version = "0.13", default-features = false, features = ["rustls", "json", "query"] }
+chrono     = { workspace = true }
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+
+[lints]
+workspace = true

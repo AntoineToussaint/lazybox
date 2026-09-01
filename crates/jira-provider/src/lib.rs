@@ -42,7 +42,9 @@ impl From<JiraError> for ProviderError {
     fn from(e: JiraError) -> Self {
         match e {
             JiraError::Config(_) => ProviderError::permanent(SOURCE, e.to_string()),
-            JiraError::Http(_) | JiraError::Api(_) => ProviderError::retryable(SOURCE, e.to_string()),
+            JiraError::Http(_) | JiraError::Api(_) => {
+                ProviderError::retryable(SOURCE, e.to_string())
+            }
         }
     }
 }
@@ -80,10 +82,13 @@ impl JiraClient {
         })
     }
 
-    /// One page of up to [`MAX_RESULTS`] assigned unresolved issues.
-    /// Assignment queues deeper than that are beyond a terminal inbox's
-    /// help anyway.
-    pub async fn fetch_assigned(&self) -> Result<Vec<Task>, JiraError> {
+    /// One page of up to `MAX_RESULTS` assigned unresolved issues,
+    /// plus whether Jira signalled more pages beyond it. Assignment
+    /// queues deeper than one page aren't paged through — a terminal
+    /// inbox tops out well before that — but the caller MUST know the
+    /// result was truncated so it does not treat a partial page as the
+    /// authoritative full set and retire the rows below the cap.
+    pub async fn fetch_assigned(&self) -> Result<AssignedIssues, JiraError> {
         let url = format!("{}/rest/api/3/search/jql", self.base);
         let response = self
             .http
@@ -106,12 +111,34 @@ impl JiraClient {
             return Err(JiraError::Api(format!("HTTP {status}: {snippet}")));
         }
         let page: SearchPage = response.json().await?;
-        Ok(page
-            .issues
-            .iter()
-            .map(|issue| issue_to_task(issue, &self.base))
-            .collect())
+        Ok(page_to_assigned(page, &self.base))
     }
+}
+
+/// One fetch's worth of assigned issues plus whether the caller saw the
+/// complete assignee set. `truncated` is true when Jira returned a
+/// `nextPageToken` (there are more assigned-unresolved issues than a
+/// single fetch returns), which the poll source turns into a
+/// non-authoritative scope so it never deletes the rows it didn't fetch.
+pub struct AssignedIssues {
+    pub tasks: Vec<Task>,
+    pub truncated: bool,
+}
+
+/// Map a raw search page to tasks + truncation. Pure (no I/O) so the
+/// truncation logic and field mapping are unit-testable without a live
+/// Jira. `/rest/api/3/search/jql` is token-paginated: a present
+/// `nextPageToken` — NOT a full `MAX_RESULTS`-sized page — is the
+/// authoritative "more pages exist" signal (the endpoint may return
+/// fewer than requested even when more remain).
+fn page_to_assigned(page: SearchPage, base: &str) -> AssignedIssues {
+    let truncated = page.next_page_token.is_some();
+    let tasks = page
+        .issues
+        .iter()
+        .map(|issue| issue_to_task(issue, base))
+        .collect();
+    AssignedIssues { tasks, truncated }
 }
 
 fn issue_to_task(issue: &Issue, base: &str) -> Task {
@@ -140,7 +167,6 @@ fn issue_to_task(issue: &Issue, base: &str) -> Task {
         .and_then(|a| a.display_name.clone())
         .map(|n| vec![n])
         .unwrap_or_default();
-    let now = Utc::now();
     Task {
         id: TaskId {
             source: SOURCE.into(),
@@ -164,7 +190,17 @@ fn issue_to_task(issue: &Issue, base: &str) -> Task {
             .or_else(|| Some("jira/unknown".to_string())),
         branch: None,
         base_branch: None,
-        updated_at: f.updated.map(|t| t.with_timezone(&Utc)).unwrap_or(now),
+        // Sort key. Prefer `updated`, fall back to `created`; if BOTH
+        // are absent or unparseable use a stable floor (the epoch), NOT
+        // `Utc::now()`. A per-tick `now()` re-floats the row to the top
+        // of the `updated`-sorted inbox on every poll, so a single parse
+        // failure would masquerade as fresh activity forever; the epoch
+        // sinks it deterministically to the bottom instead.
+        updated_at: f
+            .updated
+            .or(f.created)
+            .map(|t| t.with_timezone(&Utc))
+            .unwrap_or(DateTime::<Utc>::UNIX_EPOCH),
         created_at: f.created.map(|t| t.with_timezone(&Utc)),
         closed_at: None,
         labels,
@@ -204,6 +240,11 @@ fn issue_to_task(issue: &Issue, base: &str) -> Task {
 struct SearchPage {
     #[serde(default)]
     issues: Vec<Issue>,
+    /// Present when the assignee queue extends past this page. Its mere
+    /// presence — not the page size — is the "more pages" signal on the
+    /// token-paginated `/search/jql` endpoint.
+    #[serde(rename = "nextPageToken", default)]
+    next_page_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -252,20 +293,40 @@ struct Project {
 }
 
 /// Jira timestamps are `2026-08-31T14:20:30.123-0400` — RFC 3339 except
-/// the offset has no colon, which chrono's `%z` accepts but
-/// `DateTime::parse_from_rfc3339` does not.
+/// the offset has no colon. Parse the colon-less `%z` form Jira emits,
+/// but accept a standard RFC 3339 string (colon offset or `Z`) too so a
+/// format change doesn't silently drop every timestamp.
 mod jira_time {
     use chrono::{DateTime, FixedOffset};
     use serde::{Deserialize, Deserializer};
 
     const FORMAT: &str = "%Y-%m-%dT%H:%M:%S%.3f%z";
 
+    /// Parse a Jira timestamp. Try RFC 3339 first so a colon offset or a
+    /// trailing `Z` still parses, then fall back to the colon-less `%z`
+    /// form Jira Cloud actually emits (`…-0400`), which
+    /// `parse_from_rfc3339` rejects.
+    fn parse(s: &str) -> Option<DateTime<FixedOffset>> {
+        DateTime::parse_from_rfc3339(s)
+            .or_else(|_| DateTime::parse_from_str(s, FORMAT))
+            .ok()
+    }
+
     pub fn deserialize<'de, D>(d: D) -> Result<Option<DateTime<FixedOffset>>, D::Error>
     where
         D: Deserializer<'de>,
     {
         let raw = Option::<String>::deserialize(d)?;
-        Ok(raw.and_then(|s| DateTime::parse_from_str(&s, FORMAT).ok()))
+        Ok(raw.and_then(|s| {
+            let parsed = parse(&s);
+            if parsed.is_none() {
+                // Not fatal — the field is optional and `issue_to_task`
+                // has a stable floor — but log so a Jira timestamp-format
+                // drift is diagnosable instead of silently sinking rows.
+                tracing::warn!("jira: unparseable timestamp {s:?}");
+            }
+            parsed
+        }))
     }
 }
 
@@ -315,14 +376,64 @@ mod tests {
         let task = issue_to_task(&issue, "https://example.atlassian.net");
         assert_eq!(task.state, TaskState::Closed);
         assert!(task.assignees.is_empty());
+        // A missing `updated` falls back to `created` — NOT `Utc::now()`,
+        // which would re-float the row to the top of the inbox each poll.
+        let created = DateTime::parse_from_rfc3339("2026-08-01T10:00:00.000-04:00").unwrap();
+        assert_eq!(task.updated_at, created.with_timezone(&Utc));
+    }
+
+    #[test]
+    fn unparseable_timestamps_sink_to_a_stable_floor() {
+        // A garbage timestamp must not become `Utc::now()` (perpetual
+        // "fresh") — with both timestamps unparseable the row sinks to
+        // the epoch, a stable floor that doesn't churn between ticks.
+        let mut v = issue_json();
+        v["fields"]["updated"] = "not-a-date".into();
+        v["fields"]["created"] = "also-bad".into();
+        let issue: Issue = serde_json::from_value(v).unwrap();
+        let task = issue_to_task(&issue, "https://example.atlassian.net");
+        assert_eq!(task.updated_at, DateTime::<Utc>::UNIX_EPOCH);
+        assert_eq!(task.created_at, None);
+    }
+
+    #[test]
+    fn rfc3339_offset_form_still_parses() {
+        // Defensive: if Jira ever emits a colon offset or `Z`, we must
+        // still parse it rather than sink the row to the floor.
+        let mut v = issue_json();
+        v["fields"]["updated"] = "2026-08-30T09:15:00.000-04:00".into();
+        let issue: Issue = serde_json::from_value(v).unwrap();
+        let task = issue_to_task(&issue, "https://example.atlassian.net");
+        let want = DateTime::parse_from_rfc3339("2026-08-30T09:15:00.000-04:00").unwrap();
+        assert_eq!(task.updated_at, want.with_timezone(&Utc));
+    }
+
+    #[test]
+    fn truncation_flag_tracks_next_page_token() {
+        // No token → we saw the whole assignee set (authoritative).
+        let page: SearchPage = serde_json::from_value(serde_json::json!({
+            "issues": [issue_json()],
+        }))
+        .unwrap();
+        let assigned = page_to_assigned(page, "https://example.atlassian.net");
+        assert_eq!(assigned.tasks.len(), 1);
+        assert!(!assigned.truncated);
+
+        // A `nextPageToken` → the queue is deeper than this page, so the
+        // caller must NOT treat the result as authoritative (else rows
+        // below the cap get deleted and re-added as `updated` reorders).
+        let page: SearchPage = serde_json::from_value(serde_json::json!({
+            "issues": [issue_json()],
+            "nextPageToken": "CAEaAggD",
+        }))
+        .unwrap();
+        let assigned = page_to_assigned(page, "https://example.atlassian.net");
+        assert!(assigned.truncated);
     }
 
     #[test]
     fn from_env_reports_missing_config() {
         // Relies on the test env not defining LAZYBOX_JIRA_* vars.
-        assert!(matches!(
-            JiraClient::from_env(),
-            Err(JiraError::Config(_))
-        ));
+        assert!(matches!(JiraClient::from_env(), Err(JiraError::Config(_))));
     }
 }

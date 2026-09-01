@@ -16,6 +16,8 @@
 //!   (`GH_TOKEN` → `GITHUB_TOKEN` → `gh auth token`).
 //! - **Linear** — the credential chain (`LINEAR_API_KEY` env var, then
 //!   `linear auth token` from the `schpet/linear-cli` keyring).
+//! - **Jira** — the read-only Cloud provider's env vars
+//!   (`LAZYBOX_JIRA_URL` / `LAZYBOX_JIRA_EMAIL` / `LAZYBOX_JIRA_TOKEN`).
 //!
 //! Detection is fully concurrent: each probe runs as its own future and
 //! they're joined together, so a slow `claude --version` doesn't delay
@@ -27,7 +29,7 @@ use std::time::Duration;
 /// Run all probes concurrently. Bounded — every probe has its own
 /// timeout so a hanging `gh auth token` can't block startup forever.
 pub async fn detect_all() -> SetupReport {
-    let (claude, codex, cursor, github, linear) = tokio::join!(
+    let (claude, codex, cursor, github, linear, jira) = tokio::join!(
         detect_binary("claude", "Claude Code", "https://claude.ai/code"),
         detect_binary("codex", "Codex", "npm install -g @openai/codex"),
         // Probe `cursor-agent` rather than `cursor` because that's the
@@ -36,9 +38,10 @@ pub async fn detect_all() -> SetupReport {
         detect_binary("cursor-agent", "Cursor Agent", "https://cursor.com/cli"),
         detect_github(),
         detect_linear(),
+        detect_jira(),
     );
     SetupReport {
-        tools: vec![github, linear, claude, codex, cursor],
+        tools: vec![github, linear, jira, claude, codex, cursor],
     }
 }
 
@@ -179,9 +182,7 @@ async fn detect_github() -> ToolStatus {
     let cred_source = cred.source.clone();
     let host = lazybox_config::Config::load()
         .unwrap_or_default()
-        .providers
-        .github
-        .host;
+        .github_host();
     match tokio::time::timeout(
         Duration::from_secs(5),
         lazybox_gh::GhClient::from_credential_with_host(cred, host.as_deref()),
@@ -241,6 +242,32 @@ async fn detect_linear() -> ToolStatus {
         _ => mk(ToolState::Missing {
             kind: MissingKind::EnvVarMissing,
             hint: "export LINEAR_API_KEY=lin_api_… (or run `linear auth login`)".into(),
+        }),
+    }
+}
+
+/// Jira Cloud is "configured" when the three env vars its read-only
+/// provider reads are all present (`JiraClient::from_env` is the single
+/// source of truth for that check). Without this probe the provider is
+/// dead code: `enabled_providers` is derived from detected providers
+/// (see `SetupOutcome::default_enabled`), so an undetected Jira could
+/// only ever be turned on by hand-editing `setup.providers`.
+async fn detect_jira() -> ToolStatus {
+    let hint = "export LAZYBOX_JIRA_URL / LAZYBOX_JIRA_EMAIL / LAZYBOX_JIRA_TOKEN";
+    let mk = |state| ToolStatus {
+        id: lazybox_jira::SOURCE,
+        display_name: "Jira",
+        category: Category::Provider,
+        state,
+        install_hint: hint,
+    };
+    match lazybox_jira::JiraClient::from_env() {
+        Ok(_) => mk(ToolState::Found {
+            detail: "LAZYBOX_JIRA_* env".to_string(),
+        }),
+        Err(_) => mk(ToolState::Missing {
+            kind: MissingKind::EnvVarMissing,
+            hint: hint.into(),
         }),
     }
 }

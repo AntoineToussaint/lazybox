@@ -1738,9 +1738,7 @@ async fn build_scope_sources() -> Vec<Box<dyn lazybox_core::ScopeSource>> {
             cred,
             lazybox_config::Config::load()
                 .unwrap_or_default()
-                .providers
-                .github
-                .host
+                .github_host()
                 .as_deref(),
         )
         .await

@@ -3397,9 +3397,7 @@ pub(super) async fn sources_for_with_engagement(
                     None => {
                         let host = lazybox_config::Config::load()
                             .unwrap_or_default()
-                            .providers
-                            .github
-                            .host;
+                            .github_host();
                         match tokio::time::timeout(
                             CLIENT_INIT_TIMEOUT,
                             GhClient::from_credential_with_host(cred, host.as_deref()),

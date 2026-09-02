@@ -7,10 +7,10 @@ workspace has already received.
 
 A snippet is a short key backed by a complete agent instruction. It is
 sent and **submitted** to the focused agent in one action, not merely
-pasted for you to finish. lazybox ships 59 categorized workflows, so
+pasted for you to finish. lazybox ships 61 categorized workflows, so
 the system is useful before you create anything: review (`deepreview`
 — the flagship deep review — plus `rev`, `fixall`, `audit`, `scout`), Git and PR
-(`pr`, `rebase`, `sync`, `conflicts`, `freshen`, `push`, `handoff`), GitHub (`triage`, `respond`, `convert`, `designissues`),
+(`pr`, `rebase`, `sync`, `conflicts`, `freshen`, `push`, `handoff`), GitHub (`triage`, `respond`, `convert`, `carve`, `designissues`),
 Linear (`wip`, `done`, `attach`), testing (`test`, `tdd`, `repro`),
 debugging (`bug`, `bisect`, `trace`), security (`sec`, `deps`, `leaks`),
 and more. The GitHub and Linear workflows are **provider-scoped**: they
@@ -218,8 +218,10 @@ lazybox ships two provider-scoped categories:
 - **GitHub** — `triage` (issue → plan), `respond` (review comments),
   `link` (PR ↔ issue), `whyci` (summarize failing CI), `nudge`
   (request/nudge reviewers), `release` (cut a release PR), `convert`
-  (issue → PR), `designissues` (coordinated cross-repo issues from a
-  design).
+  (issue → PR), `carve` (decompose the session's proposed work into a
+  few self-contained, conflict-minimized issues with a Definition of
+  Done), `dod` (stamp a Definition-of-Done checklist onto the draft),
+  `designissues` (coordinated cross-repo issues from a design).
 - **Linear** — `wip` / `done` (move the issue's state), `status`
   (comment an update back), `subissues` (break into sub-issues),
   `attach` (link the PR), `estimate` (estimate & prioritize).
@@ -234,7 +236,7 @@ The three layers merge from least to most specific:
 
 | Scope          | Path                          | Use it for                                      |
 | -------------- | ----------------------------- | ----------------------------------------------- |
-| **Built-in**   | _(shipped with lazybox)_       | 59 categorized daily engineering workflows.    |
+| **Built-in**   | _(shipped with lazybox)_       | 61 categorized daily engineering workflows.    |
 | **Global**     | `~/.lazybox/snippets.yaml`     | Personal habits reused across every repository. |
 | **Launch directory** | `<launch-dir>/.lazybox/snippets.yaml` | Overrides for this lazybox client catalog. |
 

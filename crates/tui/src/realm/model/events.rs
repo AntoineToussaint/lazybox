@@ -2003,6 +2003,11 @@ impl<T: TerminalAdapter> Model<T> {
             // optimistic chip edit (reviewers/assignees/labels) on this
             // workspace (#476).
             self.reconcile_optimistic(ws.key.as_str());
+            // An open issue browser (#1436) holds a mount-time snapshot;
+            // rebuild it from the now-updated workspace so a label change
+            // (this client's edit reconciled, or a background poll) is
+            // reflected in the list + preview. No-op when it isn't open.
+            self.refresh_issue_browser();
             let resume = self
                 .pending_hopper_action
                 .as_ref()

@@ -10185,15 +10185,16 @@ mod merge_focus_follow_tests {
         use tuirealm::event::{Key, KeyEvent, KeyModifiers};
 
         let mut m = build_model();
-        let mut last_key = None;
+        let mut keys = Vec::new();
         for key in ["owner/repo#10", "owner/repo#20"] {
             let mut t = task(key, false, Duration::hours(1));
             t.body = Some(format!("Body for {key}"));
             let ws = Workspace::from_task(t, Utc::now());
-            last_key = Some(ws.key.clone());
+            keys.push(ws.key.clone());
             m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
         }
-        let ws_key = last_key.unwrap();
+        let other_key = keys[0].clone(); // #10 — never the sidebar cursor
+        let ws_key = keys[1].clone(); // #20 — the focused workspace
         assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
 
         m.dispatch_key(KeyEvent::new(Key::Char('g'), KeyModifiers::NONE));
@@ -10205,12 +10206,24 @@ mod merge_focus_follow_tests {
         );
 
         // Read stacks the #448 markdown reader, then returns to the browser.
+        // The reader is opened for #10 while the sidebar cursor sits on #20,
+        // so its `a` must scope to #10, not the selection (#1436).
         m.update(Msg::IssueBrowserAction(IssueBrowserAction::Read {
-            title: "owner/repo#20".into(),
-            body: "Body for owner/repo#20".into(),
+            subject: SessionKey::from(&other_key),
+            title: "owner/repo#10".into(),
+            body: "Body for owner/repo#10".into(),
         }));
         assert_eq!(m.modal_stack.last(), Some(&Id::DescriptionModal));
-        m.update(Msg::ModalDismissed);
+        // `a` in the reader → Ask about this PR, scoped to the read issue.
+        m.update(Msg::AskAboutPr(Some(SessionKey::from(&other_key))));
+        assert_eq!(m.modal_stack.last(), Some(&Id::PrChat));
+        assert_eq!(
+            m.pr_chat_subject.as_ref().map(|s| s.task.id.key.as_str()),
+            Some("owner/repo#10"),
+            "the chat is about the issue being read, not the sidebar cursor #20",
+        );
+        m.update(Msg::ModalDismissed); // close PrChat
+        m.update(Msg::ModalDismissed); // close reader
         assert_eq!(m.modal_stack.last(), Some(&Id::IssueBrowser));
 
         // Reply targets the issue carried by the action, not the cursor.
@@ -10246,6 +10259,121 @@ mod merge_focus_follow_tests {
         );
         m.update(Msg::ModalDismissed);
         assert_eq!(m.modal_stack.last(), Some(&Id::IssueBrowser));
+    }
+
+    /// The issue browser holds a mount-time snapshot (#1436); when the
+    /// underlying issue's labels change (an in-place edit reconciled, or a
+    /// background poll), an open browser must rebuild rather than keep
+    /// showing the stale chip set — the "edit didn't take" bug.
+    #[test]
+    fn issue_browser_refreshes_when_labels_change_underneath() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        use tuirealm::ratatui::layout::Rect;
+
+        fn labeled(key: &str, label: &str) -> Workspace {
+            let mut t = task(key, false, Duration::hours(1));
+            t.labels = vec![lazybox_core::Label {
+                name: label.into(),
+                color: "ccc".into(),
+            }];
+            Workspace::from_task(t, Utc::now())
+        }
+
+        fn render_browser(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) -> String {
+            let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            term.draw(|f| m.app.view(&Id::IssueBrowser, f, Rect::new(0, 0, 120, 40)))
+                .unwrap();
+            let buf = term.backend().buffer();
+            (0..buf.area.height)
+                .map(|y| {
+                    (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        let mut m = build_model();
+        let ws = labeled("owner/repo#10", "bug");
+        let key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&key)));
+
+        m.dispatch_key(KeyEvent::new(Key::Char('g'), KeyModifiers::NONE));
+        m.dispatch_key(KeyEvent::new(Key::Char('i'), KeyModifiers::NONE));
+        assert_eq!(m.modal_stack.last(), Some(&Id::IssueBrowser));
+        let before = render_browser(&mut m);
+        assert!(before.contains("[bug]"), "initial label chip: {before}");
+
+        // Same issue re-upserted with a different label — the daemon's
+        // authoritative copy after an edit or a poll. The open browser
+        // must reflect it.
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(labeled(
+            "owner/repo#10",
+            "enhancement",
+        ))));
+        assert_eq!(m.modal_stack.last(), Some(&Id::IssueBrowser));
+        let after = render_browser(&mut m);
+        assert!(
+            after.contains("[enhancement]"),
+            "browser rebuilt with the new label: {after}"
+        );
+        assert!(
+            !after.contains("[bug]"),
+            "the stale mount-time chip is gone: {after}"
+        );
+    }
+
+    /// #1436: the repo-scoped `g i` (browse issues) is gated on the
+    /// cursor being *inside a repo group* — a gate pure `availability`
+    /// can't express (it's `None`-blind between a bare repo header, where
+    /// `g i` works, and a Space / Focused header, where it can't). Raw
+    /// availability offers it with no workspace; `leader_continuations`
+    /// drops it from the which-key popup unless `cursor_repo` resolves.
+    #[test]
+    fn browse_issues_leader_row_needs_a_repo_group() {
+        use lazybox_tui_core::action::{ActionKind, KeyStroke};
+
+        let g = KeyStroke::parse("g").expect("`g` parses");
+        let kinds = |list: Vec<(KeyStroke, &lazybox_tui_core::action::CatalogEntry)>| {
+            list.into_iter().map(|(_, e)| e.kind).collect::<Vec<_>>()
+        };
+
+        let mut m = build_model();
+        // Empty sidebar → the cursor is in no repo group.
+        assert!(m.sidebar.cursor_repo().is_none());
+        // Raw availability still offers browse-issues (it's `unwrap_or(true)`)…
+        let raw = kinds(super::super::helpers::seq_continuations_available(
+            &g,
+            PaneFocus::Sidebar,
+            &m.catalog,
+            None,
+        ));
+        assert!(
+            raw.contains(&ActionKind::BrowseRepoIssues),
+            "raw availability offers g i with no workspace",
+        );
+        // …but the gated popup drops it while `cursor_repo` is None.
+        assert!(
+            !kinds(m.leader_continuations(&g, PaneFocus::Sidebar))
+                .contains(&ActionKind::BrowseRepoIssues),
+            "g i is hidden off a repo group",
+        );
+
+        // With the cursor inside a repo group, it's offered again.
+        let ws = Workspace::from_task(task("owner/repo#7", false, Duration::hours(1)), Utc::now());
+        let key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&key)));
+        assert!(m.sidebar.cursor_repo().is_some());
+        assert!(
+            kinds(m.leader_continuations(&g, PaneFocus::Sidebar))
+                .contains(&ActionKind::BrowseRepoIssues),
+            "g i returns once the cursor is inside a repo group",
+        );
     }
 
     /// Regression for #160: the daemon's issue→PR merge burst
@@ -21153,7 +21281,7 @@ mod pr_chat_tests {
         let key = seed_pr_workspace(&mut m);
         let _ = drain(&mut server);
 
-        m.open_pr_chat();
+        m.open_pr_chat(None);
         assert_eq!(m.modal_stack.last(), Some(&Id::PrChat));
         let inspected = drain(&mut server).into_iter().any(|cmd| {
             matches!(
@@ -21173,7 +21301,7 @@ mod pr_chat_tests {
         let (mut m, mut server) = build();
         seed_pr_workspace(&mut m);
         let _ = drain(&mut server);
-        m.open_pr_chat();
+        m.open_pr_chat(None);
         let _ = drain(&mut server);
 
         // Diff still pending → the question is held, no run yet.
@@ -21247,7 +21375,7 @@ mod pr_chat_tests {
         let (mut m, mut server) = build();
         seed_pr_workspace(&mut m);
         let _ = drain(&mut server);
-        m.open_pr_chat();
+        m.open_pr_chat(None);
         let _ = drain(&mut server);
 
         let _ = m.handle_pr_chat_question("what changed?".into(), HelpQuestionKind::NewQuestion);
@@ -21299,7 +21427,7 @@ mod pr_chat_tests {
         let (mut m, mut server) = build();
         seed_pr_workspace(&mut m);
         let _ = drain(&mut server);
-        m.open_pr_chat();
+        m.open_pr_chat(None);
         m.pr_chat_diff = Some(Some(sample_diff()));
         let _ = m.handle_pr_chat_question("first?".into(), HelpQuestionKind::NewQuestion);
         let request_id = m.pr_chat_request.clone().expect("start request");

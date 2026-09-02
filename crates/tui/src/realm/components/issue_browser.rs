@@ -32,7 +32,7 @@ use tuirealm::ratatui::Frame;
 use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::prelude::*;
 use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
-use tuirealm::state::State;
+use tuirealm::state::{State, StateValue};
 
 /// One tracked issue in the browser list. Built by the Model from the
 /// repo's issue-workspaces; the body is a snapshot taken at mount time.
@@ -86,8 +86,15 @@ impl IssueRow {
 /// ordered list can't dispatch against the wrong row (#512).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IssueBrowserAction {
-    /// `Enter` — open the full scrollable markdown reader (#448).
-    Read { title: String, body: String },
+    /// `Enter` — open the full scrollable markdown reader (#448). Carries
+    /// the issue's session key so the reader's `a` (Ask about this PR)
+    /// scopes to *this* issue rather than falling back to the sidebar
+    /// cursor, which the browser deliberately leaves untouched (#1436).
+    Read {
+        subject: SessionKey,
+        title: String,
+        body: String,
+    },
     /// `l` — edit labels → `Command::SetLabels`.
     Labels(WorkspaceKey),
     /// `r` — add a comment → `Command::PostReply`.
@@ -143,6 +150,27 @@ impl IssueBrowser {
             .collect();
         self.cursor = (!self.visible.is_empty()).then_some(0);
         self.list_scroll = 0;
+    }
+
+    /// Re-apply a prior view — filter text, typing mode, and the
+    /// highlighted issue (by session key) — after the Model rebuilds
+    /// `rows` from live state (#1436). Keeps an in-place label edit or a
+    /// background poll from snapping the cursor to the top or dropping a
+    /// half-typed filter. A previously-selected issue that no longer
+    /// exists (closed / joined into a PR) leaves the cursor at the
+    /// refiltered default.
+    pub fn restore_view(&mut self, filter: String, filtering: bool, selected: Option<&str>) {
+        self.filter = filter;
+        self.refilter();
+        self.filtering = filtering;
+        if let Some(key) = selected
+            && let Some(vis_pos) = self
+                .visible
+                .iter()
+                .position(|&i| self.rows[i].session_key.as_str() == key)
+        {
+            self.cursor = Some(vis_pos);
+        }
     }
 
     /// The `rows` index under the cursor, if any.
@@ -201,6 +229,7 @@ impl IssueBrowser {
             }
             Key::Enter => self.selected().map(|r| {
                 Msg::IssueBrowserAction(IssueBrowserAction::Read {
+                    subject: r.session_key.clone(),
                     title: r.reader_title(),
                     body: if r.body.is_empty() {
                         "*(no description)*".to_string()
@@ -535,8 +564,21 @@ impl Component for IssueBrowser {
         None
     }
     fn attr(&mut self, _: Attribute, _: AttrValue) {}
+    /// Expose the view (repo, filter text, typing mode, highlighted
+    /// issue key) so the Model can rebuild `rows` from live state and
+    /// restore the cursor / filter via [`Self::restore_view`] (#1436) —
+    /// the state-preserving-remount pattern the Stats modal uses.
     fn state(&self) -> State {
-        State::None
+        let selected = self
+            .selected()
+            .map(|r| r.session_key.as_str().to_string())
+            .unwrap_or_default();
+        State::Vec(vec![
+            StateValue::String(self.repo.clone()),
+            StateValue::String(self.filter.clone()),
+            StateValue::Bool(self.filtering),
+            StateValue::String(selected),
+        ])
     }
     fn perform(&mut self, _: Cmd) -> CmdResult {
         CmdResult::NoChange
@@ -547,6 +589,17 @@ impl AppComponent<Msg, UserEvent> for IssueBrowser {
     fn on(&mut self, ev: &Event<UserEvent>) -> Option<Msg> {
         match ev {
             Event::Keyboard(key) => self.on_key(key),
+            // A bracketed paste into the `/` filter appends to the query,
+            // like the sidebar search bar. Control chars (a multi-line
+            // paste's newlines) are dropped so they can't corrupt the
+            // single-line filter; a paste while not filtering is inert.
+            Event::Paste(text) if self.filtering => {
+                for c in text.chars().filter(|c| !c.is_control()) {
+                    self.filter.push(c);
+                }
+                self.refilter();
+                None
+            }
             _ => None,
         }
     }
@@ -611,7 +664,14 @@ mod tests {
     fn enter_reads_the_selected_issue() {
         let mut b = IssueBrowser::new("o/r", rows());
         match b.on_key(&key(Key::Enter)) {
-            Some(Msg::IssueBrowserAction(IssueBrowserAction::Read { title, body })) => {
+            Some(Msg::IssueBrowserAction(IssueBrowserAction::Read {
+                subject,
+                title,
+                body,
+            })) => {
+                // The reader must carry the highlighted issue's own key so
+                // a later `a` (Ask about this PR) scopes to it (#1436).
+                assert_eq!(subject.as_str(), "github:o/r#30");
                 assert_eq!(title, "#30 · Add carve workflow");
                 assert_eq!(body, "Body of 30.");
             }
@@ -701,6 +761,20 @@ mod tests {
             let _ = b.on_key(&ke(c));
         }
         assert_eq!(b.visible, vec![2], "number 10 → #10");
+    }
+
+    #[test]
+    fn paste_extends_the_filter_only_while_filtering() {
+        let mut b = IssueBrowser::new("o/r", rows());
+        // A paste with no filter open is inert — no field to accept it.
+        assert!(b.on(&Event::Paste("bug".into())).is_none());
+        assert_eq!(b.visible, vec![0, 1, 2]);
+        // In filter mode a paste extends the query; embedded newlines
+        // (a multi-line clipboard) are stripped, not corrupting it.
+        let _ = b.on_key(&ke('/'));
+        assert!(b.on(&Event::Paste("bu\ng".into())).is_none());
+        assert_eq!(b.filter, "bug");
+        assert_eq!(b.visible, vec![1], "pasted 'bug' filters to #20");
     }
 
     #[test]

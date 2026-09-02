@@ -37,6 +37,37 @@ impl lazybox_tui_core::dispatch::AgentTerminalView for crate::realm::components:
 }
 
 impl<T: TerminalAdapter> Model<T> {
+    /// [`seq_continuations_available`] plus the one gate pure
+    /// `availability` can't express: a repo-scoped leader action needs
+    /// the cursor *inside a repo group* (#1436). `availability` only sees
+    /// `Option<&Workspace>`, which is `None` alike on a bare repo header
+    /// (where `g i` works — `cursor_repo` walks up to the header) and on a
+    /// Space / Focused header (where it can't). So `BrowseRepoIssues` is
+    /// dropped from the which-key popup when the cursor isn't in a repo
+    /// group, instead of being offered only to flash-reject. Directly
+    /// typing the chord still resolves through the dispatcher's own graceful
+    /// "move onto a repo" flash — the safety net for muscle memory.
+    pub(super) fn leader_continuations<'c>(
+        &'c self,
+        prefix: &lazybox_tui_core::action::KeyStroke,
+        focus: PaneFocus,
+    ) -> Vec<(
+        lazybox_tui_core::action::KeyStroke,
+        &'c lazybox_tui_core::action::CatalogEntry,
+    )> {
+        use lazybox_tui_core::action::ActionKind;
+        let in_repo_group = self.sidebar.cursor_repo().is_some();
+        seq_continuations_available(
+            prefix,
+            focus,
+            &self.catalog,
+            self.sidebar.selected_workspace(),
+        )
+        .into_iter()
+        .filter(|(_, e)| in_repo_group || !matches!(e.kind, ActionKind::BrowseRepoIssues))
+        .collect()
+    }
+
     /// Top-level key handler when no modal is active. Routes Tab,
     /// global escapes, and forwards everything else to the focused
     /// pane wrapper.
@@ -111,13 +142,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // above found no in-group binding for them.
                 if let Some(delta) = popup_nav_delta(&key) {
                     if let Some(rf) = rfocus {
-                        let len = seq_continuations_available(
-                            &prefix,
-                            rf,
-                            &self.catalog,
-                            self.sidebar.selected_workspace(),
-                        )
-                        .len();
+                        let len = self.leader_continuations(&prefix, rf).len();
                         if len > 0 {
                             self.leader_highlight =
                                 Some(advance_highlight(self.leader_highlight, delta, len));
@@ -128,14 +153,10 @@ impl<T: TerminalAdapter> Model<T> {
                 if key.code == Key::Enter
                     && let Some(idx) = self.leader_highlight
                     && let Some(rf) = rfocus
-                    && let Some(action) = seq_continuations_available(
-                        &prefix,
-                        rf,
-                        &self.catalog,
-                        self.sidebar.selected_workspace(),
-                    )
-                    .get(idx)
-                    .and_then(|(_, entry)| action_from_entry(entry))
+                    && let Some(action) = self
+                        .leader_continuations(&prefix, rf)
+                        .get(idx)
+                        .and_then(|(_, entry)| action_from_entry(entry))
                 {
                     self.leader.take();
                     self.leader_highlight = None;
@@ -783,7 +804,10 @@ impl<T: TerminalAdapter> Model<T> {
     /// activity pane is focused on. No-op when there's no body.
     pub(super) fn open_focused_description(&mut self) {
         if let (Some(title), Some(body)) = (self.right.task_body_title(), self.right.task_body()) {
-            self.mount_description_modal(title, body);
+            // The activity pane always reads the *focused* workspace, so
+            // the reader's `a` resolves against the selection (None) — the
+            // pre-#1436 behavior.
+            self.mount_description_modal(title, body, None);
         }
     }
 

@@ -49,6 +49,12 @@ pub(crate) struct MarkdownModal {
     /// `(row, col)` back to a link.
     rendered: RenderedDoc,
     rendered_width: u16,
+    /// Explicit "Ask about this PR" subject (#1436). `Some` when the
+    /// reader was opened for a task other than the sidebar selection (the
+    /// issue browser reads an arbitrary highlighted issue); `a` then
+    /// scopes the chat to *this* key instead of the cursor. `None` keeps
+    /// the legacy behavior — resolve against the focused workspace.
+    ask_subject: Option<lazybox_core::SessionKey>,
 }
 
 impl MarkdownModal {
@@ -62,7 +68,15 @@ impl MarkdownModal {
             modal_rect: Rect::default(),
             rendered: RenderedDoc::default(),
             rendered_width: 0,
+            ask_subject: None,
         }
+    }
+
+    /// Bind the reader's `a` (Ask about this PR) to an explicit task
+    /// rather than the sidebar cursor (#1436).
+    pub(crate) fn with_ask_subject(mut self, subject: lazybox_core::SessionKey) -> Self {
+        self.ask_subject = Some(subject);
+        self
     }
 
     /// Resolve a click to a link URL, mapping the on-screen `(col, row)`
@@ -196,7 +210,7 @@ impl AppComponent<Msg, UserEvent> for MarkdownModal {
                     // Escalate this description into a chat about the
                     // focused PR/issue (#945). The model resolves the
                     // subject and no-ops with a notice if there is none.
-                    Key::Char('a') => Some(Msg::AskAboutPr),
+                    Key::Char('a') => Some(Msg::AskAboutPr(self.ask_subject.clone())),
                     // Reading surface: unknown keys are inert, never an
                     // accidental dismiss.
                     _ => None,

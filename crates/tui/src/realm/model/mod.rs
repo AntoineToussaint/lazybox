@@ -622,9 +622,12 @@ impl Id {
                 | Id::DefaultModelPicker
                 | Id::WorkAgentPicker
                 // The issue browser (#1436) is a local navigation/filter
-                // picker; its `l`/`r`/`n` keys only *open* the label / reply
-                // / note editors (which each require an explicit submit), so
-                // a stale key never posts an outward effect on its own.
+                // picker. Its `l`/`r`/`n` keys only *open* the label / reply
+                // / note editors (each gated by an explicit submit); its one
+                // immediate-effect key, `o`, opens a URL in the browser —
+                // benign and reversible (closing a tab), never a destructive
+                // or data-losing write. So a retained stale key can't post an
+                // irreversible effect, which is the bar this allowlist sets.
                 | Id::IssueBrowser
         )
     }
@@ -1155,8 +1158,11 @@ pub enum Msg {
     /// Spinner heartbeat from the `HelpAsk` modal.
     HelpSpinnerTick,
     /// `a` pressed in the description reader — open the "Ask about this
-    /// PR" chat for the focused workspace's PR/issue (#945).
-    AskAboutPr,
+    /// PR" chat (#945). The payload names the subject explicitly when the
+    /// reader was opened for a task other than the sidebar selection (the
+    /// issue browser, #1436); `None` resolves against the focused
+    /// workspace as before.
+    AskAboutPr(Option<lazybox_core::SessionKey>),
     /// Question submitted from the `PrChat` modal. The modal stays
     /// mounted; the answer streams back into `Model::pr_chat_convo`.
     PrChatAsked(String, HelpQuestionKind),
@@ -6229,12 +6235,10 @@ impl<T: TerminalAdapter> Model<T> {
         let (leader_rows, leader_group): (Vec<(String, String)>, Option<&'static str>) =
             if let Some(prefix) = self.leader.pending() {
                 let rfocus = self.resolve_focus_for_keys().unwrap_or(self.focus);
-                let conts = seq_continuations_available(
-                    prefix,
-                    rfocus,
-                    &self.catalog,
-                    self.sidebar.selected_workspace(),
-                );
+                // `leader_continuations` adds the repo-group gate that pure
+                // `availability` can't express (#1436) so `g i` doesn't show
+                // on a Space / Focused header where it'd only flash-reject.
+                let conts = self.leader_continuations(prefix, rfocus);
                 let group = conts
                     .iter()
                     .find_map(|(_, e)| lazybox_tui_core::action::leader_group_label(e.kind));
@@ -6675,8 +6679,11 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Msg::MergeHistoryReadBody { title, body } => {
                 // Stack the shared markdown reader on top of the merge-history
-                // list; Esc pops it back to the ledger.
-                self.mount_description_modal(title, body);
+                // list; Esc pops it back to the ledger. `None` ask-subject
+                // (#1436): a merged-PR entry isn't necessarily a tracked
+                // workspace, so the reader's `a` resolves against the sidebar
+                // selection as it did before the scoping change.
+                self.mount_description_modal(title, body, None);
             }
             Msg::IssueBrowserAction(action) => {
                 self.handle_issue_browser_action(action);
@@ -6854,8 +6861,8 @@ impl<T: TerminalAdapter> Model<T> {
                 self.dispatch_cmds(cmds);
             }
             Msg::HelpSpinnerTick => {}
-            Msg::AskAboutPr => {
-                self.open_pr_chat();
+            Msg::AskAboutPr(subject) => {
+                self.open_pr_chat(subject);
             }
             Msg::PrChatAsked(question, kind) => {
                 // The PrChat modal stays mounted — the answer streams

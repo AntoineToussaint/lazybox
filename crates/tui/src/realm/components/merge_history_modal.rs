@@ -3,8 +3,8 @@
 //! A "what's been landing here" view: press `g h` on any repo and this
 //! two-pane modal lists that repo's recently-merged PRs (newest first)
 //! on the left with a live body preview on the right. `Enter` opens the
-//! full scrollable markdown reader ([`super::markdown_modal::MarkdownModal`],
-//! the same `d` reader used elsewhere); `o` opens the highlighted PR in
+//! full scrollable markdown reader (`MarkdownModal`, the same `d` reader
+//! used elsewhere); `o` opens the highlighted PR in
 //! the browser. Repo-scoped, from `Sidebar::cursor_repo()`.
 //!
 //! The rows come from the daemon: mounting sends

@@ -494,7 +494,7 @@ pub enum Id {
     /// live body preview; `Enter` stacks a `DescriptionModal` for the
     /// full body, `o` opens the PR in the browser. Mounts in a loading
     /// state and repaints when `Event::RepoMergeHistory` lands (via
-    /// [`Model::update_merge_history`]).
+    /// `Model::update_merge_history`).
     MergeHistory,
     /// Navigable local worktree diff with an inline review draft.
     DiffReview,

@@ -51,6 +51,10 @@ hyper-util       = { version = "0.1", features = ["server", "service", "tokio"] 
 # stashes in the tool RequestContext, from which we read the bearer.
 rmcp             = { workspace = true }
 http             = { workspace = true }
+# Loopback listener for the MCP server: SO_REUSEADDR so the coordination port
+# can be reused across a daemon restart, letting a reattached agent's baked
+# endpoint URL keep resolving (#1420).
+socket2          = "0.6"
 http-body-util   = { version = "0.1", features = ["channel"] }
 # Outbound leg of the metering proxy (#1062): forwards agent traffic to
 # the real Anthropic/OpenAI upstream and streams the response back. TLS

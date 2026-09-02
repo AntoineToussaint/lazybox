@@ -165,6 +165,37 @@ Integration notes to verify at implementation time:
 - **Auth bridge.** Reuse the gateway's per-session bearer (§6) rather than
   `rmcp`'s own auth feature — identity is minted at spawn, not negotiated.
 
+## 7b. Trust boundary & security posture (Phase 0)
+
+The server is loopback-only and every tool requires a *registered* per-session
+bearer, so an unauthenticated caller on the port gets nothing. Beyond that:
+
+- **Bearer files are private.** Each session's `.mcp.json` embeds a bearer and
+  is written `0600` inside a `0700` `<runtime>/mcp/` dir
+  (`mcp::write_private_file` / `create_private_dir`) — the same posture the
+  gateway token file gets. On a shared box a world-readable config would let
+  any local user lift the token and read every session's terminal over
+  loopback, so this is load-bearing, not hygiene.
+- **Token lifecycle is bounded.** A token is minted + registered at spawn,
+  **revoked when the session's last agent terminal ends**
+  (`mcp::deprovision_session`, from `finish_terminal`), and persisted with the
+  bound port so an agent that survives a daemon restart (tmux) keeps working;
+  on restore, tokens whose backend session did *not* survive are dropped, so a
+  reboot-orphaned bearer can't linger and the map can't grow unbounded across
+  restarts.
+- **`read_session` is a real blast-radius widening — accepted, not ignored.**
+  Any lazybox-spawned agent can read *any* sibling session's full scrollback
+  across *all* repos. Terminal output routinely contains secrets (printed
+  tokens, `cat .env`, remote URLs with credentials), so a prompt-injection in
+  one repo's agent gains a clean exfiltration path to every other repo's
+  on-screen contents. This is deliberate: all sessions belong to the same user
+  in one trust domain, and coordination is the whole point. But it is a
+  genuine escalation of what a single compromised agent can reach, and it must
+  be re-evaluated before Phase 1/2 broaden the surface (notes, push) or before
+  any multi-user / remote exposure is ever considered — at which point
+  per-session authorization (not just authentication) on `read_session` would
+  be required.
+
 ## 8. Phasing
 
 - **Phase 0 — read loop (proves it, zero new state): ✅ landed.** `rmcp 3.2`
@@ -174,9 +205,11 @@ Integration notes to verify at implementation time:
   (`ServerConfig::mcp`), a loopback listener started at daemon boot
   (`mcp::start`), and spawn-time provisioning (`provision_for_spawn` →
   per-session `.mcp.json` + `--mcp-config`, gated by
-  `Agent::supports_mcp_config`). Verified by unit tests; two follow-ups
-  remain — an `rmcp`-client end-to-end round trip, and token cleanup on
-  session reap (respawn already self-heals by clearing the prior token).
+  `Agent::supports_mcp_config`). Bearers are written `0600`, revoked when a
+  session's last agent terminal ends, and persisted with the port so a
+  restart-surviving agent keeps working (see §7b). Verified by unit tests
+  plus an end-to-end HTTP round trip through the transport (auth accepted /
+  rejected).
 - **Phase 1 — notes blackboard:** `post_note` / `read_notes` over kv
   (`lazybox:note:*`), with per-scope pruning. This is the primary medium.
 - **Phase 2 — push + growth:** `notify_session` (wrap existing inject);

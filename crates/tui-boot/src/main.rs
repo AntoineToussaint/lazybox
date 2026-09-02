@@ -2384,6 +2384,15 @@ async fn server_start() -> anyhow::Result<()> {
     )
     .await;
 
+    // #1420: the standalone daemon owns spawns exactly like the embedded one,
+    // so it must also start the coordination MCP server before any agent
+    // spawns — otherwise agents launched through `server start` silently get
+    // no coordination tools. Advisory: a bind failure only disables the tools.
+    match lazybox_server::mcp::start(config.clone()).await {
+        Ok(addr) => tracing::info!("mcp coordination server on {addr}"),
+        Err(error) => tracing::warn!("start mcp coordination server: {error}"),
+    }
+
     let factory_config = config.clone();
     let service = SocketService::new(socket.clone(), pid_file, move || factory_config.clone());
     let shutdown = service.shutdown_handle();

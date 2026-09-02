@@ -167,13 +167,26 @@ Integration notes to verify at implementation time:
 
 ## 8. Phasing
 
-- **Phase 0 — read loop (proves it, zero new state):** MCP transport +
-  `whoami` + `list_sessions` + `read_session`, all over existing gateway
-  capabilities. One agent can discover and read another end-to-end.
+- **Phase 0 — read loop (proves it, zero new state): ✅ landed.** `rmcp 3.2`
+  streamable-HTTP server (`crates/server/src/mcp.rs`), `whoami` /
+  `list_sessions` / `read_session` over the existing agent snapshot + ring
+  buffers, a per-session `TokenRegistry` for implicit identity
+  (`ServerConfig::mcp`), a loopback listener started at daemon boot
+  (`mcp::start`), and spawn-time provisioning (`provision_for_spawn` →
+  per-session `.mcp.json` + `--mcp-config`, gated by
+  `Agent::supports_mcp_config`). Verified by unit tests; two follow-ups
+  remain — an `rmcp`-client end-to-end round trip, and token cleanup on
+  session reap (respawn already self-heals by clearing the prior token).
 - **Phase 1 — notes blackboard:** `post_note` / `read_notes` over kv
   (`lazybox:note:*`), with per-scope pruning. This is the primary medium.
 - **Phase 2 — push + growth:** `notify_session` (wrap existing inject);
   optional `tags`-driven structure once usage justifies it.
+
+The Phase 0 integration questions from §7a resolved in code: `rmcp`'s
+streamable-HTTP service wraps onto the **existing hyper stack** via
+`TowerToHyperService` (no axum listener), so §6's endpoint gets its **own
+loopback port** — the same loopback-bind-at-boot + inject-at-spawn shape the
+metering proxy and local gateway already use.
 
 ## 9. Open questions
 

@@ -47,11 +47,16 @@ struct MergeRow {
     body: String,
 }
 
+/// When a PR landed: a merge closes it, so `closed_at` is the merge time;
+/// fall back to `updated_at` for the rare snapshot without one. Used both to
+/// label rows and to order them, so the two agree.
+fn merge_time(task: &Task) -> DateTime<Utc> {
+    task.closed_at.unwrap_or(task.updated_at)
+}
+
 impl MergeRow {
     fn from_task(task: &Task, now: DateTime<Utc>) -> Self {
-        // A merge closes the PR, so `closed_at` is the merge time; fall
-        // back to `updated_at` for the rare snapshot without one.
-        let merged = task.closed_at.unwrap_or(task.updated_at);
+        let merged = merge_time(task);
         Self {
             number: task.id.number(),
             title: task.title.clone(),
@@ -104,10 +109,16 @@ impl MergeHistoryModal {
         error: Option<String>,
         now: DateTime<Utc>,
     ) -> Self {
+        // The fetch orders by `updated`, but a merged PR's `updated` bumps on
+        // later comments — so order by merge time here, keeping display order
+        // consistent with each row's "merged X ago" label and the newest
+        // landing on top regardless of post-merge chatter.
+        let mut ordered: Vec<&Task> = entries.iter().collect();
+        ordered.sort_by(|a, b| merge_time(b).cmp(&merge_time(a)));
         Self {
             repo: repo.into(),
             rows: Some(
-                entries
+                ordered
                     .iter()
                     .map(|t| MergeRow::from_task(t, now))
                     .collect(),
@@ -513,15 +524,13 @@ mod tests {
 
     #[test]
     fn enter_opens_selected_body() {
-        let mut m = MergeHistoryModal::resolved(
-            "o/r",
-            &[
-                task(10, "first", "alice", Some("first body")),
-                task(20, "second", "bob", Some("second body")),
-            ],
-            None,
-            Utc::now(),
-        );
+        let now = Utc::now();
+        // Explicit merge times so display order is deterministic (#10 on top).
+        let mut first = task(10, "first", "alice", Some("first body"));
+        first.closed_at = Some(now);
+        let mut second = task(20, "second", "bob", Some("second body"));
+        second.closed_at = Some(now - chrono::Duration::days(1));
+        let mut m = MergeHistoryModal::resolved("o/r", &[first, second], None, now);
         m.on_key(&ke(Key::Down));
         match m.on_key(&ke(Key::Enter)) {
             Some(Msg::MergeHistoryReadBody { title, body }) => {
@@ -545,6 +554,22 @@ mod tests {
                 assert_eq!(url, "https://github.com/o/r/pull/10");
             }
             other => panic!("expected open-url, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rows_are_ordered_newest_merged_first() {
+        let now = Utc::now();
+        let mut older = task(1, "older", "a", None);
+        older.closed_at = Some(now - chrono::Duration::days(10));
+        let mut newer = task(2, "newer", "b", None);
+        newer.closed_at = Some(now - chrono::Duration::days(1));
+        // Supplied oldest-first (as an `updated`-sorted fetch could); the top
+        // row must still be the most-recently-merged PR (#2).
+        let mut m = MergeHistoryModal::resolved("o/r", &[older, newer], None, now);
+        match m.on_key(&ke(Key::Enter)) {
+            Some(Msg::MergeHistoryReadBody { title, .. }) => assert_eq!(title, "o/r#2"),
+            other => panic!("expected the newest-merged row on top, got {other:?}"),
         }
     }
 

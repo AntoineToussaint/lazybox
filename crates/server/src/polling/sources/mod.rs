@@ -663,6 +663,30 @@ pub(super) fn rank_targeted_requests(
     ranked
 }
 
+/// Split targeted requests into the hot ones the batched `nodes(ids:)`
+/// query serves (hot, node id cached from a prior poll, batch path
+/// available on this server) and the rest, fetched one at a time via
+/// `repository.pullRequest` / `repository.issue`.
+pub(super) fn partition_targeted_requests(
+    requests: Vec<TargetedRequest>,
+    hot_node_ids: &std::collections::BTreeMap<lazybox_gh::NotificationTarget, String>,
+    batch_available: bool,
+) -> (Vec<(TargetedRequest, String)>, Vec<TargetedRequest>) {
+    let mut batched = Vec::new();
+    let mut individual = Vec::new();
+    for request in requests {
+        if batch_available
+            && request.flags.hot
+            && let Some(node_id) = hot_node_ids.get(&request.target)
+        {
+            batched.push((request, node_id.clone()));
+        } else {
+            individual.push(request);
+        }
+    }
+    (batched, individual)
+}
+
 fn merge_targeted_tasks(base: &mut Vec<Task>, targeted: Vec<Task>) {
     let positions: std::collections::HashMap<lazybox_core::TaskId, usize> = base
         .iter()
@@ -1204,17 +1228,8 @@ impl GhSource {
                     .map(|node_id| (hot.target.clone(), node_id.clone()))
             })
             .collect();
-        let mut batched = Vec::new();
-        let mut individual = Vec::new();
-        for request in requests {
-            if request.flags.hot
-                && let Some(node_id) = hot_node_ids.get(&request.target)
-            {
-                batched.push((request, node_id.clone()));
-            } else {
-                individual.push(request);
-            }
-        }
+        let (batched, mut individual) =
+            partition_targeted_requests(requests, &hot_node_ids, !self.client.hot_batch_rejected());
 
         let mut tasks = Vec::new();
         if !batched.is_empty() {
@@ -1222,26 +1237,38 @@ impl GhSource {
                 .iter()
                 .map(|(_, node_id)| node_id.clone())
                 .collect::<Vec<_>>();
-            let results = self
-                .client
-                .fetch_hot_tasks(&node_ids)
-                .await
-                .map_err(lazybox_core::ProviderError::from)?;
-            for ((request, _), outcome) in batched.into_iter().zip(results) {
-                match outcome {
-                    lazybox_gh::HotFetch::Fresh(task) => tasks.push(*task),
-                    // The freshness probe matched the last tick byte for
-                    // byte — nothing to upsert or broadcast (#1218).
-                    lazybox_gh::HotFetch::Unchanged => {}
-                    lazybox_gh::HotFetch::Missing => {
-                        tracing::debug!(
-                            hot = true,
-                            "targeted: {}/{}#{} not visible — skipping",
-                            request.target.owner,
-                            request.target.repo,
-                            request.target.number,
-                        );
+            match self.client.fetch_hot_tasks(&node_ids).await {
+                Ok(results) => {
+                    for ((request, _), outcome) in batched.into_iter().zip(results) {
+                        match outcome {
+                            lazybox_gh::HotFetch::Fresh(task) => tasks.push(*task),
+                            // The freshness probe matched the last tick byte for
+                            // byte — nothing to upsert or broadcast (#1218).
+                            lazybox_gh::HotFetch::Unchanged => {}
+                            lazybox_gh::HotFetch::Missing => {
+                                tracing::debug!(
+                                    hot = true,
+                                    "targeted: {}/{}#{} not visible — skipping",
+                                    request.target.owner,
+                                    request.target.repo,
+                                    request.target.number,
+                                );
+                            }
+                        }
                     }
+                }
+                // The batch is one request for the whole hot set, so a
+                // server that rejects it (GHES 3.18 — see
+                // `GhClient::hot_batch_rejected`) used to fail every hot
+                // tick. The same targets are still reachable one at a
+                // time through the per-target queries: degrade to those
+                // rather than abort the tick.
+                Err(error) => {
+                    tracing::warn!(
+                        "targeted: hot batch fetch failed ({error}); fetching {} hot target(s) individually",
+                        batched.len(),
+                    );
+                    individual.extend(batched.into_iter().map(|(request, _)| request));
                 }
             }
         }

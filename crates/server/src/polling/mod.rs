@@ -49,7 +49,7 @@ pub use handlers::{
 };
 pub use mutate::{MutationOutcome, apply_and_commit, fetch_and_apply};
 #[cfg(test)]
-use sources::{GhFetchPlan, gh_fetch_plan, rank_targeted_requests};
+use sources::{GhFetchPlan, gh_fetch_plan, partition_targeted_requests, rank_targeted_requests};
 pub use sources::{
     GhSource, LinearSource, ProviderAction, build_issue_search_qualifiers,
     build_pr_search_qualifiers, default_sources, filter_github_tasks,
@@ -723,6 +723,50 @@ mod engagement_tier_tests {
         assert_eq!(ranked[0].target.number, 2);
         assert!(ranked[0].flags.hot);
         assert!(ranked[0].flags.notification);
+    }
+
+    #[test]
+    fn hot_targets_skip_the_batch_once_the_server_rejects_it() {
+        let hot_node_ids: std::collections::BTreeMap<_, _> =
+            [(target(2), "PR_two".to_string())].into_iter().collect();
+        let requests = vec![
+            sources::TargetedRequest {
+                target: target(2),
+                flags: sources::TargetedFlags {
+                    hot: true,
+                    notification: false,
+                },
+            },
+            sources::TargetedRequest {
+                target: target(1),
+                flags: sources::TargetedFlags {
+                    hot: false,
+                    notification: true,
+                },
+            },
+        ];
+
+        // Healthy server: the hot target with a cached node id rides the
+        // batched `nodes(ids:)` query, the notification target goes alone.
+        let (batched, individual) =
+            partition_targeted_requests(requests.clone(), &hot_node_ids, true);
+        assert_eq!(batched.len(), 1);
+        assert_eq!(batched[0].0.target.number, 2);
+        assert_eq!(batched[0].1, "PR_two");
+        assert_eq!(individual.len(), 1);
+        assert_eq!(individual[0].target.number, 1);
+
+        // A server that rejects the batch (GHES 3.18): nothing is batched,
+        // hot targets are fetched one at a time and keep their rank.
+        let (batched, individual) = partition_targeted_requests(requests, &hot_node_ids, false);
+        assert!(batched.is_empty());
+        assert_eq!(
+            individual
+                .iter()
+                .map(|request| request.target.number)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
     }
 
     #[test]

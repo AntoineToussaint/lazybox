@@ -44,6 +44,7 @@ pub mod event_forward;
 pub mod keep_awake;
 pub mod lifecycle;
 pub mod local_gateway;
+pub mod mcp;
 
 /// Run one store operation on the blocking pool (#1237). The single
 /// SQLite connection mutex must never be held from a tokio worker: a

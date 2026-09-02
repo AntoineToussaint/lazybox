@@ -121,6 +121,12 @@ lazybox-relay     = { path = "crates/relay" }
 lazybox-agents    = { path = "crates/agents" }
 
 # ── Third-party ────────────────────────────────────────────────────────
+# MCP coordination server (#1420). Only the streamable-HTTP server transport
+# is enabled; client/auth/elicitation stay off to keep the transitive tree
+# (axum/tower/schemars) minimal. Identity rides the gateway's own per-session
+# bearer, read from the request Parts — hence the `http` type dependency.
+rmcp               = { version = "3.2", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
+http               = "1"
 tokio              = { version = "1", features = ["full"] }
 futures            = "0.3"
 fs2                = "0.4"

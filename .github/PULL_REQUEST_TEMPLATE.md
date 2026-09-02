@@ -13,3 +13,5 @@ Closes #
 - [ ] `cargo fmt --all` is clean
 - [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean
 - [ ] No new dependencies in the core libraries (`core`, `auth`, `store`)
+
+- [ ] I have read and agree to the [Contributor License Agreement](../CLA.md).

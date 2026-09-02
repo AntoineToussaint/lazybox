@@ -439,6 +439,12 @@ pub struct ServerConfig {
     /// worktree removals) so shutdown can wait for them — see
     /// `register_maintenance_latch` / `drain_maintenance_tasks`.
     pub(crate) maintenance_done: Arc<parking_lot::Mutex<Vec<tokio::sync::oneshot::Receiver<()>>>>,
+    /// MCP cross-agent coordination runtime (#1420): the per-session bearer
+    /// → `SessionKey` registry the MCP server reads to identify a tool caller,
+    /// and the bound endpoint URL set once [`mcp::start`] runs. Shared (Arc)
+    /// so the spawn path can register a token per agent and the listener can
+    /// resolve it. Inert until a listener starts and an agent spawns.
+    pub mcp: Arc<mcp::McpRuntime>,
 }
 
 impl ServerConfig {
@@ -575,6 +581,7 @@ impl ServerConfig {
             worktree_ownership_lock: Arc::new(Mutex::new(())),
             provisioning_worktree_claims: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             maintenance_done: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            mcp: Arc::new(mcp::McpRuntime::default()),
         }
     }
 

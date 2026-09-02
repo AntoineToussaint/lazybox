@@ -79,6 +79,10 @@ pub(crate) struct SpawnPlanInput {
     /// this host's, so the local metering proxy can't reach it — never
     /// inject the proxy URL for a remote spawn (overrides `meter_all` too).
     pub remote: bool,
+    /// Path to the coordination MCP config file for this spawn (#1420), when
+    /// the caller provisioned one via [`crate::mcp::provision_for_spawn`].
+    /// Threaded onto a supporting agent's argv as `--mcp-config <path>`.
+    pub mcp_config_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +153,7 @@ pub(crate) fn build_spawn_plan(
         shell_command,
         meter,
         remote,
+        mcp_config_path,
     } = input;
     let no_permission = access != AgentRunAccess::ReadOnly
         && no_permission_override
@@ -191,6 +196,21 @@ pub(crate) fn build_spawn_plan(
         provider_session_id.as_deref(),
         access,
     )?;
+    // Inject the coordination MCP server (#1420) into a supporting agent's
+    // argv when the caller provisioned a config. Server-side (not in the
+    // agent's own flag builder) because only the daemon knows the bound
+    // endpoint and the per-session token behind the file. Read-only launches
+    // restrict the tool allowlist, so an MCP tool wouldn't be callable — skip.
+    let mut argv = argv;
+    if let Some(path) = mcp_config_path.as_ref()
+        && access == AgentRunAccess::Default
+        && agent
+            .as_deref()
+            .is_some_and(|agent| agent.supports_mcp_config())
+    {
+        argv.push("--mcp-config".into());
+        argv.push(path.to_string_lossy().into_owned());
+    }
     // Deprioritize agent processes (`agent.nice`, default 10) so a big
     // fleet's CPU burn can't starve the interactive stack: a 50-agent
     // fleet at normal priority ran the load average to 17× the core
@@ -581,6 +601,7 @@ mod tests {
             shell_command: String::new(),
             meter: false,
             remote: false,
+            mcp_config_path: None,
         }
     }
 

@@ -1749,6 +1749,19 @@ async fn run_embedded_realm(
         None
     };
 
+    // #1420: when this process owns the daemon, start the cross-agent
+    // coordination MCP server on loopback so spawned agents can discover and
+    // read sibling sessions (whoami / list_sessions / read_session). Starting
+    // it here — before any agent spawns — means the spawn path sees the bound
+    // endpoint and can wire each agent's `--mcp-config`. Advisory: a bind
+    // failure only disables coordination tooling, never the TUI.
+    if embedded_socket.is_some() {
+        match lazybox_server::mcp::start(config.clone()).await {
+            Ok(addr) => tracing::info!("mcp coordination server on {addr}"),
+            Err(error) => tracing::warn!("start mcp coordination server: {error}"),
+        }
+    }
+
     // Two paths into the polling loop:
     //   1. Persisted setup exists → kick polling immediately.
     //   2. No persisted setup → run detection, hand the wizard to

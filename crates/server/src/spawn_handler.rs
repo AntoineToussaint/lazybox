@@ -1717,6 +1717,18 @@ async fn handle_spawn_inner(
                 .as_ref()
                 .map(|ws| ws.metered || workspace_in_metered_space(&cfg, ws))
                 .unwrap_or(false));
+    // #1420: provision the cross-agent coordination MCP for a supporting
+    // agent spawn (Claude). Mints + registers a per-session token and writes
+    // the agent's `--mcp-config` file; `None` for shells, unsupported agents,
+    // read-only launches, or before the MCP listener has started.
+    let mcp_config_path = match (&kind, access) {
+        (TerminalKind::Agent(id), AgentRunAccess::Default) => {
+            config.agents.get(id).and_then(|agent| {
+                crate::mcp::provision_for_spawn(config, &session_key, agent.as_ref())
+            })
+        }
+        _ => None,
+    };
     let plan = match build_spawn_plan(
         SpawnPlanInput {
             session_key,
@@ -1744,6 +1756,7 @@ async fn handle_spawn_inner(
             shell_command,
             meter,
             remote,
+            mcp_config_path,
         },
         &cfg,
         &config.agents,
@@ -12009,6 +12022,7 @@ mod tests {
                 shell_command: String::new(),
                 meter: false,
                 remote: false,
+                mcp_config_path: None,
             },
             &lazybox_config::Config::default(),
             &config.agents,

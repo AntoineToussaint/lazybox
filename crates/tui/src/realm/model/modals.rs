@@ -3131,8 +3131,7 @@ impl<T: TerminalAdapter> Model<T> {
         // a picker that would then re-provision the wrong spawn — it falls
         // through to the failure modal instead.
         if let lazybox_ipc::WorktreeStepStatus::Failed(message) = &status
-            && lazybox_ipc::WorktreeRecovery::classify(message)
-                == lazybox_ipc::WorktreeRecovery::LinearUnmapped
+            && lazybox_ipc::WorktreeRecovery::classify(message).picks_repo()
             && let Some(spawn) = self.last_spawn.clone().filter(|cmd| {
                 matches!(
                     cmd,
@@ -3325,8 +3324,7 @@ impl<T: TerminalAdapter> Model<T> {
         // (#594), so `last_spawn` is the spawn that just failed — hand it to
         // the picker to re-provision. Only when there's genuinely no repo to
         // propose does it fall through to the failure modal below.
-        if lazybox_ipc::WorktreeRecovery::classify(message)
-            == lazybox_ipc::WorktreeRecovery::LinearUnmapped
+        if lazybox_ipc::WorktreeRecovery::classify(message).picks_repo()
             && self.open_linear_team_repo_picker(message, spawn)
         {
             return true;
@@ -3500,13 +3498,14 @@ impl<T: TerminalAdapter> Model<T> {
     /// never dead-ends. With no team parseable from the error, or no GitHub
     /// repos to offer, it falls back to the manual hint.
     pub(super) fn pick_repo_for_linear_team(&mut self) {
-        let Some((team, failed_key)) = self.worktree_progress.as_ref().and_then(|state| {
-            let team = state
-                .error()
-                .and_then(lazybox_ipc::WorktreeRecovery::linear_team)?;
-            Some((team, state.session_key.clone()))
+        let Some((target, failed_key)) = self.worktree_progress.as_ref().and_then(|state| {
+            let target = state.error().and_then(TrackerTarget::parse)?;
+            Some((target, state.session_key.clone()))
         }) else {
-            self.flash_hint("couldn't read the team — set providers.linear.teams by hand");
+            self.flash_hint(
+                "couldn't read the team/project — set providers.linear.teams or \
+                 providers.jira.projects by hand",
+            );
             return;
         };
         // Capture the failed spawn to re-provision only when it's this
@@ -3519,14 +3518,15 @@ impl<T: TerminalAdapter> Model<T> {
                 lazybox_ipc::Command::Spawn { session_key, .. } if *session_key == failed_key,
             )
         });
-        if !self.mount_linear_team_repo_picker(&team, spawn) {
+        let label = target.label();
+        if !self.mount_tracker_repo_picker(target, spawn) {
             // Genuinely nothing to propose: the user tracks no GitHub repo,
             // so there's no repo to map the team *to* either. Point at the
             // fix (add a repo) rather than at a config key that can't yet be
             // filled in (#1041, review).
             self.flash_info(format!(
                 "no GitHub repos in scope yet — add one to lazybox, then `w w` \
-                 offers it for Linear team {team}"
+                 offers it for {label}"
             ));
         }
     }
@@ -3548,10 +3548,12 @@ impl<T: TerminalAdapter> Model<T> {
         // here. The first opens the picker (and captures its spawn); the
         // second must be a no-op — neither a second stacked picker nor an
         // overwrite of the captured spawn with a later, racing one.
-        if self.modal_stack.contains(&Id::LinearTeamRepo) {
+        if self.modal_stack.contains(&Id::LinearTeamRepo)
+            || self.modal_stack.contains(&Id::JiraProjectRepo)
+        {
             return true;
         }
-        let Some(team) = lazybox_ipc::WorktreeRecovery::linear_team(message) else {
+        let Some(target) = TrackerTarget::parse(message) else {
             return false;
         };
         // Never fabricated failure state: a spinner from an earlier progress
@@ -3559,37 +3561,55 @@ impl<T: TerminalAdapter> Model<T> {
         // the user sees.
         self.force_dismiss_worktree_progress();
         self.worktree_progress_dismissed = None;
-        self.mount_linear_team_repo_picker(&team, Some(spawn))
+        self.mount_tracker_repo_picker(target, Some(spawn))
     }
 
-    /// Mount the team→repo `Choice` picker for `team`, ranking repos the
-    /// team's other tickets already link to first (#1041), and stash `spawn`
-    /// as the spawn the pick will re-provision. Returns `false` without
-    /// mounting (or capturing) when no GitHub repo is tracked yet — a blank
-    /// picker helps no one.
-    fn mount_linear_team_repo_picker(
+    /// Mount the tracker→repo `Choice` picker for `target` — for a Linear
+    /// team, ranking repos the team's other tickets already link to first
+    /// (#1041) — and stash `spawn` as the spawn the pick will re-provision.
+    /// Returns `false` without mounting (or capturing) when no GitHub repo
+    /// is tracked yet — a blank picker helps no one.
+    fn mount_tracker_repo_picker(
         &mut self,
-        team: &str,
+        target: TrackerTarget,
         spawn: Option<lazybox_ipc::Command>,
     ) -> bool {
         use crate::realm::components::choice::Choice;
 
-        let repos = self.sidebar.github_repos_ranked_for_linear_team(team);
+        let repos = match &target {
+            TrackerTarget::LinearTeam(team) => {
+                self.sidebar.github_repos_ranked_for_linear_team(team)
+            }
+            TrackerTarget::JiraProject(_) => self.sidebar.github_repos_for_picker(),
+        };
         if repos.is_empty() {
             return false;
         }
         self.linear_map_spawn = spawn;
-        self.set_modal_flow(ModalFlow::LinearTeamRepo {
-            team: team.to_string(),
-        });
+        let label = target.label();
+        let (id, flow, title, noun) = match target {
+            TrackerTarget::LinearTeam(team) => (
+                Id::LinearTeamRepo,
+                ModalFlow::LinearTeamRepo { team },
+                "Map Linear team",
+                "tickets",
+            ),
+            TrackerTarget::JiraProject(project) => (
+                Id::JiraProjectRepo,
+                ModalFlow::JiraProjectRepo { project },
+                "Map Jira project",
+                "issues",
+            ),
+        };
+        self.set_modal_flow(flow);
         let modal = Choice::single(
-            format!("Which repo should Linear team {team} use? (saved for its future tickets)"),
+            format!("Which repo should {label} use? (saved for its future {noun})"),
             repos,
         )
-        .title("Map Linear team")
+        .title(title)
         .label(|repo: &String| repo.clone())
         .payload_for(|repo: &String| ChoicePayload::Text(repo.clone()));
-        self.mount_modal(Id::LinearTeamRepo, modal);
+        self.mount_modal(id, modal);
         true
     }
 
@@ -4042,5 +4062,36 @@ mod tests {
     #[test]
     fn age_formatter_handles_missing_mtime() {
         assert_eq!(format_age_short(None), "—");
+    }
+}
+
+/// The tracker-side key an unmapped-repo provisioning failure names —
+/// a Linear team or a Jira project — parsed from the daemon's message so
+/// one picker flow can persist the mapping under the right config key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TrackerTarget {
+    LinearTeam(String),
+    JiraProject(String),
+}
+
+impl TrackerTarget {
+    fn parse(message: &str) -> Option<Self> {
+        match lazybox_ipc::WorktreeRecovery::classify(message) {
+            lazybox_ipc::WorktreeRecovery::LinearUnmapped => {
+                lazybox_ipc::WorktreeRecovery::linear_team(message).map(Self::LinearTeam)
+            }
+            lazybox_ipc::WorktreeRecovery::JiraUnmapped => {
+                lazybox_ipc::WorktreeRecovery::jira_project(message).map(Self::JiraProject)
+            }
+            _ => None,
+        }
+    }
+
+    /// `Linear team OBI` / `Jira project ENG`, for prompts and notices.
+    fn label(&self) -> String {
+        match self {
+            Self::LinearTeam(team) => format!("Linear team {team}"),
+            Self::JiraProject(project) => format!("Jira project {project}"),
+        }
     }
 }

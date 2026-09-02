@@ -137,6 +137,12 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 _ => PickFlow::Plain,
             },
+            Id::JiraProjectRepo => match &self.modal_flow {
+                Some(ModalFlow::JiraProjectRepo { project }) => PickFlow::JiraProjectRepo {
+                    project: project.clone(),
+                },
+                _ => PickFlow::Plain,
+            },
             Id::MoveToSpacePicker => match &self.modal_flow {
                 Some(ModalFlow::MoveToSpacePick { source, entries }) => PickFlow::MoveToSpace {
                     source: Some(source.clone()),
@@ -278,6 +284,7 @@ impl<T: TerminalAdapter> Model<T> {
             | Id::AddAssignees
             | Id::ImportCheckoutList
             | Id::LinearTeamRepo
+            | Id::JiraProjectRepo
             | Id::HopperProject
             | Id::MoveToSpacePicker
             | Id::InspectList => {
@@ -578,6 +585,22 @@ impl<T: TerminalAdapter> Model<T> {
                         // no failure modal) or as the last-resort recovery, so
                         // it re-sends unconditionally rather than gating on a
                         // failed checklist.
+                        self.reprovision_after_linear_map();
+                    }
+                    Err(error) => self.flash_error(format!("couldn't save mapping: {error}")),
+                }
+            }
+            PickOutcome::MapJiraProject { project, repo } => {
+                let (project_key, repo_slug) = (project.clone(), repo.clone());
+                match lazybox_config::Config::save_with(move |config| {
+                    config
+                        .providers
+                        .jira
+                        .projects
+                        .insert(project_key, repo_slug);
+                }) {
+                    Ok(()) => {
+                        self.flash_info(format!("mapped Jira project {project} → {repo}"));
                         self.reprovision_after_linear_map();
                     }
                     Err(error) => self.flash_error(format!("couldn't save mapping: {error}")),

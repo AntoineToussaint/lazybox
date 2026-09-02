@@ -3583,6 +3583,10 @@ fn repo_for_workspace_provision(
         // a clonable GitHub repo — resolve the real one from the team map
         // (or fail loudly) instead of returning `task.repo` verbatim.
         Some(task) if task.id.source == "linear" => linear_repo_for_task(cfg, task).map(Some),
+        // Likewise a Jira issue's `repo` is the synthetic `jira/<site>`.
+        Some(task) if task.id.source == lazybox_jira::SOURCE => {
+            jira_repo_for_task(cfg, task).map(Some)
+        }
         Some(task) => Ok(task.repo.clone()),
         None if lazybox_core::workspace_project_key(workspace)
             .is_some_and(|key| key.source_prefix() == "github") =>
@@ -3660,6 +3664,42 @@ fn linear_repo_for_task(
                 .into(),
         ),
     })
+}
+
+/// Resolve the GitHub repo a Jira issue is worked on in, from the
+/// `providers.jira.projects` map keyed by the issue's project (the
+/// `ENG` of `ENG-123`). An unmapped project fails with the message the
+/// client classifies as `JiraUnmapped` so it can offer the repo picker
+/// instead of a dead-end retry; the project key rides back-quoted for
+/// `WorktreeRecovery::jira_project`.
+fn jira_repo_for_task(
+    cfg: &lazybox_config::Config,
+    task: &Task,
+) -> Result<String, crate::ServerError> {
+    let project = task
+        .id
+        .key
+        .rsplit_once('-')
+        .map(|(project, _)| project)
+        .filter(|p| !p.is_empty());
+    match project {
+        Some(project) => cfg
+            .providers
+            .jira
+            .projects
+            .get(project)
+            .cloned()
+            .ok_or_else(|| {
+                crate::ServerError::Workspace(format!(
+                    "Jira project `{project}` has no repo mapping — set \
+                     providers.jira.projects.{project} in ~/.lazybox/config.yaml"
+                ))
+            }),
+        None => Err(crate::ServerError::Workspace(format!(
+            "Jira issue `{}` has no project key — cannot resolve a repo to work in",
+            task.id.key
+        ))),
+    }
 }
 
 /// The `owner/repo` of a Linear ticket's linked GitHub PR, if any. The
@@ -17719,6 +17759,37 @@ mod tests {
         assert_eq!(
             lazybox_ipc::WorktreeRecovery::linear_team(&message).as_deref(),
             Some("OBI"),
+        );
+    }
+
+    #[test]
+    fn jira_repo_for_task_resolves_mapped_project() {
+        let mut cfg = lazybox_config::Config::default();
+        cfg.providers
+            .jira
+            .projects
+            .insert("ENG".into(), "acme/widget".into());
+        let mut t = task_for("jira", "ENG-123");
+        t.repo = Some("jira/acme".into());
+        assert_eq!(jira_repo_for_task(&cfg, &t).unwrap(), "acme/widget");
+    }
+
+    /// An unmapped project is a hard error whose wire text the client
+    /// classifies as `JiraUnmapped` and parses the project back out of, so
+    /// the modal offers the repo picker — never a clone of `jira/<site>`.
+    #[test]
+    fn jira_repo_for_task_unmapped_project_errors() {
+        let cfg = lazybox_config::Config::default();
+        let mut t = task_for("jira", "ENG-123");
+        t.repo = Some("jira/acme".into());
+        let message = jira_repo_for_task(&cfg, &t).unwrap_err().to_string();
+        assert_eq!(
+            lazybox_ipc::WorktreeRecovery::classify(&message),
+            lazybox_ipc::WorktreeRecovery::JiraUnmapped,
+        );
+        assert_eq!(
+            lazybox_ipc::WorktreeRecovery::jira_project(&message).as_deref(),
+            Some("ENG"),
         );
     }
 

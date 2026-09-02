@@ -282,12 +282,13 @@ pub fn provider_display(id: &str) -> String {
     match id {
         "github" => "GitHub".into(),
         "linear" => "Linear".into(),
+        "jira" => "Jira".into(),
         other => other.to_string(),
     }
 }
 
 /// Provider-specific filter options. GitHub uses a per-type schema
-/// (`pr.*` / `issue.*`); Linear is flat.
+/// (`pr.*` / `issue.*`); Linear and Jira are flat.
 fn filter_options(provider_id: &str) -> Vec<FilterOption> {
     match provider_id {
         "github" => vec![
@@ -336,6 +337,20 @@ fn filter_options(provider_id: &str) -> Vec<FilterOption> {
             FilterOption {
                 key: "role.mentioned".into(),
                 label: "Mentioned me".into(),
+            },
+        ],
+        "jira" => vec![
+            FilterOption {
+                key: "role.assignee".into(),
+                label: "Assigned to me".into(),
+            },
+            FilterOption {
+                key: "role.author".into(),
+                label: "I reported".into(),
+            },
+            FilterOption {
+                key: "role.mentioned".into(),
+                label: "Watching".into(),
             },
         ],
         _ => vec![],
@@ -1442,6 +1457,14 @@ mod tests {
                 .iter()
                 .any(|f| f.key == "role.subscriber")
         );
+        // Jira mirrors Linear's flat roles — an empty filter screen used
+        // to read as "nothing to configure" and lost the provider tick.
+        let jira = filter_options("jira");
+        assert_eq!(
+            jira.iter().map(|f| f.key.as_str()).collect::<Vec<_>>(),
+            ["role.assignee", "role.author", "role.mentioned"]
+        );
+        assert_eq!(provider_display("jira"), "Jira");
         assert!(filter_options("nonexistent").is_empty());
     }
 

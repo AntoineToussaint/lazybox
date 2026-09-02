@@ -751,7 +751,8 @@ impl Workspace {
     ///   replacing, lazy-fetched fields on the existing PR are
     ///   preserved if the incoming task left them empty — see
     ///   `preserve_lazy_pr_fields` for the list.
-    /// - GitHub issue → `gh_issues` (de-duped by `TaskId`).
+    /// - GitHub issue, or any provider-typed issue (Jira, …) → `gh_issues`
+    ///   (de-duped by `TaskId`).
     /// - Linear ticket → `linear_issues` (de-duped by `TaskId`).
     /// - Anything else → silently dropped (we don't have a slot).
     ///
@@ -1473,8 +1474,13 @@ fn classify(task: &Task) -> TaskSlot {
     }
     // Anything else from a known issue-tracking source is treated
     // as an issue. The explicit `/issues/` check catches paths even
-    // if `source` is set to something custom.
-    if task.url.contains("/issues/") || task.id.source == "github" {
+    // if `source` is set to something custom, and a provider that
+    // typed its task `Issue` (Jira's `/browse/KEY` URLs say nothing)
+    // is believed over the URL heuristic.
+    if task.url.contains("/issues/")
+        || task.id.source == "github"
+        || task.kind == Some(crate::TaskKind::Issue)
+    {
         return TaskSlot::GhIssue;
     }
     TaskSlot::Unknown
@@ -2439,6 +2445,24 @@ mod tests {
         let ws = Workspace::from_task(t, now());
         assert!(ws.pr.is_none(), "typed Issue is not routed to the PR slot");
         assert_eq!(ws.gh_issues.len(), 1);
+    }
+
+    #[test]
+    fn classify_routes_typed_issue_from_any_source_to_the_issue_slot() {
+        // A Jira row: `/browse/KEY` URL, source neither github nor
+        // linear. Before the typed-kind check it fell through to
+        // `Unknown` and was dropped, leaving a title-only workspace with
+        // no key, role, status, or parent to nest under.
+        let mut t = issue("jira", "DEMO-954");
+        t.url = "https://example.atlassian.net/browse/DEMO-954".into();
+        t.kind = Some(crate::TaskKind::Issue);
+        let ws = Workspace::from_task(t, now());
+        assert_eq!(ws.gh_issues.len(), 1, "typed issue attaches");
+        assert!(ws.pr.is_none());
+        assert_eq!(
+            ws.primary_task().map(|t| t.id.key.as_str()),
+            Some("DEMO-954")
+        );
     }
 
     #[test]

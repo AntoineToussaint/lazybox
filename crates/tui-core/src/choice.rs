@@ -145,6 +145,11 @@ pub enum PickFlow {
     LinearTeamRepo {
         team: String,
     },
+    /// Repo picker for an unmapped Jira project — the Jira twin of
+    /// [`Self::LinearTeamRepo`]; the pick becomes [`PickOutcome::MapJiraProject`].
+    JiraProjectRepo {
+        project: String,
+    },
     Reviewers {
         workspace_key: Option<WorkspaceKey>,
     },
@@ -345,6 +350,12 @@ pub enum PickOutcome<F> {
     /// stuck Linear spawn (#1041).
     MapLinearTeam {
         team: String,
+        repo: String,
+    },
+    /// Persist `providers.jira.projects.<project> = repo` and re-provision
+    /// the stuck Jira spawn — the Jira twin of [`Self::MapLinearTeam`].
+    MapJiraProject {
+        project: String,
         repo: String,
     },
     Reviewers {
@@ -579,6 +590,14 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
             .and_then(P::as_text)
             .map(|repo| PickOutcome::MapLinearTeam {
                 team,
+                repo: repo.to_string(),
+            })
+            .unwrap_or(PickOutcome::NoOp),
+        PickFlow::JiraProjectRepo { project } => picks
+            .first()
+            .and_then(P::as_text)
+            .map(|repo| PickOutcome::MapJiraProject {
+                project,
                 repo: repo.to_string(),
             })
             .unwrap_or(PickOutcome::NoOp),
@@ -1281,6 +1300,29 @@ mod tests {
         ));
         assert!(matches!(
             resolve_pick::<Payload>(&[], PickFlow::LinearTeamRepo { team: "OBI".into() }),
+            PickOutcome::NoOp
+        ));
+    }
+
+    /// The Jira twin: the picked repo maps the project the picker was
+    /// opened for; an empty pick is a no-op.
+    #[test]
+    fn jira_project_repo_pick_maps_the_project() {
+        assert!(matches!(
+            resolve_pick(
+                &[Payload::Text("acme/widget".into())],
+                PickFlow::JiraProjectRepo { project: "ENG".into() },
+            ),
+            PickOutcome::MapJiraProject { project, repo }
+                if project == "ENG" && repo == "acme/widget"
+        ));
+        assert!(matches!(
+            resolve_pick::<Payload>(
+                &[],
+                PickFlow::JiraProjectRepo {
+                    project: "ENG".into()
+                }
+            ),
             PickOutcome::NoOp
         ));
     }

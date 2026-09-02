@@ -1771,8 +1771,7 @@ impl Sidebar {
                     .workspaces
                     .get(k)
                     .and_then(|w| w.primary_task())
-                    .and_then(crate::components::task_label::pr_number)
-                    .map(|n| 1 + n.checked_ilog10().unwrap_or(0) as usize),
+                    .and_then(crate::components::task_label::identifier_width),
                 _ => None,
             })
             .max()

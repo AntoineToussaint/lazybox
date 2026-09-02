@@ -628,6 +628,15 @@ async fn prepare_upsert(
                     "snooze wake condition fired — waking workspace",
                 );
             }
+            // A stored row that never got its task attached (a provider
+            // whose tasks the slot router used to drop) has a project
+            // key derived from a task shape we no longer produce; take
+            // the current one so the row groups with its peers. A
+            // workspace holding a task keeps its key — that's where a
+            // move landed it.
+            if w.primary_task().is_none() {
+                w.project_key = lazybox_core::project_key_for_task(&task);
+            }
             w.attach_task(task);
             w
         }

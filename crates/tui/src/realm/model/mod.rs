@@ -165,6 +165,11 @@ pub enum Id {
     /// `ModalFlow::LinearTeamRepo`; `Msg::ChoicePicked` persists
     /// `providers.linear.teams.<team>` and re-provisions the stuck spawn.
     LinearTeamRepo,
+    /// Repo picker for an unmapped Jira project — the Jira twin of
+    /// [`Self::LinearTeamRepo`]. The project lives in
+    /// `ModalFlow::JiraProjectRepo`; the pick persists
+    /// `providers.jira.projects.<project>` and re-provisions the spawn.
+    JiraProjectRepo,
     /// Picker for selecting an editor when 2+ are detected.
     /// Submit → `editors::launch(template, worktree)`.
     Editor,
@@ -966,6 +971,10 @@ pub(crate) enum ModalFlow {
     /// key the picked `owner/repo` will be persisted under. Consumed by
     /// `Msg::ChoicePicked` → `PickOutcome::MapLinearTeam`.
     LinearTeamRepo { team: String },
+    /// Repo picker for an unmapped Jira project, carrying the project key
+    /// the picked `owner/repo` will be persisted under. Consumed by
+    /// `Msg::ChoicePicked` → `PickOutcome::MapJiraProject`.
+    JiraProjectRepo { project: String },
     /// New-workspace name input, carrying the project to create under.
     NewWorkspaceProject { project: lazybox_core::ProjectKey },
     /// Rename-workspace name input (#744), carrying the workspace to

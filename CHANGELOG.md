@@ -76,6 +76,10 @@ through auth expiry and context resets, and spawns never dead-end.
   high-resolution demo hero, resource-awareness prompting guidance, and CI no
   longer hard-blocks on the cargo-deny yanked check.
 
+### Install
+
+brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox
+
 ## [0.1.13] - 2026-08-24
 
 The rate-limit, liveness, and multi-agent release. GitHub API pressure is now

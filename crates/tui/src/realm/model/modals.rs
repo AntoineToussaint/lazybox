@@ -1793,6 +1793,7 @@ impl<T: TerminalAdapter> Model<T> {
     pub(crate) fn mount_merge_history_modal(&mut self, repo: String) {
         use crate::realm::components::merge_history_modal::MergeHistoryModal;
 
+        self.merge_history_repo = Some(repo.clone());
         self.mount_modal(Id::MergeHistory, MergeHistoryModal::loading(repo));
     }
 
@@ -1811,6 +1812,12 @@ impl<T: TerminalAdapter> Model<T> {
         use crate::realm::components::merge_history_modal::MergeHistoryModal;
 
         if self.modal_stack.last() != Some(&Id::MergeHistory) {
+            return;
+        }
+        // The reply is keyed by repo. Drop one for any repo other than the
+        // ledger's current subject so a slow or out-of-order reply for a
+        // since-reopened repo can't repaint it with the wrong merges.
+        if self.merge_history_repo.as_deref() != Some(repo.as_str()) {
             return;
         }
         self.mount_modal(

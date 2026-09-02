@@ -1942,8 +1942,10 @@ impl<T: TerminalAdapter> Model<T> {
             error,
         } = &event
         {
+            // `update_merge_history` repaints (via `mount_modal`) only when it
+            // applies — a reply dropped for a closed ledger or a mismatched
+            // repo leaves the screen untouched rather than forcing a redraw.
             self.update_merge_history(repo.clone(), entries.clone(), error.clone());
-            self.redraw = true;
             return;
         }
         // Usage-stats snapshot (#1339) — repaint the open stats window and

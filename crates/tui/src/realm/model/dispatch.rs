@@ -2405,8 +2405,16 @@ impl<T: TerminalAdapter> Model<T> {
                 // cursor, so it works on a repo header, a workspace, or a
                 // session row alike. The mount fires the daemon fetch and
                 // shows a loading state until the reply lands.
-                let Some(repo) = self.sidebar.cursor_repo() else {
-                    self.flash_info("no repo under the cursor");
+                // `cursor_repo` also yields non-GitHub group labels — the
+                // `(no repo)` bucket, a Linear team name — which aren't
+                // `owner/name` and can't be a GitHub merge search. Merge
+                // history is GitHub-only, so require a slug rather than firing
+                // a query that could only come back an error.
+                let repo = self.sidebar.cursor_repo();
+                let Some(repo) = repo.filter(|r| r.contains('/')) else {
+                    self.flash_info(
+                        "merge history is GitHub-only — no GitHub repo under the cursor",
+                    );
                     return cmds;
                 };
                 self.mount_merge_history_modal(repo.clone());

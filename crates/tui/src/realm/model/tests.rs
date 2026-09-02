@@ -503,13 +503,30 @@ mod effects_tests {
         );
         assert_eq!(model.modal_stack.last(), Some(&Id::MergeHistory));
 
-        // The reply repaints the still-open ledger (no crash, still mounted).
+        // A late reply for a DIFFERENT repo — a since-reopened ledger, or an
+        // out-of-order pair — is dropped rather than repainting with the
+        // wrong repo's merges. `update_merge_history` repaints only when it
+        // applies, so a dropped reply leaves `redraw` untouched.
+        model.redraw = false;
+        model.handle_daemon_event(lazybox_ipc::Event::RepoMergeHistory {
+            repo: "other/repo".into(),
+            entries: vec![],
+            error: None,
+        });
+        assert!(
+            !model.redraw,
+            "a reply for a different repo than the open ledger must be dropped"
+        );
+
+        // The reply for the ledger's own repo repaints it.
+        model.redraw = false;
         model.handle_daemon_event(lazybox_ipc::Event::RepoMergeHistory {
             repo: "o/r".into(),
             entries: vec![],
             error: None,
         });
         assert_eq!(model.modal_stack.last(), Some(&Id::MergeHistory));
+        assert!(model.redraw, "the matching reply repaints the ledger");
     }
 
     /// A merge-history reply that lands while the ledger is closed is

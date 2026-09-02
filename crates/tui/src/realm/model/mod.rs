@@ -1853,6 +1853,13 @@ pub struct Model<T: TerminalAdapter> {
     /// (the reply then disarms it), so it stays out of [`ModalFlow`].
     /// Cleared on mount / submit / dismiss / fetch-failure.
     awaiting_repo_labels: Option<lazybox_core::WorkspaceKey>,
+    /// Repo the currently-open merge-history ledger (#1432) is showing.
+    /// The `FetchRepoMergeHistory` reply is keyed by repo, so this gates
+    /// `update_merge_history`: a reply for any repo other than the one the
+    /// ledger is currently displaying is dropped, so a slow reply for a
+    /// since-reopened repo (or an out-of-order pair) can't repaint the
+    /// ledger with the wrong repo's merges. `None` when no ledger is open.
+    merge_history_repo: Option<String>,
     /// Workspace whose requestable-reviewer set we've asked the daemon
     /// for (`g r` → `Command::FetchRequestableReviewers`), waiting on
     /// the async `Event::RequestableReviewers` reply to mount the
@@ -2492,6 +2499,7 @@ impl<T: TerminalAdapter> Model<T> {
             conversion: None,
             last_reply_body: None,
             awaiting_repo_labels: None,
+            merge_history_repo: None,
             awaiting_requestable_reviewers: None,
             pending_diff_session: None,
             pending_mutations: Vec::new(),

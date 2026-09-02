@@ -290,6 +290,13 @@ pub trait Agent: Send + Sync {
         None
     }
 
+    /// Whether this agent accepts an explicit MCP-server config file the
+    /// daemon can inject (Claude's `--mcp-config`). Used to wire the lazybox
+    /// coordination MCP server (#1420) into a spawn. Default: no.
+    fn supports_mcp_config(&self) -> bool {
+        false
+    }
+
     /// Command + args to spawn a fresh session.
     fn spawn(&self, ctx: &SpawnCtx) -> Vec<String>;
 
@@ -731,6 +738,9 @@ pub mod builtins {
         }
         fn structured_protocol(&self) -> Option<StructuredAgentProtocol> {
             Some(StructuredAgentProtocol::ClaudeStreamJson)
+        }
+        fn supports_mcp_config(&self) -> bool {
+            true
         }
         fn pty_protocol(&self) -> PtyProtocol {
             PtyProtocol::GUARDED_COMPOSER

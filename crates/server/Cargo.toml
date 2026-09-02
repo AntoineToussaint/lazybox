@@ -44,7 +44,17 @@ libc             = "0.2"
 uuid             = { version = "1", features = ["v4"] }
 bytes            = "1"
 hyper            = { version = "1", features = ["server", "http1"] }
-hyper-util       = { version = "0.1", features = ["server", "tokio"] }
+hyper-util       = { version = "0.1", features = ["server", "service", "tokio"] }
+# MCP coordination server (#1420): rmcp's StreamableHttpService is a tower
+# Service wrapped onto the existing hyper stack via TowerToHyperService, so
+# no axum listener of our own. `http` names the request Parts type rmcp
+# stashes in the tool RequestContext, from which we read the bearer.
+rmcp             = { workspace = true }
+http             = { workspace = true }
+# Loopback listener for the MCP server: SO_REUSEADDR so the coordination port
+# can be reused across a daemon restart, letting a reattached agent's baked
+# endpoint URL keep resolving (#1420).
+socket2          = "0.6"
 http-body-util   = { version = "0.1", features = ["channel"] }
 # Outbound leg of the metering proxy (#1062): forwards agent traffic to
 # the real Anthropic/OpenAI upstream and streams the response back. TLS

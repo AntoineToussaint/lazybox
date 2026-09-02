@@ -1717,6 +1717,23 @@ async fn handle_spawn_inner(
                 .as_ref()
                 .map(|ws| ws.metered || workspace_in_metered_space(&cfg, ws))
                 .unwrap_or(false));
+    // #1420: provision the cross-agent coordination MCP for a supporting
+    // agent spawn (Claude). Mints + registers a per-session token and writes
+    // the agent's `--mcp-config` file; `None` for shells, unsupported agents,
+    // read-only launches, or before the MCP listener has started.
+    let mcp_config_path = match (&kind, access) {
+        (TerminalKind::Agent(id), AgentRunAccess::Default) => {
+            config.agents.get(id).and_then(|agent| {
+                crate::mcp::provision_for_spawn(config, &session_key, agent.as_ref())
+            })
+        }
+        _ => None,
+    };
+    // Persist the freshly-minted token so a restart-surviving (tmux) agent's
+    // baked bearer keeps resolving after a daemon restart (#1420).
+    if mcp_config_path.is_some() {
+        crate::mcp::persist_tokens(config).await;
+    }
     let plan = match build_spawn_plan(
         SpawnPlanInput {
             session_key,
@@ -1744,6 +1761,7 @@ async fn handle_spawn_inner(
             shell_command,
             meter,
             remote,
+            mcp_config_path,
         },
         &cfg,
         &config.agents,
@@ -6115,6 +6133,22 @@ async fn finish_terminal(
     // tidy. Reconstructed from the id, no bookkeeping needed.
     let _ = std::fs::remove_file(hook_settings_path(terminal_id));
     let _ = std::fs::remove_file(hook_backend_key_path(terminal_id));
+    // #1420: when the last agent terminal for this session ends, revoke its
+    // coordination bearer and drop its on-disk MCP config so a dead session's
+    // token stops resolving (a terminated agent could otherwise keep reading
+    // every live sibling) and its bearer file leaves disk. The claimed
+    // terminal is already non-live, so `running_agent_terminal` returning
+    // `None` means no sibling agent remains in this workspace — guarding on it
+    // keeps a second agent in the same workspace working.
+    if let Some(session_key) = ended_agent_workspace.as_ref()
+        && config
+            .terminal
+            .running_agent_terminal(session_key)
+            .await
+            .is_none()
+    {
+        crate::mcp::deprovision_session(config, session_key).await;
+    }
     config
         .terminal
         .forget_terminal_persistence_lock(backend_key);
@@ -12009,6 +12043,7 @@ mod tests {
                 shell_command: String::new(),
                 meter: false,
                 remote: false,
+                mcp_config_path: None,
             },
             &lazybox_config::Config::default(),
             &config.agents,

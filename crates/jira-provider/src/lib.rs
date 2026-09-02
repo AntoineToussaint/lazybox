@@ -202,11 +202,25 @@ impl JiraClient {
     /// parent — see [`Task::parent`]. Ancestors are context rows: they
     /// carry whatever role the viewer actually has on them (usually none,
     /// i.e. [`TaskRole::Mentioned`]) and are not filtered by `roles`.
+    ///
+    /// The viewer `accountId` is only needed to attribute each row's
+    /// role. If `/myself` can't be resolved this tick (a transient blip
+    /// or a token scope change) the fetch does NOT abort — losing every
+    /// Jira row over a labeling detail is the worse failure — it proceeds
+    /// with an unresolved viewer, which attributes rows as
+    /// [`TaskRole::Mentioned`] until the next tick resolves the id (the
+    /// cache only stores successes, so the retry is automatic).
     pub async fn fetch_involved(&self, roles: &JiraRoles) -> Result<InvolvedIssues, JiraError> {
         let Some(jql) = roles.jql() else {
             return Err(JiraError::Config("no jira roles enabled".into()));
         };
-        let viewer = self.viewer_account_id().await?;
+        let viewer = self.viewer_account_id().await.unwrap_or_else(|e| {
+            tracing::warn!(
+                "jira: could not resolve viewer accountId ({e}); attributing rows as \
+                 watched until it resolves"
+            );
+            String::new()
+        });
         let mut involved = page_to_involved(self.search(&jql).await?, &self.base, &viewer);
 
         let mut known: BTreeSet<String> = involved.tasks.iter().map(|t| t.id.key.clone()).collect();
@@ -316,6 +330,13 @@ fn page_to_involved(page: SearchPage, base: &str, viewer_account_id: &str) -> In
 /// beats reported beats everything else (watching, or a row that only
 /// matched because Jira auto-watched the user onto it).
 fn role_for(f: &Fields, viewer_account_id: &str) -> TaskRole {
+    // Viewer id unresolved (a transient `/myself` failure) — we can't
+    // tell which involvement matched the query, so attribute the weakest
+    // role rather than over-claim assignment. Rows still surface; the
+    // next tick that resolves the id relabels them.
+    if viewer_account_id.is_empty() {
+        return TaskRole::Mentioned;
+    }
     let is_viewer = |u: &Option<User>| {
         u.as_ref()
             .and_then(|u| u.account_id.as_deref())
@@ -619,6 +640,21 @@ mod tests {
         let mut v = issue_json();
         v["fields"]["assignee"] = serde_json::Value::Null;
         assert_eq!(task_from(v).role, TaskRole::Mentioned);
+    }
+
+    #[test]
+    fn unresolved_viewer_downgrades_role_but_keeps_the_row() {
+        // A transient `/myself` failure leaves the viewer id empty:
+        // `fetch_involved` proceeds rather than dropping every Jira row.
+        // `issue_json`'s assignee IS the viewer, so a resolved id would
+        // read Assignee — an empty id must downgrade to the weakest role
+        // (never over-claim assignment) while the row still maps.
+        let issue: Issue = serde_json::from_value(issue_json()).unwrap();
+        let resolved = issue_to_task(&issue, BASE, VIEWER);
+        assert_eq!(resolved.role, TaskRole::Assignee);
+        let unresolved = issue_to_task(&issue, BASE, "");
+        assert_eq!(unresolved.role, TaskRole::Mentioned);
+        assert_eq!(unresolved.id.key, "DEMO-954", "the row still maps");
     }
 
     #[test]

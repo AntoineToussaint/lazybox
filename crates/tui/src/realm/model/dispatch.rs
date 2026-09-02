@@ -2399,6 +2399,27 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                 }
             }
+            Action::MergeHistory => {
+                // Repo-scoped (#1432): the "what's been landing here" ledger
+                // for the cursor's repo group — resolves from the sidebar
+                // cursor, so it works on a repo header, a workspace, or a
+                // session row alike. The mount fires the daemon fetch and
+                // shows a loading state until the reply lands.
+                // `cursor_repo` also yields non-GitHub group labels — the
+                // `(no repo)` bucket, a Linear team name — which aren't
+                // `owner/name` and can't be a GitHub merge search. Merge
+                // history is GitHub-only, so require a slug rather than firing
+                // a query that could only come back an error.
+                let repo = self.sidebar.cursor_repo();
+                let Some(repo) = repo.filter(|r| r.contains('/')) else {
+                    self.flash_info(
+                        "merge history is GitHub-only — no GitHub repo under the cursor",
+                    );
+                    return cmds;
+                };
+                self.mount_merge_history_modal(repo.clone());
+                cmds.push(IpcCommand::FetchRepoMergeHistory { repo });
+            }
             Action::SyncWorkspace => {
                 // Bulk (#899): re-poll every selected PR / issue at once;
                 // rows with nothing to sync (no PR, no issue) are skipped

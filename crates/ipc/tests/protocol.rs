@@ -27,7 +27,11 @@ fn sample_session_id(value: u128) -> lazybox_core::SessionId {
 }
 
 fn sample_workspace() -> lazybox_core::Workspace {
-    let task = lazybox_core::Task {
+    lazybox_core::Workspace::from_task(sample_task(), sample_time())
+}
+
+fn sample_task() -> lazybox_core::Task {
+    lazybox_core::Task {
         id: lazybox_core::TaskId {
             source: "github".into(),
             key: "o/r#1".into(),
@@ -71,8 +75,7 @@ fn sample_workspace() -> lazybox_core::Workspace {
         parent: None,
         priority: None,
         state_label: None,
-    };
-    lazybox_core::Workspace::from_task(task, sample_time())
+    }
 }
 
 fn sample_project() -> lazybox_core::Project {
@@ -408,6 +411,9 @@ fn all_commands() -> Vec<Command> {
         Command::FetchRequestableReviewers {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
         },
+        Command::FetchRepoMergeHistory {
+            repo: "o/r".to_string(),
+        },
         Command::Refresh,
         Command::CleanWorktrees,
         Command::InspectWorktrees,
@@ -676,6 +682,16 @@ fn all_events() -> Vec<Event> {
         Event::RequestableReviewers {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
             logins: vec!["octocat".into()],
+        },
+        Event::RepoMergeHistory {
+            repo: "o/r".to_string(),
+            entries: vec![sample_task()],
+            error: None,
+        },
+        Event::RepoMergeHistory {
+            repo: "o/r".to_string(),
+            entries: vec![],
+            error: Some("github credentials: not signed in".to_string()),
         },
         {
             let mut session = lazybox_core::WorkspaceSession::new(
@@ -1239,6 +1255,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::SetLabels { .. } => "SetLabels",
         Command::FetchRepoLabels { .. } => "FetchRepoLabels",
         Command::FetchRequestableReviewers { .. } => "FetchRequestableReviewers",
+        Command::FetchRepoMergeHistory { .. } => "FetchRepoMergeHistory",
         Command::CleanWorktrees => "CleanWorktrees",
         Command::InspectWorktrees => "InspectWorktrees",
         Command::InspectWorkspaceDiff { .. } => "InspectWorkspaceDiff",
@@ -1315,6 +1332,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::RemovalCancelled { .. } => "RemovalCancelled",
         Event::RepoLabels { .. } => "RepoLabels",
         Event::RequestableReviewers { .. } => "RequestableReviewers",
+        Event::RepoMergeHistory { .. } => "RepoMergeHistory",
         Event::SessionCreated(_) => "SessionCreated",
         Event::WorktreeProgress { .. } => "WorktreeProgress",
         Event::SessionEnded { .. } => "SessionEnded",
@@ -1397,12 +1415,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        89,
+        90,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        97,
+        98,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

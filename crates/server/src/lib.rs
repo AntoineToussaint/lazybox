@@ -1070,6 +1070,9 @@ impl Server {
                         lazybox_ipc::Command::FetchRequestableReviewers { .. } => {
                             "FetchRequestableReviewers"
                         }
+                        lazybox_ipc::Command::FetchRepoMergeHistory { .. } => {
+                            "FetchRepoMergeHistory"
+                        }
                         lazybox_ipc::Command::SetSessionLayout { .. } => "SetSessionLayout",
                         lazybox_ipc::Command::StartAgentRun { .. } => "StartAgentRun",
                         lazybox_ipc::Command::SendAgentInput { .. } => "SendAgentInput",
@@ -2251,6 +2254,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::FetchRequestableReviewers { workspace_key } => {
             polling::handle_fetch_requestable_reviewers(config, workspace_key).await;
+        }
+        lazybox_ipc::Command::FetchRepoMergeHistory { repo } => {
+            polling::handle_fetch_repo_merge_history(config, repo).await;
         }
         lazybox_ipc::Command::CleanWorktrees => {
             polling::handle_clean_worktrees(config).await;

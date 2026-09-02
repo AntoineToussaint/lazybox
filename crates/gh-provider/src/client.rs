@@ -4090,6 +4090,40 @@ impl GhClient {
         Ok(tasks)
     }
 
+    /// A repository's most-recently-merged PRs, for the merge-history
+    /// modal (#1432) — the "what's been landing here" ledger. A single
+    /// search page, `sort:updated-desc`, so it stays cheap and bounded no
+    /// matter how many PRs the repo has ever merged — the poll's global
+    /// merged sweep floors on a date, but here the user wants the last
+    /// handful regardless of when they landed. Returns full `Task`s (via
+    /// `pr_to_task`, the same projection the inbox scan uses) so the modal
+    /// can list authors + merge time, preview the body, and drill into the
+    /// full description without a second round-trip.
+    pub async fn fetch_repo_merged_prs(&self, repo: &str) -> Result<Vec<Task>, GhError> {
+        self.acquire_or_block("merge history")?;
+        let query = format!("repo:{repo} is:pr is:merged sort:updated-desc");
+        let body = graphql::query_body_after(&query, None);
+        let response: graphql::GqlResponse =
+            self.post_graphql_with_retry("merge history", &body).await?;
+        if let Some(errors) = &response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.message.clone())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(GhError::Graphql(joined));
+        }
+        let data = response
+            .data
+            .ok_or_else(|| GhError::Graphql("merge history: no data".into()))?;
+        Ok(data
+            .search
+            .nodes
+            .iter()
+            .map(|pr| graphql::pr_to_task(pr, &self.user))
+            .collect())
+    }
+
     /// One page of a WATCHED repo's open issues, for the poll's per-repo
     /// issue fan-out. The main issues query is `involves:you`-scoped, so a
     /// watched repo's issues that don't involve you never appear otherwise —

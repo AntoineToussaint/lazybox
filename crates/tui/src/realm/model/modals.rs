@@ -1785,6 +1785,47 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::DescriptionModal, MarkdownModal::new(title, body));
     }
 
+    /// Open the repo merge-history ledger (#1432) in its loading state.
+    /// The caller pairs this with a `Command::FetchRepoMergeHistory`; the
+    /// reply (`Event::RepoMergeHistory`) repaints it via
+    /// [`Model::update_merge_history`]. `repo` is the cursor's `owner/name`
+    /// from `Sidebar::cursor_repo()`.
+    pub(crate) fn mount_merge_history_modal(&mut self, repo: String) {
+        use crate::realm::components::merge_history_modal::MergeHistoryModal;
+
+        self.merge_history_repo = Some(repo.clone());
+        self.mount_modal(Id::MergeHistory, MergeHistoryModal::loading(repo));
+    }
+
+    /// Repaint the open merge-history ledger with the daemon's reply. A
+    /// reply that lands while the ledger is closed (or with the markdown
+    /// reader stacked on top of it) is dropped — the top modal must be the
+    /// ledger itself. The remount carries the reply's own `repo`, so a
+    /// late reply for a since-reopened repo repaints consistently and the
+    /// matching reply then supersedes it.
+    pub(super) fn update_merge_history(
+        &mut self,
+        repo: String,
+        entries: Vec<lazybox_core::Task>,
+        error: Option<String>,
+    ) {
+        use crate::realm::components::merge_history_modal::MergeHistoryModal;
+
+        if self.modal_stack.last() != Some(&Id::MergeHistory) {
+            return;
+        }
+        // The reply is keyed by repo. Drop one for any repo other than the
+        // ledger's current subject so a slow or out-of-order reply for a
+        // since-reopened repo can't repaint it with the wrong merges.
+        if self.merge_history_repo.as_deref() != Some(repo.as_str()) {
+            return;
+        }
+        self.mount_modal(
+            Id::MergeHistory,
+            MergeHistoryModal::resolved(repo, &entries, error, chrono::Utc::now()),
+        );
+    }
+
     /// Build + mount the notices-log window from the current
     /// `MessageLog` snapshot (#309). Idempotent: re-pressing the key
     /// while it's up is a no-op. Re-mounting after a `c` clear is

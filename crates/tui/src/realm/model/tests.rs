@@ -465,6 +465,87 @@ mod effects_tests {
         assert!(model.pending_diff_session.is_none());
     }
 
+    /// `g h` (#1432) mounts the merge-history ledger in its loading state,
+    /// scoped to the cursor's repo, and fires the repo fetch; the reply
+    /// then repaints the still-open ledger.
+    #[test]
+    fn merge_history_mounts_loading_fetches_and_repaints_on_reply() {
+        use lazybox_core::{SessionKind, Workspace, WorkspaceSession};
+        use lazybox_tui_core::action::Action;
+
+        let mut model = build_model();
+        let workspace_key = WorkspaceKey::new("github:o/r#1");
+        let now = chrono::Utc::now();
+        model.handle_daemon_event(lazybox_ipc::Event::ProjectUpserted(Box::new(
+            lazybox_core::Project::new(lazybox_core::ProjectKey::github("o", "r"), "o/r", now),
+        )));
+        let mut workspace = Workspace::empty(workspace_key.clone(), "ws", now);
+        workspace.project_key = Some(lazybox_core::ProjectKey::github("o", "r"));
+        workspace.sessions.push(WorkspaceSession::new(
+            workspace_key.clone(),
+            SessionKind::Shell,
+            "/tmp/ws".into(),
+            now,
+        ));
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
+        let session_key: lazybox_core::SessionKey = (&workspace_key).into();
+        assert!(model.sidebar.focus_workspace_key(&session_key));
+
+        let commands = model.dispatch_action(&Action::MergeHistory);
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [IpcCommand::FetchRepoMergeHistory { repo }] if repo == "o/r"
+            ),
+            "dispatch fetches the cursor repo's merge history: {commands:?}"
+        );
+        assert_eq!(model.modal_stack.last(), Some(&Id::MergeHistory));
+
+        // A late reply for a DIFFERENT repo — a since-reopened ledger, or an
+        // out-of-order pair — is dropped rather than repainting with the
+        // wrong repo's merges. `update_merge_history` repaints only when it
+        // applies, so a dropped reply leaves `redraw` untouched.
+        model.redraw = false;
+        model.handle_daemon_event(lazybox_ipc::Event::RepoMergeHistory {
+            repo: "other/repo".into(),
+            entries: vec![],
+            error: None,
+        });
+        assert!(
+            !model.redraw,
+            "a reply for a different repo than the open ledger must be dropped"
+        );
+
+        // The reply for the ledger's own repo repaints it.
+        model.redraw = false;
+        model.handle_daemon_event(lazybox_ipc::Event::RepoMergeHistory {
+            repo: "o/r".into(),
+            entries: vec![],
+            error: None,
+        });
+        assert_eq!(model.modal_stack.last(), Some(&Id::MergeHistory));
+        assert!(model.redraw, "the matching reply repaints the ledger");
+    }
+
+    /// A merge-history reply that lands while the ledger is closed is
+    /// dropped rather than force-opening a modal.
+    #[test]
+    fn merge_history_reply_is_dropped_when_ledger_is_closed() {
+        let mut model = build_model();
+        assert!(model.modal_stack.is_empty());
+        model.handle_daemon_event(lazybox_ipc::Event::RepoMergeHistory {
+            repo: "o/r".into(),
+            entries: vec![],
+            error: None,
+        });
+        assert!(
+            model.modal_stack.is_empty(),
+            "a reply must not open the ledger on its own"
+        );
+    }
+
     #[test]
     fn view_diff_uses_the_workspace_default_session_when_no_session_row_is_selected() {
         use lazybox_core::{SessionKind, Workspace, WorkspaceSession};
@@ -7633,6 +7714,7 @@ mod stale_input_tests {
                 | Id::MoveToSpacePicker
                 | Id::DefaultAgentPicker
                 | Id::DefaultModelPicker
+                | Id::MergeHistory
                 | Id::WorkAgentPicker => true,
                 // Drop — confirms (a stale Enter must not confirm).
                 Id::AgentAuth

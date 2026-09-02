@@ -221,6 +221,11 @@ pub enum Action {
     /// in-lazybox UI doesn't carry every affordance yet (mobile-rich
     /// review thread, full diff view, etc.).
     OpenInBrowser,
+    /// Open the merge-history modal for the cursor's repo (#1432) — a
+    /// "what's been landing here" ledger of recently-merged PRs with a
+    /// live body preview and drill-in to the full description. Repo-
+    /// scoped (`Sidebar::cursor_repo()`), not workspace-scoped.
+    MergeHistory,
     /// Delete or close the workspace's upstream item, resolved by
     /// kind: a PR is closed without merging; an issue is hard-deleted
     /// when the token has the admin rights GitHub requires, degrading
@@ -555,6 +560,7 @@ pub enum ActionKind {
     ManageLabels,
     SyncWorkspace,
     OpenInBrowser,
+    MergeHistory,
     DeleteOrClose,
     ClosePr,
     ConvertToDraft,
@@ -714,6 +720,7 @@ impl ActionKind {
         Self::ManageLabels,
         Self::SyncWorkspace,
         Self::OpenInBrowser,
+        Self::MergeHistory,
         Self::DeleteOrClose,
         Self::ClosePr,
         Self::ConvertToDraft,
@@ -844,6 +851,7 @@ impl Action {
             Action::ManageLabels => ActionKind::ManageLabels,
             Action::SyncWorkspace => ActionKind::SyncWorkspace,
             Action::OpenInBrowser => ActionKind::OpenInBrowser,
+            Action::MergeHistory => ActionKind::MergeHistory,
             Action::DeleteOrClose => ActionKind::DeleteOrClose,
             Action::ClosePr => ActionKind::ClosePr,
             Action::ConvertToDraft => ActionKind::ConvertToDraft,
@@ -1467,6 +1475,13 @@ impl ActionDef {
                 default_keys: "g o",
                 label: "open in browser",
                 describe: "Open the focused workspace's PR / issue page in your default web browser.",
+                section: Section::Workspace,
+            },
+            ActionKind::MergeHistory => &Self {
+                kind: ActionKind::MergeHistory,
+                default_keys: "g h",
+                label: "history",
+                describe: "Open the merge-history ledger for the cursor's repo: recently-merged PRs, newest first, with a live body preview and drill-in to the full description.",
                 section: Section::Workspace,
             },
             ActionKind::DeleteOrClose => &Self {
@@ -2234,6 +2249,7 @@ impl ActionKind {
             ActionKind::ManageLabels => "manage_labels",
             ActionKind::SyncWorkspace => "sync_workspace",
             ActionKind::OpenInBrowser => "open_in_browser",
+            ActionKind::MergeHistory => "merge_history",
             ActionKind::DeleteOrClose => "delete_or_close",
             ActionKind::ClosePr => "close_pr",
             ActionKind::ConvertToDraft => "convert_to_draft",
@@ -2487,6 +2503,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::ManageLabels
         | ActionKind::SyncWorkspace
         | ActionKind::OpenInBrowser
+        | ActionKind::MergeHistory
         | ActionKind::DeleteOrClose
         | ActionKind::ClosePr
         | ActionKind::ConvertToDraft
@@ -3049,6 +3066,16 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // workspace owns a GitHub entity — a PR or a linked issue.
         ActionKind::SyncWorkspace => workspace
             .map(|w| w.pr.is_some() || !w.gh_issues.is_empty())
+            .unwrap_or(false),
+        // Repo-scoped, not workspace-scoped: the merge-history ledger
+        // needs only a github repo under the cursor. Surface it whenever
+        // the focused workspace resolves to one — a PR, a github issue,
+        // or a repo/project scope (a taskless pre-PR workspace). The
+        // dispatcher reads `Sidebar::cursor_repo()`, so pressing `g h` on
+        // a bare repo-header row works too; this gate only drives the
+        // footer / which-key display.
+        ActionKind::MergeHistory => workspace
+            .map(|w| w.worktree_scope().is_some() || w.pr.is_some() || !w.gh_issues.is_empty())
             .unwrap_or(false),
         ActionKind::Work | ActionKind::WorkWith => intent::classify_work(workspace, &[]).is_some(),
         ActionKind::OpenEditor => matches!(

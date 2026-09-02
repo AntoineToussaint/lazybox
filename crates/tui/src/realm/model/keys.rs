@@ -2619,6 +2619,7 @@ pub(super) fn action_from_kind(
         ActionKind::SyncWorkspace => Action::SyncWorkspace,
         ActionKind::OpenInBrowser => Action::OpenInBrowser,
         ActionKind::MergeHistory => Action::MergeHistory,
+        ActionKind::BrowseRepoIssues => Action::BrowseRepoIssues,
         ActionKind::DeleteOrClose => Action::DeleteOrClose,
         ActionKind::ClosePr => Action::ClosePr,
         ActionKind::ConvertToDraft => Action::ConvertToDraft,

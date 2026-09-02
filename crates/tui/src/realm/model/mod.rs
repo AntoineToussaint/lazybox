@@ -496,6 +496,13 @@ pub enum Id {
     /// state and repaints when `Event::RepoMergeHistory` lands (via
     /// `Model::update_merge_history`).
     MergeHistory,
+    /// Repo-scoped issue browser (`g i`, #1436). A two-pane picker over
+    /// the repo's tracked issue-workspaces with a live description
+    /// preview; `l`/`r`/`n` stack the existing label / reply / note
+    /// editors on top targeting the highlighted issue, and `Enter` opens
+    /// the `DescriptionModal` reader. Holds its own snapshot state (no
+    /// `ModalFlow`), so the reused editors' flows own the single flow slot.
+    IssueBrowser,
     /// Navigable local worktree diff with an inline review draft.
     DiffReview,
     /// "Ask about this PR" chat (#945), opened with `a` from the
@@ -614,6 +621,11 @@ impl Id {
                 | Id::DefaultAgentPicker
                 | Id::DefaultModelPicker
                 | Id::WorkAgentPicker
+                // The issue browser (#1436) is a local navigation/filter
+                // picker; its `l`/`r`/`n` keys only *open* the label / reply
+                // / note editors (which each require an explicit submit), so
+                // a stale key never posts an outward effect on its own.
+                | Id::IssueBrowser
         )
     }
 }
@@ -1216,6 +1228,11 @@ pub enum Msg {
         title: String,
         body: String,
     },
+    /// A detail-pane key in the repo issue browser (`g i`, #1436) — read
+    /// the highlighted issue's full body, or dispatch a label / reply /
+    /// note / open-in-browser against it. The action carries its resolved
+    /// target so a filtered list can't act on the wrong row.
+    IssueBrowserAction(crate::realm::components::issue_browser::IssueBrowserAction),
     /// `i` in the Error Inbox (#831) — draft a pre-filled GitHub issue
     /// for the selected error class in the browser.
     ErrorInboxFileIssue(lazybox_ipc::ErrorInboxRecord),
@@ -6660,6 +6677,9 @@ impl<T: TerminalAdapter> Model<T> {
                 // Stack the shared markdown reader on top of the merge-history
                 // list; Esc pops it back to the ledger.
                 self.mount_description_modal(title, body);
+            }
+            Msg::IssueBrowserAction(action) => {
+                self.handle_issue_browser_action(action);
             }
             Msg::MessagesCleared => {
                 // Wipe the durable history and re-render the window

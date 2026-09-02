@@ -18,6 +18,7 @@ pub mod help;
 pub mod help_ask;
 pub mod hopper;
 pub mod input;
+pub mod issue_browser;
 pub mod jump_picker;
 pub mod loading;
 pub mod markdown_modal;

@@ -7715,7 +7715,8 @@ mod stale_input_tests {
                 | Id::DefaultAgentPicker
                 | Id::DefaultModelPicker
                 | Id::MergeHistory
-                | Id::WorkAgentPicker => true,
+                | Id::WorkAgentPicker
+                | Id::IssueBrowser => true,
                 // Drop — confirms (a stale Enter must not confirm).
                 Id::AgentAuth
                 | Id::RemoveOutOfScope
@@ -7869,6 +7870,7 @@ mod stale_input_tests {
             Id::HelpActionConfirm,
             Id::WorkAgentPicker,
             Id::DescriptionModal,
+            Id::IssueBrowser,
             Id::DiffReview,
             Id::PrChat,
         ] {
@@ -10171,6 +10173,79 @@ mod merge_focus_follow_tests {
             &m.modal_flow,
             Some(super::super::ModalFlow::PolicyWorkspace { workspace }) if *workspace == ws_key
         ));
+    }
+
+    /// The issue browser (`g i`, #1436): pressing the chord in a repo
+    /// group mounts `Id::IssueBrowser`, and its detail actions stack the
+    /// reused editors on top targeting the highlighted issue (not the
+    /// sidebar cursor), returning to the browser on dismiss.
+    #[test]
+    fn browse_repo_issues_mounts_and_dispatches_detail_actions() {
+        use crate::realm::components::issue_browser::IssueBrowserAction;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        let mut last_key = None;
+        for key in ["owner/repo#10", "owner/repo#20"] {
+            let mut t = task(key, false, Duration::hours(1));
+            t.body = Some(format!("Body for {key}"));
+            let ws = Workspace::from_task(t, Utc::now());
+            last_key = Some(ws.key.clone());
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        }
+        let ws_key = last_key.unwrap();
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+
+        m.dispatch_key(KeyEvent::new(Key::Char('g'), KeyModifiers::NONE));
+        m.dispatch_key(KeyEvent::new(Key::Char('i'), KeyModifiers::NONE));
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::IssueBrowser),
+            "g i mounts the issue browser",
+        );
+
+        // Read stacks the #448 markdown reader, then returns to the browser.
+        m.update(Msg::IssueBrowserAction(IssueBrowserAction::Read {
+            title: "owner/repo#20".into(),
+            body: "Body for owner/repo#20".into(),
+        }));
+        assert_eq!(m.modal_stack.last(), Some(&Id::DescriptionModal));
+        m.update(Msg::ModalDismissed);
+        assert_eq!(m.modal_stack.last(), Some(&Id::IssueBrowser));
+
+        // Reply targets the issue carried by the action, not the cursor.
+        let target = SessionKey::from(&ws_key);
+        m.update(Msg::IssueBrowserAction(IssueBrowserAction::Reply(
+            target.clone(),
+        )));
+        assert_eq!(m.modal_stack.last(), Some(&Id::Reply));
+        assert!(matches!(
+            &m.modal_flow,
+            Some(super::super::ModalFlow::Reply { target: t }) if *t == target
+        ));
+        m.update(Msg::ModalDismissed);
+        assert_eq!(m.modal_stack.last(), Some(&Id::IssueBrowser));
+
+        // Labels arms the async fetch, and the picker mounts on TOP of the
+        // still-open browser (the relaxed `mount_manage_labels` guard).
+        m.update(Msg::IssueBrowserAction(IssueBrowserAction::Labels(
+            ws_key.clone(),
+        )));
+        assert_eq!(m.awaiting_repo_labels.as_ref(), Some(&ws_key));
+        m.mount_manage_labels(
+            ws_key.clone(),
+            vec![lazybox_core::Label {
+                name: "bug".into(),
+                color: "red".into(),
+            }],
+        );
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::ManageLabels),
+            "the label picker stacks on the issue browser",
+        );
+        m.update(Msg::ModalDismissed);
+        assert_eq!(m.modal_stack.last(), Some(&Id::IssueBrowser));
     }
 
     /// Regression for #160: the daemon's issue→PR merge burst

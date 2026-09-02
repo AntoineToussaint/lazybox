@@ -976,7 +976,13 @@ impl<T: TerminalAdapter> Model<T> {
         // already up wins, and the fetch result is dropped (the user
         // can press `g l` again — the hint says so). Also covers the
         // old ManageLabels-only idempotence check.
-        if let Some(top) = self.modal_stack.last() {
+        // The issue browser (`g i`, #1436) intentionally requests labels
+        // for a highlighted issue while it stays on the stack, so the
+        // picker stacks on top of it and returns there on dismiss. Every
+        // other open modal wins and the fetch result is dropped.
+        if let Some(top) = self.modal_stack.last()
+            && !matches!(top, Id::IssueBrowser)
+        {
             tracing::info!(?top, "label picker skipped — another modal owns the stack");
             // Disarm the request stash so a later stray `RepoLabels`
             // broadcast can't mount the picker unprompted.
@@ -1824,6 +1830,90 @@ impl<T: TerminalAdapter> Model<T> {
             Id::MergeHistory,
             MergeHistoryModal::resolved(repo, &entries, error, chrono::Utc::now()),
         );
+    }
+
+    /// Build + mount the repo-scoped issue browser (`g i`, #1436) from the
+    /// cursor repo's tracked issue-workspaces — a filtered list view over
+    /// existing local state, no new provider fetch. Newest-first by issue
+    /// number. Flashes and no-ops when the cursor isn't in a repo group or
+    /// the repo has no tracked issues.
+    pub(crate) fn mount_issue_browser(&mut self) {
+        use crate::realm::components::issue_browser::{IssueBrowser, IssueRow};
+
+        if self.modal_stack.last() == Some(&Id::IssueBrowser) {
+            return;
+        }
+        let Some(repo) = self.sidebar.cursor_repo() else {
+            self.flash_info("move the cursor onto a repo to browse its issues");
+            return;
+        };
+        let now = chrono::Utc::now();
+        let mut rows: Vec<IssueRow> = self
+            .sidebar
+            .issue_workspaces_for_repo(&repo)
+            .into_iter()
+            .filter_map(|w| {
+                let issue = w.gh_issues.first()?;
+                let opened = issue.created_at.as_ref().unwrap_or(&issue.updated_at);
+                Some(IssueRow {
+                    session_key: lazybox_core::SessionKey::from(&w.key),
+                    workspace_key: w.key.clone(),
+                    number: issue.id.number(),
+                    title: issue.title.clone(),
+                    labels: issue.labels.iter().map(|l| l.name.clone()).collect(),
+                    age: lazybox_core::time::time_ago_at(opened, now),
+                    url: issue.url.clone(),
+                    body: issue.body.clone().unwrap_or_default(),
+                    unread: w.unread_count() > 0,
+                })
+            })
+            .collect();
+        if rows.is_empty() {
+            self.flash_info(format!("no tracked issues in {repo}"));
+            return;
+        }
+        // Newest-first: a higher issue number is newer; unknown numbers
+        // sort last.
+        rows.sort_by_key(|r| std::cmp::Reverse(r.number));
+        self.mount_modal(Id::IssueBrowser, IssueBrowser::new(repo, rows));
+    }
+
+    /// Dispatch a detail-pane action from the issue browser (#1436)
+    /// against the highlighted issue. Read stacks the `#448` markdown
+    /// reader; label / reply / note reuse the existing workspace editors
+    /// (which set the single `ModalFlow` slot the browser deliberately
+    /// leaves free) targeting the row's own key; open hands the URL to the
+    /// platform browser. Each editor stacks on top of the browser and
+    /// returns to it on dismiss.
+    pub(crate) fn handle_issue_browser_action(
+        &mut self,
+        action: crate::realm::components::issue_browser::IssueBrowserAction,
+    ) {
+        use crate::realm::components::issue_browser::IssueBrowserAction;
+
+        match action {
+            IssueBrowserAction::Read { title, body } => {
+                self.mount_description_modal(title, body);
+            }
+            IssueBrowserAction::Labels(workspace_key) => {
+                self.awaiting_repo_labels = Some(workspace_key.clone());
+                self.send_cmd(lazybox_ipc::Command::FetchRepoLabels { workspace_key });
+                self.flash_hint("loading repo labels…");
+            }
+            IssueBrowserAction::Reply(session_key) => {
+                self.mount_reply(session_key);
+            }
+            IssueBrowserAction::Note(session_key) => {
+                self.mount_notes(session_key);
+            }
+            IssueBrowserAction::OpenUrl(url) => {
+                let browser = self.ui_defaults.browser.clone();
+                match lazybox_tui_core::editors::open_url(&url, browser.as_deref()) {
+                    Ok(()) => self.flash_info(format!("opening {url}…")),
+                    Err(e) => self.flash_error(format!("open failed: {e}")),
+                }
+            }
+        }
     }
 
     /// Build + mount the notices-log window from the current

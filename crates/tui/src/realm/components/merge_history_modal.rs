@@ -114,7 +114,7 @@ impl MergeHistoryModal {
         // consistent with each row's "merged X ago" label and the newest
         // landing on top regardless of post-merge chatter.
         let mut ordered: Vec<&Task> = entries.iter().collect();
-        ordered.sort_by(|a, b| merge_time(b).cmp(&merge_time(a)));
+        ordered.sort_by_key(|t| std::cmp::Reverse(merge_time(t)));
         Self {
             repo: repo.into(),
             rows: Some(

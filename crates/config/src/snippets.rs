@@ -1053,6 +1053,67 @@ impl Snippets {
                      and any ambiguity that prevented an issue from being created.",
                 ),
             ),
+            (
+                "carve".to_string(),
+                scoped(
+                    gh,
+                    "GitHub",
+                    "Split the proposed work into a few self-contained issues with DOD",
+                    "Don't start coding yet. You've finished exploring and are about to \
+                     work on the proposal in your context — instead, carve it into a \
+                     small number of self-contained GitHub issues and stop there; \
+                     creating those issues with `gh issue create` is the deliverable, \
+                     not a diff. Prefer few, larger, independently-deliverable slices \
+                     over many granular tasks — aim for at most three or four issues, and \
+                     when in doubt merge two rather than split one. The reason is \
+                     conflict-minimization, not tidiness: several agents will pick these \
+                     up in parallel, so slice along file / module / ownership boundaries \
+                     that leave each issue touching a disjoint set of files, so two \
+                     issues rarely edit the same lines. Before creating anything, search \
+                     open *and* closed issues (`gh issue list`, `gh search issues`) and \
+                     reuse or reference what already exists rather than fragmenting a \
+                     tracked line of work. Make each issue stand alone so a cold agent \
+                     with none of this conversation can execute it: the problem and \
+                     intent; the scope and the explicit non-goals; the relevant context, \
+                     files, and constraints; and links to its sibling and blocker \
+                     issues. Give each issue an explicit Definition of Done as a \
+                     checklist — the acceptance criteria, the concrete verification \
+                     commands to run (build, test, lint), a regression test where the \
+                     change warrants one, and the docs, snapshot, or codegen updates \
+                     this repo's conventions require — so \"done\" is checkable, not \
+                     asserted. State the sequencing explicitly: the dependency order, \
+                     and which issues are safe to run concurrently versus which must be \
+                     serialized — the conflict map the operator needs to fan the work \
+                     out. On any consequential ambiguity — the slice boundaries, an \
+                     unclear scope, a decision that changes what gets built — stop and \
+                     ask one focused question rather than guessing. Finish with a \
+                     per-issue report: each created issue's URL, the existing issues \
+                     reused, and the concurrency-and-ordering plan.",
+                ),
+            ),
+            (
+                "dod".to_string(),
+                scoped(
+                    gh,
+                    "GitHub",
+                    "Stamp a Definition-of-Done checklist onto the draft",
+                    "Append a Definition of Done to the issue or PR you're drafting so \
+                     \"done\" is a checkable contract, not an assertion. Ground it in \
+                     this repo's real conventions — read how existing issues and PRs \
+                     state acceptance, and what the build, test, and lint commands \
+                     actually are — rather than emitting a generic template. The \
+                     checklist carries: the acceptance criteria that define the change \
+                     as complete; the concrete verification commands to run (build, \
+                     test, lint) with their real invocations; a regression test where \
+                     the change warrants one; and the docs, snapshot, or codegen updates \
+                     this repo requires. Edit it onto the draft in place — `gh issue \
+                     edit` / `gh pr edit`, or into the body you're about to create — \
+                     don't just print it. Keep it tight and specific to the change at \
+                     hand; drop any line that doesn't apply rather than padding. Close \
+                     with a one-line, human-readable confirmation of what you stamped and \
+                     where.",
+                ),
+            ),
             // ── Linear ──────────────────────────────────────────────
             (
                 "wip".to_string(),
@@ -2737,6 +2798,67 @@ snippets:
             assert!(
                 body.contains(anchor),
                 "`designissues` body should anchor on {anchor:?}",
+            );
+        }
+    }
+
+    /// `carve` ships as a provider-scoped GitHub workflow (#1434) for the
+    /// "don't start yet — decompose first" moment: it splits the session's
+    /// proposed work into a bounded set of self-contained, conflict-minimized
+    /// GitHub issues, each with an explicit Definition of Done. The body must
+    /// keep encoding stop-before-coding, few-not-many, conflict-minimization,
+    /// self-containment, an explicit DOD, dedup, and a sequencing/conflict map
+    /// so it can't regress into a vague "make some issues."
+    #[test]
+    fn builtin_ships_carve() {
+        let b = Snippets::builtin();
+        let s = b.get("carve").expect("`carve` ships built-in");
+        assert_eq!(s.category, "GitHub");
+        assert_eq!(s.provider.as_deref(), Some("github"));
+        assert_eq!(s.origin, SnippetOrigin::BuiltIn);
+        let body = s.body.to_ascii_lowercase();
+        for anchor in [
+            "don't start coding yet", // stop-before-coding trigger
+            "gh issue create",        // creation is the deliverable
+            "three or four",          // few-not-many soft cap
+            "conflict-minimization",  // conflict-minimization is the reason
+            "disjoint",               // slice by disjoint file sets
+            "closed issue",           // search open AND closed to dedup
+            "stand alone",            // self-contained per cold agent
+            "non-goal",               // explicit non-goals
+            "definition of done",     // explicit DOD
+            "regression test",        // DOD carries a regression test
+            "concurrent",             // safe-to-parallelize set
+            "serialized",             // vs must-serialize
+        ] {
+            assert!(
+                body.contains(anchor),
+                "`carve` body should anchor on {anchor:?}",
+            );
+        }
+    }
+
+    /// `dod` ships as a provider-scoped GitHub workflow (#1434): a lightweight
+    /// snippet that stamps a repo-grounded Definition-of-Done checklist onto
+    /// the issue/PR the agent is drafting. It edits the draft in place rather
+    /// than just printing a template.
+    #[test]
+    fn builtin_ships_dod() {
+        let b = Snippets::builtin();
+        let s = b.get("dod").expect("`dod` ships built-in");
+        assert_eq!(s.category, "GitHub");
+        assert_eq!(s.provider.as_deref(), Some("github"));
+        assert_eq!(s.origin, SnippetOrigin::BuiltIn);
+        let body = s.body.to_ascii_lowercase();
+        for anchor in [
+            "definition of done",
+            "acceptance criteria",
+            "regression test",
+            "gh issue edit", // edits the draft in place, not just prints
+        ] {
+            assert!(
+                body.contains(anchor),
+                "`dod` body should anchor on {anchor:?}",
             );
         }
     }

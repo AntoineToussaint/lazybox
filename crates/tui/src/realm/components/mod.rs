@@ -21,6 +21,7 @@ pub mod input;
 pub mod jump_picker;
 pub mod loading;
 pub mod markdown_modal;
+pub mod merge_history_modal;
 pub mod messages;
 pub mod polling;
 pub mod pr_chat;

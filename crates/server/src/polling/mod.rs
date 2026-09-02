@@ -42,10 +42,11 @@ pub use handlers::{
     ProviderHandle, apply_pr_details, handle_add_assignees, handle_clean_worktrees,
     handle_close_issue, handle_close_pr, handle_convert_to_draft, handle_delete_or_close,
     handle_delete_orphaned_worktree, handle_fetch_pr_details, handle_fetch_repo_labels,
-    handle_fetch_requestable_reviewers, handle_inspect_workspace_diff, handle_inspect_worktrees,
-    handle_mark_ready, handle_merge_pr, handle_request_reviewers, handle_scan_checkouts,
-    handle_set_assignees, handle_set_labels, handle_sync_workspace, handle_update_branch,
-    post_reply, prefetch_top_pr_details, remove_merged_workspace,
+    handle_fetch_repo_merge_history, handle_fetch_requestable_reviewers,
+    handle_inspect_workspace_diff, handle_inspect_worktrees, handle_mark_ready, handle_merge_pr,
+    handle_request_reviewers, handle_scan_checkouts, handle_set_assignees, handle_set_labels,
+    handle_sync_workspace, handle_update_branch, post_reply, prefetch_top_pr_details,
+    remove_merged_workspace,
 };
 pub use mutate::{MutationOutcome, apply_and_commit, fetch_and_apply};
 #[cfg(test)]

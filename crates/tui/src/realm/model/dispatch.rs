@@ -2399,6 +2399,19 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                 }
             }
+            Action::MergeHistory => {
+                // Repo-scoped (#1432): the "what's been landing here" ledger
+                // for the cursor's repo group — resolves from the sidebar
+                // cursor, so it works on a repo header, a workspace, or a
+                // session row alike. The mount fires the daemon fetch and
+                // shows a loading state until the reply lands.
+                let Some(repo) = self.sidebar.cursor_repo() else {
+                    self.flash_info("no repo under the cursor");
+                    return cmds;
+                };
+                self.mount_merge_history_modal(repo.clone());
+                cmds.push(IpcCommand::FetchRepoMergeHistory { repo });
+            }
             Action::SyncWorkspace => {
                 // Bulk (#899): re-poll every selected PR / issue at once;
                 // rows with nothing to sync (no PR, no issue) are skipped

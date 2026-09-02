@@ -1290,6 +1290,16 @@ pub enum Command {
     FetchRequestableReviewers {
         workspace_key: lazybox_core::WorkspaceKey,
     },
+    /// Ask the daemon for a repository's recently-merged PRs — the
+    /// "what's been landing here" ledger (#1432) — and broadcast the
+    /// result via `Event::RepoMergeHistory`. `repo` is `owner/name`,
+    /// taken from the sidebar cursor's repo group. Repo-scoped, not
+    /// workspace-scoped: the merge history stands on its own, and the
+    /// background poll discards merged PRs no workspace tracks, so this
+    /// is a dedicated on-demand fetch.
+    FetchRepoMergeHistory {
+        repo: String,
+    },
     /// Admin command: walk every persisted workspace, drop sessions
     /// whose terminals aren't currently live, and remove the
     /// corresponding worktrees from disk only after freshly proving each is
@@ -2128,6 +2138,18 @@ pub enum Event {
     RequestableReviewers {
         workspace_key: lazybox_core::WorkspaceKey,
         logins: Vec<String>,
+    },
+    /// Response to `Command::FetchRepoMergeHistory` (#1432): the repo's
+    /// recently-merged PRs, newest first, as full `Task`s (title, body,
+    /// author, url, merge time) so the modal can preview the body and
+    /// drill into the full description. Keyed by `repo` so the receiver
+    /// knows which open modal to fill. `error` carries a human-readable
+    /// reason when the fetch failed, so the modal shows it instead of
+    /// spinning forever; `entries` is empty in that case.
+    RepoMergeHistory {
+        repo: String,
+        entries: Vec<lazybox_core::Task>,
+        error: Option<String>,
     },
     /// A new session (= folder worktree) was provisioned inside its
     /// workspace. Sent in response to `Command::CreateSession` and

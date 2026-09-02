@@ -1241,6 +1241,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::SnippetKeepMine { .. }
                 | IpcEvent::GithubDiscoveryBehind { .. }
                 | IpcEvent::SessionCosts { .. }
+                | IpcEvent::RepoMergeHistory { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -1931,6 +1932,20 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
+        // Merge-history reply (#1432) — repaint the open modal with the
+        // fetched merged PRs (or the error). A reply that lands while the
+        // modal is closed, or names a different repo than the open one, is
+        // dropped by `update_merge_history`.
+        if let IpcEvent::RepoMergeHistory {
+            repo,
+            entries,
+            error,
+        } = &event
+        {
+            self.update_merge_history(repo.clone(), entries.clone(), error.clone());
+            self.redraw = true;
+            return;
+        }
         // Usage-stats snapshot (#1339) — repaint the open stats window and
         // feed the always-visible "today" header strip (#1344). A snapshot
         // that lands while the window is closed is dropped by
@@ -2217,6 +2232,7 @@ impl<T: TerminalAdapter> Model<T> {
             // Not a sync ATTEMPT — it's a standing advisory about a
             // deferred sweep, handled (set/clear) in the main event match.
             | IpcEvent::GithubDiscoveryBehind { .. }
+            | IpcEvent::RepoMergeHistory { .. }
             | IpcEvent::ResourcePosture(..) => {}
         }
         // Background-poll indicator. Lights up whenever the daemon
@@ -2536,6 +2552,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentSessionStarted { .. }
                 | IpcEvent::SnippetKeepMine { .. }
                 | IpcEvent::SessionCosts { .. }
+                | IpcEvent::RepoMergeHistory { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }

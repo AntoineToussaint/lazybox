@@ -1829,6 +1829,49 @@ pub async fn handle_sync_workspace(config: &ServerConfig, workspace_key: Workspa
     tracing::info!(workspace = %workspace_key, "sync_workspace: targeted re-poll complete");
 }
 
+/// Handle `Command::FetchRepoMergeHistory` (#1432): fetch a repo's
+/// recently-merged PRs and broadcast them via `Event::RepoMergeHistory`
+/// for the merge-history modal to render. The modal mounts in a loading
+/// state and waits for this reply, so — unlike the silent
+/// `handle_fetch_pr_details` — a failure is reported back in the event's
+/// `error` field rather than swallowed; otherwise the modal would spin
+/// forever with no way to learn why.
+pub async fn handle_fetch_repo_merge_history(config: &ServerConfig, repo: String) {
+    let client = match resolve_gh_client_result(config).await {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!("fetch_repo_merge_history({repo}): {error}");
+            let _ = config.bus.send(Event::RepoMergeHistory {
+                repo,
+                entries: Vec::new(),
+                error: Some(error),
+            });
+            return;
+        }
+    };
+    match client.fetch_repo_merged_prs(&repo).await {
+        Ok(entries) => {
+            tracing::info!(
+                "fetch_repo_merge_history {repo}: {} merged PRs",
+                entries.len()
+            );
+            let _ = config.bus.send(Event::RepoMergeHistory {
+                repo,
+                entries,
+                error: None,
+            });
+        }
+        Err(e) => {
+            tracing::warn!("fetch_repo_merge_history {repo}: {e:?}");
+            let _ = config.bus.send(Event::RepoMergeHistory {
+                repo,
+                entries: Vec::new(),
+                error: Some(format!("merge-history fetch failed: {e}")),
+            });
+        }
+    }
+}
+
 /// Handle `Command::FetchPrDetails`: pull the workspace's PR
 /// review-thread activity from GitHub (the field the inbox-scan
 /// query deliberately omits), merge it into the workspace's

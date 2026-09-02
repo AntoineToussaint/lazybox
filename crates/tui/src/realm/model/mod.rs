@@ -489,6 +489,13 @@ pub enum Id {
     /// the modal so link clicks open, and the modal dismisses its own
     /// outside-clicks.
     DescriptionModal,
+    /// Repo merge-history ledger (#1432), opened with `g h` on a repo.
+    /// A two-pane list of the cursor repo's recently-merged PRs with a
+    /// live body preview; `Enter` stacks a `DescriptionModal` for the
+    /// full body, `o` opens the PR in the browser. Mounts in a loading
+    /// state and repaints when `Event::RepoMergeHistory` lands (via
+    /// [`Model::update_merge_history`]).
+    MergeHistory,
     /// Navigable local worktree diff with an inline review draft.
     DiffReview,
     /// "Ask about this PR" chat (#945), opened with `a` from the
@@ -538,6 +545,7 @@ impl Id {
                 | Id::SnippetPicker
                 | Id::SkillPicker
                 | Id::SnippetBrowser
+                | Id::MergeHistory
         )
     }
 
@@ -1201,6 +1209,13 @@ pub enum Msg {
     /// A link inside the description-reader modal (#448) was clicked —
     /// hand its URL to the platform browser launcher.
     OpenUrl(String),
+    /// `Enter` on a merge-history row (#1432) — stack the markdown reader
+    /// on the selected PR's full body. Carries the reader title and body
+    /// since the Model doesn't hold the modal's row data.
+    MergeHistoryReadBody {
+        title: String,
+        body: String,
+    },
     /// `i` in the Error Inbox (#831) — draft a pre-filled GitHub issue
     /// for the selected error class in the browser.
     ErrorInboxFileIssue(lazybox_ipc::ErrorInboxRecord),
@@ -6632,6 +6647,11 @@ impl<T: TerminalAdapter> Model<T> {
                         crate::realm::components::footer::NoticeSeverity::Retryable,
                     ),
                 }
+            }
+            Msg::MergeHistoryReadBody { title, body } => {
+                // Stack the shared markdown reader on top of the merge-history
+                // list; Esc pops it back to the ledger.
+                self.mount_description_modal(title, body);
             }
             Msg::MessagesCleared => {
                 // Wipe the durable history and re-render the window

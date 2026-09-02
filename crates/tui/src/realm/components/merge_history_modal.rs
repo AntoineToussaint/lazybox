@@ -158,11 +158,11 @@ impl MergeHistoryModal {
                 self.move_cursor(-1);
                 None
             }
-            Key::Home | Key::Char('g') => {
+            Key::Home => {
                 self.cursor = 0;
                 None
             }
-            Key::End | Key::Char('G') => {
+            Key::End => {
                 if let Some(rows) = self.rows.as_ref() {
                     self.cursor = rows.len().saturating_sub(1);
                 }
@@ -172,6 +172,10 @@ impl MergeHistoryModal {
                 title: row.reader_title(&self.repo),
                 body: row.body.clone(),
             }),
+            // `o` opens the highlighted PR. `g`/`G` are deliberately NOT bound
+            // to top/bottom: a user reaching for the global `g o` "open in
+            // browser" chord would otherwise have `g` jump the cursor to the
+            // top row and `o` open the wrong PR. `Home`/`End` cover top/bottom.
             Key::Char('o') => self.selected().map(|row| Msg::OpenUrl(row.url.clone())),
             _ => None,
         }
@@ -554,6 +558,29 @@ mod tests {
                 assert_eq!(url, "https://github.com/o/r/pull/10");
             }
             other => panic!("expected open-url, got {other:?}"),
+        }
+    }
+
+    /// `g` must not jump the cursor: a user reaching for the global `g o`
+    /// "open in browser" chord would otherwise open the top row instead of
+    /// the one they were on. `g` is inert; `o` opens the current row.
+    #[test]
+    fn g_is_inert_so_reflexive_g_o_opens_the_current_row() {
+        let now = Utc::now();
+        let mut top = task(1, "top", "a", None);
+        top.closed_at = Some(now);
+        let mut bottom = task(2, "bottom", "b", None);
+        bottom.closed_at = Some(now - chrono::Duration::days(1));
+        // Display order: #1 (top), #2 (bottom).
+        let mut m = MergeHistoryModal::resolved("o/r", &[top, bottom], None, now);
+        m.on_key(&ke(Key::Down)); // cursor now on #2
+        assert!(
+            m.on_key(&ke(Key::Char('g'))).is_none(),
+            "g must be inert, not a top-jump"
+        );
+        match m.on_key(&ke(Key::Char('o'))) {
+            Some(Msg::OpenUrl(url)) => assert_eq!(url, "https://github.com/o/r/pull/2"),
+            other => panic!("expected the current row's url, got {other:?}"),
         }
     }
 

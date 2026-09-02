@@ -6,6 +6,13 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+- A hot-target batch the server rejects no longer fails the whole poll tick.
+  GitHub Enterprise Server 3.18 answers lazybox's batched `nodes(ids:)` hot
+  queries with "Something went wrong while executing your query" (a PR node
+  lookup selecting both `mergeStateStatus` and `reviewDecision` trips it); the
+  targeted refresh now falls back to per-target fetches, and after three
+  consecutive rejections skips the batch until the next Shift-R refresh.
+
 ## [0.1.14] - 2026-09-01
 
 The cost-visibility, scale, and provider-reach release. Lazybox now *prices*

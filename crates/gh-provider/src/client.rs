@@ -988,6 +988,10 @@ pub enum HotFetch {
 /// chunk at this bound (#1218).
 const HOT_BATCH_MAX_IDS: usize = 100;
 
+/// Consecutive GraphQL-rejected hot batches before `hot_batch_rejected`
+/// reports the batched `nodes(ids:)` path unsupported by this server.
+const HOT_BATCH_REJECTION_THRESHOLD: u32 = 3;
+
 /// Ceiling on concurrent in-flight GitHub requests across ALL client clones
 /// (background sweeps and interactive actions share it). GitHub's secondary
 /// (abuse) limiter is concurrency-sensitive — it keys on burst/concurrency,
@@ -1058,6 +1062,19 @@ pub struct GhClient {
     /// requested id set each batch and cleared by `force_full_sweep` so
     /// an explicit refresh always re-fetches.
     hot_freshness: std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, String>>>,
+    /// Consecutive hot batches this server answered with a GraphQL
+    /// error. Some GitHub Enterprise Server builds reject the batched
+    /// `nodes(ids:)` hot queries outright — GHES 3.18 fails any PR node
+    /// lookup that selects both `mergeStateStatus` and `reviewDecision`
+    /// with "Something went wrong while executing your query", while the
+    /// same fields resolve fine through `repository.pullRequest` and
+    /// `search`. At `HOT_BATCH_REJECTION_THRESHOLD` the batched path is
+    /// considered unsupported here (`hot_batch_rejected`) and callers
+    /// fetch hot targets one at a time instead. A success resets the
+    /// count so github.com's occasional transient "Something went wrong"
+    /// never disables the probe for good; `force_full_sweep` resets it
+    /// too so an explicit refresh re-tries the batch.
+    hot_batch_graphql_failures: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 /// Per-branch cost breakdown for one branch of a PR fetch, emitted
@@ -1185,6 +1202,7 @@ impl GhClient {
             hot_freshness: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         })
     }
 
@@ -1219,6 +1237,7 @@ impl GhClient {
             hot_freshness: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         })
     }
 
@@ -2538,6 +2557,9 @@ impl GhClient {
         // hot-freshness fingerprints so the next hot batch re-fetches
         // full detail for the whole set (#1218).
         self.hot_freshness.lock().clear();
+        // And give the batched hot query another chance on this server.
+        self.hot_batch_graphql_failures
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn manual_refresh_pending(&self) -> bool {
@@ -2913,6 +2935,17 @@ impl GhClient {
         }
     }
 
+    /// True once `HOT_BATCH_REJECTION_THRESHOLD` consecutive hot batches
+    /// came back as GraphQL errors: this server rejects the batched
+    /// `nodes(ids:)` hot queries (GHES 3.18 does), so hot targets should
+    /// be fetched one at a time via `fetch_single_pr` / `fetch_single_issue`
+    /// until `force_full_sweep` re-arms the batch.
+    pub fn hot_batch_rejected(&self) -> bool {
+        self.hot_batch_graphql_failures
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= HOT_BATCH_REJECTION_THRESHOLD
+    }
+
     /// Fetch the bounded hot set, two-tier (#1218): a lean freshness
     /// probe first (~10 nodes/PR), then the full-detail query only for
     /// nodes whose probe moved since the last tick. `nodes(ids:)`
@@ -2921,7 +2954,26 @@ impl GhClient {
     /// GraphQL errors a `nodes(ids:)` list past 100 outright, which
     /// used to fail the whole hot refresh once 100+ workspaces held
     /// sessions.
+    ///
+    /// Tracks consecutive GraphQL rejections for `hot_batch_rejected`;
+    /// transport / rate-limit failures don't count, since they say
+    /// nothing about whether this server accepts the query.
     pub async fn fetch_hot_tasks(&self, node_ids: &[String]) -> Result<Vec<HotFetch>, GhError> {
+        let result = self.fetch_hot_tasks_batch(node_ids).await;
+        match &result {
+            Ok(_) => self
+                .hot_batch_graphql_failures
+                .store(0, std::sync::atomic::Ordering::Relaxed),
+            Err(GhError::Graphql(_)) => {
+                self.hot_batch_graphql_failures
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(_) => {}
+        }
+        result
+    }
+
+    async fn fetch_hot_tasks_batch(&self, node_ids: &[String]) -> Result<Vec<HotFetch>, GhError> {
         if node_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -7388,6 +7440,7 @@ mod tests {
             hot_freshness: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -7473,6 +7526,91 @@ mod tests {
             0,
             "missing cached node ids must fail before provider IO"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hot_batch_graphql_rejection_trips_after_consecutive_failures() {
+        // GHES 3.18 answers the hot probe with GitHub's generic GraphQL
+        // runtime error (HTTP 200, `errors` only, no `data`).
+        const REJECTED: &str = r#"{
+          "errors": [
+            {"message": "Something went wrong while executing your query on 2026-09-02T15:25:54Z. Please include `88548e61-d69d-421a-abd8-4ff10ffd900a` when reporting this issue."}
+          ]
+        }"#;
+        const LEAN: &str = r#"{
+          "data": {
+            "nodes": [
+              {"__typename": "Issue", "id": "I_one", "updatedAt": "2026-07-25T10:00:00Z", "state": "OPEN", "stateReason": null}
+            ],
+            "rateLimit": {"cost": 1, "limit": 5000, "remaining": 4999, "resetAt": "2026-07-25T11:00:00Z"}
+          }
+        }"#;
+        const FULL_ONE: &str = r#"{
+          "data": {
+            "nodes": [
+              {
+                "id": "I_one",
+                "number": 7,
+                "title": "Fast sync",
+                "body": "body",
+                "url": "https://github.com/acme/widget/issues/7",
+                "updatedAt": "2026-07-25T10:00:00Z",
+                "createdAt": "2026-07-24T10:00:00Z",
+                "closedAt": null,
+                "state": "OPEN",
+                "author": {"login": "test-user"},
+                "labels": {"nodes": []},
+                "assignees": {"nodes": []},
+                "comments": {"nodes": []},
+                "repository": {"nameWithOwner": "acme/widget"}
+              }
+            ],
+            "rateLimit": {"cost": 2, "limit": 5000, "remaining": 4998, "resetAt": "2026-07-25T11:00:00Z"}
+          }
+        }"#;
+        let body = async {
+            let base_uri = spawn_sequenced_response_server(vec![
+                REJECTED, REJECTED, // two rejections: below the threshold
+                LEAN, FULL_ONE, // a success resets the count
+                REJECTED, REJECTED, REJECTED, // three in a row: rejected
+            ])
+            .await;
+            let client = make_client(&base_uri);
+            let ids: Vec<String> = vec!["I_one".into()];
+
+            for _ in 0..2 {
+                let error = client
+                    .fetch_hot_tasks(&ids)
+                    .await
+                    .expect_err("rejected probe");
+                assert!(matches!(error, GhError::Graphql(_)), "got {error:?}");
+            }
+            assert!(
+                !client.hot_batch_rejected(),
+                "two rejections are still within a transient blip"
+            );
+
+            client.fetch_hot_tasks(&ids).await.expect("healthy batch");
+            assert!(!client.hot_batch_rejected());
+
+            for _ in 0..HOT_BATCH_REJECTION_THRESHOLD {
+                client
+                    .fetch_hot_tasks(&ids)
+                    .await
+                    .expect_err("rejected probe");
+            }
+            assert!(
+                client.hot_batch_rejected(),
+                "a success resets the count, so rejection needs {HOT_BATCH_REJECTION_THRESHOLD} fresh failures"
+            );
+
+            // Shift-R gives the batch another chance on this server.
+            client.force_full_sweep();
+            assert!(!client.hot_batch_rejected());
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), body)
+            .await
+            .expect("test timed out");
     }
 
     #[tokio::test(flavor = "current_thread")]

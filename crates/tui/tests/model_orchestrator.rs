@@ -2426,3 +2426,87 @@ fn repo_header_shows_overview_not_dead_pane() {
         "a real workspace hides the overview",
     );
 }
+
+/// #1442 regression: while the cursor is parked on a repo header, the
+/// overview must track background polls. An `AgentState` event is the
+/// worst case — its handler early-returns and skips `sync_panes` — so
+/// the "with agent" count would freeze at 0 without the explicit
+/// projection request in `dispatch_daemon_event`.
+#[test]
+fn overview_refreshes_on_background_agent_state() {
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    let session_key: SessionKey = (&ws.key).into();
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![ws],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+
+    for _ in 0..4 {
+        m.dispatch_key(key(Key::Char('k')));
+    }
+    assert!(m.__test_showing_overview(), "parked on the repo header");
+    assert_eq!(
+        m.__test_overview_counts().map(|c| c.with_agent),
+        Some(0),
+        "no agent yet",
+    );
+
+    // A background poll flips an agent to Working — the cursor never moves.
+    m.handle_daemon_event(IpcEvent::AgentState {
+        session_key,
+        terminal_id: lazybox_ipc::TerminalId(1),
+        state: lazybox_ipc::AgentState::Working,
+    });
+
+    assert!(m.__test_showing_overview(), "still on the header");
+    assert_eq!(
+        m.__test_overview_counts().map(|c| c.with_agent),
+        Some(1),
+        "overview must reflect the background agent-state change without a cursor move",
+    );
+}
+
+/// #1442: clicking the overview anywhere other than a roster row must
+/// not strand keyboard focus on the workspace-less Right pane (there is
+/// nothing to navigate there) — focus stays on the sidebar.
+#[test]
+fn overview_click_off_roster_keeps_sidebar_focus() {
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![ws],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    for _ in 0..4 {
+        m.dispatch_key(key(Key::Char('k')));
+    }
+    assert!(m.__test_showing_overview());
+    assert_eq!(m.focus(), PaneFocus::Sidebar);
+
+    m.view();
+    let area = Rect::new(0, 0, 120, 40);
+    // Row 0 of the right column is the overview title — never a roster row.
+    m.dispatch_mouse_in(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 90,
+            row: 0,
+            modifiers: CtKeyModifiers::empty(),
+        },
+        area,
+    );
+    assert_eq!(
+        m.focus(),
+        PaneFocus::Sidebar,
+        "an overview click off the roster must not move focus to the empty Right pane",
+    );
+}

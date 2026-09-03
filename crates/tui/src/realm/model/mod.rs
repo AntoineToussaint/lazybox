@@ -3175,6 +3175,15 @@ impl<T: TerminalAdapter> Model<T> {
         self.right.showing_overview()
     }
 
+    /// Test-only: the counts of the projected overview (issue #1442),
+    /// so freshness tests can assert they track background polls.
+    #[doc(hidden)]
+    pub fn __test_overview_counts(
+        &self,
+    ) -> Option<&crate::components::repo_overview::OverviewCounts> {
+        self.right.overview().map(|o| &o.counts)
+    }
+
     /// Apply `~/.lazybox/config.yaml::attention` +
     /// `ui.collapsed_repos` to the sidebar at startup. Must be called
     /// before the first daemon Subscribe so the saved collapse state

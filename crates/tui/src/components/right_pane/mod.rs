@@ -890,6 +890,11 @@ impl RightPane {
         self.workspace.is_none() && self.overview.is_some()
     }
 
+    /// The overview currently projected onto the pane, if any.
+    pub fn overview(&self) -> Option<&crate::components::repo_overview::RepoOverview> {
+        self.overview.as_ref()
+    }
+
     /// Drain a roster-click workspace selection queued by the overview.
     pub fn take_select_workspace(&mut self) -> Option<lazybox_core::SessionKey> {
         self.pending_select_workspace.take()

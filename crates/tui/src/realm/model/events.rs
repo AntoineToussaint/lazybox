@@ -962,6 +962,17 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
+        // On a group-header row the right pane shows a repo/Space overview
+        // projected — in `sync_panes` — from workspace + agent data. Unlike
+        // a selected workspace (refreshed in place via `RightPane::on_event`),
+        // that projection only rebuilds when `sync_panes` runs, which the
+        // `needs_pane_sync` gate suppresses for a plain poll. Every event
+        // past the two terminal-output fast-paths above can move those
+        // counts, so request the projection now — otherwise the overview
+        // freezes at whatever it showed when the cursor landed (#1442).
+        if self.right.showing_overview() {
+            self.needs_pane_sync = true;
+        }
         // An armed leader's which-key popup — and the row index its
         // `Enter` fires — is derived from the *selected workspace's*
         // currently-available actions (#1351). A poll that lands

@@ -63,6 +63,11 @@ impl Right {
         self.inner.showing_overview()
     }
 
+    /// The projected overview, if any (read by the model's tests).
+    pub fn overview(&self) -> Option<&crate::components::repo_overview::RepoOverview> {
+        self.inner.overview()
+    }
+
     /// Drain an overview roster-click workspace selection (#1442).
     pub fn take_select_workspace(&mut self) -> Option<lazybox_core::SessionKey> {
         self.inner.take_select_workspace()

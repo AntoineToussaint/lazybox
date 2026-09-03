@@ -65,20 +65,11 @@ impl OverviewCounts {
                 self.failing_ci += 1;
             }
         }
-        // A workspace has a "live agent" when it carries an agent state
-        // that isn't the never-worked `Idle` or a terminal `Exited` — the
-        // same coarse liveness the sidebar badge uses.
-        if matches!(
-            agent,
-            Some(
-                AgentState::Working
-                    | AgentState::InputNeeded
-                    | AgentState::Done
-                    | AgentState::LimitReached
-                    | AgentState::CreditExhausted
-                    | AgentState::AwaitingReset
-            )
-        ) {
+        // "With a live agent" means the agent process exists — every
+        // state except the terminal `Exited`. `Idle` counts (a freshly
+        // launched agent sitting at a ready composer is running); only a
+        // dead process doesn't.
+        if agent.is_some_and(|s| !matches!(s, AgentState::Exited { .. })) {
             self.with_agent += 1;
         }
         self.unread += w.unread_count();
@@ -512,11 +503,24 @@ fn title_budget(width: u16) -> usize {
     (width as usize).saturating_sub(28).max(8)
 }
 
+/// Truncate to a display-**width** budget (not a char count), so a
+/// title of wide (CJK / emoji) glyphs can't overflow `max` columns and
+/// silently push the trailing chips off the pane.
 fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
+    if crate::util::visual_width(s) <= max {
         return s.to_string();
     }
-    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    let budget = max.saturating_sub(1);
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in s.chars() {
+        let w = crate::util::char_visual_width(ch);
+        if used + w > budget {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
     out.push('…');
     out
 }
@@ -621,17 +625,24 @@ mod tests {
     }
 
     #[test]
-    fn with_agent_counts_live_states_only() {
+    fn with_agent_counts_every_state_but_exited() {
         let workspaces = map(vec![
             ws("o/r", 1, TaskKind::Pr, TaskState::Open, CiStatus::None),
             ws("o/r", 2, TaskKind::Pr, TaskState::Open, CiStatus::None),
+            ws("o/r", 3, TaskKind::Pr, TaskState::Open, CiStatus::None),
         ]);
         let keys: Vec<SessionKey> = workspaces.keys().cloned().collect();
         let mut agents = HashMap::new();
         agents.insert(keys[0].clone(), AgentState::Working);
+        // An Idle agent is still a live process — it must count.
         agents.insert(keys[1].clone(), AgentState::Idle);
+        // A dead process must not.
+        agents.insert(keys[2].clone(), AgentState::Exited { code: Some(0) });
         let ov = build_repo_overview("o/r", &workspaces, &BTreeMap::new(), &agents);
-        assert_eq!(ov.counts.with_agent, 1, "Idle is not a live agent");
+        assert_eq!(
+            ov.counts.with_agent, 2,
+            "Working + Idle count; Exited does not",
+        );
     }
 
     #[test]
@@ -688,5 +699,22 @@ mod tests {
         // Busiest repo (r1, 2 ws) leads the rollup.
         assert_eq!(ov.rollup[0].repo, "o/r1");
         assert_eq!(ov.rollup[0].counts.workspaces, 2);
+    }
+
+    #[test]
+    fn truncate_respects_display_width_not_char_count() {
+        // Ten fullwidth CJK glyphs = 20 display columns. A char-count
+        // truncation would keep all ten (10 chars ≤ budget) and overflow;
+        // the width-aware one must clip to fit the budget + ellipsis.
+        let wide = "上上上上上上上上上上";
+        let out = truncate(wide, 8);
+        assert!(
+            crate::util::visual_width(&out) <= 8,
+            "truncated width {} exceeds budget",
+            crate::util::visual_width(&out)
+        );
+        assert!(out.ends_with('…'));
+        // A short ASCII title is returned untouched.
+        assert_eq!(truncate("hi", 8), "hi");
     }
 }

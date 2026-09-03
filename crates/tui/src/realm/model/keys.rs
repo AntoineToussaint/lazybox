@@ -1988,8 +1988,18 @@ impl<T: TerminalAdapter> Model<T> {
                 } else {
                     None
                 };
+                // The group overview has no focusable content — its only
+                // interaction is a roster click, which moves the sidebar
+                // cursor. Focusing the (workspace-less) Right pane on an
+                // overview click would strand keyboard focus on an empty
+                // activity feed, so keep focus where it is; the roster
+                // click below still routes because `target` stays `Right`
+                // (#1442).
+                let overview_click =
+                    target == Some(PaneFocus::Right) && self.right.showing_overview();
                 if let Some(focus) = target
                     && self.focus != focus
+                    && !overview_click
                 {
                     self.set_focus(focus);
                     self.redraw = true;

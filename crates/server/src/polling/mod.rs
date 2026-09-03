@@ -1156,6 +1156,8 @@ impl Default for TickState {
             retryable_streak: Default::default(),
             implicit_gh_scopes: None,
             linear_schedule: Default::default(),
+            full_sweep_deferral_streak: Default::default(),
+            discovery_behind_notified: Default::default(),
         }
     }
 }

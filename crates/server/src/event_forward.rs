@@ -30,7 +30,7 @@
 //!   behind this terminal's own debt or a queued event that mutates this
 //!   terminal's stream (or a global `Snapshot`) — one overflowing
 //!   terminal never converts the others' output into resync debt. Repeat
-//!   replays for the same terminal are paced ([`RESYNC_DEBOUNCE`]) and
+//!   replays for the same terminal are paced (`RESYNC_DEBOUNCE`) and
 //!   capped at the snapshot replay budget, so recovery traffic cannot
 //!   itself sustain the congestion it is recovering from.
 //!

@@ -1555,7 +1555,7 @@ impl TerminalStack {
     /// passed re-arms its request. Retries never stop
     /// (advise-never-forbid: the pane must eventually converge); the
     /// backoff merely paces them, doubling per consecutive failure up
-    /// to [`RESYNC_RETRY_CAP`].
+    /// to `RESYNC_RETRY_CAP`.
     pub fn tick_resync_retries(&mut self, now: std::time::Instant) {
         let due: Vec<TerminalId> = self
             .terminals

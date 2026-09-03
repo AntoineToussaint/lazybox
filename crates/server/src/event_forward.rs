@@ -757,7 +757,7 @@ mod tests {
             raw_tx
                 .send(Event::TerminalOutput {
                     terminal_id: tid,
-                    bytes: format!("chunk{seq}").into_bytes(),
+                    bytes: Arc::<[u8]>::from(format!("chunk{seq}").into_bytes()),
                     first_seq: seq,
                     seq,
                 })
@@ -850,7 +850,7 @@ mod tests {
             &tx,
             Event::TerminalOutput {
                 terminal_id: tid,
-                bytes: vec![b'x'],
+                bytes: Arc::<[u8]>::from(vec![b'x']),
                 first_seq: 1,
                 seq: 1,
             },
@@ -861,7 +861,7 @@ mod tests {
             &tx,
             Event::TerminalOutput {
                 terminal_id: tid,
-                bytes: vec![b'y'],
+                bytes: Arc::<[u8]>::from(vec![b'y']),
                 first_seq: 2,
                 seq: 2,
             },
@@ -950,7 +950,7 @@ mod tests {
             &tx,
             Event::TerminalOutput {
                 terminal_id: tid,
-                bytes: b"B".to_vec(),
+                bytes: Arc::<[u8]>::from(b"B".to_vec()),
                 first_seq: 2,
                 seq: 2,
             },
@@ -1007,7 +1007,7 @@ mod tests {
                 &tx,
                 Event::TerminalOutput {
                     terminal_id: tid,
-                    bytes: vec![b'z'],
+                    bytes: Arc::<[u8]>::from(vec![b'z']),
                     first_seq: seq,
                     seq,
                 },
@@ -1144,7 +1144,7 @@ mod tests {
             raw_tx
                 .send(Event::TerminalOutput {
                     terminal_id: TerminalId(1),
-                    bytes: vec![b'x'],
+                    bytes: Arc::<[u8]>::from(vec![b'x']),
                     first_seq: seq,
                     seq,
                 })

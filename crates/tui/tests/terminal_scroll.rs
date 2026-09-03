@@ -110,7 +110,7 @@ fn fresh_agent() -> TerminalStack {
     render(&mut stack);
     stack.on_event(&Event::TerminalOutput {
         terminal_id: TerminalId(1),
-        bytes: scrollback_payload(),
+        bytes: scrollback_payload().into(),
         first_seq: 1,
         seq: 1,
     });
@@ -321,7 +321,7 @@ fn focused_reattach_flush_parses_replay_at_render_width() {
     spawn_focused(&mut fresh, RW, RH);
     fresh.on_event(&Event::TerminalOutput {
         terminal_id: TerminalId(1),
-        bytes: payload.clone(),
+        bytes: payload.clone().into(),
         first_seq: 1,
         seq: 1,
     });
@@ -373,7 +373,7 @@ fn split_stack() -> TerminalStack {
     for id in [1u64, 2] {
         stack.on_event(&Event::TerminalOutput {
             terminal_id: TerminalId(id),
-            bytes: scrollback_payload(),
+            bytes: scrollback_payload().into(),
             first_seq: 1,
             seq: 1,
         });

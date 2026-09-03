@@ -43,7 +43,10 @@ use lazybox_ipc::{
 use lazybox_store::{StoreMutation, WorkspaceRecord};
 use spawn_executor::{ExecutedSpawn, SpawnExecutionOutcome, execute_spawn_plan};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 use std::time::Duration;
 
 /// Hard ceiling on `backend.snapshot(key)` calls inside `snapshot_terminals`.
@@ -2008,7 +2011,7 @@ async fn handle_spawn_inner(
                 if sub.replay_complete {
                     let _ = bus.send(Event::TerminalOutput {
                         terminal_id: id_for_pump,
-                        bytes: sub.replay.clone(),
+                        bytes: Arc::<[u8]>::from(sub.replay.clone()),
                         first_seq: 1,
                         seq: sub.last_seq,
                     });
@@ -2267,7 +2270,7 @@ async fn handle_spawn_inner(
                 }
                 let _ = bus.send(Event::TerminalOutput {
                     terminal_id: id_for_pump,
-                    bytes: chunk.bytes,
+                    bytes: Arc::<[u8]>::from(chunk.bytes),
                     first_seq: chunk.seq,
                     seq: chunk.seq,
                 });
@@ -8840,7 +8843,7 @@ async fn pump_recovered_session(
         .await;
         let _ = config.bus.send(Event::TerminalOutput {
             terminal_id,
-            bytes: sub.replay.clone(),
+            bytes: Arc::<[u8]>::from(sub.replay.clone()),
             first_seq: 1,
             seq: sub.last_seq,
         });
@@ -8986,7 +8989,7 @@ async fn pump_recovered_session(
                 last_chunk_len = chunk.bytes.len();
                 let _ = config.bus.send(Event::TerminalOutput {
                     terminal_id,
-                    bytes: chunk.bytes,
+                    bytes: Arc::<[u8]>::from(chunk.bytes),
                     first_seq: chunk.seq,
                     seq: chunk.seq,
                 });
@@ -14025,14 +14028,14 @@ mod tests {
         config.terminal.record_composer_ready(id, true).await;
         let _ = config.bus.send(Event::TerminalOutput {
             terminal_id: id,
-            bytes: b"composer ready".to_vec(),
+            bytes: Arc::<[u8]>::from(b"composer ready".to_vec()),
             first_seq: 1,
             seq: 1,
         });
         wait_for_write_count(&mock, &backend_key, 2).await;
         let _ = config.bus.send(Event::TerminalOutput {
             terminal_id: id,
-            bytes: b"Continue the work you were doing.".to_vec(),
+            bytes: Arc::<[u8]>::from(b"Continue the work you were doing.".to_vec()),
             first_seq: 2,
             seq: 2,
         });
@@ -14374,7 +14377,7 @@ mod tests {
         config.terminal.record_composer_ready(id, true).await;
         let _ = config.bus.send(Event::TerminalOutput {
             terminal_id: id,
-            bytes: b"composer ready".to_vec(),
+            bytes: Arc::<[u8]>::from(b"composer ready".to_vec()),
             first_seq: 1,
             seq: 1,
         });
@@ -15117,7 +15120,7 @@ mod tests {
                         wait_for_write_count(&mock, &backend_key, 1).await;
                         let _ = config.bus.send(Event::TerminalOutput {
                             terminal_id: id,
-                            bytes: prompt.into_bytes(),
+                            bytes: Arc::<[u8]>::from(prompt.into_bytes()),
                             first_seq: 1,
                             seq: 1,
                         });
@@ -15298,7 +15301,7 @@ mod tests {
         for _ in 0..crate::BUS_CAPACITY + 8 {
             let _ = config.bus.send(Event::TerminalOutput {
                 terminal_id: TerminalId(9_999),
-                bytes: Vec::new(),
+                bytes: Arc::<[u8]>::from(Vec::new()),
                 first_seq: 0,
                 seq: 0,
             });
@@ -16587,7 +16590,7 @@ mod tests {
             for seq in 0..6u64 {
                 let _ = bus.send(Event::TerminalOutput {
                     terminal_id: id,
-                    bytes: b"paint".to_vec(),
+                    bytes: Arc::<[u8]>::from(b"paint".to_vec()),
                     first_seq: seq,
                     seq,
                 });
@@ -16620,7 +16623,7 @@ mod tests {
             for seq in 0..200u64 {
                 let _ = bus.send(Event::TerminalOutput {
                     terminal_id: TerminalId(99),
-                    bytes: b"noise".to_vec(),
+                    bytes: Arc::<[u8]>::from(b"noise".to_vec()),
                     first_seq: seq,
                     seq,
                 });
@@ -16655,7 +16658,7 @@ mod tests {
             for seq in 0..200u64 {
                 let _ = bus.send(Event::TerminalOutput {
                     terminal_id: id,
-                    bytes: b"spin".to_vec(),
+                    bytes: Arc::<[u8]>::from(b"spin".to_vec()),
                     first_seq: seq,
                     seq,
                 });
@@ -16703,7 +16706,7 @@ mod tests {
                 };
                 let _ = bus.send(Event::TerminalOutput {
                     terminal_id: id,
-                    bytes,
+                    bytes: Arc::<[u8]>::from(bytes),
                     first_seq: seq,
                     seq,
                 });
@@ -16744,7 +16747,9 @@ mod tests {
         tokio::spawn(async move {
             let _ = bus.send(Event::TerminalOutput {
                 terminal_id: id,
-                bytes: b"\x1b[2K> \x1b[2m[Pasted text #1 +2 lines]\x1b[0m".to_vec(),
+                bytes: Arc::<[u8]>::from(
+                    b"\x1b[2K> \x1b[2m[Pasted text #1 +2 lines]\x1b[0m".to_vec(),
+                ),
                 first_seq: 0,
                 seq: 0,
             });

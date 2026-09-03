@@ -1633,7 +1633,7 @@ async fn spawned_subprocess_output_reaches_client_via_bus() {
                     terminal_id: tid,
                     bytes,
                     ..
-                } => *tid == terminal_id && bytes == b"lazybox-marker",
+                } => *tid == terminal_id && bytes.as_ref() == b"lazybox-marker",
                 _ => false,
             },
             Duration::from_secs(2),
@@ -1719,7 +1719,7 @@ async fn snapshot_replay_includes_buffered_pty_output_for_late_subscribers() {
         let _ = wait_for(
             &mut producer,
             |e| match e {
-                Event::TerminalOutput { bytes, .. } => bytes == b"lazybox-replay-marker",
+                Event::TerminalOutput { bytes, .. } => bytes.as_ref() == b"lazybox-replay-marker",
                 _ => false,
             },
             Duration::from_secs(2),

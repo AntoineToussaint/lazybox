@@ -655,7 +655,10 @@ pub(super) fn coalesce_adjacent_output(events: Vec<IpcEvent>) -> Vec<IpcEvent> {
                 {
                     // Same terminal and contiguous with the tail run —
                     // extend it while preserving the run's first seq.
-                    prev_bytes.extend_from_slice(&bytes);
+                    // Convert Arc<[u8]> to Vec<u8>, extend it, and convert back.
+                    let mut combined = prev_bytes.to_vec();
+                    combined.extend_from_slice(&bytes);
+                    *prev_bytes = combined.into();
                     *prev_seq = seq;
                     continue;
                 }

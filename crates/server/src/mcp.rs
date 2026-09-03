@@ -19,7 +19,10 @@
 //!
 //! Notes persist across restarts and outlive their authoring session, so an
 //! agent can leave a note that a sibling in another repo reads later. Each
-//! scope is capped so the blackboard can't grow without bound.
+//! scope is bounded — most-recent-N notes, each size-capped — so no scope
+//! grows without limit; aggregate kv use still scales with the number of
+//! distinct scopes ever written (one per session that posts), which is not
+//! reclaimed here since notes deliberately outlive their author.
 //!
 //! Identity is **implicit from the connection**: each spawned agent carries a
 //! per-session bearer token (minted at spawn, see the spawn wiring in a later
@@ -125,12 +128,24 @@ pub struct McpRuntime {
     /// Base URL of the MCP endpoint (`http://127.0.0.1:PORT/`) once
     /// [`start`] has bound the listener; `None` before then.
     endpoint: RwLock<Option<String>>,
+    /// Serializes the read-then-write sequence-allocation in `post_note`.
+    /// The handler is built per connection, so posts from different agents run
+    /// in independent tasks; without this, two concurrent posts to one scope
+    /// read the same max sequence, compute the same key, and the second
+    /// `apply_batch` silently overwrites the first. Held across the list +
+    /// insert so seq allocation is atomic process-wide.
+    notes_write: tokio::sync::Mutex<()>,
 }
 
 impl McpRuntime {
     /// The token registry shared with the spawn path.
     pub fn tokens(&self) -> &TokenRegistry {
         &self.tokens
+    }
+
+    /// The lock guarding note sequence allocation (see the field docs).
+    fn notes_write(&self) -> &tokio::sync::Mutex<()> {
+        &self.notes_write
     }
 
     /// Record the bound endpoint URL (called once by [`start`]).
@@ -403,8 +418,32 @@ impl LazyboxMcp {
         if text.is_empty() {
             return Err(McpError::invalid_request("note text is empty", None));
         }
+        if text.len() > MAX_NOTE_BYTES {
+            return Err(McpError::invalid_request(
+                format!(
+                    "note text exceeds {MAX_NOTE_BYTES} bytes (post distilled context, not raw output)"
+                ),
+                None,
+            ));
+        }
+        if tags.len() > MAX_NOTE_TAGS {
+            return Err(McpError::invalid_request(
+                format!("too many tags (max {MAX_NOTE_TAGS})"),
+                None,
+            ));
+        }
+        if let Some(tag) = tags.iter().find(|tag| tag.len() > MAX_TAG_BYTES) {
+            return Err(McpError::invalid_request(
+                format!("tag {tag:?} exceeds {MAX_TAG_BYTES} bytes"),
+                None,
+            ));
+        }
         let scope = scope.unwrap_or(author.as_str()).to_string();
         let prefix = note_key_prefix(&scope);
+        // Hold the sequence-allocation lock across the list + insert so two
+        // concurrent posts to this scope can't both claim the same seq and
+        // have the second silently overwrite the first.
+        let _seq_guard = self.config.mcp.notes_write().lock().await;
         let existing: Vec<String> = self
             .list_scope_notes(&prefix)
             .await?
@@ -470,9 +509,9 @@ impl LazyboxMcp {
             Some(scope) => vec![scope.to_string()],
             None => vec![GLOBAL_SCOPE.to_string(), caller.as_str().to_string()],
         };
-        let mut notes: Vec<Note> = Vec::new();
+        let mut notes: Vec<(i64, u64, Note)> = Vec::new();
         for scope in &scopes {
-            for (_, value) in self.list_scope_notes(&note_key_prefix(scope)).await? {
+            for (key, value) in self.list_scope_notes(&note_key_prefix(scope)).await? {
                 let Ok(note) = serde_json::from_str::<Note>(&value) else {
                     continue;
                 };
@@ -487,13 +526,16 @@ impl LazyboxMcp {
                 if !tags.is_empty() && !tags.iter().any(|tag| note.tags.contains(tag)) {
                     continue;
                 }
-                notes.push(note);
+                notes.push((note.ts, note_seq(&key).unwrap_or(0), note));
             }
         }
-        notes.sort_by_key(|note| std::cmp::Reverse(note.ts));
+        // Newest-first. The seq breaks ties within a scope so two notes stamped
+        // in the same millisecond still order last-posted-first, not the
+        // stable oldest-first the timestamp alone would leave.
+        notes.sort_by_key(|(ts, seq, _)| std::cmp::Reverse((*ts, *seq)));
         let rendered: Vec<serde_json::Value> = notes
             .into_iter()
-            .map(|note| {
+            .map(|(_, _, note)| {
                 serde_json::json!({
                     "author": note.author,
                     "scope": note.scope,
@@ -883,8 +925,15 @@ const NOTE_KV_PREFIX: &str = "lazybox:note:";
 /// The scope every session can read from and post to, for broadcast.
 const GLOBAL_SCOPE: &str = "global";
 /// Most recent notes retained per scope; older ones are pruned on each post so
-/// the blackboard can't grow without bound.
+/// no single scope grows without bound.
 const NOTES_PER_SCOPE: usize = 50;
+/// Largest accepted note body, in bytes. A note is distilled context, not raw
+/// scrollback; capping it (with [`NOTES_PER_SCOPE`]) bounds a scope's bytes so
+/// a runaway agent can't bloat the kv with one giant note.
+const MAX_NOTE_BYTES: usize = 16 * 1024;
+/// Largest accepted tag count / tag length, bounding the tag vector likewise.
+const MAX_NOTE_TAGS: usize = 32;
+const MAX_TAG_BYTES: usize = 64;
 /// Zero-pad width for the per-scope sequence in a note key, so `list_kv_prefix`
 /// (which orders lexically by key) returns a scope's notes in insertion order.
 const NOTE_SEQ_WIDTH: usize = 12;
@@ -1412,5 +1461,96 @@ mod tests {
         assert!(read_text.contains("chose approach X"), "{read_text}");
 
         client.cancel().await.ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_posts_to_one_scope_dont_collide() {
+        // Two posts racing on the same scope must not both claim the same seq
+        // and have the second overwrite the first. Handlers clone-share the
+        // McpRuntime (and its seq lock) and the store.
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let poster = SessionKey::from("poster");
+        let count = 20i64;
+        let mut tasks = Vec::new();
+        for i in 0..count {
+            let handler = handler.clone();
+            let poster = poster.clone();
+            tasks.push(tokio::spawn(async move {
+                handler
+                    .post_note_payload(&poster, format!("note {i}"), Some(GLOBAL_SCOPE), vec![], i)
+                    .await
+                    .expect("post");
+            }));
+        }
+        for task in tasks {
+            task.await.expect("join");
+        }
+
+        let read = handler
+            .read_notes_payload(&SessionKey::from("reader"), Some(GLOBAL_SCOPE), &[], None)
+            .await
+            .expect("read");
+        let notes = read["notes"].as_array().expect("array");
+        assert_eq!(
+            notes.len(),
+            count as usize,
+            "every concurrent post must persist — no seq collision"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_note_rejects_oversized_text_and_tags() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let author = SessionKey::from("a");
+        let huge = "x".repeat(MAX_NOTE_BYTES + 1);
+        assert!(
+            handler
+                .post_note_payload(&author, huge, None, vec![], 1)
+                .await
+                .is_err(),
+            "a note past the byte cap must be rejected, not stored"
+        );
+        let many_tags: Vec<String> = (0..MAX_NOTE_TAGS + 1).map(|i| i.to_string()).collect();
+        assert!(
+            handler
+                .post_note_payload(&author, "ok".into(), None, many_tags, 1)
+                .await
+                .is_err()
+        );
+        let long_tag = vec!["t".repeat(MAX_TAG_BYTES + 1)];
+        assert!(
+            handler
+                .post_note_payload(&author, "ok".into(), None, long_tag, 1)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn equal_timestamps_order_newest_posted_first() {
+        // Same-millisecond posts must still render last-posted-first, not the
+        // stable oldest-first a timestamp-only sort leaves.
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let author = SessionKey::from("a");
+        handler
+            .post_note_payload(&author, "first".into(), None, vec![], 500)
+            .await
+            .expect("post");
+        handler
+            .post_note_payload(&author, "second".into(), None, vec![], 500)
+            .await
+            .expect("post");
+
+        let read = handler
+            .read_notes_payload(&author, Some("a"), &[], None)
+            .await
+            .expect("read");
+        let texts: Vec<&str> = read["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|note| note["text"].as_str().unwrap())
+            .collect();
+        assert_eq!(texts, vec!["second", "first"]);
     }
 }

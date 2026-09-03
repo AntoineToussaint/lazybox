@@ -396,8 +396,9 @@ regression test so it can't quietly soften back:
   touches and everything that breaks because of it*, so it can't be the
   escape hatch.
 - **`fixall` implements, it does not curate.** The deliverable is a clean,
-  tested diff; "here are the changes I would make" is not an acceptable
-  output.
+  tested diff that is **committed and pushed**; "here are the changes I would
+  make" is not an acceptable output, and neither is a fix left stranded in the
+  working tree (it's lost when the worktree is cleaned up).
 - **The review bodies close with a completeness self-critique** — what was
   not examined, and why skipping it is justified with evidence.
 

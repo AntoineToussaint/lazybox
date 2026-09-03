@@ -54,6 +54,27 @@ impl<T: TerminalAdapter> Model<T> {
             sent += chunk.len();
         }
     }
+
+    /// Tick-driven resync retry (#1254 finding 2): re-arm any desynced
+    /// terminal whose `TerminalResyncUnavailable` backoff has elapsed and
+    /// flush the resulting requests. Runs every loop iteration so a
+    /// quiescent pane — one that will never see another output event —
+    /// still converges on the daemon's authoritative replay.
+    pub fn tick_terminal_resyncs(&mut self) {
+        self.terminals
+            .tick_resync_retries(std::time::Instant::now());
+        self.flush_pending_terminal_resyncs();
+    }
+
+    /// Ctrl-L's honest half (#1254 finding 7): beyond repainting the host
+    /// terminal, distrust every visible client VT grid and request the
+    /// daemon's authoritative replay for each. A repaint can only fix
+    /// what the HOST screen forgot; a wrong client grid (seam-garbled
+    /// resync, missed mode changes) needs the ring truth.
+    pub fn request_terminal_truth(&mut self) {
+        self.terminals.mark_visible_desynced();
+        self.flush_pending_terminal_resyncs();
+    }
 }
 
 /// Compose a readable action-failure banner (merge/close/update/delete

@@ -912,6 +912,17 @@ fn subtree_at_path<'a>(
     Some(node)
 }
 
+/// First retry delay after a `TerminalResyncUnavailable` reply (#1254
+/// finding 2). Without a tick-driven retry, a desynced pane whose agent
+/// already finished had nothing left to re-drive its request — new
+/// output was the only trigger — and froze forever.
+const RESYNC_RETRY_INITIAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Backoff cap for the resync retry loop. Retries never stop
+/// (advise-never-forbid: the pane must eventually converge); they just
+/// slow to this cadence while the daemon keeps answering "unavailable".
+const RESYNC_RETRY_CAP: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerminalStreamSync {
     Coherent,
@@ -939,6 +950,18 @@ struct TerminalSlot {
     /// mutate the last coherent grid. Only an authoritative resync clears
     /// the debt.
     sync: TerminalStreamSync,
+    /// When a `Desynced { request_pending: false }` slot should re-issue
+    /// its resync request (#1254 finding 2). Armed by a
+    /// `TerminalResyncUnavailable` reply; consumed by
+    /// [`TerminalStack::tick_resync_retries`], which runs from the UI
+    /// tick loop so recovery is driven by TIME, not by new output — a
+    /// quiescent pane converges too. `None` while a request is in
+    /// flight or the slot is coherent.
+    resync_retry_at: Option<std::time::Instant>,
+    /// Next retry delay: doubles per consecutive `Unavailable` reply
+    /// from [`RESYNC_RETRY_INITIAL`] up to [`RESYNC_RETRY_CAP`]; reset
+    /// on a successful resync.
+    resync_retry_backoff: std::time::Duration,
     /// libghostty-vt parser. Each client owns its own — the daemon
     /// streams raw bytes; this is what turns them into a cell grid.
     /// `Box`ed so moving `TerminalSlot` doesn't move the inner FFI
@@ -1513,11 +1536,90 @@ impl TerminalStack {
                 } => {
                     debt.required_seq = debt.required_seq.max(request.required_seq);
                     *request_pending = true;
+                    slot.resync_retry_at = None;
                 }
                 TerminalStreamSync::Coherent => continue,
             }
             if !self.pending_resync_requests.contains(&request.terminal_id) {
                 self.pending_resync_requests.push(request.terminal_id);
+            }
+        }
+    }
+
+    /// Re-drive recovery for quiescent desynced panes (#1254 finding 2).
+    /// A `TerminalResyncUnavailable` reply releases the request latch,
+    /// and without this only NEW output on that terminal would re-issue
+    /// the request — a finished agent's desynced pane stayed frozen
+    /// forever. Called from the UI tick loop; any slot in
+    /// `Desynced { request_pending: false }` whose backoff deadline has
+    /// passed re-arms its request. Retries never stop
+    /// (advise-never-forbid: the pane must eventually converge); the
+    /// backoff merely paces them, doubling per consecutive failure up
+    /// to `RESYNC_RETRY_CAP`.
+    pub fn tick_resync_retries(&mut self, now: std::time::Instant) {
+        let due: Vec<TerminalId> = self
+            .terminals
+            .iter()
+            .filter_map(|(id, slot)| match slot.sync {
+                TerminalStreamSync::Desynced {
+                    request_pending: false,
+                    ..
+                } if slot.exited.is_none() && slot.resync_retry_at.is_none_or(|at| now >= at) => {
+                    Some(*id)
+                }
+                _ => None,
+            })
+            .collect();
+        for id in due {
+            let Some(slot) = self.terminals.get_mut(&id) else {
+                continue;
+            };
+            if let TerminalStreamSync::Desynced {
+                request_pending, ..
+            } = &mut slot.sync
+            {
+                *request_pending = true;
+            }
+            // The next `Unavailable` reply re-arms the (doubled) backoff.
+            slot.resync_retry_at = None;
+            if !self.pending_resync_requests.contains(&id) {
+                self.pending_resync_requests.push(id);
+            }
+        }
+    }
+
+    /// Ctrl-L's "give me the truth" hatch (#1254 finding 7): distrust
+    /// every visible grid and ask the daemon for its authoritative
+    /// replay. Clearing the host terminal fixes what the HOST forgot;
+    /// only a ring replay can fix a client VT grid that parsed a torn
+    /// or seam-garbled stream. The last coherent grid keeps rendering
+    /// until each replay lands (`resync_terminal` resets + re-feeds),
+    /// so the hatch never blanks a pane. Exited panes are skipped —
+    /// they render a freeze-frame and have no daemon stream to ask.
+    pub fn mark_visible_desynced(&mut self) {
+        for id in self.visible_terminals() {
+            let Some(slot) = self.terminals.get_mut(&id) else {
+                continue;
+            };
+            if slot.exited.is_some() {
+                continue;
+            }
+            let required_seq = match slot.sync {
+                TerminalStreamSync::Coherent => slot.last_seq,
+                TerminalStreamSync::Desynced { request, .. } => {
+                    request.required_seq.max(slot.last_seq)
+                }
+            };
+            slot.sync = TerminalStreamSync::Desynced {
+                request: TerminalResyncRequest {
+                    terminal_id: id,
+                    required_seq,
+                },
+                request_pending: true,
+            };
+            slot.resync_retry_at = None;
+            if !self.pending_resync_requests.contains(&id) {
+                self.pending_resync_requests.push(id);
             }
         }
     }
@@ -2825,6 +2927,9 @@ impl TerminalStack {
             request.required_seq = request.required_seq.max(seq);
             if !*request_pending {
                 *request_pending = true;
+                // Fresh output re-drove the request; the timed retry
+                // stands down until the reply comes back unavailable.
+                slot.resync_retry_at = None;
                 self.pending_resync_requests.push(id);
             }
             return;
@@ -2969,6 +3074,10 @@ impl TerminalStack {
         slot.recent.extend_from_slice(&replay[tail_start..]);
         slot.last_seq = seq;
         slot.sync = TerminalStreamSync::Coherent;
+        // Recovery converged — disarm the retry loop and reset its
+        // backoff so the next episode starts fast again.
+        slot.resync_retry_at = None;
+        slot.resync_retry_backoff = RESYNC_RETRY_INITIAL;
         // The raw-stream rebuild just replaced any capture-fed deep
         // scrollback with the ring's shallow history, so the current
         // scrollback visit's fetch is spent. Release the latch: the
@@ -3094,6 +3203,8 @@ impl TerminalStack {
             kind,
             last_seq,
             sync: TerminalStreamSync::Coherent,
+            resync_retry_at: None,
+            resync_retry_backoff: RESYNC_RETRY_INITIAL,
             vt,
             recent: Vec::new(),
             osc52_carry: Vec::new(),
@@ -3761,6 +3872,16 @@ impl TerminalStack {
                             };
                         }
                     }
+                    // Arm the tick-driven retry (#1254 finding 2): with
+                    // the request latch released, NOTHING else re-drives
+                    // recovery when the terminal never produces another
+                    // byte — a finished agent's desynced pane froze
+                    // forever. Bounded backoff, retried until the daemon
+                    // finally serves an authoritative replay.
+                    slot.resync_retry_at =
+                        Some(std::time::Instant::now() + slot.resync_retry_backoff);
+                    slot.resync_retry_backoff =
+                        (slot.resync_retry_backoff * 2).min(RESYNC_RETRY_CAP);
                 }
             }
             Event::TerminalScrollback {
@@ -4469,6 +4590,53 @@ impl TerminalStack {
             }
             slot.authenticating = authenticating;
             slot.auth_recovery_id = authenticating.then_some(old_terminal_id);
+            // The slot's identity just changed under it — a cached frame
+            // painted for the OLD identity (badges, kind) must never
+            // blit again. Repainting from the live VT is always safe.
+            slot.last_frame = None;
+            slot.last_frame_rev = None;
+            if !authenticating {
+                // Non-auth slot reuse (#1254 finding 7): a duplicate or
+                // late `TerminalReplaced` re-announcing an id this
+                // client never matched to its old terminal. Nothing
+                // guarantees the reused slot's grid or sequence
+                // watermark describe the PTY now behind the id — a
+                // watermark above the new stream's next seq silently
+                // drops ALL of its output (`append_output`'s
+                // `seq <= last_seq` dedupe), a permanently frozen pane.
+                // Start from a clean grid, quarantined until the
+                // daemon's authoritative replay describes the stream.
+                // If the VT reset fails (allocator hiccup) the replay
+                // path resets again before feeding, so recovery still
+                // converges.
+                //
+                // An `authenticating` handoff is the one reuse that is
+                // KNOWN current: the auth PTY's bytes stream on the
+                // connection-private lane and legitimately precede this
+                // broadcast (see `replacement_event_is_idempotent_…`),
+                // and the provider-owned auth PTY has no replay ring to
+                // serve a resync from — wiping it would blank the very
+                // login screen the user must read.
+                let _ = slot.vt.reset();
+                slot.pending_feed.clear();
+                slot.recent.clear();
+                slot.osc52_carry.clear();
+                slot.last_seq = 0;
+                slot.deep_scrollback_requested = false;
+                slot.resync_retry_at = None;
+                slot.resync_retry_backoff = RESYNC_RETRY_INITIAL;
+                slot.sync = TerminalStreamSync::Desynced {
+                    request: TerminalResyncRequest {
+                        terminal_id,
+                        required_seq: 0,
+                    },
+                    request_pending: true,
+                };
+                if !self.pending_resync_requests.contains(&terminal_id) {
+                    self.pending_resync_requests.push(terminal_id);
+                }
+            }
+            self.invalidate_visible();
             if self.active_session.as_ref() == Some(&session_key) {
                 self.focus_terminal(terminal_id);
             }
@@ -7610,6 +7778,142 @@ mod resync_tests {
             seq: 5,
         });
         assert_eq!(stack.terminals[&id].recent, b"recovered!");
+    }
+
+    /// #1254 finding 2: after the daemon answers `TerminalResyncUnavailable`,
+    /// a pane whose agent has FINISHED produces no further output — and
+    /// output used to be the only thing that re-drove the request, so the
+    /// pane froze forever. The tick loop must re-issue the request on a
+    /// bounded backoff until an authoritative replay converges the grid.
+    #[test]
+    fn quiescent_terminal_recovers_after_resync_unavailable() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = shell_stack(id, &sk);
+        stack.on_event(&Event::TerminalOutput {
+            terminal_id: id,
+            bytes: b"ok".to_vec(),
+            first_seq: 1,
+            seq: 1,
+        });
+        // A gap desyncs the pane and sends one request.
+        stack.on_event(&Event::TerminalOutput {
+            terminal_id: id,
+            bytes: b"torn".to_vec(),
+            first_seq: 3,
+            seq: 3,
+        });
+        let request = TerminalResyncRequest {
+            terminal_id: id,
+            required_seq: 3,
+        };
+        assert_eq!(stack.drain_pending_resync_requests(), vec![request]);
+
+        // The daemon can't serve it right now — and no further output
+        // will EVER arrive on this terminal.
+        stack.on_event(&Event::TerminalResyncUnavailable { terminal_id: id });
+        let now = std::time::Instant::now();
+        // Inside the backoff window nothing is re-issued (no hammering)...
+        stack.tick_resync_retries(now);
+        assert!(
+            stack.drain_pending_resync_requests().is_empty(),
+            "the backoff window paces the retry"
+        );
+        // ...but ticks alone — zero new output — re-drive the request.
+        stack.tick_resync_retries(now + std::time::Duration::from_secs(31));
+        assert_eq!(
+            stack.drain_pending_resync_requests(),
+            vec![request],
+            "the tick loop must re-drive a quiescent desynced pane"
+        );
+
+        // A second unavailable reply keeps the loop alive: retries slow
+        // down (backoff doubles, capped) but never stop.
+        stack.on_event(&Event::TerminalResyncUnavailable { terminal_id: id });
+        stack.tick_resync_retries(now + std::time::Duration::from_secs(120));
+        assert_eq!(
+            stack.drain_pending_resync_requests(),
+            vec![request],
+            "retries continue for as long as recovery keeps failing"
+        );
+
+        // The authoritative replay finally lands and converges the pane.
+        stack.on_event(&Event::TerminalResync {
+            terminal_id: id,
+            replay: b"ok-then-torn".to_vec(),
+            seq: 3,
+        });
+        let slot = &stack.terminals[&id];
+        assert!(!slot.sync.is_desynced(), "the pane converged");
+        assert!(slot.resync_retry_at.is_none(), "the retry loop disarmed");
+        assert_eq!(
+            slot.resync_retry_backoff, RESYNC_RETRY_INITIAL,
+            "the next episode starts from the fast backoff again"
+        );
+    }
+
+    /// #1254 finding 7 (second half): `replace_terminal`'s slot-reuse
+    /// branch used to mutate slot identity while keeping the old grid,
+    /// frame cache, and sequence watermark — a permanently stale pane.
+    /// The reused slot must start from a clean grid, quarantined until
+    /// the daemon's authoritative replay describes the new stream.
+    #[test]
+    fn replace_terminal_slot_reuse_starts_from_a_clean_grid() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(2);
+        let mut stack = shell_stack(id, &sk);
+        stack.on_event(&Event::TerminalOutput {
+            terminal_id: id,
+            bytes: b"stale\r\n".to_vec(),
+            first_seq: 1,
+            seq: 5,
+        });
+        assert_eq!(
+            row(&mut stack, ROW0),
+            "stale",
+            "precondition: prior content"
+        );
+        {
+            let slot = stack.terminals.get_mut(&id).expect("slot");
+            slot.last_frame = Some(ratatui::buffer::Buffer::empty(Rect::new(0, 0, 10, 2)));
+            slot.last_frame_rev = Some((slot.vt.content_rev, Rect::new(0, 0, 10, 2)));
+        }
+
+        // The daemon replaces a terminal this client never saw the old
+        // id of — the slot-reuse branch.
+        stack.on_event(&Event::TerminalReplaced {
+            old_terminal_id: TerminalId(99),
+            terminal_id: id,
+            session_key: sk.clone(),
+            kind: TerminalKind::Shell,
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            authenticating: false,
+        });
+
+        let slot = &stack.terminals[&id];
+        assert!(
+            slot.last_frame.is_none() && slot.last_frame_rev.is_none(),
+            "a stale cached frame must never blit for the new stream"
+        );
+        assert_eq!(
+            slot.last_seq, 0,
+            "the watermark restarts with the new stream"
+        );
+        assert!(
+            slot.sync.is_desynced(),
+            "the clean grid is quarantined until the authoritative replay"
+        );
+        assert_eq!(
+            stack.drain_pending_resync_requests(),
+            vec![TerminalResyncRequest {
+                terminal_id: id,
+                required_seq: 0,
+            }],
+            "the replacement immediately requests the daemon's truth"
+        );
+        assert_eq!(row(&mut stack, ROW0), "", "the old grid's content is gone");
     }
 
     #[test]

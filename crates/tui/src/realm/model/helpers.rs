@@ -1480,6 +1480,10 @@ pub(super) fn run_loop_step<T: TerminalAdapter>(
     model.tick_terminal_drag();
     model.tick_mouse_capture();
     model.tick_daemon_health();
+    // Quiescent desynced panes are re-driven by TIME, not output
+    // (#1254): a pane whose resync came back unavailable retries with
+    // backoff until it converges, even if its agent never prints again.
+    model.tick_terminal_resyncs();
     timings.ticks = ticks_start.elapsed();
 
     // 3. Process tuirealm messages without blocking.

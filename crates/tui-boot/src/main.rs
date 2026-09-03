@@ -396,6 +396,34 @@ fn wants_version(args: &[String]) -> bool {
     args.iter().any(|a| a == "-V" || a == "--version")
 }
 
+/// What a leftover first argument means once the known subcommands and the
+/// launch flags (`--fresh` / `--test` / `--workspace` / …, consumed earlier)
+/// have been peeled off in `run`.
+#[derive(Debug, PartialEq, Eq)]
+enum TopLevelFallback {
+    /// Bare `lazybox` — launch the inbox (TUI + embedded daemon).
+    Launch,
+    /// `lazybox help` — the bare-word alias for `--help` (which `wants_help`
+    /// only matches as a flag). Print usage, exit 0.
+    ShowHelp,
+    /// An unrecognized command / typo. Print usage and exit non-zero — it must
+    /// NOT fall through to launching a whole second lazybox instance. This
+    /// matters now that `lazybox` is on the agent PATH (#1419/#1425) and the
+    /// SessionStart prompt tells agents to run it: a stray `lazybox help`,
+    /// `lazybox status`, or typo previously spun up a rogue embedded daemon
+    /// that spawned duplicate agent sessions.
+    Unknown,
+}
+
+/// Classify the dispatch fallback. Only `None` (no leftover args) launches.
+fn classify_top_level_fallback(first: Option<&str>) -> TopLevelFallback {
+    match first {
+        None => TopLevelFallback::Launch,
+        Some("help") => TopLevelFallback::ShowHelp,
+        Some(_) => TopLevelFallback::Unknown,
+    }
+}
+
 // The disallowed-methods allow covers the `Runtime::block_on` that
 // `#[tokio::main]` expands to — the process entrypoint standing up
 // the runtime, not run-loop work (see clippy.toml).
@@ -479,7 +507,18 @@ async fn main() -> anyhow::Result<()> {
             run_remote(&socket_path, preselect).await
         }
         Some("--connect-relay") => run_connect_relay(&args[1..], preselect).await,
-        _ => run_embedded_realm(preselect).await,
+        other => match classify_top_level_fallback(other) {
+            TopLevelFallback::Launch => run_embedded_realm(preselect).await,
+            TopLevelFallback::ShowHelp => {
+                println!("{HELP}");
+                Ok(())
+            }
+            TopLevelFallback::Unknown => {
+                eprintln!("lazybox: unrecognized command '{}'\n", other.unwrap_or(""));
+                eprintln!("{HELP}");
+                std::process::exit(2);
+            }
+        },
     }
 }
 
@@ -2770,6 +2809,20 @@ mod argv_tests {
         assert!(wants_version(&args(&["--version"])));
         assert!(wants_version(&args(&["-V"])));
         assert!(!wants_version(&args(&["-v"]))); // lowercase -v is not the version flag
+    }
+
+    #[test]
+    fn only_bare_lazybox_launches_unknown_commands_do_not() {
+        use TopLevelFallback::*;
+        // Bare `lazybox` (no leftover positional after flags are consumed) launches.
+        assert_eq!(classify_top_level_fallback(None), Launch);
+        // `help` is the bare-word alias for `--help`.
+        assert_eq!(classify_top_level_fallback(Some("help")), ShowHelp);
+        // A typo or unknown command must NOT launch a second full instance
+        // (the `lazybox help` → rogue-daemon footgun once agents have it on PATH).
+        assert_eq!(classify_top_level_fallback(Some("status")), Unknown);
+        assert_eq!(classify_top_level_fallback(Some("lgo")), Unknown);
+        assert_eq!(classify_top_level_fallback(Some("--typo")), Unknown);
     }
 
     #[tokio::test]

@@ -2158,6 +2158,50 @@ impl Sidebar {
             .and_then(|k| self.workspaces.get(k))
     }
 
+    /// A cheap identity for the cursor's group when it rests on a header
+    /// row — `Some("repo:owner/repo")` / `Some("space:Name")` — else
+    /// `None`. The pane-sync identity gate folds this in so moving the
+    /// cursor between two header rows (both of which have no selected
+    /// workspace) still re-projects the overview (#1442).
+    pub fn header_group_ident(&self) -> Option<String> {
+        if self.selected_workspace().is_some() {
+            return None;
+        }
+        if self.cursor_on_space_header() {
+            return self.cursor_space().map(|s| format!("space:{s}"));
+        }
+        self.cursor_repo().map(|r| format!("repo:{r}"))
+    }
+
+    /// Repo / Space **overview** for the cursor's group when it rests on
+    /// a header row (issue #1442). `None` when the cursor is on a real
+    /// workspace (the pane renders that instead) or on a non-group row
+    /// (`★ Focused` / hopper / empty list). A Space header takes
+    /// priority over the repo it may also sit under, so a cursor
+    /// directly on a `SpaceHeader` yields the cross-repo aggregate.
+    pub fn header_overview(&self) -> Option<crate::components::repo_overview::RepoOverview> {
+        if self.selected_workspace().is_some() {
+            return None;
+        }
+        if self.cursor_on_space_header() {
+            let space = self.cursor_space()?;
+            return Some(crate::components::repo_overview::build_space_overview(
+                &space,
+                &self.workspaces,
+                &self.projects,
+                &self.spaces,
+                &self.agents,
+            ));
+        }
+        let repo = self.cursor_repo()?;
+        Some(crate::components::repo_overview::build_repo_overview(
+            &repo,
+            &self.workspaces,
+            &self.projects,
+            &self.agents,
+        ))
+    }
+
     /// The active filter set — read by the header renderer for its
     /// chips and by the model to pre-check the filter menu.
     pub fn filters(&self) -> &FilterSet {

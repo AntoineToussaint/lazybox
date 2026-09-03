@@ -2040,7 +2040,7 @@ pub struct Model<T: TerminalAdapter> {
     /// `(selected key, sidebar pane revision)` of the last full
     /// `sync_panes` projection — the per-keystroke identity gate
     /// (#1237).
-    last_pane_sync_identity: Option<(Option<lazybox_core::SessionKey>, u64)>,
+    last_pane_sync_identity: Option<(Option<lazybox_core::SessionKey>, u64, Option<String>)>,
     /// Set by a daemon-event handler that needs the panes re-projected
     /// from the (possibly moved) sidebar selection, flushed to a single
     /// `sync_panes` once the whole drain batch is handled. A merge burst
@@ -3175,6 +3175,22 @@ impl<T: TerminalAdapter> Model<T> {
     #[doc(hidden)]
     pub fn __test_sidebar(&self) -> &Sidebar {
         &self.sidebar
+    }
+
+    /// Test-only: whether the right pane is painting a repo / Space
+    /// overview instead of a workspace (issue #1442).
+    #[doc(hidden)]
+    pub fn __test_showing_overview(&self) -> bool {
+        self.right.showing_overview()
+    }
+
+    /// Test-only: the counts of the projected overview (issue #1442),
+    /// so freshness tests can assert they track background polls.
+    #[doc(hidden)]
+    pub fn __test_overview_counts(
+        &self,
+    ) -> Option<&crate::components::repo_overview::OverviewCounts> {
+        self.right.overview().map(|o| &o.counts)
     }
 
     /// Apply `~/.lazybox/config.yaml::attention` +
@@ -6436,18 +6452,26 @@ impl<T: TerminalAdapter> Model<T> {
                     activity_mode,
                 );
                 self.sidebar.view_in(left, f);
-                // `right_top` carries the Activity pane; what renders
-                // there depends on the mode. Hidden gave its row to the
-                // terminal stack (zero height); Summary keeps a single
-                // slim count line; Full draws the whole feed.
-                if right_top.height > 0 {
-                    match activity_mode {
-                        ActivityPaneMode::Summary => self.right.view_summary_in(right_top, f),
-                        _ => self.right.view_in(right_top, f),
+                if self.right.showing_overview() {
+                    // Group-header overview (#1442): no terminal to share
+                    // with, so the overview takes the whole right column.
+                    let full = right_top.union(right_bottom);
+                    self.right.view_in(full, f);
+                    full
+                } else {
+                    // `right_top` carries the Activity pane; what renders
+                    // there depends on the mode. Hidden gave its row to the
+                    // terminal stack (zero height); Summary keeps a single
+                    // slim count line; Full draws the whole feed.
+                    if right_top.height > 0 {
+                        match activity_mode {
+                            ActivityPaneMode::Summary => self.right.view_summary_in(right_top, f),
+                            _ => self.right.view_in(right_top, f),
+                        }
                     }
+                    self.terminals.view_in(right_bottom, f);
+                    right_bottom
                 }
-                self.terminals.view_in(right_bottom, f);
-                right_bottom
             };
 
             // Selection highlight overlay. Painted AFTER the terminal

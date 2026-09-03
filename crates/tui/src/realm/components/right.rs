@@ -48,6 +48,31 @@ impl Right {
         self.inner.set_stack(stack);
     }
 
+    /// Feed the repo / Space overview shown on a group-header row (issue
+    /// #1442). Paired with `set_workspace(None)`.
+    pub fn set_overview(
+        &mut self,
+        overview: Option<crate::components::repo_overview::RepoOverview>,
+    ) {
+        self.inner.set_overview(overview);
+    }
+
+    /// Whether the pane is currently painting a group overview — the
+    /// model gives it the whole right column when so.
+    pub fn showing_overview(&self) -> bool {
+        self.inner.showing_overview()
+    }
+
+    /// The projected overview, if any (read by the model's tests).
+    pub fn overview(&self) -> Option<&crate::components::repo_overview::RepoOverview> {
+        self.inner.overview()
+    }
+
+    /// Drain an overview roster-click workspace selection (#1442).
+    pub fn take_select_workspace(&mut self) -> Option<lazybox_core::SessionKey> {
+        self.inner.take_select_workspace()
+    }
+
     /// Forward the YAML-configured `setup.default_agent` to the inner
     /// pane so `f`-on-selection spawns the user's preferred agent.
     pub fn set_default_agent(&mut self, agent: impl Into<String>) {

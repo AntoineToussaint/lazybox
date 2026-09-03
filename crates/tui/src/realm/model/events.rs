@@ -962,6 +962,17 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
+        // On a group-header row the right pane shows a repo/Space overview
+        // projected — in `sync_panes` — from workspace + agent data. Unlike
+        // a selected workspace (refreshed in place via `RightPane::on_event`),
+        // that projection only rebuilds when `sync_panes` runs, which the
+        // `needs_pane_sync` gate suppresses for a plain poll. Every event
+        // past the two terminal-output fast-paths above can move those
+        // counts, so request the projection now — otherwise the overview
+        // freezes at whatever it showed when the cursor landed (#1442).
+        if self.right.showing_overview() {
+            self.needs_pane_sync = true;
+        }
         // An armed leader's which-key popup — and the row index its
         // `Enter` fires — is derived from the *selected workspace's*
         // currently-available actions (#1351). A poll that lands
@@ -3254,6 +3265,11 @@ impl<T: TerminalAdapter> Model<T> {
         let identity = (
             self.sidebar.selected_workspace_key().cloned(),
             self.sidebar.pane_state_rev(),
+            // Disambiguates two header rows, which both have no selected
+            // workspace: without it, a header→header cursor move would
+            // hit the fast-path skip and never re-project the overview
+            // (#1442).
+            self.sidebar.header_group_ident(),
         );
         if self.last_pane_sync_identity.as_ref() == Some(&identity) {
             // Deferred one-shots still honored on the fast path: a
@@ -3326,7 +3342,16 @@ impl<T: TerminalAdapter> Model<T> {
             .and_then(|k| self.sidebar.stack_info(k))
             .cloned();
         self.right.set_stack(stack);
+        // On a group-header row there's no workspace to show; feed the
+        // pane a repo / Space overview instead so it isn't a dead panel
+        // (#1442). Cheap: built from already-tracked workspaces.
+        let overview = if workspace.is_none() {
+            self.sidebar.header_overview()
+        } else {
+            None
+        };
         self.right.set_workspace(workspace);
+        self.right.set_overview(overview);
         self.terminals.set_active_session(session_key);
         self.terminals.set_layout(layout);
         // A pinned `w` spawn-follow asked for a specific terminal to be

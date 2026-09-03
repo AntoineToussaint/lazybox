@@ -1974,6 +1974,13 @@ impl<T: TerminalAdapter> Model<T> {
                 // redundant second click before typing works (#103).
                 let target = if rect_contains(sidebar_rect, m.column, m.row) {
                     Some(PaneFocus::Sidebar)
+                } else if self.right.showing_overview()
+                    && (rect_contains(right_top_rect, m.column, m.row)
+                        || rect_contains(right_bottom_rect, m.column, m.row))
+                {
+                    // The group overview fills the whole right column, so
+                    // both halves route to the Right pane (#1442).
+                    Some(PaneFocus::Right)
                 } else if rect_contains(right_top_rect, m.column, m.row) {
                     Some(PaneFocus::Right)
                 } else if rect_contains(right_bottom_rect, m.column, m.row) {
@@ -1981,8 +1988,18 @@ impl<T: TerminalAdapter> Model<T> {
                 } else {
                     None
                 };
+                // The group overview has no focusable content — its only
+                // interaction is a roster click, which moves the sidebar
+                // cursor. Focusing the (workspace-less) Right pane on an
+                // overview click would strand keyboard focus on an empty
+                // activity feed, so keep focus where it is; the roster
+                // click below still routes because `target` stays `Right`
+                // (#1442).
+                let overview_click =
+                    target == Some(PaneFocus::Right) && self.right.showing_overview();
                 if let Some(focus) = target
                     && self.focus != focus
+                    && !overview_click
                 {
                     self.set_focus(focus);
                     self.redraw = true;
@@ -2208,6 +2225,14 @@ impl<T: TerminalAdapter> Model<T> {
                         }
                         if let Some(msg) = self.right.drain_selection_notice() {
                             self.flash_hint(msg);
+                        }
+                        // A click on an overview roster row moves the
+                        // sidebar cursor onto that workspace (#1442).
+                        if let Some(key) = self.right.take_select_workspace()
+                            && self.sidebar.focus_workspace_key(&key)
+                        {
+                            self.sync_panes();
+                            self.redraw = true;
                         }
                     }
                 }

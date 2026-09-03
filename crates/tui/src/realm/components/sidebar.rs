@@ -466,6 +466,18 @@ impl Sidebar {
         self.inner.selected_workspace()
     }
 
+    /// Repo / Space overview for the cursor's group when it rests on a
+    /// header row — projected into `Right::set_overview` (#1442).
+    pub fn header_overview(&self) -> Option<crate::components::repo_overview::RepoOverview> {
+        self.inner.header_overview()
+    }
+
+    /// Cursor's header-group identity, folded into the pane-sync gate so
+    /// header→header cursor moves re-project the overview (#1442).
+    pub fn header_group_ident(&self) -> Option<String> {
+        self.inner.header_group_ident()
+    }
+
     /// See `Sidebar::agent_terminal_for` (#1204).
     pub fn agent_terminal_for(
         &self,

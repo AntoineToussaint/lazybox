@@ -54,34 +54,26 @@ pub fn render(screen: Screen) -> (Box<dyn AppComponent<Msg, UserEvent>>, Option<
 
         Screen::Providers { items, selected } => (
             Box::new(
-                Choice::multi(
-                    "Where do your tasks come from?  Lazybox polls these for new \
-                     PRs, issues, and tickets so you don't have to refresh.",
-                    items,
-                )
-                .title("Setup · providers")
-                .label(|c: &ToolChoice| c.label())
-                .selectable(|c: &ToolChoice| c.found)
-                .selected_mask(selected)
-                .with_refresh(true)
-                .with_back(true),
+                Choice::multi(providers_description(&items), items)
+                    .title("Setup · providers")
+                    .label(|c: &ToolChoice| c.label())
+                    .selectable(|c: &ToolChoice| c.found)
+                    .selected_mask(selected)
+                    .with_refresh(true)
+                    .with_back(true),
             ),
             None,
         ),
 
         Screen::Agents { items, selected } => (
             Box::new(
-                Choice::multi(
-                    "Which AI coding agents should lazybox let you spawn into a \
-                     worktree?  Press `a` then `c`/`x`/`u` on a row to drop into them.",
-                    items,
-                )
-                .title("Setup · agents")
-                .label(|c: &ToolChoice| c.label())
-                .selectable(|c: &ToolChoice| c.found)
-                .selected_mask(selected)
-                .with_refresh(true)
-                .with_back(true),
+                Choice::multi(agents_description(&items), items)
+                    .title("Setup · agents")
+                    .label(|c: &ToolChoice| c.label())
+                    .selectable(|c: &ToolChoice| c.found)
+                    .selected_mask(selected)
+                    .with_refresh(true)
+                    .with_back(true),
             ),
             None,
         ),
@@ -323,6 +315,54 @@ fn accent_for(kind: InfoKind) -> Accent {
         InfoKind::Permanent => Accent::error("permanent"),
         InfoKind::Notice => Accent::warn("notice"),
     }
+}
+
+/// Generate a description for the providers screen that includes setup hints
+/// for any missing providers.
+fn providers_description(items: &[ToolChoice]) -> String {
+    let mut description = "Where do your tasks come from?  Lazybox polls these for new \
+                          PRs, issues, and tickets so you don't have to refresh."
+        .to_string();
+
+    // Collect action hints from missing providers
+    let missing_hints: Vec<(String, String)> = items
+        .iter()
+        .filter(|item| !item.found && !item.action_hint.is_empty())
+        .map(|item| (item.display_name.clone(), item.action_hint.clone()))
+        .collect();
+
+    if !missing_hints.is_empty() {
+        description.push_str("\n\nSetup tips:");
+        for (name, hint) in missing_hints {
+            description.push_str(&format!("\n  {}: {}", name, hint));
+        }
+    }
+
+    description
+}
+
+/// Generate a description for the agents screen that includes setup hints
+/// for any missing agents.
+fn agents_description(items: &[ToolChoice]) -> String {
+    let mut description = "Which AI coding agents should lazybox let you spawn into a \
+                          worktree?  Press `a` then `c`/`x`/`u` on a row to drop into them."
+        .to_string();
+
+    // Collect action hints from missing agents
+    let missing_hints: Vec<(String, String)> = items
+        .iter()
+        .filter(|item| !item.found && !item.action_hint.is_empty())
+        .map(|item| (item.display_name.clone(), item.action_hint.clone()))
+        .collect();
+
+    if !missing_hints.is_empty() {
+        description.push_str("\n\nInstall:");
+        for (name, hint) in missing_hints {
+            description.push_str(&format!("\n  {}: {}", name, hint));
+        }
+    }
+
+    description
 }
 
 // Tests may block (tokio::test bodies run via block_on); the crate-wide

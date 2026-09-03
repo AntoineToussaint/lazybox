@@ -933,11 +933,18 @@ showing keybinding search only",
     /// workspace's PR (or, failing that, its first issue). Snapshots the
     /// task + activity, tears down any prior PR-chat thread, kicks off
     /// the worktree-diff read that grounds answers, and mounts the modal.
-    pub(super) fn open_pr_chat(&mut self) {
+    pub(super) fn open_pr_chat(&mut self, subject: Option<lazybox_core::SessionKey>) {
         use super::PrChatSubject;
         use lazybox_ipc::WorkspaceDiffTarget;
 
-        let Some(workspace) = self.sidebar.selected_workspace() else {
+        // An explicit subject (the issue browser reads an arbitrary
+        // highlighted issue, #1436) resolves against that key; without one
+        // the reader is about the sidebar selection, as before (#945).
+        let workspace = match &subject {
+            Some(key) => self.sidebar.workspace_by_key(key),
+            None => self.sidebar.selected_workspace(),
+        };
+        let Some(workspace) = workspace else {
             self.flash_hint("no workspace focused to ask about");
             return;
         };

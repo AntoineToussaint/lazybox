@@ -976,7 +976,13 @@ impl<T: TerminalAdapter> Model<T> {
         // already up wins, and the fetch result is dropped (the user
         // can press `g l` again — the hint says so). Also covers the
         // old ManageLabels-only idempotence check.
-        if let Some(top) = self.modal_stack.last() {
+        // The issue browser (`g i`, #1436) intentionally requests labels
+        // for a highlighted issue while it stays on the stack, so the
+        // picker stacks on top of it and returns there on dismiss. Every
+        // other open modal wins and the fetch result is dropped.
+        if let Some(top) = self.modal_stack.last()
+            && !matches!(top, Id::IssueBrowser)
+        {
             tracing::info!(?top, "label picker skipped — another modal owns the stack");
             // Disarm the request stash so a later stray `RepoLabels`
             // broadcast can't mount the picker unprompted.
@@ -1776,13 +1782,27 @@ impl<T: TerminalAdapter> Model<T> {
     /// raw markdown `body` under `title`. Idempotent: re-triggering
     /// while it's up is a no-op. The modal renders proper markdown and
     /// owns no pending model state, so dismiss just pops it.
-    pub(crate) fn mount_description_modal(&mut self, title: String, body: String) {
+    ///
+    /// `ask_subject` scopes the reader's `a` (Ask about this PR) to a
+    /// specific task: `Some` when the reader shows something other than
+    /// the sidebar selection (the issue browser, #1436), `None` to keep
+    /// the legacy "ask about the focused workspace" behavior (#945).
+    pub(crate) fn mount_description_modal(
+        &mut self,
+        title: String,
+        body: String,
+        ask_subject: Option<lazybox_core::SessionKey>,
+    ) {
         use crate::realm::components::markdown_modal::MarkdownModal;
 
         if self.modal_stack.last() == Some(&Id::DescriptionModal) {
             return;
         }
-        self.mount_modal(Id::DescriptionModal, MarkdownModal::new(title, body));
+        let mut modal = MarkdownModal::new(title, body);
+        if let Some(subject) = ask_subject {
+            modal = modal.with_ask_subject(subject);
+        }
+        self.mount_modal(Id::DescriptionModal, modal);
     }
 
     /// Open the repo merge-history ledger (#1432) in its loading state.
@@ -1824,6 +1844,153 @@ impl<T: TerminalAdapter> Model<T> {
             Id::MergeHistory,
             MergeHistoryModal::resolved(repo, &entries, error, chrono::Utc::now()),
         );
+    }
+
+    /// Build the newest-first `IssueRow` snapshot for `repo` from its
+    /// tracked issue-workspaces (#1436). Shared by the initial mount and
+    /// [`Self::refresh_issue_browser`], so a re-read after an in-place
+    /// edit produces an identically-shaped, freshly-valued list.
+    fn issue_rows_for_repo(
+        &self,
+        repo: &str,
+    ) -> Vec<crate::realm::components::issue_browser::IssueRow> {
+        use crate::realm::components::issue_browser::IssueRow;
+
+        let now = chrono::Utc::now();
+        let mut rows: Vec<IssueRow> = self
+            .sidebar
+            .issue_workspaces_for_repo(repo)
+            .into_iter()
+            .filter_map(|w| {
+                let issue = w.gh_issues.first()?;
+                let opened = issue.created_at.as_ref().unwrap_or(&issue.updated_at);
+                Some(IssueRow {
+                    session_key: lazybox_core::SessionKey::from(&w.key),
+                    workspace_key: w.key.clone(),
+                    number: issue.id.number(),
+                    title: issue.title.clone(),
+                    labels: issue.labels.iter().map(|l| l.name.clone()).collect(),
+                    age: lazybox_core::time::time_ago_at(opened, now),
+                    url: issue.url.clone(),
+                    body: issue.body.clone().unwrap_or_default(),
+                    unread: w.unread_count() > 0,
+                })
+            })
+            .collect();
+        // Newest-first: a higher issue number is newer; unknown numbers
+        // sort last.
+        rows.sort_by_key(|r| std::cmp::Reverse(r.number));
+        rows
+    }
+
+    /// Build + mount the repo-scoped issue browser (`g i`, #1436) from the
+    /// cursor repo's tracked issue-workspaces — a filtered list view over
+    /// existing local state, no new provider fetch. Newest-first by issue
+    /// number. Flashes and no-ops when the cursor isn't in a repo group or
+    /// the repo has no tracked issues.
+    pub(crate) fn mount_issue_browser(&mut self) {
+        use crate::realm::components::issue_browser::IssueBrowser;
+
+        if self.modal_stack.last() == Some(&Id::IssueBrowser) {
+            return;
+        }
+        let Some(repo) = self.sidebar.cursor_repo() else {
+            self.flash_info("move the cursor onto a repo to browse its issues");
+            return;
+        };
+        let rows = self.issue_rows_for_repo(&repo);
+        if rows.is_empty() {
+            self.flash_info(format!("no tracked issues in {repo}"));
+            return;
+        }
+        self.mount_modal(Id::IssueBrowser, IssueBrowser::new(repo, rows));
+    }
+
+    /// Rebuild the open issue browser's rows from current workspace state,
+    /// preserving the filter and highlighted issue (#1436). No-op unless
+    /// the browser is the top modal. Called when returning to it after an
+    /// in-place edit (the optimistic label chip lands here) and on every
+    /// `WorkspaceUpserted` while it's open (the daemon reconcile / a
+    /// background poll), so the list + preview never keep showing the
+    /// mount-time snapshot after the underlying issue changes.
+    pub(crate) fn refresh_issue_browser(&mut self) {
+        use crate::realm::components::issue_browser::IssueBrowser;
+        use tuirealm::state::{State, StateValue};
+
+        if self.modal_stack.last() != Some(&Id::IssueBrowser) {
+            return;
+        }
+        let str_at = |v: &[StateValue], i: usize| match v.get(i) {
+            Some(StateValue::String(s)) => s.clone(),
+            _ => String::new(),
+        };
+        let (repo, filter, filtering, selected) = match self.app.state(&Id::IssueBrowser) {
+            Ok(State::Vec(v)) => (
+                str_at(&v, 0),
+                str_at(&v, 1),
+                matches!(v.get(2), Some(StateValue::Bool(true))),
+                str_at(&v, 3),
+            ),
+            _ => return,
+        };
+        if repo.is_empty() {
+            return;
+        }
+        // Rebuild from live state. An empty result (last issue closed or
+        // joined into a PR) still remounts — the browser renders its own
+        // "(no tracked issues)" state rather than freezing the stale list.
+        let rows = self.issue_rows_for_repo(&repo);
+        let mut browser = IssueBrowser::new(repo, rows);
+        browser.restore_view(
+            filter,
+            filtering,
+            (!selected.is_empty()).then_some(selected.as_str()),
+        );
+        self.mount_modal(Id::IssueBrowser, browser);
+    }
+
+    /// Dispatch a detail-pane action from the issue browser (#1436)
+    /// against the highlighted issue. Read stacks the `#448` markdown
+    /// reader; label / reply / note reuse the existing workspace editors
+    /// (which set the single `ModalFlow` slot the browser deliberately
+    /// leaves free) targeting the row's own key; open hands the URL to the
+    /// platform browser. Each editor stacks on top of the browser and
+    /// returns to it on dismiss.
+    pub(crate) fn handle_issue_browser_action(
+        &mut self,
+        action: crate::realm::components::issue_browser::IssueBrowserAction,
+    ) {
+        use crate::realm::components::issue_browser::IssueBrowserAction;
+
+        match action {
+            IssueBrowserAction::Read {
+                subject,
+                title,
+                body,
+            } => {
+                // Scope the reader's `a` to the issue being read, not the
+                // sidebar cursor the browser never moved (#1436).
+                self.mount_description_modal(title, body, Some(subject));
+            }
+            IssueBrowserAction::Labels(workspace_key) => {
+                self.awaiting_repo_labels = Some(workspace_key.clone());
+                self.send_cmd(lazybox_ipc::Command::FetchRepoLabels { workspace_key });
+                self.flash_hint("loading repo labels…");
+            }
+            IssueBrowserAction::Reply(session_key) => {
+                self.mount_reply(session_key);
+            }
+            IssueBrowserAction::Note(session_key) => {
+                self.mount_notes(session_key);
+            }
+            IssueBrowserAction::OpenUrl(url) => {
+                let browser = self.ui_defaults.browser.clone();
+                match lazybox_tui_core::editors::open_url(&url, browser.as_deref()) {
+                    Ok(()) => self.flash_info(format!("opening {url}…")),
+                    Err(e) => self.flash_error(format!("open failed: {e}")),
+                }
+            }
+        }
     }
 
     /// Build + mount the notices-log window from the current
@@ -3609,6 +3776,13 @@ impl<T: TerminalAdapter> Model<T> {
         }
         if let Some(top) = self.modal_stack.last() {
             let _ = self.app.active(top);
+        }
+        // Returning to the issue browser after an editor (#1436): rebuild
+        // its rows so an in-place label edit — already applied optimistically
+        // to the workspace — shows immediately instead of the stale
+        // mount-time chip set.
+        if self.modal_stack.last() == Some(&Id::IssueBrowser) {
+            self.refresh_issue_browser();
         }
         // A sidebar `]]` picker's retarget is scoped to that one picker
         // (#871); once it closes, the next snippet/skill/history picker

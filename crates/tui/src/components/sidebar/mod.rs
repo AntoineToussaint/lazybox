@@ -2787,6 +2787,21 @@ impl Sidebar {
             .count()
     }
 
+    /// Every tracked workspace grouped under `repo` that carries an open
+    /// GitHub issue and no PR — the source list for the repo issue-browser
+    /// modal (#1436). `repo` is a [`Self::cursor_repo`] group label. Order
+    /// is unspecified; the caller sorts.
+    pub fn issue_workspaces_for_repo(&self, repo: &str) -> Vec<&lazybox_core::Workspace> {
+        self.workspaces
+            .values()
+            .filter(|w| w.pr.is_none() && !w.gh_issues.is_empty())
+            .filter(|w| {
+                crate::components::visible_rows::group_label(w, &self.projects, &self.workspaces)
+                    == repo
+            })
+            .collect()
+    }
+
     /// Step the cursor `delta` selectable rows from its current
     /// position, skipping repo headers. Workspace rows AND session
     /// sub-rows are selectable; only headers are not. Clamps at the

@@ -496,6 +496,13 @@ pub enum Id {
     /// state and repaints when `Event::RepoMergeHistory` lands (via
     /// `Model::update_merge_history`).
     MergeHistory,
+    /// Repo-scoped issue browser (`g i`, #1436). A two-pane picker over
+    /// the repo's tracked issue-workspaces with a live description
+    /// preview; `l`/`r`/`n` stack the existing label / reply / note
+    /// editors on top targeting the highlighted issue, and `Enter` opens
+    /// the `DescriptionModal` reader. Holds its own snapshot state (no
+    /// `ModalFlow`), so the reused editors' flows own the single flow slot.
+    IssueBrowser,
     /// Navigable local worktree diff with an inline review draft.
     DiffReview,
     /// "Ask about this PR" chat (#945), opened with `a` from the
@@ -614,6 +621,14 @@ impl Id {
                 | Id::DefaultAgentPicker
                 | Id::DefaultModelPicker
                 | Id::WorkAgentPicker
+                // The issue browser (#1436) is a local navigation/filter
+                // picker. Its `l`/`r`/`n` keys only *open* the label / reply
+                // / note editors (each gated by an explicit submit); its one
+                // immediate-effect key, `o`, opens a URL in the browser —
+                // benign and reversible (closing a tab), never a destructive
+                // or data-losing write. So a retained stale key can't post an
+                // irreversible effect, which is the bar this allowlist sets.
+                | Id::IssueBrowser
         )
     }
 }
@@ -1143,8 +1158,11 @@ pub enum Msg {
     /// Spinner heartbeat from the `HelpAsk` modal.
     HelpSpinnerTick,
     /// `a` pressed in the description reader — open the "Ask about this
-    /// PR" chat for the focused workspace's PR/issue (#945).
-    AskAboutPr,
+    /// PR" chat (#945). The payload names the subject explicitly when the
+    /// reader was opened for a task other than the sidebar selection (the
+    /// issue browser, #1436); `None` resolves against the focused
+    /// workspace as before.
+    AskAboutPr(Option<lazybox_core::SessionKey>),
     /// Question submitted from the `PrChat` modal. The modal stays
     /// mounted; the answer streams back into `Model::pr_chat_convo`.
     PrChatAsked(String, HelpQuestionKind),
@@ -1216,6 +1234,11 @@ pub enum Msg {
         title: String,
         body: String,
     },
+    /// A detail-pane key in the repo issue browser (`g i`, #1436) — read
+    /// the highlighted issue's full body, or dispatch a label / reply /
+    /// note / open-in-browser against it. The action carries its resolved
+    /// target so a filtered list can't act on the wrong row.
+    IssueBrowserAction(crate::realm::components::issue_browser::IssueBrowserAction),
     /// `i` in the Error Inbox (#831) — draft a pre-filled GitHub issue
     /// for the selected error class in the browser.
     ErrorInboxFileIssue(lazybox_ipc::ErrorInboxRecord),
@@ -6212,12 +6235,10 @@ impl<T: TerminalAdapter> Model<T> {
         let (leader_rows, leader_group): (Vec<(String, String)>, Option<&'static str>) =
             if let Some(prefix) = self.leader.pending() {
                 let rfocus = self.resolve_focus_for_keys().unwrap_or(self.focus);
-                let conts = seq_continuations_available(
-                    prefix,
-                    rfocus,
-                    &self.catalog,
-                    self.sidebar.selected_workspace(),
-                );
+                // `leader_continuations` adds the repo-group gate that pure
+                // `availability` can't express (#1436) so `g i` doesn't show
+                // on a Space / Focused header where it'd only flash-reject.
+                let conts = self.leader_continuations(prefix, rfocus);
                 let group = conts
                     .iter()
                     .find_map(|(_, e)| lazybox_tui_core::action::leader_group_label(e.kind));
@@ -6658,8 +6679,14 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Msg::MergeHistoryReadBody { title, body } => {
                 // Stack the shared markdown reader on top of the merge-history
-                // list; Esc pops it back to the ledger.
-                self.mount_description_modal(title, body);
+                // list; Esc pops it back to the ledger. `None` ask-subject
+                // (#1436): a merged-PR entry isn't necessarily a tracked
+                // workspace, so the reader's `a` resolves against the sidebar
+                // selection as it did before the scoping change.
+                self.mount_description_modal(title, body, None);
+            }
+            Msg::IssueBrowserAction(action) => {
+                self.handle_issue_browser_action(action);
             }
             Msg::MessagesCleared => {
                 // Wipe the durable history and re-render the window
@@ -6834,8 +6861,8 @@ impl<T: TerminalAdapter> Model<T> {
                 self.dispatch_cmds(cmds);
             }
             Msg::HelpSpinnerTick => {}
-            Msg::AskAboutPr => {
-                self.open_pr_chat();
+            Msg::AskAboutPr(subject) => {
+                self.open_pr_chat(subject);
             }
             Msg::PrChatAsked(question, kind) => {
                 // The PrChat modal stays mounted — the answer streams

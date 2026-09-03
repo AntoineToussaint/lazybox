@@ -555,6 +555,12 @@ impl Sidebar {
         self.inner.workspace_iter()
     }
 
+    /// See `Sidebar::issue_workspaces_for_repo` — the repo issue-browser
+    /// (`g i`, #1436) source list.
+    pub fn issue_workspaces_for_repo(&self, repo: &str) -> Vec<&lazybox_core::Workspace> {
+        self.inner.issue_workspaces_for_repo(repo)
+    }
+
     /// Every known Project as `(key, display name)`. Backs the global
     /// "start agent" (`Shift-W`) project picker.
     pub fn projects_for_picker(&self) -> Vec<(lazybox_core::ProjectKey, String)> {

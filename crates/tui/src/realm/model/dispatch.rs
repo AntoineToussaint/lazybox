@@ -2420,6 +2420,9 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_merge_history_modal(repo.clone());
                 cmds.push(IpcCommand::FetchRepoMergeHistory { repo });
             }
+            Action::BrowseRepoIssues => {
+                self.mount_issue_browser();
+            }
             Action::SyncWorkspace => {
                 // Bulk (#899): re-poll every selected PR / issue at once;
                 // rows with nothing to sync (no PR, no issue) are skipped

@@ -239,6 +239,27 @@ pub(crate) fn seq_continuations<'c>(
     out
 }
 
+/// [`seq_continuations`] restricted to the rows that make sense for
+/// `workspace` — the same PR-vs-Issue (and every other) gate the
+/// dispatcher and the right-click context menu consult via
+/// `availability`. The which-key popup and its keyboard navigation
+/// share this so an issue workspace never advertises PR-only chords
+/// (`g m` merge, `g c` close PR, …) it would only flash-reject (#1351).
+pub(crate) fn seq_continuations_available<'c>(
+    prefix: &lazybox_tui_core::action::KeyStroke,
+    focus: PaneFocus,
+    catalog: &'c [lazybox_tui_core::action::CatalogEntry],
+    workspace: Option<&lazybox_core::Workspace>,
+) -> Vec<(
+    lazybox_tui_core::action::KeyStroke,
+    &'c lazybox_tui_core::action::CatalogEntry,
+)> {
+    seq_continuations(prefix, focus, catalog)
+        .into_iter()
+        .filter(|(_, e)| lazybox_tui_core::action::availability(e.kind, workspace))
+        .collect()
+}
+
 /// Resolution priority of a catalog section under the given focus.
 /// `None` = unreachable from this focus; lower rank wins a chord
 /// collision.
@@ -1454,6 +1475,7 @@ pub(super) fn run_loop_step<T: TerminalAdapter>(
     model.tick_tips();
     model.tick_right();
     model.tick_working();
+    model.tick_pr_details();
     model.tick_terminal_leader();
     model.tick_terminal_drag();
     model.tick_mouse_capture();
@@ -1557,6 +1579,11 @@ fn run_loop<T: TerminalAdapter>(model: &mut Model<T>) -> anyhow::Result<()> {
             &mut redraw_is_input,
             &mut timings,
         );
+
+        // Fire any coalesced desktop notifications whose debounce window
+        // has now elapsed. Runs before the OSC drain below so a summary
+        // banner it queues is emitted this same iteration (#1370).
+        model.sidebar.flush_due_notifications();
 
         // Emit any OSC desktop notifications queued during this iteration's
         // drain. Routed through the render writer (not stdout directly) so

@@ -117,12 +117,15 @@ implementation and report the smallest viable design."
 ### Bulk-update branches behind main
 
 When several of your PRs have fallen behind their base branch, select them and
-press `Shift-U`. lazybox issues one branch update per **behind** PR (merging the
-base into the head). Up-to-date PRs and any non-PR rows in the selection are
-skipped and counted in the result notice — you never trigger a needless update.
+press `g u`. Under a multi-select, `g u` issues one branch update per **behind**
+PR (merging the base into the head). Up-to-date PRs and any non-PR rows in the
+selection are skipped and counted in the result notice — you never trigger a
+needless update.
 
-This is the multi-select twin of `g u` (["Update branch"](/docs/reference/keybindings/))
-on a single workspace.
+`g u` is selection-first: with no multi-select it updates just the focused
+workspace's PR (the ["Update branch"](/docs/reference/keybindings/) action);
+with a selection it fans out over the whole set. (The old dedicated `Shift-U`
+bulk key is retired — `g u` under a selection now covers it.)
 
 ### Hand work from one agent to another
 

@@ -2,7 +2,9 @@ use parking_lot::Mutex;
 use rusqlite::Connection;
 use std::path::Path;
 
-use crate::traits::{ErrorOccurrence, ErrorRecord, Store, StoreError, StoreMutation};
+use crate::traits::{
+    ErrorOccurrence, ErrorRecord, StatBucket, StatEvent, Store, StoreError, StoreMutation,
+};
 use chrono::{DateTime, Utc};
 
 /// Hard cap on distinct deduplicated error classes kept in the durable
@@ -10,6 +12,12 @@ use chrono::{DateTime, Utc};
 /// note in `record_error`); a generous ceiling that still bounds the
 /// table so a long-lived daemon can't accrete unbounded rows.
 const ERROR_INBOX_MAX_ROWS: i64 = 1000;
+
+/// Distinct calendar days retained in the usage-stats rollup. Day/week
+/// views never look back more than a couple weeks, so a year-plus of
+/// history is generous; whole oldest days past this bound are evicted on
+/// write (7-ish metrics/day makes the table trivially small regardless).
+const STAT_RETENTION_DAYS: i64 = 400;
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
@@ -85,6 +93,12 @@ impl SqliteStore {
                 count         INTEGER NOT NULL,
                 first_seen    TEXT NOT NULL,
                 last_seen     TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS stat_daily (
+                day    TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                value  INTEGER NOT NULL,
+                PRIMARY KEY (day, metric)
             );",
         )
         .map_err(|e| StoreError::Backend(e.to_string()))?;
@@ -281,6 +295,63 @@ impl Store for SqliteStore {
         conn.execute("DELETE FROM errors", [])
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         Ok(())
+    }
+
+    fn record_stats(&self, events: &[StatEvent]) -> Result<(), StoreError> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction()
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        for ev in events {
+            // Same day + metric folds with `+` so a day's
+            // tokens/sessions/merges accrue in one row. The daemon owns the
+            // day boundary (local calendar day); the store just buckets.
+            tx.execute(
+                "INSERT INTO stat_daily (day, metric, value) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(day, metric) DO UPDATE SET value = value + excluded.value",
+                rusqlite::params![ev.day, ev.metric, ev.value],
+            )
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        }
+        // Evict whole oldest days past the retention window so the table
+        // stays bounded on a long-lived daemon. Day strings sort by date,
+        // so `ORDER BY day DESC LIMIT N` keeps the N most-recent days.
+        tx.execute(
+            "DELETE FROM stat_daily WHERE day NOT IN (
+                 SELECT day FROM stat_daily
+                 GROUP BY day
+                 ORDER BY day DESC
+                 LIMIT ?1
+             )",
+            [STAT_RETENTION_DAYS],
+        )
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
+        tx.commit().map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    fn list_stats_since(&self, since_day: &str) -> Result<Vec<StatBucket>, StoreError> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT day, metric, value FROM stat_daily
+                 WHERE day >= ?1
+                 ORDER BY day, metric",
+            )
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        let rows = stmt
+            .query_map([since_day], |row| {
+                Ok(StatBucket {
+                    day: row.get(0)?,
+                    metric: row.get(1)?,
+                    value: row.get(2)?,
+                })
+            })
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| StoreError::Backend(e.to_string()))
     }
 
     /// SQLite-native scan: prefix-match on the kv table. The default
@@ -582,6 +653,115 @@ mod tests {
         assert!(
             keys.contains(format!("github|merge|class {newest}").as_str()),
             "the most-recently-seen class must survive"
+        );
+    }
+
+    fn stat(day: &str, metric: &str, value: i64) -> crate::traits::StatEvent {
+        crate::traits::StatEvent {
+            day: day.into(),
+            metric: metric.into(),
+            value,
+        }
+    }
+
+    /// Same `(day, metric)` bucket folds additively, and distinct
+    /// metrics on the same day stay separate rows.
+    #[test]
+    fn stats_fold_additively_per_day_and_metric() {
+        let store = SqliteStore::in_memory().unwrap();
+        store
+            .record_stats(&[
+                stat("2026-08-20", "sessions", 1),
+                stat("2026-08-20", "sessions", 1),
+                stat("2026-08-20", "input_tokens", 500),
+            ])
+            .unwrap();
+        // A later day for the same metric is its own bucket.
+        store
+            .record_stats(&[stat("2026-08-21", "sessions", 3)])
+            .unwrap();
+
+        let buckets = store.list_stats_since("2026-08-01").unwrap();
+        assert_eq!(
+            buckets,
+            vec![
+                StatBucket {
+                    day: "2026-08-20".into(),
+                    metric: "input_tokens".into(),
+                    value: 500,
+                },
+                StatBucket {
+                    day: "2026-08-20".into(),
+                    metric: "sessions".into(),
+                    value: 2,
+                },
+                StatBucket {
+                    day: "2026-08-21".into(),
+                    metric: "sessions".into(),
+                    value: 3,
+                },
+            ],
+        );
+    }
+
+    /// `list_stats_since` is an inclusive lower bound on the day string,
+    /// so a week window drops older days.
+    #[test]
+    fn stats_since_is_an_inclusive_day_lower_bound() {
+        let store = SqliteStore::in_memory().unwrap();
+        for day in ["2026-08-18", "2026-08-19", "2026-08-25"] {
+            store.record_stats(&[stat(day, "merged", 1)]).unwrap();
+        }
+        let days: Vec<String> = store
+            .list_stats_since("2026-08-19")
+            .unwrap()
+            .into_iter()
+            .map(|b| b.day)
+            .collect();
+        assert_eq!(days, vec!["2026-08-19", "2026-08-25"], "18th is excluded");
+    }
+
+    /// Stats survive a reopen — the whole point of the accumulator is
+    /// history that outlives the session that produced it.
+    #[test]
+    fn stats_survive_a_reopen() {
+        let db = TempDb::new("stats-reopen");
+        {
+            let store = SqliteStore::open(&db.0).unwrap();
+            store
+                .record_stats(&[stat("2026-08-20", "merged", 1)])
+                .unwrap();
+        }
+        let store = SqliteStore::open(&db.0).unwrap();
+        let buckets = store.list_stats_since("2026-08-01").unwrap();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].value, 1);
+    }
+
+    /// The rollup evicts whole oldest days past the retention window; the
+    /// most-recent day always survives.
+    #[test]
+    fn stats_evict_oldest_days_past_retention() {
+        let store = SqliteStore::in_memory().unwrap();
+        let base = chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
+        let day = |i: i64| {
+            (base + chrono::Duration::days(i))
+                .format("%Y-%m-%d")
+                .to_string()
+        };
+        // One metric per day for retention + 5 consecutive days.
+        let overflow = 5;
+        for i in 0..(STAT_RETENTION_DAYS + overflow) {
+            store.record_stats(&[stat(&day(i), "sessions", 1)]).unwrap();
+        }
+        let buckets = store.list_stats_since("0000-00-00").unwrap();
+        let days: std::collections::HashSet<String> = buckets.into_iter().map(|b| b.day).collect();
+        assert_eq!(days.len() as i64, STAT_RETENTION_DAYS, "table is capped");
+        // The oldest day is gone, the newest survives.
+        assert!(!days.contains(&day(0)), "oldest day evicted");
+        assert!(
+            days.contains(&day(STAT_RETENTION_DAYS + overflow - 1)),
+            "newest day retained"
         );
     }
 

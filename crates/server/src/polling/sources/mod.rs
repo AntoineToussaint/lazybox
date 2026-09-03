@@ -18,6 +18,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
+mod jira;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FullSweepCommit {
     pr_window: bool,
@@ -42,6 +44,139 @@ fn full_sweep_admitted(
     required_points: u32,
 ) -> bool {
     will_full_sweep && governor_plan.admits_complete_graphql_unit(manual_refresh, required_points)
+}
+
+/// Consecutive due-but-deferred full-sweep ticks before the daemon raises
+/// the user-visible "discovery behind" advisory (#1391). A single deferred
+/// tick is normal governor pacing and stays quiet; a persistent stall
+/// (`watch:` repos exceeding the poll budget on every tick) is the failure
+/// the notice must surface. At the 60s base cadence this is ~3 minutes of
+/// uninterrupted deferral.
+pub(super) const DISCOVERY_BEHIND_TICKS: u32 = 3;
+
+/// State transition emitted by [`note_full_sweep_deferral`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DeferralSignal {
+    /// Nothing to broadcast this tick.
+    None,
+    /// Discovery is behind: assert the standing "discovery behind"
+    /// indicator. Emitted on EVERY deferred tick past the threshold (a
+    /// LEVEL, not a one-shot edge) so a client that subscribes mid-stall
+    /// still learns the state within one tick instead of waiting for a
+    /// rising edge it already missed. The client dedupes the attention
+    /// flash to the moment it first sees the level.
+    Behind,
+    /// A previously-asserted stall recovered (sweep admitted, no longer
+    /// due, or a manual refresh): retract the indicator. Emitted once, on
+    /// the falling edge.
+    Recovered,
+}
+
+/// Fold this tick's full-sweep admission decision into the persistent
+/// deferral streak and decide what to broadcast about the standing
+/// "discovery behind" indicator. Pure so the state machine is
+/// unit-testable without a live governor or bus.
+///
+/// [`DeferralSignal::Behind`] is a LEVEL — returned on every deferred tick
+/// once the streak crosses [`DISCOVERY_BEHIND_TICKS`], so late-subscribing
+/// clients converge on the state rather than missing a one-shot edge.
+/// [`DeferralSignal::Recovered`] is the single falling edge when a
+/// previously-asserted stall clears (admitted, not due, or manual refresh),
+/// re-arming for a later re-stall.
+fn note_full_sweep_deferral(
+    streak: &mut u32,
+    notified: &mut bool,
+    sweep_due: bool,
+    admitted: bool,
+    manual_refresh: bool,
+) -> DeferralSignal {
+    if !sweep_due || admitted || manual_refresh {
+        *streak = 0;
+        if *notified {
+            *notified = false;
+            return DeferralSignal::Recovered;
+        }
+        return DeferralSignal::None;
+    }
+    *streak = streak.saturating_add(1);
+    if *streak >= DISCOVERY_BEHIND_TICKS {
+        *notified = true;
+        return DeferralSignal::Behind;
+    }
+    DeferralSignal::None
+}
+
+/// Round-robin schedule for one GitHub tick. A manual Shift-R refresh
+/// is promoted to the GLOBAL reconcile path (its `force_full_sweep`
+/// flag already makes `next_pr_sweep_window` return `None`, i.e. an
+/// unwindowed sweep covering every involved PR, review-requested,
+/// merged, watched repos, and issues) — and the per-repo pick stays
+/// governor-capped, because `fetch_round_robin_with_status` skips the
+/// per-repo fan-out entirely when `run_global` is set. The old shape
+/// lifted `max_repos` to `usize::MAX` instead, fanning one paginated
+/// `repo:` search out PER SESSIONED REPO in the manual tick — ~30 open
+/// worktrees meant ~30 extra searches, all serialized behind the
+/// request pacer's per-request gap and racing the 180s tick timeout.
+fn schedule_github_tick(
+    round_robin: &mut crate::polling::scheduler::RoundRobinState,
+    sessioned_repos: &std::collections::HashSet<String>,
+    manual_refresh: bool,
+    full_sweep_admitted: bool,
+    max_repos: usize,
+    now: std::time::Instant,
+) -> RoundRobinPick {
+    let mut scheduling = plan_round_robin_tick_budgeted(
+        round_robin,
+        sessioned_repos,
+        full_sweep_admitted,
+        DEFAULT_ROUND_ROBIN_N,
+        max_repos,
+        now,
+    );
+    if manual_refresh {
+        scheduling.run_global = true;
+    }
+    scheduling
+}
+
+#[cfg(test)]
+mod schedule_github_tick_tests {
+    use super::*;
+
+    /// Regression (#scale): a manual refresh must NOT lift the per-tick
+    /// repo cap. It rides the global reconcile instead — capped pick,
+    /// `run_global` forced — so Shift-R with many open worktrees can't
+    /// fan one `repo:` search out per sessioned repo in a single tick.
+    #[test]
+    fn manual_refresh_rides_the_global_sweep_not_a_repo_fanout() {
+        let mut state = crate::polling::scheduler::RoundRobinState::default();
+        let now = std::time::Instant::now();
+        let sessioned: std::collections::HashSet<String> =
+            (0..30).map(|i| format!("owner/repo-{i:02}")).collect();
+        for repo in &sessioned {
+            state.record_sync(repo, now);
+        }
+        // Pick a tick where the normal cadence would NOT run the global
+        // sweep, so the promotion below is observable.
+        state.tick = 1;
+        assert!(!will_run_global(
+            state.cursor.len(),
+            state.tick,
+            DEFAULT_ROUND_ROBIN_N
+        ));
+
+        let max_repos = 3; // governor-shaped cap
+        let scheduling = schedule_github_tick(&mut state, &sessioned, true, true, max_repos, now);
+        assert!(
+            scheduling.run_global,
+            "manual refresh promotes the tick to the global reconcile"
+        );
+        assert!(
+            scheduling.repos.len() <= max_repos,
+            "manual refresh must keep the per-repo pick governor-capped, got {}",
+            scheduling.repos.len()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -94,6 +229,156 @@ mod full_sweep_commit_tests {
     }
 }
 
+#[cfg(test)]
+mod heartbeat_promote_tests {
+    use super::*;
+    use lazybox_core::ProviderError;
+
+    #[test]
+    fn transport_outage_promotes_but_rate_limits_do_not() {
+        // A plain transport outage (no retry-after hint) — a full sweep may
+        // recover missed coverage, so promote.
+        let outage = ProviderError::retryable("github", "connection reset by peer");
+        assert!(heartbeat_error_should_promote(&outage));
+
+        // GitHub's secondary/primary limit surfaces as a retryable-with-hint
+        // — promoting would re-trip it, so do NOT.
+        let github_limit = ProviderError::retryable_after("github", "secondary rate limit", 30);
+        assert!(!heartbeat_error_should_promote(&github_limit));
+
+        // Our own governor pacing (self-throttle) — likewise no promote.
+        let self_throttle = ProviderError::self_throttle("github", "tick allowance spent", 20);
+        assert!(!heartbeat_error_should_promote(&self_throttle));
+    }
+}
+
+#[cfg(test)]
+mod discovery_behind_tests {
+    use super::*;
+
+    fn run(
+        sweep_due: bool,
+        admitted: bool,
+        manual: bool,
+        streak: &mut u32,
+        notified: &mut bool,
+    ) -> DeferralSignal {
+        note_full_sweep_deferral(streak, notified, sweep_due, admitted, manual)
+    }
+
+    #[test]
+    fn behind_asserts_at_the_threshold_then_holds_the_level() {
+        let (mut streak, mut notified) = (0, false);
+        // A due sweep the governor keeps refusing: quiet until the
+        // threshold.
+        for tick in 1..DISCOVERY_BEHIND_TICKS {
+            assert_eq!(
+                run(true, false, false, &mut streak, &mut notified),
+                DeferralSignal::None,
+                "tick {tick} is still within the quiet window"
+            );
+        }
+        // The threshold tick asserts Behind, and — crucially — it stays
+        // asserted every deferred tick after, so a client that subscribes
+        // mid-stall still learns the state (no missed one-shot edge). No
+        // Recovered is emitted while still deferred.
+        for tick in 0..3 {
+            assert_eq!(
+                run(true, false, false, &mut streak, &mut notified),
+                DeferralSignal::Behind,
+                "deferred tick {tick} past threshold re-asserts the level"
+            );
+        }
+    }
+
+    #[test]
+    fn a_single_deferred_tick_stays_quiet() {
+        let (mut streak, mut notified) = (0, false);
+        assert_eq!(
+            run(true, false, false, &mut streak, &mut notified),
+            DeferralSignal::None
+        );
+        assert_eq!(streak, 1);
+    }
+
+    #[test]
+    fn admission_after_behind_emits_exactly_one_recovered() {
+        let (mut streak, mut notified) = (0, false);
+        for _ in 0..DISCOVERY_BEHIND_TICKS {
+            run(true, false, false, &mut streak, &mut notified);
+        }
+        assert!(notified);
+        // The sweep finally lands → one Recovered edge, streak reset, latch re-armed.
+        assert_eq!(
+            run(true, true, false, &mut streak, &mut notified),
+            DeferralSignal::Recovered
+        );
+        assert_eq!(streak, 0);
+        assert!(!notified);
+        // A second admitted tick is a no-op — Recovered fires ONCE, not every tick.
+        assert_eq!(
+            run(true, true, false, &mut streak, &mut notified),
+            DeferralSignal::None
+        );
+        // A later re-stall asserts Behind again at the threshold.
+        for tick in 1..DISCOVERY_BEHIND_TICKS {
+            assert_eq!(
+                run(true, false, false, &mut streak, &mut notified),
+                DeferralSignal::None,
+                "re-stall tick {tick}"
+            );
+        }
+        assert_eq!(
+            run(true, false, false, &mut streak, &mut notified),
+            DeferralSignal::Behind
+        );
+    }
+
+    #[test]
+    fn recovery_before_the_threshold_never_emits_recovered() {
+        let (mut streak, mut notified) = (0, false);
+        // Deferred once (below threshold, so never asserted Behind) then
+        // admitted: resetting an un-asserted streak must NOT emit a
+        // spurious Recovered.
+        assert_eq!(
+            run(true, false, false, &mut streak, &mut notified),
+            DeferralSignal::None
+        );
+        assert_eq!(
+            run(true, true, false, &mut streak, &mut notified),
+            DeferralSignal::None
+        );
+    }
+
+    #[test]
+    fn a_not_due_tick_never_counts_as_deferral() {
+        let (mut streak, mut notified) = (0, false);
+        // Most ticks take the incremental path and aren't sweep-due; they
+        // must not accumulate toward the advisory.
+        for _ in 0..10 {
+            assert_eq!(
+                run(false, false, false, &mut streak, &mut notified),
+                DeferralSignal::None
+            );
+        }
+        assert_eq!(streak, 0);
+    }
+
+    #[test]
+    fn manual_refresh_is_never_a_deferral() {
+        let (mut streak, mut notified) = (0, false);
+        // A manual Shift-R always admits, so it can't be the thing that's
+        // behind — and it resets an accumulating streak.
+        run(true, false, false, &mut streak, &mut notified);
+        assert_eq!(streak, 1);
+        assert_eq!(
+            run(true, false, true, &mut streak, &mut notified),
+            DeferralSignal::None
+        );
+        assert_eq!(streak, 0);
+    }
+}
+
 /// `GhClient` adapter. The filter narrows the upstream result by
 /// role and item type before they reach the daemon's upsert path —
 /// disabled roles / types never become Workspaces. `scopes` further
@@ -122,6 +407,14 @@ pub struct GhSource {
     /// viewer's login added as a default when the YAML list is
     /// empty. Empty here disables the feature entirely.
     mention_allowed_logins: std::collections::BTreeSet<String>,
+    /// The authenticated viewer's own login, resolved by `sources_for`.
+    /// Distinguishes a `@lazybox` mention *you* wrote (trusted, keeps the
+    /// unattended bypass) from one a collaborator wrote (untrusted, keeps
+    /// permission prompts) — see the `untrusted` flag on
+    /// [`ProviderAction::AutoSpawnAgent`] (#1392). Empty until the first
+    /// viewer resolve, which fails safe (any configured allowlist login
+    /// then reads as foreign).
+    viewer_login: String,
     /// Auto-fix-on-failure settings, resolved by `sources_for` from
     /// `config.yaml::auto_fix`. When `enabled` is false (the default)
     /// the auto-fix scan is skipped entirely. See
@@ -147,6 +440,14 @@ pub struct GhSource {
     /// `sources_for` call produces a fresh source.
     scheduling: RoundRobinPick,
     governor_plan: lazybox_gh::BackgroundPlan,
+    /// Whether the governor admitted a due full sweep on this tick.
+    /// `false` while a sweep is due but the budget can't cover it —
+    /// the state `governor_status` must NAME (#scale): past ~25
+    /// watched repos the forecast's required points can permanently
+    /// exceed the per-tick allowance, and sync then silently stops
+    /// reconciling. Shift-D used to report "next=global reconcile"
+    /// forever in that state, indistinguishable from a healthy queue.
+    full_sweep_admitted: bool,
     cursor_store: Option<std::sync::Arc<dyn lazybox_store::Store>>,
     /// Mode of the last successful fetch — read after `fetch` resolves
     /// by [`TaskSource::last_fetch_kind`]. `parking_lot::Mutex` is fine:
@@ -228,6 +529,13 @@ pub enum ProviderAction {
         /// sweep would re-focus the live agent and re-inject the prompt.
         /// `None` for `@lazybox` mentions, which dedupe via the reaction.
         dedup_key: Option<String>,
+        /// A *foreign* actor triggered this spawn — a mention from a
+        /// login other than the viewer, or a label on an issue the
+        /// viewer didn't author (so its prompt derives from that actor's
+        /// issue text). Withholds the unattended
+        /// `--dangerously-skip-permissions` bypass unless the user pinned
+        /// `agent.autonomous_skip_permissions` (#1392).
+        untrusted: bool,
     },
     /// Auto-fix a PR that's failing CI or conflicting with its base.
     /// Surfaced by the auto-fix scan (`evaluate_auto_fix`) during a
@@ -298,6 +606,20 @@ fn full_sweep_stages(has_focused_targets: bool) -> Vec<FullSweepStage> {
     }
 }
 
+/// Whether a failed notifications heartbeat should PROMOTE this tick to a
+/// full sweep. Only a genuine transport outage (network / 5xx — no
+/// retry-after hint, not self-throttled) does: a full sweep may re-establish
+/// coverage the dead channel missed. A **rate-limited** heartbeat — our own
+/// governor pacing, or GitHub's secondary (abuse) / primary limit — must NOT
+/// promote (#1218): firing the heaviest possible request burst into the exact
+/// limiter that just blocked us re-trips GitHub's secondary limit and loops
+/// into a throttle blackout where nothing new ever surfaces. A rate limit
+/// carries a `retry_after` hint (or the self-throttle flag); a transport
+/// outage carries neither.
+fn heartbeat_error_should_promote(error: &lazybox_core::ProviderError) -> bool {
+    !(error.is_self_throttle() || error.retry_after_secs().is_some())
+}
+
 pub(super) fn gh_fetch_plan(full_sweep_due: bool, poll_notifications: bool) -> GhFetchPlan {
     if full_sweep_due {
         GhFetchPlan::Full
@@ -341,6 +663,30 @@ pub(super) fn rank_targeted_requests(
     ranked
 }
 
+/// Split targeted requests into the hot ones the batched `nodes(ids:)`
+/// query serves (hot, node id cached from a prior poll, batch path
+/// available on this server) and the rest, fetched one at a time via
+/// `repository.pullRequest` / `repository.issue`.
+pub(super) fn partition_targeted_requests(
+    requests: Vec<TargetedRequest>,
+    hot_node_ids: &std::collections::BTreeMap<lazybox_gh::NotificationTarget, String>,
+    batch_available: bool,
+) -> (Vec<(TargetedRequest, String)>, Vec<TargetedRequest>) {
+    let mut batched = Vec::new();
+    let mut individual = Vec::new();
+    for request in requests {
+        if batch_available
+            && request.flags.hot
+            && let Some(node_id) = hot_node_ids.get(&request.target)
+        {
+            batched.push((request, node_id.clone()));
+        } else {
+            individual.push(request);
+        }
+    }
+    (batched, individual)
+}
+
 fn merge_targeted_tasks(base: &mut Vec<Task>, targeted: Vec<Task>) {
     let positions: std::collections::HashMap<lazybox_core::TaskId, usize> = base
         .iter()
@@ -381,6 +727,19 @@ impl GhSource {
             at.to_rfc3339()
         } else if !self.client.should_full_sweep() {
             "notification heartbeat / hot targets".to_string()
+        } else if !self.full_sweep_admitted {
+            // A sweep is DUE but the budget can't cover it. Name the
+            // numbers and the lever: with many `watch:` repos the
+            // required points can exceed the allowance on EVERY tick,
+            // and reconcile then never runs — the "sync silently
+            // stopped" failure (#scale). Shift-R still forces it.
+            format!(
+                "full sweep DEFERRED — needs {} pts, allowance {} ({} watched repos); \
+                 fewer `watch:` filters or a higher background_budget_share would unblock it",
+                self.required_sweep_points(),
+                self.governor_plan.graphql_points,
+                self.watch_repos.len(),
+            )
         } else if self.scheduling.run_global {
             "global reconcile".to_string()
         } else if self.scheduling.repos.is_empty() {
@@ -758,6 +1117,10 @@ impl GhSource {
                     reason,
                     // Mentions dedupe via the 👀 reaction, not a store key.
                     dedup_key: None,
+                    // A mention you wrote yourself is trusted; one a
+                    // collaborator wrote builds the prompt from their
+                    // issue text, so it keeps permission prompts (#1392).
+                    untrusted: mention.triggered_by_login != self.viewer_login,
                 });
                 react_targets.push(mention.target_node_id);
             }
@@ -865,17 +1228,8 @@ impl GhSource {
                     .map(|node_id| (hot.target.clone(), node_id.clone()))
             })
             .collect();
-        let mut batched = Vec::new();
-        let mut individual = Vec::new();
-        for request in requests {
-            if request.flags.hot
-                && let Some(node_id) = hot_node_ids.get(&request.target)
-            {
-                batched.push((request, node_id.clone()));
-            } else {
-                individual.push(request);
-            }
-        }
+        let (batched, mut individual) =
+            partition_targeted_requests(requests, &hot_node_ids, !self.client.hot_batch_rejected());
 
         let mut tasks = Vec::new();
         if !batched.is_empty() {
@@ -883,26 +1237,38 @@ impl GhSource {
                 .iter()
                 .map(|(_, node_id)| node_id.clone())
                 .collect::<Vec<_>>();
-            let results = self
-                .client
-                .fetch_hot_tasks(&node_ids)
-                .await
-                .map_err(lazybox_core::ProviderError::from)?;
-            for ((request, _), outcome) in batched.into_iter().zip(results) {
-                match outcome {
-                    lazybox_gh::HotFetch::Fresh(task) => tasks.push(*task),
-                    // The freshness probe matched the last tick byte for
-                    // byte — nothing to upsert or broadcast (#1218).
-                    lazybox_gh::HotFetch::Unchanged => {}
-                    lazybox_gh::HotFetch::Missing => {
-                        tracing::debug!(
-                            hot = true,
-                            "targeted: {}/{}#{} not visible — skipping",
-                            request.target.owner,
-                            request.target.repo,
-                            request.target.number,
-                        );
+            match self.client.fetch_hot_tasks(&node_ids).await {
+                Ok(results) => {
+                    for ((request, _), outcome) in batched.into_iter().zip(results) {
+                        match outcome {
+                            lazybox_gh::HotFetch::Fresh(task) => tasks.push(*task),
+                            // The freshness probe matched the last tick byte for
+                            // byte — nothing to upsert or broadcast (#1218).
+                            lazybox_gh::HotFetch::Unchanged => {}
+                            lazybox_gh::HotFetch::Missing => {
+                                tracing::debug!(
+                                    hot = true,
+                                    "targeted: {}/{}#{} not visible — skipping",
+                                    request.target.owner,
+                                    request.target.repo,
+                                    request.target.number,
+                                );
+                            }
+                        }
                     }
+                }
+                // The batch is one request for the whole hot set, so a
+                // server that rejects it (GHES 3.18 — see
+                // `GhClient::hot_batch_rejected`) used to fail every hot
+                // tick. The same targets are still reachable one at a
+                // time through the per-target queries: degrade to those
+                // rather than abort the tick.
+                Err(error) => {
+                    tracing::warn!(
+                        "targeted: hot batch fetch failed ({error}); fetching {} hot target(s) individually",
+                        batched.len(),
+                    );
+                    individual.extend(batched.into_iter().map(|(request, _)| request));
                 }
             }
         }
@@ -992,13 +1358,28 @@ impl GhSource {
         let poll = match self.client.fetch_notifications().await {
             Ok(p) => p,
             Err(e) => {
-                // Heartbeat failure isn't fatal: signal "no
-                // incremental data" so the outer `fetch` promotes to
-                // a full sweep this tick. The full sweep also re-arms
-                // the slow-sweep clock so a chronically-broken
-                // heartbeat doesn't trap us in a loop.
-                tracing::warn!("notifications heartbeat failed: {e} — promoting to full sweep");
-                return Ok(None);
+                let error = lazybox_core::ProviderError::from(e);
+                // A genuine transport outage (network / 5xx) signals "no
+                // incremental data" so the outer `fetch` promotes to a full
+                // sweep this tick, which also re-arms the slow-sweep clock so
+                // a chronically-broken heartbeat doesn't trap us.
+                //
+                // A RATE-LIMITED heartbeat, though, must NOT promote (#1218):
+                // a full sweep here fires the heaviest request burst into the
+                // limiter that just blocked us, re-tripping GitHub's secondary
+                // (abuse) limit into a throttle blackout. Surface it as the
+                // retryable wait it is and let the (short) circuit cool; the
+                // next unblocked tick resumes the heartbeat.
+                if heartbeat_error_should_promote(&error) {
+                    tracing::warn!(
+                        "notifications heartbeat failed: {error} — promoting to full sweep"
+                    );
+                    return Ok(None);
+                }
+                tracing::info!(
+                    "notifications heartbeat rate-limited: {error} — deferring, not promoting to a full sweep (would re-trip the limit)"
+                );
+                return Err(error);
             }
         };
         let (entries, pending_cursor, commit_cursor) = match poll {
@@ -1152,6 +1533,7 @@ pub(super) async fn dispatch_action(
             prompt,
             reason,
             dedup_key,
+            untrusted,
         } => {
             // Label-triggered spawns carry a store-backed marker (labels
             // persist with no reaction to skip on). If we've already
@@ -1204,6 +1586,7 @@ pub(super) async fn dispatch_action(
                     autonomous: true,
                     model_alias,
                     origin: lazybox_ipc::SpawnOrigin::Autonomous(trigger),
+                    untrusted,
                     ..Default::default()
                 },
             )
@@ -1463,7 +1846,8 @@ impl TaskSource for GhSource {
                     required_sweep_points,
                 );
                 let plan = gh_fetch_plan(full_sweep_admitted, self.poll_notifications);
-                let (tasks, kind) = match plan {
+                let is_full_plan = matches!(plan, GhFetchPlan::Full);
+                let (mut tasks, kind) = match plan {
                     GhFetchPlan::Full => {
                         let mut focused = Vec::new();
                         let mut broad = None;
@@ -1515,6 +1899,64 @@ impl TaskSource for GhSource {
                         }
                     },
                 };
+
+                // Discovery probe: a PR you (or your agent) just created has
+                // no notification, so Hot/Warm ticks never see it — it would
+                // wait out the full sweep. On a bounded cadence, run a cheap
+                // `author:USER` search and merge any hits, so a fresh PR (and
+                // the issue→PR rollover it drives) surfaces within a tick or
+                // two. Full is already comprehensive, so skip it there.
+                if !is_full_plan && self.client.authored_probe_due() {
+                    let since = chrono::Utc::now() - chrono::Duration::minutes(10);
+                    match self.client.fetch_recently_authored_prs(since).await {
+                        Ok(authored) if !authored.is_empty() => {
+                            let authored = apply_needs_reply_toggle(
+                                filter_github_tasks_with_watches(
+                                    authored,
+                                    &self.filter,
+                                    &self.scopes,
+                                    &self.watch_repos,
+                                ),
+                                self.detect_needs_reply,
+                            );
+                            merge_targeted_tasks(&mut tasks, authored);
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("authored-PR discovery probe failed: {e}"),
+                    }
+                    self.client.mark_authored_probe_done();
+                }
+
+                // Issue-discovery probe (#1391): the sibling of the
+                // authored-PR probe. New-issue discovery otherwise only runs
+                // on the heavy full `involves:` sweep, which the governor
+                // perpetually DEFERS past ~25 watched repos — so a brand-new
+                // involved issue would silently wait out the 30-min sweep (or
+                // a manual `Shift-R`). A cheap windowed `involves:me is:issue
+                // updated:>=` search on its own light cadence surfaces it
+                // within a tick or two even while the full sweep is deferred.
+                // Skipped on the full plan (already comprehensive) and when
+                // issue display is off.
+                if !is_full_plan && self.filter.issue_enabled() && self.client.issue_probe_due() {
+                    let since = chrono::Utc::now() - chrono::Duration::minutes(10);
+                    match self.client.fetch_recently_involved_issues(since).await {
+                        Ok(issues) if !issues.is_empty() => {
+                            let issues = apply_needs_reply_toggle(
+                                filter_github_tasks_with_watches(
+                                    issues,
+                                    &self.filter,
+                                    &self.scopes,
+                                    &self.watch_repos,
+                                ),
+                                self.detect_needs_reply,
+                            );
+                            merge_targeted_tasks(&mut tasks, issues);
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("involved-issue discovery probe failed: {e}"),
+                    }
+                    self.client.mark_issue_probe_done();
+                }
 
                 self.queue_auto_fix_actions(&tasks);
                 self.set_last_kind(kind);
@@ -2032,6 +2474,96 @@ pub fn github_watch_repos_from_filters(
         .collect()
 }
 
+/// Source-attention ladder (#scale): Muted (or source-snoozed)
+/// `watch:` repos leave the watched fan-out entirely — each entry
+/// costs 2 unrotated queries per sweep AND inflates the governor's
+/// required-points forecast (the ~25-repo cliff where full sweeps
+/// stop being admitted). Muting is the lever that buys that budget
+/// back; unmuting restores the entry on the next tick, because the
+/// watch list is rebuilt from config every `sources_for`.
+fn retain_unmuted_watches(
+    watch_repos: &mut std::collections::BTreeSet<String>,
+    cfg: &lazybox_config::Config,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    if cfg.ui.source_attention.is_empty() {
+        return;
+    }
+    watch_repos.retain(|repo| {
+        lazybox_config::effective_source_attention(
+            &cfg.ui.source_attention,
+            repo,
+            Some(&lazybox_config::space_of(repo, &cfg.ui.spaces)),
+        )
+        .effective_level(now)
+            != lazybox_config::SourceAttentionLevel::Muted
+    });
+}
+
+#[cfg(test)]
+mod retain_unmuted_watches_tests {
+    use super::*;
+
+    /// Regression (#scale, proposal A): muting a `watch:` repo — or the
+    /// Space it sits in, or time-box-snoozing it — must drop it from
+    /// the watched fan-out; expiry restores it.
+    #[test]
+    fn muted_and_snoozed_watches_leave_the_fanout() {
+        use lazybox_config::{SourceAttention, SourceAttentionLevel, SpaceConfig};
+        let now = chrono::Utc::now();
+        let mut cfg = lazybox_config::Config::default();
+        cfg.ui.spaces = vec![SpaceConfig {
+            name: "acme".into(),
+            sources: vec!["acme/inherited".into()],
+        }];
+        cfg.ui.source_attention.insert(
+            "o/muted".into(),
+            SourceAttention {
+                level: SourceAttentionLevel::Muted,
+                snoozed_until: None,
+            },
+        );
+        cfg.ui.source_attention.insert(
+            "o/napping".into(),
+            SourceAttention {
+                level: SourceAttentionLevel::Live,
+                snoozed_until: Some(now + chrono::Duration::hours(2)),
+            },
+        );
+        cfg.ui.source_attention.insert(
+            "o/expired".into(),
+            SourceAttention {
+                level: SourceAttentionLevel::Live,
+                snoozed_until: Some(now - chrono::Duration::hours(2)),
+            },
+        );
+        cfg.ui.source_attention.insert(
+            "space:acme".into(),
+            SourceAttention {
+                level: SourceAttentionLevel::Muted,
+                snoozed_until: None,
+            },
+        );
+
+        let mut watches: std::collections::BTreeSet<String> = [
+            "o/live".to_string(),
+            "o/muted".to_string(),
+            "o/napping".to_string(),
+            "o/expired".to_string(),
+            "acme/inherited".to_string(),
+        ]
+        .into();
+        retain_unmuted_watches(&mut watches, &cfg, now);
+        let kept: Vec<&str> = watches.iter().map(String::as_str).collect();
+        assert_eq!(
+            kept,
+            vec!["o/expired", "o/live"],
+            "muted, actively-snoozed, and Space-inherited watches leave; \
+             an expired snooze restores"
+        );
+    }
+}
+
 /// Re-admit `@lazybox`-mentioned issue tasks that `filter_github_tasks`
 /// dropped, so an auto-spawn lands in a real workspace/worktree.
 ///
@@ -2092,6 +2624,11 @@ pub fn label_spawn_actions(
         ));
         let reason = format!("{label_name} label on {}", task.id.key);
         let dedup_key = Some(format!("autospawn-label:{session_key}:{label_name}"));
+        // A label on an issue *you authored* builds the prompt from your
+        // own text (trusted). One where you're only the assignee may have
+        // a foreign author, and the labeller is unknowable — treat it as
+        // untrusted so its prompt can't drive an unattended agent (#1392).
+        let untrusted = !matches!(task.role, lazybox_core::TaskRole::Author);
         out.push((
             task.clone(),
             ProviderAction::AutoSpawnAgent {
@@ -2101,6 +2638,7 @@ pub fn label_spawn_actions(
                 prompt,
                 reason,
                 dedup_key,
+                untrusted,
             },
         ));
     }
@@ -2491,6 +3029,7 @@ mod auto_spawn_dedup_tests {
                 prompt: Some("Implement issue".into()),
                 reason: "lazybox:codex/xhigh label on o/r#1".into(),
                 dedup_key: Some(key),
+                untrusted: false,
             },
         )
         .await;
@@ -2661,6 +3200,61 @@ mod auto_fix_dispatch_tests {
         );
     }
 
+    /// Regression (issue #122 follow-up): auto-fix dispatch runs INLINE on
+    /// the serial poll loop (`for action in actions { dispatch_action().await }`).
+    /// Once the self-confirming optimistic `Done→Working` flip was removed, a
+    /// `Done` agent whose Enter is swallowed no longer manufactures its own
+    /// confirmation, so `confirm_prompt_submission` runs its full ~30s
+    /// Enter-resend/backoff cycle. Awaited inline, that would stall every other
+    /// queued provider action for 30s. The recovery is now handed to a detached
+    /// task: the paste + attempt are delivered synchronously and the dispatch
+    /// returns promptly, while the resend safety net runs in the background.
+    /// The mock here never emits a genuine `Working` transition — the exact
+    /// never-confirmed case — yet dispatch must still return fast.
+    #[tokio::test]
+    async fn auto_fix_into_unconfirmed_done_agent_does_not_block_the_poll_loop() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let session_key = SessionKey::new("github:o/r#7");
+        seed_workspace(&config, &session_key);
+        let (_, backend_key) = seed_agent(
+            &config,
+            &session_key,
+            TerminalId(709),
+            "codex",
+            AgentState::Done,
+            false,
+        )
+        .await;
+
+        // Well under the ~30s inline resend/backoff cycle, but generous enough
+        // to absorb the bounded paste-settle wait under CI load.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            dispatch_action(&config, "github", None, action(session_key.clone())),
+        )
+        .await
+        .expect(
+            "auto-fix dispatch must not block the serial poll loop on the \
+             submit-confirm/resend cycle",
+        );
+
+        // The prompt still landed (paste written synchronously) and the attempt
+        // was recorded — only the confirm/resend recovery was deferred.
+        assert!(
+            String::from_utf8_lossy(&mock.writes_for(&backend_key).await.concat())
+                .contains("Fix the failed CI checks."),
+            "the paste must be delivered synchronously even though confirm is deferred"
+        );
+        assert!(
+            config
+                .store
+                .get_kv(&format!("autofix:{session_key}:ci"))
+                .expect("read attempt record")
+                .is_some(),
+            "a delivered repair consumes one attempt regardless of deferred confirmation"
+        );
+    }
+
     #[tokio::test]
     async fn working_agent_of_another_kind_blocks_auto_fix() {
         let (config, mock) = ServerConfig::in_memory_with_mock();
@@ -2828,9 +3422,12 @@ pub(super) async fn sources_for_with_engagement(
                 let client_result: Result<GhClient, lazybox_core::ProviderError> = match cached {
                     Some(existing) => Ok(existing),
                     None => {
+                        let host = lazybox_config::Config::load()
+                            .unwrap_or_default()
+                            .github_host();
                         match tokio::time::timeout(
                             CLIENT_INIT_TIMEOUT,
-                            GhClient::from_credential(cred),
+                            GhClient::from_credential_with_host(cred, host.as_deref()),
                         )
                         .await
                         {
@@ -2993,6 +3590,23 @@ pub(super) async fn sources_for_with_engagement(
         }
     }
 
+    if setup.enabled_providers.contains(lazybox_jira::SOURCE) {
+        let roles =
+            lazybox_jira::JiraRoles::from_filter(&setup.provider_config(lazybox_jira::SOURCE));
+        if roles.is_empty() {
+            // Every role unticked is the "skip this provider" gesture the
+            // filter screen documents; nothing to ask Jira for.
+            tracing::info!("jira: no roles ticked in setup — skipping");
+        } else {
+            match lazybox_jira::JiraClient::from_env() {
+                Ok(client) => sources.push(Box::new(jira::JiraSource::new(client, roles))),
+                // A missing env var is a setup state, not a fault — log
+                // once per tick at info, matching the Linear path above.
+                Err(e) => tracing::info!("{e}"),
+            }
+        }
+    }
+
     sources
 }
 
@@ -3025,9 +3639,12 @@ async fn push_github_source(
     let config_scopes = github_cfg
         .map(|g| github_scopes_from_filters(&g.filters))
         .unwrap_or_default();
-    let watch_repos = github_cfg
+    let mut watch_repos = github_cfg
         .map(|g| github_watch_repos_from_filters(&g.filters))
         .unwrap_or_default();
+    if let Some(cfg) = cfg.as_ref() {
+        retain_unmuted_watches(&mut watch_repos, cfg, chrono::Utc::now());
+    }
     let detect_needs_reply = github_cfg.map(|g| g.detect_needs_reply).unwrap_or(true);
     let poll_interval = github_cfg
         .map(|g| g.poll_interval)
@@ -3209,32 +3826,79 @@ async fn push_github_source(
     let scan_issues = filter.issue_enabled() || !mention_allowed.is_empty();
     let forecast = client.background_sweep_forecast(want_prs, scan_issues);
     state.round_robin.prune(now);
-    let global_due = will_run_global(
-        state.round_robin.cursor.len(),
-        state.round_robin.tick,
+    let manual_refresh = client.manual_refresh_pending();
+    // A manual Shift-R runs as ONE unwindowed global reconcile (its
+    // `force_full_sweep` flag makes `next_pr_sweep_window` return
+    // `None`), which covers every involved PR, review-requested,
+    // merged, watched repos, and issues in a single fixed-size sweep.
+    let global_due = manual_refresh
+        || will_run_global(
+            state.round_robin.cursor.len(),
+            state.round_robin.tick,
+            DEFAULT_ROUND_ROBIN_N,
+        );
+    let required_sweep_points = forecast.required_points(global_due, want_prs);
+    let max_repos = forecast.repo_capacity(
+        governor_plan.graphql_points,
+        global_due,
         DEFAULT_ROUND_ROBIN_N,
     );
-    let required_sweep_points = forecast.required_points(global_due, want_prs);
-    let max_repos = if client.manual_refresh_pending() {
-        usize::MAX
-    } else {
-        forecast.repo_capacity(
-            governor_plan.graphql_points,
-            global_due,
-            DEFAULT_ROUND_ROBIN_N,
-        )
-    };
     let full_sweep_admitted = full_sweep_admitted(
         will_full_sweep,
-        client.manual_refresh_pending(),
+        manual_refresh,
         &governor_plan,
         required_sweep_points,
     );
-    let scheduling = plan_round_robin_tick_budgeted(
+    // Make a persistent full-sweep deferral visible where the user is
+    // looking (#1391). A due sweep the governor can't admit for several
+    // ticks running means new-issue/PR reconcile discovery has silently
+    // stalled; raise one dismissable advisory that names the numbers and
+    // the levers instead of burying it in the `Shift-D` sync string.
+    //
+    // Only count a deferral against a *known* budget: while the GraphQL
+    // budget isn't current (startup bootstrap, an expired window) the sweep
+    // is briefly not-admitted for a reason that self-heals in a tick or
+    // two, which is normal warm-up rather than the scale stall this notice
+    // is about. Gating on `graphql_budget_current` keeps the advisory from
+    // firing on every fresh daemon start.
+    let sweep_deferrable = will_full_sweep && governor_plan.graphql_budget_current;
+    match note_full_sweep_deferral(
+        &mut state.full_sweep_deferral_streak,
+        &mut state.discovery_behind_notified,
+        sweep_deferrable,
+        full_sweep_admitted,
+        manual_refresh,
+    ) {
+        // A DEDICATED standing signal, not a `ProviderError`: the client
+        // holds it as a persistent, self-retracting indicator (so it can't
+        // be missed the way a one-shot toast can), it never registers a
+        // phantom failing provider in the sync summary, and it never
+        // cross-leaks to other clients as a bare error. The figures name the
+        // lever the user can pull (`Shift-R`, or fewer `watch:` filters).
+        DeferralSignal::Behind => {
+            let _ = bus.send(Event::GithubDiscoveryBehind {
+                behind: true,
+                watched_repos: watch_repos.len() as u32,
+                required_points: required_sweep_points,
+                allowance: governor_plan.graphql_points,
+            });
+        }
+        // The stall recovered — retract the indicator.
+        DeferralSignal::Recovered => {
+            let _ = bus.send(Event::GithubDiscoveryBehind {
+                behind: false,
+                watched_repos: 0,
+                required_points: 0,
+                allowance: 0,
+            });
+        }
+        DeferralSignal::None => {}
+    }
+    let scheduling = schedule_github_tick(
         &mut state.round_robin,
         sessioned_repos,
+        manual_refresh,
         full_sweep_admitted,
-        DEFAULT_ROUND_ROBIN_N,
         max_repos,
         now,
     );
@@ -3263,11 +3927,13 @@ async fn push_github_source(
         detect_needs_reply,
         bus: bus.clone(),
         mention_allowed_logins: mention_allowed,
+        viewer_login: viewer.clone(),
         auto_fix,
         conventions,
         pending_actions: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
         scheduling,
         governor_plan,
+        full_sweep_admitted,
         cursor_store: cursor_store.clone(),
         // Default to Full so a never-fetched
         // source doesn't accidentally block rescope.

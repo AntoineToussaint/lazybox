@@ -23,6 +23,18 @@ now a library-only crate — see Architecture).
 
 Logs go to `/tmp/lazybox.log`. State persisted in `~/.lazybox/v2/state.db`.
 
+### Before you compile or test — check shared resources
+
+Lazybox routinely runs many agents on one box. **Before** `cargo build`,
+`cargo test`, or `cargo clippy`, check for available resources — sample the
+system load (`uptime` vs. `nproc`) and back off, throttle the job count
+(`CARGO_BUILD_JOBS`), or scope to the crate you touched (`cargo test -p
+<crate>`) while iterating when the machine is already busy. Blindly grabbing
+every core when fifteen other agents are doing the same is what drives the box
+to 100% CPU. Throttling changes *how hard* you compile, never *whether* the
+full gate suite runs before you push — scoped runs miss cross-crate gates.
+Full guidance: [`docs/agent-resource-awareness.md`](docs/agent-resource-awareness.md).
+
 ### Staying current (outdated-build guard)
 
 A uniformly-stale build — daemon *and* client compiled from the same
@@ -301,7 +313,11 @@ direct chord that skips the picker (`open_with_app.<name>`, remappable);
 #1100), `x j` join
 issue
 into PR, `x z` long snooze, `x x` archive, `x c` close issue
-(as not-planned, upstream; issue workspaces only, confirmed first) —
+(as not-planned, upstream; issue workspaces only, confirmed first),
+`x k` close & kill — the combined `g d` + `x x`: delete/close the
+issue or PR upstream AND archive the workspace (killing its sessions)
+in one confirm, for ending a finished line of work (only when there's
+an open issue/PR; confirmed first) —
 the legacy `Shift-{N,A,J,X,C,Z}` direct aliases are gone (#304).
 `r` reply (works from the sidebar as well as the activity pane —
 it's a Workspace-section action). With a `sandbox:` box configured
@@ -364,7 +380,16 @@ tick, mirroring the terminal's held literal `]`. (The dedicated
 already updates every behind PR in the set, #484/#932.) `a` is a leader
 for the **agent** group (which-key popup): `a c` claude, `a x` codex,
 `a u` cursor — no top-level `c`/`x`/`u` aliases (re-add via
-`ui.action_keys`, keyed `spawn_agent.<id>`). Both the `w` and `a`
+`ui.action_keys`, keyed `spawn_agent.<id>`). These explicit spawn keys
+(and `r c`/`r x`/`r u`, `b c`/`b x`/`b u`, `a S`/`a M`/`a L`) always
+start a NEW agent, even beside an idle one of the same kind (#1310, via
+`Spawn { force_new: true }`) — lazybox no longer enforces one-agent-per-
+workspace. The daemon still collapses genuinely-concurrent duplicate
+spawns (the SpawnCoordinator) and adopts an issue→PR managed-branch-owner
+transfer, so a double-fire or a rebadge never silently forks two backends.
+The reuse-first keys stay reuse-first: bare `w`/`w w` inject into a live
+conversation, and bulk / autonomous (`@lazybox` mentions, auto-fix) still
+collapse onto a running agent. Both the `w` and `a`
 leaders also carry **model-tier** chords (#308): `w S`/`w M`/`w L` work
 on the contextual agent at the small / medium / large model, and
 `a S`/`a M`/`a L` spawn the default agent at that tier. Tiers are

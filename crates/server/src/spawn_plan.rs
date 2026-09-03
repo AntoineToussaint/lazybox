@@ -23,6 +23,23 @@ pub struct SpawnOptions {
     pub access: AgentRunAccess,
     pub client_request_id: Option<String>,
     pub origin: SpawnOrigin,
+    /// A *foreign* actor triggered this autonomous spawn — a mention from
+    /// someone other than the viewer, or a label on an issue the viewer
+    /// didn't author — so its prompt derives from attacker-influenceable
+    /// issue text. Defaults `false` (your own work); the auto-spawn
+    /// dispatch sets it from the trigger. Consulted only for autonomous
+    /// spawns with no explicit `autonomous_skip_permissions` (#1392).
+    pub untrusted: bool,
+    /// Deliberately start a new agent even when an idle singleton of the
+    /// same kind is already running (#1310). Suppresses idle-singleton
+    /// reuse only — the concurrent-race collapse and the issue→PR
+    /// managed-branch-owner transfer still apply.
+    pub force_new: bool,
+    /// Route this spawn's LLM traffic through the metering proxy (the
+    /// per-session/per-workspace opt-in). Effective only when the proxy is
+    /// enabled (`agent.metering_proxy`) and running; ignored otherwise. The
+    /// global `agent.meter_all` overrides this to route every spawn.
+    pub meter: bool,
 }
 
 #[derive(Debug)]
@@ -39,6 +56,13 @@ pub(crate) struct SpawnPlanInput {
     pub repo_env: Vec<(String, String)>,
     pub priority_model_alias: Option<String>,
     pub autonomous: bool,
+    /// Whether a *foreign* actor triggered this autonomous spawn (a
+    /// mention from someone other than the viewer, or a label on an
+    /// issue the viewer didn't author) — its prompt derives from issue
+    /// text that actor controls. Only consulted for autonomous spawns
+    /// with no explicit `autonomous_skip_permissions`, where it forces
+    /// permission prompts back on (#1392).
+    pub autonomous_untrusted: bool,
     pub landed_on_main: bool,
     pub model_alias: Option<String>,
     pub resume: bool,
@@ -49,6 +73,16 @@ pub(crate) struct SpawnPlanInput {
     pub composing_buffer: Option<String>,
     pub access: AgentRunAccess,
     pub shell_command: String,
+    /// Per-session metering opt-in for this spawn (see [`SpawnOptions::meter`]).
+    pub meter: bool,
+    /// This workspace's sessions run on a remote box. Its loopback isn't
+    /// this host's, so the local metering proxy can't reach it — never
+    /// inject the proxy URL for a remote spawn (overrides `meter_all` too).
+    pub remote: bool,
+    /// Path to the coordination MCP config file for this spawn (#1420), when
+    /// the caller provisioned one via [`crate::mcp::provision_for_spawn`].
+    /// Threaded onto a supporting agent's argv as `--mcp-config <path>`.
+    pub mcp_config_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +140,7 @@ pub(crate) fn build_spawn_plan(
         repo_env,
         priority_model_alias,
         autonomous,
+        autonomous_untrusted,
         landed_on_main,
         model_alias,
         resume,
@@ -116,9 +151,13 @@ pub(crate) fn build_spawn_plan(
         composing_buffer,
         access,
         shell_command,
+        meter,
+        remote,
+        mcp_config_path,
     } = input;
     let no_permission = access != AgentRunAccess::ReadOnly
-        && no_permission_override.unwrap_or_else(|| skip_permissions_for(autonomous, cfg));
+        && no_permission_override
+            .unwrap_or_else(|| skip_permissions_for(autonomous, cfg, autonomous_untrusted));
     let agent = match &kind {
         TerminalKind::Agent(id) => Some(
             agents
@@ -157,6 +196,21 @@ pub(crate) fn build_spawn_plan(
         provider_session_id.as_deref(),
         access,
     )?;
+    // Inject the coordination MCP server (#1420) into a supporting agent's
+    // argv when the caller provisioned a config. Server-side (not in the
+    // agent's own flag builder) because only the daemon knows the bound
+    // endpoint and the per-session token behind the file. Read-only launches
+    // restrict the tool allowlist, so an MCP tool wouldn't be callable — skip.
+    let mut argv = argv;
+    if let Some(path) = mcp_config_path.as_ref()
+        && access == AgentRunAccess::Default
+        && agent
+            .as_deref()
+            .is_some_and(|agent| agent.supports_mcp_config())
+    {
+        argv.push("--mcp-config".into());
+        argv.push(path.to_string_lossy().into_owned());
+    }
     // Deprioritize agent processes (`agent.nice`, default 10) so a big
     // fleet's CPU burn can't starve the interactive stack: a 50-agent
     // fleet at normal priority ran the load average to 17× the core
@@ -181,7 +235,9 @@ pub(crate) fn build_spawn_plan(
         .zip(hook_command.as_deref())
         .is_some_and(|(agent, command)| !agent.hook_command_args(command).is_empty());
     let mut env = repo_env;
-    for (key, value) in gateway_env_for_agent(cfg, agent.as_deref(), true) {
+    for (key, value) in
+        gateway_env_for_agent(cfg, agent.as_deref(), meter, remote, session_key.as_str())
+    {
         if !env.iter().any(|(existing, _)| existing == &key) {
             env.push((key, value));
         }
@@ -189,6 +245,51 @@ pub(crate) fn build_spawn_plan(
     for (key, value) in credential_home_env(agent.as_deref(), &session_key) {
         if !env.iter().any(|(existing, _)| existing == &key) {
             env.push((key, value));
+        }
+    }
+    // Session identity, so a helper the agent (or a shell user) runs — e.g.
+    // `lazybox log` — knows which workspace it sits in and can attach a new
+    // window as a sibling of this terminal. The only carrier of this before
+    // was the hook `backend-key`, which is not visible to a child process.
+    if !env.iter().any(|(key, _)| key == "LAZYBOX_SESSION_KEY") {
+        env.push((
+            "LAZYBOX_SESSION_KEY".to_string(),
+            session_key.as_str().to_string(),
+        ));
+    }
+    // Put lazybox's own stable launcher (`<home>/bin/lazybox`) on the spawn's
+    // PATH so a helper invoked by bare name — `lazybox log`, exactly as the
+    // SessionStart discovery prompt instructs the agent to run — actually
+    // resolves. Claude's non-interactive Bash tool inherits this spawn env
+    // (that is how `LAZYBOX_SESSION_KEY` reaches it) but does NOT source the
+    // user's login shell profile, so `<home>/bin` is otherwise absent and
+    // `lazybox log` fails with "command not found" — silently, because the
+    // recommended `… | lazybox log &` form backgrounds the pipeline and
+    // discards the error. Prepended (not appended) so lazybox's launcher wins
+    // over any stale `lazybox` elsewhere; deduped so repeated segments don't
+    // accrete. Based on the daemon's own PATH, which the PTY child inherits.
+    {
+        let bin_dir = lazybox_core::paths::bin_dir();
+        let bin_dir = bin_dir.to_string_lossy();
+        let slot = env.iter().position(|(key, _)| key == "PATH");
+        let current = match slot {
+            Some(index) => env[index].1.clone(),
+            None => std::env::var("PATH").unwrap_or_default(),
+        };
+        // Prepend the launcher dir, dropping any existing occurrence so it
+        // doesn't accrete across the daemon's own PATH or a re-spawn.
+        let rest: Vec<&str> = current
+            .split(':')
+            .filter(|segment| *segment != bin_dir.as_ref())
+            .collect();
+        let combined = if current.is_empty() || rest.is_empty() {
+            bin_dir.to_string()
+        } else {
+            format!("{bin_dir}:{}", rest.join(":"))
+        };
+        match slot {
+            Some(index) => env[index].1 = combined,
+            None => env.push(("PATH".to_string(), combined)),
         }
     }
     let env = with_agent_spawn_defaults(env, agent.as_deref());
@@ -283,16 +384,26 @@ pub(crate) fn argv_for(
     }
 }
 
-/// Base-URL env for an agent spawn. `meter` routes the agent through the
-/// local metering proxy when it is enabled and running; pass it only for
-/// interactive PTY spawns, whose usage has no other source. Structured
-/// runs must pass `false`: they already report token usage by parsing
-/// their own stream-json, so proxying them too would count every turn
-/// twice in the header summary (#1109).
+/// Base-URL env for an agent spawn. `meter` is this spawn's per-session
+/// opt-in (the workspace meter toggle); the agent is routed through the local
+/// metering proxy when `meter` — OR the global `agent.meter_all` — is set and
+/// the proxy is enabled and running. `session` attributes the proxied usage to
+/// a workspace (#per-session cost). Pass metering only for interactive PTY
+/// spawns, whose usage has no other source: structured runs pass `meter: false`
+/// because they already report token usage by parsing their own stream-json,
+/// so proxying them too would count every turn twice in the header summary
+/// (#1109). `agent.metering_proxy` alone only makes the proxy *run* — a session
+/// that didn't opt in is never redirected. Two coverage guards keep a metered
+/// spawn from being a silent bypass: `remote` skips a workspace whose sessions
+/// run on a box (its loopback isn't this host's — the proxy URL would be dead),
+/// and [`Agent::meterable`] skips an agent that ignores the base-URL env
+/// (`cursor-agent`) so it never shows metered while it isn't.
 pub(crate) fn gateway_env_for_agent(
     cfg: &lazybox_config::Config,
     agent: Option<&dyn Agent>,
     meter: bool,
+    remote: bool,
+    session: &str,
 ) -> Vec<(String, String)> {
     let Some(agent) = agent else {
         return Vec::new();
@@ -302,15 +413,19 @@ pub(crate) fn gateway_env_for_agent(
     };
     let env_var = provider.base_url_env().to_string();
 
-    // Metering proxy on and serving: point this provider's traffic at its
-    // per-agent proxy URL so the response's token usage is captured
-    // (#1109). The proxy forwards to the real upstream (or the configured
-    // gateway), so this supersedes the plain gateway injection below.
-    if meter
+    // Metering proxy on and serving, and this spawn opted in (per-session
+    // toggle) or blanket metering is configured: point this provider's traffic
+    // at its per-session proxy URL so the response's token usage is captured
+    // and priced (#1109). The proxy forwards to the real upstream (or the
+    // configured gateway), so this supersedes the plain gateway injection
+    // below.
+    if (meter || cfg.agent.meter_all)
+        && !remote
+        && agent.meterable()
         && cfg.agent.metering_proxy
         && let Some(port) = crate::proxy::port()
     {
-        let url = crate::proxy::injected_base_url(port, provider, agent.id());
+        let url = crate::proxy::injected_base_url(port, provider, agent.id(), session);
         return vec![(env_var, url)];
     }
 
@@ -443,9 +558,13 @@ pub(crate) fn with_worktree_cargo_target(
     env
 }
 
-pub(crate) fn skip_permissions_for(autonomous: bool, cfg: &lazybox_config::Config) -> bool {
+pub(crate) fn skip_permissions_for(
+    autonomous: bool,
+    cfg: &lazybox_config::Config,
+    untrusted_trigger: bool,
+) -> bool {
     if autonomous {
-        cfg.agent.autonomous_skip_permissions
+        cfg.agent.autonomous_skip(untrusted_trigger)
     } else {
         cfg.agent.skip_permissions
     }
@@ -469,6 +588,7 @@ mod tests {
             repo_env: Vec::new(),
             priority_model_alias: None,
             autonomous: false,
+            autonomous_untrusted: false,
             landed_on_main: false,
             model_alias: None,
             resume: false,
@@ -479,6 +599,9 @@ mod tests {
             composing_buffer: None,
             access: AgentRunAccess::Default,
             shell_command: String::new(),
+            meter: false,
+            remote: false,
+            mcp_config_path: None,
         }
     }
 
@@ -514,13 +637,26 @@ mod tests {
                 "claude-sonnet-5",
             ]
         );
+        // PATH is derived from the daemon's own PATH (non-deterministic), so
+        // check it separately (asserted in full by
+        // `every_spawn_puts_lazybox_launcher_on_path`) and compare the rest.
+        let env_without_path: Vec<_> = plan
+            .env
+            .iter()
+            .filter(|(key, _)| key != "PATH")
+            .cloned()
+            .collect();
         assert_eq!(
-            plan.env,
+            env_without_path,
             vec![
                 ("PROJECT_ENV".into(), "test".into()),
                 (
                     "ANTHROPIC_BASE_URL".into(),
                     "http://gateway.internal".into()
+                ),
+                (
+                    "LAZYBOX_SESSION_KEY".into(),
+                    "github-acme-widget-657".into()
                 ),
                 ("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".into(), "1".into()),
                 (
@@ -528,6 +664,10 @@ mod tests {
                     "/worktrees/widget-657/target".into()
                 ),
             ]
+        );
+        assert!(
+            plan.env.iter().any(|(key, _)| key == "PATH"),
+            "the spawn env must carry a PATH with lazybox's launcher dir",
         );
         assert_eq!(plan.hint, "github-acme-widget-657-claude");
         assert!(plan.persist_key.is_some());
@@ -676,6 +816,72 @@ mod tests {
     }
 
     #[test]
+    fn every_spawn_carries_the_session_key_in_its_env() {
+        // A helper the agent (or a shell user) runs reads LAZYBOX_SESSION_KEY
+        // to learn which workspace it sits in — so it must be present for
+        // agents and shells alike.
+        let cfg = lazybox_config::Config::default();
+        for kind in [
+            TerminalKind::Agent("claude".into()),
+            TerminalKind::Shell,
+            TerminalKind::LogTail {
+                path: "/tmp/x.log".into(),
+            },
+        ] {
+            let mut input = input(kind.clone());
+            input.shell_command = "/bin/sh".into();
+            let plan =
+                build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("valid plan");
+            assert_eq!(
+                plan.env
+                    .iter()
+                    .find(|(k, _)| k == "LAZYBOX_SESSION_KEY")
+                    .map(|(_, v)| v.as_str()),
+                Some("github-acme-widget-657"),
+                "{kind:?} spawn is missing LAZYBOX_SESSION_KEY",
+            );
+        }
+    }
+
+    #[test]
+    fn every_spawn_puts_lazybox_launcher_on_path() {
+        // The SessionStart discovery prompt tells the agent to run `lazybox
+        // log`; that only works if `<home>/bin` (the stable launcher's dir) is
+        // on the spawn's PATH, since the agent's Bash tool doesn't source a
+        // login profile. Assert every spawn kind gets it, prepended.
+        let cfg = lazybox_config::Config::default();
+        let bin_dir = lazybox_core::paths::bin_dir();
+        let bin_dir = bin_dir.to_string_lossy().into_owned();
+        for kind in [
+            TerminalKind::Agent("claude".into()),
+            TerminalKind::Shell,
+            TerminalKind::LogTail {
+                path: "/tmp/x.log".into(),
+            },
+        ] {
+            let mut input = input(kind.clone());
+            input.shell_command = "/bin/sh".into();
+            let plan =
+                build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("valid plan");
+            let path = plan
+                .env
+                .iter()
+                .find(|(k, _)| k == "PATH")
+                .map(|(_, v)| v.as_str())
+                .unwrap_or_else(|| panic!("{kind:?} spawn has no PATH entry"));
+            assert!(
+                path.split(':').next() == Some(bin_dir.as_str()),
+                "{kind:?} spawn must PREPEND the launcher dir; PATH = {path}",
+            );
+            assert_eq!(
+                path.split(':').filter(|s| *s == bin_dir.as_str()).count(),
+                1,
+                "{kind:?} spawn must not duplicate the launcher dir; PATH = {path}",
+            );
+        }
+    }
+
+    #[test]
     fn shell_plan_uses_resolved_command_and_main_flags() {
         let cfg = lazybox_config::Config::default();
         let mut input = input(TerminalKind::Shell);
@@ -712,7 +918,7 @@ mod tests {
     #[test]
     fn read_only_agent_plan_never_enables_unattended_bypass() {
         let mut cfg = lazybox_config::Config::default();
-        cfg.agent.autonomous_skip_permissions = true;
+        cfg.agent.autonomous_skip_permissions = Some(true);
         let mut input = input(TerminalKind::Agent("codex".into()));
         input.autonomous = true;
         input.access = AgentRunAccess::ReadOnly;
@@ -726,6 +932,64 @@ mod tests {
             plan.argv
                 .windows(2)
                 .any(|args| args == ["--sandbox", "read-only"])
+        );
+    }
+
+    /// A foreign-triggered autonomous spawn (a mention from someone else,
+    /// or a label on an issue you didn't author) must NOT run unattended
+    /// with `--dangerously-skip-permissions` under the default (unset)
+    /// config — its prompt is attacker-influenceable issue text (#1392).
+    #[test]
+    fn autonomous_untrusted_spawn_keeps_permission_prompts_by_default() {
+        let cfg = lazybox_config::Config::default();
+        assert_eq!(cfg.agent.autonomous_skip_permissions, None);
+        let mut input = input(TerminalKind::Agent("claude".into()));
+        input.autonomous = true;
+        input.autonomous_untrusted = true;
+
+        let plan =
+            build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("valid plan");
+
+        assert!(
+            !plan.flags.no_permission,
+            "a foreign-triggered spawn keeps its permission prompts on the unset default"
+        );
+    }
+
+    /// Your own autonomous work (`w`, your own mention/label) keeps the
+    /// frictionless unattended bypass on the default config.
+    #[test]
+    fn autonomous_trusted_spawn_keeps_bypass_by_default() {
+        let cfg = lazybox_config::Config::default();
+        let mut input = input(TerminalKind::Agent("claude".into()));
+        input.autonomous = true;
+        input.autonomous_untrusted = false;
+
+        let plan =
+            build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("valid plan");
+
+        assert!(
+            plan.flags.no_permission,
+            "your own autonomous work still runs unattended by default"
+        );
+    }
+
+    /// An explicit `autonomous_skip_permissions = true` wins even for a
+    /// foreign trigger — the override is a conscious opt-in.
+    #[test]
+    fn pinned_skip_permissions_overrides_untrusted_trigger() {
+        let mut cfg = lazybox_config::Config::default();
+        cfg.agent.autonomous_skip_permissions = Some(true);
+        let mut input = input(TerminalKind::Agent("claude".into()));
+        input.autonomous = true;
+        input.autonomous_untrusted = true;
+
+        let plan =
+            build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("valid plan");
+
+        assert!(
+            plan.flags.no_permission,
+            "an explicit opt-in keeps the bypass even for a foreign trigger"
         );
     }
 }

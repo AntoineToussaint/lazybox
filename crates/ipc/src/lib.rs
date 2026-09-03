@@ -348,7 +348,26 @@ pub enum AgentState {
     /// state remains visible until the complete recovery transaction has
     /// selected the provider-owned wait option, reached a ready composer,
     /// and submitted the continuation prompt.
+    ///
+    /// Appended last: the socket transport encodes this enum by bincode
+    /// ordinal, so it must never be reordered ahead of `LimitReached`.
     CreditExhausted,
+    /// The calm sibling of `LimitReached`: the daemon has auto-pressed
+    /// "Wait" on a usage-limit block (`ui.auto_wait_on_limit`) and the
+    /// agent is now parked, sleeping until its limit resets — the block is
+    /// being handled automatically, so unlike `LimitReached` it needs
+    /// nothing from the user. Purely daemon-asserted (the screen scraper
+    /// never produces it); set right after the Wait keystroke and held
+    /// against a still-visible limit banner, it leaves only on the same
+    /// affirmative evidence that clears `LimitReached` — the agent visibly
+    /// working again or coming to rest once the reset lands (where
+    /// auto-wait injects its continuation nudge). **Not** an alert: no
+    /// desktop/Slack notification, no `⏳ N limited` count, no resume-all
+    /// target — it renders a distinct 💤 badge and otherwise stays quiet.
+    ///
+    /// Appended last: the socket transport encodes this enum by bincode
+    /// ordinal, so it must never be reordered ahead of `CreditExhausted`.
+    AwaitingReset,
 }
 
 impl AgentState {
@@ -366,6 +385,7 @@ impl AgentState {
         AgentState::Exited { code: None },
         AgentState::LimitReached,
         AgentState::CreditExhausted,
+        AgentState::AwaitingReset,
     ];
 }
 
@@ -666,6 +686,17 @@ pub struct DiffFileDto {
     pub hunks: Vec<DiffHunkDto>,
 }
 
+/// One editable row in the personal Hopper. Existing rows carry their
+/// stable workspace key; newly typed rows leave it empty so the daemon
+/// allocates collision-safe workspace identities at the persistence
+/// boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct HopperEntryDraft {
+    pub workspace_key: Option<lazybox_core::WorkspaceKey>,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct DiffHunkDto {
@@ -785,6 +816,18 @@ pub enum Command {
         /// terminals ignore this field.
         #[serde(default)]
         access: AgentRunAccess,
+        /// Deliberately start a NEW agent even when a matching singleton
+        /// is already running in this workspace (#1310). Set by the
+        /// explicit `a c` / `a x` / `a u` spawn keys so a second agent
+        /// can be launched beside an idle one. The daemon skips its
+        /// idle-singleton reuse for this spawn — but still honors the
+        /// concurrent-race collapse (the SpawnCoordinator) and the
+        /// issue→PR managed-branch-owner *transfer* (adopting the
+        /// migrated session is not "reuse of an idle duplicate"). Bare
+        /// contextual `w` / autonomous mentions / bulk leave this false
+        /// so they keep collapsing onto a live agent.
+        #[serde(default)]
+        force_new: bool,
     },
     /// Cancel an in-flight `Spawn` for this workspace that is still
     /// provisioning its worktree (cold clone / fetch). The daemon
@@ -1052,6 +1095,10 @@ pub enum Command {
     Snooze {
         session_key: SessionKey,
         until: chrono::DateTime<chrono::Utc>,
+        /// Event that ends the snooze before `until` (#scale, B4):
+        /// new activity / CI settling / a review landing — checked by
+        /// the daemon's upsert path on every poll. `None` = time-only.
+        wake: Option<lazybox_core::SnoozeWake>,
     },
     Unsnooze {
         session_key: SessionKey,
@@ -1072,6 +1119,16 @@ pub enum Command {
     /// `SetAutoMergeOnGreen`), resolves and stores the base branch, and
     /// re-broadcasts.
     SetTrackMain {
+        session_key: SessionKey,
+        enabled: bool,
+    },
+    /// Set the workspace's metering opt-in (the `$ meter` canary). When
+    /// enabled, every agent spawn in this workspace is routed through the
+    /// local metering proxy so its cost/tokens/rate are captured per session,
+    /// without affecting any other workspace. The daemon persists the flag on
+    /// the `Workspace` (like `SetTrackMain`) and re-broadcasts. Effective only
+    /// when `agent.metering_proxy` is enabled and the proxy is running.
+    SetMetered {
         session_key: SessionKey,
         enabled: bool,
     },
@@ -1156,6 +1213,26 @@ pub enum Command {
     DeleteOrClose {
         workspace_key: lazybox_core::WorkspaceKey,
     },
+    /// Close the workspace's PR without merging (`closePullRequest`).
+    /// Fires from the github leader's `g c` chord, after a confirm.
+    /// Unlike [`Command::DeleteOrClose`], this only ever targets a PR
+    /// (never deletes an issue) and leaves the workspace in place — the
+    /// next poll's rescope sweep reconciles the closed state.
+    ClosePr {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
+    /// Convert the workspace's open PR to a draft
+    /// (`convertPullRequestToDraft`). Fires from the github leader's
+    /// `g f` chord. The next poll picks up the draft state.
+    ConvertPrToDraft {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
+    /// Mark the workspace's draft PR ready for review
+    /// (`markPullRequestReadyForReview`). Fires from the github leader's
+    /// `g y` chord. The next poll picks up the ready state.
+    MarkPrReady {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
     /// Request reviews on the workspace's PR from the given GitHub
     /// logins. Adds to the existing reviewer set (no replacement).
     /// Only meaningful when the focused workspace's primary task is
@@ -1212,6 +1289,16 @@ pub enum Command {
     /// `workspace_key`; no-op for a workspace with no PR.
     FetchRequestableReviewers {
         workspace_key: lazybox_core::WorkspaceKey,
+    },
+    /// Ask the daemon for a repository's recently-merged PRs — the
+    /// "what's been landing here" ledger (#1432) — and broadcast the
+    /// result via `Event::RepoMergeHistory`. `repo` is `owner/name`,
+    /// taken from the sidebar cursor's repo group. Repo-scoped, not
+    /// workspace-scoped: the merge history stands on its own, and the
+    /// background poll discards merged PRs no workspace tracks, so this
+    /// is a dedicated on-demand fetch.
+    FetchRepoMergeHistory {
+        repo: String,
     },
     /// Admin command: walk every persisted workspace, drop sessions
     /// whose terminals aren't currently live, and remove the
@@ -1314,6 +1401,16 @@ pub enum Command {
         resume_latest: bool,
         #[serde(default)]
         access: AgentRunAccess,
+        /// Model-tier alias for this structured run (`agents.<id>.models`,
+        /// e.g. `"L"` for Opus), so a headless run — a Critic review, an
+        /// Ask-about-this-PR — can be escalated to a stronger model instead
+        /// of always using the agent's default (#1312 follow-up). `None`
+        /// keeps the agent's own default, unchanged. Resolved daemon-side
+        /// via `Config::agent_models().resolve_args()`, mirroring PTY
+        /// spawns. Trailing `#[serde(default)]` — same wire-tolerance as the
+        /// fields above.
+        #[serde(default)]
+        model_alias: Option<String>,
     },
     SendAgentInput {
         run_id: AgentRunId,
@@ -1509,6 +1606,52 @@ pub enum Command {
         client_request_id: String,
         continuation_prompt: String,
     },
+    /// Persist one ordered edit of the active personal Hopper. Existing
+    /// keys are renamed/reordered in place; keyless rows become new
+    /// zero-session workspaces. Omitted existing rows are preserved so a
+    /// text edit can never become an implicit destructive action.
+    SaveHopper {
+        entries: Vec<HopperEntryDraft>,
+    },
+    /// Attach a captured Hopper workspace to a tracked project. This is
+    /// deliberately separate from spawning: the daemon persists and echoes
+    /// the assignment first, then the client resumes the action that required
+    /// a worktree against that authoritative `WorkspaceUpserted`.
+    AssignHopperProject {
+        workspace_key: lazybox_core::WorkspaceKey,
+        project_key: lazybox_core::ProjectKey,
+    },
+    /// Reversible Hopper lifecycle transition. Completion changes mailbox
+    /// placement only; sessions, terminal history, and worktrees survive.
+    SetHopperCompleted {
+        workspace_key: lazybox_core::WorkspaceKey,
+        completed: bool,
+    },
+    /// Acknowledge ("keep mine") a snippet override against the current
+    /// built-in body, silencing the "built-in changed" nudge until the
+    /// built-in changes again (#1312). `target` is the opaque
+    /// `snippet:<key>:<builtin-content-hash>` key the client derives via
+    /// `lazybox_config::keep_mine_target`; because it embeds the built-in
+    /// hash, a later built-in edit produces a fresh target that no prior
+    /// acknowledgement covers. The daemon persists the set and replays it
+    /// via `Event::Snapshot`'s `snippet_keepmine`, so an acknowledgement on
+    /// one client sticks for all. Appended last (bincode is
+    /// ordinal-sensitive).
+    SetSnippetKeepMine {
+        target: String,
+    },
+    /// Request the daily usage-stats rollup for the day/week view (#1339).
+    /// The daemon reads its persisted accumulator and replies with
+    /// [`Event::Stats`]. Appended last (bincode is ordinal-sensitive).
+    GetStats,
+    /// Reversible Hopper cancellation. Kept distinct from completion so
+    /// the history view can report both outcomes, and from `Kill`, which
+    /// destructively deletes the workspace. Appended last because bincode
+    /// command ordinals are part of the client/daemon wire contract.
+    SetHopperCanceled {
+        workspace_key: lazybox_core::WorkspaceKey,
+        canceled: bool,
+    },
 }
 
 impl Command {
@@ -1620,6 +1763,42 @@ pub struct ErrorInboxRecord {
     pub last_seen: chrono::DateTime<chrono::Utc>,
 }
 
+/// One rolled-up daily usage bucket, mirrored onto the wire from the
+/// store's `StatBucket` (#1339). `metric` is one of the opaque keys in
+/// [`stats`]; `value` is a count or a summable quantity (tokens, USD
+/// micros). The TUI aggregates these into today/week totals and a
+/// per-day series — the daemon ships the raw daily rollup, keeping the
+/// query handler trivial and the client free to slice it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct StatBucket {
+    /// UTC calendar day, `YYYY-MM-DD`.
+    pub day: String,
+    pub metric: String,
+    pub value: i64,
+}
+
+/// Usage-stats metric keys (#1339) — the shared vocabulary the daemon
+/// accumulator emits and the TUI day/week view labels. Kept as opaque
+/// strings so the store stays source-agnostic (it never interprets a
+/// metric), the same stance the Error Inbox takes with `source`.
+pub mod stats {
+    /// Agent sessions started (interactive agent terminals).
+    pub const SESSIONS: &str = "sessions";
+    /// Prompts delivered to an agent (snippet + composer sends).
+    pub const PROMPTS: &str = "prompts";
+    /// PRs merged (manual + auto-merge).
+    pub const MERGED: &str = "merged";
+    /// Agent turns completed.
+    pub const TURNS: &str = "turns";
+    /// Input tokens metered across agent responses.
+    pub const INPUT_TOKENS: &str = "input_tokens";
+    /// Output tokens metered across agent responses.
+    pub const OUTPUT_TOKENS: &str = "output_tokens";
+    /// Cost in USD micros (millionths of a dollar) metered across responses.
+    pub const COST_MICROS: &str = "cost_micros";
+}
+
 /// Connection → TUI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
@@ -1668,6 +1847,19 @@ pub enum Event {
         /// `#[serde(default)]` field — same caveat as `projects`.
         #[serde(default)]
         dismissed_updates: Vec<String>,
+    },
+    /// Persisted metered cost per session key (`(session_key, cost_micros)`),
+    /// pushed once right after [`Event::Snapshot`] on subscribe. The
+    /// per-workspace `$ METER · $cost` figure lives only in the client's live
+    /// `UsageTracker`, so a restart would reset it to bare `$ METER`; the
+    /// daemon accumulates the cost durably from priced proxy usage and replays
+    /// it here so the figure survives (#1389). Its own event rather than a
+    /// `Snapshot` field so the ~150 snapshot construction sites stay untouched;
+    /// the client seeds its tracker from it, and a per-Space figure is summed
+    /// client-side over the Space's workspaces. Empty vec is valid (nothing
+    /// metered yet).
+    SessionCosts {
+        costs: Vec<(String, u64)>,
     },
     /// Authenticated user's login per provider source ("github" →
     /// "AntoineToussaint", etc.). Emitted once after the daemon's
@@ -1861,6 +2053,35 @@ pub enum Event {
         label: String,
         reason: String,
     },
+    /// `Command::ClosePr` failed at the GitHub API — the user pressed
+    /// `g c` and the PR was NOT closed. Surfaced as a prominent,
+    /// persistent error naming the reason, mirroring `IssueCloseFailed`.
+    /// The PR stays open/actionable. (Success reuses `Event::PrClosed`.)
+    PrCloseFailed {
+        workspace_key: lazybox_core::WorkspaceKey,
+        pr_label: String,
+        reason: String,
+    },
+    /// The PR for `workspace_key` had its draft state changed via
+    /// `Command::ConvertPrToDraft` (`is_draft = true`) or
+    /// `Command::MarkPrReady` (`is_draft = false`). The local Task still
+    /// reads the old state until the next poll catches up, so the TUI
+    /// flashes a footer notice so the keypress doesn't look like a no-op.
+    PrDraftChanged {
+        workspace_key: lazybox_core::WorkspaceKey,
+        pr_label: String,
+        is_draft: bool,
+    },
+    /// `Command::ConvertPrToDraft` / `Command::MarkPrReady` failed at the
+    /// GitHub API — nothing changed. Surfaced as a prominent, persistent
+    /// error naming the reason, mirroring `PrCloseFailed`. `to_draft`
+    /// records which direction was attempted so the TUI can say so.
+    PrDraftChangeFailed {
+        workspace_key: lazybox_core::WorkspaceKey,
+        pr_label: String,
+        to_draft: bool,
+        reason: String,
+    },
     /// A workspace's primary task reached a terminal state (a PR
     /// merged, or an issue closed) and its workspace is a candidate for
     /// removal. Level-triggered: emitted on the open→terminal flip and
@@ -1917,6 +2138,18 @@ pub enum Event {
     RequestableReviewers {
         workspace_key: lazybox_core::WorkspaceKey,
         logins: Vec<String>,
+    },
+    /// Response to `Command::FetchRepoMergeHistory` (#1432): the repo's
+    /// recently-merged PRs, newest first, as full `Task`s (title, body,
+    /// author, url, merge time) so the modal can preview the body and
+    /// drill into the full description. Keyed by `repo` so the receiver
+    /// knows which open modal to fill. `error` carries a human-readable
+    /// reason when the fetch failed, so the modal shows it instead of
+    /// spinning forever; `entries` is empty in that case.
+    RepoMergeHistory {
+        repo: String,
+        entries: Vec<lazybox_core::Task>,
+        error: Option<String>,
     },
     /// A new session (= folder worktree) was provisioned inside its
     /// workspace. Sent in response to `Command::CreateSession` and
@@ -2247,6 +2480,13 @@ pub enum Event {
     /// per agent for the header's quota widget.
     AgentSessionUsage {
         agent_id: String,
+        /// The workspace/session this usage is attributed to, parsed from the
+        /// proxy request path. `None` for a metered spawn without a resolvable
+        /// key (e.g. blanket `meter_all` on an ad-hoc spawn). Lets the tracker
+        /// and the durable stats roll cost up per workspace, not just per
+        /// agent type.
+        #[serde(default)]
+        session_key: Option<SessionKey>,
         usage: AgentUsage,
     },
     /// Provider plan-quota utilization (5h + weekly windows) read off live
@@ -2257,6 +2497,10 @@ pub enum Event {
     /// request; absent an active agent it simply holds its last value.
     AgentProviderQuota {
         agent_id: String,
+        /// The workspace/session whose request surfaced this quota, parsed
+        /// from the proxy request path. `None` when no key was resolvable.
+        #[serde(default)]
+        session_key: Option<SessionKey>,
         quota: ProviderQuota,
     },
     AgentTurnFinished {
@@ -2524,6 +2768,54 @@ pub enum Event {
         session_key: SessionKey,
         terminal_id: TerminalId,
         hint: String,
+    },
+    /// The user's snippet-override "keep mine" acknowledgements
+    /// (`snippet:<key>:<builtin-content-hash>`), so the picker's
+    /// "built-in changed" nudge stays silenced for an override the user
+    /// chose to keep — until the built-in changes again (#1312). Pushed as
+    /// its own event right after `Snapshot` (like `ViewerIdentities`),
+    /// rather than a `Snapshot` field, so adding it doesn't churn the many
+    /// `Snapshot` construction sites. Re-sent whenever the set changes so
+    /// an acknowledgement on one client lands on all. Appended last
+    /// (bincode is ordinal-sensitive).
+    SnippetKeepMine {
+        targets: Vec<String>,
+    },
+    /// Reply to [`Command::GetStats`]: the daily usage-stats rollup
+    /// (#1339), most-recent day last. The client aggregates these into
+    /// the day/week view. Appended last (bincode is ordinal-sensitive).
+    Stats {
+        buckets: Vec<StatBucket>,
+    },
+    /// A genuinely-fresh agent session started (#1339) — a new
+    /// conversation, not a restart-recovery/restore reattach or a resume
+    /// continuation (all of which re-emit `TerminalSpawned` for an
+    /// already-counted session). The usage-stats accumulator counts this,
+    /// so "sessions" stays one-per-logical-session across daemon
+    /// restarts. Appended last (bincode is ordinal-sensitive).
+    AgentSessionStarted {
+        session_key: SessionKey,
+    },
+    /// New-item discovery is behind (#1391): a due GitHub full sweep has
+    /// been deferred by the background rate governor for several
+    /// consecutive ticks, so new-issue/PR reconcile discovery has stalled
+    /// (past ~25 `watch:` repos the forecast permanently exceeds the
+    /// per-tick GraphQL allowance). A **standing, self-clearing** signal —
+    /// `behind: true` when the stall sets in, `behind: false` when a sweep
+    /// is finally admitted (or stops being due) — so the client shows a
+    /// persistent indicator that retracts itself, not a one-shot toast that
+    /// can be missed. This is an advisory, never a sync failure: the cheap
+    /// issue-discovery probe keeps surfacing new issues meanwhile, so it
+    /// must NOT flow through the `ProviderError` error channel (which would
+    /// register a phantom failing provider and, cross-client, a bare error).
+    /// The `watched_repos` / `required_points` / `allowance` figures name
+    /// the lever; they are `0` on the clearing (`behind: false`) event.
+    /// Appended last (bincode is ordinal-sensitive).
+    GithubDiscoveryBehind {
+        behind: bool,
+        watched_repos: u32,
+        required_points: u32,
+        allowance: u32,
     },
 }
 
@@ -2828,10 +3120,24 @@ pub enum WorktreeRecovery {
     /// re-provision (issue #1041). The team key is recovered from the
     /// message via [`Self::linear_team`].
     LinearUnmapped,
+    /// A Jira issue's project has no `providers.jira.projects` mapping, so
+    /// provisioning can't resolve a repo to clone. Same recovery as
+    /// [`Self::LinearUnmapped`]: the client picks a repo for the project,
+    /// persists the mapping, and re-provisions. The project key is
+    /// recovered from the message via [`Self::jira_project`].
+    JiraUnmapped,
     /// B14/B17: disk, permission, or generic I/O error (out of space,
     /// read-only mount, `git init` half-write). Retryable once the
     /// filesystem problem is cleared.
     Disk,
+    /// The requested branch name collides with an existing branch in the
+    /// same namespace — git can't hold both `release` and `release/*`
+    /// (a directory/file conflict). The daemon already tried a safe
+    /// auto-delete of the conflicting branch and it couldn't be cleared
+    /// (unmerged, or checked out live), so a bare retry just replays the
+    /// same failure. The fix is manual: delete or rename the conflicting
+    /// branch. The conflicting name is recovered via [`Self::df_conflict_branch`].
+    BranchDirFileConflict,
     /// Unclassified — surface the raw text and still offer a retry, since
     /// a failed provision persists no session and re-pressing is clean.
     Unknown,
@@ -2863,7 +3169,11 @@ impl WorktreeRecovery {
         // picker fallback needs this distinct from the generic pre-git
         // config errors so the modal can offer a repo pick.
         if message.contains("has no repo mapping") {
-            return Self::LinearUnmapped;
+            return if message.contains("Jira project `") {
+                Self::JiraUnmapped
+            } else {
+                Self::LinearUnmapped
+            };
         }
         // B11 — malformed repo string, caught before any git runs.
         if message.contains("is not owner/name") {
@@ -2910,7 +3220,27 @@ impl WorktreeRecovery {
             || message.contains("index.lock")
             || message.contains("cannot lock ref")
         {
+            // A directory/file branch conflict is NOT a transient lock,
+            // yet git's raw phrasing is "cannot lock ref '…': '…' exists;
+            // cannot create '…'" — which trips the "cannot lock ref" arm
+            // above. Match git's own D/F marker ("exists; cannot create"),
+            // not the wrapped BranchDirFileConflict's "directory/file
+            // conflict" phrasing (that message never contains "cannot lock
+            // ref", so it reaches the post-block check instead). Without
+            // this, a raw D/F error would be mislabeled Transient and the
+            // modal would offer the exact doomed retry this class prevents.
+            if message.contains("exists; cannot create")
+                || message.contains("directory/file conflict")
+            {
+                return Self::BranchDirFileConflict;
+            }
             return Self::Transient;
+        }
+        // Directory/file branch-name conflict the daemon couldn't clear
+        // safely. Matched on the distinct phrase from
+        // `GitError::BranchDirFileConflict`.
+        if message.contains("directory/file conflict") {
+            return Self::BranchDirFileConflict;
         }
         Self::Unknown
     }
@@ -2926,6 +3256,7 @@ impl WorktreeRecovery {
         match self {
             Self::BadRepo
             | Self::LinearUnmapped
+            | Self::JiraUnmapped
             | Self::DefaultBranchUnresolved
             | Self::BranchMissing
             | Self::Transient => WorktreeStep::Fetch,
@@ -2934,6 +3265,7 @@ impl WorktreeRecovery {
             | Self::BranchMismatch
             | Self::DirtyLeftover
             | Self::Offline
+            | Self::BranchDirFileConflict
             | Self::Disk => WorktreeStep::WorktreeAdd,
             // Unknown: keep it on whatever row the display is showing —
             // the modal's `fail_current` treats `Fetch` as "use the
@@ -2975,9 +3307,9 @@ impl WorktreeRecovery {
     /// Whether the modal can offer a one-keypress **repo pick**: an
     /// unmapped Linear team, where the fix is to choose the repo its
     /// tickets should use and persist the mapping, then re-provision
-    /// (issue #1041). Only `LinearUnmapped`.
+    /// (issue #1041). `LinearUnmapped` and its Jira twin.
     pub fn picks_repo(&self) -> bool {
-        matches!(self, Self::LinearUnmapped)
+        matches!(self, Self::LinearUnmapped | Self::JiraUnmapped)
     }
 
     /// The Linear team key named in a `LinearUnmapped` message. The daemon
@@ -2985,9 +3317,20 @@ impl WorktreeRecovery {
     /// the client needs it to persist `providers.linear.teams.<team>`.
     /// `None` when the message has no such quoted team.
     pub fn linear_team(message: &str) -> Option<String> {
-        let after = message.split_once("Linear team `")?.1;
-        let team = after.split_once('`')?.0.trim();
-        (!team.is_empty()).then(|| team.to_string())
+        Self::back_quoted_after(message, "Linear team `")
+    }
+
+    /// The Jira project key named in a `JiraUnmapped` message (``Jira
+    /// project `ENG` has no repo mapping…``); the client persists
+    /// `providers.jira.projects.<project>` under it.
+    pub fn jira_project(message: &str) -> Option<String> {
+        Self::back_quoted_after(message, "Jira project `")
+    }
+
+    fn back_quoted_after(message: &str, marker: &str) -> Option<String> {
+        let after = message.split_once(marker)?.1;
+        let key = after.split_once('`')?.0.trim();
+        (!key.is_empty()).then(|| key.to_string())
     }
 
     /// Whether the modal can offer a one-keypress **jump** to the live
@@ -3060,9 +3403,31 @@ impl WorktreeRecovery {
                 "This Linear team has no repo mapping. Press r to pick the repo its \
                  tickets use — lazybox remembers the choice."
             }
+            Self::JiraUnmapped => {
+                "This Jira project has no repo mapping. Press r to pick the repo its \
+                 issues use — lazybox remembers the choice."
+            }
             Self::Disk => "Disk or permission error. Free space or fix permissions, then press r.",
+            Self::BranchDirFileConflict => {
+                "The branch name collides with an existing branch (a directory/file \
+                 conflict). Delete or rename the conflicting branch — a bare retry \
+                 can't clear it."
+            }
             Self::Unknown => "Press r to retry, or Esc to dismiss.",
         }
+    }
+
+    /// The existing conflicting branch name parsed out of a
+    /// [`Self::BranchDirFileConflict`] message. The daemon's error names
+    /// it verbatim (`… because '<conflicting>' already exists —`), so the
+    /// modal can tell the user exactly which branch to delete or rename.
+    /// `None` for every other class / message shape.
+    pub fn df_conflict_branch(message: &str) -> Option<String> {
+        let after = message.split_once("already exists")?.0;
+        let end = after.rfind('\'')?;
+        let start = after[..end].rfind('\'')? + 1;
+        let name = after[start..end].trim();
+        (!name.is_empty()).then(|| name.to_string())
     }
 
     /// Concrete recovery text for a particular failure message.
@@ -3221,7 +3586,7 @@ use tokio::sync::{mpsc, watch};
 pub struct FlowControl;
 
 impl FlowControl {
-    pub const DRAIN_QUANTUM: usize = 256;
+    pub const DRAIN_QUANTUM: usize = 1024;
     pub const EVENT_CAPACITY: usize = Self::DRAIN_QUANTUM * 2;
     pub const RAW_EVENT_CAPACITY: usize = Self::EVENT_CAPACITY * 2;
     /// 8× the original 32 (#1237): capacity is a BATCHING knob, not an
@@ -3751,6 +4116,12 @@ mod worktree_recovery_tests {
                 WorktreeStep::Fetch,
             ),
             (
+                "Jira project `ENG` has no repo mapping — set providers.jira.projects.ENG \
+                 in ~/.lazybox/config.yaml",
+                WorktreeRecovery::JiraUnmapped,
+                WorktreeStep::Fetch,
+            ),
+            (
                 "init_standalone_at: I/O error: No space left on device (os error 28)",
                 WorktreeRecovery::Disk,
                 WorktreeStep::WorktreeAdd,
@@ -3785,6 +4156,23 @@ mod worktree_recovery_tests {
                 WorktreeStep::Fetch,
             ),
             (
+                "branch 'release' can't be created because 'release/v0.2.102' already \
+                 exists — git can't hold both a branch and a path named 'release' (a \
+                 directory/file conflict). Delete or rename 'release/v0.2.102', then retry",
+                WorktreeRecovery::BranchDirFileConflict,
+                WorktreeStep::WorktreeAdd,
+            ),
+            (
+                // Git's RAW D/F phrasing also contains "cannot lock ref"
+                // (the transient-lock marker) — it must still classify as
+                // the D/F conflict, not a retryable transient, or the
+                // modal offers a doomed retry.
+                "fatal: cannot lock ref 'refs/heads/release': \
+                 'refs/heads/release/v0.2.102' exists; cannot create 'refs/heads/release'",
+                WorktreeRecovery::BranchDirFileConflict,
+                WorktreeStep::WorktreeAdd,
+            ),
+            (
                 "something the classifier has never seen",
                 WorktreeRecovery::Unknown,
                 WorktreeStep::Fetch,
@@ -3799,6 +4187,29 @@ mod worktree_recovery_tests {
                 "hint for {class:?} must not be empty"
             );
         }
+    }
+
+    /// The directory/file branch conflict is a manual-fix class: it must
+    /// NOT be retryable (a bare replay re-runs the same doomed add) nor
+    /// recreatable (the conflict is a foreign branch, not the workspace's
+    /// own worktree), and the conflicting branch name is recoverable so
+    /// the modal can name it.
+    #[test]
+    fn dir_file_conflict_is_manual_fix_and_names_the_branch() {
+        let msg = "branch 'release' can't be created because 'release/v0.2.102' already \
+             exists — git can't hold both a branch and a path named 'release' (a \
+             directory/file conflict). Delete or rename 'release/v0.2.102', then retry";
+        let class = WorktreeRecovery::classify(msg);
+        assert_eq!(class, WorktreeRecovery::BranchDirFileConflict);
+        assert!(!class.retryable(), "a bare retry replays the same failure");
+        assert!(
+            !class.recreatable(),
+            "the conflict is a foreign branch, not the workspace's own worktree"
+        );
+        assert_eq!(
+            WorktreeRecovery::df_conflict_branch(msg).as_deref(),
+            Some("release/v0.2.102"),
+        );
     }
 
     /// The disk marker must beat the network markers: a message that is
@@ -3835,6 +4246,7 @@ mod worktree_recovery_tests {
             WorktreeRecovery::BranchMissing,
             WorktreeRecovery::BadRepo,
             WorktreeRecovery::LinearUnmapped,
+            WorktreeRecovery::JiraUnmapped,
         ] {
             assert!(!c.retryable(), "{c:?} needs a manual fix first");
         }
@@ -3895,6 +4307,28 @@ mod worktree_recovery_tests {
     /// not retryable/recreatable/jumpable, but `picks_repo`, and the team
     /// key is recovered from the daemon's back-quoted phrasing so the
     /// client can persist the mapping.
+    #[test]
+    fn jira_unmapped_offers_a_repo_pick_and_names_the_project() {
+        let c = WorktreeRecovery::JiraUnmapped;
+        assert!(c.picks_repo());
+        assert!(!c.retryable() && !c.recreatable() && !c.jump_to_holder());
+        let message = "Jira project `ENG` has no repo mapping — set providers.jira.projects.ENG \
+                       in ~/.lazybox/config.yaml";
+        assert_eq!(WorktreeRecovery::classify(message), c);
+        assert_eq!(
+            WorktreeRecovery::jira_project(message).as_deref(),
+            Some("ENG")
+        );
+        // The two trackers' extractors don't read each other's messages.
+        assert_eq!(WorktreeRecovery::linear_team(message), None);
+        assert_eq!(
+            WorktreeRecovery::jira_project(
+                "Linear team `OBI` has no repo mapping and the ticket has no linked GitHub PR"
+            ),
+            None
+        );
+    }
+
     #[test]
     fn linear_unmapped_offers_a_repo_pick_and_names_the_team() {
         let c = WorktreeRecovery::LinearUnmapped;
@@ -4164,9 +4598,10 @@ mod agent_state_tests {
                 | AgentState::Done
                 | AgentState::Exited { .. }
                 | AgentState::LimitReached
-                | AgentState::CreditExhausted => {}
+                | AgentState::CreditExhausted
+                | AgentState::AwaitingReset => {}
             }
         }
-        assert_eq!(AgentState::ALL.len(), 7);
+        assert_eq!(AgentState::ALL.len(), 8);
     }
 }

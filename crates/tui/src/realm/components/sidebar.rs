@@ -17,6 +17,7 @@
 
 use crate::PaneId;
 use crate::components::sidebar::Sidebar as LazyboxSidebar;
+use crate::notify_coalesce::NotificationCoalescer;
 use crate::realm::keymap::realm_key_to_crossterm;
 use crate::realm::{Msg, UserEvent};
 use lazybox_ipc::Command as IpcCommand;
@@ -40,6 +41,11 @@ pub struct Sidebar {
     /// `Model::update` arm for `Msg::SidebarCmds(...)` and forward
     /// them to the daemon.
     pending_cmds: Vec<IpcCommand>,
+    /// Debounces desktop-notification bursts so N agents changing state
+    /// at once collapse into one summary banner instead of N popups
+    /// (#1370). Fed by `on_daemon_event`, drained by
+    /// `flush_due_notifications` from the run loop.
+    coalescer: NotificationCoalescer,
 }
 
 impl Sidebar {
@@ -50,6 +56,7 @@ impl Sidebar {
             inner: LazyboxSidebar::new(id),
             focused: true, // sidebar is the default-focused pane
             pending_cmds: Vec::new(),
+            coalescer: NotificationCoalescer::default(),
         }
     }
 
@@ -77,7 +84,21 @@ impl Sidebar {
     /// `platform::set_notifier_backend` at startup.
     pub fn on_daemon_event(&mut self, evt: &IpcEvent) {
         self.inner.on_event(evt);
+        // Buffer rather than fire immediately: a state storm across many
+        // agents would otherwise emit one banner per workspace. The
+        // coalescer collapses a same-kind burst into a single summary
+        // once its debounce window elapses (#1370).
+        let now = std::time::Instant::now();
         for notif in self.inner.drain_pending_notifications() {
+            self.coalescer.push(now, notif);
+        }
+    }
+
+    /// Fire any coalesced desktop notifications whose debounce window
+    /// has elapsed, collapsing a same-kind burst into one summary
+    /// banner. Called each run-loop iteration (#1370).
+    pub fn flush_due_notifications(&mut self) {
+        for notif in self.coalescer.flush_due(std::time::Instant::now()) {
             crate::platform::notify_user(&notif.title, &notif.body, &notif.workspace_key);
         }
     }
@@ -160,6 +181,19 @@ impl Sidebar {
         self.inner.tick_working()
     }
 
+    /// Drop any per-row "spawning" arc a spawn stranded past the guard
+    /// window (#1372). Returns `true` when it cleared one so the run loop
+    /// can redraw.
+    pub fn prune_stale_spawning(&mut self) -> bool {
+        self.inner.prune_stale_spawning()
+    }
+
+    /// Cancel one workspace's "spawning" arc — the `Esc` escape from a
+    /// stuck spinner (#1372). Returns `true` when there was one to clear.
+    pub fn clear_spawning(&mut self, session_key: &lazybox_core::SessionKey) -> bool {
+        self.inner.clear_spawning(session_key)
+    }
+
     /// Drain `g m` "Merge PR #N?" requests. The orchestrator mounts
     /// a Confirm modal per entry.
 
@@ -232,6 +266,12 @@ impl Sidebar {
         self.inner.set_keep_awake(keep_awake);
     }
 
+    /// Record whether `ui.auto_wait_on_limit` is on so the rising-edge
+    /// rate-limit alert stays quiet for a block the daemon auto-handles.
+    pub fn set_auto_wait_on_limit(&mut self, auto_wait_on_limit: bool) {
+        self.inner.set_auto_wait_on_limit(auto_wait_on_limit);
+    }
+
     /// Record whether `ui.show_agent_model` is on — gates the per-agent
     /// model + effort label beside each runner badge.
     pub fn set_show_agent_model(&mut self, show: bool) {
@@ -253,6 +293,18 @@ impl Sidebar {
     /// Load the per-agent plan-window token budgets (`ui.usage_budgets`).
     pub fn set_usage_budgets(&mut self, budgets: std::collections::BTreeMap<String, u64>) {
         self.inner.set_usage_budgets(budgets);
+    }
+
+    /// Record whether `ui.today_summary` is on — gates the always-visible
+    /// "today" stats strip in the header (#1344).
+    pub fn set_today_summary(&mut self, show: bool) {
+        self.inner.set_today_summary(show);
+    }
+
+    /// Install the latest daily rollup (`Event::Stats`) the header strip
+    /// re-sums today's slice from (#1344).
+    pub fn set_today_buckets(&mut self, buckets: Vec<lazybox_ipc::StatBucket>) {
+        self.inner.set_today_buckets(buckets);
     }
 
     /// Bind a structured run to its agent for usage accounting
@@ -282,15 +334,33 @@ impl Sidebar {
     }
 
     /// Observe proxy-metered usage attributed straight to an agent
-    /// (`AgentSessionUsage`).
-    pub fn add_agent_session_usage(&mut self, agent_id: &str, usage: &lazybox_ipc::AgentUsage) {
-        self.inner.add_agent_session_usage(agent_id, usage);
+    /// (`AgentSessionUsage`), with the workspace/session it belongs to when
+    /// the proxy path carried one (#per-session cost).
+    pub fn add_agent_session_usage(
+        &mut self,
+        agent_id: &str,
+        session_key: Option<&lazybox_core::SessionKey>,
+        usage: &lazybox_ipc::AgentUsage,
+    ) {
+        self.inner
+            .add_agent_session_usage(agent_id, session_key, usage);
+    }
+
+    /// Hydrate persisted per-session cost on connect (`Event::SessionCosts`,
+    /// #1389) so the `$ METER · $cost` figure survives a restart.
+    pub fn hydrate_session_costs(&mut self, costs: &[(String, u64)]) {
+        self.inner.hydrate_session_costs(costs);
     }
 
     /// Record a provider plan-quota report (`AgentProviderQuota`) — the
     /// 5h/weekly "can I keep working?" headroom.
-    pub fn note_provider_quota(&mut self, agent_id: &str, quota: lazybox_ipc::ProviderQuota) {
-        self.inner.note_provider_quota(agent_id, quota);
+    pub fn note_provider_quota(
+        &mut self,
+        agent_id: &str,
+        session_key: Option<&lazybox_core::SessionKey>,
+        quota: lazybox_ipc::ProviderQuota,
+    ) {
+        self.inner.note_provider_quota(agent_id, session_key, quota);
     }
 
     /// Attribute a usage-limit reset hint to a terminal's agent
@@ -396,6 +466,18 @@ impl Sidebar {
         self.inner.selected_workspace()
     }
 
+    /// Repo / Space overview for the cursor's group when it rests on a
+    /// header row — projected into `Right::set_overview` (#1442).
+    pub fn header_overview(&self) -> Option<crate::components::repo_overview::RepoOverview> {
+        self.inner.header_overview()
+    }
+
+    /// Cursor's header-group identity, folded into the pane-sync gate so
+    /// header→header cursor moves re-project the overview (#1442).
+    pub fn header_group_ident(&self) -> Option<String> {
+        self.inner.header_group_ident()
+    }
+
     /// See `Sidebar::agent_terminal_for` (#1204).
     pub fn agent_terminal_for(
         &self,
@@ -485,6 +567,12 @@ impl Sidebar {
         self.inner.workspace_iter()
     }
 
+    /// See `Sidebar::issue_workspaces_for_repo` — the repo issue-browser
+    /// (`g i`, #1436) source list.
+    pub fn issue_workspaces_for_repo(&self, repo: &str) -> Vec<&lazybox_core::Workspace> {
+        self.inner.issue_workspaces_for_repo(repo)
+    }
+
     /// Every known Project as `(key, display name)`. Backs the global
     /// "start agent" (`Shift-W`) project picker.
     pub fn projects_for_picker(&self) -> Vec<(lazybox_core::ProjectKey, String)> {
@@ -513,6 +601,7 @@ impl Sidebar {
         focused_workspaces: Vec<lazybox_core::SessionKey>,
         spaces: Vec<lazybox_config::SpaceConfig>,
         collapsed_spaces: std::collections::BTreeSet<String>,
+        metered_spaces: std::collections::BTreeSet<String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
     ) {
@@ -523,9 +612,48 @@ impl Sidebar {
             focused_workspaces,
             spaces,
             collapsed_spaces,
+            metered_spaces,
             default_agent,
             display,
         );
+    }
+
+    /// See `Sidebar::seed_lens` — the persisted `ui.last_lens`
+    /// applied at startup by `Model::apply_client_config` (#scale).
+    pub fn seed_lens(&mut self, lens: &lazybox_config::LensSection) {
+        self.inner.seed_lens(lens);
+    }
+
+    /// See `Sidebar::apply_lens` — apply + persist a saved view's
+    /// lens (#scale).
+    pub fn apply_lens(&mut self, lens: &lazybox_config::LensSection) {
+        self.inner.apply_lens(lens);
+    }
+
+    /// See `Sidebar::current_lens` — the active lens as config tokens,
+    /// frozen by the save-view flow (#scale).
+    pub fn current_lens(&self) -> lazybox_config::LensSection {
+        self.inner.current_lens()
+    }
+
+    /// See `Sidebar::seed_source_attention` — the persisted
+    /// `ui.source_attention` ladder applied at startup (#scale).
+    pub fn seed_source_attention(
+        &mut self,
+        map: std::collections::BTreeMap<String, lazybox_config::SourceAttention>,
+    ) {
+        self.inner.seed_source_attention(map);
+    }
+
+    /// See `Sidebar::source_attention_for` (#scale).
+    pub fn source_attention_for(&self, label: &str) -> lazybox_config::SourceAttention {
+        self.inner.source_attention_for(label)
+    }
+
+    /// See `Sidebar::set_source_attention` — apply + persist one
+    /// source's ladder entry (#scale).
+    pub fn set_source_attention(&mut self, key: &str, entry: lazybox_config::SourceAttention) {
+        self.inner.set_source_attention(key, entry);
     }
 
     /// See `Sidebar::set_snapshot_prune` — disabled by
@@ -717,6 +845,13 @@ impl Sidebar {
         self.inner.cursor_on_repo_header()
     }
 
+    /// See `Sidebar::cursor_space` — the Space header at/above the
+    /// cursor. Used by the header-scoped source-attention actions
+    /// (#scale) together with `cursor_on_space_header`.
+    pub fn cursor_space(&self) -> Option<String> {
+        self.inner.cursor_space()
+    }
+
     /// Index of the cursor row within the visible list. Observability
     /// passthrough mirroring `Sidebar::cursor` — used by tests to map a
     /// workspace onto the screen row a click would land on.
@@ -768,6 +903,13 @@ impl Sidebar {
     /// on a Space header row (#860).
     pub fn toggle_space_at_cursor(&mut self) -> bool {
         self.inner.toggle_space_at_cursor()
+    }
+
+    /// Toggle Space-tier metering for the Space under the cursor (`x $`,
+    /// approach C). Returns `(space_name, now_metered)`, or `None` off a
+    /// Space header. Delegates to the domain `Sidebar` method of the same name.
+    pub fn toggle_space_metering_at_cursor(&mut self) -> Option<(String, bool)> {
+        self.inner.toggle_space_metering_at_cursor()
     }
 
     /// The Space a source currently resolves to — prefills the
@@ -913,10 +1055,7 @@ impl AppComponent<Msg, UserEvent> for Sidebar {
             // `on_event` so its `workspaces` map + `running_terminals`
             // stay current.
             Event::User(UserEvent::Daemon(evt)) => {
-                self.inner.on_event(evt);
-                for notif in self.inner.drain_pending_notifications() {
-                    crate::platform::notify_user(&notif.title, &notif.body, &notif.workspace_key);
-                }
+                self.on_daemon_event(evt);
                 None
             }
             Event::Keyboard(key) if self.focused => {

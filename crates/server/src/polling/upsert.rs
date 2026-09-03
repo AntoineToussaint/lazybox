@@ -12,6 +12,32 @@ use lazybox_core::{Task, Workspace, WorkspaceKey};
 use lazybox_ipc::Event;
 use lazybox_store::{StoreError, StoreMutation, WorkspaceRecord};
 
+/// How long a single poll upsert waits for a workspace's lock before
+/// skipping the row for this tick. Short on purpose: a contended lock means
+/// the workspace is actively busy (agent mutation / git op / user action),
+/// and blocking the serial reconcile loop on it stalls new-item discovery
+/// for the whole batch. Comfortably longer than a normal lock hold
+/// (mark-read, snooze), so only a genuinely-busy workspace is skipped —
+/// and it re-attempts next tick.
+const WORKSPACE_LOCK_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// [`lock_workspace_with_closing_issues`] bounded by
+/// [`WORKSPACE_LOCK_ACQUIRE_TIMEOUT`]. `None` means the workspace (or a
+/// closing-issue workspace it collapses with) is busy and the poll should
+/// skip it this tick rather than block the reconcile batch on it.
+async fn lock_workspace_with_closing_issues_or_skip(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    incoming_pr: Option<&Task>,
+) -> Option<Vec<tokio::sync::OwnedMutexGuard<()>>> {
+    tokio::time::timeout(
+        WORKSPACE_LOCK_ACQUIRE_TIMEOUT,
+        lock_workspace_with_closing_issues(config, key, incoming_pr),
+    )
+    .await
+    .ok()
+}
+
 /// Merge `task` into the existing workspace for its workspace key
 /// (PR + matching issues collapse to one row), persist it, and
 /// broadcast `WorkspaceUpserted`. The store backs this with
@@ -37,16 +63,14 @@ pub async fn upsert(config: &ServerConfig, task: Task) {
     upsert_with_context(config, &mut ctx, task).await;
 }
 
-/// Per-tick context shared across a batch of `upsert` calls. Both
-/// fields used to be re-derived from the store on EVERY task — a
-/// KV read + JSON parse for the archive set, and a full workspace-
-/// list deserialize for the closes-issue lookup — which made the
-/// upsert loop's cost quadratic in inbox size. The tick builds this
-/// once and threads it through; the one-off public `upsert` builds a
-/// fresh context per call (identical behavior, just not batched).
+/// Per-tick context shared across a batch of `upsert` calls. The
+/// closes-issue lookup used to be re-derived from the store on EVERY
+/// task, making the upsert loop's cost quadratic in inbox size. The tick
+/// builds this once and threads it through; the one-off public `upsert`
+/// builds a fresh context per call (identical behavior, just not batched).
+/// The archived set is checked fresh on each upsert (issue #1255) to
+/// detect archives that occur mid-poll.
 pub(super) struct UpsertContext {
-    /// Workspace keys the user explicitly archived (`x x`).
-    archived: std::collections::HashSet<String>,
     /// `closes_issues` TaskId → claiming PR workspace key. Mirrors
     /// what `pr_workspace_claiming_issue` derives per call. Updated
     /// inline as PR tasks flow through the batch so an issue polled
@@ -62,7 +86,6 @@ pub(super) struct UpsertContext {
 
 impl UpsertContext {
     pub(super) fn build(config: &ServerConfig) -> Self {
-        let archived = crate::workspace::load_archived_set(config);
         let approvals = approval_policies();
         let mut closes_index = std::collections::HashMap::new();
         if let Ok(records) = config.store.list_workspaces() {
@@ -87,7 +110,6 @@ impl UpsertContext {
             }
         }
         Self {
-            archived,
             closes_index,
             approvals,
         }
@@ -150,10 +172,12 @@ pub(super) async fn upsert_with_context(
 
     // Skip re-creating workspaces the user explicitly archived
     // (`x x`). Without this, every 60s tick re-creates the row
-    // from the upstream task and the dismiss feels broken. Cached
-    // archive set lives in the store under KV_KEY_ARCHIVED.
+    // from the upstream task and the dismiss feels broken. Check
+    // the archived set fresh each time (issue #1255) — if a session
+    // is archived mid-poll, later providers' upserts see the updated
+    // state rather than a stale snapshot.
     let candidate_key = lazybox_core::workspace_key_for(&task);
-    if ctx.archived.contains(&candidate_key) {
+    if crate::workspace::load_archived_set(config).contains(&candidate_key) {
         tracing::debug!(
             workspace_key = %candidate_key,
             "upsert: skipping archived workspace"
@@ -233,7 +257,47 @@ pub(super) async fn upsert_into_workspace_key(
     // until after the commit; released before the terminal-transition
     // tail, which prompts/cleans through its own paths and must not
     // nest under this guard.
-    let ws_guards = lock_workspace_with_closing_issues(config, key, Some(&task)).await;
+    // Acquire the per-workspace lock with a SHORT bound rather than blocking
+    // the poll's serial upsert loop on it. A contended lock means the
+    // workspace is busy — a live agent mutation, a git worktree op, or a user
+    // action holds it. A full reconcile upserts ~130 rows back-to-back; one
+    // busy workspace blocking the old 15s per-task cap froze new-item
+    // discovery for that long PER contended row (minutes across a batch), the
+    // "upsert N/132 TIMED OUT after 15s" stall. Skipping fast and re-attempting
+    // next tick is the SAME skip-and-retry the outer timeout already does — the
+    // fetch succeeded, so the row's data is merely deferred one tick, never
+    // lost — just without burning the batch's wall-clock on a lock we won't get
+    // this instant anyway.
+    let Some(ws_guards) =
+        lock_workspace_with_closing_issues_or_skip(config, key, Some(&task)).await
+    else {
+        tracing::debug!(
+            workspace_key = %key.as_str(),
+            "upsert: workspace busy (lock contended {}s) — skipping this tick, will re-attempt",
+            WORKSPACE_LOCK_ACQUIRE_TIMEOUT.as_secs(),
+        );
+        return CommitOutcome::Unchanged;
+    };
+
+    // TOCTOU RE-CHECK (issue #1385): the archived-set gate in
+    // `upsert_with_context` runs BEFORE this lock. An `x x` on an open
+    // PR/issue archives + deletes the row under its own workspace lock; if
+    // that lands in the window between the pre-lock check and here, this
+    // in-flight upsert would reacquire the freed lock, load `Absent`, and
+    // rebuild the just-deleted row — resurrecting it for a tick. Re-read the
+    // archived set and the delete tombstone now that we hold the lock so we
+    // observe any archive/delete that committed while we waited. The
+    // tombstone (`deleted_workspaces`) covers a non-archiving delete, whose
+    // key never enters the archived set.
+    if crate::workspace::load_archived_set(config).contains(key.as_str())
+        || config.deleted_workspaces.lock().contains(key.as_str())
+    {
+        tracing::debug!(
+            workspace_key = %key.as_str(),
+            "upsert: skipping archived/deleted workspace (re-checked under lock)"
+        );
+        return CommitOutcome::Unchanged;
+    }
     // 0. TERMINAL-STATE DETECTION: cheap pre-check (no IO) gates the
     //    store read — only a PR observed Merged or an issue observed
     //    Closed can trigger cleanup. We snapshot the previous state
@@ -552,6 +616,27 @@ async fn prepare_upsert(
 
     let mut workspace = match existing {
         Some(mut w) => {
+            // Event-conditional snooze (#scale, B4): compare the
+            // freshly polled task against the stored one BEFORE
+            // attaching — a satisfied wake condition ends the snooze
+            // and stamps `woke_at`, so the row re-enters the Inbox
+            // announced (wake pill + top-of-group boost) on this very
+            // upsert instead of waiting out its deadline.
+            if w.maybe_wake_on(&task, Utc::now()) {
+                tracing::info!(
+                    workspace = %key.as_str(),
+                    "snooze wake condition fired — waking workspace",
+                );
+            }
+            // A stored row that never got its task attached (a provider
+            // whose tasks the slot router used to drop) has a project
+            // key derived from a task shape we no longer produce; take
+            // the current one so the row groups with its peers. A
+            // workspace holding a task keeps its key — that's where a
+            // move landed it.
+            if w.primary_task().is_none() {
+                w.project_key = lazybox_core::project_key_for_task(&task);
+            }
             w.attach_task(task);
             w
         }
@@ -889,10 +974,21 @@ pub(super) async fn commit_workspace_move(
     let config_owned = config.clone();
     tokio::task::spawn_blocking(move || {
         let mut terminal_guard = terminal_guard;
-        let (terminal_mutations, rebadge_plans) = match terminal_guard.as_ref() {
+        let (mut terminal_mutations, rebadge_plans) = match terminal_guard.as_ref() {
             Some(entries) => prepare_terminal_rebadges(entries, terminal_moves)?,
             None => (Vec::new(), Vec::new()),
         };
+        // History/draft are workspace-scoped (keyed by session_key), so a rebadge
+        // must relabel them onto the new workspace in the SAME transaction as the
+        // workspace + terminal-meta move — otherwise the `]]h` history / recap /
+        // draft would blank the instant the terminal wears the PR badge.
+        for plan in &rebadge_plans {
+            terminal_mutations.extend(crate::spawn_handler::rebadge_workspace_history_mutations(
+                &*config_owned.store,
+                plan.from.as_str(),
+                plan.to.as_str(),
+            ));
+        }
         let committed =
             persist_workspace_batch(&config_owned, upserts, deletes, terminal_mutations)?;
         let outcome = committed.outcome;
@@ -1131,7 +1227,6 @@ mod approval_lookup_tests {
         );
 
         let ctx = UpsertContext {
-            archived: Default::default(),
             closes_index: Default::default(),
             approvals: map,
         };
@@ -1161,5 +1256,45 @@ mod approval_lookup_tests {
         )
         .expect("parse repos");
         assert!(approval_map_from_config(&config).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod lock_contention_tests {
+    use super::*;
+
+    /// A poll upsert must NOT block on a workspace whose lock is held by a
+    /// live agent / user action / git op — it fast-skips (returns `None`) so
+    /// the serial reconcile batch keeps moving instead of stalling the full
+    /// per-task timeout on every contended row (#1218). The paused clock lets
+    /// the bounded wait elapse instantly, so the test is fast and
+    /// deterministic rather than sleeping the real timeout.
+    #[tokio::test(start_paused = true)]
+    async fn a_held_workspace_lock_is_skipped_not_awaited() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("github:o/r#1".to_string());
+
+        // Hold the workspace lock, exactly as a concurrent mutation would.
+        let _held = config.lock_workspace(key.as_str()).await;
+
+        // The bounded acquisition gives up and signals "skip this tick"
+        // instead of awaiting the held lock indefinitely.
+        let guards = lock_workspace_with_closing_issues_or_skip(&config, &key, None).await;
+        assert!(
+            guards.is_none(),
+            "a contended workspace lock must be skipped, not awaited"
+        );
+    }
+
+    /// The complement: an UNcontended workspace acquires immediately.
+    #[tokio::test(start_paused = true)]
+    async fn a_free_workspace_lock_is_acquired() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("github:o/r#2".to_string());
+        let guards = lock_workspace_with_closing_issues_or_skip(&config, &key, None).await;
+        assert!(
+            guards.is_some(),
+            "a free workspace lock must be acquired, not skipped"
+        );
     }
 }

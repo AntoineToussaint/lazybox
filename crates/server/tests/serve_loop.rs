@@ -169,7 +169,10 @@ async fn client_kv_recorded_by_one_connection_replays_to_another() {
         .expect("workspace exists");
     let recorded_workspace: lazybox_core::Workspace =
         serde_json::from_str(record.workspace_json.as_deref().expect("workspace json")).unwrap();
-    assert_eq!(recorded_workspace.sent_snippets, vec!["rev"]);
+    assert_eq!(
+        recorded_workspace.sent_snippets.recent().to_vec(),
+        vec!["rev"]
+    );
     server_client
         .send(Command::SetUpdateDismissal {
             target: "release:v0.2.0".into(),
@@ -290,6 +293,14 @@ async fn subscribe_is_admitted_only_once_per_connection() {
     ));
     assert!(matches!(
         client.recv().await,
+        Some(Event::SnippetKeepMine { .. })
+    ));
+    assert!(matches!(
+        client.recv().await,
+        Some(Event::SessionCosts { .. })
+    ));
+    assert!(matches!(
+        client.recv().await,
         Some(Event::AutoFixPolicyConfig { .. })
     ));
     client
@@ -357,6 +368,7 @@ async fn graceful_stop_drains_in_flight_mutation_before_exit() {
             initial_prompt: None,
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         })
         .expect("spawn");
     // Let the serve loop dequeue Spawn onto the mutations JoinSet and
@@ -414,6 +426,7 @@ async fn graceful_stop_abandons_mutation_past_the_drain_bound() {
             initial_prompt: None,
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         })
         .expect("spawn");
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -454,6 +467,7 @@ async fn start_agent_run_unknown_agent_reports_error() {
             initial_input: None,
             resume_latest: false,
             access: lazybox_ipc::AgentRunAccess::Default,
+            model_alias: None,
         })
         .unwrap();
 
@@ -612,20 +626,40 @@ async fn client_drop_terminates_daemon_loop() {
 /// Isolate filesystem-touching commands (CleanWorktrees, InspectWorktrees,
 /// DeleteOrphanedWorktree) onto a throwaway `LAZYBOX_HOME` so the test
 /// never scans or mutates the developer's real `~/.lazybox`.
+/// Serialize env-var mutations across concurrent tests. Each test that
+/// modifies `LAZYBOX_HOME` acquires this lock to prevent interference.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct IsolatedHome {
+    _guard: Option<std::sync::MutexGuard<'static, ()>>,
     _tmp: tempfile::TempDir,
     prev: Option<std::ffi::OsString>,
 }
 
 impl IsolatedHome {
     fn new() -> Self {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        Self::with_guard(Some(guard))
+    }
+
+    /// For a caller that already holds [`ENV_LOCK`] across a larger
+    /// scope (the isolation-guard self-test): same behavior, no
+    /// re-lock (the mutex is not reentrant).
+    fn new_unlocked() -> Self {
+        Self::with_guard(None)
+    }
+
+    fn with_guard(guard: Option<std::sync::MutexGuard<'static, ()>>) -> Self {
         let tmp = tempfile::TempDir::new().unwrap();
         let prev = std::env::var_os("LAZYBOX_HOME");
-        // SAFETY: process-global, but within this test binary only this
-        // guard sets it; an empty dir resolves readers to CI defaults, so
-        // a leak to a concurrent test is harmless. Restored on drop.
+        // SAFETY: mutation is serialized by ENV_LOCK (held by this
+        // guard or by the caller); restored on drop.
         unsafe { std::env::set_var("LAZYBOX_HOME", tmp.path()) };
-        Self { _tmp: tmp, prev }
+        Self {
+            _guard: guard,
+            _tmp: tmp,
+            prev,
+        }
     }
 }
 
@@ -666,6 +700,7 @@ fn all_non_shutdown_commands() -> Vec<Command> {
             initial_prompt: None,
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         },
         Command::Write {
             terminal_id: tid,
@@ -751,6 +786,7 @@ fn all_non_shutdown_commands() -> Vec<Command> {
         Command::Snooze {
             session_key: "test:ws".into(),
             until: chrono::Utc::now(),
+            wake: None,
         },
         Command::Unsnooze {
             session_key: "test:ws".into(),
@@ -820,6 +856,7 @@ fn all_non_shutdown_commands() -> Vec<Command> {
             initial_input: None,
             resume_latest: false,
             access: lazybox_ipc::AgentRunAccess::Default,
+            model_alias: None,
         },
         Command::SendAgentInput {
             run_id: AgentRunId(1),
@@ -933,6 +970,7 @@ async fn a_stalled_handler_does_not_block_poll_forwarding() {
             initial_prompt: None,
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         })
         .unwrap();
 
@@ -1351,9 +1389,18 @@ async fn failed_terminal_close_keeps_the_io_lane_alive() {
 async fn composing_burst_persists_the_latest_ordered_revision() {
     let (config, mock) = ServerConfig::in_memory_with_mock();
     let key = mock.spawn(&[], None, &[], "draft").await.expect("spawn");
+    // Draft persistence is keyed by the stable workspace session_key, so the
+    // terminal needs its owning-workspace metadata registered (not just a bound
+    // backend_key) for the composer write to resolve where to land.
+    let session_key: lazybox_core::SessionKey = "acme/widget#61".into();
     config
         .terminal
-        .bind_backend(TerminalId(61), key.clone())
+        .register_terminal(
+            TerminalId(61),
+            key.clone(),
+            session_key.clone(),
+            TerminalKind::Agent("claude".into()),
+        )
         .await;
     let (client, server) = channel::pair();
     let handle = tokio::spawn({
@@ -1379,7 +1426,7 @@ async fn composing_burst_persists_the_latest_ordered_revision() {
     assert_eq!(
         config
             .store
-            .get_kv(&format!("terminal-draft:{key}"))
+            .get_kv(&format!("workspace-draft:{}", session_key.as_str()))
             .expect("store read")
             .as_deref(),
         Some("draft-24")
@@ -1597,4 +1644,69 @@ async fn injected_paste_and_submit_are_atomic_against_user_input() {
         .expect("serve shutdown")
         .expect("join")
         .expect("serve result");
+}
+
+/// Regression test for #1250: test isolation with global env vars.
+/// Verifies that concurrent tests don't interfere when modifying LAZYBOX_HOME.
+#[test]
+fn env_isolation_guard_restores_state() {
+    // Hold ENV_LOCK for the WHOLE test: the pre/post assertions are
+    // only meaningful while no other test's `IsolatedHome` can
+    // interleave. Reading `original` and asserting BETWEEN guard
+    // drops used to happen unlocked — another env test could set
+    // LAZYBOX_HOME in exactly that window, and once the daemon's
+    // per-tick config loads shifted test scheduling (#scale) the race
+    // fired deterministically.
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let original = std::env::var_os("LAZYBOX_HOME");
+
+    // Scope 1: set to temp dir 1
+    {
+        let _guard1 = IsolatedHome::new_unlocked();
+        let temp1 = std::env::var_os("LAZYBOX_HOME").expect("should be set");
+        let path1 = std::path::PathBuf::from(&temp1);
+        assert!(path1.exists(), "temp dir 1 should exist");
+    }
+
+    // After drop, state is restored
+    match original {
+        Some(ref orig) => {
+            assert_eq!(
+                std::env::var_os("LAZYBOX_HOME"),
+                Some(orig.clone()),
+                "LAZYBOX_HOME should be restored to original"
+            )
+        }
+        None => {
+            assert!(
+                std::env::var_os("LAZYBOX_HOME").is_none(),
+                "LAZYBOX_HOME should be cleared after drop"
+            )
+        }
+    }
+
+    // Scope 2: independent isolation with no interference
+    {
+        let _guard2 = IsolatedHome::new_unlocked();
+        let temp2 = std::env::var_os("LAZYBOX_HOME").expect("should be set again");
+        let path2 = std::path::PathBuf::from(&temp2);
+        assert!(path2.exists(), "temp dir 2 should exist");
+    }
+
+    // Final state matches original
+    match original {
+        Some(ref orig) => {
+            assert_eq!(
+                std::env::var_os("LAZYBOX_HOME"),
+                Some(orig.clone()),
+                "LAZYBOX_HOME should be restored again"
+            )
+        }
+        None => {
+            assert!(
+                std::env::var_os("LAZYBOX_HOME").is_none(),
+                "LAZYBOX_HOME should be cleared again after final drop"
+            )
+        }
+    }
 }

@@ -1217,6 +1217,30 @@ mod mailbox_membership_tests {
         ));
     }
 
+    #[test]
+    fn completed_hopper_moves_from_inbox_to_inactive() {
+        let mut w = ws(None);
+        w.hopper = Some(lazybox_core::HopperMeta {
+            position: 0,
+            completed_at: Some(Utc::now()),
+            canceled_at: None,
+        });
+        assert!(!mailbox_membership(&w, Mailbox::Inbox, Utc::now(), false));
+        assert!(mailbox_membership(&w, Mailbox::Inactive, Utc::now(), false));
+    }
+
+    #[test]
+    fn canceled_hopper_moves_from_inbox_to_inactive() {
+        let mut w = ws(None);
+        w.hopper = Some(lazybox_core::HopperMeta {
+            position: 0,
+            completed_at: None,
+            canceled_at: Some(Utc::now()),
+        });
+        assert!(!mailbox_membership(&w, Mailbox::Inbox, Utc::now(), false));
+        assert!(mailbox_membership(&w, Mailbox::Inactive, Utc::now(), false));
+    }
+
     // ── Snoozed wins over everything ─────────────────────────────
 
     #[test]
@@ -1459,7 +1483,11 @@ mod filter_tests {
         w: &'a Workspace,
         agents: &'a HashMap<SessionKey, lazybox_ipc::AgentState>,
     ) -> FilterCtx<'a> {
-        FilterCtx { w, agents }
+        FilterCtx {
+            w,
+            agents,
+            now: chrono::Utc::now(),
+        }
     }
 
     #[test]
@@ -1474,7 +1502,7 @@ mod filter_tests {
     #[test]
     fn every_filter_has_an_axis_and_appears_in_all() {
         // ALL must list each variant exactly once; drives the menu.
-        assert_eq!(Filter::ALL.len(), 25);
+        assert_eq!(Filter::ALL.len(), 27);
         let mut seen = std::collections::BTreeSet::new();
         for f in Filter::ALL {
             assert!(seen.insert(f), "{f:?} listed twice in Filter::ALL");
@@ -1602,6 +1630,93 @@ mod filter_tests {
         assert_eq!(by[&Filter::Author], 1);
         assert_eq!(by[&Filter::Pr], 1);
         assert_eq!(by[&Filter::Reviewer], 0);
+    }
+
+    /// Regression (#scale): `is_bot` must stay authoritative regardless
+    /// of which task field names a bot first. A suffix-less bot login
+    /// (no `[bot]`) that is BOTH a requested reviewer (plain string, no
+    /// flag) and a submitted-review author (`is_bot: true`) used to be
+    /// tallied from the reviewers field first and mis-sorted among the
+    /// humans; it must land in the bot bucket, after every human, in the
+    /// People axis.
+    #[test]
+    fn people_axis_sorts_flagged_bots_after_humans_regardless_of_field_order() {
+        use crate::components::sidebar::FilterEntry;
+        let mut t = base_task();
+        t.id.key = "o/r#1".into();
+        t.url = "https://github.com/o/r/pull/1".into();
+        // The human `zoe` sorts AFTER the bot `renovate` alphabetically,
+        // so only correct bucketing (bot last) reorders them — a test
+        // with an alpha-earlier human wouldn't catch the mis-sort.
+        t.author = "zoe".into();
+        // `renovate` carries no `[bot]` suffix; only the submitted review
+        // flags it. It is ALSO a requested reviewer, tallied first.
+        t.reviewers = vec!["renovate".into()];
+        t.reviews = vec![lazybox_core::Reviewer {
+            login: "renovate".into(),
+            state: lazybox_core::ReviewState::Approved,
+            is_bot: true,
+        }];
+        let w = Workspace::from_task(t, chrono::Utc::now());
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(SessionKey::from(&w.key), w);
+        sb.recompute_visible();
+
+        let people: Vec<String> = sb
+            .filter_menu_entries()
+            .into_iter()
+            .filter_map(|(e, _)| match e {
+                FilterEntry::Person(login) => Some(login),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            people,
+            vec!["zoe".to_string(), "renovate".to_string()],
+            "the flagged bot sorts after the human, not among them"
+        );
+    }
+
+    /// Regression (#scale): the People-axis menu treats a login as its
+    /// case-insensitive identity. An active mixed-case person (a
+    /// hand-edited `person:Alice` lens token) against a discovered
+    /// lowercase `alice` must render as ONE checked row, not the discovered
+    /// row plus a phantom count-0 duplicate a case-sensitive reconciliation
+    /// would add.
+    #[test]
+    fn people_axis_menu_folds_case_variants_into_one_row() {
+        use crate::components::sidebar::FilterEntry;
+        let mut t = base_task();
+        t.id.key = "o/r#1".into();
+        t.url = "https://github.com/o/r/pull/1".into();
+        t.author = "alice".into(); // discovered as lowercase
+        let w = Workspace::from_task(t, chrono::Utc::now());
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(SessionKey::from(&w.key), w);
+        // An active filter carrying a different case — as a hand-edited
+        // lens token would seed it.
+        sb.set_filter_entries([FilterEntry::Person("Alice".into())]);
+        sb.recompute_visible();
+
+        let people: Vec<(String, usize)> = sb
+            .filter_menu_entries()
+            .into_iter()
+            .filter_map(|(e, c)| match e {
+                FilterEntry::Person(login) => Some((login, c)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            people,
+            vec![("alice".to_string(), 1)],
+            "one row for the person, at the real count — no case-variant phantom"
+        );
+        // And that single row reads as active (pre-checked).
+        assert!(
+            sb.filters()
+                .contains_entry(&FilterEntry::Person("alice".into())),
+            "the discovered row is the active filter"
+        );
     }
 
     #[test]
@@ -1989,6 +2104,39 @@ mod search_tests {
         w
     }
 
+    /// #1389: the per-Space meter figure sums the hydrated per-workspace
+    /// costs of every workspace under that Space, so a Space-metered header
+    /// shows a legible total that survives a restart (hydrated via
+    /// `Event::SessionCosts`).
+    #[test]
+    fn space_cost_sums_hydrated_workspace_costs_under_the_owner_space() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let a = issue_ws_in_repo("obin-ai/platform", "1", "one");
+        let b = issue_ws_in_repo("obin-ai/service", "2", "two");
+        let other = issue_ws_in_repo("acme/widget", "3", "three");
+        let a_key = SessionKey::from(&a.key);
+        let b_key = SessionKey::from(&b.key);
+        let other_key = SessionKey::from(&other.key);
+        sb.workspaces.insert(a_key.clone(), a);
+        sb.workspaces.insert(b_key.clone(), b);
+        sb.workspaces.insert(other_key.clone(), other);
+        // Space membership is cached at recompute (not scanned per frame).
+        sb.recompute_visible();
+
+        // Durable per-session totals replayed on connect (Event::SessionCosts).
+        sb.hydrate_session_costs(&[
+            (a_key.as_str().to_string(), 1_500_000),
+            (b_key.as_str().to_string(), 500_000),
+            (other_key.as_str().to_string(), 250_000),
+        ]);
+
+        // Both obin-ai repos auto-seed into the "obin-ai" owner Space, so the
+        // per-Space figure sums them; acme/widget stays under its own owner.
+        assert_eq!(sb.space_cost_micros("obin-ai"), 2_000_000);
+        assert_eq!(sb.space_cost_micros("acme"), 250_000);
+        assert_eq!(sb.space_cost_micros("nonexistent"), 0);
+    }
+
     /// Frame-budget regression gate (#1090, acceptance #4): the sidebar's
     /// per-frame widget build must stay cheap at scale.
     /// `prebuild_workspace_lines` rebuilds every visible row every frame
@@ -2056,6 +2204,56 @@ mod search_tests {
                  of the #1090 class). Profile prebuild_workspace_lines."
             );
         }
+    }
+
+    /// The line prebuild must only lay out groups intersecting the
+    /// viewport window. The cursor is part of the cache signature, so
+    /// every j/k misses the cache — building the ENTIRE list on each
+    /// miss made cursor motion O(total workspaces) on a crowded
+    /// sidebar. Intersecting groups still build in full so their
+    /// column widths stay stable while scrolling (#22 / #961).
+    #[test]
+    fn prebuild_lays_out_only_viewport_groups() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        for repo in 0..10 {
+            for num in 0..10 {
+                let w = issue_ws_in_repo(
+                    &format!("owner/repo-{repo:02}"),
+                    &format!("{num}"),
+                    &format!("Issue {repo}-{num}"),
+                );
+                sb.workspaces.insert(SessionKey::from(&w.key), w);
+            }
+        }
+        sb.recompute_visible();
+        let theme = crate::theme::current();
+        let now = chrono::Utc::now();
+
+        // Rows: header at 0, then 10 workspace rows per group. A window
+        // cutting into the first group mid-way…
+        let lines = sb.cached_workspace_lines(60, theme, now, true, 0..5);
+        assert!(
+            lines[8].is_some(),
+            "a partially-visible group is laid out in full (stable columns)"
+        );
+        let last_ws = sb
+            .visible
+            .iter()
+            .rposition(|r| matches!(r, VisibleRow::Workspace(_)))
+            .expect("workspace rows exist");
+        assert!(
+            lines[last_ws].is_none(),
+            "groups entirely below the window must not be built"
+        );
+
+        // …and a window at the bottom leaves the top groups unbuilt.
+        let total = sb.visible.len();
+        let lines = sb.cached_workspace_lines(60, theme, now, true, total - 5..total);
+        assert!(lines[8].is_none(), "top group is outside the bottom window");
+        assert!(
+            lines[last_ws].is_some(),
+            "the bottom group must be built for a bottom window"
+        );
     }
 
     fn key(c: char) -> KeyEvent {
@@ -2291,6 +2489,7 @@ mod search_tests {
         // Reset far in the future so the window is unambiguously current.
         sb.note_provider_quota(
             "codex",
+            None,
             lazybox_ipc::ProviderQuota {
                 five_hour: Some(lazybox_ipc::QuotaWindow {
                     utilization_bp: 4500,
@@ -2314,6 +2513,7 @@ mod search_tests {
         // Both resets in 1970 — unambiguously in the past for any real clock.
         sb.note_provider_quota(
             "codex",
+            None,
             lazybox_ipc::ProviderQuota {
                 five_hour: Some(lazybox_ipc::QuotaWindow {
                     utilization_bp: 9000,
@@ -2408,6 +2608,184 @@ mod search_tests {
         sb.set_usage_summary(false);
         assert_eq!(sb.usage_row_height(area), 0);
         assert!(!usage_row(&mut sb).contains("Claude"));
+    }
+
+    /// The "today" strip (#1344) sits just below the usage row (or row 2
+    /// when there is none) — render at `width` and read whichever row it
+    /// lands on for this sidebar's header layout.
+    fn today_row(sb: &mut Sidebar, width: u16) -> String {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let area = Rect::new(0, 0, width, 14);
+        let backend = TestBackend::new(width, 14);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(area, frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let y = 3 + sb.usage_row_height(area);
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    }
+
+    /// Pin the sidebar clock and feed a rollup whose buckets are stamped
+    /// with that same local day, so the strip's day math is deterministic
+    /// regardless of the runner's timezone. The strip re-sums "today" from
+    /// these buckets against the sidebar's clock at render.
+    fn set_today(sb: &mut Sidebar, sessions: i64, merged: i64, cost_micros: i64) {
+        use lazybox_ipc::{StatBucket, stats};
+        let now = chrono::DateTime::parse_from_rfc3339("2026-08-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        sb.set_now_override(now);
+        let day = now
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        let b = |metric: &str, value: i64| StatBucket {
+            day: day.clone(),
+            metric: metric.into(),
+            value,
+        };
+        sb.set_today_buckets(vec![
+            b(stats::SESSIONS, sessions),
+            b(stats::MERGED, merged),
+            b(stats::COST_MICROS, cost_micros),
+        ]);
+    }
+
+    /// A landed stats snapshot paints the terse today strip: sessions,
+    /// merged, and cost of the day's persisted rollup (#1344).
+    #[test]
+    fn header_renders_today_strip() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        set_today(&mut sb, 3, 4, 2_140_000);
+
+        let area = Rect::new(0, 0, 60, 14);
+        assert_eq!(sb.today_row_height(area), 1);
+        let row = today_row(&mut sb, 60);
+        assert!(row.contains("today"), "{row:?}");
+        assert!(row.contains("3 sessions"), "{row:?}");
+        assert!(row.contains("4 merged"), "{row:?}");
+        assert!(row.contains("$2.14"), "{row:?}");
+    }
+
+    /// Before the first `Event::Stats` lands the strip stays hidden rather
+    /// than flashing zeros, and reclaims its line.
+    #[test]
+    fn today_strip_hidden_until_a_snapshot_lands() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        let area = Rect::new(0, 0, 60, 14);
+        assert_eq!(sb.today_row_height(area), 0);
+        assert!(!today_row(&mut sb, 60).contains("today"), "no strip yet");
+    }
+
+    /// `ui.today_summary = false` hides the strip entirely and reclaims its
+    /// line even after a snapshot has landed.
+    #[test]
+    fn today_strip_can_be_disabled() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        set_today(&mut sb, 3, 4, 2_140_000);
+        let area = Rect::new(0, 0, 60, 14);
+        assert_eq!(sb.today_row_height(area), 1);
+
+        sb.set_today_summary(false);
+        assert_eq!(sb.today_row_height(area), 0);
+        assert!(!today_row(&mut sb, 60).contains("today"));
+    }
+
+    /// A narrow sidebar sheds whole groups lowest-priority-first — cost
+    /// drops before the merged/sessions accomplishment counts, never a
+    /// mid-word clip.
+    #[test]
+    fn today_strip_drops_cost_before_the_counts_when_narrow() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        set_today(&mut sb, 3, 4, 2_140_000);
+
+        // Wide enough for `today  3 sessions · 4 merged` (28 cells) but not
+        // the trailing ` · $2.14` (+8) — inner width 30, pane width 32.
+        let row = today_row(&mut sb, 32);
+        assert!(row.contains("3 sessions"), "{row:?}");
+        assert!(row.contains("4 merged"), "{row:?}");
+        assert!(!row.contains("$2.14"), "{row:?}");
+    }
+
+    /// Priority is contiguous: once a higher-priority group doesn't fit,
+    /// nothing lower is smuggled in behind it. At pane width 27 (inner 25)
+    /// `merged` (needs 28) doesn't fit after `sessions`, so the narrower
+    /// `cost` must NOT appear in its place — the `continue`-style gate this
+    /// replaced rendered `today  3 sessions · $2.14`, inverting the stated
+    /// sessions > merged > cost priority.
+    #[test]
+    fn today_strip_never_smuggles_cost_past_a_dropped_count() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        set_today(&mut sb, 3, 4, 2_140_000);
+
+        let row = today_row(&mut sb, 27);
+        assert!(
+            row.contains("3 sessions"),
+            "keeps the headline count: {row:?}"
+        );
+        assert!(
+            !row.contains("$2.14"),
+            "cost must not jump the dropped merged: {row:?}"
+        );
+        assert!(!row.contains("merged"), "merged did not fit: {row:?}");
+    }
+
+    /// `TodayStats::from_buckets` sums only today's buckets for the metrics
+    /// the strip shows, ignoring other days and unrelated metrics.
+    #[test]
+    fn today_stats_from_buckets_sums_only_today() {
+        use lazybox_ipc::{StatBucket, stats};
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 8, 25).unwrap();
+        let b = |day: &str, metric: &str, value: i64| StatBucket {
+            day: day.into(),
+            metric: metric.into(),
+            value,
+        };
+        let buckets = vec![
+            b("2026-08-25", stats::SESSIONS, 2),
+            b("2026-08-25", stats::SESSIONS, 1),
+            b("2026-08-24", stats::SESSIONS, 9),
+            b("2026-08-25", stats::MERGED, 4),
+            b("2026-08-25", stats::COST_MICROS, 2_140_000),
+            b("2026-08-25", stats::PROMPTS, 50),
+        ];
+        let stats = TodayStats::from_buckets(&buckets, today);
+        assert_eq!(stats.sessions, 3, "today's two session buckets sum");
+        assert_eq!(stats.merged, 4);
+        assert_eq!(stats.cost_micros, 2_140_000);
+    }
+
+    /// #1344: "today" is re-summed against the current calendar day at
+    /// render, not frozen when the rollup lands. A window left open across
+    /// local midnight must read the new day's zero, not yesterday's counts,
+    /// even with no fresh push — the buckets are unchanged, only the clock
+    /// advances.
+    #[test]
+    fn today_strip_rolls_over_at_local_midnight() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        // `set_today` pins the clock at 2026-08-25T12:00Z and stamps the
+        // rollup for that local day.
+        set_today(&mut sb, 3, 4, 2_140_000);
+        assert!(
+            today_row(&mut sb, 60).contains("3 sessions"),
+            "shows today's work"
+        );
+
+        // Advance a full day with no new push. Same buckets, new day → 0.
+        let next_day = chrono::DateTime::parse_from_rfc3339("2026-08-26T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        sb.set_now_override(next_day);
+        let row = today_row(&mut sb, 60);
+        assert!(row.contains("0 sessions"), "rolled to the new day: {row:?}");
+        assert!(
+            !row.contains("3 sessions"),
+            "yesterday's count is gone: {row:?}"
+        );
     }
 
     /// The bottom `/` search bar records its rect so a click on the
@@ -2963,13 +3341,13 @@ mod workspace_removal_cursor_tests {
         let theme = crate::theme::current();
 
         // First frame builds.
-        let _ = sb.cached_workspace_lines(40, theme, now, true);
+        let _ = sb.cached_workspace_lines(40, theme, now, true, 0..40);
         assert_eq!(sb.workspace_line_builds.get(), 1);
 
         // Repeated identical frames — the streaming-redraw path — must hit the
         // cache and never rebuild.
         for _ in 0..10 {
-            let _ = sb.cached_workspace_lines(40, theme, now, true);
+            let _ = sb.cached_workspace_lines(40, theme, now, true, 0..40);
         }
         assert_eq!(
             sb.workspace_line_builds.get(),
@@ -2978,24 +3356,24 @@ mod workspace_removal_cursor_tests {
         );
 
         // A width change re-lays out → one rebuild, then holds.
-        let _ = sb.cached_workspace_lines(30, theme, now, true);
-        let _ = sb.cached_workspace_lines(30, theme, now, true);
+        let _ = sb.cached_workspace_lines(30, theme, now, true, 0..40);
+        let _ = sb.cached_workspace_lines(30, theme, now, true, 0..40);
         assert_eq!(sb.workspace_line_builds.get(), 2);
 
         // A focus change restyles rows → one rebuild.
-        let _ = sb.cached_workspace_lines(30, theme, now, false);
+        let _ = sb.cached_workspace_lines(30, theme, now, false, 0..40);
         assert_eq!(sb.workspace_line_builds.get(), 3);
 
         // Workspace data changing (any daemon upsert recomputes) bumps
         // `data_version` → the cache invalidates.
         sb.recompute_visible();
-        let _ = sb.cached_workspace_lines(30, theme, now, false);
+        let _ = sb.cached_workspace_lines(30, theme, now, false, 0..40);
         assert_eq!(
             sb.workspace_line_builds.get(),
             4,
             "a recompute (workspace-data change) must invalidate the cache"
         );
-        let _ = sb.cached_workspace_lines(30, theme, now, false);
+        let _ = sb.cached_workspace_lines(30, theme, now, false, 0..40);
         assert_eq!(sb.workspace_line_builds.get(), 4);
     }
 
@@ -4156,6 +4534,151 @@ mod spawning_tests {
             "spawning arc cleared once live: {working:?}"
         );
     }
+
+    /// #1372 watchdog: an arc no terminating event ever cleared (a dropped
+    /// bus event, a remote box that erred before provisioning began) must
+    /// self-cancel once it ages past the guard, so a spawn never spins
+    /// forever. A fresh arc is left alone.
+    #[test]
+    fn stale_spawning_arc_is_pruned() {
+        use std::time::{Duration, Instant};
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(sb.is_spawning(&key));
+        // A fresh arc is within the window — the watchdog leaves it.
+        assert!(!sb.prune_stale_spawning());
+        assert!(sb.is_spawning(&key));
+        // Backdate past the guard: now it self-cancels.
+        *sb.spawning.get_mut(&key).unwrap() = Instant::now() - Duration::from_secs(121);
+        assert!(sb.prune_stale_spawning(), "a stranded arc must be pruned");
+        assert!(!sb.is_spawning(&key), "a spawn must never spin forever");
+    }
+
+    /// A burst of `Progress` events keeps the original start time, so the
+    /// guard measures the whole provision — not the gap since the last step.
+    #[test]
+    fn progress_bursts_do_not_reset_the_guard_clock() {
+        use std::time::{Duration, Instant};
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        *sb.spawning.get_mut(&key).unwrap() = Instant::now() - Duration::from_secs(121);
+        // A later step must NOT refresh the clock, or a slow-but-doomed
+        // provision could dodge the guard indefinitely.
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::WorktreeAdd,
+            WorktreeStepStatus::Progress("42%".into()),
+        ));
+        assert!(sb.prune_stale_spawning());
+        assert!(!sb.is_spawning(&key));
+    }
+
+    /// `Esc` escape: `clear_spawning` cancels one workspace's arc on demand.
+    #[test]
+    fn clear_spawning_cancels_one_arc() {
+        let (mut sb, key) = one_workspace();
+        sb.on_event(&progress(
+            &key,
+            WorktreeStep::Clone,
+            WorktreeStepStatus::Started,
+        ));
+        assert!(sb.is_spawning(&key));
+        assert!(sb.clear_spawning(&key));
+        assert!(!sb.is_spawning(&key));
+        assert!(!sb.clear_spawning(&key), "nothing left to clear");
+    }
+}
+
+#[cfg(test)]
+mod work_target_kill_tests {
+    use super::super::*;
+    use super::status_pill_tests::base_task;
+    use lazybox_core::Workspace;
+    use lazybox_ipc::{AgentState, Event, TerminalId, TerminalKind};
+
+    fn one_workspace() -> (Sidebar, SessionKey) {
+        let mut t = base_task();
+        t.title = "Ship it".into();
+        let w = Workspace::from_task(t, chrono::Utc::now());
+        let key = SessionKey::from(&w.key);
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.workspaces.insert(key.clone(), w);
+        sb.recompute_visible();
+        (sb, key)
+    }
+
+    /// #1372 / #1310: `w w` on a workspace whose agent was killed (its
+    /// terminal lingers in the snapshot with an `Exited` state) must spawn a
+    /// FRESH agent, never collapse onto the dead conversation.
+    #[test]
+    fn work_target_spawns_fresh_when_the_only_agent_exited() {
+        let (mut sb, key) = one_workspace();
+        // A reconnect snapshot re-seeds the dead terminal (running, but its
+        // last reported state is Exited).
+        sb.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(1),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+        });
+        sb.on_event(&Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Exited { code: Some(137) },
+        });
+        assert_eq!(
+            sb.work_target(&key, "claude"),
+            WorkTarget::Spawn("claude".into()),
+            "a killed agent must not be reused — w spawns fresh"
+        );
+        assert!(sb.running_work_targets(&key).is_empty());
+        assert_eq!(sb.find_agent_terminal(&key, "claude"), None);
+    }
+
+    /// A live agent beside the dead one is still the reuse target — only the
+    /// exited terminal is filtered out.
+    #[test]
+    fn work_target_reuses_the_live_agent_next_to_a_dead_one() {
+        let (mut sb, key) = one_workspace();
+        for tid in [1u64, 2] {
+            sb.on_event(&Event::TerminalSpawned {
+                terminal_id: TerminalId(tid),
+                session_key: key.clone(),
+                kind: TerminalKind::Agent("claude".into()),
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+            });
+        }
+        sb.on_event(&Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::Exited { code: Some(0) },
+        });
+        sb.on_event(&Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(2),
+            state: AgentState::Working,
+        });
+        assert_eq!(
+            sb.work_target(&key, "claude"),
+            WorkTarget::Running(RunningWorkTarget {
+                terminal_id: TerminalId(2),
+                agent_id: "claude".into(),
+            }),
+            "the live agent is reused; the dead one is skipped"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -4434,6 +4957,56 @@ mod done_alert_tests {
                 .iter()
                 .any(|n| n.contains("finished")),
             "footer notice on done",
+        );
+    }
+
+    /// A usage-limit block alerts the user on its rising edge — an OS
+    /// notification + a footer notice naming the manual resume keys — exactly
+    /// like `Done` (#847). This is the default (auto-wait off).
+    #[test]
+    fn reaching_limit_reached_alerts_by_default() {
+        let (mut sb, key) = sidebar_with_one_workspace();
+        sb.on_event(&agent_state(&key, AgentState::Working));
+        sb.drain_pending_notifications();
+        sb.drain_pending_asking_notices();
+
+        sb.on_event(&agent_state(&key, AgentState::LimitReached));
+        let notifs = sb.drain_pending_notifications();
+        assert_eq!(notifs.len(), 1);
+        assert!(
+            notifs[0].title.contains("rate-limited"),
+            "OS banner on the limit rising edge",
+        );
+        assert!(
+            sb.drain_pending_asking_notices()
+                .iter()
+                .any(|n| n.contains("hit its usage limit")),
+            "footer notice on the limit rising edge",
+        );
+    }
+
+    /// Regression (F2): with `ui.auto_wait_on_limit` on, the daemon
+    /// auto-presses Wait and immediately relabels the block to the calm
+    /// `AwaitingReset`, so the transient `LimitReached` the client sees first
+    /// is *handled* — it must fire NO OS push and NO footer notice (which
+    /// would name the Shift-K/Shift-L manual sweeps the policy exists to
+    /// eliminate). The whole point of the policy is that the agent stays quiet.
+    #[test]
+    fn auto_wait_on_limit_suppresses_the_rate_limit_alert() {
+        let (mut sb, key) = sidebar_with_one_workspace();
+        sb.set_auto_wait_on_limit(true);
+        sb.on_event(&agent_state(&key, AgentState::Working));
+        sb.drain_pending_notifications();
+        sb.drain_pending_asking_notices();
+
+        sb.on_event(&agent_state(&key, AgentState::LimitReached));
+        assert!(
+            sb.drain_pending_notifications().is_empty(),
+            "an auto-waited limit fires no OS notification",
+        );
+        assert!(
+            sb.drain_pending_asking_notices().is_empty(),
+            "an auto-waited limit fires no footer notice",
         );
     }
 

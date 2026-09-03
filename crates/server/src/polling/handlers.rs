@@ -143,6 +143,24 @@ impl ProviderHandle {
             Self::Linear(c) => lazybox_core::TaskProvider::close_pr(c, ws).await,
         }
     }
+    pub async fn convert_to_draft(
+        &self,
+        ws: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        match self {
+            Self::Github(c) => lazybox_core::TaskProvider::convert_to_draft(c, ws).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::convert_to_draft(c, ws).await,
+        }
+    }
+    pub async fn mark_ready(
+        &self,
+        ws: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        match self {
+            Self::Github(c) => lazybox_core::TaskProvider::mark_ready(c, ws).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::mark_ready(c, ws).await,
+        }
+    }
     pub async fn delete_issue(
         &self,
         ws: &lazybox_core::Workspace,
@@ -639,6 +657,34 @@ pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey)
     detach_mutation(async move { merge_pr_task(&config, workspace_key).await });
 }
 
+/// Where the fresh pre-merge status check (#1394) routes a `g m`: to the
+/// conflict-resolve flow, or on to the merge mutation.
+#[derive(Debug, PartialEq, Eq)]
+enum FreshMergeCheck {
+    /// GitHub's live state reports the branch conflicts — route to the
+    /// resolve prompt (via `PrMergeFailed { conflict }`) instead of firing
+    /// a mutation GitHub will only reject.
+    Conflict,
+    /// No conflict on fresh state — attempt the merge, pinned to `head`
+    /// when the fetch surfaced one so a force-push between the check and
+    /// the mutation can't land the wrong commit.
+    Proceed { head: Option<String> },
+}
+
+/// Decide the merge route from a freshly-fetched PR. Pure so the
+/// stale-vs-fresh routing that is the substance of #1394 is unit-tested
+/// without a live GitHub client. Merge conflict is the one hard block
+/// with a dedicated resolve flow; soft state (red CI / changes-requested)
+/// deliberately still proceeds — GitHub stays the authority at merge time
+/// (#1203).
+fn classify_fresh_pr(fresh: &lazybox_core::Task, head: Option<String>) -> FreshMergeCheck {
+    if fresh.mergeable.is_conflicting() {
+        FreshMergeCheck::Conflict
+    } else {
+        FreshMergeCheck::Proceed { head }
+    }
+}
+
 async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
     let emit_err = |msg: &str| {
         let _ = config
@@ -652,6 +698,61 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
     };
     let pr_label = ws.pr.as_ref().map(|p| p.id.key.clone());
 
+    // Fresh pre-merge status check (#1394): `g m` used to route the
+    // conflict / CI decision off the last poll's cached `Task`. A stale
+    // `Conflicting` sent the user into a dead-end resolve prompt for a
+    // conflict GitHub had already cleared, and a head that had moved
+    // merged blind. Re-fetch THIS PR's current state from GitHub first.
+    // Merge conflict is the one hard block with a dedicated resolve
+    // flow, so route to it off FRESH truth (via `PrMergeFailed { conflict
+    // }`, the same event the post-rejection path emits — the client opens
+    // the resolve prompt on it). The head OID from the same fetch pins
+    // the mutation so a force-push between fetch and merge can't land the
+    // wrong commit. Soft state (red CI / changes-requested) still
+    // proceeds — GitHub stays the authority at merge time (#1203) — but
+    // the stored row is now fresh so the pills the user just saw don't
+    // lie. GitHub-only (Linear has no PRs); a transient fetch failure
+    // falls back to the cached path rather than blocking a user-initiated
+    // merge.
+    let mut merge_ws = ws.clone();
+    let mut expected_head: Option<String> = None;
+    if let Some((owner, repo, number)) = ws.pr.as_ref().and_then(github_target)
+        && let Some(client) = resolve_gh_client(config).await
+    {
+        match client
+            .fetch_single_pr_with_head_interactive(&owner, &repo, number)
+            .await
+        {
+            Ok(Some((fresh, head))) => {
+                // Reflect GitHub truth in the store so the CONFLICT / READY
+                // pills and any next action read fresh state.
+                super::upsert(config, fresh.clone()).await;
+                match classify_fresh_pr(&fresh, head) {
+                    FreshMergeCheck::Conflict => {
+                        let _ = config.bus.send(Event::PrMergeFailed {
+                            workspace_key: workspace_key.clone(),
+                            pr_label: fresh.id.key.clone(),
+                            reason: "the branch has merge conflicts".to_string(),
+                            conflict: true,
+                        });
+                        return;
+                    }
+                    FreshMergeCheck::Proceed { head } => {
+                        merge_ws.pr = Some(fresh);
+                        expected_head = head;
+                    }
+                }
+            }
+            // PR no longer visible (merged out-of-band / transferred /
+            // scope revoked): fall through and let the mutation surface
+            // GitHub's own verdict.
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("merge {workspace_key}: pre-merge status fetch failed: {e}");
+            }
+        }
+    }
+
     // Route through the workspace's matching provider. The handle
     // dispatches `merge` to github / linear / future-provider based
     // on the workspace key's prefix — the server stays provider-
@@ -663,8 +764,10 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
             return;
         }
     };
-    if let Err(e) =
-        run_mutation_with_retry(&config.bus, "merge", || provider.merge(&ws, None)).await
+    if let Err(e) = run_mutation_with_retry(&config.bus, "merge", || {
+        provider.merge(&merge_ws, expected_head.as_deref())
+    })
+    .await
     {
         tracing::warn!("merge {workspace_key}: {e:?}");
         // A user-initiated merge that GitHub rejected is not a
@@ -685,7 +788,7 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
         // failure event — so the CONFLICT pill is accurate and the TUI's
         // resolve flow classifies the conflict prompt off fresh state.
         if conflict
-            && let Some(mut pr) = ws.pr.clone()
+            && let Some(mut pr) = merge_ws.pr.clone()
             && !pr.mergeable.is_conflicting()
         {
             pr.mergeable = lazybox_core::Mergeable::Conflicting;
@@ -727,6 +830,13 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
     if let Some(cleanup) = merged_pr_cleanup(&ws) {
         on_terminal_transition(config, &workspace_key, cleanup).await;
     }
+
+    // Reflect the MERGED state now instead of waiting for a poll to
+    // happen to re-select this PR (a merged PR drops out of the open-PR
+    // search — otherwise minutes stale; #1355). The upsert's own
+    // terminal detection is collapsed by the reprompt throttle + the
+    // TUI's per-key dedupe against the cleanup fired above.
+    refresh_pr_after_mutation(config, &ws).await;
 }
 
 /// Handle `Command::UpdateBranch`: load the workspace, recover the PR's
@@ -792,6 +902,11 @@ async fn update_branch_task(config: &ServerConfig, workspace_key: WorkspaceKey) 
     // Wake the poll loop so the refreshed state lands in <5s instead of
     // waiting out the full interval.
     config.poll.wake(true);
+
+    // Reflect the cleared BEHIND / recomputed mergeStateStatus now via a
+    // targeted re-fetch, rather than relying on the generic wake to
+    // re-select this PR on its next tick (#1355).
+    refresh_pr_after_mutation(config, &ws).await;
 }
 
 /// Handle `Command::CloseIssue`: load the workspace, recover the
@@ -1029,6 +1144,138 @@ async fn delete_or_close_task(config: &ServerConfig, workspace_key: WorkspaceKey
     }
     // Wake the poll loop so the vanished/closed state (and the rescope
     // removal) lands in <5s instead of waiting out the full interval.
+    config.poll.wake(true);
+}
+
+/// Handle `Command::ClosePr`: close the workspace's PR without merging
+/// (`closePullRequest`). Unlike [`handle_delete_or_close`] this only ever
+/// targets a PR — the catalog gates the `g c` chord to PR workspaces.
+/// Success wakes the poll loop; the rescope sweep retires the closed PR's
+/// workspace. Failure surfaces as a persistent `Event::PrCloseFailed`.
+pub async fn handle_close_pr(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let config = config.clone();
+    detach_mutation(async move { close_pr_task(&config, workspace_key).await });
+}
+
+async fn close_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let emit_err = |msg: &str| {
+        let _ = config
+            .bus
+            .send(Event::provider_error_retryable("close-pr", msg));
+    };
+
+    let Some(ws) = load_workspace(config, &workspace_key) else {
+        emit_err(&format!("close-pr: workspace {workspace_key} not found"));
+        return;
+    };
+    let pr_label = ws
+        .pr
+        .as_ref()
+        .map(|pr| pr.id.key.clone())
+        .filter(|k| !k.is_empty())
+        .unwrap_or_else(|| workspace_key.as_str().to_string());
+
+    let provider = match build_provider_for_workspace(config, &workspace_key).await {
+        Ok(p) => p,
+        Err(e) => {
+            emit_err(&e);
+            return;
+        }
+    };
+    if let Err(e) =
+        run_mutation_with_retry(&config.bus, "close-pr", || provider.close_pr(&ws)).await
+    {
+        tracing::warn!("close-pr {workspace_key}: {e:?}");
+        let _ = config.bus.send(Event::PrCloseFailed {
+            workspace_key: workspace_key.clone(),
+            pr_label,
+            reason: humanize_mutation_failure("close-pr", &e),
+        });
+        return;
+    }
+    tracing::info!("closed PR for workspace {workspace_key}");
+    let _ = config.bus.send(Event::PrClosed {
+        workspace_key: workspace_key.clone(),
+        pr_label,
+    });
+    // Wake the poll loop so the closed state (and the rescope removal)
+    // lands in <5s instead of waiting out the full interval.
+    config.poll.wake(true);
+}
+
+/// Handle `Command::ConvertPrToDraft`: convert the workspace's open PR to
+/// a draft. Success flashes a notice and wakes the poll loop to pick up
+/// the draft state; failure surfaces as a persistent
+/// `Event::PrDraftChangeFailed`.
+pub async fn handle_convert_to_draft(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let config = config.clone();
+    detach_mutation(async move { draft_change_task(&config, workspace_key, true).await });
+}
+
+/// Handle `Command::MarkPrReady`: mark the workspace's draft PR ready for
+/// review. Mirror of [`handle_convert_to_draft`] in the other direction.
+pub async fn handle_mark_ready(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let config = config.clone();
+    detach_mutation(async move { draft_change_task(&config, workspace_key, false).await });
+}
+
+/// Shared body for the two draft-toggle commands. `to_draft` selects the
+/// direction: `true` converts an open PR to a draft, `false` marks a
+/// draft PR ready for review.
+async fn draft_change_task(config: &ServerConfig, workspace_key: WorkspaceKey, to_draft: bool) {
+    let op = if to_draft {
+        "convert-to-draft"
+    } else {
+        "mark-ready"
+    };
+    let emit_err = |msg: &str| {
+        let _ = config.bus.send(Event::provider_error_retryable(op, msg));
+    };
+
+    let Some(ws) = load_workspace(config, &workspace_key) else {
+        emit_err(&format!("{op}: workspace {workspace_key} not found"));
+        return;
+    };
+    let pr_label = ws
+        .pr
+        .as_ref()
+        .map(|pr| pr.id.key.clone())
+        .filter(|k| !k.is_empty())
+        .unwrap_or_else(|| workspace_key.as_str().to_string());
+
+    let provider = match build_provider_for_workspace(config, &workspace_key).await {
+        Ok(p) => p,
+        Err(e) => {
+            emit_err(&e);
+            return;
+        }
+    };
+    let result = run_mutation_with_retry(&config.bus, op, || async {
+        if to_draft {
+            provider.convert_to_draft(&ws).await
+        } else {
+            provider.mark_ready(&ws).await
+        }
+    })
+    .await;
+    if let Err(e) = result {
+        tracing::warn!("{op} {workspace_key}: {e:?}");
+        let _ = config.bus.send(Event::PrDraftChangeFailed {
+            workspace_key: workspace_key.clone(),
+            pr_label,
+            to_draft,
+            reason: humanize_mutation_failure(op, &e),
+        });
+        return;
+    }
+    tracing::info!("{op} for workspace {workspace_key}");
+    let _ = config.bus.send(Event::PrDraftChanged {
+        workspace_key: workspace_key.clone(),
+        pr_label,
+        is_draft: to_draft,
+    });
+    // Wake the poll loop so the new draft state lands in <5s instead of
+    // waiting out the full interval.
     config.poll.wake(true);
 }
 
@@ -1361,7 +1608,10 @@ pub(crate) async fn resolve_gh_client_result(config: &ServerConfig) -> Result<Gh
         .resolve(lazybox_gh::SOURCE)
         .await
         .map_err(|error| format!("github credentials: {error}"))?;
-    let client = GhClient::from_credential(cred)
+    let host = lazybox_config::Config::load()
+        .unwrap_or_default()
+        .github_host();
+    let client = GhClient::from_credential_with_host(cred, host.as_deref())
         .await
         .map_err(|error| format!("github client init: {error}"))?;
     config.poll.cache_gh_client(client.clone());
@@ -1395,6 +1645,42 @@ pub(super) fn github_target(task: &lazybox_core::Task) -> Option<(String, String
     Some((owner.to_string(), name.to_string(), number))
 }
 
+/// Post-mutation freshness (#1355): after a `merge` / `update-branch`
+/// succeeds, targeted-refetch THIS workspace's PR so the row reflects the
+/// new terminal / mergeability state within one API round-trip.
+///
+/// The mutation handlers already `poll.wake(true)`, but that only
+/// *schedules* a tick — whether the next tick re-fetches this specific PR
+/// still depends on notifications / round-robin / hot scheduling. A
+/// just-merged PR is the worst case: it drops out of the incremental
+/// open-PR search, so its MERGED state is otherwise only re-observed by
+/// the periodic `is:merged` sweep, minutes later. This closes that window
+/// with the same `fetch_single_pr_interactive` machinery `g s` uses.
+///
+/// Best-effort: on a missing PR / unresolvable target / fetch failure it
+/// simply returns, leaving the row's prior state in place with the
+/// poll-loop wake as the backstop. Failures are logged, not surfaced as
+/// interactive errors — the user-visible mutation already succeeded.
+async fn refresh_pr_after_mutation(config: &ServerConfig, ws: &Workspace) {
+    let Some(pr) = ws.pr.as_ref() else {
+        return;
+    };
+    let Some((owner, repo, number)) = github_target(pr) else {
+        return;
+    };
+    let Some(client) = resolve_gh_client(config).await else {
+        return;
+    };
+    match client
+        .fetch_single_pr_interactive(&owner, &repo, number)
+        .await
+    {
+        Ok(Some(task)) => super::upsert(config, task).await,
+        Ok(None) => {}
+        Err(e) => tracing::warn!("refresh {owner}/{repo}#{number} after mutation: {e}"),
+    }
+}
+
 /// Handle `Command::SyncWorkspace`: a targeted re-poll of one
 /// workspace's own GitHub entities — the "sync this" action. Instead
 /// of the global `Refresh` sweep, deep-fetch the workspace's PR and
@@ -1408,12 +1694,14 @@ pub(super) fn github_target(task: &lazybox_core::Task) -> Option<(String, String
 /// with no GitHub PR/issue; per-entity fetch failures are logged and
 /// skipped so one bad entity never poisons the rest.
 pub async fn handle_sync_workspace(config: &ServerConfig, workspace_key: WorkspaceKey) {
-    let Some(client) = resolve_gh_client(config).await else {
-        return;
-    };
     let Some(workspace) = load_workspace(config, &workspace_key) else {
         return;
     };
+    // The GitHub client is OPTIONAL here: a Linear-only workspace has no
+    // GitHub credentials, and their absence must not abort the Linear
+    // re-poll below (before this, `g s` on a Linear issue resolved no gh
+    // client and silently returned — the whole sync did nothing).
+    let gh_client = resolve_gh_client(config).await;
 
     // Interactive priority (#1218): `g s` is user-initiated — it must
     // not queue behind the background budget, and a refusal must be
@@ -1426,34 +1714,162 @@ pub async fn handle_sync_workspace(config: &ServerConfig, workspace_key: Workspa
             format!("sync {owner}/{repo}#{number}: {e}"),
         ));
     };
-    if let Some(pr) = workspace.pr.as_ref()
-        && let Some((owner, repo, number)) = github_target(pr)
-    {
-        match client
-            .fetch_single_pr_interactive(&owner, &repo, number)
-            .await
+    if let Some(client) = gh_client.as_ref() {
+        if let Some(pr) = workspace.pr.as_ref()
+            && let Some((owner, repo, number)) = github_target(pr)
         {
-            Ok(Some(task)) => super::upsert(config, task).await,
-            Ok(None) => {}
-            Err(e) => surface("pr", &owner, &repo, number, &e),
+            match client
+                .fetch_single_pr_interactive(&owner, &repo, number)
+                .await
+            {
+                Ok(Some(task)) => super::upsert(config, task).await,
+                Ok(None) => {}
+                Err(e) => surface("pr", &owner, &repo, number, &e),
+            }
+        }
+
+        for issue in &workspace.gh_issues {
+            let Some((owner, repo, number)) = github_target(issue) else {
+                continue;
+            };
+            match client
+                .fetch_single_issue_interactive(&owner, &repo, number)
+                .await
+            {
+                Ok(Some(task)) => super::upsert(config, task).await,
+                Ok(None) => {}
+                Err(e) => surface("issue", &owner, &repo, number, &e),
+            }
+        }
+
+        // Repo-level discovery: whenever this workspace is scoped to a
+        // github repo, `g s` fetches that repo's OPEN issues + PRs — even
+        // when the workspace already tracks its own PR/issue. The background
+        // poll only surfaces a watched repo's *PRs* and issues that
+        // *involve* you, so a repo's plain open issues never reach the inbox
+        // on their own; without this pass `g s` on a normal issue/PR
+        // workspace could only ever re-fetch the one item you're looking at
+        // and never surface a newly-filed issue (#1390). This is the
+        // explicit "sync this thing and its repo" the user expects.
+        if let Some(slug) = workspace
+            .project_key
+            .as_ref()
+            .and_then(|key| key.unambiguous_github_slug())
+        {
+            match client.fetch_repo_open_tasks(&slug).await {
+                Ok(tasks) => {
+                    let discovered = tasks.len();
+                    // Build the closes-issue / approval index ONCE and thread
+                    // it through the batch. The one-off `super::upsert`
+                    // rebuilds this index from a full `list_workspaces` scan on
+                    // every call, so upserting a repo's whole open-issue page
+                    // (up to the search node cap) per `g s` was O(discovered ×
+                    // inbox) store deserializations on the interactive path —
+                    // the exact quadratic `UpsertContext` exists to avoid.
+                    let mut ctx = super::UpsertContext::build(config);
+                    for task in tasks {
+                        super::upsert_with_context(config, &mut ctx, task).await;
+                    }
+                    tracing::info!(
+                        workspace = %workspace_key,
+                        "sync_workspace: repo `{slug}` discovered {discovered} open issues/PRs"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("sync_workspace repo `{slug}`: {e}");
+                    let _ = config.bus.send(Event::provider_error_retryable(
+                        "github",
+                        format!("sync repo {slug}: {e}"),
+                    ));
+                }
+            }
         }
     }
 
-    for issue in &workspace.gh_issues {
-        let Some((owner, repo, number)) = github_target(issue) else {
-            continue;
-        };
-        match client
-            .fetch_single_issue_interactive(&owner, &repo, number)
+    // Linear issues: re-fetch each tracked Linear ticket by its node id.
+    // The Linear client is resolved lazily and only when the workspace
+    // actually tracks Linear issues, so a GitHub-only workspace pays no
+    // credential lookup. A single-issue fetch applies no open-state
+    // filter, so a ticket that has since closed comes back with its new
+    // state instead of the sync keeping the stale one.
+    if !workspace.linear_issues.is_empty() {
+        match lazybox_linear::credential_chain()
+            .resolve(lazybox_linear::SOURCE)
             .await
         {
-            Ok(Some(task)) => super::upsert(config, task).await,
-            Ok(None) => {}
-            Err(e) => surface("issue", &owner, &repo, number, &e),
+            Ok(cred) => {
+                let linear = LinearClient::from_credential(cred);
+                for issue in &workspace.linear_issues {
+                    let Some(node_id) = issue.node_id.as_deref() else {
+                        continue;
+                    };
+                    match linear.fetch_issue_by_id(node_id).await {
+                        Ok(Some(task)) => super::upsert(config, task).await,
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::warn!("sync_workspace linear `{}`: {e}", issue.id.key);
+                            let _ = config.bus.send(Event::provider_error_retryable(
+                                "linear",
+                                format!("sync {}: {e}", issue.id.key),
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("sync_workspace linear credentials: {e}");
+                let _ = config.bus.send(Event::provider_error_retryable(
+                    "linear",
+                    format!("sync linear credentials: {e}"),
+                ));
+            }
         }
     }
 
     tracing::info!(workspace = %workspace_key, "sync_workspace: targeted re-poll complete");
+}
+
+/// Handle `Command::FetchRepoMergeHistory` (#1432): fetch a repo's
+/// recently-merged PRs and broadcast them via `Event::RepoMergeHistory`
+/// for the merge-history modal to render. The modal mounts in a loading
+/// state and waits for this reply, so — unlike the silent
+/// `handle_fetch_pr_details` — a failure is reported back in the event's
+/// `error` field rather than swallowed; otherwise the modal would spin
+/// forever with no way to learn why.
+pub async fn handle_fetch_repo_merge_history(config: &ServerConfig, repo: String) {
+    let client = match resolve_gh_client_result(config).await {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!("fetch_repo_merge_history({repo}): {error}");
+            let _ = config.bus.send(Event::RepoMergeHistory {
+                repo,
+                entries: Vec::new(),
+                error: Some(error),
+            });
+            return;
+        }
+    };
+    match client.fetch_repo_merged_prs(&repo).await {
+        Ok(entries) => {
+            tracing::info!(
+                "fetch_repo_merge_history {repo}: {} merged PRs",
+                entries.len()
+            );
+            let _ = config.bus.send(Event::RepoMergeHistory {
+                repo,
+                entries,
+                error: None,
+            });
+        }
+        Err(e) => {
+            tracing::warn!("fetch_repo_merge_history {repo}: {e:?}");
+            let _ = config.bus.send(Event::RepoMergeHistory {
+                repo,
+                entries: Vec::new(),
+                error: Some(format!("merge-history fetch failed: {e}")),
+            });
+        }
+    }
 }
 
 /// Handle `Command::FetchPrDetails`: pull the workspace's PR
@@ -1756,26 +2172,27 @@ pub(crate) async fn clean_worktrees_with(
         }
     };
 
-    // Serialize against new provisioning/adoption for the inspection through
-    // removal window. The delete helper additionally holds the per-repo lock
-    // while it re-runs every destructive safety probe.
-    let _ownership_guard = config.worktree_ownership_lock.lock().await;
-
     // Snapshot live session ids — anything in `terminal_sessions`
     // (the per-terminal owning-session map) is a session we must
-    // not touch. Lock dropped before any async fs work. Recovered
-    // (post-restart) terminals never land in `terminal_sessions`, so
-    // also honor `terminal_meta`'s workspace-key view — see
-    // `live_workspace_keys`.
-    let live_sessions: std::collections::HashSet<lazybox_core::SessionId> = {
-        config
+    // not touch. Recovered (post-restart) terminals never land in
+    // `terminal_sessions`, so also honor `terminal_meta`'s
+    // workspace-key view — see `live_workspace_keys`.
+    // Hold lock only for the snapshot. Release before expensive fs work.
+    // Serialize against new provisioning/adoption: the per-repo lock inside
+    // `delete_inspected` will re-run safety probes while it's held.
+    let live_sessions: std::collections::HashSet<lazybox_core::SessionId>;
+    let live_keys: std::collections::HashSet<String>;
+    {
+        let _ownership_guard = config.worktree_ownership_lock.lock().await;
+        live_sessions = config
             .terminal
             .session_bindings()
             .await
             .into_values()
-            .collect()
-    };
-    let live_keys = live_workspace_keys(config).await;
+            .collect();
+        live_keys = live_workspace_keys(config).await;
+    }
+    // Lock released here; expensive fs work follows.
 
     let tracked = match crate::workspace::collect_tracked_sessions(config).await {
         Ok(tracked) => tracked,
@@ -2152,7 +2569,6 @@ pub(crate) async fn delete_orphaned_worktree_with(
     path: std::path::PathBuf,
     force: bool,
 ) {
-    let _ownership_guard = config.worktree_ownership_lock.lock().await;
     let tracked = match crate::workspace::collect_tracked_sessions(config).await {
         Ok(tracked) => tracked,
         Err(error) => {
@@ -2188,16 +2604,24 @@ pub(crate) async fn delete_orphaned_worktree_with(
         });
         return;
     };
-    if !target.is_orphaned()
-        || crate::spawn_handler::managed_worktree_has_live_session_owner(config, &target.path)
+
+    // Hold lock only for the critical section: checking if the worktree
+    // is orphaned and has a live owner. Release immediately before
+    // the expensive deletion operation.
     {
-        let _ = config.bus.send(Event::OrphanedWorktreeDeleted {
-            path,
-            ok: false,
-            error: Some("worktree is no longer orphaned".into()),
-        });
-        return;
+        let _ownership_guard = config.worktree_ownership_lock.lock().await;
+        if !target.is_orphaned()
+            || crate::spawn_handler::managed_worktree_has_live_session_owner(config, &target.path)
+        {
+            let _ = config.bus.send(Event::OrphanedWorktreeDeleted {
+                path,
+                ok: false,
+                error: Some("worktree is no longer orphaned".into()),
+            });
+            return;
+        }
     }
+    // Lock released here; expensive deletion operation follows.
 
     match mgr.delete_inspected(&target, force).await {
         Ok(()) => {
@@ -2286,6 +2710,16 @@ pub(crate) async fn prompt_merged_pr_removal_with(
     let Some(workspace) = load_workspace(config, key) else {
         return;
     };
+    // A removal already in flight owns this workspace's fate: `remove()`
+    // marks `deleted_workspaces` before its slow (multi-GB) worktree
+    // reclaim and releases it only if the removal FAILS (the row survives)
+    // or after the row is gone. Re-deriving a cleanup prompt off the
+    // still-present row during that window would pop an orphan modal for a
+    // workspace that's on its way out — the level-trigger racing the single
+    // removal owner. Respect the owner's state instead of re-deciding.
+    if config.deleted_workspaces.lock().contains(key.as_str()) {
+        return;
+    }
     // A "keep" answer is durable (issue #499) — check it before the
     // throttle so a declined workspace never re-prompts, even after a
     // restart clears the in-memory cadence memory.
@@ -2913,7 +3347,7 @@ pub async fn prefetch_top_pr_details(
 
 #[cfg(test)]
 mod github_target_tests {
-    use super::github_target;
+    use super::{FreshMergeCheck, classify_fresh_pr, github_target};
     use lazybox_core::{CiStatus, Mergeable, ReviewStatus, Task, TaskId, TaskRole, TaskState};
 
     fn task(repo: Option<&str>, key: &str) -> Task {
@@ -2962,6 +3396,40 @@ mod github_target_tests {
             priority: None,
             state_label: None,
         }
+    }
+
+    /// #1394: the fresh pre-merge check routes to the resolve flow only
+    /// when GitHub's *live* state reports a conflict — and pins the head
+    /// OID from that same fetch when it doesn't. This is the routing the
+    /// old client short-circuit did off stale poll data.
+    #[test]
+    fn fresh_conflict_routes_to_resolve_clean_proceeds_with_pinned_head() {
+        let mut conflicting = task(Some("o/r"), "o/r#1");
+        conflicting.mergeable = Mergeable::Conflicting;
+        assert_eq!(
+            classify_fresh_pr(&conflicting, Some("deadbeef".into())),
+            FreshMergeCheck::Conflict,
+            "a fresh conflict routes to resolve, not a doomed merge",
+        );
+
+        let clean = task(Some("o/r"), "o/r#2");
+        assert_eq!(
+            classify_fresh_pr(&clean, Some("cafef00d".into())),
+            FreshMergeCheck::Proceed {
+                head: Some("cafef00d".into())
+            },
+            "a clean PR proceeds, pinned to the freshly-fetched head OID",
+        );
+
+        // Soft state (red CI) still proceeds — GitHub is the authority at
+        // merge time (#1203); only conflict is a hard local block.
+        let mut red_ci = task(Some("o/r"), "o/r#3");
+        red_ci.ci = CiStatus::Failure;
+        assert_eq!(
+            classify_fresh_pr(&red_ci, None),
+            FreshMergeCheck::Proceed { head: None },
+            "red CI is advisory, not a block — the merge still reaches GitHub",
+        );
     }
 
     #[test]
@@ -3136,6 +3604,7 @@ mod inspect_tests {
 
     use super::*;
     use crate::ServerConfig;
+    use crate::backend::SessionBackend;
     use lazybox_core::{SessionId, SessionKind, SessionRunState, WorkspaceSession};
     use lazybox_ipc::{Event, TerminalId, TerminalKind, WorkspaceDiffTarget};
     use lazybox_store::{MemoryStore, Store, WorkspaceRecord};
@@ -5066,6 +5535,101 @@ mod inspect_tests {
         );
     }
 
+    /// #1396 lever 1: a squash/rebase merge with the head branch auto-deleted
+    /// leaves the local tip on a SHA no remote ref reaches, so the git-only
+    /// unpushed probe reports the whole feature diff as "unpushed commits".
+    /// Because the provider knows the PR merged, that false positive must not
+    /// block `x x` — the row is removed and the key tombstoned so it stays
+    /// gone across a restart.
+    #[tokio::test]
+    async fn merged_pr_archive_ignores_squash_merge_false_unpushed() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "merged-unpushed", "feat").await;
+        // The squashed local tip: a commit the remote never took.
+        std::fs::write(wt.join("work.txt"), "squashed work\n").unwrap();
+        run(&wt, &["add", "."]).await;
+        run(&wt, &["commit", "-q", "-m", "work"]).await;
+        delete_remote_ref(&fx, "feat").await;
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store,
+            Arc::new(crate::backend::MockBackend::new()),
+            fx.base.path().to_path_buf(),
+        );
+
+        let removed = crate::workspace::delete_workspace(&config, &key).await;
+
+        assert!(
+            removed.is_some(),
+            "a merged PR's false-positive unpushed commits must not block x x"
+        );
+        assert!(load_workspace(&config, &key).is_none(), "row removed");
+        assert!(
+            crate::workspace::load_archived_set(&config).contains(key.as_str()),
+            "archive tombstone written so the row stays gone on restart"
+        );
+    }
+
+    /// #1396 lever 2: even when the worktree-preservation gate refuses to
+    /// delete the row (genuine uncommitted work), an explicit archive must
+    /// still reap a detached orphan tmux session — killing a session loses no
+    /// on-disk work — so the next restart's `recover_sessions` cannot find it
+    /// and resurrect the archived workspace.
+    #[tokio::test]
+    async fn archive_reaps_orphan_session_even_when_gate_refuses() {
+        let fx = setup_fixture().await;
+        let wt = add_wt(&fx, "refused-archive", "feat").await;
+        // Genuine on-disk work the gate must preserve.
+        std::fs::write(wt.join("scratch.txt"), "wip").unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let (key, _sid) = seed_merged_workspace(&store, wt.clone(), "feat");
+
+        let backend = crate::backend::MockBackend::new();
+        // A detached orphan tmux for this workspace: a live backend session
+        // with persisted meta but no live terminal registry entry.
+        let orphan_key = backend
+            .spawn(&["sh".into()], Some(wt.as_path()), &[], "orphan")
+            .await
+            .unwrap();
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            store,
+            backend.as_backend(),
+            fx.base.path().to_path_buf(),
+        );
+        let session_key: lazybox_core::SessionKey = key.as_str().into();
+        crate::spawn_handler::persist_terminal_meta(
+            &config,
+            &orphan_key,
+            &session_key,
+            &TerminalKind::Shell,
+        )
+        .await;
+
+        let removed = crate::workspace::delete_workspace(&config, &key).await;
+
+        assert!(
+            removed.is_none(),
+            "uncommitted work must refuse the row delete"
+        );
+        assert!(
+            load_workspace(&config, &key).is_some(),
+            "row preserved for retry"
+        );
+        assert!(wt.exists(), "dirty worktree preserved");
+        assert!(
+            !backend.list().await.unwrap().contains(&orphan_key),
+            "the detached orphan session is killed despite the refusal"
+        );
+        assert!(
+            crate::spawn_handler::load_terminal_meta(&config, &orphan_key)
+                .await
+                .is_none(),
+            "the orphan's persisted meta is swept so recovery can't rebuild it"
+        );
+    }
+
     /// #573: the merge handler routes a successful merge straight into
     /// the cleanup path, keyed on the PR's number, instead of waiting for
     /// a poll to rediscover the open→merged flip. The decision function
@@ -5637,5 +6201,419 @@ mod mutation_retry_tests {
             !delete_should_fall_back_to_close(&rate_limited),
             "an exhausted rate limit must not downgrade a delete into a close"
         );
+    }
+}
+
+#[cfg(test)]
+mod post_mutation_refresh_tests {
+    //! `refresh_pr_after_mutation` (#1355): after a merge / update-branch
+    //! succeeds, a targeted single-PR re-fetch must reflect the fresh
+    //! upstream state onto the stored row within one round-trip, instead
+    //! of leaving it stale until the poll scheduler happens to re-select
+    //! this PR. Driven against a canned GraphQL response over a real
+    //! socket — the boundary under test is fetch → upsert.
+
+    use super::*;
+    use crate::ServerConfig;
+    use lazybox_core::{Task, TaskId, TaskRole, TaskState, Workspace, WorkspaceKey};
+
+    /// Minimal recording HTTP server: replies to every request with the
+    /// same canned JSON body. Mirrors the harness in `working_claims`.
+    async fn spawn_single_response_server(body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    continue;
+                };
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                );
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn open_pr_task() -> Task {
+        Task {
+            author: "me".into(),
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#42".into(),
+            },
+            title: "test".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/pull/42".into(),
+            repo: Some("o/r".into()),
+            branch: Some("feat".into()),
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            merge_blocked: false,
+            approval_policy: Default::default(),
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            kind: None,
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            parent: None,
+            priority: None,
+            state_label: None,
+        }
+    }
+
+    /// A `SINGLE_PR_QUERY` response for `o/r#42` in its post-merge state.
+    const MERGED_PR_RESPONSE: &str = r#"{
+      "data": {
+        "repository": {
+          "pullRequest": {
+            "number": 42,
+            "title": "test",
+            "body": null,
+            "url": "https://github.com/o/r/pull/42",
+            "updatedAt": "2026-08-26T12:00:00Z",
+            "isDraft": false,
+            "state": "MERGED",
+            "merged": true,
+            "headRefName": "feat",
+            "baseRefName": "main",
+            "reviewDecision": null,
+            "autoMergeRequest": null,
+            "author": {"login": "me"},
+            "labels": {"nodes": []},
+            "assignees": {"nodes": []},
+            "reviewRequests": {"nodes": []},
+            "comments": {"nodes": []},
+            "commits": {"nodes": []}
+          }
+        }
+      }
+    }"#;
+
+    #[tokio::test]
+    async fn refresh_reflects_the_merged_state_onto_the_stored_row() {
+        let config = ServerConfig::in_memory();
+        let base_uri = spawn_single_response_server(MERGED_PR_RESPONSE).await;
+        config
+            .poll
+            .cache_gh_client(GhClient::stub_with_base_uri_for_tests(&base_uri).unwrap());
+
+        let task = open_pr_task();
+        let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
+        super::super::upsert(&config, task).await;
+        assert_eq!(
+            load_workspace(&config, &key)
+                .and_then(|w| w.pr)
+                .map(|p| p.state),
+            Some(TaskState::Open),
+            "precondition: row starts Open"
+        );
+
+        let ws = load_workspace(&config, &key).unwrap();
+        refresh_pr_after_mutation(&config, &ws).await;
+
+        assert_eq!(
+            load_workspace(&config, &key)
+                .and_then(|w| w.pr)
+                .map(|p| p.state),
+            Some(TaskState::Merged),
+            "targeted re-fetch must land MERGED without a poll cycle"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_is_a_noop_for_a_workspace_without_a_pr() {
+        let config = ServerConfig::in_memory();
+        // No gh client cached: if the helper tried to fetch it would
+        // resolve credentials and fail loudly. A PR-less workspace must
+        // short-circuit before any of that.
+        let ws = Workspace::from_task(
+            {
+                let mut issue = open_pr_task();
+                issue.id.key = "o/r#7".into();
+                issue.url = "https://github.com/o/r/issues/7".into();
+                issue.kind = Some(lazybox_core::TaskKind::Issue);
+                issue
+            },
+            chrono::Utc::now(),
+        );
+        assert!(ws.pr.is_none(), "precondition: issue workspace has no pr");
+        refresh_pr_after_mutation(&config, &ws).await;
+    }
+}
+
+#[cfg(test)]
+mod sync_workspace_discovery_tests {
+    //! `handle_sync_workspace` (#1390): `g s` on a repo-scoped workspace
+    //! that already tracks its own PR must STILL run the repo-level
+    //! open-issue/PR discovery pass, so a newly-filed issue surfaces
+    //! without a full `Shift-R` sweep. Before the fix that pass was gated
+    //! on `pr.is_none() && gh_issues.is_empty()`, so on a normal PR
+    //! workspace `g s` could only re-fetch the one item you were looking
+    //! at. Driven against canned GraphQL responses over a real socket.
+
+    use super::*;
+    use crate::ServerConfig;
+    use lazybox_core::{Task, TaskId, TaskRole, TaskState, WorkspaceKey};
+
+    /// Minimal HTTP server that routes each request to a canned body by
+    /// what the request *asks for*, not by call order. `g s` makes three
+    /// distinct GraphQL calls — a single-PR node fetch, a `is:pr` repo
+    /// search, and a `is:issue` repo search — so matching on the query
+    /// text keeps the test correct no matter what order they arrive in or
+    /// whether the code adds a round-trip (an order-coupled server would
+    /// silently hand back the wrong canned response and mask the change).
+    async fn spawn_routed_response_server(
+        single_pr: &'static str,
+        pr_search: &'static str,
+        issue_search: &'static str,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    continue;
+                };
+                let mut buf = [0u8; 16384];
+                let read = sock.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]);
+                let body = if request.contains("is:issue") {
+                    issue_search
+                } else if request.contains("is:pr") {
+                    pr_search
+                } else {
+                    single_pr
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                );
+                let _ = sock.write_all(response.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn open_pr_task() -> Task {
+        Task {
+            author: "me".into(),
+            id: TaskId {
+                source: "github".into(),
+                key: "o/r#42".into(),
+            },
+            title: "existing pr".into(),
+            body: None,
+            state: TaskState::Open,
+            role: TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: "https://github.com/o/r/pull/42".into(),
+            repo: Some("o/r".into()),
+            branch: Some("feat".into()),
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            merge_blocked: false,
+            approval_policy: Default::default(),
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            kind: None,
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            parent: None,
+            priority: None,
+            state_label: None,
+        }
+    }
+
+    /// `SINGLE_PR_QUERY` response re-fetching the focused PR `o/r#42`
+    /// (still open) — the first request `g s` makes.
+    const SINGLE_PR_RESPONSE: &str = r#"{
+      "data": {
+        "repository": {
+          "pullRequest": {
+            "number": 42,
+            "title": "existing pr",
+            "body": null,
+            "url": "https://github.com/o/r/pull/42",
+            "updatedAt": "2026-08-29T12:00:00Z",
+            "isDraft": false,
+            "state": "OPEN",
+            "merged": false,
+            "headRefName": "feat",
+            "baseRefName": "main",
+            "reviewDecision": null,
+            "autoMergeRequest": null,
+            "author": {"login": "me"},
+            "labels": {"nodes": []},
+            "assignees": {"nodes": []},
+            "reviewRequests": {"nodes": []},
+            "comments": {"nodes": []},
+            "commits": {"nodes": []}
+          }
+        }
+      }
+    }"#;
+
+    /// The repo-sync PR search (`is:open is:pr repo:o/r`) — no open PRs
+    /// beyond the one already tracked.
+    const EMPTY_PR_SEARCH_RESPONSE: &str = r#"{
+      "data": {
+        "search": {
+          "issueCount": 0,
+          "pageInfo": {"hasNextPage": false, "endCursor": null},
+          "nodes": []
+        },
+        "rateLimit": null
+      }
+    }"#;
+
+    /// The repo-sync issue search — two brand-new open issues (`o/r#99`,
+    /// `o/r#100`) the workspace does not yet track. Returning more than one
+    /// exercises the shared-context discovery loop end to end: every
+    /// discovered task must be upserted, not just the first.
+    const NEW_ISSUE_SEARCH_RESPONSE: &str = r#"{
+      "data": {
+        "search": {
+          "issueCount": 2,
+          "pageInfo": {"hasNextPage": false, "endCursor": null},
+          "nodes": [
+            {
+              "id": "I_99",
+              "number": 99,
+              "title": "freshly filed bug",
+              "body": null,
+              "url": "https://github.com/o/r/issues/99",
+              "updatedAt": "2026-08-29T11:00:00Z",
+              "createdAt": "2026-08-29T11:00:00Z",
+              "closedAt": null,
+              "state": "OPEN",
+              "author": {"login": "someone"},
+              "labels": {"nodes": []},
+              "assignees": {"nodes": []},
+              "reactions": {"viewerHasReacted": false},
+              "comments": {"nodes": []},
+              "repository": {"nameWithOwner": "o/r"}
+            },
+            {
+              "id": "I_100",
+              "number": 100,
+              "title": "another new bug",
+              "body": null,
+              "url": "https://github.com/o/r/issues/100",
+              "updatedAt": "2026-08-29T11:05:00Z",
+              "createdAt": "2026-08-29T11:05:00Z",
+              "closedAt": null,
+              "state": "OPEN",
+              "author": {"login": "someone"},
+              "labels": {"nodes": []},
+              "assignees": {"nodes": []},
+              "reactions": {"viewerHasReacted": false},
+              "comments": {"nodes": []},
+              "repository": {"nameWithOwner": "o/r"}
+            }
+          ]
+        },
+        "rateLimit": null
+      }
+    }"#;
+
+    /// Workspace key GitHub discovery lands issue `o/r#N` under.
+    fn issue_workspace_key(number: u64) -> WorkspaceKey {
+        let mut t = open_pr_task();
+        t.id.key = format!("o/r#{number}");
+        WorkspaceKey::new(lazybox_core::workspace_key_for(&t))
+    }
+
+    #[tokio::test]
+    async fn sync_on_a_pr_workspace_discovers_new_repo_issues() {
+        let config = ServerConfig::in_memory();
+        let base_uri = spawn_routed_response_server(
+            SINGLE_PR_RESPONSE,
+            EMPTY_PR_SEARCH_RESPONSE,
+            NEW_ISSUE_SEARCH_RESPONSE,
+        )
+        .await;
+        config
+            .poll
+            .cache_gh_client(GhClient::stub_with_base_uri_for_tests(&base_uri).unwrap());
+
+        // Seed a repo-scoped workspace that already tracks its own PR — the
+        // case where the old guard skipped discovery entirely.
+        let pr = open_pr_task();
+        let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&pr));
+        super::super::upsert(&config, pr).await;
+        let seeded = load_workspace(&config, &key).unwrap();
+        assert!(seeded.pr.is_some(), "precondition: workspace tracks a PR");
+        assert_eq!(
+            seeded
+                .project_key
+                .as_ref()
+                .and_then(|k| k.unambiguous_github_slug())
+                .as_deref(),
+            Some("o/r"),
+            "precondition: workspace is scoped to a github repo"
+        );
+
+        handle_sync_workspace(&config, key).await;
+
+        // BOTH new issues must now be their own workspace rows, surfaced
+        // purely by `g s` on the PR workspace — no `Shift-R` sweep. Asserting
+        // every discovered task lands (not just the first) guards the
+        // shared-`UpsertContext` discovery loop.
+        for number in [99, 100] {
+            assert!(
+                load_workspace(&config, &issue_workspace_key(number)).is_some(),
+                "g s on a PR workspace must upsert the repo's new open issue #{number}"
+            );
+        }
     }
 }

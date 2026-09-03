@@ -51,9 +51,12 @@ fn builtin_auth_and_exact_resume_commands_are_provider_owned() {
     let ctx = SpawnCtx::default();
     let claude = Claude;
     let claude_auth = claude.auth_commands().expect("claude auth support");
-    assert_eq!(claude_auth.status, ["claude", "auth", "status"]);
+    // `--json` is pinned so the status gate's `"loggedIn": false` scan can't be
+    // silently disabled by a future change to the default output format.
+    assert_eq!(claude_auth.status, ["claude", "auth", "status", "--json"]);
     assert_eq!(claude_auth.logout, ["claude", "auth", "logout"]);
     assert_eq!(claude_auth.login, ["claude", "auth", "login"]);
+    assert_eq!(claude_auth.signed_out_marker, Some("\"loggedIn\": false"));
     assert_eq!(
         claude.resume_session(&ctx, Some("claude-session-42")),
         ["claude", "--resume", "claude-session-42"],

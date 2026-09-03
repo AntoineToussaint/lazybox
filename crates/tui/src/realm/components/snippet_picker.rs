@@ -307,7 +307,7 @@ impl SnippetPicker {
                     if is_cursor {
                         base = base.add_modifier(Modifier::BOLD);
                     }
-                    lines.push(Line::from(vec![
+                    let mut spans = vec![
                         Span::styled(caret.to_string(), bg(base)),
                         Span::styled(
                             "● ".to_string(),
@@ -318,7 +318,16 @@ impl SnippetPicker {
                             bg(Style::default().fg(theme.accent)),
                         ),
                         Span::styled(r.description.clone(), bg(base)),
-                    ]));
+                    ];
+                    // A stale fork / redundant copy gets a compact ⚠ marker in
+                    // the list itself, so it's visible without the preview (#1312).
+                    if r.attention {
+                        spans.push(Span::styled(
+                            "  ⚠".to_string(),
+                            bg(Style::default().fg(theme.warn)),
+                        ));
+                    }
+                    lines.push(Line::from(spans));
                 }
             }
         }
@@ -369,6 +378,20 @@ impl SnippetPicker {
                 Style::default().fg(theme.text_dim).italic(),
             ));
         }
+        // Override-state badge (#1312): a stale/redundant override is colored
+        // as a nudge; a plain "override"/"custom" is dim provenance.
+        if !r.badge.is_empty() {
+            let color = if r.attention {
+                theme.warn
+            } else {
+                theme.text_dim
+            };
+            meta.push(Span::styled("  ·  ", Style::default().fg(theme.text_dim)));
+            meta.push(Span::styled(
+                r.badge.clone(),
+                Style::default().fg(color).italic(),
+            ));
+        }
         lines.push(Line::from(meta));
         lines.push(Line::raw(""));
 
@@ -380,6 +403,27 @@ impl SnippetPicker {
             ));
         }
         frame.render_widget(Paragraph::new(lines), area);
+    }
+
+    /// The key of the row under the cursor, resolving through the visible
+    /// index list exactly like the preview pane. Used by the #1312
+    /// reconcile actions in `custom_key`.
+    fn highlighted_key(&self) -> Option<String> {
+        Some(self.highlighted_row()?.key.clone())
+    }
+
+    /// The row under the cursor, resolved through the visible index list.
+    fn highlighted_row(&self) -> Option<&PickerRow> {
+        let idx = *self.visible_indices.get(self.cursor?)?;
+        self.rows.get(idx)
+    }
+
+    /// Whether the highlighted row is a user override of a built-in, i.e.
+    /// the compare/keep/adopt reconcile actions apply (#1312). "custom" and
+    /// plain built-ins are excluded.
+    fn highlighted_is_override(&self) -> bool {
+        self.highlighted_row()
+            .is_some_and(|r| !r.badge.is_empty() && r.badge != "custom")
     }
 }
 
@@ -447,13 +491,35 @@ impl FilterableList for SnippetPicker {
             .map(|row| Msg::ChoicePicked(vec![ChoicePayload::Text(row.key.clone())]))
     }
 
-    /// `Ctrl-F` "no snippet — free text only": an empty pick the
-    /// broadcast handler reads as "skip straight to compose". Inert
-    /// unless the broadcast flow opted in with `with_free_text_option`.
+    /// Ctrl-modified extra keys (the highlighted row is the target):
+    /// - `Ctrl-F` "no snippet — free text only": an empty pick the
+    ///   broadcast handler reads as "skip straight to compose". Inert
+    ///   unless the broadcast flow opted in with `with_free_text_option`.
+    /// - `Ctrl-D` / `Ctrl-K` / `Ctrl-A`: the #1312 override-reconcile
+    ///   actions — compare the override against the current built-in,
+    ///   keep-mine (silence the stale nudge), or adopt (drop the override
+    ///   so the built-in shows through). The Model validates that the row
+    ///   is actually an override and flashes otherwise, since only it knows
+    ///   the shadowed built-in body.
     fn custom_key(&mut self, key: &KeyEvent) -> Option<Msg> {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        (ctrl && matches!(key.code, Key::Char('f')) && self.offer_free_text)
-            .then(|| Msg::ChoicePicked(Vec::new()))
+        if !key.modifiers.contains(KeyModifiers::CONTROL) {
+            return None;
+        }
+        match key.code {
+            Key::Char('f') if self.offer_free_text => Some(Msg::ChoicePicked(Vec::new())),
+            // The reconcile actions belong to the snippet picker (which opts
+            // into `insert_without_submit`), not the skills/broadcast reuses.
+            Key::Char('d') if self.insert_without_submit => {
+                self.highlighted_key().map(Msg::SnippetCompare)
+            }
+            Key::Char('k') if self.insert_without_submit => {
+                self.highlighted_key().map(Msg::SnippetKeepMine)
+            }
+            Key::Char('a') if self.insert_without_submit => {
+                self.highlighted_key().map(Msg::SnippetAdopt)
+            }
+            _ => None,
+        }
     }
 }
 
@@ -597,6 +663,25 @@ impl Component for SnippetPicker {
                 Style::default().fg(theme.accent).bold(),
             ));
             help.push(Span::raw(" free text  "));
+        }
+        // Override-reconcile hints, only when the highlighted row is an
+        // override and this picker owns the actions (#1312).
+        if self.insert_without_submit && self.highlighted_is_override() {
+            help.push(Span::styled(
+                "Ctrl-D",
+                Style::default().fg(theme.accent).bold(),
+            ));
+            help.push(Span::raw(" compare  "));
+            help.push(Span::styled(
+                "Ctrl-K",
+                Style::default().fg(theme.accent).bold(),
+            ));
+            help.push(Span::raw(" keep  "));
+            help.push(Span::styled(
+                "Ctrl-A",
+                Style::default().fg(theme.accent).bold(),
+            ));
+            help.push(Span::raw(" adopt  "));
         }
         help.push(Span::styled("Esc", Style::default().fg(theme.error).bold()));
         help.push(Span::raw(" cancel"));

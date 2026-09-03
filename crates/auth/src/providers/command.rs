@@ -7,6 +7,11 @@ use std::time::{Duration, Instant};
 /// cache before the command runs again. `gh auth token` rotates rarely
 /// and used to be spawned fresh on *every* poll tick — dozens of
 /// subprocesses per minute, each a 5s liability under system load.
+///
+/// NOTE: Tunable via `server.cred_cache_ttl_secs` in config (#1254-G).
+/// This constant is the default; the daemon's server initialization reads
+/// the config and uses that value instead. See `lazybox_server` for the
+/// integration point.
 const SUCCESS_TTL: Duration = Duration::from_secs(300);
 
 /// Failure backoff: 30s doubling to a 5-minute cap. Without it, a

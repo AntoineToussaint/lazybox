@@ -32,6 +32,18 @@ pub struct PickerRow {
     /// trivially serializable for the desktop; the picker only ever
     /// displays it.
     pub origin: String,
+    /// Override-state badge — `"custom"` / `"= built-in"` / `"override"` /
+    /// `"⚠ built-in changed"` / `""` (#1312). A plain string for the same
+    /// serialization reason as `origin`; derived from
+    /// [`lazybox_config::SnippetState::badge`]. Defaulted so the desktop and
+    /// older callers stay source-compatible.
+    #[serde(default)]
+    pub badge: String,
+    /// Whether the badge is a reconcile nudge (a stale fork or a redundant
+    /// copy), so the picker can color it as attention-worthy rather than
+    /// mere provenance.
+    #[serde(default)]
+    pub attention: bool,
 }
 
 impl PickerRow {
@@ -45,6 +57,19 @@ impl PickerRow {
             // invocation, not the raw authored body.
             body: snippet.dispatch_body(),
             origin: snippet.origin.label().to_string(),
+            badge: String::new(),
+            attention: false,
+        }
+    }
+
+    /// Like [`Self::new`] but stamped with an override-state badge (#1312).
+    /// `state` comes from [`lazybox_config::classify_snippet`] against the
+    /// built-in library and the user's keep-mine acknowledgements.
+    pub fn classified(key: &str, snippet: &Snippet, state: lazybox_config::SnippetState) -> Self {
+        Self {
+            badge: state.badge().to_string(),
+            attention: state.needs_attention(),
+            ..Self::new(key, snippet)
         }
     }
 }
@@ -308,6 +333,26 @@ mod tests {
             provider: None,
             origin,
         }
+    }
+
+    /// `PickerRow::classified` stamps the badge + attention flag from the
+    /// override state (#1312); `new` leaves them empty.
+    #[test]
+    fn classified_row_carries_badge_and_attention() {
+        let s = snip("Review", "rev", "body", SnippetOrigin::Global);
+
+        let stale = PickerRow::classified("rev", &s, lazybox_config::SnippetState::OverrideStale);
+        assert_eq!(stale.badge, "⚠ built-in changed");
+        assert!(stale.attention);
+
+        let current =
+            PickerRow::classified("rev", &s, lazybox_config::SnippetState::OverrideCurrent);
+        assert_eq!(current.badge, "override");
+        assert!(!current.attention);
+
+        let plain = PickerRow::new("rev", &s);
+        assert_eq!(plain.badge, "");
+        assert!(!plain.attention);
     }
 
     /// Keys already alphabetical, matching the production caller which

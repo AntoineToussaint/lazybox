@@ -34,6 +34,13 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 /// animation only nudges the render loop a few times a second while
 /// an agent is busy (and never when nothing is working).
 const WORKING_SPIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
+/// Backstop for the per-row "spawning" arc: if no terminating event
+/// (a live `AgentState`, `TerminalSpawned`, a `Failed` step, or a
+/// `spawn*` `ProviderError`) clears it within this window, the arc
+/// self-cancels so a stranded spawn can never spin forever (#1372).
+/// Matches the footer spinner's `SPAWN_SPINNER_GUARD` — a cold clone
+/// legitimately runs for tens of seconds, so the cap sits well past it.
+const SIDEBAR_SPAWN_GUARD: std::time::Duration = std::time::Duration::from_secs(120);
 use crate::util::{truncate_ellipsis, visual_width};
 use lazybox_core::{SessionId, SessionKey, TaskId, Workspace};
 use lazybox_ipc::{Command, Event, TerminalId, TerminalKind};
@@ -51,6 +58,39 @@ pub use lazybox_tui_core::inbox::{
     Mailbox, RepoSummary, SearchState, SortMode, TicketTreeMeta, VisibleRow, WorkspaceKind,
     role_rank,
 };
+
+/// The persisted "today" rollup counts surfaced by the always-visible
+/// header strip (#1344). Built from the daemon's daily stat buckets
+/// (#1339) filtered to the local calendar day. Held as `Option` on the
+/// sidebar: `None` until the first `Event::Stats` lands, so the strip
+/// stays hidden rather than flashing zeros before the real counts arrive.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TodayStats {
+    pub sessions: i64,
+    pub merged: i64,
+    pub cost_micros: i64,
+}
+
+impl TodayStats {
+    /// Sum today's buckets into the header counts. `today` is the local
+    /// calendar day, matching the daemon's local-day bucketing so "today"
+    /// is the user's day, not UTC.
+    pub fn from_buckets(buckets: &[lazybox_ipc::StatBucket], today: chrono::NaiveDate) -> Self {
+        let day = today.format("%Y-%m-%d").to_string();
+        let sum = |metric: &str| {
+            buckets
+                .iter()
+                .filter(|b| b.day == day && b.metric == metric)
+                .map(|b| b.value)
+                .sum()
+        };
+        Self {
+            sessions: sum(lazybox_ipc::stats::SESSIONS),
+            merged: sum(lazybox_ipc::stats::MERGED),
+            cost_micros: sum(lazybox_ipc::stats::COST_MICROS),
+        }
+    }
+}
 
 /// At-a-glance attention tallies across the visible mailbox, surfaced
 /// by the focus-mode event header so a heads-down user stays aware of
@@ -118,6 +158,25 @@ pub struct Sidebar {
     /// Spaces the user collapsed. Mirrors `collapsed_repos` one tier up;
     /// persisted to `ui.collapsed_spaces`.
     collapsed_spaces: BTreeSet<String>,
+    /// Spaces the user metered (approach C): every workspace under one of
+    /// these Spaces routes through the metering proxy. Persisted to
+    /// `agent.metered_spaces`, toggled by `x $` on a Space header, read by the
+    /// header render for the `$` badge. The daemon derives the same set at
+    /// spawn (`Config::source_is_metered`) — this copy only drives the UI.
+    metered_spaces: BTreeSet<String>,
+    /// Space name → the session keys of every workspace under it, rebuilt
+    /// once per `recompute_visible` (#1389). The per-Space meter figure sums
+    /// live per-session cost over these keys — keeping the `group_label` +
+    /// allocation work out of the per-frame render path (the #1059/#1090
+    /// hot-path class). Cost changes far more often than membership, so the
+    /// membership is cached and the cheap sum runs per frame.
+    space_members: BTreeMap<String, Vec<SessionKey>>,
+    /// Per-source attention ladder (#scale): group label / `space:…`
+    /// keys → level + optional snooze. Seeded from
+    /// `ui.source_attention`, mutated by the header `z` / `x ,`
+    /// actions, read by `compute_visible` (sink/collapse/punch-through)
+    /// and the row/badge renderers.
+    source_attention: BTreeMap<String, lazybox_config::SourceAttention>,
     /// Set once `apply_config` has seeded the persisted view state
     /// (stars, pins, collapse, Spaces). Until then the in-memory lists
     /// are empty by construction, not by user intent, so anything that
@@ -332,7 +391,13 @@ pub struct Sidebar {
     /// spawn reads as *coming up* instead of a blank row until the agent
     /// is live. Independent of `agents` above, which only gains an entry
     /// once a terminal reports state.
-    spawning: std::collections::HashSet<SessionKey>,
+    ///
+    /// The value is the moment the arc was first shown, so
+    /// [`Sidebar::prune_stale_spawning`] can drop an entry no terminating
+    /// event ever cleared — a spawn that failed without a `Failed` step or
+    /// a `spawn*` `ProviderError` (a dropped bus event, a remote box that
+    /// erred before provisioning began) must never spin forever (#1372).
+    spawning: std::collections::HashMap<SessionKey, std::time::Instant>,
     /// Current frame of the shared "working" spinner, mirrored from
     /// the free-running wall clock by [`Sidebar::tick_working`] so the
     /// render path stays a cheap field read and every working row shows
@@ -405,6 +470,14 @@ pub struct Sidebar {
     /// being kept awake and why. The daemon re-reads the flag live;
     /// this client-side mirror refreshes on restart.
     keep_awake: bool,
+    /// Mirror of `ui.auto_wait_on_limit` as loaded at startup. When set, the
+    /// daemon auto-presses "Wait" on a usage-limit block and immediately
+    /// relabels it to the calm `AwaitingReset`, so the transient
+    /// `LimitReached` the client sees first is a *handled* block — not an
+    /// alert. Gates the rising-edge rate-limit desktop notification + footer
+    /// notice so an auto-waited agent stays quiet (the whole point of the
+    /// policy). Refreshes on restart, mirroring the daemon's live re-read.
+    auto_wait_on_limit: bool,
     /// Mirror of `ui.show_agent_model` (default on). When set, each agent
     /// runner badge is followed by its model + effort label
     /// ([`terminal_models`](Self::terminal_models)); off keeps the sidebar
@@ -424,6 +497,32 @@ pub struct Sidebar {
     /// Mirror of `ui.usage_budgets`: agent id → plan-window token budget,
     /// the denominator for the summary's percentage.
     usage_budgets: BTreeMap<String, u64>,
+    /// Mirror of `ui.today_summary` (default on) — gates the "today"
+    /// stats strip in the header (#1344).
+    today_summary: bool,
+    /// The latest daily rollup from the daemon (`Event::Stats`), or `None`
+    /// before the first snapshot lands — the strip stays hidden until then
+    /// rather than flashing zeros. Stored raw (not pre-summed) so "today"
+    /// is re-evaluated against the current calendar day at render time; a
+    /// window left open across local midnight then reads 0 for the new day
+    /// instead of freezing yesterday's counts until the next push.
+    today_buckets: Option<Vec<lazybox_ipc::StatBucket>>,
+}
+
+/// The category of a queued notification. Drives burst coalescing:
+/// a flurry of same-kind banners collapses into one summary
+/// ("N agents need input") rather than N separate popups (#1370).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NotificationKind {
+    /// An agent transitioned into `InputNeeded`.
+    Asking,
+    /// An agent finished its turn (`Done`).
+    Done,
+    /// An agent hit a usage / rate limit.
+    LimitReached,
+    /// A workspace gained a non-agent attention signal (CI failing,
+    /// review requested, new activity, mention).
+    Activity,
 }
 
 /// A queued user-facing notification that the outer (IO-aware) layer
@@ -434,6 +533,10 @@ pub struct PendingNotification {
     pub title: String,
     pub body: String,
     pub workspace_key: SessionKey,
+    /// Workspace display name — used to build a summary body when a
+    /// burst of same-kind notifications is coalesced.
+    pub name: String,
+    pub kind: NotificationKind,
 }
 
 impl Sidebar {
@@ -447,6 +550,9 @@ impl Sidebar {
             focused_workspaces: Vec::new(),
             spaces: Vec::new(),
             collapsed_spaces: BTreeSet::new(),
+            metered_spaces: BTreeSet::new(),
+            space_members: BTreeMap::new(),
+            source_attention: BTreeMap::new(),
             config_seeded: false,
             snapshot_prune: true,
             collapsed_tickets: HashSet::new(),
@@ -484,7 +590,7 @@ impl Sidebar {
             pending_notifications: Vec::new(),
             pending_asking_notices: Vec::new(),
             agents: std::collections::HashMap::new(),
-            spawning: std::collections::HashSet::new(),
+            spawning: std::collections::HashMap::new(),
             agent_terminal_states: std::collections::HashMap::new(),
             working_spinner_frame: 0,
             spinner_epoch: std::time::Instant::now(),
@@ -498,11 +604,14 @@ impl Sidebar {
             broadcast_selected: std::collections::HashSet::new(),
             sweep: None,
             keep_awake: false,
+            auto_wait_on_limit: false,
             show_agent_model: true,
             usage: lazybox_tui_core::usage::UsageTracker::default(),
             usage_reset: HashMap::new(),
             usage_summary: true,
             usage_budgets: BTreeMap::new(),
+            today_summary: true,
+            today_buckets: None,
         }
     }
 
@@ -533,6 +642,14 @@ impl Sidebar {
         self.keep_awake = keep_awake;
     }
 
+    /// Record whether `ui.auto_wait_on_limit` is on. When set, the rising-edge
+    /// rate-limit alert (desktop notification + footer notice) is suppressed:
+    /// the daemon parks the block to the calm `AwaitingReset`, so a handled
+    /// limit must not ping the user like an unhandled one.
+    pub fn set_auto_wait_on_limit(&mut self, auto_wait_on_limit: bool) {
+        self.auto_wait_on_limit = auto_wait_on_limit;
+    }
+
     /// Record whether `ui.show_agent_model` is on — gates the per-agent
     /// model + effort label rendered beside each runner badge.
     pub fn set_show_agent_model(&mut self, show: bool) {
@@ -556,6 +673,26 @@ impl Sidebar {
     /// the denominator for the usage summary's percentage.
     pub fn set_usage_budgets(&mut self, budgets: BTreeMap<String, u64>) {
         self.usage_budgets = budgets;
+    }
+
+    /// Record whether `ui.today_summary` is on — gates the always-visible
+    /// "today" stats strip in the header (#1344).
+    pub fn set_today_summary(&mut self, show: bool) {
+        self.today_summary = show;
+    }
+
+    /// Install the latest daily rollup (`Event::Stats`); the header strip
+    /// re-sums today's slice from it each render. The first call flips the
+    /// strip from hidden to shown.
+    pub fn set_today_buckets(&mut self, buckets: Vec<lazybox_ipc::StatBucket>) {
+        self.today_buckets = Some(buckets);
+    }
+
+    /// The current local calendar day, matching the daemon's local-day
+    /// bucketing (#1344) so the strip's "today" is the user's day. Derived
+    /// through [`Self::now`] so a test clock override drives it.
+    fn local_today(&self) -> chrono::NaiveDate {
+        self.now().with_timezone(&chrono::Local).date_naive()
     }
 
     /// Bind a structured run to its agent so the run's later usage events
@@ -588,14 +725,37 @@ impl Sidebar {
     /// Observe usage the metering proxy attributed to an agent directly
     /// (`AgentSessionUsage`) — the data source for interactive terminals
     /// and for Codex, which emit no structured `AgentUsage` (#1109).
-    pub fn add_agent_session_usage(&mut self, agent_id: &str, usage: &lazybox_ipc::AgentUsage) {
-        self.usage.observe_session_usage(agent_id, usage);
+    pub fn add_agent_session_usage(
+        &mut self,
+        agent_id: &str,
+        session_key: Option<&lazybox_core::SessionKey>,
+        usage: &lazybox_ipc::AgentUsage,
+    ) {
+        self.usage
+            .observe_session_usage(agent_id, session_key.map(|k| k.as_str()), usage);
+    }
+
+    /// Hydrate the live cost tracker from the daemon's persisted per-session
+    /// totals (`Event::SessionCosts`, #1389), so the per-workspace
+    /// `$ METER · $cost` figure survives a restart. Each entry overwrites its
+    /// baseline (idempotent across reconnects).
+    pub fn hydrate_session_costs(&mut self, costs: &[(String, u64)]) {
+        for (session_key, micros) in costs {
+            self.usage.hydrate_session_cost(session_key, *micros);
+        }
     }
 
     /// Record a provider plan-quota report (`AgentProviderQuota`) — the
     /// "can I keep working?" 5h/weekly headroom that mirrors Claude's
     /// `/usage` and Codex's `/status`. Merged per window by the tracker.
-    pub fn note_provider_quota(&mut self, agent_id: &str, quota: lazybox_ipc::ProviderQuota) {
+    /// Quota is a provider-global signal, so the session key (if any) is not
+    /// used here — it rides the event only for symmetry with usage.
+    pub fn note_provider_quota(
+        &mut self,
+        agent_id: &str,
+        _session_key: Option<&lazybox_core::SessionKey>,
+        quota: lazybox_ipc::ProviderQuota,
+    ) {
         self.usage.note_quota(agent_id, quota);
     }
 
@@ -706,7 +866,26 @@ impl Sidebar {
     /// spawn and no terminal has reported an `AgentState` yet — drives
     /// the row's "spawning" arc (#1069). Reads the private `spawning` set.
     pub fn is_spawning(&self, session_key: &SessionKey) -> bool {
-        self.spawning.contains(session_key)
+        self.spawning.contains_key(session_key)
+    }
+
+    /// Drop any "spawning" arc older than `SIDEBAR_SPAWN_GUARD`. A
+    /// terminating event (live state, `TerminalSpawned`, `Failed` step,
+    /// `spawn*` `ProviderError`) normally clears the arc; this is the
+    /// backstop for a spawn that produced none — a dropped bus event, or a
+    /// remote box that erred before it emitted any progress. Returns `true`
+    /// when it cleared at least one so the caller can redraw (#1372).
+    pub fn prune_stale_spawning(&mut self) -> bool {
+        let before = self.spawning.len();
+        self.spawning
+            .retain(|_, started| started.elapsed() < SIDEBAR_SPAWN_GUARD);
+        self.spawning.len() != before
+    }
+
+    /// Cancel one workspace's "spawning" arc now — the `Esc` escape from a
+    /// stuck spinner (#1372). Returns `true` when there was one to clear.
+    pub fn clear_spawning(&mut self, session_key: &SessionKey) -> bool {
+        self.spawning.remove(session_key).is_some()
     }
     /// Sync the "working" spinner to the wall clock. Returns `true`
     /// when the displayed frame changed, so the caller knows a
@@ -774,7 +953,7 @@ impl Sidebar {
         // A live sibling session (`Working`/`Done`/`InputNeeded`/
         // `LimitReached`) owns the slot instead, so its repeated pings must
         // still dedup here rather than force a needless repaint every tick.
-        if self.spawning.contains(session_key)
+        if self.spawning.contains_key(session_key)
             && matches!(
                 self.agents.get(session_key),
                 None | Some(lazybox_ipc::AgentState::Idle)
@@ -827,6 +1006,9 @@ impl Sidebar {
             if sk != workspace_key {
                 continue;
             }
+            if self.terminal_agent_exited(*tid) {
+                continue;
+            }
             if let TerminalKind::Agent(id) = kind
                 && id == agent_id
             {
@@ -836,12 +1018,29 @@ impl Sidebar {
         None
     }
 
+    /// True when this terminal's agent has exited (killed, or crashed and
+    /// awaiting `r restart`). Such a terminal lingers in `running_terminals`
+    /// after a reconnect `Snapshot` even though its PTY is dead, so the
+    /// reuse paths must skip it — bare `w` / `w w` reuse only a LIVE agent
+    /// and otherwise spawn fresh (#1310, #1372); collapsing onto a dead
+    /// terminal would stall with no agent ever starting.
+    fn terminal_agent_exited(&self, terminal_id: TerminalId) -> bool {
+        matches!(
+            self.agent_terminal_states.get(&terminal_id),
+            Some((_, lazybox_ipc::AgentState::Exited { .. }))
+        )
+    }
+
     /// Exact running agent terminals in `workspace_key`, sorted by agent
-    /// id and then terminal id for stable chooser order.
+    /// id and then terminal id for stable chooser order. Excludes exited
+    /// agents so `w` never offers to continue a dead conversation (#1372).
     pub fn running_work_targets(&self, workspace_key: &SessionKey) -> Vec<RunningWorkTarget> {
         let mut targets = Vec::new();
         for (terminal_id, (sk, kind)) in &self.running_terminals {
             if sk != workspace_key {
+                continue;
+            }
+            if self.terminal_agent_exited(*terminal_id) {
                 continue;
             }
             if let TerminalKind::Agent(agent_id) = kind {
@@ -1029,6 +1228,7 @@ impl Sidebar {
         focused_workspaces: Vec<SessionKey>,
         spaces: Vec<lazybox_config::SpaceConfig>,
         collapsed_spaces: BTreeSet<String>,
+        metered_spaces: BTreeSet<String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
     ) {
@@ -1047,6 +1247,7 @@ impl Sidebar {
             .collect();
         self.spaces = spaces;
         self.collapsed_spaces = collapsed_spaces;
+        self.metered_spaces = metered_spaces;
         if let Some(agent) = default_agent.filter(|s| !s.is_empty()) {
             self.default_agent = agent;
         }
@@ -1055,6 +1256,95 @@ impl Sidebar {
         // The persisted lists are now user intent, not empty defaults —
         // seed-gated behavior (the snapshot-time star prune) may run.
         self.config_seeded = true;
+    }
+
+    /// Seed the persisted `ui.last_lens` (filters / sort / mailbox) at
+    /// startup (#scale) — the write-side counterpart is
+    /// `persist_lens`. Unknown tokens are dropped silently: a
+    /// stale lens degrades, it never wedges boot. Fields are set
+    /// directly (not via `set_filter_entries` / `cycle_*`) so seeding
+    /// can't echo a persist of the very value just loaded.
+    pub fn seed_lens(&mut self, lens: &lazybox_config::LensSection) {
+        self.filters.replace_entries(
+            lens.filters
+                .iter()
+                .filter_map(|t| FilterEntry::from_token(t)),
+        );
+        if let Some(sort) = lens
+            .sort
+            .as_deref()
+            .and_then(lazybox_tui_core::inbox::SortMode::from_chip_label)
+        {
+            self.sort_mode = sort;
+        }
+        if let Some(mailbox) = lens
+            .mailbox
+            .as_deref()
+            .and_then(lazybox_tui_core::inbox::Mailbox::from_chip_label)
+        {
+            self.mailbox = mailbox;
+        }
+        self.reset_cursor_and_recompute();
+    }
+
+    /// Seed the persisted `ui.source_attention` ladder at startup
+    /// (#scale). Direct field set — no persist echo, no recompute (the
+    /// boot path recomputes once after all seeding).
+    pub fn seed_source_attention(
+        &mut self,
+        map: BTreeMap<String, lazybox_config::SourceAttention>,
+    ) {
+        self.source_attention = map;
+    }
+
+    /// The attention entry in effect for a source label (Space tier
+    /// honored). Readers: header render, the `z`/`x ,` header actions.
+    pub fn source_attention_for(&self, label: &str) -> lazybox_config::SourceAttention {
+        lazybox_config::effective_source_attention(
+            &self.source_attention,
+            label,
+            Some(&lazybox_tui_core::inbox::space_of(label, &self.spaces)),
+        )
+    }
+
+    /// Set (or clear, when the entry is default) one source's attention
+    /// and persist the map. Muting also collapses the group once — the
+    /// muted residue header at the bottom of the sidebar — via the
+    /// existing `ui.collapsed_repos` mechanics, so the user can still
+    /// expand it with `Space` (#scale: muted-but-counted, never
+    /// invisible). `key` is a group label (`owner/repo`, `linear/TEAM`)
+    /// or `space:<name>`.
+    pub fn set_source_attention(&mut self, key: &str, entry: lazybox_config::SourceAttention) {
+        let now_muted =
+            entry.effective_level(self.now()) == lazybox_config::SourceAttentionLevel::Muted;
+        if entry.is_default() {
+            self.source_attention.remove(key);
+        } else {
+            self.source_attention.insert(key.to_string(), entry.clone());
+        }
+        // Persist as a targeted read-modify-write against the on-disk
+        // map (#1244-style): another client's entries survive. Seed-
+        // gated like `persist_lens`, so unsandboxed tests can never
+        // write the developer's real config.yaml.
+        if self.config_seeded {
+            let key_owned = key.to_string();
+            lazybox_config::Config::save_with_async(move |c| {
+                if entry.is_default() {
+                    c.ui.source_attention.remove(&key_owned);
+                } else {
+                    c.ui.source_attention.insert(key_owned, entry);
+                }
+            });
+        }
+        if now_muted && !key.starts_with("space:") && self.collapsed_repos.insert(key.to_string()) {
+            if self.config_seeded {
+                lazybox_config::Config::mutate_ui_list(
+                    |c| &mut c.ui.collapsed_repos,
+                    lazybox_config::UiListOp::Add(key.to_string()),
+                );
+            }
+        }
+        self.recompute_visible();
     }
 
     /// Disable the snapshot-time stale-star prune. Called (via the realm
@@ -1072,6 +1362,7 @@ impl Sidebar {
             VisibleRow::Workspace(k) => Some(k),
             VisibleRow::Session { workspace, .. } => Some(workspace),
             VisibleRow::FocusedHeader
+            | VisibleRow::HopperHeader
             | VisibleRow::SpaceHeader(_)
             | VisibleRow::RepoHeader(_)
             | VisibleRow::KindHeader(_) => None,
@@ -1173,7 +1464,7 @@ impl Sidebar {
     /// Additive, like [`extend_selection`](Self::extend_selection).
     /// Returns whether the click landed on a real row (#932).
     pub fn extend_selection_to(&mut self, area: Rect, click_row: u16) -> bool {
-        let header_height = 5 + self.usage_row_height(area);
+        let header_height = self.header_height(area);
         if click_row < area.y + header_height {
             return false;
         }
@@ -1386,9 +1677,9 @@ impl Sidebar {
 
     pub fn click_to_select(&mut self, area: Rect, click_row: u16) -> bool {
         // Mirror the header layout from `render` — including the
-        // always-visible usage row, which shifts content down by one when
-        // present (#1059).
-        let header_height = 5 + self.usage_row_height(area);
+        // always-visible usage row (#1059) and today strip (#1344), each
+        // of which shifts content down by one when present.
+        let header_height = self.header_height(area);
         if click_row < area.y + header_height {
             return false;
         }
@@ -1408,6 +1699,7 @@ impl Sidebar {
             Some(VisibleRow::Workspace(_))
             | Some(VisibleRow::Session { .. })
             | Some(VisibleRow::FocusedHeader)
+            | Some(VisibleRow::HopperHeader)
             | Some(VisibleRow::SpaceHeader(_))
             | Some(VisibleRow::RepoHeader(_))
             | Some(VisibleRow::KindHeader(_)) => {
@@ -1540,6 +1832,7 @@ impl Sidebar {
         let filter_hides = !self.filters.accepts(&FilterCtx {
             w: workspace,
             agents: &self.agents,
+            now: self.now(),
         });
         let search_hides = self.search.as_ref().is_some_and(|search| {
             !search.query.is_empty()
@@ -1865,6 +2158,50 @@ impl Sidebar {
             .and_then(|k| self.workspaces.get(k))
     }
 
+    /// A cheap identity for the cursor's group when it rests on a header
+    /// row — `Some("repo:owner/repo")` / `Some("space:Name")` — else
+    /// `None`. The pane-sync identity gate folds this in so moving the
+    /// cursor between two header rows (both of which have no selected
+    /// workspace) still re-projects the overview (#1442).
+    pub fn header_group_ident(&self) -> Option<String> {
+        if self.selected_workspace().is_some() {
+            return None;
+        }
+        if self.cursor_on_space_header() {
+            return self.cursor_space().map(|s| format!("space:{s}"));
+        }
+        self.cursor_repo().map(|r| format!("repo:{r}"))
+    }
+
+    /// Repo / Space **overview** for the cursor's group when it rests on
+    /// a header row (issue #1442). `None` when the cursor is on a real
+    /// workspace (the pane renders that instead) or on a non-group row
+    /// (`★ Focused` / hopper / empty list). A Space header takes
+    /// priority over the repo it may also sit under, so a cursor
+    /// directly on a `SpaceHeader` yields the cross-repo aggregate.
+    pub fn header_overview(&self) -> Option<crate::components::repo_overview::RepoOverview> {
+        if self.selected_workspace().is_some() {
+            return None;
+        }
+        if self.cursor_on_space_header() {
+            let space = self.cursor_space()?;
+            return Some(crate::components::repo_overview::build_space_overview(
+                &space,
+                &self.workspaces,
+                &self.projects,
+                &self.spaces,
+                &self.agents,
+            ));
+        }
+        let repo = self.cursor_repo()?;
+        Some(crate::components::repo_overview::build_repo_overview(
+            &repo,
+            &self.workspaces,
+            &self.projects,
+            &self.agents,
+        ))
+    }
+
     /// The active filter set — read by the header renderer for its
     /// chips and by the model to pre-check the filter menu.
     pub fn filters(&self) -> &FilterSet {
@@ -1881,6 +2218,7 @@ impl Sidebar {
     pub fn cycle_sort_mode(&mut self) -> SortMode {
         self.sort_mode = self.sort_mode.next();
         self.reset_cursor_and_recompute();
+        self.persist_lens();
         self.sort_mode
     }
 
@@ -1891,13 +2229,60 @@ impl Sidebar {
     pub fn set_filters(&mut self, filters: impl IntoIterator<Item = Filter>) {
         self.filters.replace(filters);
         self.reset_cursor_and_recompute();
+        self.persist_lens();
     }
 
     /// Replace the active filters from picker entries (fixed predicates
-    /// plus the value-driven label / Linear-state axes).
+    /// plus the value-driven label / Linear-state / person axes).
     pub fn set_filter_entries(&mut self, entries: impl IntoIterator<Item = FilterEntry>) {
         self.filters.replace_entries(entries);
         self.reset_cursor_and_recompute();
+        self.persist_lens();
+    }
+
+    /// Apply a lens as a user action (#scale, saved views): seed it
+    /// AND persist it as the last lens — unlike the boot-time
+    /// [`Self::seed_lens`], which must not echo a write.
+    pub fn apply_lens(&mut self, lens: &lazybox_config::LensSection) {
+        self.seed_lens(lens);
+        self.persist_lens();
+    }
+
+    /// The current lens (filters / sort / mailbox) as config tokens.
+    /// Public for the save-view flow (`x v` freezes it under a name).
+    pub fn current_lens(&self) -> lazybox_config::LensSection {
+        let mut filters: Vec<String> = self.filters.iter().map(|f| f.label().to_string()).collect();
+        filters.extend(self.filters.labels().iter().map(|n| format!("label:{n}")));
+        filters.extend(
+            self.filters
+                .linear_states()
+                .iter()
+                .map(|n| format!("linear-state:{n}")),
+        );
+        filters.extend(self.filters.people().iter().map(|l| format!("person:{l}")));
+        lazybox_config::LensSection {
+            filters,
+            sort: Some(self.sort_mode.chip_label().to_string()),
+            mailbox: Some(self.mailbox.chip_label().to_string()),
+        }
+    }
+
+    /// Persist the lens after a user-driven change (#scale: filters,
+    /// sort, and mailbox used to evaporate on restart). Whole-value
+    /// assignment like `ui.last_space` — the lens has a single writer
+    /// (the user's own action in this client), so the `mutate_ui_list`
+    /// read-modify-write machinery isn't needed. Seed-gated: before
+    /// `apply_config` has run, a lens change is programmatic (boot,
+    /// tests building a bare sidebar), not user intent — and unit
+    /// tests exercising `cycle_sort_mode` / `set_filters` without a
+    /// sandboxed `LAZYBOX_HOME` must never enqueue a write against the
+    /// developer's real config.yaml.
+    fn persist_lens(&self) {
+        if !self.config_seeded {
+            return;
+        }
+        let lens = self.current_lens();
+        lazybox_config::Config::save_with_async(move |c| c.ui.last_lens = Some(lens));
     }
 
     /// Every row the `f` filter menu offers, with its match count: the
@@ -1924,6 +2309,7 @@ impl Sidebar {
                         f.matches(&FilterCtx {
                             w,
                             agents: &self.agents,
+                            now,
                         })
                     })
                     .count();
@@ -1931,11 +2317,37 @@ impl Sidebar {
             })
             .collect();
 
+        // The `snoozed` count over Inbox candidates is always 0 — the
+        // mailbox excludes snoozed rows, which is exactly what the
+        // snoozed lens un-hides. Count what toggling would SURFACE
+        // (every currently-snoozed workspace), matching the menu's
+        // "what would this toggle show" contract.
+        if self.mailbox == Mailbox::Inbox
+            && let Some(row) = out
+                .iter_mut()
+                .find(|(e, _)| matches!(e, FilterEntry::Predicate(Filter::Snoozed)))
+        {
+            row.1 = self
+                .workspaces
+                .values()
+                .filter(|w| w.is_snoozed(now))
+                .count();
+        }
+
         // Distinct label names across candidates' primary tasks, counted
         // per workspace (a workspace with the label once, not per label
         // instance). BTreeMap keeps the rows in a stable alpha order.
         let mut labels: BTreeMap<String, usize> = BTreeMap::new();
         let mut states: BTreeMap<String, usize> = BTreeMap::new();
+        // People axis (#scale): distinct logins across the candidates'
+        // primary tasks — author + requested reviewers + submitted
+        // reviewers + assignees, the same role-union
+        // `filter::task_involves` matches against — counted per
+        // workspace. Bots (a submitted review's `is_bot`, or the
+        // GitHub `…[bot]` login convention) collect separately so
+        // they sort after every human in the menu.
+        let mut people: BTreeMap<String, usize> = BTreeMap::new();
+        let mut bots: BTreeMap<String, usize> = BTreeMap::new();
         for w in &candidates {
             let Some(task) = w.primary_task() else {
                 continue;
@@ -1952,6 +2364,49 @@ impl Sidebar {
             if let Some(state) = &task.state_label {
                 *states.entry(state.clone()).or_default() += 1;
             }
+            // `is_bot` only rides submitted reviews, but a bot can also
+            // appear as author / requested reviewer / assignee — plain
+            // strings with no flag. Bucketing per-field would let
+            // whichever field names the login FIRST win (the per-workspace
+            // `seen_people` is first-wins), mis-sorting a suffix-less bot
+            // into the humans list the moment it's also a requested
+            // reviewer. Scan the reviews up front so `is_bot` is
+            // authoritative regardless of which field mentions the login.
+            // Keys are the ASCII-lowercased login: a GitHub login is
+            // case-insensitive, so this is the People axis's identity —
+            // the same normalization `FilterSet` stores and `task_involves`
+            // matches with. Matching the filter set's case here is what
+            // keeps an active `person:Alice` and a discovered `alice` on
+            // ONE row instead of a duplicated, unchecked count-0 phantom.
+            let bot_logins: std::collections::BTreeSet<String> = task
+                .reviews
+                .iter()
+                .filter(|r| r.is_bot)
+                .map(|r| r.login.to_ascii_lowercase())
+                .collect();
+            let mut seen_people = std::collections::BTreeSet::new();
+            let mut tally = |login: &str| {
+                let key = login.to_ascii_lowercase();
+                if key.is_empty() || !seen_people.insert(key.clone()) {
+                    return;
+                }
+                let bucket = if bot_logins.contains(&key) || key.ends_with("[bot]") {
+                    &mut bots
+                } else {
+                    &mut people
+                };
+                *bucket.entry(key).or_default() += 1;
+            };
+            tally(&task.author);
+            for r in &task.reviewers {
+                tally(r);
+            }
+            for r in &task.reviews {
+                tally(&r.login);
+            }
+            for a in &task.assignees {
+                tally(a);
+            }
         }
         // Always surface currently-active values, even when no candidate
         // carries them right now (count 0). Otherwise an active
@@ -1966,11 +2421,39 @@ impl Sidebar {
         for name in self.filters.linear_states() {
             states.entry(name.clone()).or_insert(0);
         }
+        for login in self.filters.people() {
+            if !people.contains_key(login) && !bots.contains_key(login) {
+                people.insert(login.clone(), 0);
+            }
+        }
+        // A login can straddle buckets across workspaces (tallied as a
+        // requested reviewer in one, flagged `is_bot` by a submitted
+        // review in another) — fold the human count into the bot row so
+        // one login never renders twice.
+        for (login, count) in std::mem::take(&mut people) {
+            if let Some(bot_count) = bots.get_mut(&login) {
+                *bot_count += count;
+            } else {
+                people.insert(login, count);
+            }
+        }
         out.extend(labels.into_iter().map(|(n, c)| (FilterEntry::Label(n), c)));
         out.extend(
             states
                 .into_iter()
                 .map(|(n, c)| (FilterEntry::LinearState(n), c)),
+        );
+        // Humans in alpha order, bots after — a review bot shows up on
+        // most PRs, and a high count must not drown the humans the
+        // People axis exists for.
+        out.extend(
+            people
+                .into_iter()
+                .map(|(login, c)| (FilterEntry::Person(login), c)),
+        );
+        out.extend(
+            bots.into_iter()
+                .map(|(login, c)| (FilterEntry::Person(login), c)),
         );
         out
     }
@@ -1989,6 +2472,7 @@ impl Sidebar {
             Mailbox::Snoozed => Mailbox::Inbox,
         };
         self.reset_cursor_and_recompute();
+        self.persist_lens();
         self.mailbox
     }
 
@@ -2126,7 +2610,7 @@ impl Sidebar {
                 .map(|p| p.key.clone()),
             // The `★ Focused` header isn't a project — starring is a
             // cross-repo shortlist, not a group you create workspaces in.
-            VisibleRow::FocusedHeader => None,
+            VisibleRow::FocusedHeader | VisibleRow::HopperHeader => None,
             // Kind headers (PRs / Issues) don't belong to a single
             // project — they partition workspaces within a project,
             // so the parent project is whichever RepoHeader came
@@ -2345,6 +2829,21 @@ impl Sidebar {
             .values()
             .filter(|w| w.project_key.as_ref() == Some(key))
             .count()
+    }
+
+    /// Every tracked workspace grouped under `repo` that carries an open
+    /// GitHub issue and no PR — the source list for the repo issue-browser
+    /// modal (#1436). `repo` is a [`Self::cursor_repo`] group label. Order
+    /// is unspecified; the caller sorts.
+    pub fn issue_workspaces_for_repo(&self, repo: &str) -> Vec<&lazybox_core::Workspace> {
+        self.workspaces
+            .values()
+            .filter(|w| w.pr.is_none() && !w.gh_issues.is_empty())
+            .filter(|w| {
+                crate::components::visible_rows::group_label(w, &self.projects, &self.workspaces)
+                    == repo
+            })
+            .collect()
     }
 
     /// Step the cursor `delta` selectable rows from its current
@@ -2605,7 +3104,10 @@ impl Sidebar {
             // Neither the `★ Focused` header (nor rows lifted under it)
             // nor a Space header belongs to a repo group — pin / collapse
             // no-op there.
-            Some(VisibleRow::FocusedHeader) | Some(VisibleRow::SpaceHeader(_)) | None => None,
+            Some(VisibleRow::FocusedHeader)
+            | Some(VisibleRow::HopperHeader)
+            | Some(VisibleRow::SpaceHeader(_))
+            | None => None,
         }
     }
 
@@ -2753,6 +3255,34 @@ impl Sidebar {
     /// render to pick `▾` vs `▸`).
     pub fn is_space_collapsed(&self, name: &str) -> bool {
         self.collapsed_spaces.contains(name)
+    }
+
+    /// Toggle metering for the Space at or above the cursor (approach C):
+    /// add/remove its name in `agent.metered_spaces` so every workspace under
+    /// it routes through the metering proxy on the next spawn. Persists the
+    /// targeted add/remove like the collapse toggle above, and returns
+    /// `(space_name, now_metered)` for the caller's notice — or `None` when the
+    /// cursor isn't on a Space header. The daemon reads the same set at spawn,
+    /// so this write is the single user-facing control; nothing is redirected
+    /// until `agent.metering_proxy` is on.
+    pub fn toggle_space_metering_at_cursor(&mut self) -> Option<(String, bool)> {
+        let space = self.cursor_space()?;
+        let was_metered = self.metered_spaces.contains(&space);
+        let op = if was_metered {
+            self.metered_spaces.remove(&space);
+            lazybox_config::UiListOp::Remove(space.clone())
+        } else {
+            self.metered_spaces.insert(space.clone());
+            lazybox_config::UiListOp::Add(space.clone())
+        };
+        lazybox_config::Config::mutate_ui_list(|c| &mut c.agent.metered_spaces, op);
+        Some((space, !was_metered))
+    }
+
+    /// True when the Space is metered (`agent.metered_spaces`) — drives the
+    /// `$` badge on its header row.
+    pub fn is_space_metered(&self, name: &str) -> bool {
+        self.metered_spaces.contains(name)
     }
 
     /// Test-only: park the cursor on the named Space / repo header —
@@ -2949,6 +3479,21 @@ impl Sidebar {
     /// move-to-Space prompt.
     pub fn space_of_source(&self, source: &str) -> String {
         lazybox_tui_core::inbox::space_of(source, &self.spaces)
+    }
+
+    /// Total metered cost (micro-USD) accrued by every workspace under
+    /// `space`, summed from the live/hydrated per-session figures — the
+    /// per-Space headline for the metered-Space badge (#1389). Reads the
+    /// membership cached by `recompute_space_members`, so the per-frame cost
+    /// is only cheap map lookups (no `group_label`, no allocation) — this
+    /// must stay off the render hot path (#1059/#1090).
+    pub fn space_cost_micros(&self, space: &str) -> u64 {
+        self.space_members
+            .get(space)
+            .into_iter()
+            .flatten()
+            .map(|key| self.usage.cost_micros_for_session(key.as_str()))
+            .sum()
     }
 
     /// The hand-created Spaces, in display order. Exactly the
@@ -3355,6 +3900,7 @@ impl Sidebar {
                 collapsed_spaces: &self.collapsed_spaces,
                 collapsed_tickets: &self.collapsed_tickets,
                 attention: &self.attention,
+                source_attention: &self.source_attention,
                 agents: &self.agents,
                 now: self.now(),
                 search: self.search.as_ref(),
@@ -3365,6 +3911,7 @@ impl Sidebar {
         self.ticket_tree = outcome.ticket_tree;
         self.recompute_stacks();
         self.recompute_searched_keys();
+        self.recompute_space_members();
         // Prune multi-select marks the new projection hid (#1243): a
         // hidden mark can't be seen or un-marked, yet it used to linger
         // in the set and silently re-join the target pool when the
@@ -3407,6 +3954,7 @@ impl Sidebar {
                         session_id,
                     } => *workspace == key && Some(*session_id) == prior_session,
                     VisibleRow::FocusedHeader
+                    | VisibleRow::HopperHeader
                     | VisibleRow::SpaceHeader(_)
                     | VisibleRow::RepoHeader(_)
                     | VisibleRow::KindHeader(_) => false,
@@ -3441,6 +3989,23 @@ impl Sidebar {
     /// highlighted row can never diverge from what the filter kept, and
     /// keeps the per-row `group_label` work here (once per recompute)
     /// rather than in the per-frame render path (#1099).
+    /// Rebuild the Space → member-session-keys map (#1389). Assigning each
+    /// workspace to its Space is the expensive part (`group_label` allocates
+    /// a `String`, and its project-record fallback is O(workspaces)); doing
+    /// it here — once per recompute, exactly when membership can change —
+    /// keeps it off the per-frame render path, where `space_cost_micros`
+    /// then only sums the live per-session costs over the cached keys.
+    fn recompute_space_members(&mut self) {
+        let mut members: BTreeMap<String, Vec<SessionKey>> = BTreeMap::new();
+        for (key, w) in &self.workspaces {
+            let group =
+                crate::components::visible_rows::group_label(w, &self.projects, &self.workspaces);
+            let space = lazybox_tui_core::inbox::space_of(&group, &self.spaces);
+            members.entry(space).or_default().push(key.clone());
+        }
+        self.space_members = members;
+    }
+
     fn recompute_searched_keys(&mut self) {
         let keys: std::collections::HashSet<SessionKey> = self
             .visible

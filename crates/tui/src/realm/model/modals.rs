@@ -422,6 +422,61 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::Notes, modal);
     }
 
+    /// Mount the ordered personal Hopper editor.
+    pub(super) fn mount_hopper(&mut self) {
+        use crate::realm::components::hopper::{HopperEditor, HopperItem};
+
+        if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
+            return;
+        }
+        let mut rows: Vec<_> = self
+            .sidebar
+            .workspace_iter()
+            .filter_map(|(_, workspace)| {
+                workspace.hopper.map(|meta| {
+                    (
+                        meta.position,
+                        HopperItem {
+                            key: workspace.key.clone(),
+                            name: workspace.name.clone(),
+                            created_at: workspace.created_at,
+                            completed_at: meta.completed_at,
+                            canceled_at: meta.canceled_at,
+                        },
+                    )
+                })
+            })
+            .collect();
+        rows.sort_by_key(|(position, item)| (*position, item.key.as_str().to_string()));
+        self.mount_modal(
+            Id::Hopper,
+            HopperEditor::new(rows.into_iter().map(|(_, item)| item).collect()),
+        );
+    }
+
+    /// Ask which tracked project should own a repo-less Hopper workspace.
+    /// The action resumes only after the daemon echoes the persisted choice.
+    pub(super) fn mount_hopper_project_picker(
+        &mut self,
+        workspace: lazybox_core::WorkspaceKey,
+        action: lazybox_tui_core::action::Action,
+    ) {
+        use crate::realm::components::choice::Choice;
+
+        let projects = self.sidebar.projects_for_picker();
+        if projects.is_empty() {
+            self.flash_info("no projects yet — create one with x p");
+            return;
+        }
+        type ProjectRow = (lazybox_core::ProjectKey, String);
+        let modal = Choice::single("Use which repo for this Hopper item?", projects)
+            .title("Choose repo")
+            .label(|(_, name): &ProjectRow| name.clone())
+            .payload_for(|(key, _): &ProjectRow| ChoicePayload::Project(key.clone()));
+        self.set_modal_flow(ModalFlow::HopperProject { workspace, action });
+        self.mount_modal(Id::HopperProject, modal);
+    }
+
     /// Mount the "New workspace" name prompt under a specific
     /// Project. Submit → `Msg::InputSubmitted(name)` while
     /// `Id::NewWorkspace` is on top → `Command::CreateWorkspace
@@ -921,7 +976,13 @@ impl<T: TerminalAdapter> Model<T> {
         // already up wins, and the fetch result is dropped (the user
         // can press `g l` again — the hint says so). Also covers the
         // old ManageLabels-only idempotence check.
-        if let Some(top) = self.modal_stack.last() {
+        // The issue browser (`g i`, #1436) intentionally requests labels
+        // for a highlighted issue while it stays on the stack, so the
+        // picker stacks on top of it and returns there on dismiss. Every
+        // other open modal wins and the fetch result is dropped.
+        if let Some(top) = self.modal_stack.last()
+            && !matches!(top, Id::IssueBrowser)
+        {
             tracing::info!(?top, "label picker skipped — another modal owns the stack");
             // Disarm the request stash so a later stray `RepoLabels`
             // broadcast can't mount the picker unprompted.
@@ -1023,25 +1084,173 @@ impl<T: TerminalAdapter> Model<T> {
                 .to_std()
                 .unwrap_or(Duration::from_secs(7 * 24 * 3600))
         };
-        let options: Vec<(&'static str, Duration)> = vec![
-            ("1 hour", Duration::from_secs(3600)),
-            ("4 hours (default)", Duration::from_secs(4 * 3600)),
-            ("Until end of day (6pm)", until_eod),
-            ("Tomorrow morning (9am)", until_tomorrow),
-            ("Next Monday 9am", until_next_week),
-            ("1 week", Duration::from_secs(7 * 24 * 3600)),
-            ("1 month", Duration::from_secs(30 * 24 * 3600)),
-            ("Forever (1 year)", Duration::from_secs(365 * 24 * 3600)),
+        // Time rows carry Durations; the event-conditional rows
+        // (#scale, B4) carry the tui-core wake tokens — the snooze
+        // ends at the deadline OR on the event, whichever first, so a
+        // snooze is never a black hole.
+        let options: Vec<(&'static str, ChoicePayload)> = vec![
+            ("1 hour", ChoicePayload::Duration(Duration::from_secs(3600))),
+            (
+                "4 hours (default)",
+                ChoicePayload::Duration(Duration::from_secs(4 * 3600)),
+            ),
+            ("Until end of day (6pm)", ChoicePayload::Duration(until_eod)),
+            (
+                "Tomorrow morning (9am)",
+                ChoicePayload::Duration(until_tomorrow),
+            ),
+            ("Next Monday 9am", ChoicePayload::Duration(until_next_week)),
+            (
+                "1 week",
+                ChoicePayload::Duration(Duration::from_secs(7 * 24 * 3600)),
+            ),
+            (
+                "1 month",
+                ChoicePayload::Duration(Duration::from_secs(30 * 24 * 3600)),
+            ),
+            (
+                "Forever (1 year)",
+                ChoicePayload::Duration(Duration::from_secs(365 * 24 * 3600)),
+            ),
+            (
+                "Until new activity",
+                ChoicePayload::Text(lazybox_tui_core::choice::SNOOZE_WAKE_ACTIVITY.to_string()),
+            ),
+            (
+                "Until CI settles",
+                ChoicePayload::Text(lazybox_tui_core::choice::SNOOZE_WAKE_CI.to_string()),
+            ),
+            (
+                "Until a review lands",
+                ChoicePayload::Text(lazybox_tui_core::choice::SNOOZE_WAKE_REVIEW.to_string()),
+            ),
         ];
         self.set_modal_flow(ModalFlow::Snooze {
             workspace: session_key,
         });
-        // Each row carries its own duration (#512).
+        // Each row carries its own payload (#512).
         let modal = Choice::single("Snooze for…", options)
             .title("Snooze duration")
+            .label(|(l, _): &(&'static str, ChoicePayload)| (*l).to_string())
+            .payload_for(|(_, p): &(&'static str, ChoicePayload)| p.clone());
+        self.mount_modal(Id::SnoozeDuration, modal);
+    }
+
+    /// `z` on a Repo/Space header (#scale): snooze the whole SOURCE.
+    /// The workspace duration menu plus a trailing "Until I unmute"
+    /// row (the [`lazybox_tui_core::choice::SOURCE_MUTE_SENTINEL`]
+    /// sentinel → `Muted` with no deadline). `key` is a group label or
+    /// `space:<name>`; `level` is the source's stored level, preserved
+    /// so a timed snooze falls back to it on expiry.
+    pub(crate) fn mount_source_snooze_picker(
+        &mut self,
+        key: String,
+        level: lazybox_config::SourceAttentionLevel,
+    ) {
+        use crate::realm::components::choice::Choice;
+        use std::time::Duration;
+        if matches!(self.modal_stack.last(), Some(Id::SourceSnooze)) {
+            return;
+        }
+        let mut options: Vec<(&'static str, Duration)> = vec![
+            ("4 hours", Duration::from_secs(4 * 3600)),
+            ("Until tomorrow", Duration::from_secs(24 * 3600)),
+            ("1 week", Duration::from_secs(7 * 24 * 3600)),
+            ("1 month", Duration::from_secs(30 * 24 * 3600)),
+        ];
+        options.push((
+            "Until I unmute",
+            lazybox_tui_core::choice::SOURCE_MUTE_SENTINEL,
+        ));
+        self.set_modal_flow(ModalFlow::SourceSnooze {
+            key: key.clone(),
+            level,
+        });
+        let modal = Choice::single(format!("Snooze {key} — every row, one gesture"), options)
+            .title("Snooze source")
             .label(|(l, _): &(&'static str, Duration)| (*l).to_string())
             .payload_for(|(_, d): &(&'static str, Duration)| ChoicePayload::Duration(*d));
-        self.mount_modal(Id::SnoozeDuration, modal);
+        self.mount_modal(Id::SourceSnooze, modal);
+    }
+
+    /// `x v` (#scale, proposal D): name input freezing the current
+    /// lens into `ui.views` on submit.
+    pub(crate) fn mount_save_view_input(&mut self) {
+        use crate::realm::components::input::Input;
+        if matches!(self.modal_stack.last(), Some(Id::SaveViewName)) {
+            return;
+        }
+        let modal = Input::new("Save the current filters / sort / mailbox as…")
+            .title("Save view")
+            .with_validator(|s: &str| !s.trim().is_empty());
+        self.mount_modal(Id::SaveViewName, modal);
+    }
+
+    /// `x V` (#scale, proposal D): the saved-views picker. Rows index
+    /// into the `ModalFlow::ViewPick` snapshot so resolution can't
+    /// drift from render order.
+    pub(crate) fn mount_view_picker(&mut self, views: Vec<lazybox_config::ViewConfig>) {
+        use crate::realm::components::choice::Choice;
+        if matches!(self.modal_stack.last(), Some(Id::ViewPicker)) {
+            return;
+        }
+        let rows: Vec<(usize, String)> = views
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let mut label = v.name.clone();
+                if !v.lens.filters.is_empty() {
+                    label.push_str(&format!("  ({})", v.lens.filters.join(", ")));
+                }
+                (i, label)
+            })
+            .collect();
+        self.set_modal_flow(ModalFlow::ViewPick { views });
+        let modal = Choice::single("Apply a saved view", rows)
+            .title("Views")
+            .label(|(_, l): &(usize, String)| l.clone())
+            .payload_for(|(i, _): &(usize, String)| ChoicePayload::Index(*i));
+        self.mount_modal(Id::ViewPicker, modal);
+    }
+
+    /// `x ,` on a Repo/Space header (#scale): the attention-level
+    /// picker. Rows in [`lazybox_tui_core::choice::SOURCE_LEVELS`]
+    /// order — resolution indexes into that constant.
+    pub(crate) fn mount_source_level_picker(
+        &mut self,
+        key: String,
+        current: lazybox_config::SourceAttentionLevel,
+    ) {
+        use crate::realm::components::choice::Choice;
+        if matches!(self.modal_stack.last(), Some(Id::SourceLevel)) {
+            return;
+        }
+        let rows: Vec<(usize, String)> = lazybox_tui_core::choice::SOURCE_LEVELS
+            .iter()
+            .enumerate()
+            .map(|(i, level)| {
+                let desc = match level {
+                    lazybox_config::SourceAttentionLevel::Live => "full badges, engaged polling",
+                    lazybox_config::SourceAttentionLevel::Quiet => {
+                        "badges only when it's about you"
+                    }
+                    lazybox_config::SourceAttentionLevel::Digest => {
+                        "accumulates quietly, polled at idle cadence"
+                    }
+                    lazybox_config::SourceAttentionLevel::Muted => {
+                        "sinks + folds, leaves the GitHub sweep"
+                    }
+                };
+                let marker = if *level == current { "● " } else { "  " };
+                (i, format!("{marker}{} — {desc}", level.label()))
+            })
+            .collect();
+        self.set_modal_flow(ModalFlow::SourceLevel { key: key.clone() });
+        let modal = Choice::single(format!("Attention for {key}"), rows)
+            .title("Source attention")
+            .label(|(_, l): &(usize, String)| l.clone())
+            .payload_for(|(i, _): &(usize, String)| ChoicePayload::Index(*i));
+        self.mount_modal(Id::SourceLevel, modal);
     }
 
     /// Mount the single global LLM-gateway URL input (Settings →
@@ -1573,13 +1782,215 @@ impl<T: TerminalAdapter> Model<T> {
     /// raw markdown `body` under `title`. Idempotent: re-triggering
     /// while it's up is a no-op. The modal renders proper markdown and
     /// owns no pending model state, so dismiss just pops it.
-    pub(crate) fn mount_description_modal(&mut self, title: String, body: String) {
+    ///
+    /// `ask_subject` scopes the reader's `a` (Ask about this PR) to a
+    /// specific task: `Some` when the reader shows something other than
+    /// the sidebar selection (the issue browser, #1436), `None` to keep
+    /// the legacy "ask about the focused workspace" behavior (#945).
+    pub(crate) fn mount_description_modal(
+        &mut self,
+        title: String,
+        body: String,
+        ask_subject: Option<lazybox_core::SessionKey>,
+    ) {
         use crate::realm::components::markdown_modal::MarkdownModal;
 
         if self.modal_stack.last() == Some(&Id::DescriptionModal) {
             return;
         }
-        self.mount_modal(Id::DescriptionModal, MarkdownModal::new(title, body));
+        let mut modal = MarkdownModal::new(title, body);
+        if let Some(subject) = ask_subject {
+            modal = modal.with_ask_subject(subject);
+        }
+        self.mount_modal(Id::DescriptionModal, modal);
+    }
+
+    /// Open the repo merge-history ledger (#1432) in its loading state.
+    /// The caller pairs this with a `Command::FetchRepoMergeHistory`; the
+    /// reply (`Event::RepoMergeHistory`) repaints it via
+    /// [`Model::update_merge_history`]. `repo` is the cursor's `owner/name`
+    /// from `Sidebar::cursor_repo()`.
+    pub(crate) fn mount_merge_history_modal(&mut self, repo: String) {
+        use crate::realm::components::merge_history_modal::MergeHistoryModal;
+
+        self.merge_history_repo = Some(repo.clone());
+        self.mount_modal(Id::MergeHistory, MergeHistoryModal::loading(repo));
+    }
+
+    /// Repaint the open merge-history ledger with the daemon's reply. A
+    /// reply that lands while the ledger is closed (or with the markdown
+    /// reader stacked on top of it) is dropped — the top modal must be the
+    /// ledger itself. The remount carries the reply's own `repo`, so a
+    /// late reply for a since-reopened repo repaints consistently and the
+    /// matching reply then supersedes it.
+    pub(super) fn update_merge_history(
+        &mut self,
+        repo: String,
+        entries: Vec<lazybox_core::Task>,
+        error: Option<String>,
+    ) {
+        use crate::realm::components::merge_history_modal::MergeHistoryModal;
+
+        if self.modal_stack.last() != Some(&Id::MergeHistory) {
+            return;
+        }
+        // The reply is keyed by repo. Drop one for any repo other than the
+        // ledger's current subject so a slow or out-of-order reply for a
+        // since-reopened repo can't repaint it with the wrong merges.
+        if self.merge_history_repo.as_deref() != Some(repo.as_str()) {
+            return;
+        }
+        self.mount_modal(
+            Id::MergeHistory,
+            MergeHistoryModal::resolved(repo, &entries, error, chrono::Utc::now()),
+        );
+    }
+
+    /// Build the newest-first `IssueRow` snapshot for `repo` from its
+    /// tracked issue-workspaces (#1436). Shared by the initial mount and
+    /// [`Self::refresh_issue_browser`], so a re-read after an in-place
+    /// edit produces an identically-shaped, freshly-valued list.
+    fn issue_rows_for_repo(
+        &self,
+        repo: &str,
+    ) -> Vec<crate::realm::components::issue_browser::IssueRow> {
+        use crate::realm::components::issue_browser::IssueRow;
+
+        let now = chrono::Utc::now();
+        let mut rows: Vec<IssueRow> = self
+            .sidebar
+            .issue_workspaces_for_repo(repo)
+            .into_iter()
+            .filter_map(|w| {
+                let issue = w.gh_issues.first()?;
+                let opened = issue.created_at.as_ref().unwrap_or(&issue.updated_at);
+                Some(IssueRow {
+                    session_key: lazybox_core::SessionKey::from(&w.key),
+                    workspace_key: w.key.clone(),
+                    number: issue.id.number(),
+                    title: issue.title.clone(),
+                    labels: issue.labels.iter().map(|l| l.name.clone()).collect(),
+                    age: lazybox_core::time::time_ago_at(opened, now),
+                    url: issue.url.clone(),
+                    body: issue.body.clone().unwrap_or_default(),
+                    unread: w.unread_count() > 0,
+                })
+            })
+            .collect();
+        // Newest-first: a higher issue number is newer; unknown numbers
+        // sort last.
+        rows.sort_by_key(|r| std::cmp::Reverse(r.number));
+        rows
+    }
+
+    /// Build + mount the repo-scoped issue browser (`g i`, #1436) from the
+    /// cursor repo's tracked issue-workspaces — a filtered list view over
+    /// existing local state, no new provider fetch. Newest-first by issue
+    /// number. Flashes and no-ops when the cursor isn't in a repo group or
+    /// the repo has no tracked issues.
+    pub(crate) fn mount_issue_browser(&mut self) {
+        use crate::realm::components::issue_browser::IssueBrowser;
+
+        if self.modal_stack.last() == Some(&Id::IssueBrowser) {
+            return;
+        }
+        let Some(repo) = self.sidebar.cursor_repo() else {
+            self.flash_info("move the cursor onto a repo to browse its issues");
+            return;
+        };
+        let rows = self.issue_rows_for_repo(&repo);
+        if rows.is_empty() {
+            self.flash_info(format!("no tracked issues in {repo}"));
+            return;
+        }
+        self.mount_modal(Id::IssueBrowser, IssueBrowser::new(repo, rows));
+    }
+
+    /// Rebuild the open issue browser's rows from current workspace state,
+    /// preserving the filter and highlighted issue (#1436). No-op unless
+    /// the browser is the top modal. Called when returning to it after an
+    /// in-place edit (the optimistic label chip lands here) and on every
+    /// `WorkspaceUpserted` while it's open (the daemon reconcile / a
+    /// background poll), so the list + preview never keep showing the
+    /// mount-time snapshot after the underlying issue changes.
+    pub(crate) fn refresh_issue_browser(&mut self) {
+        use crate::realm::components::issue_browser::IssueBrowser;
+        use tuirealm::state::{State, StateValue};
+
+        if self.modal_stack.last() != Some(&Id::IssueBrowser) {
+            return;
+        }
+        let str_at = |v: &[StateValue], i: usize| match v.get(i) {
+            Some(StateValue::String(s)) => s.clone(),
+            _ => String::new(),
+        };
+        let (repo, filter, filtering, selected) = match self.app.state(&Id::IssueBrowser) {
+            Ok(State::Vec(v)) => (
+                str_at(&v, 0),
+                str_at(&v, 1),
+                matches!(v.get(2), Some(StateValue::Bool(true))),
+                str_at(&v, 3),
+            ),
+            _ => return,
+        };
+        if repo.is_empty() {
+            return;
+        }
+        // Rebuild from live state. An empty result (last issue closed or
+        // joined into a PR) still remounts — the browser renders its own
+        // "(no tracked issues)" state rather than freezing the stale list.
+        let rows = self.issue_rows_for_repo(&repo);
+        let mut browser = IssueBrowser::new(repo, rows);
+        browser.restore_view(
+            filter,
+            filtering,
+            (!selected.is_empty()).then_some(selected.as_str()),
+        );
+        self.mount_modal(Id::IssueBrowser, browser);
+    }
+
+    /// Dispatch a detail-pane action from the issue browser (#1436)
+    /// against the highlighted issue. Read stacks the `#448` markdown
+    /// reader; label / reply / note reuse the existing workspace editors
+    /// (which set the single `ModalFlow` slot the browser deliberately
+    /// leaves free) targeting the row's own key; open hands the URL to the
+    /// platform browser. Each editor stacks on top of the browser and
+    /// returns to it on dismiss.
+    pub(crate) fn handle_issue_browser_action(
+        &mut self,
+        action: crate::realm::components::issue_browser::IssueBrowserAction,
+    ) {
+        use crate::realm::components::issue_browser::IssueBrowserAction;
+
+        match action {
+            IssueBrowserAction::Read {
+                subject,
+                title,
+                body,
+            } => {
+                // Scope the reader's `a` to the issue being read, not the
+                // sidebar cursor the browser never moved (#1436).
+                self.mount_description_modal(title, body, Some(subject));
+            }
+            IssueBrowserAction::Labels(workspace_key) => {
+                self.awaiting_repo_labels = Some(workspace_key.clone());
+                self.send_cmd(lazybox_ipc::Command::FetchRepoLabels { workspace_key });
+                self.flash_hint("loading repo labels…");
+            }
+            IssueBrowserAction::Reply(session_key) => {
+                self.mount_reply(session_key);
+            }
+            IssueBrowserAction::Note(session_key) => {
+                self.mount_notes(session_key);
+            }
+            IssueBrowserAction::OpenUrl(url) => {
+                let browser = self.ui_defaults.browser.clone();
+                match lazybox_tui_core::editors::open_url(&url, browser.as_deref()) {
+                    Ok(()) => self.flash_info(format!("opening {url}…")),
+                    Err(e) => self.flash_error(format!("open failed: {e}")),
+                }
+            }
+        }
     }
 
     /// Build + mount the notices-log window from the current
@@ -1645,6 +2056,53 @@ impl<T: TerminalAdapter> Model<T> {
         );
     }
 
+    /// Open the usage-stats window (#1339). Mounts immediately in a
+    /// loading state and asks the daemon for the persisted daily rollup;
+    /// the answer (`Event::Stats`) repaints it via [`Model::update_stats`].
+    pub(super) fn mount_stats(&mut self) {
+        use crate::realm::components::stats::Stats;
+
+        if self.modal_stack.last() == Some(&Id::Stats) {
+            return;
+        }
+        self.mount_modal(
+            Id::Stats,
+            Stats::new(Vec::new(), chrono::Local::now().date_naive(), true),
+        );
+        self.send_cmd(lazybox_ipc::Command::GetStats);
+    }
+
+    /// Repaint a live usage-stats window with a fresh daemon snapshot. A
+    /// snapshot that arrives after the window was closed is dropped. The
+    /// daemon re-pushes after every accumulator flush (#1344), so this can
+    /// fire repeatedly while the window is open — carry the current
+    /// Today⇄Week selection *and* scroll offset across the rebuild rather
+    /// than resetting them (else a scrolled deep-dive snaps to the top on
+    /// every flush, #1345).
+    pub(super) fn update_stats(&mut self, buckets: Vec<lazybox_ipc::StatBucket>) {
+        use crate::realm::components::stats::Stats;
+        use tuirealm::state::{State, StateValue};
+
+        if self.modal_stack.last() != Some(&Id::Stats) {
+            return;
+        }
+        let (week, scroll) = match self.app.state(&Id::Stats) {
+            Ok(State::Vec(v)) => {
+                let week = matches!(v.first(), Some(StateValue::Bool(true)));
+                let scroll = match v.get(1) {
+                    Some(StateValue::U16(n)) => *n,
+                    _ => 0,
+                };
+                (week, scroll)
+            }
+            _ => (false, 0),
+        };
+        let mut stats = Stats::new(buckets, chrono::Local::now().date_naive(), false);
+        stats.set_week(week);
+        stats.set_scroll(scroll);
+        self.mount_modal(Id::Stats, stats);
+    }
+
     /// `i` in the Error Inbox — open a pre-filled GitHub *new issue*
     /// form in the browser, deriving the repo from the error's
     /// workspace key. Pre-filling the form (rather than creating the
@@ -1698,6 +2156,7 @@ impl<T: TerminalAdapter> Model<T> {
             on_main: false,
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
+            force_new: false,
         });
         if self.modal_stack.last() == Some(&Id::ErrorInbox) {
             self.pop_modal();
@@ -1776,12 +2235,12 @@ impl<T: TerminalAdapter> Model<T> {
                 )
             } else if prompt.other_session_count == 0 {
                 format!(
-                    "This changes the machine-wide {} login.",
+                    "This refreshes the machine-wide {} login in place — it won't sign out any other session.",
                     prompt.display_name
                 )
             } else {
                 format!(
-                    "This changes the machine-wide {} login and may affect {} other running {} session{}.",
+                    "This refreshes the shared machine-wide {} login in place — your {} other running {} session{} won't be signed out.",
                     prompt.display_name,
                     prompt.other_session_count,
                     prompt.display_name,
@@ -1816,24 +2275,36 @@ impl<T: TerminalAdapter> Model<T> {
         if !self.modal_stack.is_empty() {
             return;
         }
-        let Some(prompt) = self.removal_prompt_queue.pop_front() else {
-            return;
+        // A removal prompt may only be shown for a workspace the client
+        // actually knows about. One can outlive its workspace — queued
+        // behind another modal while the row was archived/deleted, or
+        // arriving on a fresh connect before the Snapshot populated the
+        // workspace map. Drop any prompt whose workspace isn't known
+        // rather than mount an orphaned "remove <gone workspace>?" ask
+        // for a row not in the sidebar. Safe: the daemon re-emits removal
+        // prompts on its throttled sweep, so one dropped during a brief
+        // connect race re-fires once the workspace is known.
+        // (`workspace_by_key` reads the full workspace map, so a snoozed /
+        // inactive / filtered-out but still-known workspace is NOT dropped.)
+        let prompt = loop {
+            let Some(candidate) = self.removal_prompt_queue.pop_front() else {
+                return;
+            };
+            let session_key: lazybox_core::SessionKey = (&candidate.workspace_key).into();
+            if self.sidebar.workspace_by_key(&session_key).is_some() {
+                break candidate;
+            }
         };
         let copy = match prompt.reason {
             RemovalReason::OutOfScope => out_of_scope_copy(&prompt),
             RemovalReason::Merged => terminal_removal_copy(&prompt, "merged"),
             RemovalReason::Closed => terminal_removal_copy(&prompt, "closed"),
         };
-        // Event path: this prompt popped unsolicited (a merged/closed
-        // task, or a scope change), so a stray Enter must not delete a
-        // worktree by reflex (issue #525). The
-        // `ui.confirm_default.event` knob (default No) drives it.
-        let modal = Confirm::new(copy);
-        let modal = if self.ui_defaults.confirm_default.event.is_yes() {
-            modal.default_yes()
-        } else {
-            modal.default_no()
-        };
+        // Removing a workspace deletes its worktree — always destructive.
+        // Every confirm defaults to Yes now (fast to accept), and this one
+        // wears the warning border + `⚠` title so an unsolicited
+        // merged/closed removal reads as dangerous before Enter.
+        let modal = Confirm::new(copy).destructive();
         self.set_modal_flow(ModalFlow::RemovalPrompt {
             workspace: prompt.workspace_key,
             reason: prompt.reason,
@@ -1861,6 +2332,73 @@ impl<T: TerminalAdapter> Model<T> {
             if self.modal_stack.last() == Some(&Id::RemoveOutOfScope) {
                 self.pop_modal();
                 self.maybe_mount_next_removal_prompt();
+            }
+        }
+    }
+
+    /// Dismiss a modal left open *for* a workspace that was just removed
+    /// (archived, deleted, merged-away, or polled out of scope), so it
+    /// can't linger as an orphan pointing at a PR/issue that no longer
+    /// exists. The modal stack is context-free (`Vec<Id>`); the per-modal
+    /// workspace/session lives in the single armed `modal_flow` (always the
+    /// top modal's continuation) and, for the setup checklist, its own
+    /// `worktree_progress` slot. So we key off those, and — mirroring
+    /// [`Self::cancel_removal_prompt`] — clear the flow and pop the modal
+    /// only when the top `Id` is the one that flow mounts. The
+    /// removal-*prompt* itself is retracted by `cancel_removal_prompt`;
+    /// this covers every other per-workspace modal.
+    pub(super) fn dismiss_modals_for_removed_workspace(
+        &mut self,
+        key: &lazybox_core::WorkspaceKey,
+    ) {
+        let session: lazybox_core::SessionKey = key.into();
+
+        // The "Setting up workspace" checklist carries its own session
+        // slot, independent of the modal stack. A checklist for a removed
+        // workspace — failed (which never auto-dismisses) or still in
+        // flight — has nothing left to provision, so drop it.
+        if self
+            .worktree_progress
+            .as_ref()
+            .is_some_and(|s| s.session_key == session)
+        {
+            self.force_dismiss_worktree_progress();
+        }
+
+        // The `Id` the active flow mounts, *if* that flow targets the
+        // removed workspace. `SessionKey`-keyed variants compare against
+        // the session form; `WorkspaceKey`-keyed ones against the key.
+        let bound_id = match &self.modal_flow {
+            Some(ModalFlow::Reply { target }) if *target == session => Some(Id::Reply),
+            Some(ModalFlow::Notes { target }) if *target == session => Some(Id::Notes),
+            Some(ModalFlow::Snooze { workspace }) if *workspace == session => {
+                Some(Id::SnoozeDuration)
+            }
+            Some(ModalFlow::ConflictResolve { workspace }) if *workspace == session => {
+                Some(Id::ConflictResolve)
+            }
+            Some(ModalFlow::SidebarContext { session_key, .. }) if *session_key == session => {
+                Some(Id::SidebarContext)
+            }
+            Some(ModalFlow::ReviewRequest { workspace }) if workspace == key => {
+                Some(Id::RequestReviewers)
+            }
+            Some(ModalFlow::AssigneesRequest { workspace }) if workspace == key => {
+                Some(Id::AddAssignees)
+            }
+            Some(ModalFlow::PolicyWorkspace { workspace }) if workspace == key => {
+                Some(Id::PolicyPicker)
+            }
+            Some(ModalFlow::AdoptSource { source }) if source == key => Some(Id::AdoptTarget),
+            Some(ModalFlow::HopperProject { workspace, .. }) if workspace == key => {
+                Some(Id::HopperProject)
+            }
+            _ => None,
+        };
+        if let Some(id) = bound_id {
+            self.modal_flow = None;
+            if self.modal_stack.last() == Some(&id) {
+                self.pop_modal();
             }
         }
     }
@@ -1898,23 +2436,17 @@ impl<T: TerminalAdapter> Model<T> {
                 .unwrap_or("Confirm action?")
                 .to_string()
         });
-        // Shortcut path: the user pressed a destructive chord, so the
-        // chord itself is the intent and Enter confirms (issue #525),
-        // governed by `ui.confirm_default.destructive_shortcut` (default
-        // Yes). A benign awareness gate (the on-main spawn) destroys
-        // nothing, so it always affirms regardless of that knob.
-        let default_yes = def.confirm_is_benign_gate()
-            || self
-                .ui_defaults
-                .confirm_default
-                .destructive_shortcut
-                .is_yes();
         self.set_modal_flow(ModalFlow::ActionConfirm { action, targets });
+        // Every confirm defaults to Yes now — the chord/event is itself
+        // the intent, so Enter completes it. A benign awareness gate (the
+        // on-main spawn) destroys nothing and stays neutral; a genuinely
+        // destructive action (archive / merge / delete / close / reset)
+        // wears the warning coloring so the danger shows before Enter.
         let modal = Confirm::new(&prompt);
-        let modal = if default_yes {
+        let modal = if def.confirm_is_benign_gate() {
             modal.default_yes()
         } else {
-            modal.default_no()
+            modal.destructive()
         };
         self.mount_modal(Id::ActionConfirm, modal);
     }
@@ -2766,8 +3298,7 @@ impl<T: TerminalAdapter> Model<T> {
         // a picker that would then re-provision the wrong spawn — it falls
         // through to the failure modal instead.
         if let lazybox_ipc::WorktreeStepStatus::Failed(message) = &status
-            && lazybox_ipc::WorktreeRecovery::classify(message)
-                == lazybox_ipc::WorktreeRecovery::LinearUnmapped
+            && lazybox_ipc::WorktreeRecovery::classify(message).picks_repo()
             && let Some(spawn) = self.last_spawn.clone().filter(|cmd| {
                 matches!(
                     cmd,
@@ -2960,8 +3491,7 @@ impl<T: TerminalAdapter> Model<T> {
         // (#594), so `last_spawn` is the spawn that just failed — hand it to
         // the picker to re-provision. Only when there's genuinely no repo to
         // propose does it fall through to the failure modal below.
-        if lazybox_ipc::WorktreeRecovery::classify(message)
-            == lazybox_ipc::WorktreeRecovery::LinearUnmapped
+        if lazybox_ipc::WorktreeRecovery::classify(message).picks_repo()
             && self.open_linear_team_repo_picker(message, spawn)
         {
             return true;
@@ -3052,6 +3582,9 @@ impl<T: TerminalAdapter> Model<T> {
             on_main,
             model_alias,
             access,
+            // The recreate retry re-provisions the same target; it is a
+            // reuse-eligible replay, not a deliberate second agent.
+            force_new: _,
         }) = self.last_spawn.clone()
         else {
             self.flash_hint("nothing to recreate");
@@ -3132,13 +3665,14 @@ impl<T: TerminalAdapter> Model<T> {
     /// never dead-ends. With no team parseable from the error, or no GitHub
     /// repos to offer, it falls back to the manual hint.
     pub(super) fn pick_repo_for_linear_team(&mut self) {
-        let Some((team, failed_key)) = self.worktree_progress.as_ref().and_then(|state| {
-            let team = state
-                .error()
-                .and_then(lazybox_ipc::WorktreeRecovery::linear_team)?;
-            Some((team, state.session_key.clone()))
+        let Some((target, failed_key)) = self.worktree_progress.as_ref().and_then(|state| {
+            let target = state.error().and_then(TrackerTarget::parse)?;
+            Some((target, state.session_key.clone()))
         }) else {
-            self.flash_hint("couldn't read the team — set providers.linear.teams by hand");
+            self.flash_hint(
+                "couldn't read the team/project — set providers.linear.teams or \
+                 providers.jira.projects by hand",
+            );
             return;
         };
         // Capture the failed spawn to re-provision only when it's this
@@ -3151,14 +3685,15 @@ impl<T: TerminalAdapter> Model<T> {
                 lazybox_ipc::Command::Spawn { session_key, .. } if *session_key == failed_key,
             )
         });
-        if !self.mount_linear_team_repo_picker(&team, spawn) {
+        let label = target.label();
+        if !self.mount_tracker_repo_picker(target, spawn) {
             // Genuinely nothing to propose: the user tracks no GitHub repo,
             // so there's no repo to map the team *to* either. Point at the
             // fix (add a repo) rather than at a config key that can't yet be
             // filled in (#1041, review).
             self.flash_info(format!(
                 "no GitHub repos in scope yet — add one to lazybox, then `w w` \
-                 offers it for Linear team {team}"
+                 offers it for {label}"
             ));
         }
     }
@@ -3180,10 +3715,12 @@ impl<T: TerminalAdapter> Model<T> {
         // here. The first opens the picker (and captures its spawn); the
         // second must be a no-op — neither a second stacked picker nor an
         // overwrite of the captured spawn with a later, racing one.
-        if self.modal_stack.contains(&Id::LinearTeamRepo) {
+        if self.modal_stack.contains(&Id::LinearTeamRepo)
+            || self.modal_stack.contains(&Id::JiraProjectRepo)
+        {
             return true;
         }
-        let Some(team) = lazybox_ipc::WorktreeRecovery::linear_team(message) else {
+        let Some(target) = TrackerTarget::parse(message) else {
             return false;
         };
         // Never fabricated failure state: a spinner from an earlier progress
@@ -3191,37 +3728,55 @@ impl<T: TerminalAdapter> Model<T> {
         // the user sees.
         self.force_dismiss_worktree_progress();
         self.worktree_progress_dismissed = None;
-        self.mount_linear_team_repo_picker(&team, Some(spawn))
+        self.mount_tracker_repo_picker(target, Some(spawn))
     }
 
-    /// Mount the team→repo `Choice` picker for `team`, ranking repos the
-    /// team's other tickets already link to first (#1041), and stash `spawn`
-    /// as the spawn the pick will re-provision. Returns `false` without
-    /// mounting (or capturing) when no GitHub repo is tracked yet — a blank
-    /// picker helps no one.
-    fn mount_linear_team_repo_picker(
+    /// Mount the tracker→repo `Choice` picker for `target` — for a Linear
+    /// team, ranking repos the team's other tickets already link to first
+    /// (#1041) — and stash `spawn` as the spawn the pick will re-provision.
+    /// Returns `false` without mounting (or capturing) when no GitHub repo
+    /// is tracked yet — a blank picker helps no one.
+    fn mount_tracker_repo_picker(
         &mut self,
-        team: &str,
+        target: TrackerTarget,
         spawn: Option<lazybox_ipc::Command>,
     ) -> bool {
         use crate::realm::components::choice::Choice;
 
-        let repos = self.sidebar.github_repos_ranked_for_linear_team(team);
+        let repos = match &target {
+            TrackerTarget::LinearTeam(team) => {
+                self.sidebar.github_repos_ranked_for_linear_team(team)
+            }
+            TrackerTarget::JiraProject(_) => self.sidebar.github_repos_for_picker(),
+        };
         if repos.is_empty() {
             return false;
         }
         self.linear_map_spawn = spawn;
-        self.set_modal_flow(ModalFlow::LinearTeamRepo {
-            team: team.to_string(),
-        });
+        let label = target.label();
+        let (id, flow, title, noun) = match target {
+            TrackerTarget::LinearTeam(team) => (
+                Id::LinearTeamRepo,
+                ModalFlow::LinearTeamRepo { team },
+                "Map Linear team",
+                "tickets",
+            ),
+            TrackerTarget::JiraProject(project) => (
+                Id::JiraProjectRepo,
+                ModalFlow::JiraProjectRepo { project },
+                "Map Jira project",
+                "issues",
+            ),
+        };
+        self.set_modal_flow(flow);
         let modal = Choice::single(
-            format!("Which repo should Linear team {team} use? (saved for its future tickets)"),
+            format!("Which repo should {label} use? (saved for its future {noun})"),
             repos,
         )
-        .title("Map Linear team")
+        .title(title)
         .label(|repo: &String| repo.clone())
         .payload_for(|repo: &String| ChoicePayload::Text(repo.clone()));
-        self.mount_modal(Id::LinearTeamRepo, modal);
+        self.mount_modal(id, modal);
         true
     }
 
@@ -3241,6 +3796,13 @@ impl<T: TerminalAdapter> Model<T> {
         }
         if let Some(top) = self.modal_stack.last() {
             let _ = self.app.active(top);
+        }
+        // Returning to the issue browser after an editor (#1436): rebuild
+        // its rows so an in-place label edit — already applied optimistically
+        // to the workspace — shows immediately instead of the stale
+        // mount-time chip set.
+        if self.modal_stack.last() == Some(&Id::IssueBrowser) {
+            self.refresh_issue_browser();
         }
         // A sidebar `]]` picker's retarget is scoped to that one picker
         // (#871); once it closes, the next snippet/skill/history picker
@@ -3674,5 +4236,36 @@ mod tests {
     #[test]
     fn age_formatter_handles_missing_mtime() {
         assert_eq!(format_age_short(None), "—");
+    }
+}
+
+/// The tracker-side key an unmapped-repo provisioning failure names —
+/// a Linear team or a Jira project — parsed from the daemon's message so
+/// one picker flow can persist the mapping under the right config key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TrackerTarget {
+    LinearTeam(String),
+    JiraProject(String),
+}
+
+impl TrackerTarget {
+    fn parse(message: &str) -> Option<Self> {
+        match lazybox_ipc::WorktreeRecovery::classify(message) {
+            lazybox_ipc::WorktreeRecovery::LinearUnmapped => {
+                lazybox_ipc::WorktreeRecovery::linear_team(message).map(Self::LinearTeam)
+            }
+            lazybox_ipc::WorktreeRecovery::JiraUnmapped => {
+                lazybox_ipc::WorktreeRecovery::jira_project(message).map(Self::JiraProject)
+            }
+            _ => None,
+        }
+    }
+
+    /// `Linear team OBI` / `Jira project ENG`, for prompts and notices.
+    fn label(&self) -> String {
+        match self {
+            Self::LinearTeam(team) => format!("Linear team {team}"),
+            Self::JiraProject(project) => format!("Jira project {project}"),
+        }
     }
 }

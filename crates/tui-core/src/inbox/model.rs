@@ -49,6 +49,17 @@ impl Mailbox {
             Mailbox::Snoozed => "snoozed",
         }
     }
+
+    /// Parse a persisted `ui.last_lens` mailbox token (the
+    /// [`Self::chip_label`] round-trip). `None` for unknown tokens.
+    pub fn from_chip_label(label: &str) -> Option<Self> {
+        match label {
+            "inbox" => Some(Mailbox::Inbox),
+            "inactive" => Some(Mailbox::Inactive),
+            "snoozed" => Some(Mailbox::Snoozed),
+            _ => None,
+        }
+    }
 }
 
 /// How the inbox orders workspaces within each repo group.
@@ -85,6 +96,17 @@ impl SortMode {
             SortMode::Recent => "recent",
             SortMode::ByRole => "by-role",
             SortMode::ByRoleSplit => "split",
+        }
+    }
+
+    /// Parse a persisted `ui.last_lens` sort token (the
+    /// [`Self::chip_label`] round-trip). `None` for unknown tokens.
+    pub fn from_chip_label(label: &str) -> Option<Self> {
+        match label {
+            "recent" => Some(SortMode::Recent),
+            "by-role" => Some(SortMode::ByRole),
+            "split" => Some(SortMode::ByRoleSplit),
+            _ => None,
         }
     }
 }
@@ -190,6 +212,9 @@ pub enum VisibleRow {
     /// their repo groups regardless of which repo they belong to.
     /// Non-selectable like the other headers; j/k skips it.
     FocusedHeader,
+    /// Synthetic personal queue header. Active hopper workspaces render
+    /// here, directly below Focused and outside their assigned repo group.
+    HopperHeader,
     /// Space group header — the higher-level grouping tier (#860),
     /// emitted above the `RepoHeader`s it contains. The string is the
     /// Space name (a user-defined bucket, an owner auto-seed, or
@@ -276,8 +301,20 @@ pub struct RepoSummary {
     /// attention: unread activity, CI failing, review pending /
     /// changes-requested, agent in `Asking` state. Configurable in
     /// the future; defaults are the indicators lazybox already
-    /// surfaces as badges on workspace rows.
+    /// surfaces as badges on workspace rows. For a Quiet / Digest /
+    /// Muted source (#scale) only punch-through rows count.
     pub attention: usize,
+    /// Effective source-attention level (#scale): `None` = Live;
+    /// `Some("quiet" | "digest" | "muted")` otherwise (an active
+    /// source snooze reads as `"muted"`). A string rather than the
+    /// config enum so this TS-exported DTO stays dependency-free.
+    #[serde(default)]
+    pub source_attention: Option<String>,
+    /// Active source-snooze deadline as epoch milliseconds — drives
+    /// the header's "⏾ wakes in 3d" label. `None` when the source
+    /// isn't time-box snoozed.
+    #[serde(default)]
+    pub source_snooze_until_epoch_ms: Option<i64>,
 }
 
 #[cfg(test)]

@@ -30,6 +30,9 @@
 //!                                  injected into Claude via --settings,
 //!                                  into Codex via -c hooks.* overrides
 //!                                  (which pass --backend-key-file instead)
+//!   lazybox log [--title T]         stream piped stdin into a live log
+//!                                  window in this workspace; --close-all
+//!                                  closes every log window (agent-facing)
 //!
 //! All arg parsing is intentionally stupid — see `take_flag`.
 
@@ -43,6 +46,7 @@ mod device_cli;
 mod relay_e2e;
 mod remote_box;
 mod sandbox;
+mod scenario;
 mod serve;
 mod setup_detect;
 mod setup_persist;
@@ -392,6 +396,34 @@ fn wants_version(args: &[String]) -> bool {
     args.iter().any(|a| a == "-V" || a == "--version")
 }
 
+/// What a leftover first argument means once the known subcommands and the
+/// launch flags (`--fresh` / `--test` / `--workspace` / …, consumed earlier)
+/// have been peeled off in `run`.
+#[derive(Debug, PartialEq, Eq)]
+enum TopLevelFallback {
+    /// Bare `lazybox` — launch the inbox (TUI + embedded daemon).
+    Launch,
+    /// `lazybox help` — the bare-word alias for `--help` (which `wants_help`
+    /// only matches as a flag). Print usage, exit 0.
+    ShowHelp,
+    /// An unrecognized command / typo. Print usage and exit non-zero — it must
+    /// NOT fall through to launching a whole second lazybox instance. This
+    /// matters now that `lazybox` is on the agent PATH (#1419/#1425) and the
+    /// SessionStart prompt tells agents to run it: a stray `lazybox help`,
+    /// `lazybox status`, or typo previously spun up a rogue embedded daemon
+    /// that spawned duplicate agent sessions.
+    Unknown,
+}
+
+/// Classify the dispatch fallback. Only `None` (no leftover args) launches.
+fn classify_top_level_fallback(first: Option<&str>) -> TopLevelFallback {
+    match first {
+        None => TopLevelFallback::Launch,
+        Some("help") => TopLevelFallback::ShowHelp,
+        Some(_) => TopLevelFallback::Unknown,
+    }
+}
+
 // The disallowed-methods allow covers the `Runtime::block_on` that
 // `#[tokio::main]` expands to — the process entrypoint standing up
 // the runtime, not run-loop work (see clippy.toml).
@@ -439,6 +471,7 @@ async fn main() -> anyhow::Result<()> {
 
     let fresh = take_flag(&mut args, "--fresh");
     let test_mode = take_flag(&mut args, "--test");
+    let demo_mode = take_flag(&mut args, "--demo");
     let preselect_workspace = take_value(&mut args, "--workspace");
     let preselect_session = take_value(&mut args, "--session");
     let preselect = preselect_workspace.map(|w| lazybox_tui::realm::model::Preselect {
@@ -447,6 +480,9 @@ async fn main() -> anyhow::Result<()> {
     });
     if fresh {
         wipe_state_db();
+    }
+    if demo_mode {
+        return run_demo(preselect).await;
     }
     if test_mode {
         return run_test(preselect).await;
@@ -459,6 +495,7 @@ async fn main() -> anyhow::Result<()> {
         Some("scan") => scan_subcommand(&args[1..]).await,
         Some("worktree") => worktree_gc::worktree_subcommand(&args[1..]).await,
         Some("workspace") => workspace_subcommand(&args[1..]).await,
+        Some("log") => log_subcommand(&args[1..]).await,
         Some("device") => device_cli::device_subcommand(&args[1..]).await,
         Some("auth") => auth_cli::auth_subcommand(&args[1..]).await,
         Some("sandbox") => sandbox::sandbox_subcommand(&args[1..]).await,
@@ -470,7 +507,18 @@ async fn main() -> anyhow::Result<()> {
             run_remote(&socket_path, preselect).await
         }
         Some("--connect-relay") => run_connect_relay(&args[1..], preselect).await,
-        _ => run_embedded_realm(preselect).await,
+        other => match classify_top_level_fallback(other) {
+            TopLevelFallback::Launch => run_embedded_realm(preselect).await,
+            TopLevelFallback::ShowHelp => {
+                println!("{HELP}");
+                Ok(())
+            }
+            TopLevelFallback::Unknown => {
+                eprintln!("lazybox: unrecognized command '{}'\n", other.unwrap_or(""));
+                eprintln!("{HELP}");
+                std::process::exit(2);
+            }
+        },
     }
 }
 
@@ -710,6 +758,268 @@ async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `lazybox log [--title <name>] [--workspace <key>] [--socket <path>]` — open
+/// a live log window that streams this command's piped stdin, or `lazybox log
+/// --close-all` to close every log window in the workspace (issue #1414).
+///
+/// The agent-facing "stream a command's output into a separate lazybox window"
+/// surface. Reads `LAZYBOX_SESSION_KEY` — injected into the agent/shell PTY at
+/// spawn — to know which workspace to attach the window to; `--workspace`
+/// overrides it. It drains stdin to a temp file and asks the daemon to open a
+/// `LogTail` window tailing it, so the output streams in its own tile and never
+/// lands in the agent's own capture:
+///
+/// ```text
+/// cargo test 2>&1 | lazybox log --title tests
+/// ```
+///
+/// Errors are printed to stdout, not stderr: `init_tracing` redirects this
+/// process's stderr into the log file, so an `anyhow` message on stderr would
+/// never reach the agent that invoked us. stdout is the channel it reads.
+async fn log_subcommand(args: &[String]) -> anyhow::Result<()> {
+    if let Err(error) = run_log(args).await {
+        println!("lazybox log: {error:#}");
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn run_log(args: &[String]) -> anyhow::Result<()> {
+    let mut args = args.to_vec();
+    let close_all = take_flag(&mut args, "--close-all");
+    let title = take_value(&mut args, "--title");
+    let socket_path = take_value(&mut args, "--socket")
+        .map(PathBuf::from)
+        .unwrap_or_else(lifecycle::socket_path);
+    let Some(session_key) = take_value(&mut args, "--workspace")
+        .or_else(|| std::env::var("LAZYBOX_SESSION_KEY").ok())
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .map(lazybox_core::SessionKey::new)
+    else {
+        anyhow::bail!(
+            "lazybox log needs a workspace: run inside a lazybox session \
+             (LAZYBOX_SESSION_KEY is injected automatically) or pass --workspace <key>"
+        );
+    };
+
+    if close_all {
+        return log_close_all(&socket_path, &session_key).await;
+    }
+    log_open(&socket_path, &session_key, title.as_deref()).await
+}
+
+/// Open one `LogTail` window on a fresh temp file, then stream stdin into that
+/// file until the piped command closes it. The window persists for viewing after
+/// stdin ends and is torn down with `--close-all` or `]]x`.
+///
+/// The spawn is *confirmed* before we start draining: a bare fire-and-forget
+/// would drain stdin into a temp file that nothing tails if the daemon accepts
+/// the connection but the spawn fails server-side (no resolvable session, a
+/// worktree error) — the output would then reach neither the window nor the
+/// agent. So we subscribe, correlate the spawn with a request id, and only drain
+/// once the daemon reports the window actually opened.
+async fn log_open(
+    socket_path: &std::path::Path,
+    session_key: &lazybox_core::SessionKey,
+    title: Option<&str>,
+) -> anyhow::Result<()> {
+    let path = create_log_file(title)?;
+    let (mut client, _peer) = socket::connect(socket_path).await.map_err(|e| {
+        anyhow::anyhow!(
+            "connect to daemon at {}: {e} (is lazybox running?)",
+            socket_path.display(),
+        )
+    })?;
+    client
+        .send(lazybox_ipc::Command::Subscribe)
+        .map_err(|e| anyhow::anyhow!("subscribe to daemon: {e}"))?;
+    await_workspace_snapshot(&mut client).await?;
+    let client_request_id = uuid::Uuid::new_v4().hyphenated().to_string();
+    client
+        .send(lazybox_ipc::Command::Spawn {
+            session_key: session_key.clone(),
+            session_id: None,
+            client_request_id: Some(client_request_id.clone()),
+            kind: lazybox_ipc::TerminalKind::LogTail {
+                path: path.to_string_lossy().into_owned(),
+            },
+            cwd: None,
+            initial_prompt: None,
+            on_main: false,
+            model_alias: None,
+            initial_snippet: None,
+            access: Default::default(),
+            force_new: false,
+        })
+        .map_err(|e| anyhow::anyhow!("send spawn: {e}"))?;
+    // A session-less workspace provisions a worktree first, so allow generously;
+    // the common agent case (session already live) confirms near-instantly.
+    await_command_outcome(&mut client, &client_request_id, Duration::from_secs(60)).await?;
+    drop(client);
+    tokio::task::spawn_blocking(move || drain_stdin_to(&path))
+        .await
+        .map_err(|e| anyhow::anyhow!("log stream task panicked: {e}"))?
+}
+
+/// Wait for the daemon's correlated outcome for a command carrying
+/// `client_request_id`: `CommandCompleted` → `Ok`, `CommandFailed` → the
+/// daemon's message, a dropped connection or timeout → an error. Lets a spawn
+/// confirm it took effect before the caller acts on that assumption.
+async fn await_command_outcome(
+    client: &mut lazybox_ipc::Client,
+    client_request_id: &str,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        match tokio::time::timeout_at(deadline, client.recv()).await {
+            Ok(Some(lazybox_ipc::Event::CommandCompleted {
+                client_request_id: id,
+            })) if id == client_request_id => {
+                return Ok(());
+            }
+            Ok(Some(lazybox_ipc::Event::CommandFailed {
+                client_request_id: id,
+                message,
+            })) if id == client_request_id => {
+                anyhow::bail!("daemon rejected the command: {message}")
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => anyhow::bail!("daemon closed the connection before the command completed"),
+            Err(_) => anyhow::bail!("timed out waiting for the daemon to confirm the command"),
+        }
+    }
+}
+
+/// Close every `LogTail` window in `session_key`. Subscribes, reads the
+/// snapshot to find the workspace's log terminals, and sends `Command::Close`
+/// for each — the bulk teardown an agent runs after a task (issue #1414 Part C).
+async fn log_close_all(
+    socket_path: &std::path::Path,
+    session_key: &lazybox_core::SessionKey,
+) -> anyhow::Result<()> {
+    let (mut client, _peer) = socket::connect(socket_path).await.map_err(|e| {
+        anyhow::anyhow!(
+            "connect to daemon at {}: {e} (is lazybox running?)",
+            socket_path.display(),
+        )
+    })?;
+    client
+        .send(lazybox_ipc::Command::Subscribe)
+        .map_err(|e| anyhow::anyhow!("subscribe to daemon: {e}"))?;
+    let ids = collect_log_terminals(&mut client, session_key).await?;
+    if ids.is_empty() {
+        println!("No log windows open in {session_key}.");
+        return Ok(());
+    }
+    for id in &ids {
+        client
+            .send(lazybox_ipc::Command::Close {
+                terminal_id: *id,
+                client_request_id: None,
+            })
+            .map_err(|e| anyhow::anyhow!("send close for terminal {}: {e}", id.0))?;
+    }
+    await_terminals_closed(&mut client, &ids).await;
+    println!("Closed {} log window(s) in {session_key}.", ids.len());
+    Ok(())
+}
+
+/// The `LogTail` terminal ids in `session_key`, read off the subscribe
+/// snapshot (snapshot-before-live-events, so nothing races ahead of it).
+async fn collect_log_terminals(
+    client: &mut lazybox_ipc::Client,
+    session_key: &lazybox_core::SessionKey,
+) -> anyhow::Result<Vec<lazybox_ipc::TerminalId>> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match tokio::time::timeout_at(deadline, client.recv()).await {
+            Ok(Some(lazybox_ipc::Event::Snapshot { terminals, .. })) => {
+                return Ok(terminals
+                    .into_iter()
+                    .filter(|t| {
+                        &t.session_key == session_key
+                            && matches!(t.kind, lazybox_ipc::TerminalKind::LogTail { .. })
+                    })
+                    .map(|t| t.terminal_id)
+                    .collect());
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) => anyhow::bail!("daemon closed the connection before sending a snapshot"),
+            Err(_) => anyhow::bail!("timed out waiting for the daemon snapshot"),
+        }
+    }
+}
+
+/// Wait (briefly) until every closed terminal has reported `TerminalExited`,
+/// so the `Close` frames flush before the process exits. Best-effort: a
+/// timeout just means we stop waiting, not that the closes failed.
+async fn await_terminals_closed(client: &mut lazybox_ipc::Client, ids: &[lazybox_ipc::TerminalId]) {
+    let mut remaining: std::collections::HashSet<u64> = ids.iter().map(|id| id.0).collect();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while !remaining.is_empty() {
+        match tokio::time::timeout_at(deadline, client.recv()).await {
+            Ok(Some(lazybox_ipc::Event::TerminalExited { terminal_id, .. })) => {
+                remaining.remove(&terminal_id.0);
+            }
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => break,
+        }
+    }
+}
+
+/// Create the temp file a `LogTail` window tails. A per-invocation directory
+/// keeps the file's basename — the window's tab label — clean (the daemon and
+/// renderer both title a log window by its path's last segment).
+fn create_log_file(title: Option<&str>) -> anyhow::Result<PathBuf> {
+    let dir = std::env::temp_dir()
+        .join("lazybox-logs")
+        .join(uuid::Uuid::new_v4().hyphenated().to_string());
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| anyhow::anyhow!("create log dir {}: {e}", dir.display()))?;
+    let path = dir.join(sanitize_log_title(title));
+    std::fs::File::create(&path)
+        .map_err(|e| anyhow::anyhow!("create log file {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// Reduce a `--title` to a single safe path segment (the window's label).
+/// Empty or all-stripped titles fall back to `log`.
+fn sanitize_log_title(title: Option<&str>) -> String {
+    let cleaned: String = title
+        .map(str::trim)
+        .unwrap_or_default()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .take(48)
+        .collect();
+    let trimmed = cleaned.trim_matches(['-', '.']);
+    if trimmed.is_empty() {
+        "log".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Copy stdin into the tailed file, unbuffered, so the `LogTail` window sees
+/// output as it arrives. Returns when the piped command closes stdin.
+fn drain_stdin_to(path: &std::path::Path) -> anyhow::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .map_err(|e| anyhow::anyhow!("open log file {}: {e}", path.display()))?;
+    let mut stdin = std::io::stdin().lock();
+    std::io::copy(&mut stdin, &mut file).map_err(|e| anyhow::anyhow!("stream stdin: {e}"))?;
+    Ok(())
+}
+
 /// Wait until Subscribe has installed the live stream. The daemon's contract
 /// is snapshot-before-live-events, so no create outcome can race ahead of it.
 async fn await_workspace_snapshot(client: &mut lazybox_ipc::Client) -> anyhow::Result<()> {
@@ -875,6 +1185,80 @@ async fn run_test(preselect: Option<lazybox_tui::realm::model::Preselect>) -> an
     });
 
     // No drain handle: --test state is a throwaway tempdir.
+    spawn_terminal_restore_on_signal(None);
+    let snippets = fixture.snippets.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut model = lazybox_tui::realm::Model::new(client, snippets)?;
+        if let Some(p) = preselect {
+            model = model.with_preselect(p);
+        }
+        lazybox_tui::realm::model::run_loop_with_model(model)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("realm task panicked: {e}"))?
+    // `fixture` drops here → TempDir cleanup.
+}
+
+/// `lazybox --demo` boots against a throwaway multi-repo inbox (no
+/// GitHub, no PTY) and runs the built-in "fleet" scenario: it publishes a
+/// scripted timeline of synthetic daemon events onto the process-wide bus,
+/// bringing the whole UI to life — agents working across repos, one asking,
+/// one done, one rate-limited, live terminals streaming canned output — so
+/// the six v0.1.13 features can be exercised and recorded deterministically.
+///
+/// The scenario driver is a *second producer* on the same bus the daemon
+/// uses; the daemon still runs (it owns the Subscribe → Snapshot handshake
+/// and the bus → client relay), so this is the production event path fed
+/// synthetic events, not a bypass. See `scenario.rs` for the harness and its
+/// documented interface gaps.
+async fn run_demo(preselect: Option<lazybox_tui::realm::model::Preselect>) -> anyhow::Result<()> {
+    let fixture = scenario::DemoFixture::seed()?;
+    let repos: std::collections::BTreeSet<&str> =
+        fixture.workspaces.iter().map(|w| w.repo.as_str()).collect();
+    eprintln!(
+        "--demo: {} seeded workspaces across {} ({}); repo at {}",
+        fixture.workspaces.len(),
+        repos.len(),
+        repos.into_iter().collect::<Vec<_>>().join(", "),
+        fixture.repo.path().display()
+    );
+    let _ = std::env::set_current_dir(fixture.repo.path());
+
+    let (client, server) = channel::pair();
+    // Tier 2: back the daemon with an in-memory MockBackend so the scenario
+    // can spawn REAL daemon terminals (durable across recovery, input-accepting)
+    // and feed them canned output — no real PTY, no agent subprocess.
+    let mock = lazybox_server::backend::MockBackend::new();
+    let config = ServerConfig::with_store_and_backend(fixture.store.clone(), mock.as_backend());
+    // Grab handles BEFORE `config` moves into the daemon: the bus every TUI
+    // subscribes to, and a config clone the scenario uses to issue real spawn
+    // commands and resolve their backend keys.
+    let bus = config.bus.clone();
+    let stage_config = config.clone();
+    let cwd = fixture.repo.path().to_path_buf();
+
+    tokio::spawn(async move {
+        if let Err(e) = Server::new(config).serve(server).await {
+            tracing::error!("demo-mode daemon exited: {e}");
+        }
+    });
+
+    // Drive the scripted timeline in the background. The settle delay lets the
+    // TUI's Subscribe → Snapshot land before the first live event, so nothing
+    // is broadcast into the void.
+    let steps = scenario::fleet_scenario(&fixture);
+    let stage = scenario::Stage::Backed {
+        config: stage_config,
+        mock,
+        cwd,
+    };
+    tokio::spawn(scenario::run(
+        bus,
+        stage,
+        std::time::Duration::from_millis(1500),
+        steps,
+    ));
+
     spawn_terminal_restore_on_signal(None);
     let snippets = fixture.snippets.clone();
     tokio::task::spawn_blocking(move || {
@@ -1404,6 +1788,19 @@ async fn run_embedded_realm(
         None
     };
 
+    // #1420: when this process owns the daemon, start the cross-agent
+    // coordination MCP server on loopback so spawned agents can discover and
+    // read sibling sessions (whoami / list_sessions / read_session). Starting
+    // it here — before any agent spawns — means the spawn path sees the bound
+    // endpoint and can wire each agent's `--mcp-config`. Advisory: a bind
+    // failure only disables coordination tooling, never the TUI.
+    if embedded_socket.is_some() {
+        match lazybox_server::mcp::start(config.clone()).await {
+            Ok(addr) => tracing::info!("mcp coordination server on {addr}"),
+            Err(error) => tracing::warn!("start mcp coordination server: {error}"),
+        }
+    }
+
     // Two paths into the polling loop:
     //   1. Persisted setup exists → kick polling immediately.
     //   2. No persisted setup → run detection, hand the wizard to
@@ -1655,7 +2052,14 @@ async fn build_scope_sources() -> Vec<Box<dyn lazybox_core::ScopeSource>> {
     if let Ok(cred) = lazybox_gh::credential_chain()
         .resolve(lazybox_gh::SOURCE)
         .await
-        && let Ok(client) = lazybox_gh::GhClient::from_credential(cred).await
+        && let Ok(client) = lazybox_gh::GhClient::from_credential_with_host(
+            cred,
+            lazybox_config::Config::load()
+                .unwrap_or_default()
+                .github_host()
+                .as_deref(),
+        )
+        .await
     {
         sources.push(Box::new(lazybox_gh::GhScopes::new(std::sync::Arc::new(
             client,
@@ -2019,6 +2423,15 @@ async fn server_start() -> anyhow::Result<()> {
     )
     .await;
 
+    // #1420: the standalone daemon owns spawns exactly like the embedded one,
+    // so it must also start the coordination MCP server before any agent
+    // spawns — otherwise agents launched through `server start` silently get
+    // no coordination tools. Advisory: a bind failure only disables the tools.
+    match lazybox_server::mcp::start(config.clone()).await {
+        Ok(addr) => tracing::info!("mcp coordination server on {addr}"),
+        Err(error) => tracing::warn!("start mcp coordination server: {error}"),
+    }
+
     let factory_config = config.clone();
     let service = SocketService::new(socket.clone(), pid_file, move || factory_config.clone());
     let shutdown = service.shutdown_handle();
@@ -2187,6 +2600,145 @@ mod argv_tests {
         assert_eq!(a, args(&["--workspace", "foo"]));
     }
 
+    #[test]
+    fn sanitize_log_title_keeps_a_clean_single_segment() {
+        assert_eq!(sanitize_log_title(Some("dev")), "dev");
+        assert_eq!(sanitize_log_title(Some("dev-server_2")), "dev-server_2");
+        // Path separators and spaces can't leak into the basename.
+        assert_eq!(sanitize_log_title(Some("../etc/passwd")), "etc-passwd");
+        assert_eq!(sanitize_log_title(Some("build logs")), "build-logs");
+        // Empty / absent / all-stripped fall back to a usable name.
+        assert_eq!(sanitize_log_title(None), "log");
+        assert_eq!(sanitize_log_title(Some("   ")), "log");
+        assert_eq!(sanitize_log_title(Some("///")), "log");
+    }
+
+    #[tokio::test]
+    async fn collect_log_terminals_filters_to_this_workspace_logs() {
+        let sk = lazybox_core::SessionKey::from("github-acme-widget-1");
+        let other = lazybox_core::SessionKey::from("github-acme-widget-2");
+        let snap = |id: u64, sk: &lazybox_core::SessionKey, kind: lazybox_ipc::TerminalKind| {
+            lazybox_ipc::TerminalSnapshot {
+                terminal_id: lazybox_ipc::TerminalId(id),
+                session_key: sk.clone(),
+                kind,
+                replay: Vec::new(),
+                last_seq: 0,
+                replay_available: false,
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+                prompt_history: Vec::new(),
+                composing_buffer: None,
+                agent_state: None,
+                authenticating: false,
+            }
+        };
+        let (command_tx, _command_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(1);
+        let mut client = lazybox_ipc::Client::from_channels(command_tx, event_rx);
+        event_tx
+            .send(lazybox_ipc::Event::Snapshot {
+                workspaces: Vec::new(),
+                terminals: vec![
+                    snap(1, &sk, lazybox_ipc::TerminalKind::Agent("claude".into())),
+                    snap(
+                        2,
+                        &sk,
+                        lazybox_ipc::TerminalKind::LogTail {
+                            path: "/t/a".into(),
+                        },
+                    ),
+                    snap(
+                        3,
+                        &sk,
+                        lazybox_ipc::TerminalKind::LogTail {
+                            path: "/t/b".into(),
+                        },
+                    ),
+                    // A log window in a different workspace must be left alone.
+                    snap(
+                        4,
+                        &other,
+                        lazybox_ipc::TerminalKind::LogTail {
+                            path: "/t/c".into(),
+                        },
+                    ),
+                ],
+                projects: Vec::new(),
+                recent_snippets: Vec::new(),
+                dismissed_updates: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        let ids = collect_log_terminals(&mut client, &sk).await.unwrap();
+        assert_eq!(
+            ids,
+            vec![lazybox_ipc::TerminalId(2), lazybox_ipc::TerminalId(3)]
+        );
+    }
+
+    #[tokio::test]
+    async fn await_command_outcome_resolves_success_and_surfaces_failure() {
+        let short = Duration::from_secs(2);
+
+        // A matching CommandCompleted (after unrelated noise) → Ok. This is what
+        // lets `log_open` know the window actually opened before it drains stdin
+        // into the tailed file — the fire-and-forget path could not.
+        let (command_tx, _c) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(4);
+        let mut client = lazybox_ipc::Client::from_channels(command_tx, event_rx);
+        event_tx
+            .send(lazybox_ipc::Event::CommandCompleted {
+                client_request_id: "other".into(),
+            })
+            .await
+            .unwrap();
+        event_tx
+            .send(lazybox_ipc::Event::CommandCompleted {
+                client_request_id: "req-1".into(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            await_command_outcome(&mut client, "req-1", short)
+                .await
+                .is_ok()
+        );
+
+        // A matching CommandFailed → Err carrying the daemon's message, so the
+        // caller aborts instead of streaming output into a window nothing tails.
+        let (command_tx, _c) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(4);
+        let mut client = lazybox_ipc::Client::from_channels(command_tx, event_rx);
+        event_tx
+            .send(lazybox_ipc::Event::CommandFailed {
+                client_request_id: "req-2".into(),
+                message: "no session in workspace".into(),
+            })
+            .await
+            .unwrap();
+        let err = await_command_outcome(&mut client, "req-2", short)
+            .await
+            .expect_err("failed spawn must surface as an error");
+        assert!(
+            err.to_string().contains("no session in workspace"),
+            "must carry the daemon message: {err}"
+        );
+
+        // A closed connection → Err, never a false success.
+        let (command_tx, _c) = tokio::sync::mpsc::unbounded_channel();
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(1);
+        let mut client = lazybox_ipc::Client::from_channels(command_tx, event_rx);
+        drop(event_tx);
+        assert!(
+            await_command_outcome(&mut client, "req-3", short)
+                .await
+                .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn relay_smoke_requires_a_snapshot_round_trip() {
         let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2257,6 +2809,20 @@ mod argv_tests {
         assert!(wants_version(&args(&["--version"])));
         assert!(wants_version(&args(&["-V"])));
         assert!(!wants_version(&args(&["-v"]))); // lowercase -v is not the version flag
+    }
+
+    #[test]
+    fn only_bare_lazybox_launches_unknown_commands_do_not() {
+        use TopLevelFallback::*;
+        // Bare `lazybox` (no leftover positional after flags are consumed) launches.
+        assert_eq!(classify_top_level_fallback(None), Launch);
+        // `help` is the bare-word alias for `--help`.
+        assert_eq!(classify_top_level_fallback(Some("help")), ShowHelp);
+        // A typo or unknown command must NOT launch a second full instance
+        // (the `lazybox help` → rogue-daemon footgun once agents have it on PATH).
+        assert_eq!(classify_top_level_fallback(Some("status")), Unknown);
+        assert_eq!(classify_top_level_fallback(Some("lgo")), Unknown);
+        assert_eq!(classify_top_level_fallback(Some("--typo")), Unknown);
     }
 
     #[tokio::test]

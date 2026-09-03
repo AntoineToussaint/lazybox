@@ -486,6 +486,7 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
   let workspaces = new Map<string, Workspace>();
   let terminals = new Map<number, TerminalRecord>();
   let selectedKey: string | null = null;
+  const selectedWorkspaces = new Set<string>(); // Multi-select set for bulk actions
   const markedWorkspaces = new Set<string>();
   const markedActivity = new Map<string, Set<string>>();
   const expandedActivity = new Set<string>();
@@ -598,6 +599,7 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
   let maxTerminalWriteBytes = 128 * 1024;
   let terminalChannelHealthy = false;
   let terminalChannelEverOnline = false;
+  let terminalStreamConnected = false; // Separate state for terminal stream connection
   let terminalInputDroppedWhileOffline = false;
   let terminalIncidentMessage: string | null = null;
   const pendingTerminalFrames = new Map<number, TerminalBinaryFrame[]>();
@@ -610,6 +612,10 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
   const inboxConnection = new InboxConnection(
     () => invoke<WorkspacesResponse>("list_workspaces"),
     async () => {
+      // If already subscribed, unsubscribe the old channel first.
+      if (eventChannel !== null) {
+        eventChannel.onmessage = () => {};
+      }
       eventChannel = new Channel<DesktopStreamMessage>();
       eventChannel.onmessage = handleStreamMessage;
       await invoke("subscribe_events", { onEvent: eventChannel, controllerId });
@@ -1675,6 +1681,7 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
 
   function handleTerminalDisconnect(message: string): void {
     terminalChannelHealthy = false;
+    terminalStreamConnected = false; // Mark stream as disconnected
     terminalDecoder.reset();
     if (pendingInput.size > 0) {
       terminalInputDroppedWhileOffline = true;
@@ -1698,6 +1705,7 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
     // connect, not a recovery, so it must not surface a recovery notice.
     const recovered = terminalChannelEverOnline;
     terminalChannelHealthy = true;
+    terminalStreamConnected = true; // Mark stream as connected
     terminalChannelEverOnline = true;
     terminalDecoder.reset();
     terminalStreamHealth.textContent = recovered
@@ -2243,6 +2251,7 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
     button.className = "workspace-row";
     button.dataset.key = workspace.key;
     button.classList.toggle("selected", workspace.key === selectedKey);
+    button.classList.toggle("multi-selected", selectedWorkspaces.has(workspace.key));
     button.classList.toggle("marked", markedWorkspaces.has(workspace.key));
     button.type = "button";
     button.setAttribute(
@@ -2310,6 +2319,22 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
       bottom,
       workspaceRuntimeSignals(terminals.values(), workspace.key),
     );
+
+    // Render automation pills
+    const automationPills: TaskSignal[] = [];
+    if (workspace.auto_merge_on_green) {
+      automationPills.push({ label: "AUTO", tone: "success" });
+    }
+    if (workspace.policies.auto_fix_ci !== "None" || workspace.policies.auto_fix_conflict !== "None") {
+      automationPills.push({ label: "ARM", tone: "attention" });
+    }
+    if (workspace.track_main) {
+      automationPills.push({ label: "⎇ main" });
+    }
+    if (automationPills.length > 0) {
+      renderTaskBadges(bottom, automationPills);
+    }
+
     const agentJump = liveAgentWorkspaceKeys().indexOf(workspace.key);
     if (agentJump >= 0 && agentJump < 9) {
       renderTaskBadges(bottom, [{ label: `⌥${agentJump + 1}` }]);
@@ -2577,6 +2602,13 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
   function toggleWorkspaceMark(key: string): void {
     if (!markedWorkspaces.delete(key)) {
       markedWorkspaces.add(key);
+    }
+    renderInbox();
+  }
+
+  function toggleWorkspaceSelection(key: string): void {
+    if (!selectedWorkspaces.delete(key)) {
+      selectedWorkspaces.add(key);
     }
     renderInbox();
   }
@@ -4799,6 +4831,10 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
   }
 
   async function markSelectedRead(): Promise<void> {
+    if (selectedWorkspaces.size > 1) {
+      await performBulkMarkRead();
+      return;
+    }
     if (selectedKey === null) {
       return;
     }
@@ -4806,6 +4842,150 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
       commandsForWorkspaceIntent(selectedKey, { type: "mark-read" }),
       "Marking workspace read…",
       "Workspace marked read.",
+    );
+  }
+
+  /**
+   * Perform bulk merge on selected workspaces.
+   * Shows confirmation with eligible/skipped breakdown.
+   */
+  async function performBulkMerge(): Promise<void> {
+    const targets = Array.from(selectedWorkspaces);
+    const eligible = targets.filter((key) => {
+      const workspace = workspaces.get(key);
+      const task = workspace === undefined ? null : primaryTask(workspace);
+      const isPr = task?.kind === "Pr";
+      const hasTerminal = (workspace?.sessions ?? []).some(
+        (s) => s.terminal !== null,
+      );
+      return isPr && !hasTerminal && task?.state !== "Draft";
+    });
+    const skipped = targets.length - eligible.length;
+
+    const affectedList = eligible
+      .map((key) => {
+        const workspace = workspaces.get(key);
+        return workspace ? `${workspace.name} (${taskReference(primaryTask(workspace))})` : key;
+      })
+      .join("\n");
+
+    const message = skipped > 0
+      ? `Merge ${eligible.length} of ${targets.length} PRs?\n\nSkipped: ${skipped} (not mergeable or draft)`
+      : `Merge ${eligible.length} PR${eligible.length === 1 ? "" : "s"}?`;
+
+    const accepted = await confirmUserAction(
+      `Merge ${eligible.length} PR${eligible.length === 1 ? "" : "s"}`,
+      message,
+      "Merge",
+      affectedList || undefined,
+    );
+    if (!accepted) {
+      return;
+    }
+
+    const commands = eligible.map((key) => mergePrCommand(key));
+    await runCommands(
+      commands,
+      `Merging ${eligible.length} PR${eligible.length === 1 ? "" : "s"}…`,
+      `Merge requested for ${eligible.length} PR${eligible.length === 1 ? "" : "s"}.`,
+    );
+  }
+
+  /**
+   * Perform bulk archive on selected workspaces.
+   */
+  async function performBulkArchive(): Promise<void> {
+    const targets = Array.from(selectedWorkspaces);
+    const affectedList = targets
+      .map((key) => {
+        const workspace = workspaces.get(key);
+        return workspace ? workspace.name : key;
+      })
+      .join("\n");
+
+    const message = `Archive ${targets.length} workspace${targets.length === 1 ? "" : "s"}?\n\nSessions will be killed and rows removed from inbox.`;
+
+    const accepted = await confirmUserAction(
+      `Archive ${targets.length} workspace${targets.length === 1 ? "" : "s"}`,
+      message,
+      "Archive",
+      affectedList || undefined,
+    );
+    if (!accepted) {
+      return;
+    }
+
+    const commands = targets.map((key) => archiveCommand(key));
+    await runCommands(
+      commands,
+      `Archiving ${targets.length} workspace${targets.length === 1 ? "" : "s"}…`,
+      `Archived ${targets.length} workspace${targets.length === 1 ? "" : "s"}.`,
+    );
+  }
+
+  /**
+   * Perform bulk snooze on selected workspaces.
+   */
+  async function performBulkSnooze(preset: (typeof SNOOZE_PRESETS)[number]): Promise<void> {
+    const targets = Array.from(selectedWorkspaces);
+    const affectedList = targets
+      .map((key) => {
+        const workspace = workspaces.get(key);
+        return workspace ? workspace.name : key;
+      })
+      .join("\n");
+
+    const message = `Snooze ${targets.length} workspace${targets.length === 1 ? "" : "s"} for ${preset.label}?\n\nThey'll reappear in your inbox when the timer expires.`;
+
+    const accepted = await confirmUserAction(
+      `Snooze ${targets.length} workspace${targets.length === 1 ? "" : "s"}`,
+      message,
+      "Snooze",
+      affectedList || undefined,
+    );
+    if (!accepted) {
+      return;
+    }
+
+    const commands = targets.map((key) => snoozeCommand(key, preset.until(new Date())));
+    await runCommands(
+      commands,
+      `Snoozed ${targets.length} workspace${targets.length === 1 ? "" : "s"} for ${preset.label}…`,
+      `Snoozed ${targets.length} workspace${targets.length === 1 ? "" : "s"}.`,
+    );
+  }
+
+  /**
+   * Perform bulk mark-read on selected workspaces.
+   */
+  async function performBulkMarkRead(): Promise<void> {
+    const targets = Array.from(selectedWorkspaces);
+    const affectedList = targets
+      .map((key) => {
+        const workspace = workspaces.get(key);
+        return workspace ? workspace.name : key;
+      })
+      .join("\n");
+
+    const message = `Mark ${targets.length} workspace${targets.length === 1 ? "" : "s"} as read?`;
+
+    const accepted = await confirmUserAction(
+      `Mark ${targets.length} workspace${targets.length === 1 ? "" : "s"} read`,
+      message,
+      "Mark Read",
+      affectedList || undefined,
+    );
+    if (!accepted) {
+      return;
+    }
+
+    const commands = targets.flatMap((key) =>
+      commandsForWorkspaceIntent(key, { type: "mark-read" }),
+    );
+    await runCommands(
+      commands,
+      `Marking ${targets.length} workspace${targets.length === 1 ? "" : "s"} read…`,
+      `Marked ${targets.length} workspace${targets.length === 1 ? "" : "s"} read.`,
     );
   }
 
@@ -4915,6 +5095,12 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
   }
 
   async function snoozeSelected(): Promise<void> {
+    if (selectedWorkspaces.size > 1) {
+      const preset =
+        SNOOZE_PRESETS[Number(snoozeSelect.value)] ?? SNOOZE_PRESETS[1]!;
+      await performBulkSnooze(preset);
+      return;
+    }
     if (selectedKey === null) {
       return;
     }
@@ -5815,6 +6001,16 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
         closeFilterMenu();
         return;
       }
+      if (renameDialog.open) {
+        event.preventDefault();
+        renameDialog.close();
+        return;
+      }
+      if (diffDialog.open) {
+        event.preventDefault();
+        diffDialog.close();
+        return;
+      }
       if (document.activeElement === inboxSearch) {
         inboxSearch.blur();
         return;
@@ -5837,6 +6033,14 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
     }
     const keyboardOwned =
       editable || document.querySelector("dialog[open]") !== null;
+    // Guard single-letter keys with modifiers to prevent accidental actions
+    // (e.g., Cmd+A should not spawn an agent).
+    if ((event.metaKey || event.ctrlKey || event.altKey) && event.key.length === 1 && /^[a-z]$/i.test(event.key)) {
+      // Alt+digit is an explicitly-assigned shortcut, so allow it through.
+      if (!event.altKey || !/^[1-9]$/.test(event.key)) {
+        return;
+      }
+    }
     // Alt+digit jumps to the Nth live-agent workspace (#975). It's an
     // explicitly-assigned modifier shortcut, so it runs ahead of the general
     // resolver (which rejects unassigned Alt/Cmd/Ctrl combos), and only when
@@ -5893,7 +6097,7 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
       void refreshInbox(true);
     } else if (event.key === "v" && selectedKey !== null) {
       event.preventDefault();
-      toggleWorkspaceMark(selectedKey);
+      toggleWorkspaceSelection(selectedKey);
     } else if (event.key === "B") {
       event.preventDefault();
       openBroadcastDialog();

@@ -111,6 +111,18 @@ pub(crate) struct AgentTurnWatchdogFire {
     pub elapsed_since_output: std::time::Duration,
 }
 
+/// A live agent terminal the global working-watchdog sweep may force closed:
+/// still cached `Working` with no meaningful content change for longer than
+/// the sweep bound. Carries the identities the out-of-pump state commit needs
+/// (#1383).
+#[derive(Debug, Clone)]
+pub(crate) struct StalledWorkingAgent {
+    pub id: TerminalId,
+    pub backend_key: String,
+    pub session_key: SessionKey,
+    pub generation: u64,
+}
+
 impl AgentTurn {
     fn configure(
         &mut self,
@@ -232,6 +244,10 @@ impl AgentTurn {
     fn fire_quiet(&mut self) -> std::time::Duration {
         self.quiet_deadline = None;
         tokio::time::Instant::now().saturating_duration_since(self.content_stable_since)
+    }
+
+    fn content_stable_for(&self, now: tokio::time::Instant) -> std::time::Duration {
+        now.saturating_duration_since(self.content_stable_since)
     }
 
     fn fire_watchdog(&mut self) -> Option<AgentTurnWatchdogFire> {
@@ -701,6 +717,19 @@ impl TerminalRegistry {
             .unwrap_or_default()
     }
 
+    /// Whether the live terminal `id` was launched with permission prompts
+    /// disabled (`--dangerously-skip-permissions`). A running process's
+    /// permission posture is fixed at spawn, so a caller about to inject a
+    /// foreign prompt into an existing agent must consult this before it
+    /// hands attacker-influenceable text to an unattended bypass (#1392).
+    pub(crate) async fn no_permission_for(&self, id: TerminalId) -> bool {
+        self.lock_entries()
+            .await
+            .get(&id)
+            .map(|entry| entry.no_permission)
+            .unwrap_or(false)
+    }
+
     pub(crate) async fn record_access(&self, id: TerminalId, access: AgentRunAccess) {
         if access != AgentRunAccess::Default {
             self.lock_entries().await.entry(id).or_default().access = access;
@@ -969,6 +998,36 @@ impl TerminalRegistry {
             .await
             .values()
             .any(|entry| !entry.finishing && matches!(entry.agent_state, Some(AgentState::Working)))
+    }
+
+    /// Live agent terminals still cached `Working` whose meaningful content
+    /// has been at rest for at least `min_stable` — the candidates the global
+    /// working-watchdog sweep force-closes when the per-terminal pump's own
+    /// timers were starved and never promoted them (#1383). Shells and
+    /// terminals without a live backend/generation are skipped; the turn
+    /// clock's content-stability age is reset by meaningful output and by
+    /// affirmative hooks, so a genuinely busy agent never accrues it.
+    pub(crate) async fn stalled_working_agents(
+        &self,
+        min_stable: std::time::Duration,
+    ) -> Vec<StalledWorkingAgent> {
+        let now = tokio::time::Instant::now();
+        self.lock_entries()
+            .await
+            .iter()
+            .filter(|(_, entry)| !entry.finishing)
+            .filter(|(_, entry)| matches!(entry.agent_state, Some(AgentState::Working)))
+            .filter(|(_, entry)| matches!(entry.meta.as_ref(), Some((_, TerminalKind::Agent(_)))))
+            .filter(|(_, entry)| entry.turn.content_stable_for(now) >= min_stable)
+            .filter_map(|(id, entry)| {
+                Some(StalledWorkingAgent {
+                    id: *id,
+                    backend_key: entry.backend_key.clone()?,
+                    session_key: entry.meta.as_ref()?.0.clone(),
+                    generation: entry.agent_state_generation?,
+                })
+            })
+            .collect()
     }
 
     /// Return the number of live terminal-to-backend registrations.
@@ -1819,6 +1878,57 @@ mod tests {
         assert!(
             waiting.prepare_schedule(0).watchdog_due,
             "a waiting-on-user hook must not re-arm the watchdog"
+        );
+    }
+
+    /// The quiet timer measures BYTE silence, not content silence (#504):
+    /// EVERY output chunk re-arms it, even a non-meaningful repaint (a spinner
+    /// frame, a ticking counter). This is load-bearing — the quiet
+    /// classification promotes a `Working` terminal to `Done` on the premise
+    /// that a genuinely working agent repaints within the window, so a quiet
+    /// one has stopped. `content_fingerprint` cannot tell a live counter-only
+    /// spinner from a frozen one (both strip to the same letters), so gating
+    /// the quiet timer on meaningful progress would let it fire mid-work and
+    /// force a busy agent to `Done`. Frozen/starved spinners are promoted by
+    /// the content-stability watchdog and the global sweep instead (#1383).
+    #[tokio::test(start_paused = true)]
+    async fn any_output_re_arms_the_quiet_window() {
+        let quiet = std::time::Duration::from_secs(5);
+        let mut turn = AgentTurn::default();
+        turn.configure(quiet, Some(std::time::Duration::from_secs(15)));
+
+        turn.record(AgentTurnEvent::OutputChunk {
+            backend_seq: 1,
+            meaningful_progress: true,
+        });
+        let armed = turn
+            .prepare_schedule(0)
+            .quiet_deadline
+            .expect("output arms the quiet timer");
+
+        // A non-meaningful repaint 4s later — a live spinner whose only change
+        // is the ticking counter — must still push the deadline forward, or
+        // the quiet classifier would fire on a genuinely working screen.
+        tokio::time::advance(std::time::Duration::from_secs(4)).await;
+        turn.record(AgentTurnEvent::OutputChunk {
+            backend_seq: 2,
+            meaningful_progress: false,
+        });
+        let rearmed = turn
+            .prepare_schedule(0)
+            .quiet_deadline
+            .expect("still armed after a repaint");
+        assert!(
+            rearmed > armed,
+            "any output byte — meaningful or not — re-arms the quiet window",
+        );
+
+        // 4s after the repaint (8s total): not yet due, because the repaint
+        // pushed the deadline out to repaint-time + 5s.
+        tokio::time::advance(std::time::Duration::from_secs(4)).await;
+        assert!(
+            tokio::time::Instant::now() < rearmed,
+            "the window runs 5s from the LAST byte, not the last meaningful one",
         );
     }
 

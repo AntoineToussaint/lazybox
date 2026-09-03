@@ -62,15 +62,49 @@ fn scrollback_rows(stream: &[u8]) -> usize {
     term.scrollback_rows().expect("scrollback_rows")
 }
 
+/// Serialize env-var mutations across concurrent tests. Each test that
+/// modifies `LAZYBOX_HOME` acquires this lock to prevent interference.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct IsolatedHome {
+    prev: Option<std::ffi::OsString>,
+    _tmp: tempfile::TempDir,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl IsolatedHome {
+    fn new() -> Self {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().unwrap();
+        let prev = std::env::var_os("LAZYBOX_HOME");
+        // SAFETY: mutation is serialized by ENV_LOCK; restored on drop.
+        unsafe {
+            std::env::set_var("LAZYBOX_HOME", tmp.path());
+        }
+        Self {
+            _guard: guard,
+            _tmp: tmp,
+            prev,
+        }
+    }
+}
+
+impl Drop for IsolatedHome {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.prev {
+                Some(v) => std::env::set_var("LAZYBOX_HOME", v),
+                None => std::env::remove_var("LAZYBOX_HOME"),
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn scrollback_survives_a_simulated_restart() {
     // Isolate all lazybox state (incl. the scrollback dir the backend
-    // derives from `LAZYBOX_HOME`) to a temp dir. Single-test binary, so
-    // this process-global env write races nothing.
-    let home = tempfile::TempDir::new().unwrap();
-    unsafe {
-        std::env::set_var("LAZYBOX_HOME", home.path());
-    }
+    // derives from `LAZYBOX_HOME`) to a temp dir under serialization.
+    let _home_guard = IsolatedHome::new();
 
     // Run 1: ~600 committed lines — far more than one screenful, so a
     // blank respawn (the pre-fix behavior) is trivially distinguishable
@@ -127,8 +161,41 @@ async fn scrollback_survives_a_simulated_restart() {
         recovered_depth >= run1_depth,
         "the restart must not shrink scrollback (run1 {run1_depth}, recovered {recovered_depth})"
     );
+}
 
-    unsafe {
-        std::env::remove_var("LAZYBOX_HOME");
+/// Regression test for #1250: IsolatedHome guard restores env properly.
+/// Concurrent tests no longer interfere with LAZYBOX_HOME modifications.
+#[test]
+fn env_guard_properly_restores_state() {
+    let original = std::env::var_os("LAZYBOX_HOME");
+
+    // First isolation scope
+    {
+        let _guard = IsolatedHome::new();
+        assert!(
+            std::env::var_os("LAZYBOX_HOME").is_some(),
+            "should set LAZYBOX_HOME"
+        );
     }
+    // Should be restored
+    assert_eq!(
+        std::env::var_os("LAZYBOX_HOME"),
+        original,
+        "env restored after scope 1"
+    );
+
+    // Second isolation scope — independent and doesn't interfere
+    {
+        let _guard = IsolatedHome::new();
+        assert!(
+            std::env::var_os("LAZYBOX_HOME").is_some(),
+            "should set again"
+        );
+    }
+    // Should be restored again
+    assert_eq!(
+        std::env::var_os("LAZYBOX_HOME"),
+        original,
+        "env restored after scope 2"
+    );
 }

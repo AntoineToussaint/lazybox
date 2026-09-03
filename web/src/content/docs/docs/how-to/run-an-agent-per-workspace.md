@@ -35,6 +35,14 @@ Press `]]` then `q` to return to the sidebar; the session keeps running.
 (Prefer the old top-level keys? Remap them via `ui.action_keys`, keyed
 `spawn_agent.<id>` — e.g. `spawn_agent.claude: "c"`.)
 
+Each explicit `a c` / `a x` / `a u` starts a **new** agent, even beside an idle
+one of the same kind — a workspace can hold several agent conversations at once
+(one-agent-per-workspace is gone). The daemon still collapses a genuine spawn
+race (a double-fire lands one backend, not two) and adopts an issue→PR handoff,
+so you never silently fork two backends. The reuse-first path is unchanged: bare
+`w` / `w w` and autonomous work (`@lazybox` mentions, auto-fix) still inject into
+a running agent rather than spawning a second one.
+
 ## Add another agent CLI
 
 Generic agent definitions are loaded from `agents.<id>` at daemon startup.
@@ -207,6 +215,23 @@ Terminal exits are explicit rather than inferred from a quiet screen:
 
 The failed-to-start grace period is configurable with
 `terminal.agent_dead_on_arrival_ms`.
+
+## Recover credit- and rate-limited agents
+
+When an agent hits a provider limit, lazybox surfaces it (a `⏳` pill on the row
+and header count) and gives you keys to recover a whole fleet without visiting
+each terminal:
+
+| Chord | Does |
+| --- | --- |
+| `Ctrl-k` | Recover the focused blocked agent from a provider **credit** chooser: select its "Wait for credit" option, wait for the composer, and submit the configured continuation prompt (`ui.credit_recovery_prompt`). Chooser detection is Codex-style today. |
+| `Shift-K` | **Resume every** workspace blocked on a usage / **rate** limit at once — a settle-gated "continue" injected into each limit-blocked agent. Use it after switching Claude account / API key so you don't reopen each terminal. |
+| `x w` | **Reset** the focused agent's conversation context in place (injects the agent's own clear command — `/clear` for Claude, `/new` for Codex). Session, worktree, and prompt history survive; only the model's context resets. Confirmed first. |
+
+Set `ui.auto_wait_on_limit: true` to auto-press "Wait" the moment a Claude agent
+hits its limit, so a fleet all capping at once doesn't each need a manual visit.
+Route agent traffic through the metering proxy (`agent.metering_proxy: true`) to
+see live per-provider usage in the sidebar header before any limit is hit.
 
 ## Autonomous runs and skip-permissions
 

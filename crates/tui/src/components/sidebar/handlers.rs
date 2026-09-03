@@ -113,6 +113,8 @@ impl Sidebar {
                         initial_prompt: prompt,
                         initial_snippet: None,
                         on_main: false,
+                        // Sidebar `w w` continues a live conversation.
+                        force_new: false,
                     });
                 }
                 PaneOutcome::Consumed
@@ -140,6 +142,7 @@ impl Sidebar {
                             initial_prompt: None,
                             initial_snippet: None,
                             on_main: false,
+                            force_new: false,
                         });
                     }
                     _ => {
@@ -421,6 +424,8 @@ impl Sidebar {
                                 title,
                                 body,
                                 workspace_key: session_key.clone(),
+                                name: workspace.name.clone(),
+                                kind: NotificationKind::Asking,
                             });
                         }
                         // Inline footer notice in addition to the OS
@@ -452,6 +457,8 @@ impl Sidebar {
                             title,
                             body,
                             workspace_key: session_key.clone(),
+                            name: workspace.name.clone(),
+                            kind: NotificationKind::Done,
                         });
                     }
                     self.pending_asking_notices.push(format!(
@@ -463,7 +470,17 @@ impl Sidebar {
                 // the same path as asking/done so N agents all hitting the
                 // cap at once surface without visiting each terminal. The
                 // footer notice names the bulk-resume key.
+                //
+                // Suppressed when `ui.auto_wait_on_limit` is on: the daemon
+                // auto-presses Wait and immediately relabels this block to the
+                // calm `AwaitingReset`, so the `LimitReached` we see here is a
+                // *handled* transient, not a "needs you" alert. Alerting on it
+                // (a desktop push naming Shift-K/Shift-L manual sweeps the
+                // policy exists to eliminate) defeats the point. A block the
+                // policy can't handle — the agent already moved on, so the
+                // park no-ops — was transient anyway and needs no alert.
                 if change.now_limit_reached
+                    && !self.auto_wait_on_limit
                     && let Some(workspace) = self.workspaces.get(session_key)
                 {
                     if self.attention.desktop_notify {
@@ -476,6 +493,8 @@ impl Sidebar {
                             title,
                             body,
                             workspace_key: session_key.clone(),
+                            name: workspace.name.clone(),
+                            kind: NotificationKind::LimitReached,
                         });
                     }
                     self.pending_asking_notices.push(format!(
@@ -506,7 +525,13 @@ impl Sidebar {
                 match status {
                     lazybox_ipc::WorktreeStepStatus::Started
                     | lazybox_ipc::WorktreeStepStatus::Progress(_) => {
-                        self.spawning.insert(session_key.clone());
+                        // Preserve the original start time across the burst of
+                        // `Progress` events for the same spawn, so the stale
+                        // guard measures the whole provision, not the gap since
+                        // the last step (#1372).
+                        self.spawning
+                            .entry(session_key.clone())
+                            .or_insert_with(std::time::Instant::now);
                     }
                     // Setup failed (or was cancelled — a `Failed` carrying
                     // `SPAWN_CANCELLED_NOTE`): stop spinning. The failure
@@ -614,10 +639,15 @@ fn aggregate_agent_state(
         // A usage-limit block outranks even `InputNeeded`: it's the most
         // urgent "you must act (externally) before this agent moves" state
         // across a workspace's terminals (#847).
-        lazybox_ipc::AgentState::CreditExhausted => 7,
-        lazybox_ipc::AgentState::LimitReached => 6,
-        lazybox_ipc::AgentState::InputNeeded => 5,
-        lazybox_ipc::AgentState::Working => 4,
+        lazybox_ipc::AgentState::CreditExhausted => 8,
+        lazybox_ipc::AgentState::LimitReached => 7,
+        lazybox_ipc::AgentState::InputNeeded => 6,
+        lazybox_ipc::AgentState::Working => 5,
+        // The calm auto-waiting block: notable enough to surface over a
+        // resting `Done` (one agent is still parked on its reset), but it
+        // yields to an actively `Working` sibling — real work is the more
+        // representative glyph, and the parked agent self-resumes.
+        lazybox_ipc::AgentState::AwaitingReset => 4,
         lazybox_ipc::AgentState::Done => 3,
         lazybox_ipc::AgentState::Exited { .. } => 2,
         lazybox_ipc::AgentState::Idle => 1,
@@ -645,5 +675,7 @@ fn attention_notification(signal: AttentionSignal, w: &Workspace) -> Option<Pend
         title,
         body,
         workspace_key: (&w.key).into(),
+        name: w.name.clone(),
+        kind: NotificationKind::Activity,
     })
 }

@@ -7,10 +7,10 @@ workspace has already received.
 
 A snippet is a short key backed by a complete agent instruction. It is
 sent and **submitted** to the focused agent in one action, not merely
-pasted for you to finish. lazybox ships 58 categorized workflows, so
+pasted for you to finish. lazybox ships 61 categorized workflows, so
 the system is useful before you create anything: review (`deepreview`
 — the flagship deep review — plus `rev`, `fixall`, `audit`, `scout`), Git and PR
-(`pr`, `rebase`, `sync`, `conflicts`, `freshen`, `push`, `handoff`), GitHub (`triage`, `respond`, `convert`),
+(`pr`, `rebase`, `sync`, `conflicts`, `freshen`, `push`, `handoff`), GitHub (`triage`, `respond`, `convert`, `carve`, `designissues`),
 Linear (`wip`, `done`, `attach`), testing (`test`, `tdd`, `repro`),
 debugging (`bug`, `bisect`, `trace`), security (`sec`, `deps`, `leaks`),
 and more. The GitHub and Linear workflows are **provider-scoped**: they
@@ -218,7 +218,10 @@ lazybox ships two provider-scoped categories:
 - **GitHub** — `triage` (issue → plan), `respond` (review comments),
   `link` (PR ↔ issue), `whyci` (summarize failing CI), `nudge`
   (request/nudge reviewers), `release` (cut a release PR), `convert`
-  (issue → PR).
+  (issue → PR), `carve` (decompose the session's proposed work into a
+  few self-contained, conflict-minimized issues with a Definition of
+  Done), `dod` (stamp a Definition-of-Done checklist onto the draft),
+  `designissues` (coordinated cross-repo issues from a design).
 - **Linear** — `wip` / `done` (move the issue's state), `status`
   (comment an update back), `subissues` (break into sub-issues),
   `attach` (link the PR), `estimate` (estimate & prioritize).
@@ -233,7 +236,7 @@ The three layers merge from least to most specific:
 
 | Scope          | Path                          | Use it for                                      |
 | -------------- | ----------------------------- | ----------------------------------------------- |
-| **Built-in**   | _(shipped with lazybox)_       | 58 categorized daily engineering workflows.    |
+| **Built-in**   | _(shipped with lazybox)_       | 61 categorized daily engineering workflows.    |
 | **Global**     | `~/.lazybox/snippets.yaml`     | Personal habits reused across every repository. |
 | **Launch directory** | `<launch-dir>/.lazybox/snippets.yaml` | Overrides for this lazybox client catalog. |
 
@@ -248,6 +251,40 @@ another workspace does not load that workspace's `.lazybox/snippets.yaml`;
 restart lazybox from a different directory to select a different directory
 layer. Both user-owned files are optional and work well in dotfiles or version
 control.
+
+## Stay current with built-in improvements
+
+An override silently shadows the built-in of the same key, so a snippet
+you forked once never sees later built-in improvements — and nothing
+tells you you're on a stale copy. The picker and browser close that gap
+with an **override-state badge** next to each entry's origin:
+
+| Badge | Meaning | What to do |
+| ----- | ------- | ---------- |
+| _(none)_ | The shipped built-in, unmodified. | Nothing. |
+| `custom` | Your snippet; no built-in of this key. | Nothing. |
+| `override` | Differs from the built-in; acknowledged as an intentional, up-to-date fork. | Nothing. |
+| `⚠ built-in changed` | Differs from the built-in, and the built-in has moved since you last reconciled. | Compare, then keep or adopt. |
+| `= built-in` | A redundant copy of the current built-in. | Adopt to drop it and track the built-in. |
+
+A stale (`⚠`) or redundant (`= built-in`) row also carries a `⚠` marker
+in the picker list itself. On any override row the `]]s` picker offers
+three reconcile actions (shown in the footer):
+
+- **`Ctrl-D` compare** — view your override next to the current built-in
+  in a scrollable reader, so you can see exactly what diverged.
+- **`Ctrl-K` keep mine** — acknowledge your override against the current
+  built-in. The `⚠` badge clears and stays quiet until the built-in
+  changes *again* (the acknowledgement is keyed to the built-in's
+  content, so a future built-in edit re-raises it).
+- **`Ctrl-A` adopt built-in** — drop a **global** override so the
+  improved built-in shows through. A repo-local override lives in a
+  shared, checked-in file, so adopt points you at
+  `.lazybox/snippets.yaml` to edit rather than editing it for you.
+
+Keep-mine acknowledgements are owned by the daemon and shared across
+in-process and `--connect` clients, exactly like dismissed update
+prompts — acknowledge on one, and it sticks everywhere.
 
 ## Broadcast one workflow to several workspaces
 
@@ -318,26 +355,30 @@ snippets:
     category: Review
     body: |
       Review the current diff (`git diff` against the base branch) as a
-      rigorous code review — assume there IS a bug and your job is to find
-      it, not to confirm the code is fine. Read adversarially across every
-      lens that applies: correctness (logic errors, off-by-one, missing
-      error handling, broken edge cases), security (untrusted input
-      crossing a trust boundary), data loss, and concurrency. Treat each
-      changed line as guilty until you can trace why it's safe, and treat a
-      safe-looking default — an early return, a fallback, a delete-on-missing
-      — as a footgun to disprove, not a comfort. In scope is everything the
-      diff touches *and* everything that breaks because of it; scope is not
-      an escape hatch. Report findings ranked by severity, each with a
-      `file:line` anchor and the concrete input or state that triggers the
-      wrong result — a falsifiable failure, not a vague worry, and no
-      shallow nit dressed up as a bug. A finding is dismissed only by
-      refuting it with a specific failure scenario that proves it can't
-      happen; "out of scope," "not worth the complexity," "degrades
-      gracefully," and "should be fine" are banned as dismissals. Look only
-      at the changed lines and the code they directly touch, not the whole
-      file. Finish with a completeness check — what you did not examine and
-      why skipping it is justified with evidence — and, if a traced line is
-      genuinely clean, say so plainly rather than inventing nits.
+      rigorous, adversarial code review — assume there IS a bug and your
+      job is to find it, not to confirm the code is fine. Read adversarially
+      across every lens that applies: correctness (logic errors, off-by-one,
+      missing error handling, broken edge cases), security (untrusted input
+      crossing a trust boundary), data loss, resource leaks, and
+      concurrency. Treat each changed line as guilty until you can trace why
+      it's safe, and treat a safe-looking default — an early return, a
+      fallback, a delete-on-missing — as a footgun to disprove, not a
+      comfort. In scope is everything the diff touches *and* everything that
+      breaks because of it; scope is not an escape hatch. A finding is
+      dismissed only by refuting it with a specific, falsifiable failure
+      scenario that proves it can't happen; "out of scope," "not worth
+      the complexity," "degrades gracefully," and "should be fine" are
+      banned as dismissals. Lead with the full detail — every finding ranked
+      by severity, each with a `file:line` anchor and the concrete input or
+      state that triggers the wrong result, a real failure and not a vague
+      worry, with no shallow nit dressed up as a bug. Look only at the
+      changed lines and the code they directly touch, not the whole file.
+      Then close with a completeness check — what you did not examine and
+      why skipping it is safe — and a summary a human can read in ten
+      seconds: a one-line verdict (🟢 ship / 🟡 fix these nits first / 🔴
+      blockers, do not ship / ❓ need context) followed by the headline
+      findings as a tight, glanceable list. If a traced line is genuinely
+      clean, say so plainly rather than inventing nits.
 ```
 
 Review, fix, and security bodies go a step further — they are written to
@@ -355,8 +396,9 @@ regression test so it can't quietly soften back:
   touches and everything that breaks because of it*, so it can't be the
   escape hatch.
 - **`fixall` implements, it does not curate.** The deliverable is a clean,
-  tested diff; "here are the changes I would make" is not an acceptable
-  output.
+  tested diff that is **committed and pushed**; "here are the changes I would
+  make" is not an acceptable output, and neither is a fix left stranded in the
+  working tree (it's lost when the worktree is cleaned up).
 - **The review bodies close with a completeness self-critique** — what was
   not examined, and why skipping it is justified with evidence.
 

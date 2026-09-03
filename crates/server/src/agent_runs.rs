@@ -44,6 +44,23 @@ pub const AGENT_INPUT_CHANNEL_CAPACITY: usize = 64;
 /// is a pacing signal, never an admission gate (#1249).
 const AGENT_INPUT_STALL_NOTICE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Resolve the model-tier args to append to a structured run's argv.
+/// Only an *explicit* alias adds args — a `None` alias keeps the agent's
+/// own default, unlike [`lazybox_core::AgentModels::resolve_args`]`(None)`,
+/// which falls back to the configured default tier and would silently
+/// re-pin every existing headless run's model. Mirrors the PTY-spawn
+/// resolution in [`crate::spawn_plan`].
+fn structured_model_args(
+    cfg: &lazybox_config::Config,
+    agent: &str,
+    model_alias: Option<&str>,
+) -> Vec<String> {
+    match model_alias {
+        Some(alias) => cfg.agent_models(agent).resolve_args(Some(alias)),
+        None => Vec::new(),
+    }
+}
+
 pub async fn handle_start_agent_run(
     config: &ServerConfig,
     request_id: AgentRunRequestId,
@@ -56,6 +73,7 @@ pub async fn handle_start_agent_run(
     initial_input: Option<AgentInputMessage>,
     resume_latest: bool,
     access: AgentRunAccess,
+    model_alias: Option<String>,
 ) {
     if mode != AgentRuntimeMode::StreamJson {
         let _ = config.bus.send(Event::AgentRunStartFailed {
@@ -118,7 +136,16 @@ pub async fn handle_start_agent_run(
         // Not skip-permissions, so the strict-MCP gate never applies.
         strict_mcp: false,
     };
-    let argv = agent_impl.spawn(&spawn_ctx);
+    // Load the config once for both the model-tier resolution and the
+    // gateway/env routing below.
+    let yaml = lazybox_config::Config::load().unwrap_or_default();
+    // Escalate this headless run to a chosen model tier when asked — a
+    // Critic review or Ask-about-this-PR can run at Opus while the working
+    // agent stays on its default (#1312 follow-up). Model args land last on
+    // argv, exactly as PTY spawns append them (`spawn_plan::argv_for`).
+    let model_args = structured_model_args(&yaml, &agent, model_alias.as_deref());
+    let mut argv = agent_impl.spawn(&spawn_ctx);
+    argv.extend(model_args);
     let Some((program, extra_args)) = argv.split_first() else {
         let _ = config.bus.send(Event::AgentRunStartFailed {
             request_id: request_id.clone(),
@@ -135,8 +162,13 @@ pub async fn handle_start_agent_run(
     // run already reports its token usage by parsing its own stream-json,
     // so routing it through the proxy too would count every turn twice in
     // the header summary (#1109).
-    let yaml = lazybox_config::Config::load().unwrap_or_default();
-    let env = crate::spawn_plan::gateway_env_for_agent(&yaml, Some(agent_impl.as_ref()), false);
+    let env = crate::spawn_plan::gateway_env_for_agent(
+        &yaml,
+        Some(agent_impl.as_ref()),
+        false,
+        false,
+        resolved_session_key.as_str(),
+    );
     let env = crate::spawn_plan::with_agent_spawn_defaults(env, Some(agent_impl.as_ref()));
 
     let mut stream_config = AgentStreamConfig::new(protocol, program.clone());
@@ -931,6 +963,30 @@ fn question_choices(raw: &Value) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A headless run escalates to an explicit tier's `--model` args, while
+    /// `None` keeps the agent's own default — crucially NOT the configured
+    /// default tier (which `resolve_args(None)` would apply), so existing
+    /// headless runs are unchanged (#1312 follow-up).
+    #[test]
+    fn structured_model_args_only_applies_an_explicit_tier() {
+        let cfg = lazybox_config::Config::default();
+        // Claude ships a built-in S/M/L menu, so an explicit tier resolves
+        // to `--model …`.
+        let large = structured_model_args(&cfg, "claude", Some("L"));
+        assert!(
+            large.iter().any(|a| a == "--model"),
+            "an explicit tier appends model args: {large:?}",
+        );
+        // None keeps the agent's default — no args, unlike resolve_args(None)
+        // which would fall back to the default tier.
+        assert!(structured_model_args(&cfg, "claude", None).is_empty());
+        // An unknown alias falls through to the agent default, not the
+        // configured default tier.
+        assert!(structured_model_args(&cfg, "claude", Some("zzz")).is_empty());
+        // An agent with no configured tiers adds nothing even for an alias.
+        assert!(structured_model_args(&cfg, "no-such-agent", Some("L")).is_empty());
+    }
 
     fn tool_finished_ids(events: &[Event]) -> Vec<String> {
         events

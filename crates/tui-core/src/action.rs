@@ -140,6 +140,12 @@ pub enum Action {
     /// "delete" resolves to a close here (reversible, provider-side).
     /// Confirm-guarded.
     CloseIssue,
+    /// Close/delete the issue or PR upstream AND archive the workspace
+    /// (killing its sessions) in one step — the combined `g d` + `x x`
+    /// so ending a finished line of work is one chord, not two. Gated
+    /// like [`ActionKind::DeleteOrClose`] (needs an open issue/PR);
+    /// GitHub-scoped. Confirm-guarded.
+    CloseAndArchive,
     /// Reset the focused workspace's running agent conversation in
     /// place — inject the agent's own clear-context command (`/clear`
     /// for Claude Code, `/new` for Codex) through the settle-gated
@@ -168,6 +174,10 @@ pub enum Action {
     /// `origin/<default>` while the tree is clean — a persistent scratch
     /// workspace stays based on main without a manual rebase each session.
     ToggleTrackMain,
+    /// Toggle the workspace's metering opt-in (the `$ meter` canary): route
+    /// its agent spawns through the local metering proxy so cost/tokens/rate
+    /// accrue per session, without affecting any other workspace.
+    ToggleMetering,
     /// Open the unified automation-policies menu for the focused
     /// PR/issue (issue #363): one surface listing every policy
     /// (merge-on-green, per-session auto-fix arm/disarm, GitHub-native
@@ -211,12 +221,34 @@ pub enum Action {
     /// in-lazybox UI doesn't carry every affordance yet (mobile-rich
     /// review thread, full diff view, etc.).
     OpenInBrowser,
+    /// Open the merge-history modal for the cursor's repo (#1432) — a
+    /// "what's been landing here" ledger of recently-merged PRs with a
+    /// live body preview and drill-in to the full description. Repo-
+    /// scoped (`Sidebar::cursor_repo()`), not workspace-scoped.
+    MergeHistory,
+    /// Open the repo-scoped issue browser (#1436): a two-pane modal over
+    /// the cursor repo's tracked issue-workspaces with a live description
+    /// preview and in-place label / comment / note triage.
+    BrowseRepoIssues,
     /// Delete or close the workspace's upstream item, resolved by
     /// kind: a PR is closed without merging; an issue is hard-deleted
     /// when the token has the admin rights GitHub requires, degrading
     /// to a close-as-not-planned (with a notice) otherwise.
     /// Confirm-guarded — destructive and outward-facing.
     DeleteOrClose,
+    /// Close the workspace's PR without merging (`closePullRequest`).
+    /// Only surfaces on PR workspaces whose PR is still open. Unlike
+    /// [`ActionKind::DeleteOrClose`] this never touches an issue and
+    /// leaves the workspace in place. Confirm-guarded — outward-facing.
+    ClosePr,
+    /// Convert the workspace's open PR to a draft
+    /// (`convertPullRequestToDraft`). Only surfaces on a PR workspace
+    /// whose PR is open and not already a draft.
+    ConvertToDraft,
+    /// Mark the workspace's draft PR ready for review
+    /// (`markPullRequestReadyForReview`). Only surfaces on a PR
+    /// workspace whose PR is currently a draft.
+    MarkReady,
     /// Open the notes editor (a Textarea) for the focused workspace —
     /// a free-form local scratchpad that never syncs to a provider
     /// (issue #458). Pre-filled with the current note; submit persists.
@@ -263,6 +295,21 @@ pub enum Action {
     MoveGroupTop,
     /// [`Self::MoveGroupUp`], straight to the bottom of its tier.
     MoveGroupBottom,
+    /// Source-attention settings for the Repo/Space header at the
+    /// cursor (#scale): the live / quiet / digest / muted level picker.
+    /// Time-boxed source snoozing rides the header-contextual `z`
+    /// instead.
+    SourceSettings,
+    /// Freeze the current lens (filters / sort / mailbox) under a name
+    /// (#scale, proposal D): the saved views that make reorganizing a
+    /// query instead of a migration.
+    SaveView,
+    /// Recall a saved view — the named-lens picker.
+    OpenViews,
+    /// One-line repo subscription (#scale, proposal F): type
+    /// `owner/repo`, skip the wizard walk. Appends to `setup.scopes`;
+    /// the daemon's next tick starts polling it.
+    AddRepo,
     /// Star / unstar the cursor's workspace, lifting it into (or out
     /// of) the synthetic `★ Focused` section at the top of the sidebar.
     /// The manual, per-workspace counterpart to [`Self::ToggleRepoPin`]:
@@ -340,6 +387,12 @@ pub enum Action {
     /// the session-only messages log, it survives restart and can turn
     /// an error class into an issue, an agent run, or a JSONL export.
     OpenErrorInbox,
+    /// Open the usage-stats view (#1339) — a day/week breakdown of what
+    /// you've done (agent sessions, prompts, merges, turns, tokens,
+    /// cost) built from the daemon's persisted event accumulator.
+    OpenStats,
+    /// Open the personal Hopper editor from any non-terminal pane.
+    OpenHopper,
     /// Clear the current footer notice regardless of severity. Severity
     /// still decides auto-fade (Retryable/Info fade on their timers;
     /// Permanent/Auth stay), but this lets the user swat any notice away
@@ -493,12 +546,14 @@ pub enum ActionKind {
     LongSnooze,
     Archive,
     CloseIssue,
+    CloseAndArchive,
     ResetAgentContext,
     MergePr,
     UpdateBranch,
     ToggleAutoMerge,
     ToggleAutoFix,
     ToggleTrackMain,
+    ToggleMetering,
     ManagePolicies,
     AdoptSessions,
     SendToSession,
@@ -509,7 +564,12 @@ pub enum ActionKind {
     ManageLabels,
     SyncWorkspace,
     OpenInBrowser,
+    MergeHistory,
+    BrowseRepoIssues,
     DeleteOrClose,
+    ClosePr,
+    ConvertToDraft,
+    MarkReady,
     EditNotes,
     // Sidebar list management
     OpenFilterMenu,
@@ -523,6 +583,10 @@ pub enum ActionKind {
     MoveGroupDown,
     MoveGroupTop,
     MoveGroupBottom,
+    SourceSettings,
+    SaveView,
+    OpenViews,
+    AddRepo,
     ToggleFocusWorkspace,
     SelectWorkspace,
     BroadcastToSelected,
@@ -547,6 +611,8 @@ pub enum ActionKind {
     OpenSyncStatus,
     OpenMessages,
     OpenErrorInbox,
+    OpenStats,
+    OpenHopper,
     DismissNotice,
     InspectNotice,
     OpenSettings,
@@ -593,6 +659,8 @@ impl ActionKind {
         Self::OpenSyncStatus,
         Self::OpenMessages,
         Self::OpenErrorInbox,
+        Self::OpenStats,
+        Self::OpenHopper,
         Self::DismissNotice,
         Self::InspectNotice,
         // The three Jump actions sit together so the help panel reads
@@ -642,6 +710,7 @@ impl ActionKind {
         Self::LongSnooze,
         Self::Archive,
         Self::CloseIssue,
+        Self::CloseAndArchive,
         Self::ResetAgentContext,
         // GitHub menu.
         Self::MergePr,
@@ -649,13 +718,19 @@ impl ActionKind {
         Self::ToggleAutoMerge,
         Self::ToggleAutoFix,
         Self::ToggleTrackMain,
+        Self::ToggleMetering,
         Self::ManagePolicies,
         Self::RequestReviewers,
         Self::AddAssignees,
         Self::ManageLabels,
         Self::SyncWorkspace,
         Self::OpenInBrowser,
+        Self::MergeHistory,
+        Self::BrowseRepoIssues,
         Self::DeleteOrClose,
+        Self::ClosePr,
+        Self::ConvertToDraft,
+        Self::MarkReady,
         Self::Reply,
         Self::EditNotes,
         // Sidebar list management
@@ -670,6 +745,10 @@ impl ActionKind {
         Self::MoveGroupDown,
         Self::MoveGroupTop,
         Self::MoveGroupBottom,
+        Self::SourceSettings,
+        Self::SaveView,
+        Self::OpenViews,
+        Self::AddRepo,
         Self::ToggleFocusWorkspace,
         Self::FocusPaneRight,
         Self::SelectWorkspace,
@@ -760,12 +839,14 @@ impl Action {
             Action::LongSnooze => ActionKind::LongSnooze,
             Action::Archive => ActionKind::Archive,
             Action::CloseIssue => ActionKind::CloseIssue,
+            Action::CloseAndArchive => ActionKind::CloseAndArchive,
             Action::ResetAgentContext => ActionKind::ResetAgentContext,
             Action::MergePr => ActionKind::MergePr,
             Action::UpdateBranch => ActionKind::UpdateBranch,
             Action::ToggleAutoMerge => ActionKind::ToggleAutoMerge,
             Action::ToggleAutoFix => ActionKind::ToggleAutoFix,
             Action::ToggleTrackMain => ActionKind::ToggleTrackMain,
+            Action::ToggleMetering => ActionKind::ToggleMetering,
             Action::ManagePolicies => ActionKind::ManagePolicies,
             Action::AdoptSessions => ActionKind::AdoptSessions,
             Action::SendToSession => ActionKind::SendToSession,
@@ -776,7 +857,12 @@ impl Action {
             Action::ManageLabels => ActionKind::ManageLabels,
             Action::SyncWorkspace => ActionKind::SyncWorkspace,
             Action::OpenInBrowser => ActionKind::OpenInBrowser,
+            Action::MergeHistory => ActionKind::MergeHistory,
+            Action::BrowseRepoIssues => ActionKind::BrowseRepoIssues,
             Action::DeleteOrClose => ActionKind::DeleteOrClose,
+            Action::ClosePr => ActionKind::ClosePr,
+            Action::ConvertToDraft => ActionKind::ConvertToDraft,
+            Action::MarkReady => ActionKind::MarkReady,
             Action::OpenFilterMenu => ActionKind::OpenFilterMenu,
             Action::CycleSort => ActionKind::CycleSort,
             Action::CycleMailbox => ActionKind::CycleMailbox,
@@ -788,6 +874,10 @@ impl Action {
             Action::MoveGroupDown => ActionKind::MoveGroupDown,
             Action::MoveGroupTop => ActionKind::MoveGroupTop,
             Action::MoveGroupBottom => ActionKind::MoveGroupBottom,
+            Action::SourceSettings => ActionKind::SourceSettings,
+            Action::SaveView => ActionKind::SaveView,
+            Action::OpenViews => ActionKind::OpenViews,
+            Action::AddRepo => ActionKind::AddRepo,
             Action::ToggleFocusWorkspace => ActionKind::ToggleFocusWorkspace,
             Action::SelectWorkspace => ActionKind::SelectWorkspace,
             Action::BroadcastToSelected => ActionKind::BroadcastToSelected,
@@ -811,6 +901,8 @@ impl Action {
             Action::OpenSyncStatus => ActionKind::OpenSyncStatus,
             Action::OpenMessages => ActionKind::OpenMessages,
             Action::OpenErrorInbox => ActionKind::OpenErrorInbox,
+            Action::OpenStats => ActionKind::OpenStats,
+            Action::OpenHopper => ActionKind::OpenHopper,
             Action::DismissNotice => ActionKind::DismissNotice,
             Action::OpenSettings => ActionKind::OpenSettings,
             Action::OpenThemePicker => ActionKind::OpenThemePicker,
@@ -930,6 +1022,20 @@ impl ActionDef {
                 default_keys: "Shift-E",
                 label: "errors",
                 describe: "Open the Error Inbox — the daemon's durable, deduplicated error store (survives restart), grouped by class with counts. Sorted by frequency, filterable by source; the selected class shows its full raw + humanized detail. Turn a class into a GitHub issue (`i`), route it to an agent (`a`), or export the set as JSONL (`x`); `d` deletes one class, `c` clears all.",
+                section: Section::Global,
+            },
+            ActionKind::OpenStats => &Self {
+                kind: ActionKind::OpenStats,
+                default_keys: "Shift-U",
+                label: "usage stats",
+                describe: "Open the usage-stats view — a day/week breakdown of what you've done, built from the daemon's persisted event history: agent sessions, prompts, PRs merged, agent turns, tokens, and cost. Press `w` there to toggle between today and this week.",
+                section: Section::Global,
+            },
+            ActionKind::OpenHopper => &Self {
+                kind: ActionKind::OpenHopper,
+                default_keys: "Shift-H",
+                label: "hopper",
+                describe: "Open the personal Hopper editor. Active items are editable lines; Tab opens dated completion and cancellation history.",
                 section: Section::Global,
             },
             ActionKind::DismissNotice => &Self {
@@ -1248,6 +1354,13 @@ impl ActionDef {
                 describe: "Close the focused GitHub issue upstream (as not-planned). Only on issue workspaces; a true delete needs elevated permissions, so this closes instead. Confirmed first.",
                 section: Section::Workspace,
             },
+            ActionKind::CloseAndArchive => &Self {
+                kind: ActionKind::CloseAndArchive,
+                default_keys: "x k",
+                label: "close & kill",
+                describe: "Delete/close the issue or PR upstream AND archive the workspace (killing its sessions) in one step — the combined `g d` + `x x` for ending a finished line of work. Only when there's an open issue/PR. Confirmed first.",
+                section: Section::Workspace,
+            },
             ActionKind::ResetAgentContext => &Self {
                 kind: ActionKind::ResetAgentContext,
                 // Under the `x` workspace leader, not `a` — confirmed
@@ -1294,6 +1407,13 @@ impl ActionDef {
                 describe: "Toggle \"track main\": keep this workspace's worktree fast-forwarded to the repo's default branch while it's clean, so a persistent scratch workspace stays based on main. Fast-forward only — a dirty or diverged tree is skipped, never reset.",
                 section: Section::Workspace,
             },
+            ActionKind::ToggleMetering => &Self {
+                kind: ActionKind::ToggleMetering,
+                default_keys: "x $",
+                label: "meter",
+                describe: "Toggle metering ($ meter) for this workspace: route its agent spawns through lazybox's local metering proxy so cost, tokens, and rate-limit headroom accrue per session — a safe canary you can turn on for one workspace without affecting any other. Requires agent.metering_proxy enabled.",
+                section: Section::Workspace,
+            },
             ActionKind::ManagePolicies => &Self {
                 kind: ActionKind::ManagePolicies,
                 default_keys: "g p",
@@ -1319,7 +1439,7 @@ impl ActionDef {
                 kind: ActionKind::ConvertSession,
                 default_keys: "x f",
                 label: "convert session",
-                describe: "Replace this agent with a fresh Continue or Critic session in the same worktree, seeded from a structured handoff authored by the current agent.",
+                describe: "Replace this agent with a fresh Continue or Critic session in the same worktree, seeded from a structured handoff authored by the current agent. Critic runs read-only and at the large model tier (a stronger model reviews the work); Continue keeps the working tier.",
                 section: Section::Workspace,
             },
             ActionKind::CollapseIntoPr => &Self {
@@ -1364,11 +1484,46 @@ impl ActionDef {
                 describe: "Open the focused workspace's PR / issue page in your default web browser.",
                 section: Section::Workspace,
             },
+            ActionKind::MergeHistory => &Self {
+                kind: ActionKind::MergeHistory,
+                default_keys: "g h",
+                label: "history",
+                describe: "Open the merge-history ledger for the cursor's repo: recently-merged PRs, newest first, with a live body preview and drill-in to the full description.",
+                section: Section::Workspace,
+            },
+            ActionKind::BrowseRepoIssues => &Self {
+                kind: ActionKind::BrowseRepoIssues,
+                default_keys: "g i",
+                label: "browse issues",
+                describe: "Open a two-pane browser over the cursor repo's tracked issues — skim descriptions and label / comment / note each one in place, without hunting them down as separate sidebar workspaces.",
+                section: Section::Workspace,
+            },
             ActionKind::DeleteOrClose => &Self {
                 kind: ActionKind::DeleteOrClose,
                 default_keys: "g d",
                 label: "delete / close",
                 describe: "Delete the focused issue (close as not-planned when the token lacks the admin rights a hard delete needs) or close the PR without merging. Confirmed first.",
+                section: Section::Workspace,
+            },
+            ActionKind::ClosePr => &Self {
+                kind: ActionKind::ClosePr,
+                default_keys: "g c",
+                label: "close PR",
+                describe: "Close the focused PR without merging it. Only on PR workspaces whose PR is still open; the workspace stays put and the next poll retires the closed row. Confirmed first.",
+                section: Section::Workspace,
+            },
+            ActionKind::ConvertToDraft => &Self {
+                kind: ActionKind::ConvertToDraft,
+                default_keys: "g f",
+                label: "convert to draft",
+                describe: "Convert the focused open PR to a draft (GitHub's convertPullRequestToDraft). Only on a PR workspace whose PR is open and not already a draft.",
+                section: Section::Workspace,
+            },
+            ActionKind::MarkReady => &Self {
+                kind: ActionKind::MarkReady,
+                default_keys: "g y",
+                label: "mark ready",
+                describe: "Mark the focused draft PR ready for review (GitHub's markPullRequestReadyForReview). Only on a PR workspace whose PR is currently a draft.",
                 section: Section::Workspace,
             },
             // ── Sidebar list management ─────────────────────────────
@@ -1447,6 +1602,34 @@ impl ActionDef {
                 default_keys: "x b",
                 label: "move to bottom",
                 describe: "Move the group at the cursor straight to the bottom of its tier (Space among Spaces, repo within its Space). Persists via ui.spaces.",
+                section: Section::Sidebar,
+            },
+            ActionKind::SourceSettings => &Self {
+                kind: ActionKind::SourceSettings,
+                default_keys: "x ,",
+                label: "source attention",
+                describe: "Set the attention level for the Repo/Space header at the cursor: live (full badges), quiet (badges only when it's about you), digest (accumulates at idle poll cadence), or muted (sinks, folds, and leaves the GitHub sweep). Persists to ui.source_attention; z on the header time-boxes a snooze instead.",
+                section: Section::Sidebar,
+            },
+            ActionKind::SaveView => &Self {
+                kind: ActionKind::SaveView,
+                default_keys: "x v",
+                label: "save view",
+                describe: "Freeze the current lens — active filters, sort mode, and mailbox — under a name in ui.views. Recall it with x V; saving under an existing name replaces that view.",
+                section: Section::Sidebar,
+            },
+            ActionKind::OpenViews => &Self {
+                kind: ActionKind::OpenViews,
+                default_keys: "x V",
+                label: "views",
+                describe: "Pick a saved view (ui.views) and apply its frozen lens — filters, sort, and mailbox — in one step.",
+                section: Section::Sidebar,
+            },
+            ActionKind::AddRepo => &Self {
+                kind: ActionKind::AddRepo,
+                default_keys: "x A",
+                label: "add repo",
+                describe: "Subscribe a repo by typing owner/repo — no wizard walk. Appends to setup.scopes; the daemon's next poll starts syncing it, and a header appears immediately. Remove repos via Settings (which confirms before deleting workspaces).",
                 section: Section::Sidebar,
             },
             ActionKind::ToggleFocusWorkspace => &Self {
@@ -1910,6 +2093,21 @@ impl ActionDef {
                  is closed as not-planned instead. A PR is closed without \
                  merging.",
             },
+            // Closes the PR upstream (reopen on GitHub to undo).
+            ActionKind::ClosePr => Guard::Confirm {
+                prompt: "Close this PR upstream without merging? It drops \
+                 out of the inbox once the close lands. Reopen on GitHub \
+                 to undo.",
+            },
+            // Both the upstream mutation of DeleteOrClose and the local
+            // teardown of Archive, in one confirm.
+            ActionKind::CloseAndArchive => Guard::Confirm {
+                prompt: "Close/delete this issue or PR upstream AND archive \
+                 the workspace? The upstream item is closed (an issue is \
+                 deleted with admin rights, else closed as not-planned; a PR \
+                 is closed without merging), its sessions are killed, and the \
+                 row drops from the inbox.",
+            },
             // Explicitly invoked; merging mutates the mainline branch
             // immediately and is hard to undo.
             ActionKind::MergePr => Guard::Confirm {
@@ -2047,12 +2245,14 @@ impl ActionKind {
             ActionKind::LongSnooze => "long_snooze",
             ActionKind::Archive => "archive",
             ActionKind::CloseIssue => "close_issue",
+            ActionKind::CloseAndArchive => "close_and_archive",
             ActionKind::ResetAgentContext => "reset_agent_context",
             ActionKind::MergePr => "merge_pr",
             ActionKind::UpdateBranch => "update_branch",
             ActionKind::ToggleAutoMerge => "toggle_auto_merge",
             ActionKind::ToggleAutoFix => "toggle_auto_fix",
             ActionKind::ToggleTrackMain => "toggle_track_main",
+            ActionKind::ToggleMetering => "toggle_metering",
             ActionKind::ManagePolicies => "manage_policies",
             ActionKind::AdoptSessions => "adopt_sessions",
             ActionKind::SendToSession => "send_to_session",
@@ -2063,7 +2263,12 @@ impl ActionKind {
             ActionKind::ManageLabels => "manage_labels",
             ActionKind::SyncWorkspace => "sync_workspace",
             ActionKind::OpenInBrowser => "open_in_browser",
+            ActionKind::MergeHistory => "merge_history",
+            ActionKind::BrowseRepoIssues => "browse_repo_issues",
             ActionKind::DeleteOrClose => "delete_or_close",
+            ActionKind::ClosePr => "close_pr",
+            ActionKind::ConvertToDraft => "convert_to_draft",
+            ActionKind::MarkReady => "mark_ready",
             ActionKind::OpenFilterMenu => "open_filter_menu",
             ActionKind::CycleSort => "cycle_sort",
             ActionKind::CycleMailbox => "cycle_mailbox",
@@ -2075,6 +2280,10 @@ impl ActionKind {
             ActionKind::MoveGroupDown => "move_group_down",
             ActionKind::MoveGroupTop => "move_group_top",
             ActionKind::MoveGroupBottom => "move_group_bottom",
+            ActionKind::SourceSettings => "source_settings",
+            ActionKind::SaveView => "save_view",
+            ActionKind::OpenViews => "open_views",
+            ActionKind::AddRepo => "add_repo",
             ActionKind::ToggleFocusWorkspace => "toggle_focus_workspace",
             ActionKind::SelectWorkspace => "select_workspace",
             ActionKind::BroadcastToSelected => "broadcast_to_selected",
@@ -2098,6 +2307,8 @@ impl ActionKind {
             ActionKind::OpenSyncStatus => "open_sync_status",
             ActionKind::OpenMessages => "open_messages",
             ActionKind::OpenErrorInbox => "open_error_inbox",
+            ActionKind::OpenStats => "open_stats",
+            ActionKind::OpenHopper => "open_hopper",
             ActionKind::DismissNotice => "dismiss_notice",
             ActionKind::InspectNotice => "inspect_notice",
             ActionKind::OpenSettings => "open_settings",
@@ -2307,7 +2518,12 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::ManageLabels
         | ActionKind::SyncWorkspace
         | ActionKind::OpenInBrowser
-        | ActionKind::DeleteOrClose => Some("github"),
+        | ActionKind::MergeHistory
+        | ActionKind::BrowseRepoIssues
+        | ActionKind::DeleteOrClose
+        | ActionKind::ClosePr
+        | ActionKind::ConvertToDraft
+        | ActionKind::MarkReady => Some("github"),
         ActionKind::SpawnAgent | ActionKind::RecoverAllAgentCredit => Some("agent"),
         ActionKind::SpawnAgentRemote => Some("remote"),
         ActionKind::Work | ActionKind::WorkWith => Some("work"),
@@ -2321,6 +2537,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::LongSnooze
         | ActionKind::Archive
         | ActionKind::CloseIssue
+        | ActionKind::CloseAndArchive
         | ActionKind::AdoptSessions
         | ActionKind::SendToSession
         | ActionKind::ConvertSession
@@ -2329,7 +2546,12 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::MoveGroupDown
         | ActionKind::MoveGroupTop
         | ActionKind::MoveGroupBottom
+        | ActionKind::SourceSettings
+        | ActionKind::SaveView
+        | ActionKind::OpenViews
+        | ActionKind::AddRepo
         | ActionKind::ResetAgentContext
+        | ActionKind::ToggleMetering
         | ActionKind::CollapseIntoPr => Some("workspace"),
         _ => None,
     }
@@ -2765,11 +2987,29 @@ pub fn contextual_label(
                 default
             }
         }
+        // `z` toggles: on a snoozed row it WAKES. Naming that in the
+        // footer / which-key popup is what makes un-snoozing
+        // discoverable (#scale — there was no visible wake affordance
+        // anywhere; users had to know the toggle).
+        Action::ToggleSnooze => {
+            if workspace.is_some_and(|w| w.is_snoozed(chrono::Utc::now())) {
+                "wake"
+            } else {
+                default
+            }
+        }
         // Name the resolution the keypress would actually take so the
         // which-key popup / footer don't advertise an ambiguous verb.
         Action::DeleteOrClose => match workspace {
             Some(w) if w.pr.is_some() => "close PR",
             Some(_) => "delete issue",
+            None => default,
+        },
+        // Name the upstream resolution + the local kill, mirroring
+        // DeleteOrClose's contextual verb.
+        Action::CloseAndArchive => match workspace {
+            Some(w) if w.pr.is_some() => "close PR & kill",
+            Some(_) => "delete issue & kill",
             None => default,
         },
         _ => default,
@@ -2822,17 +3062,48 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // same predicate the resolver Notices on, so `g t` only surfaces
         // where the sweep could actually fast-forward something.
         ActionKind::ToggleTrackMain => workspace.map(|w| w.supports_track_main()).unwrap_or(false),
+        // Metering is available on any workspace that can host an agent (a
+        // repo/project scope to spawn into). With NO workspace it stays
+        // available too — the `x $` chord doubles as the Space-tier toggle on a
+        // Space header (approach C), which the dispatch path routes by cursor
+        // position (a header has no selected workspace). Whether either actually
+        // routes is a daemon-side gate (metering_proxy + proxy running), so the
+        // toggle stays available even when the proxy is off: it records intent.
+        ActionKind::ToggleMetering => workspace
+            .map(|w| w.project_key.is_some() || w.pr.is_some() || !w.gh_issues.is_empty())
+            .unwrap_or(true),
         // The policies menu surfaces on any workspace carrying a PR or a
-        // GitHub issue — the "tag this PR/issue" surface (issue #363).
-        // The menu itself marks which policies apply to PRs vs issues.
+        // mutation-capable issue — the "tag this PR/issue" surface (issue
+        // #363). Every policy it toggles (merge-on-green, auto-fix,
+        // GitHub-native auto-merge) is a GitHub-automation concept, so a
+        // read-only issue (Jira) has nothing the menu can arm. The menu
+        // itself marks which policies apply to PRs vs issues.
         ActionKind::ManagePolicies => workspace
-            .map(|w| w.pr.is_some() || !w.gh_issues.is_empty())
+            .map(|w| w.pr.is_some() || w.gh_issues.iter().any(|i| i.source_supports_mutations()))
             .unwrap_or(false),
         // Targeted re-poll only has something to fetch when the
         // workspace owns a GitHub entity — a PR or a linked issue.
         ActionKind::SyncWorkspace => workspace
             .map(|w| w.pr.is_some() || !w.gh_issues.is_empty())
             .unwrap_or(false),
+        // Repo-scoped, not workspace-scoped: the merge-history ledger
+        // needs only a github repo under the cursor. Surface it whenever
+        // the focused workspace resolves to one — a PR, a github issue,
+        // or a repo/project scope (a taskless pre-PR workspace). The
+        // dispatcher reads `Sidebar::cursor_repo()`, so pressing `g h` on
+        // a bare repo-header row works too; this gate only drives the
+        // footer / which-key display.
+        ActionKind::MergeHistory => workspace
+            .map(|w| w.worktree_scope().is_some() || w.pr.is_some() || !w.gh_issues.is_empty())
+            .unwrap_or(false),
+        // The issue browser is repo-scoped (#1436): available wherever the
+        // cursor has a repo group — a workspace with a repo scope, or a
+        // bare repo header (no selected workspace). Dispatch reads
+        // `cursor_repo` and the mount flashes when the repo has no tracked
+        // issues, so availability stays broad like the repo-header actions.
+        ActionKind::BrowseRepoIssues => workspace
+            .map(|w| w.project_key.is_some() || w.pr.is_some() || !w.gh_issues.is_empty())
+            .unwrap_or(true),
         ActionKind::Work | ActionKind::WorkWith => intent::classify_work(workspace, &[]).is_some(),
         ActionKind::OpenEditor => matches!(
             intent::resolve_open_editor(workspace),
@@ -2876,7 +3147,10 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
                         .iter()
                         .chain(w.linear_issues.iter())
                         .next()
-                        .is_some_and(|i| i.state != lazybox_core::TaskState::Closed)
+                        .is_some_and(|i| {
+                            i.state != lazybox_core::TaskState::Closed
+                                && i.source_supports_mutations()
+                        })
             })
             .unwrap_or(false),
         // Resolves by workspace kind: close the PR while it's still
@@ -2892,12 +3166,44 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
                         | lazybox_core::TaskState::InReview
                         | lazybox_core::TaskState::Draft
                 ),
-                None => w
-                    .gh_issues
-                    .first()
-                    .is_some_and(|i| i.state != lazybox_core::TaskState::Closed),
+                None => w.gh_issues.first().is_some_and(|i| {
+                    i.state != lazybox_core::TaskState::Closed && i.source_supports_mutations()
+                }),
             })
             .unwrap_or(false),
+        // Same gate as DeleteOrClose — the combined action only makes
+        // sense when there's an open issue/PR to close; a plain archive
+        // (`x x`) covers the rest.
+        ActionKind::CloseAndArchive => availability(ActionKind::DeleteOrClose, workspace),
+        // Only on a PR workspace whose PR is still open (any open state,
+        // draft included). A merged/closed PR has nothing left to close,
+        // and an issue-only workspace routes through DeleteOrClose/CloseIssue.
+        ActionKind::ClosePr => workspace
+            .and_then(|w| w.pr.as_ref())
+            .is_some_and(|pr| {
+                matches!(
+                    pr.state,
+                    lazybox_core::TaskState::Open
+                        | lazybox_core::TaskState::InProgress
+                        | lazybox_core::TaskState::InReview
+                        | lazybox_core::TaskState::Draft
+                )
+            }),
+        // Only on a PR workspace whose PR is open and NOT already a draft.
+        ActionKind::ConvertToDraft => workspace
+            .and_then(|w| w.pr.as_ref())
+            .is_some_and(|pr| {
+                matches!(
+                    pr.state,
+                    lazybox_core::TaskState::Open
+                        | lazybox_core::TaskState::InProgress
+                        | lazybox_core::TaskState::InReview
+                )
+            }),
+        // Only on a PR workspace whose PR is currently a draft.
+        ActionKind::MarkReady => workspace
+            .and_then(|w| w.pr.as_ref())
+            .is_some_and(|pr| pr.state == lazybox_core::TaskState::Draft),
         ActionKind::SpawnShell => matches!(
             intent::resolve_spawn_shell(workspace),
             intent::Intent::SpawnShell { .. },
@@ -2974,6 +3280,10 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::MoveGroupDown
         | ActionKind::MoveGroupTop
         | ActionKind::MoveGroupBottom
+        | ActionKind::SourceSettings
+        | ActionKind::SaveView
+        | ActionKind::OpenViews
+        | ActionKind::AddRepo
         // Acts on the repo group at/above the cursor (a header row has
         // no workspace, so `has_ws` would wrongly hide it there); the
         // dispatcher no-ops with a notice when the cursor isn't in a
@@ -3011,6 +3321,8 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::OpenSyncStatus
         | ActionKind::OpenMessages
         | ActionKind::OpenErrorInbox
+        | ActionKind::OpenStats
+        | ActionKind::OpenHopper
         | ActionKind::DismissNotice
         | ActionKind::InspectNotice
         | ActionKind::OpenSettings
@@ -3808,6 +4120,41 @@ mod tests {
         // A PR present → act on the PR instead, not the issue.
         ws.pr = Some(task("acme/widget#8"));
         assert!(!availability(ActionKind::CloseIssue, Some(&ws)));
+
+        // A read-only issue (Jira) attaches to `gh_issues` too now
+        // (workspace::classify routes any typed Issue there), but it has
+        // no mutation backend — the daemon dead-ends on `no provider
+        // registered for workspace prefix jira`. Regression guard: every
+        // GitHub-issue mutation must be UNAVAILABLE on a read-only source
+        // so the UI never mounts a (GitHub-worded) confirm that can only
+        // fail.
+        let mut jira_ws =
+            Workspace::empty(WorkspaceKey("jira-DEMO-954".into()), "main", Utc::now());
+        let mut jira = task("DEMO-954");
+        jira.id.source = "jira".into();
+        jira.kind = Some(lazybox_core::TaskKind::Issue);
+        jira.url = "https://acme.atlassian.net/browse/DEMO-954".into();
+        jira_ws.attach_task(jira);
+        assert!(
+            !jira_ws.gh_issues.is_empty() && jira_ws.pr.is_none(),
+            "the jira issue must land in the gh_issues slot for this to be a real guard",
+        );
+        assert!(
+            !availability(ActionKind::CloseIssue, Some(&jira_ws)),
+            "read-only jira issue offers no close",
+        );
+        assert!(
+            !availability(ActionKind::DeleteOrClose, Some(&jira_ws)),
+            "read-only jira issue offers no delete/close",
+        );
+        assert!(
+            !availability(ActionKind::CloseAndArchive, Some(&jira_ws)),
+            "combined close+archive follows DeleteOrClose",
+        );
+        assert!(
+            !availability(ActionKind::ManagePolicies, Some(&jira_ws)),
+            "no github-automation policy applies to a jira issue",
+        );
     }
 
     #[test]
@@ -3889,6 +4236,112 @@ mod tests {
         // A PR workspace → reviewers offered.
         issue.pr = Some(task("github", "acme/widget#8", TaskKind::Pr));
         assert!(availability(ActionKind::RequestReviewers, Some(&issue)));
+    }
+
+    #[test]
+    fn close_pr_and_draft_actions_gate_on_pr_state() {
+        // ClosePr surfaces on any open PR (draft included); ConvertToDraft
+        // only on an open, non-draft PR; MarkReady only on a draft PR. None
+        // surface without a PR or on a terminal (merged/closed) PR.
+        use chrono::Utc;
+        use lazybox_core::{
+            CiStatus, Mergeable, ReviewStatus, Task, TaskId, TaskKind, TaskRole, TaskState,
+            Workspace, WorkspaceKey,
+        };
+        let pr_in = |state: TaskState| Task {
+            author: String::new(),
+            id: TaskId {
+                source: "github".into(),
+                key: "acme/widget#8".into(),
+            },
+            title: "widget".into(),
+            body: None,
+            state,
+            role: TaskRole::Author,
+            ci: CiStatus::None,
+            review: ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: String::new(),
+            repo: Some("acme/widget".into()),
+            branch: None,
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: Mergeable::Mergeable,
+            is_behind_base: false,
+            merge_blocked: false,
+            approval_policy: Default::default(),
+            node_id: Some("node".into()),
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            kind: Some(TaskKind::Pr),
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            parent: None,
+            priority: None,
+            state_label: None,
+        };
+        let ws_with_pr = |state: TaskState| {
+            let mut ws = Workspace::empty(
+                WorkspaceKey("github-acme-widget-8".into()),
+                "main",
+                Utc::now(),
+            );
+            ws.pr = Some(pr_in(state));
+            ws
+        };
+
+        // No workspace → nothing offered.
+        assert!(!availability(ActionKind::ClosePr, None));
+        assert!(!availability(ActionKind::ConvertToDraft, None));
+        assert!(!availability(ActionKind::MarkReady, None));
+
+        // Open PR: close + convert-to-draft yes, mark-ready no.
+        let open = ws_with_pr(TaskState::Open);
+        assert!(availability(ActionKind::ClosePr, Some(&open)));
+        assert!(availability(ActionKind::ConvertToDraft, Some(&open)));
+        assert!(!availability(ActionKind::MarkReady, Some(&open)));
+
+        // Draft PR: close + mark-ready yes, convert-to-draft no.
+        let draft = ws_with_pr(TaskState::Draft);
+        assert!(availability(ActionKind::ClosePr, Some(&draft)));
+        assert!(!availability(ActionKind::ConvertToDraft, Some(&draft)));
+        assert!(availability(ActionKind::MarkReady, Some(&draft)));
+
+        // Merged/closed PR: nothing left to do.
+        for terminal in [TaskState::Merged, TaskState::Closed] {
+            let ws = ws_with_pr(terminal);
+            assert!(!availability(ActionKind::ClosePr, Some(&ws)));
+            assert!(!availability(ActionKind::ConvertToDraft, Some(&ws)));
+            assert!(!availability(ActionKind::MarkReady, Some(&ws)));
+        }
+
+        // Issue-only workspace (no PR): none of the three surface.
+        let mut issue = Workspace::empty(
+            WorkspaceKey("github-acme-widget-7".into()),
+            "main",
+            Utc::now(),
+        );
+        let mut issue_task = pr_in(TaskState::Open);
+        issue_task.id.key = "acme/widget#7".into();
+        issue_task.kind = Some(TaskKind::Issue);
+        issue.attach_task(issue_task);
+        assert!(issue.pr.is_none());
+        assert!(!availability(ActionKind::ClosePr, Some(&issue)));
+        assert!(!availability(ActionKind::ConvertToDraft, Some(&issue)));
+        assert!(!availability(ActionKind::MarkReady, Some(&issue)));
     }
 
     #[test]

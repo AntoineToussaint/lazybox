@@ -24,6 +24,15 @@ fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
     Model::new_for_test(client, Size::new(120, 40)).expect("model init")
 }
 
+/// Seed a bare workspace so a removal / out-of-scope prompt for `key`
+/// passes the mount-time liveness gate (unknown workspaces are dropped
+/// to avoid orphaned "remove <gone workspace>?" modals).
+fn seed_ws(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>, key: &str) {
+    m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(
+        Workspace::empty(WorkspaceKey::new(key), "main", Utc::now()),
+    )));
+}
+
 fn key(code: Key) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
 }
@@ -756,6 +765,7 @@ fn out_of_scope_with_active_session_queues_a_prompt() {
     let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
     let target = "github:owner/repo#42";
+    seed_ws(&mut m, target);
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
         workspace_key: lazybox_core::WorkspaceKey::new(target),
         label: "owner/repo#42".into(),
@@ -772,6 +782,8 @@ fn out_of_scope_prompts_queue_one_at_a_time() {
     // first is dismissed.
     let (client, _server) = channel::pair();
     let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    seed_ws(&mut m, "github:o/a#1");
+    seed_ws(&mut m, "github:o/b#2");
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
         workspace_key: lazybox_core::WorkspaceKey::new("github:o/a#1"),
         label: "o/a#1".into(),
@@ -803,6 +815,7 @@ fn confirm_modal_y_dismisses_through_channel_pipeline() {
     // the keypress through `dispatch_modal_key`, the same path the
     // run loop uses.
     let mut m = build_model();
+    seed_ws(&mut m, "github:o/r#1");
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
         workspace_key: WorkspaceKey::new("github:o/r#1"),
         label: "o/r#1".into(),
@@ -821,6 +834,7 @@ fn confirm_modal_y_dismisses_through_channel_pipeline() {
 #[test]
 fn confirm_modal_n_dismisses_through_channel_pipeline() {
     let mut m = build_model();
+    seed_ws(&mut m, "github:o/r#1");
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
         workspace_key: WorkspaceKey::new("github:o/r#1"),
         label: "o/r#1".into(),
@@ -842,6 +856,7 @@ fn confirm_modal_esc_dismisses_through_channel_pipeline() {
     // test alongside the Y / N tests so future regressions in *any*
     // of the three keypress paths are caught.
     let mut m = build_model();
+    seed_ws(&mut m, "github:o/r#1");
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
         workspace_key: WorkspaceKey::new("github:o/r#1"),
         label: "o/r#1".into(),
@@ -867,6 +882,7 @@ fn out_of_scope_queued_during_help_modal_drains_on_help_dismiss() {
     m.dispatch_key(key(Key::Char('?')));
     assert_eq!(m.top_modal(), Some(&Id::HelpAsk));
     // Daemon sends an out-of-scope event while Help is up.
+    seed_ws(&mut m, "github:o/r#1");
     m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
         workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
         label: "o/r#1".into(),
@@ -2365,5 +2381,132 @@ fn remote_client_applies_config_and_keeps_local_stars() {
     assert!(
         m.__test_sidebar().is_focused(&local_star),
         "the remote snapshot must not prune the laptop's star"
+    );
+}
+
+/// #1442: on a repo-header row the right pane paints a repo overview
+/// instead of the dead `(no session selected)` placeholder, and yields
+/// back to the workspace pane when the cursor returns to a workspace.
+#[test]
+fn repo_header_shows_overview_not_dead_pane() {
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![ws],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+
+    // Walk to the top of the sidebar — the repo header.
+    for _ in 0..4 {
+        m.dispatch_key(key(Key::Char('k')));
+    }
+    assert!(
+        m.__test_sidebar().cursor_on_repo_header(),
+        "cursor should rest on the repo header",
+    );
+    assert!(
+        m.__test_showing_overview(),
+        "a repo header renders the overview, not a dead pane",
+    );
+
+    // Step back down onto the workspace — the overview yields.
+    for _ in 0..4 {
+        m.dispatch_key(key(Key::Char('j')));
+    }
+    assert!(
+        m.__test_sidebar().selected_workspace().is_some(),
+        "cursor back on a workspace",
+    );
+    assert!(
+        !m.__test_showing_overview(),
+        "a real workspace hides the overview",
+    );
+}
+
+/// #1442 regression: while the cursor is parked on a repo header, the
+/// overview must track background polls. An `AgentState` event is the
+/// worst case — its handler early-returns and skips `sync_panes` — so
+/// the "with agent" count would freeze at 0 without the explicit
+/// projection request in `dispatch_daemon_event`.
+#[test]
+fn overview_refreshes_on_background_agent_state() {
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    let session_key: SessionKey = (&ws.key).into();
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![ws],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+
+    for _ in 0..4 {
+        m.dispatch_key(key(Key::Char('k')));
+    }
+    assert!(m.__test_showing_overview(), "parked on the repo header");
+    assert_eq!(
+        m.__test_overview_counts().map(|c| c.with_agent),
+        Some(0),
+        "no agent yet",
+    );
+
+    // A background poll flips an agent to Working — the cursor never moves.
+    m.handle_daemon_event(IpcEvent::AgentState {
+        session_key,
+        terminal_id: lazybox_ipc::TerminalId(1),
+        state: lazybox_ipc::AgentState::Working,
+    });
+
+    assert!(m.__test_showing_overview(), "still on the header");
+    assert_eq!(
+        m.__test_overview_counts().map(|c| c.with_agent),
+        Some(1),
+        "overview must reflect the background agent-state change without a cursor move",
+    );
+}
+
+/// #1442: clicking the overview anywhere other than a roster row must
+/// not strand keyboard focus on the workspace-less Right pane (there is
+/// nothing to navigate there) — focus stays on the sidebar.
+#[test]
+fn overview_click_off_roster_keeps_sidebar_focus() {
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![ws],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    for _ in 0..4 {
+        m.dispatch_key(key(Key::Char('k')));
+    }
+    assert!(m.__test_showing_overview());
+    assert_eq!(m.focus(), PaneFocus::Sidebar);
+
+    m.view();
+    let area = Rect::new(0, 0, 120, 40);
+    // Row 0 of the right column is the overview title — never a roster row.
+    m.dispatch_mouse_in(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 90,
+            row: 0,
+            modifiers: CtKeyModifiers::empty(),
+        },
+        area,
+    );
+    assert_eq!(
+        m.focus(),
+        PaneFocus::Sidebar,
+        "an overview click off the roster must not move focus to the empty Right pane",
     );
 }

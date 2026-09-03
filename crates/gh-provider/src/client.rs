@@ -32,6 +32,23 @@ pub enum GhError {
         content_type: String,
         body_excerpt: String,
     },
+    /// A 2xx response with a JSON content-type whose body is NOT valid
+    /// JSON — the raw `from_str::<Value>` failed at the *syntax* level
+    /// (e.g. "while parsing a string at line 1 column 219264"), NOT a
+    /// schema-shape mismatch. GitHub occasionally returns a truncated /
+    /// corrupt 200 body (the parse dies mid-string, deep into a large
+    /// response); that is transient, so — unlike a genuine schema
+    /// mismatch (`HttpStatus` " (json parse failed)") — this is retried.
+    /// Carries the body length + serde detail so a recurrence is
+    /// diagnosable from the footer, with the full body in the log.
+    #[error(
+        "github HTTP {status} returned a malformed/truncated body ({byte_len} bytes): {detail}"
+    )]
+    MalformedResponse {
+        status: u16,
+        byte_len: usize,
+        detail: String,
+    },
     /// Pagination safety cap hit — typically means the user's filter
     /// is too loose (>2000 matching PRs). Tail truncated.
     #[error("GraphQL paged out: returned {count} PRs across {pages} pages, hit safety cap")]
@@ -123,6 +140,11 @@ fn is_transient(e: &GhError) -> bool {
         | GhError::Api(octocrab::Error::Http { .. })
         | GhError::Api(octocrab::Error::Json { .. })
         | GhError::Api(octocrab::Error::Serde { .. }) => true,
+        // A truncated / corrupt 200 body — the raw JSON didn't even parse
+        // (syntax error mid-string). GitHub cut the response; the next
+        // attempt usually gets a whole one. Retryable, unlike a real
+        // schema mismatch (which stays a non-retryable `HttpStatus`).
+        GhError::MalformedResponse { .. } => true,
         GhError::Api(octocrab::Error::GitHub { source, .. }) => {
             matches!(source.status_code.as_u16(), 502..=504)
         }
@@ -551,6 +573,10 @@ fn detail_of(err: &GhError) -> String {
         GhError::WatchAllFailed { count } => {
             format!("all {count} configured watched-repo queries failed (network or auth issue)")
         }
+        GhError::MalformedResponse { byte_len, .. } => format!(
+            "GitHub returned a truncated/corrupt response body ({byte_len} bytes) — a transient \
+             partial reply. lazybox retries these; it should clear on the next sync."
+        ),
         GhError::HttpStatus { .. } => format!("{err}"),
         GhError::Timeout { .. } => format!("{err}"),
         GhError::Api(octo) => match octo {
@@ -625,6 +651,14 @@ impl From<GhError> for lazybox_core::ProviderError {
         // so it retries on the poll's normal cadence, never escalates to
         // an auth/permanent verdict (#825).
         if matches!(err, GhError::Timeout { .. }) {
+            return lazybox_core::ProviderError::retryable(SOURCE, detail);
+        }
+
+        // A truncated / corrupt 2xx body (the raw JSON didn't parse) is a
+        // transient partial response — retry on the poll's cadence, never a
+        // permanent or auth verdict. The in-call ladder already retried it a
+        // couple of times; surfacing it retryable keeps the poll trying.
+        if matches!(err, GhError::MalformedResponse { .. }) {
             return lazybox_core::ProviderError::retryable(SOURCE, detail);
         }
 
@@ -885,11 +919,35 @@ fn request_profile(
         | "single-issue notification deep-fetch"
         | "PR details background prefetch"
         | "PR search"
+        | "authored-PR probe"
         | "issues search"
         | "review-requested"
         | "merged-sweep"
         | "watched-repo"
+        | "watched-repo issues"
         | "round-robin-repo" => (ApiResource::Graphql, RequestPriority::Recent),
+        // Working-claim label sync (#1218 storm fix). These are REST label
+        // reads/writes (`fbca04` "Claimed by a lazybox agent" markers), fired
+        // ~6 per agent heartbeat every 15 min plus a burst at each spawn. They
+        // MUST be:
+        //   - accounted to the REST `core` bucket (the write ops previously
+        //     fell through to the `_` arm and were mis-charged to GraphQL), and
+        //   - `Cold` (scheduled), NOT `Interactive` — as Interactive they
+        //     bypassed the reserve, per-tick allowance, AND local-bucket gates,
+        //     so N concurrent agents fanned N×6 unbudgeted writes into the
+        //     concurrency gate, backing it up (the "GitHub did not respond
+        //     within 20s" timeouts) and tripping GitHub's secondary limit,
+        //     which opened the shared circuit and stalled ALL polling.
+        // As `Cold` they yield to the actual PR poll under budget pressure and
+        // are refused locally (fast, no GitHub call) instead of storming — a
+        // refused heartbeat simply retries next cycle, and the 15-min heartbeat
+        // vs 60-min claim TTL leaves ample slack for transient refusals.
+        "list issue working labels"
+        | "list issue working labels next page"
+        | "renew working claim label"
+        | "create working claim label"
+        | "add working claim label"
+        | "delete working claim label" => (ApiResource::rest("core"), RequestPriority::Cold),
         operation if operation.starts_with("list ") || operation == "post issue comment" => {
             (ApiResource::rest("core"), RequestPriority::Interactive)
         }
@@ -930,9 +988,37 @@ pub enum HotFetch {
 /// chunk at this bound (#1218).
 const HOT_BATCH_MAX_IDS: usize = 100;
 
+/// Consecutive GraphQL-rejected hot batches before `hot_batch_rejected`
+/// reports the batched `nodes(ids:)` path unsupported by this server.
+const HOT_BATCH_REJECTION_THRESHOLD: u32 = 3;
+
+/// Ceiling on concurrent in-flight GitHub requests across ALL client clones
+/// (background sweeps and interactive actions share it). GitHub's secondary
+/// (abuse) limiter is concurrency-sensitive — it keys on burst/concurrency,
+/// not the primary 5000/h budget — so a full sweep fanning many requests out
+/// at once can trip it with thousands of primary points still free (#1218).
+/// Kept deliberately low: interactive work is rarely more than one or two
+/// requests at a time, while a reconcile's fan-out is exactly the burst this
+/// bounds. Paired with the per-request pacing gap (see `rate_budget`), which
+/// widens further while a secondary limit is recent.
+const MAX_CONCURRENT_GITHUB_REQUESTS: usize = 6;
+
+// Guard the ceiling at compile time (#1218): a future bump back toward the old
+// value re-opens the burst that tripped GitHub's abuse limiter. Failing the
+// build is louder than a runtime test and can't be skipped.
+const _: () = assert!(
+    MAX_CONCURRENT_GITHUB_REQUESTS <= 6,
+    "concurrency gate too high for GitHub's secondary (abuse) limiter"
+);
+
 #[derive(Clone)]
 pub struct GhClient {
     inner: Octocrab,
+    /// Transport for GraphQL. Identical to `inner` on github.com; on a
+    /// GitHub Enterprise Server host it is based at `https://<host>/api`,
+    /// because GraphQL lives at `/api/graphql` — outside the REST
+    /// `/api/v3` prefix that `inner` carries.
+    gql: Octocrab,
     user: String,
     credential_source: String,
     /// Fingerprint of the token this client was built with — see
@@ -959,8 +1045,9 @@ pub struct GhClient {
     /// updated only after a confirmed write so a failed store retries.
     last_persisted_rate_state: std::sync::Arc<parking_lot::Mutex<Option<String>>>,
     /// GitHub's secondary limits apply across REST and GraphQL. All
-    /// client clones therefore share one concurrency gate, and all
-    /// mutations additionally share a serial lane.
+    /// client clones therefore share one concurrency gate
+    /// ([`MAX_CONCURRENT_GITHUB_REQUESTS`]), and all mutations additionally
+    /// share a serial lane.
     request_gate: std::sync::Arc<tokio::sync::Semaphore>,
     mutation_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
     /// Notifications heartbeat state — `Last-Modified` echo + slow-sweep
@@ -975,6 +1062,19 @@ pub struct GhClient {
     /// requested id set each batch and cleared by `force_full_sweep` so
     /// an explicit refresh always re-fetches.
     hot_freshness: std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, String>>>,
+    /// Consecutive hot batches this server answered with a GraphQL
+    /// error. Some GitHub Enterprise Server builds reject the batched
+    /// `nodes(ids:)` hot queries outright — GHES 3.18 fails any PR node
+    /// lookup that selects both `mergeStateStatus` and `reviewDecision`
+    /// with "Something went wrong while executing your query", while the
+    /// same fields resolve fine through `repository.pullRequest` and
+    /// `search`. At `HOT_BATCH_REJECTION_THRESHOLD` the batched path is
+    /// considered unsupported here (`hot_batch_rejected`) and callers
+    /// fetch hot targets one at a time instead. A success resets the
+    /// count so github.com's occasional transient "Something went wrong"
+    /// never disables the probe for good; `force_full_sweep` resets it
+    /// too so an explicit refresh re-tries the batch.
+    hot_batch_graphql_failures: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 /// Per-branch cost breakdown for one branch of a PR fetch, emitted
@@ -1026,8 +1126,21 @@ impl BranchMetrics {
 
 impl GhClient {
     pub async fn from_credential(cred: Credential) -> Result<Self, GhError> {
+        Self::from_credential_with_host(cred, None).await
+    }
+
+    /// Like [`Self::from_credential`], but targeting a GitHub Enterprise
+    /// Server host (bare hostname, e.g. `ghe.example.com`); `None` means
+    /// github.com. GHES serves REST under `/api/v3` but GraphQL at
+    /// `/api/graphql`, so the enterprise client carries two transports
+    /// with different base URIs (see the `gql` field).
+    pub async fn from_credential_with_host(
+        cred: Credential,
+        host: Option<&str>,
+    ) -> Result<Self, GhError> {
         let source = cred.source.clone();
         let fingerprint = credential_fingerprint(cred.token());
+        let token = cred.into_token();
         // Disable octocrab's built-in retry: its `OctoBody` clone only
         // Arc-clones a single-use body stream, so on a 429/5xx retry the
         // second attempt goes out with an empty `{}` body. GitHub answers
@@ -1040,16 +1153,37 @@ impl GhClient {
         // poll loop's critical path (outside the per-tick timeout),
         // and a dead TCP connection without these waited forever.
         // 30s is far above any healthy GitHub round-trip yet bounded.
-        let inner = Octocrab::builder()
-            .personal_token(cred.into_token())
-            .add_retry_config(octocrab::service::middleware::retry::RetryConfig::None)
-            .set_connect_timeout(Some(std::time::Duration::from_secs(30)))
-            .set_read_timeout(Some(std::time::Duration::from_secs(30)))
-            .build()
-            .map_err(GhError::Api)?;
+        let builder = || {
+            Octocrab::builder()
+                .personal_token(token.clone())
+                .add_retry_config(octocrab::service::middleware::retry::RetryConfig::None)
+                .set_connect_timeout(Some(std::time::Duration::from_secs(30)))
+                .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+        };
+        let (inner, gql) = match host {
+            None => {
+                let inner = builder().build().map_err(GhError::Api)?;
+                let gql = inner.clone();
+                (inner, gql)
+            }
+            Some(h) => {
+                let inner = builder()
+                    .base_uri(format!("https://{h}/api/v3"))
+                    .map_err(GhError::Api)?
+                    .build()
+                    .map_err(GhError::Api)?;
+                let gql = builder()
+                    .base_uri(format!("https://{h}/api"))
+                    .map_err(GhError::Api)?
+                    .build()
+                    .map_err(GhError::Api)?;
+                (inner, gql)
+            }
+        };
         let user = inner.current().user().await.map_err(GhError::Api)?.login;
         Ok(Self {
             inner,
+            gql,
             user,
             credential_source: source,
             credential_fingerprint: fingerprint,
@@ -1060,12 +1194,15 @@ impl GhClient {
                 crate::rate_budget::RateBudget::default_for_lazybox(),
             )),
             last_persisted_rate_state: std::sync::Arc::new(parking_lot::Mutex::new(None)),
-            request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
+            request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONCURRENT_GITHUB_REQUESTS,
+            )),
             mutation_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             notifications_state: NotificationsState::shared(),
             hot_freshness: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         })
     }
 
@@ -1078,8 +1215,10 @@ impl GhClient {
         credential_fingerprint: &str,
     ) -> Result<Self, GhError> {
         let inner = Octocrab::builder().build().map_err(GhError::Api)?;
+        let gql = inner.clone();
         Ok(Self {
             inner,
+            gql,
             user: "test-user".to_string(),
             credential_source: credential_source.to_string(),
             credential_fingerprint: credential_fingerprint.to_string(),
@@ -1090,12 +1229,15 @@ impl GhClient {
                 crate::rate_budget::RateBudget::default_for_lazybox(),
             )),
             last_persisted_rate_state: std::sync::Arc::new(parking_lot::Mutex::new(None)),
-            request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
+            request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONCURRENT_GITHUB_REQUESTS,
+            )),
             mutation_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             notifications_state: NotificationsState::shared(),
             hot_freshness: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         })
     }
 
@@ -1113,7 +1255,11 @@ impl GhClient {
             .build()
             .map_err(GhError::Api)?;
         let stub = Self::stub_for_tests("test", "fp")?;
-        Ok(Self { inner, ..stub })
+        Ok(Self {
+            gql: inner.clone(),
+            inner,
+            ..stub
+        })
     }
 
     /// Test-only: a stub client whose cached budget already contains a
@@ -1507,7 +1653,7 @@ impl GhClient {
         // recorded request latency measures GitHub's round-trip and not
         // the self-imposed governor waits (#745).
         let started = std::time::Instant::now();
-        let response = match self.inner._post("/graphql", Some(body)).await {
+        let response = match self.gql._post("/graphql", Some(body)).await {
             Ok(response) => response,
             Err(error) => {
                 self.budget.lock().observe_failed_response(
@@ -1609,7 +1755,50 @@ impl GhClient {
         // goes to `tracing` only: it can carry the full GraphQL
         // response (node payloads, JSON braces) which must never reach
         // a user-facing footer notice (issue #305).
-        serde_json::from_str::<serde_json::Value>(&raw_body)
+        // Split the two very different 2xx-JSON failures:
+        //   • `from_str::<Value>` (below) failing is a SYNTAX error — the
+        //     body isn't valid JSON at all, i.e. a truncated / corrupt 200
+        //     (GitHub cut the response mid-string). That is transient, so
+        //     it surfaces as the retryable `MalformedResponse`. The full
+        //     raw body goes to the log so a recurrence is diagnosable
+        //     (it never reaches the user-facing footer — issue #305).
+        //   • `from_value::<T>` (further down) failing is a real schema
+        //     mismatch on valid JSON — not retryable, kept as `HttpStatus`.
+        let value: serde_json::Value = match serde_json::from_str(&raw_body) {
+            Ok(value) => value,
+            Err(e) => {
+                self.budget.lock().observe_failed_response(
+                    operation,
+                    crate::rate_budget::ApiResource::Graphql,
+                    status,
+                    byte_len,
+                    elapsed,
+                );
+                // Log the TAIL (where a truncation cuts off), bounded to a
+                // few KB — dumping the whole ~200KB body on every occurrence
+                // would bloat the log. Char-boundary-safe.
+                let tail = {
+                    let target = raw_body.len().saturating_sub(2048);
+                    raw_body.get(target..).unwrap_or_else(|| {
+                        raw_body
+                            .char_indices()
+                            .find(|&(i, _)| i >= target)
+                            .map_or(raw_body.as_str(), |(i, _)| &raw_body[i..])
+                    })
+                };
+                tracing::warn!(
+                    "graphql 2xx body is not valid JSON — likely a truncated/corrupt \
+                     response ({byte_len} bytes) from `{operation}`: {e}; last {} bytes: {tail}",
+                    tail.len(),
+                );
+                return Err(GhError::MalformedResponse {
+                    status,
+                    byte_len,
+                    detail: e.to_string(),
+                });
+            }
+        };
+        Ok(value)
             .and_then(|value| {
                 let rate_limit = value
                     .get("data")
@@ -1734,6 +1923,19 @@ impl GhClient {
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    /// Budget-admit AND pace a REST request that goes straight to
+    /// octocrab (not through `post_graphql_with_retry`, which already
+    /// paces + gates concurrency). Returns the concurrency permit to hold
+    /// across the send, so these calls get the same secondary-limit
+    /// spacing the polling paths do. Without it a burst path — the
+    /// working-claim label sync fires ~6 label writes per agent heartbeat
+    /// — sends unspaced and trips GitHub's abuse (secondary) limit under
+    /// many concurrent agents.
+    async fn acquire_rest(&self, op: &str) -> Result<tokio::sync::SemaphorePermit<'_>, GhError> {
+        self.acquire_or_block(op)?;
+        self.request_permit().await
     }
 
     async fn request_permit(&self) -> Result<tokio::sync::SemaphorePermit<'_>, GhError> {
@@ -2203,6 +2405,24 @@ impl GhClient {
     pub const FULL_RECONCILE_INTERVAL: std::time::Duration =
         std::time::Duration::from_secs(60 * 60);
 
+    /// Cadence for the cheap `author:USER` discovery probe
+    /// ([`fetch_recently_authored_prs`](Self::fetch_recently_authored_prs)).
+    /// Short — this is the fast path that surfaces a self/agent-created PR
+    /// (which has no notification) without waiting for the 30-min full
+    /// sweep. One small windowed search per interval, independent of repo
+    /// count, so it stays well within the rate budget.
+    pub const AUTHORED_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(90);
+
+    /// Cadence for the cheap `involves:USER is:issue` discovery probe
+    /// ([`fetch_recently_involved_issues`](Self::fetch_recently_involved_issues)).
+    /// Sibling of the authored-PR probe, on its own light clock: a brand-new
+    /// issue that involves the user surfaces within this cadence even when
+    /// the heavy full `involves:` sweep is deferred by the rate governor at
+    /// scale (#1391), instead of waiting out the 30-min sweep or a manual
+    /// `Shift-R`. One small windowed search per interval, independent of
+    /// watched-repo count.
+    pub const ISSUE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(90);
+
     /// Should the next sync cycle run a heavy full sweep, or is the
     /// notifications-driven incremental path safe to use? Returns true
     /// when no sweep has run yet (first tick after daemon start) or
@@ -2238,6 +2458,32 @@ impl GhClient {
         if state.last_modified.is_none() {
             state.last_modified = Some(notifications::format_http_date(chrono::Utc::now()));
         }
+    }
+
+    /// Whether the cheap `author:USER` discovery probe is due this tick.
+    pub fn authored_probe_due(&self) -> bool {
+        self.notifications_state
+            .lock()
+            .is_authored_probe_due(Self::AUTHORED_PROBE_INTERVAL)
+    }
+
+    /// Stamp the discovery probe as just-run so it re-arms on its cadence.
+    pub fn mark_authored_probe_done(&self) {
+        self.notifications_state.lock().mark_authored_probe_done();
+    }
+
+    /// Whether the cheap `involves:USER is:issue` discovery probe is due
+    /// this tick.
+    pub fn issue_probe_due(&self) -> bool {
+        self.notifications_state
+            .lock()
+            .is_issue_probe_due(Self::ISSUE_PROBE_INTERVAL)
+    }
+
+    /// Stamp the issue-discovery probe as just-run so it re-arms on its
+    /// cadence.
+    pub fn mark_issue_probe_done(&self) {
+        self.notifications_state.lock().mark_issue_probe_done();
     }
 
     /// Decide the `updated:>=` floor for the next GLOBAL `involves:` PR
@@ -2311,6 +2557,9 @@ impl GhClient {
         // hot-freshness fingerprints so the next hot batch re-fetches
         // full detail for the whole set (#1218).
         self.hot_freshness.lock().clear();
+        // And give the batched hot query another chance on this server.
+        self.hot_batch_graphql_failures
+            .store(0, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn manual_refresh_pending(&self) -> bool {
@@ -2393,17 +2642,17 @@ impl GhClient {
     /// `should_full_sweep` honors this and bypasses the heartbeat
     /// round-trip until the deadline passes. Idempotent — re-arming
     /// while already backed off just extends the window.
-    fn note_heartbeat_failed(&self) {
-        let mut state = self.notifications_state.lock();
+    /// `rate_limited` = the heartbeat failed because a request was blocked by
+    /// a rate limit (our governor OR GitHub's secondary/primary limit) rather
+    /// than a transport outage. A rate limit never arms a catch-up sweep —
+    /// see [`NotificationsState::record_heartbeat_failure`] (#1218).
+    fn note_heartbeat_failed(&self, rate_limited: bool) {
         let deadline = std::time::Instant::now() + Self::HEARTBEAT_BACK_OFF;
-        let was_armed = state.heartbeat_back_off_until.is_some();
-        state.heartbeat_back_off_until = Some(deadline);
-        if !was_armed {
-            // One catch-up sweep for whatever the dead heartbeat may
-            // have missed; subsequent backed-off ticks stay hot-only
-            // (#1218 — a full sweep every tick for the whole back-off
-            // window burned the most quota during exhaustion).
-            state.backoff_catchup_sweep_due = true;
+        let armed = self
+            .notifications_state
+            .lock()
+            .record_heartbeat_failure(rate_limited, deadline);
+        if armed {
             tracing::warn!(
                 back_off_secs = Self::HEARTBEAT_BACK_OFF.as_secs(),
                 "notifications heartbeat failed — backing off; one catch-up sweep, then hot-only ticks",
@@ -2445,7 +2694,7 @@ impl GhClient {
         let result = self.fetch_notifications_inner().await;
         match &result {
             Ok(_) => self.note_heartbeat_succeeded(),
-            Err(_) => self.note_heartbeat_failed(),
+            Err(e) => self.note_heartbeat_failed(matches!(e, GhError::RateLimited { .. })),
         }
         result
     }
@@ -2686,6 +2935,17 @@ impl GhClient {
         }
     }
 
+    /// True once `HOT_BATCH_REJECTION_THRESHOLD` consecutive hot batches
+    /// came back as GraphQL errors: this server rejects the batched
+    /// `nodes(ids:)` hot queries (GHES 3.18 does), so hot targets should
+    /// be fetched one at a time via `fetch_single_pr` / `fetch_single_issue`
+    /// until `force_full_sweep` re-arms the batch.
+    pub fn hot_batch_rejected(&self) -> bool {
+        self.hot_batch_graphql_failures
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= HOT_BATCH_REJECTION_THRESHOLD
+    }
+
     /// Fetch the bounded hot set, two-tier (#1218): a lean freshness
     /// probe first (~10 nodes/PR), then the full-detail query only for
     /// nodes whose probe moved since the last tick. `nodes(ids:)`
@@ -2694,7 +2954,26 @@ impl GhClient {
     /// GraphQL errors a `nodes(ids:)` list past 100 outright, which
     /// used to fail the whole hot refresh once 100+ workspaces held
     /// sessions.
+    ///
+    /// Tracks consecutive GraphQL rejections for `hot_batch_rejected`;
+    /// transport / rate-limit failures don't count, since they say
+    /// nothing about whether this server accepts the query.
     pub async fn fetch_hot_tasks(&self, node_ids: &[String]) -> Result<Vec<HotFetch>, GhError> {
+        let result = self.fetch_hot_tasks_batch(node_ids).await;
+        match &result {
+            Ok(_) => self
+                .hot_batch_graphql_failures
+                .store(0, std::sync::atomic::Ordering::Relaxed),
+            Err(GhError::Graphql(_)) => {
+                self.hot_batch_graphql_failures
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(_) => {}
+        }
+        result
+    }
+
+    async fn fetch_hot_tasks_batch(&self, node_ids: &[String]) -> Result<Vec<HotFetch>, GhError> {
         if node_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -3022,6 +3301,100 @@ impl GhClient {
         Ok(issue.map(|i| graphql::issue_to_task(&i, &self.user)))
     }
 
+    /// Cheap discovery probe for PRs the authenticated user AUTHORED that
+    /// changed since `since`. Unlike [`fetch_all_prs`](Self::fetch_all_prs)
+    /// — a heavy multi-query `involves:` fan-out — this is a SINGLE
+    /// windowed `author:USER is:pr updated:>=since` search: a near-empty
+    /// page on a steady inbox, independent of how many repos you watch.
+    ///
+    /// It exists because a PR you (or your agent) just created generates
+    /// NO GitHub notification, so the incremental notifications path never
+    /// sees it and it would otherwise wait for the next 30-min full sweep.
+    /// Running this on the fast tick surfaces it in ~one tick, and because
+    /// the result feeds the normal upsert it also fires the issue→PR
+    /// rollover promptly. Priced as its own light budget class so it isn't
+    /// charged like the full `involves:` sweep.
+    pub async fn fetch_recently_authored_prs(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Task>, GhError> {
+        let query = Self::authored_probe_query(&self.user, since);
+        tracing::debug!("authored-PR discovery probe: {query}");
+        self.fetch_pr_search_paginated_as("authored-PR probe", "authored-probe", &query)
+            .await
+    }
+
+    /// Build the `author:USER … updated:>=since` search string for the
+    /// discovery probe. Split out so the query shape is unit-testable
+    /// without a live GraphQL round-trip.
+    pub(crate) fn authored_probe_query(user: &str, since: chrono::DateTime<chrono::Utc>) -> String {
+        let mut quals = graphql::default_search_qualifiers();
+        quals.push(format!("author:{user}"));
+        quals.push(graphql::updated_since_qualifier(since));
+        graphql::build_query(&quals)
+    }
+
+    /// Cheap windowed issue-discovery probe (#1391): a SINGLE
+    /// `involves:USER is:issue updated:>=since` search that honors the same
+    /// role/scope filters as the full issue sweep. Sibling of
+    /// [`fetch_recently_authored_prs`](Self::fetch_recently_authored_prs) —
+    /// a near-empty page on a steady inbox, independent of how many repos
+    /// you watch.
+    ///
+    /// New-issue discovery otherwise only happens on the heavy full
+    /// `involves:` sweep, which the rate governor perpetually DEFERS past
+    /// ~25 watched repos (its forecast exceeds the per-tick GraphQL
+    /// allowance). Running this on the fast tick surfaces a brand-new
+    /// involved issue within one probe cadence even while the full sweep is
+    /// deferred, so discovery no longer silently stalls until a manual
+    /// `Shift-R`. Priced as its own light budget class so it isn't charged
+    /// like the full sweep.
+    pub async fn fetch_recently_involved_issues(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Task>, GhError> {
+        let query = Self::issue_probe_query(&self.issue_filters, &self.user, since);
+        tracing::debug!("involved-issue discovery probe: {query}");
+        self.acquire_paced("issue-probe").await?;
+        let body = graphql::issues_query_body(&query, None);
+        let response: graphql::GqlIssueResponse =
+            self.post_graphql_with_retry("issue-probe", &body).await?;
+        if let Some(errors) = &response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.message.clone())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(GhError::Graphql(joined));
+        }
+        let mut tasks = Vec::new();
+        if let Some(data) = response.data {
+            for issue in &data.search.nodes {
+                tasks.push(graphql::issue_to_task(issue, &self.user));
+            }
+        }
+        Ok(tasks)
+    }
+
+    /// Build the `involves:USER is:issue … updated:>=since` search string
+    /// for the issue-discovery probe. Mirrors [`issue_search_query`](Self::issue_search_query)
+    /// (same role/scope narrowing) plus the incremental window, split out
+    /// so the query shape is unit-testable without a live GraphQL round-trip.
+    pub(crate) fn issue_probe_query(
+        issue_filters: &[String],
+        user: &str,
+        since: chrono::DateTime<chrono::Utc>,
+    ) -> String {
+        let mut quals = graphql::default_issues_qualifiers();
+        if issue_filters.is_empty() {
+            quals.push(format!("involves:{user}"));
+        } else {
+            quals.extend(issue_filters.iter().cloned());
+        }
+        quals.push(graphql::updated_since_qualifier(since));
+        graphql::build_issues_query(&quals)
+    }
+
     /// `since` narrows the main `involves:` paginated search to PRs
     /// updated at or after that instant (issue #14) — `None` fetches
     /// every open involved PR (a reconcile sweep). When `since` is set,
@@ -3290,7 +3663,11 @@ impl GhClient {
         const PER_REPO_CONCURRENCY: usize = 5;
         let per_repo_fut = stream::iter(repos.iter().cloned())
             .map(|repo| async move {
-                let query = format!("is:open is:pr repo:{repo} archived:false");
+                let watched = self
+                    .watch_repos
+                    .iter()
+                    .any(|w| w.eq_ignore_ascii_case(&repo));
+                let query = round_robin_repo_query(&repo, &self.user, watched);
                 let result = self.fetch_pr_single_query("round-robin-repo", query).await;
                 (repo, result)
             })
@@ -3448,14 +3825,28 @@ impl GhClient {
     /// fetch can `tokio::join!` it alongside the merged-sweep + the
     /// watched-repo fan-out.
     async fn fetch_pr_search_paginated(&self, search_query: &str) -> Result<Vec<Task>, GhError> {
+        self.fetch_pr_search_paginated_as("PR search", "involves-main", search_query)
+            .await
+    }
+
+    /// [`fetch_pr_search_paginated`] with an explicit request `class` and
+    /// metrics `label`. The class drives the rate-budget accounting — the
+    /// lightweight author probe (#discovery) is a distinct, cheap class so
+    /// it isn't priced like the heavy `involves:` sweep.
+    async fn fetch_pr_search_paginated_as(
+        &self,
+        class: &'static str,
+        metrics_label: &'static str,
+        search_query: &str,
+    ) -> Result<Vec<Task>, GhError> {
         let started = std::time::Instant::now();
-        let metrics = parking_lot::Mutex::new(BranchMetrics::new("involves-main"));
+        let metrics = parking_lot::Mutex::new(BranchMetrics::new(metrics_label));
         let outcome = paginate(
             |cursor, page| {
                 let metrics = &metrics;
                 async move {
-                    self.acquire_paced("PR search").await.map_err(|error| {
-                        tracing::error!("PR search budget error (page {page}): {error}");
+                    self.acquire_paced(class).await.map_err(|error| {
+                        tracing::error!("{class} budget error (page {page}): {error}");
                         error
                     })?;
                     let body = graphql::query_body_after(search_query, cursor.as_deref());
@@ -3464,7 +3855,7 @@ impl GhClient {
                         serde_json::to_string(&body).unwrap_or_default()
                     );
                     let (raw, page_bytes): (serde_json::Value, usize) = self
-                        .post_graphql_with_retry_measured("PR search", &body)
+                        .post_graphql_with_retry_measured(class, &body)
                         .await
                         .map_err(|e| {
                             tracing::error!("GraphQL HTTP error (page {page}): {e}\n{e:?}");
@@ -3512,7 +3903,7 @@ impl GhClient {
                         metrics.lock().graphql_cost += rl.cost.unwrap_or(0);
                     }
                     self.budget.lock().note_expected_pages(
-                        "PR search",
+                        class,
                         graphql::pr_page_count(data.search.issue_count),
                     );
                     Ok(FetchPage {
@@ -3545,11 +3936,7 @@ impl GhClient {
                 "GraphQL pagination stopped after {} pages; tail is non-authoritative",
                 metrics.requests
             );
-            return Err(incomplete_pagination_error(
-                "PR search",
-                tasks.len(),
-                reason,
-            ));
+            return Err(incomplete_pagination_error(class, tasks.len(), reason));
         }
         Ok(tasks)
     }
@@ -3661,6 +4048,119 @@ impl GhClient {
             .fetch_all_issues_with_mentions(&std::collections::BTreeSet::new())
             .await?;
         Ok(tasks)
+    }
+
+    /// User-initiated repo sync (`g s` on a repo-scoped workspace, #1390):
+    /// fetch a single repo's OPEN issues **and** PRs and return them as
+    /// tasks. Deliberately NOT gated on `involves:me` / `is:pr` the way the
+    /// background poll is — the poll only surfaces a watched repo's *PRs*
+    /// and issues that involve you, so a repo's plain open issues never
+    /// reach the inbox on their own. This is the explicit "get me this
+    /// repo's work" action, so it pulls both. First page only (up to the
+    /// search node cap) — plenty for a `g s`, and cheap.
+    pub async fn fetch_repo_open_tasks(&self, repo: &str) -> Result<Vec<Task>, GhError> {
+        // Open PRs — same shape as the round-robin/watched-repo branch.
+        let mut tasks = self
+            .fetch_pr_single_query(
+                "repo sync",
+                format!("is:open is:pr repo:{repo} archived:false"),
+            )
+            .await?;
+
+        // Open issues in the repo, repo-scoped rather than involves-scoped.
+        self.acquire_or_block("repo sync")?;
+        let mut quals = graphql::default_issues_qualifiers();
+        quals.push(format!("repo:{repo}"));
+        let body = graphql::issues_query_body(&graphql::build_issues_query(&quals), None);
+        let response: graphql::GqlIssueResponse =
+            self.post_graphql_with_retry("repo sync", &body).await?;
+        if let Some(errors) = &response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.message.clone())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(GhError::Graphql(joined));
+        }
+        if let Some(data) = response.data {
+            for issue in &data.search.nodes {
+                tasks.push(graphql::issue_to_task(issue, &self.user));
+            }
+        }
+        Ok(tasks)
+    }
+
+    /// A repository's most-recently-merged PRs, for the merge-history
+    /// modal (#1432) — the "what's been landing here" ledger. A single
+    /// search page, `sort:updated-desc`, so it stays cheap and bounded no
+    /// matter how many PRs the repo has ever merged — the poll's global
+    /// merged sweep floors on a date, but here the user wants the last
+    /// handful regardless of when they landed. Returns full `Task`s (via
+    /// `pr_to_task`, the same projection the inbox scan uses) so the modal
+    /// can list authors + merge time, preview the body, and drill into the
+    /// full description without a second round-trip.
+    pub async fn fetch_repo_merged_prs(&self, repo: &str) -> Result<Vec<Task>, GhError> {
+        self.acquire_or_block("merge history")?;
+        let query = format!("repo:{repo} is:pr is:merged sort:updated-desc");
+        let body = graphql::query_body_after(&query, None);
+        let response: graphql::GqlResponse =
+            self.post_graphql_with_retry("merge history", &body).await?;
+        if let Some(errors) = &response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.message.clone())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(GhError::Graphql(joined));
+        }
+        let data = response
+            .data
+            .ok_or_else(|| GhError::Graphql("merge history: no data".into()))?;
+        Ok(data
+            .search
+            .nodes
+            .iter()
+            .map(|pr| graphql::pr_to_task(pr, &self.user))
+            .collect())
+    }
+
+    /// One page of a WATCHED repo's open issues, for the poll's per-repo
+    /// issue fan-out. The main issues query is `involves:you`-scoped, so a
+    /// watched repo's issues that don't involve you never appear otherwise —
+    /// this closes that gap (a watched repo surfaced only its PRs before).
+    /// Best-effort: the caller logs + skips a repo that errors. Mention-
+    /// scanned like the main query so `@lazybox` still fires on these.
+    async fn fetch_watched_repo_issues(
+        &self,
+        repo: &str,
+        allowed_logins: &std::collections::BTreeSet<String>,
+    ) -> Result<(Vec<Task>, Vec<crate::LazyboxMention>), GhError> {
+        self.acquire_paced("watched-repo issues").await?;
+        let mut quals = graphql::default_issues_qualifiers();
+        quals.push(format!("repo:{repo}"));
+        let body = graphql::issues_query_body(&graphql::build_issues_query(&quals), None);
+        let response: graphql::GqlIssueResponse = self
+            .post_graphql_with_retry("watched-repo issues", &body)
+            .await?;
+        if let Some(errors) = &response.errors {
+            let joined = errors
+                .iter()
+                .map(|e| e.message.clone())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(GhError::Graphql(joined));
+        }
+        let mut tasks = Vec::new();
+        let mut mentions = Vec::new();
+        if let Some(data) = response.data {
+            for issue in &data.search.nodes {
+                tasks.push(graphql::issue_to_task(issue, &self.user));
+                if !allowed_logins.is_empty() {
+                    mentions.extend(crate::mentions::scan_issue(issue, allowed_logins));
+                }
+            }
+        }
+        Ok((tasks, mentions))
     }
 
     /// Same as `fetch_all_issues` but also scans each raw issue for
@@ -3778,6 +4278,41 @@ impl GhClient {
                 tasks.len(),
                 reason,
             ));
+        }
+
+        // Watched repos: the main query above is `involves:you`-scoped, so a
+        // watched repo's issues that DON'T involve you never appear (before
+        // this, a watched repo surfaced only its PRs). Fan out a per-repo
+        // issues query for each watched repo and merge, deduping by key
+        // against what the main query already returned. Best-effort — mirrors
+        // the PR watched fan-out in `fetch_all_prs`; a repo that errors just
+        // logs and is skipped, never failing the whole issue poll.
+        if !self.watch_repos.is_empty() {
+            use futures::stream::{self, StreamExt};
+            const WATCHED_ISSUE_CONCURRENCY: usize = 5;
+            let mut seen: std::collections::HashSet<String> =
+                tasks.iter().map(|t| t.id.key.clone()).collect();
+            let results = stream::iter(self.watch_repos.iter().cloned())
+                .map(|repo| async move {
+                    let result = self.fetch_watched_repo_issues(&repo, allowed_logins).await;
+                    (repo, result)
+                })
+                .buffer_unordered(WATCHED_ISSUE_CONCURRENCY)
+                .collect::<Vec<_>>()
+                .await;
+            for (repo, result) in results {
+                match result {
+                    Ok((repo_tasks, mut repo_mentions)) => {
+                        for task in repo_tasks {
+                            if seen.insert(task.id.key.clone()) {
+                                tasks.push(task);
+                            }
+                        }
+                        mentions.append(&mut repo_mentions);
+                    }
+                    Err(e) => tracing::warn!("watched-repo issues `{repo}` failed: {e}"),
+                }
+            }
         }
 
         let elapsed_ms = started.elapsed().as_millis();
@@ -4442,7 +4977,7 @@ impl GhClient {
     ) -> Result<(), GhError> {
         let (owner, name, number) = working_claim_target(task_id, repo)?;
         let handler = self.inner.issues(owner, name);
-        self.acquire_or_block("list issue working labels")?;
+        let _permit = self.acquire_rest("list issue working labels").await?;
         let mut page = handler
             .list_labels_for_issue(number)
             .per_page(100)
@@ -4455,7 +4990,9 @@ impl GhClient {
             if page.next.is_none() {
                 break;
             }
-            self.acquire_or_block("list issue working labels next page")?;
+            let _permit = self
+                .acquire_rest("list issue working labels next page")
+                .await?;
             page = match self
                 .inner
                 .get_page::<octocrab::models::Label>(&page.next)
@@ -4487,7 +5024,7 @@ impl GhClient {
             if !owned.iter().any(|name| name == desired) {
                 let mut available = false;
                 if let Some(previous) = owned.first() {
-                    self.acquire_or_block("renew working claim label")?;
+                    let _permit = self.acquire_rest("renew working claim label").await?;
                     match handler
                         .update_label(
                             previous,
@@ -4503,7 +5040,7 @@ impl GhClient {
                     }
                 }
                 if !available {
-                    self.acquire_or_block("create working claim label")?;
+                    let _permit = self.acquire_rest("create working claim label").await?;
                     match handler
                         .create_label(
                             desired,
@@ -4517,7 +5054,7 @@ impl GhClient {
                         Err(error) => return Err(GhError::Api(error)),
                     }
                 }
-                self.acquire_or_block("add working claim label")?;
+                let _permit = self.acquire_rest("add working claim label").await?;
                 handler
                     .add_labels(number, &[desired.to_string()])
                     .await
@@ -4529,7 +5066,7 @@ impl GhClient {
             // leak one dead label into the repo's label picker per heartbeat
             // (the rename path above already carried the definition forward).
             for previous in owned.iter().filter(|name| name.as_str() != desired) {
-                self.acquire_or_block("delete working claim label")?;
+                let _permit = self.acquire_rest("delete working claim label").await?;
                 if let Err(error) = handler.delete_label(previous).await
                     && octocrab_error_status(&error) != Some(404)
                 {
@@ -4541,7 +5078,7 @@ impl GhClient {
             // detaches it from the issue) so a finished claim leaves nothing
             // behind in the repo's label picker.
             for label in &owned {
-                self.acquire_or_block("delete working claim label")?;
+                let _permit = self.acquire_rest("delete working claim label").await?;
                 if let Err(error) = handler.delete_label(label).await
                     && octocrab_error_status(&error) != Some(404)
                 {
@@ -4574,7 +5111,7 @@ impl GhClient {
                     "working claim cleanup: refusing malformed or legacy label".into(),
                 ));
             }
-            self.acquire_or_block("delete working claim label")?;
+            let _permit = self.acquire_rest("delete working claim label").await?;
             if let Err(error) = handler.delete_label(label).await
                 && octocrab_error_status(&error) != Some(404)
             {
@@ -4641,6 +5178,44 @@ impl GhClient {
             return Err(mutation_error_response("mergePullRequest", &errors));
         }
         Ok(())
+    }
+
+    /// Best-effort: is `pr` already merged on GitHub right now? Used to
+    /// disambiguate an ambiguous merge rejection — GitHub returns a
+    /// generic "not mergeable" for an already-merged PR, indistinguishable
+    /// by message alone from a real conflict, so it slips past
+    /// [`ALREADY_MERGED_MARKERS`]. A targeted re-fetch settles it: a `g m`
+    /// on a PR that's actually merged is a no-op success, not a failure.
+    /// Fails CLOSED (returns `false`) on any parse or fetch error, so a
+    /// genuine merge failure is still reported rather than swallowed.
+    async fn pr_already_merged(&self, pr: &lazybox_core::Task) -> bool {
+        let Some((owner, name, number)) = parse_github_pr_key(&pr.id.key) else {
+            return false;
+        };
+        matches!(
+            self.fetch_single_pr_interactive(owner, name, number).await,
+            Ok(Some(task)) if task.state == lazybox_core::TaskState::Merged
+        )
+    }
+
+    /// Idempotency re-check for the draft toggles, mirroring
+    /// [`Self::pr_already_merged`]. GitHub's `convertPullRequestToDraft` /
+    /// `markPullRequestReadyForReview` are NOT no-ops — converting an
+    /// already-draft PR (or readying a non-draft one) returns an error.
+    /// So a lost-response retry re-fires the mutation and GitHub rejects
+    /// it, even though the desired end-state already holds. On mutation
+    /// error we re-fetch the PR and ask whether it already reached the
+    /// target draft state; if so the caller treats it as success instead
+    /// of surfacing a spurious failure. A fetch failure returns `false`
+    /// so a genuine mutation error is still reported.
+    async fn pr_reached_draft_state(&self, pr: &lazybox_core::Task, want_draft: bool) -> bool {
+        let Some((owner, name, number)) = parse_github_pr_key(&pr.id.key) else {
+            return false;
+        };
+        matches!(
+            self.fetch_single_pr_interactive(owner, name, number).await,
+            Ok(Some(task)) if draft_end_state_reached(task.state, want_draft)
+        )
     }
 
     /// When a merge failed with GitHub's generic "Repository rule
@@ -4732,6 +5307,39 @@ impl GhClient {
         Ok(())
     }
 
+    pub async fn convert_pr_to_draft_node(
+        &self,
+        pull_request_node_id: &str,
+    ) -> Result<(), GhError> {
+        self.acquire_or_block("convertPullRequestToDraft mutation")?;
+        let body = graphql::convert_pr_to_draft_body(pull_request_node_id);
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("convertPullRequestToDraft mutation", &body)
+            .await?;
+        if let Some(errors) = response.errors {
+            return Err(mutation_error_response(
+                "convertPullRequestToDraft mutation",
+                &errors,
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn mark_pr_ready_node(&self, pull_request_node_id: &str) -> Result<(), GhError> {
+        self.acquire_or_block("markPullRequestReadyForReview mutation")?;
+        let body = graphql::mark_pr_ready_body(pull_request_node_id);
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("markPullRequestReadyForReview mutation", &body)
+            .await?;
+        if let Some(errors) = response.errors {
+            return Err(mutation_error_response(
+                "markPullRequestReadyForReview mutation",
+                &errors,
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn delete_issue_node(&self, issue_node_id: &str) -> Result<(), GhError> {
         self.acquire_or_block("deleteIssue mutation")?;
         let body = graphql::delete_issue_body(issue_node_id);
@@ -4749,6 +5357,35 @@ fn octocrab_error_status(error: &octocrab::Error) -> Option<u16> {
     match error {
         octocrab::Error::GitHub { source, .. } => Some(source.status_code.as_u16()),
         _ => None,
+    }
+}
+
+/// Parse a GitHub task key `"owner/repo#123"` into `(owner, repo, number)`.
+/// `None` when the shape doesn't match. Used by the merge already-merged
+/// re-check to target a single-PR fetch.
+fn parse_github_pr_key(key: &str) -> Option<(&str, &str, u64)> {
+    let (repo_path, number) = key.rsplit_once('#')?;
+    let (owner, name) = repo_path.split_once('/')?;
+    let number = number.parse::<u64>().ok()?;
+    Some((owner, name, number))
+}
+
+/// Whether a PR's freshly-fetched state means a draft toggle already
+/// reached its target, used by [`GhClient::pr_reached_draft_state`] to
+/// make the toggles idempotent. `want_draft` = the state the caller was
+/// trying to produce: `true` (convert-to-draft) is reached only by an
+/// actual draft; `false` (mark-ready) is reached only by an *open*,
+/// non-draft PR — a Closed/Merged PR is NOT a successful "ready", so the
+/// original mutation error is surfaced rather than masked.
+fn draft_end_state_reached(state: lazybox_core::TaskState, want_draft: bool) -> bool {
+    use lazybox_core::TaskState;
+    if want_draft {
+        state == TaskState::Draft
+    } else {
+        matches!(
+            state,
+            TaskState::Open | TaskState::InProgress | TaskState::InReview
+        )
     }
 }
 
@@ -4827,9 +5464,24 @@ impl lazybox_core::TaskProvider for GhClient {
         };
         match self.merge_pr(node_id, expected_head_oid).await {
             Ok(()) => Ok(()),
-            Err(err) => Err(mutation_provider_error(
-                self.name_rule_violation(err, pr).await,
-            )),
+            Err(err) => {
+                // GitHub rejects a merge of an ALREADY-merged PR with a
+                // generic "not mergeable" — indistinguishable by message
+                // from a real conflict. Re-check: if the PR is in fact
+                // merged, `g m` on a merged PR is a no-op success, and
+                // returning Ok lets the caller mark the row merged,
+                // correcting a poll that hadn't caught the merge yet.
+                if self.pr_already_merged(pr).await {
+                    tracing::info!(
+                        "merge {}: PR already merged on GitHub — treating as no-op success",
+                        pr.id.key
+                    );
+                    return Ok(());
+                }
+                Err(mutation_provider_error(
+                    self.name_rule_violation(err, pr).await,
+                ))
+            }
         }
     }
 
@@ -4903,6 +5555,74 @@ impl lazybox_core::TaskProvider for GhClient {
         self.close_pr_node(node_id)
             .await
             .map_err(mutation_provider_error)
+    }
+
+    /// Convert the workspace's PR to a draft. Requires
+    /// `workspace.pr.node_id` — the polling cycle fills it in.
+    async fn convert_to_draft(
+        &self,
+        workspace: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        let Some(pr) = workspace.pr.as_ref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                format!("workspace {} has no PR", workspace.key),
+            ));
+        };
+        let Some(node_id) = pr.node_id.as_deref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                "PR has no node_id (poll first)",
+            ));
+        };
+        match self.convert_pr_to_draft_node(node_id).await {
+            Ok(()) => Ok(()),
+            // Idempotent: GitHub errors when the PR is already a draft, so
+            // a lost-response retry must not surface a spurious failure —
+            // if it already IS a draft, the desired end-state holds.
+            Err(_) if self.pr_reached_draft_state(pr, true).await => {
+                tracing::info!(
+                    "convert-to-draft {}: PR already a draft on GitHub — treating as no-op success",
+                    pr.id.key
+                );
+                Ok(())
+            }
+            Err(err) => Err(mutation_provider_error(err)),
+        }
+    }
+
+    /// Mark the workspace's draft PR ready for review. Requires
+    /// `workspace.pr.node_id` — the polling cycle fills it in.
+    async fn mark_ready(
+        &self,
+        workspace: &lazybox_core::Workspace,
+    ) -> Result<(), lazybox_core::ProviderError> {
+        let Some(pr) = workspace.pr.as_ref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                format!("workspace {} has no PR", workspace.key),
+            ));
+        };
+        let Some(node_id) = pr.node_id.as_deref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                "PR has no node_id (poll first)",
+            ));
+        };
+        match self.mark_pr_ready_node(node_id).await {
+            Ok(()) => Ok(()),
+            // Idempotent: GitHub errors when the PR is not a draft, so a
+            // lost-response retry must not surface a spurious failure — if
+            // it's already ready (open, non-draft), the end-state holds.
+            Err(_) if self.pr_reached_draft_state(pr, false).await => {
+                tracing::info!(
+                    "mark-ready {}: PR already ready on GitHub — treating as no-op success",
+                    pr.id.key
+                );
+                Ok(())
+            }
+            Err(err) => Err(mutation_provider_error(err)),
+        }
     }
 
     /// List the accounts requestable as reviewers on the workspace's
@@ -5338,11 +6058,49 @@ fn gql_errors_all_not_visible(errors: &[graphql::GqlError]) -> bool {
     !errors.is_empty() && errors.iter().all(graphql::GqlError::is_not_visible)
 }
 
+/// Search query for one repo picked by the round-robin rotation.
+///
+/// Non-watched repos are scoped to the viewer's involvement: the
+/// unscoped query downloaded a busy monorepo's ENTIRE open-PR set (up
+/// to 20 sequential pages / 500 PRs) every time the rotation picked
+/// it, only for `filter_github_tasks_with_watches` to discard every PR
+/// the user has no role in — the same `involves:` scope the global
+/// sweep's primary branch already uses. (GitHub's `involves:` misses
+/// review-requested; the reviewer companion branch in
+/// `fetch_prs_for_repos` covers that, exactly as it does for the
+/// global sweep.) Watched repos stay unscoped: their whole point is
+/// all open PRs regardless of involvement.
+fn round_robin_repo_query(repo: &str, user: &str, watched: bool) -> String {
+    if watched {
+        format!("is:open is:pr repo:{repo} archived:false")
+    } else {
+        format!("is:open is:pr repo:{repo} archived:false involves:{user}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    /// Regression (#scale): the round-robin per-repo query must scope
+    /// non-watched repos to the viewer — an unscoped query re-downloads
+    /// a busy repo's whole open-PR set (≤500 PRs) per rotation pick,
+    /// then discards the non-involved ones post-fetch. Watched repos
+    /// keep the unscoped query on purpose.
+    #[test]
+    fn round_robin_query_scopes_unwatched_repos_to_involvement() {
+        assert_eq!(
+            round_robin_repo_query("o/busy", "me", false),
+            "is:open is:pr repo:o/busy archived:false involves:me",
+        );
+        assert_eq!(
+            round_robin_repo_query("o/watched", "me", true),
+            "is:open is:pr repo:o/watched archived:false",
+            "watched repos want ALL open PRs, involvement-scoped or not",
+        );
+    }
 
     fn logins(names: &[&str]) -> std::collections::BTreeSet<String> {
         names.iter().map(|s| s.to_string()).collect()
@@ -5350,6 +6108,65 @@ mod tests {
 
     fn graphql_error(message: &str) -> GhError {
         GhError::Graphql(message.to_string())
+    }
+
+    #[test]
+    fn authored_probe_query_is_windowed_pr_search_for_the_user() {
+        let since = chrono::DateTime::parse_from_rfc3339("2026-08-25T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let query = GhClient::authored_probe_query("octo-agent", since);
+        // PR-only, open, non-archived — never issues, never a repo scan.
+        assert!(query.contains("is:pr"), "{query}");
+        assert!(query.contains("is:open"), "{query}");
+        assert!(query.contains("archived:false"), "{query}");
+        // Scoped to the caller and windowed, so it stays a near-empty page
+        // rather than the heavy `involves:` sweep.
+        assert!(query.contains("author:octo-agent"), "{query}");
+        assert!(
+            query.contains("updated:>=2026-08-25T10:00:00+00:00"),
+            "{query}"
+        );
+        assert!(!query.contains("involves:"), "{query}");
+    }
+
+    #[test]
+    fn issue_probe_query_is_windowed_involves_issue_search() {
+        let since = chrono::DateTime::parse_from_rfc3339("2026-08-25T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // Default (no explicit issue filters) → `involves:USER`, so a
+        // newly-assigned/mentioned issue surfaces, and windowed so it stays
+        // a near-empty page rather than the heavy full issue sweep.
+        let query = GhClient::issue_probe_query(&[], "octo-agent", since);
+        assert!(query.contains("is:issue"), "{query}");
+        assert!(query.contains("is:open"), "{query}");
+        assert!(query.contains("archived:false"), "{query}");
+        assert!(query.contains("involves:octo-agent"), "{query}");
+        assert!(!query.contains("is:pr"), "{query}");
+        assert!(
+            query.contains("updated:>=2026-08-25T10:00:00+00:00"),
+            "{query}"
+        );
+    }
+
+    #[test]
+    fn issue_probe_query_honors_explicit_filters() {
+        let since = chrono::DateTime::parse_from_rfc3339("2026-08-25T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // Explicit role/scope filters replace the `involves:` default,
+        // matching `issue_search_query`, so the probe surfaces the same set
+        // the full sweep would — just windowed.
+        let filters = vec!["assignee:octo-agent".to_string()];
+        let query = GhClient::issue_probe_query(&filters, "octo-agent", since);
+        assert!(query.contains("assignee:octo-agent"), "{query}");
+        assert!(!query.contains("involves:"), "{query}");
+        assert!(query.contains("is:issue"), "{query}");
+        assert!(
+            query.contains("updated:>=2026-08-25T10:00:00+00:00"),
+            "{query}"
+        );
     }
 
     /// Pagination + owner handling for `accessible_scopes`, against a
@@ -5749,6 +6566,46 @@ mod tests {
         response.errors.unwrap_or_default()
     }
 
+    /// The already-merged re-check targets a single-PR fetch, so it must
+    /// parse `owner/repo#number` out of the task key. A shape it can't
+    /// parse fails closed (`None`) so the original merge error is still
+    /// reported rather than swallowed.
+    #[test]
+    fn parse_github_pr_key_extracts_owner_repo_number() {
+        assert_eq!(
+            parse_github_pr_key("obin-ai/lazybox#1301"),
+            Some(("obin-ai", "lazybox", 1301)),
+        );
+        assert_eq!(parse_github_pr_key("owner/repo#notanumber"), None);
+        assert_eq!(parse_github_pr_key("no-hash-here"), None);
+        assert_eq!(parse_github_pr_key("owneronly#5"), None);
+    }
+
+    /// The draft toggles are made idempotent by re-checking the PR state
+    /// on mutation error (GitHub rejects a redundant convert/mark-ready).
+    /// This is the decision that turns that re-fetch into success-or-not:
+    /// convert-to-draft is only "reached" by an actual draft; mark-ready
+    /// only by an OPEN non-draft PR — a Closed/Merged PR is not a
+    /// successful "ready", so the real mutation error is still surfaced.
+    /// A wrong decision here would either mask a genuine failure or flash
+    /// a spurious one on a lost-response retry.
+    #[test]
+    fn draft_end_state_reached_matches_target_only() {
+        use lazybox_core::TaskState;
+        // convert-to-draft (want_draft = true): only Draft counts.
+        assert!(draft_end_state_reached(TaskState::Draft, true));
+        assert!(!draft_end_state_reached(TaskState::Open, true));
+        assert!(!draft_end_state_reached(TaskState::Closed, true));
+        assert!(!draft_end_state_reached(TaskState::Merged, true));
+        // mark-ready (want_draft = false): only an open, non-draft PR.
+        assert!(draft_end_state_reached(TaskState::Open, false));
+        assert!(draft_end_state_reached(TaskState::InReview, false));
+        assert!(!draft_end_state_reached(TaskState::Draft, false));
+        // A closed/merged PR is NOT a successful "ready" — surface the error.
+        assert!(!draft_end_state_reached(TaskState::Closed, false));
+        assert!(!draft_end_state_reached(TaskState::Merged, false));
+    }
+
     /// A `mergePullRequest` re-sent after a client-side timeout (first
     /// attempt landed server-side) fails with GitHub's already-merged
     /// error. That response must classify as success — surfacing it as
@@ -5892,6 +6749,44 @@ mod tests {
         );
     }
 
+    /// #1218 storm regression: every working-claim label op must be
+    /// charged to the REST `core` bucket and admitted at a SCHEDULED
+    /// priority (`Cold`), never `Interactive`. As `Interactive` they
+    /// bypassed the reserve/tick-allowance/local-bucket gates and
+    /// (for the write ops) were mis-charged to GraphQL, so a fleet of
+    /// agents storming ~6 label writes each tripped GitHub's secondary
+    /// limit and stalled all polling.
+    #[test]
+    fn working_claim_ops_are_scheduled_rest_core() {
+        use crate::rate_budget::{ApiResource, RequestPriority};
+        for op in [
+            "list issue working labels",
+            "list issue working labels next page",
+            "renew working claim label",
+            "create working claim label",
+            "add working claim label",
+            "delete working claim label",
+        ] {
+            let (resource, priority) = request_profile(op);
+            assert_eq!(
+                resource,
+                ApiResource::rest("core"),
+                "{op} must be charged to the REST core bucket, not GraphQL"
+            );
+            assert_eq!(
+                priority,
+                RequestPriority::Cold,
+                "{op} must be scheduled (Cold), never Interactive — Interactive \
+                 bypasses every budget gate and re-creates the #1218 storm"
+            );
+            assert_ne!(
+                priority,
+                RequestPriority::Interactive,
+                "{op} must not bypass the budget gates"
+            );
+        }
+    }
+
     #[test]
     fn issue_query_runs_when_issues_displayed() {
         assert!(should_query_issues(true, &logins(&[])));
@@ -5948,6 +6843,37 @@ mod tests {
             body_excerpt: "<html>maintenance</html>".to_string(),
         };
         assert!(lazybox_core::ProviderError::from(err).is_retryable());
+    }
+
+    /// A 2xx whose body is not valid JSON — the raw `from_str` failed at
+    /// the *syntax* level (GitHub's "while parsing a string at line 1
+    /// column N", a truncated/corrupt 200) — is transient: retried in-call
+    /// and surfaced retryable, NOT the permanent verdict that would fail
+    /// the whole sync. A genuine schema mismatch (valid JSON, wrong shape)
+    /// stays non-retryable.
+    #[test]
+    fn truncated_body_is_retryable_but_schema_mismatch_is_not() {
+        let truncated = GhError::MalformedResponse {
+            status: 200,
+            byte_len: 219_264,
+            detail: "while parsing a string at line 1 column 219264".to_string(),
+        };
+        assert!(
+            is_transient(&truncated),
+            "a truncated 200 is worth an in-call retry"
+        );
+        assert!(lazybox_core::ProviderError::from(truncated).is_retryable());
+
+        // Valid JSON but the wrong shape — a real bug in our types, kept as
+        // a non-retryable HttpStatus so we don't hammer GitHub for it.
+        let schema_mismatch = GhError::HttpStatus {
+            status: 200,
+            reason: " (json parse failed)".to_string(),
+            content_type: "application/json".to_string(),
+            body_excerpt: "missing field `foo`".to_string(),
+        };
+        let pe = lazybox_core::ProviderError::from(schema_mismatch);
+        assert!(!pe.is_retryable() && !pe.is_auth());
     }
 
     /// A stringly GraphQL wrapper error has no typed status, so it
@@ -6528,6 +7454,7 @@ mod tests {
             .build()
             .unwrap();
         GhClient {
+            gql: inner.clone(),
             inner,
             user: "test-user".to_string(),
             credential_source: "test".to_string(),
@@ -6539,12 +7466,15 @@ mod tests {
                 crate::rate_budget::RateBudget::default_for_lazybox(),
             )),
             last_persisted_rate_state: std::sync::Arc::new(parking_lot::Mutex::new(None)),
-            request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(8)),
+            request_gate: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONCURRENT_GITHUB_REQUESTS,
+            )),
             mutation_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             notifications_state: NotificationsState::shared(),
             hot_freshness: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -6630,6 +7560,91 @@ mod tests {
             0,
             "missing cached node ids must fail before provider IO"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hot_batch_graphql_rejection_trips_after_consecutive_failures() {
+        // GHES 3.18 answers the hot probe with GitHub's generic GraphQL
+        // runtime error (HTTP 200, `errors` only, no `data`).
+        const REJECTED: &str = r#"{
+          "errors": [
+            {"message": "Something went wrong while executing your query on 2026-09-02T15:25:54Z. Please include `88548e61-d69d-421a-abd8-4ff10ffd900a` when reporting this issue."}
+          ]
+        }"#;
+        const LEAN: &str = r#"{
+          "data": {
+            "nodes": [
+              {"__typename": "Issue", "id": "I_one", "updatedAt": "2026-07-25T10:00:00Z", "state": "OPEN", "stateReason": null}
+            ],
+            "rateLimit": {"cost": 1, "limit": 5000, "remaining": 4999, "resetAt": "2026-07-25T11:00:00Z"}
+          }
+        }"#;
+        const FULL_ONE: &str = r#"{
+          "data": {
+            "nodes": [
+              {
+                "id": "I_one",
+                "number": 7,
+                "title": "Fast sync",
+                "body": "body",
+                "url": "https://github.com/acme/widget/issues/7",
+                "updatedAt": "2026-07-25T10:00:00Z",
+                "createdAt": "2026-07-24T10:00:00Z",
+                "closedAt": null,
+                "state": "OPEN",
+                "author": {"login": "test-user"},
+                "labels": {"nodes": []},
+                "assignees": {"nodes": []},
+                "comments": {"nodes": []},
+                "repository": {"nameWithOwner": "acme/widget"}
+              }
+            ],
+            "rateLimit": {"cost": 2, "limit": 5000, "remaining": 4998, "resetAt": "2026-07-25T11:00:00Z"}
+          }
+        }"#;
+        let body = async {
+            let base_uri = spawn_sequenced_response_server(vec![
+                REJECTED, REJECTED, // two rejections: below the threshold
+                LEAN, FULL_ONE, // a success resets the count
+                REJECTED, REJECTED, REJECTED, // three in a row: rejected
+            ])
+            .await;
+            let client = make_client(&base_uri);
+            let ids: Vec<String> = vec!["I_one".into()];
+
+            for _ in 0..2 {
+                let error = client
+                    .fetch_hot_tasks(&ids)
+                    .await
+                    .expect_err("rejected probe");
+                assert!(matches!(error, GhError::Graphql(_)), "got {error:?}");
+            }
+            assert!(
+                !client.hot_batch_rejected(),
+                "two rejections are still within a transient blip"
+            );
+
+            client.fetch_hot_tasks(&ids).await.expect("healthy batch");
+            assert!(!client.hot_batch_rejected());
+
+            for _ in 0..HOT_BATCH_REJECTION_THRESHOLD {
+                client
+                    .fetch_hot_tasks(&ids)
+                    .await
+                    .expect_err("rejected probe");
+            }
+            assert!(
+                client.hot_batch_rejected(),
+                "a success resets the count, so rejection needs {HOT_BATCH_REJECTION_THRESHOLD} fresh failures"
+            );
+
+            // Shift-R gives the batch another chance on this server.
+            client.force_full_sweep();
+            assert!(!client.hot_batch_rejected());
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), body)
+            .await
+            .expect("test timed out");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6846,6 +7861,78 @@ mod tests {
             keys,
             vec!["o/r#1", "o/r#2"],
             "both pages' PRs must be returned — page 2 was previously dropped"
+        );
+    }
+
+    /// Minimal-but-valid issue SEARCH_QUERY page carrying the given
+    /// issue numbers, all in `repo`, with a terminal (`hasNextPage:false`)
+    /// pageInfo. Counterpart to [`pr_search_page`] for the issue path.
+    fn issue_search_page(numbers: &[u64], repo: &str) -> String {
+        let nodes = numbers
+            .iter()
+            .map(|n| {
+                format!(
+                    r#"{{
+                      "id": "I_{n}",
+                      "number": {n},
+                      "title": "Issue {n}",
+                      "body": null,
+                      "url": "https://github.com/{repo}/issues/{n}",
+                      "updatedAt": "2026-05-28T12:00:00Z",
+                      "createdAt": "2026-05-27T09:00:00Z",
+                      "closedAt": null,
+                      "state": "OPEN",
+                      "author": {{ "login": "carol" }},
+                      "labels": {{ "nodes": [] }},
+                      "assignees": {{ "nodes": [] }},
+                      "comments": {{ "nodes": [], "totalCount": 0 }},
+                      "repository": {{ "nameWithOwner": "{repo}" }}
+                    }}"#
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"{{
+              "data": {{
+                "search": {{
+                  "issueCount": {count},
+                  "pageInfo": {{ "hasNextPage": false, "endCursor": null }},
+                  "nodes": [ {nodes} ]
+                }},
+                "rateLimit": {{ "cost": 1, "limit": 5000, "remaining": 4999, "resetAt": "2026-05-28T13:00:00Z" }}
+              }},
+              "errors": null
+            }}"#,
+            count = numbers.len(),
+        )
+    }
+
+    /// A watched repo's plain open issues (ones that don't `involve:you`)
+    /// never reach the inbox through the main `involves:you` issue query.
+    /// The per-repo fan-out must fetch them AND dedup an issue the main
+    /// query already returned, so a watched repo doesn't double-list.
+    #[tokio::test(flavor = "current_thread")]
+    async fn watched_repo_issues_are_fetched_and_deduped() {
+        // Request 1: the main involves-you query returns issue #1.
+        // Request 2: the watched-repo fan-out returns #1 again (dedup) and
+        // #2 (a repo issue that doesn't involve the viewer → new).
+        let main_page: &'static str = Box::leak(issue_search_page(&[1], "o/r").into_boxed_str());
+        let watched_page: &'static str =
+            Box::leak(issue_search_page(&[1, 2], "o/r").into_boxed_str());
+        let base_uri = spawn_sequenced_response_server(vec![main_page, watched_page]).await;
+        let client = make_client(&base_uri).with_watch_repos(vec!["o/r".into()]);
+
+        let tasks = client
+            .fetch_all_issues()
+            .await
+            .expect("issue fetch succeeds");
+        let mut keys: Vec<&str> = tasks.iter().map(|t| t.id.key.as_str()).collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["o/r#1", "o/r#2"],
+            "watched-repo issue #2 must be added and #1 deduped, not double-listed"
         );
     }
 
@@ -7130,11 +8217,13 @@ mod tests {
         );
     }
 
-    /// A 2xx response whose body fails JSON parsing surfaces with
-    /// the status + content-type intact, plus the parse-failure
-    /// detail in the body excerpt.
+    /// A 2xx whose body isn't valid JSON at all (a truncated / corrupt
+    /// reply — GitHub cut the response mid-serialization) is transient:
+    /// the in-call ladder retries it and it finally surfaces as the
+    /// retryable `MalformedResponse`, NOT the permanent verdict that used
+    /// to fail the whole sync ("HTTP 200 … while parsing a string").
     #[tokio::test(flavor = "current_thread")]
-    async fn http_200_with_invalid_json_surfaces_parse_failure() {
+    async fn http_200_with_invalid_json_is_retryable_malformed_response() {
         let base_uri =
             spawn_canned_response_server("200 OK", "application/json", "not actually json").await;
         let client = make_client(&base_uri);
@@ -7142,15 +8231,14 @@ mod tests {
         let err = client
             .post_graphql_with_retry::<serde_json::Value>("test", &body)
             .await
-            .expect_err("unparseable 2xx body should fail");
-        let msg = err.to_string();
+            .expect_err("unparseable 2xx body should fail after retries");
         assert!(
-            msg.contains("json parse failed"),
-            "expected parse-failure marker in error: {msg}"
+            matches!(err, GhError::MalformedResponse { status: 200, .. }),
+            "a syntactically-invalid 2xx body is a truncated response, got: {err:?}"
         );
         assert!(
-            matches!(err, GhError::HttpStatus { status: 200, .. }),
-            "expected HttpStatus(200), got: {err:?}"
+            lazybox_core::ProviderError::from(err).is_retryable(),
+            "a truncated body must be retryable, not fail the sync",
         );
     }
 
@@ -7897,9 +8985,11 @@ mod tests {
         let client = GhClient::stub_for_tests("cmd:test", "fp").unwrap();
 
         // Take every concurrency slot and hold them, so the gate acquire
-        // inside `request_permit` can never succeed.
+        // inside `request_permit` can never succeed. Sized to the actual gate
+        // capacity — acquiring more than exist would itself block forever and
+        // hang the test rather than exercising `request_permit`'s timeout.
         let mut held = Vec::new();
-        for _ in 0..8 {
+        for _ in 0..MAX_CONCURRENT_GITHUB_REQUESTS {
             held.push(
                 client
                     .request_gate

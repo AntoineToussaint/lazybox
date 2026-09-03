@@ -19,6 +19,7 @@ members = [
     "crates/server",
     "crates/agents",
     "crates/linear-provider",
+    "crates/jira-provider",
     "crates/tui-core",
     "crates/tui",
     "crates/tui-boot",
@@ -81,7 +82,7 @@ x86_64-apple-darwin = "macos-14"
 x86_64-unknown-linux-gnu = "ubuntu-22.04"
 
 [workspace.package]
-version = "0.1.11"
+version = "0.1.14"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -109,6 +110,7 @@ lazybox-sandbox     = { path = "crates/sandbox" }
 lazybox-git-ops     = { path = "crates/git-ops" }
 lazybox-gh          = { path = "crates/gh-provider" }
 lazybox-linear      = { path = "crates/linear-provider" }
+lazybox-jira        = { path = "crates/jira-provider" }
 lazybox-slack       = { path = "crates/slack-provider" }
 lazybox-tui-term    = { path = "crates/tui-term" }
 lazybox-tui-core    = { path = "crates/tui-core" }
@@ -119,6 +121,12 @@ lazybox-relay     = { path = "crates/relay" }
 lazybox-agents    = { path = "crates/agents" }
 
 # ── Third-party ────────────────────────────────────────────────────────
+# MCP coordination server (#1420). Only the streamable-HTTP server transport
+# is enabled; client/auth/elicitation stay off to keep the transitive tree
+# (axum/tower/schemars) minimal. Identity rides the gateway's own per-session
+# bearer, read from the request Parts — hence the `http` type dependency.
+rmcp               = { version = "3.2", default-features = false, features = ["server", "macros", "transport-streamable-http-server"] }
+http               = "1"
 tokio              = { version = "1", features = ["full"] }
 futures            = "0.3"
 fs2                = "0.4"

@@ -10,7 +10,10 @@ pub use skills::{
     Skill, SkillError, SkillScope, discover_skills, scaffold_skill, skill_md_path,
     validate_skill_name,
 };
-pub use snippets::{Snippet, SnippetOrigin, Snippets, SnippetsError};
+pub use snippets::{
+    Snippet, SnippetOrigin, SnippetState, Snippets, SnippetsError, classify_snippet,
+    keep_mine_target,
+};
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -101,6 +104,10 @@ pub struct Config {
     /// `codex`, …). See [`AgentEntry`].
     #[serde(default)]
     pub agents: std::collections::BTreeMap<String, AgentEntry>,
+    /// Daemon-level tuning parameters: ring buffer size, credential cache TTL,
+    /// polling backoff cap, and other performance knobs. See [`ServerSection`].
+    #[serde(default)]
+    pub server: ServerSection,
     pub shell: ShellSection,
     pub hooks: HooksConfig,
     pub worktree: WorktreeConfig,
@@ -888,6 +895,169 @@ pub struct SpaceConfig {
     pub sources: Vec<String>,
 }
 
+/// Default Space for a source that carries no owner boundary and isn't
+/// explicitly assigned — Linear project labels, the `(no repo)` bucket.
+pub const UNGROUPED_SPACE: &str = "Ungrouped";
+
+/// Which Space a source group label belongs to. An explicit
+/// `ui.spaces` assignment wins; otherwise the owner segment of an
+/// `owner/repo` label auto-seeds an owner-named Space; everything else
+/// falls into [`UNGROUPED_SPACE`]. Canonical here (config) so the
+/// daemon can resolve Space-level [`SourceAttention`] without a UI
+/// dependency; `lazybox_tui_core::inbox::space_of` delegates.
+pub fn space_of(label: &str, spaces: &[SpaceConfig]) -> String {
+    for s in spaces {
+        if s.sources.iter().any(|src| src == label) {
+            return s.name.clone();
+        }
+    }
+    if let Some((owner, _)) = label.split_once('/')
+        && !owner.is_empty()
+    {
+        return owner.to_string();
+    }
+    UNGROUPED_SPACE.to_string()
+}
+
+/// Attention level for one sidebar source — a repo group
+/// (`owner/repo`), a Linear team (`linear/TEAM`), or a whole Space
+/// (`space:<name>`). The ladder (#scale, proposal A):
+///
+/// - `Live` — today's behavior: full badging, engaged poll cadence.
+/// - `Quiet` — rows stay, but ambient badges (unread counts, attention
+///   glow) are suppressed unless the row *punches through* (see
+///   `lazybox_tui_core::inbox::punches_through`).
+/// - `Digest` — additionally polled at the idle cadence; the group
+///   accumulates quietly.
+/// - `Muted` — the group sinks to the bottom of the sidebar, dim and
+///   collapsed with a count (muted-but-counted, never invisible), and
+///   its repos leave the GitHub sweep entirely (parked via the
+///   round-robin's `suspended_cold` mechanism; `watch:` entries drop
+///   out of the watched fan-out). Punch-through rows still surface
+///   and badge.
+///
+/// Muting is attention state, NOT membership: workspaces, read state,
+/// notes, and stars all persist — unlike un-ticking the repo in
+/// Settings, which deletes them. One key lifts it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SourceAttentionLevel {
+    #[default]
+    Live,
+    Quiet,
+    Digest,
+    Muted,
+}
+
+impl SourceAttentionLevel {
+    /// Short label for pickers / header glyph tooltips.
+    pub fn label(self) -> &'static str {
+        match self {
+            SourceAttentionLevel::Live => "live",
+            SourceAttentionLevel::Quiet => "quiet",
+            SourceAttentionLevel::Digest => "digest",
+            SourceAttentionLevel::Muted => "muted",
+        }
+    }
+}
+
+/// Per-source attention state persisted under `ui.source_attention`.
+/// `snoozed_until` is a time-boxed mute (the header-`z` path): while
+/// it's in the future the source behaves as `Muted` regardless of
+/// `level`, and it auto-reverts when the instant passes — no clearing
+/// write required (readers compare against *now*).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SourceAttention {
+    pub level: SourceAttentionLevel,
+    pub snoozed_until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl SourceAttention {
+    /// The level in effect at `now`: an active snooze reads as `Muted`,
+    /// an expired one falls back to the stored level.
+    pub fn effective_level(&self, now: chrono::DateTime<chrono::Utc>) -> SourceAttentionLevel {
+        if self.snoozed_until.is_some_and(|until| until > now) {
+            SourceAttentionLevel::Muted
+        } else {
+            self.level
+        }
+    }
+
+    /// The active snooze deadline, if any (drives the header wake-time
+    /// label).
+    pub fn active_snooze(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.snoozed_until.filter(|until| *until > now)
+    }
+
+    /// True when this entry is indistinguishable from the default —
+    /// writers drop such entries instead of persisting noise.
+    pub fn is_default(&self) -> bool {
+        self.level == SourceAttentionLevel::Live && self.snoozed_until.is_none()
+    }
+}
+
+/// Resolve the attention in effect for a source label, honoring the
+/// Space tier: an explicit per-source entry wins; otherwise the entry
+/// for the Space the source sits in (`space:<name>`) applies; otherwise
+/// Live. `space` is the display Space of the label as computed by
+/// `lazybox_tui_core::inbox::space_of` — passed in rather than derived
+/// here so config stays free of the grouping logic.
+pub fn effective_source_attention(
+    map: &std::collections::BTreeMap<String, SourceAttention>,
+    label: &str,
+    space: Option<&str>,
+) -> SourceAttention {
+    if let Some(entry) = map.get(label) {
+        return entry.clone();
+    }
+    if let Some(space) = space
+        && let Some(entry) = map.get(&format!("space:{space}"))
+    {
+        return entry.clone();
+    }
+    SourceAttention::default()
+}
+
+/// One saved sidebar view (#scale, proposal D): a named, frozen lens.
+/// `x v` freezes the current filters/sort/mailbox under a name; `x V`
+/// recalls one. Stored as the same string tokens as
+/// [`LensSection`], so views survive predicate additions (unknown
+/// tokens drop silently) and are hand-editable / shareable in YAML.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ViewConfig {
+    pub name: String,
+    #[serde(flatten)]
+    pub lens: LensSection,
+}
+
+/// The sidebar lens — active filters, sort mode, and mailbox — as of
+/// the user's last change, re-applied at startup so a restart doesn't
+/// silently drop the narrowing they were working in (#scale). Stored
+/// as plain string tokens rather than the TUI's typed filter enums so
+/// the config crate stays free of UI-crate dependencies: filter tokens
+/// are the predicate's stable label (`"ci-failing"`) or a prefixed
+/// value (`"label:bug"`, `"linear-state:In Review"`,
+/// `"person:alice"`); `sort` / `mailbox` hold the chip labels
+/// (`"recent"` / `"split"`, `"inbox"` / `"snoozed"`). Unknown tokens
+/// are dropped silently on load — a lens must degrade, never wedge
+/// startup. The transient `/` search query is deliberately NOT part of
+/// the lens: search is a momentary narrowing (Esc clears it), and
+/// resurrecting yesterday's query on launch reads as a bug.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LensSection {
+    /// Active filter tokens, every axis.
+    pub filters: Vec<String>,
+    /// Sort-mode chip label. None = default sort.
+    pub sort: Option<String>,
+    /// Mailbox chip label. None = Inbox.
+    pub mailbox: Option<String>,
+}
+
 /// `ui:` block — user-facing view state lazybox writes back so UI
 /// preferences survive restart.
 ///
@@ -932,6 +1102,21 @@ pub struct UiSection {
     /// longer exists; readers must validate against `spaces`.
     #[serde(default)]
     pub last_space: Option<String>,
+    /// The sidebar lens (filters / sort / mailbox) as of the last
+    /// change, re-applied at startup (#scale). See [`LensSection`].
+    #[serde(default)]
+    pub last_lens: Option<LensSection>,
+    /// Per-source attention ladder (#scale): repo / Linear-team /
+    /// Space keys → [`SourceAttention`]. Read by BOTH the renderer
+    /// (sink/dim/badge suppression) and the polling scheduler (muted
+    /// sources leave the sweep) — the one user-curation signal that is
+    /// wired end-to-end. Absent key = Live.
+    #[serde(default)]
+    pub source_attention: std::collections::BTreeMap<String, SourceAttention>,
+    /// Saved views (#scale): named frozen lenses, in save order.
+    /// `x v` saves (replacing a same-named entry), `x V` recalls.
+    #[serde(default)]
+    pub views: Vec<ViewConfig>,
     /// Sidebar column width as a percentage of total. None = use
     /// the default (40%).
     pub sidebar_pct: Option<u16>,
@@ -1068,11 +1253,14 @@ pub struct UiSection {
     /// monthly limit (issue #847). When `true`, the daemon accepts the
     /// limit prompt's default (Wait) option the moment an agent enters
     /// the `LimitReached` state, so N agents all hitting the cap at once
-    /// don't each need a manual visit — you re-auth with another account
-    /// and then `Shift-K` (resume all rate-limited) to continue them.
-    /// The daemon re-reads this on every transition, so editing it takes
-    /// effect without a restart. Defaults to `false`: lazybox only
-    /// detects + surfaces the block unless you opt in.
+    /// don't each need a manual visit. Then, once that terminal's wait
+    /// clears to a resting screen (the reset happened and the turn
+    /// settled), the daemon injects the `credit_recovery_prompt`
+    /// continuation nudge so the agent picks the interrupted work back up
+    /// instead of idling at an empty composer — closing the loop the bare
+    /// keystroke left open. The daemon re-reads this on every transition,
+    /// so editing it takes effect without a restart. Defaults to `false`:
+    /// lazybox only detects + surfaces the block unless you opt in.
     #[serde(default)]
     pub auto_wait_on_limit: bool,
     /// Prompt submitted after a credit chooser has cleared and the provider
@@ -1104,6 +1292,13 @@ pub struct UiSection {
     /// from. Opt-out — set `false` to hide the row. Defaults to `true`.
     #[serde(default = "default_true")]
     pub usage_summary: bool,
+    /// Show the always-visible "today" stats strip in the sidebar header
+    /// (#1344): a terse `today  3 sessions · 4 merged · $2.14` line of the
+    /// persisted daily rollup (#1339), so the day's accomplishment count is
+    /// visible without opening the Usage Stats window. Opt-out — set `false`
+    /// to hide the row. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub today_summary: bool,
     /// Plan-window token budget per agent id (`claude: 200000000`), the
     /// denominator for the usage summary's percentage. OAuth/plan agents
     /// expose no usage API, so the window size can't be inferred — set it
@@ -1127,6 +1322,9 @@ impl Default for UiSection {
             spaces: Vec::new(),
             collapsed_spaces: std::collections::BTreeSet::new(),
             last_space: None,
+            last_lens: None,
+            source_attention: std::collections::BTreeMap::new(),
+            views: Vec::new(),
             keymap_preset: None,
             theme: None,
             sidebar_pct: None,
@@ -1154,6 +1352,7 @@ impl Default for UiSection {
             show_agent_model: true,
             usage_limit_alerts: true,
             usage_summary: true,
+            today_summary: true,
             usage_budgets: std::collections::BTreeMap::new(),
         }
     }
@@ -1204,10 +1403,19 @@ pub struct UiDefaults {
     /// Escalate a footer alert as agents hit their usage limit. See
     /// [`UiSection::usage_limit_alerts`].
     pub usage_limit_alerts: bool,
+    /// Auto-press "Wait" on a usage-limit block. See
+    /// [`UiSection::auto_wait_on_limit`]. Mirrored into the resolved UI so
+    /// the client can stay quiet on the transient `LimitReached` the daemon
+    /// is about to park to the calm `AwaitingReset` — a handled block is not
+    /// an alert.
+    pub auto_wait_on_limit: bool,
     pub credit_recovery_prompt: String,
     /// Show the always-visible per-provider usage summary. See
     /// [`UiSection::usage_summary`].
     pub usage_summary: bool,
+    /// Show the always-visible "today" stats strip. See
+    /// [`UiSection::today_summary`].
+    pub today_summary: bool,
     /// Per-agent plan-window token budgets. See
     /// [`UiSection::usage_budgets`].
     pub usage_budgets: std::collections::BTreeMap<String, u64>,
@@ -1240,8 +1448,10 @@ impl Default for UiDefaults {
             keep_awake: false,
             show_agent_model: true,
             usage_limit_alerts: true,
+            auto_wait_on_limit: false,
             credit_recovery_prompt: default_credit_recovery_prompt(),
             usage_summary: true,
+            today_summary: true,
             usage_budgets: std::collections::BTreeMap::new(),
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
         }
@@ -1287,8 +1497,10 @@ impl UiSection {
             keep_awake: self.keep_awake,
             show_agent_model: self.show_agent_model,
             usage_limit_alerts: self.usage_limit_alerts,
+            auto_wait_on_limit: self.auto_wait_on_limit,
             credit_recovery_prompt,
             usage_summary: self.usage_summary,
+            today_summary: self.today_summary,
             usage_budgets: self.usage_budgets.clone(),
             // Sourced from the `terminal` section (see
             // `Config::resolved_ui`); the default stands until that
@@ -1679,10 +1891,14 @@ pub struct AgentEntry {
     /// a bare spawn uses. Empty → fall back to the built-in preset for
     /// this agent id.
     pub models: lazybox_core::AgentModels,
-    /// Let lazybox apply this agent's CLI updates automatically when
-    /// its scheduled out-of-band check finds a newer version. Off by
-    /// default: the check still runs and surfaces "update available",
-    /// but installing waits for the manual "update agent CLIs" action.
+    /// Opt this agent into automatic CLI updates when its scheduled
+    /// out-of-band check finds a newer version. Off by default: the check
+    /// still runs and surfaces "update available", but installing waits
+    /// for the manual "update agent CLIs" action or the global
+    /// `agent.auto_update` switch. To auto-update everything EXCEPT a
+    /// specific agent, turn on the global switch and add the agent to
+    /// `agent.auto_update_except` — that exclusion is how you pin an
+    /// agent under the global switch (this per-agent flag is opt-IN only).
     pub auto_update: bool,
 }
 
@@ -1715,7 +1931,7 @@ impl AgentEntry {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentSection {
     #[serde(flatten)]
@@ -1725,9 +1941,22 @@ pub struct AgentSection {
     /// --dangerously-skip-permissions` — so the agent runs unattended
     /// instead of blocking on every tool-use approval. Only affects
     /// autonomous spawns; interactive sessions the user opens are
-    /// governed by `skip_permissions` instead. Default on; flip to
-    /// `false` to force prompts on every autonomous session.
-    pub autonomous_skip_permissions: bool,
+    /// governed by `skip_permissions` instead.
+    ///
+    /// Unset (the default) resolves per spawn from *who* triggered it:
+    /// the bypass stays **on** for work you drive yourself (`w`, and your
+    /// own `@lazybox` mentions / `lazybox:` labels), but is withheld —
+    /// prompts stay **on** — for a spawn a *foreign* actor triggered: a
+    /// mention from someone other than you, or a label on an issue you
+    /// didn't author. Those build their prompt from issue text that
+    /// actor controls, so an unattended `--dangerously-skip-permissions`
+    /// agent with full `git`/`gh` and the host's credentials would be
+    /// arbitrary command execution driven by attacker-influenceable text
+    /// (#1392). Set it explicitly to `true`/`false` to override this
+    /// trust-aware default in either direction. See
+    /// [`AgentSection::autonomous_skip`].
+    #[serde(default)]
+    pub autonomous_skip_permissions: Option<bool>,
     /// Launch interactive sessions the user opens themselves (the `c`
     /// spawn) with permission prompts disabled too — `claude
     /// --dangerously-skip-permissions`. Off by default: the prompt is
@@ -1749,6 +1978,54 @@ pub struct AgentSection {
     /// until you want live usage. Set `true` to enable.
     #[serde(default)]
     pub metering_proxy: bool,
+    /// Route EVERY interactive agent spawn through the metering proxy when
+    /// `metering_proxy` is on. Off by default: metering is opt-in
+    /// **per session** — a spawn is proxied only when it explicitly asks
+    /// (the per-workspace meter toggle, `$ meter`), so `metering_proxy: true`
+    /// alone just makes the proxy *run* and never redirects a session that
+    /// didn't opt in. Set this `true` to restore blanket metering once you
+    /// trust the proxy (e.g. for fleet-wide cost), accepting that a proxy
+    /// fault then affects every session rather than one canary.
+    #[serde(default)]
+    pub meter_all: bool,
+    /// Per-model price overrides for cost attribution, keyed by **model-id
+    /// prefix** (`claude-opus`, `gpt-4o`, …), longest prefix wins. Values are
+    /// USD per million tokens (`input` / `output` / `cache_write` /
+    /// `cache_read`). Merged over lazybox's built-in rate card, so this is
+    /// only needed for a brand-new model or a negotiated rate — a matching
+    /// entry here always beats the built-in. See `lazybox_core::pricing`.
+    #[serde(default)]
+    pub pricing: std::collections::BTreeMap<String, lazybox_core::ModelPrice>,
+    /// Space names (see [`SpaceConfig`]) whose every workspace is metered —
+    /// the Space-tier canary (approach C). A spawn is routed through the
+    /// metering proxy when its source sits in one of these Spaces, computed
+    /// with [`space_of`] over `ui.spaces`. Independent of the visual grouping:
+    /// a name here only means "meter this Space", so a repo can be *both*
+    /// grouped under a Space *and* metered by it. Composes (OR) with the
+    /// per-workspace [`Workspace::metered`](lazybox_core::Workspace) canary and
+    /// the blanket `meter_all`; like both, it only actually routes when
+    /// `metering_proxy` is on and the proxy is running, so listing a Space here
+    /// with the proxy off records intent without redirecting anything. Toggled
+    /// live from the sidebar with `x $` on a Space header.
+    #[serde(default)]
+    pub metered_spaces: std::collections::BTreeSet<String>,
+    /// Apply EVERY updatable agent's CLI updates automatically when the
+    /// scheduled out-of-band check finds a newer version — the global
+    /// switch over the per-agent `agents.<id>.auto_update` opt-in. Off by
+    /// default; set `true` and lazybox keeps all agent CLIs current
+    /// silently through the bounded background pass (never inside a live
+    /// session PTY, never on the spawn path). Individual agents can still
+    /// opt in via `agents.<id>.auto_update` while this stays off.
+    #[serde(default)]
+    pub auto_update: bool,
+    /// Agent ids to hold back from the global `auto_update` switch. Lets
+    /// you express "auto-update everything EXCEPT these" — without it, a
+    /// global switch could only be all-or-nothing and would silently
+    /// override a pinned agent. An excluded agent never auto-updates, even
+    /// if its own `agents.<id>.auto_update` is on, so this is the single
+    /// authoritative opt-out. Ignored when the global switch is off.
+    #[serde(default)]
+    pub auto_update_except: Vec<String>,
     /// Fail-safe watchdog window: seconds a `Working` agent terminal
     /// may sit with no meaningful screen change (spinner/status churn
     /// doesn't count) before the daemon classifies the screen and
@@ -1809,24 +2086,6 @@ pub struct AgentSection {
     pub nice: Option<i32>,
 }
 
-impl Default for AgentSection {
-    fn default() -> Self {
-        Self {
-            config: lazybox_core::AgentConfig::default(),
-            autonomous_skip_permissions: true,
-            skip_permissions: false,
-            llm_gateway_url: None,
-            metering_proxy: false,
-            working_watchdog_secs: None,
-            quiet_classify_secs: None,
-            max_live_agents: None,
-            strict_mcp: None,
-            reap_closed_after: None,
-            nice: None,
-        }
-    }
-}
-
 /// Default for [`AgentSection::max_live_agents`] when unset.
 pub const DEFAULT_MAX_LIVE_AGENTS: usize = 32;
 
@@ -1835,6 +2094,32 @@ pub const DEFAULT_MAX_LIVE_AGENTS: usize = 32;
 /// long enough to hand off or recall an agent's context, short enough
 /// to stop the fleet ratchet (#1198).
 pub const DEFAULT_REAP_CLOSED_AFTER: Duration = Duration::from_secs(48 * 3600);
+
+/// Default per-terminal ring buffer size (bytes). 2 MiB provides adequate
+/// scrollback for normal sessions while keeping per-terminal daemon memory
+/// usage bounded. Tunable via `server.ring_buffer_bytes` (#1254-E).
+pub const DEFAULT_RING_BUFFER_BYTES: usize = 2 * 1024 * 1024;
+
+/// Maximum permitted ring buffer size. A hard cap prevents misconfiguration
+/// that could silently cause data loss or exhaust daemon memory. 100 MiB
+/// bounds per-terminal memory while still supporting deep scrollback on
+/// high-output sessions.
+pub const MAX_RING_BUFFER_BYTES: usize = 100 * 1024 * 1024;
+
+/// Minimum permitted ring buffer size. Zero or invalid sizes would silently
+/// cause data loss, so we enforce a minimum viable buffer.
+pub const MIN_RING_BUFFER_BYTES: usize = 64 * 1024; // 64 KiB minimum
+
+/// Default credential cache TTL, in seconds. Successfully resolved command
+/// credentials (e.g., `gh auth token`) are served from cache for this duration
+/// before the command runs again. Tunable via `server.cred_cache_ttl_secs`
+/// (#1254-G).
+pub const DEFAULT_CRED_CACHE_TTL_SECS: u64 = 300; // 5 minutes
+
+/// Default polling backoff cap, in seconds. The exponential backoff for
+/// transient errors is clamped to this duration to prevent indefinite delays.
+/// Tunable via `server.polling_backoff_cap_secs`.
+pub const DEFAULT_POLLING_BACKOFF_CAP_SECS: u64 = 120; // 2 minutes
 
 impl AgentSection {
     /// Effective live-agent ceiling: unset → [`DEFAULT_MAX_LIVE_AGENTS`],
@@ -1851,6 +2136,20 @@ impl AgentSection {
     /// Unset → `false` (inherit the user's MCP servers).
     pub fn strict_mcp(&self) -> bool {
         self.strict_mcp.unwrap_or(false)
+    }
+
+    /// Effective skip-permissions posture for autonomous (unattended)
+    /// spawns. An explicit `autonomous_skip_permissions` wins in either
+    /// direction; when unset it falls back to a safe-by-default rule
+    /// keyed on `untrusted_trigger` — whether a *foreign* actor triggered
+    /// this spawn (a mention from someone other than the viewer, or a
+    /// label on an issue the viewer didn't author). Your own work keeps
+    /// the frictionless bypass; a foreign trigger forces prompts back on
+    /// so attacker-influenceable issue text can't drive an unattended,
+    /// permission-skipping agent on the host (#1392).
+    pub fn autonomous_skip(&self, untrusted_trigger: bool) -> bool {
+        self.autonomous_skip_permissions
+            .unwrap_or(!untrusted_trigger)
     }
 
     /// Effective spawn niceness: unset → 10, clamped to 0..=20; 0
@@ -1986,6 +2285,104 @@ fn login_shell_from_passwd_db() -> Option<String> {
     None
 }
 
+/// `server:` block — daemon-level tuning parameters. Per-terminal memory usage,
+/// polling cadence, credential caching, and other performance/reliability knobs
+/// that rarely need adjustment but are exposed for special cases (deep scrollback,
+/// slow networks, credential rotation). All fields are optional with sensible
+/// defaults.
+///
+/// ```yaml
+/// server:
+///   ring_buffer_bytes: 10485760        # 10 MiB (default 2 MiB)
+///   cred_cache_ttl_secs: 600           # 10 min (default 5 min)
+///   polling_backoff_cap_secs: 180      # 3 min (default 2 min)
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ServerSection {
+    /// Per-terminal ring buffer capacity in bytes. The daemon allocates one
+    /// buffer per terminal to hold scrollback history for replay on reconnect.
+    /// Raise this for sessions with very long outputs; lower it to reduce
+    /// per-terminal memory. Range: 64 KiB – 100 MiB.
+    /// Unset → [`DEFAULT_RING_BUFFER_BYTES`] (2 MiB).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ring_buffer_bytes: Option<usize>,
+
+    /// Credential cache TTL, in seconds. Command-provider credentials
+    /// (e.g., `gh auth token`) are cached for this long before running the
+    /// command again, reducing subprocess churn on hot paths. On a slow or
+    /// loaded machine, spawning a `gh` subprocess takes seconds.
+    /// Unset → [`DEFAULT_CRED_CACHE_TTL_SECS`] (300 seconds = 5 minutes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cred_cache_ttl_secs: Option<u64>,
+
+    /// Polling backoff cap, in seconds. Provider polling uses exponential
+    /// backoff on transient errors (timeouts, rate limits, 5xx responses).
+    /// The backoff is clamped to this ceiling to prevent indefinite waits.
+    /// Unset → [`DEFAULT_POLLING_BACKOFF_CAP_SECS`] (120 seconds = 2 minutes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polling_backoff_cap_secs: Option<u64>,
+
+    /// Whether the daemon maintains "working claim" markers on GitHub — the
+    /// `fbca04` "Claimed by a lazybox agent" labels used so multiple boxes /
+    /// agents don't duplicate work on the same PR/issue. Each claimed
+    /// workspace heartbeats ~6 label writes every 15 minutes; across a large
+    /// fleet (many concurrent agents) that is meaningful GitHub traffic.
+    /// Set to `false` to disable claim synchronization entirely — a relief
+    /// valve when working-claim sync contends for the rate budget (#1218).
+    /// Unset → enabled (true).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_claims_enabled: Option<bool>,
+}
+
+impl ServerSection {
+    /// Effective ring buffer size: unset → [`DEFAULT_RING_BUFFER_BYTES`],
+    /// validated to be in [`MIN_RING_BUFFER_BYTES`]..=[`MAX_RING_BUFFER_BYTES`].
+    pub fn ring_buffer_bytes(&self) -> usize {
+        self.ring_buffer_bytes
+            .unwrap_or(DEFAULT_RING_BUFFER_BYTES)
+            .clamp(MIN_RING_BUFFER_BYTES, MAX_RING_BUFFER_BYTES)
+    }
+
+    /// Effective credential cache TTL: unset → [`DEFAULT_CRED_CACHE_TTL_SECS`].
+    pub fn cred_cache_ttl_secs(&self) -> u64 {
+        self.cred_cache_ttl_secs
+            .unwrap_or(DEFAULT_CRED_CACHE_TTL_SECS)
+    }
+
+    /// Effective polling backoff cap: unset → [`DEFAULT_POLLING_BACKOFF_CAP_SECS`].
+    pub fn polling_backoff_cap_secs(&self) -> u64 {
+        self.polling_backoff_cap_secs
+            .unwrap_or(DEFAULT_POLLING_BACKOFF_CAP_SECS)
+    }
+
+    /// Effective working-claims toggle: unset → enabled.
+    pub fn working_claims_enabled(&self) -> bool {
+        self.working_claims_enabled.unwrap_or(true)
+    }
+
+    /// Validate configuration ranges. Called at config load time to catch
+    /// invalid values early with a clear error message. Returns `Err` if
+    /// any range is violated.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(bytes) = self.ring_buffer_bytes {
+            if bytes < MIN_RING_BUFFER_BYTES {
+                return Err(format!(
+                    "server.ring_buffer_bytes {} is below minimum {} bytes",
+                    bytes, MIN_RING_BUFFER_BYTES
+                ));
+            }
+            if bytes > MAX_RING_BUFFER_BYTES {
+                return Err(format!(
+                    "server.ring_buffer_bytes {} exceeds maximum {} bytes",
+                    bytes, MAX_RING_BUFFER_BYTES
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// How the user opens lazybox's command menu from an embedded terminal.
 /// The default is `]]` — two closing brackets typed in quick succession.
 /// The menu then waits without a timeout (`q` exits to the inbox).
@@ -2042,6 +2439,22 @@ impl Default for TerminalSection {
 }
 
 impl Config {
+    /// True when `source_label` — a source group label (`owner/repo` for
+    /// GitHub, the project display name for Linear/local) — sits in a Space
+    /// listed in `agent.metered_spaces`, the Space-tier metering canary
+    /// (approach C). Resolves the label's Space with [`space_of`] over
+    /// `ui.spaces`, then checks membership. One call for the server spawn path
+    /// so the grouping tier and the metered set can't drift. An empty set short
+    /// -circuits to `false` (the common case), so this is cheap on every spawn.
+    pub fn source_is_metered(&self, source_label: &str) -> bool {
+        if self.agent.metered_spaces.is_empty() {
+            return false;
+        }
+        self.agent
+            .metered_spaces
+            .contains(&space_of(source_label, &self.ui.spaces))
+    }
+
     /// Repos that opt out of the global `sandbox:` box (`repos.<key>.sandbox:
     /// false`, #1066). Their workspaces get no remote box, so the `r`-spawn
     /// is refused there even while the box is configured for other projects.
@@ -2059,10 +2472,18 @@ impl Config {
             .collect()
     }
 
-    /// Parse config YAML, including migrations from older serialized defaults.
+    /// Parse config YAML, including migrations and validation of new-format defaults.
     pub fn parse(contents: &str) -> Result<Self, ConfigError> {
         let mut config: Self = serde_yaml::from_str(contents)?;
         config.migrate_legacy_shell_default();
+        // Validate server-section ranges at parse time so an invalid config
+        // fails fast with a clear error message (not a silent fallback).
+        config.server.validate().map_err(|msg| {
+            ConfigError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("server section validation failed: {msg}"),
+            ))
+        })?;
         Ok(config)
     }
 
@@ -2202,6 +2623,26 @@ impl Config {
             stamp,
         });
         Ok(loaded)
+    }
+
+    /// Bare GitHub Enterprise Server host (e.g. `ghe.example.com`), or
+    /// `None` for github.com. THE single source of truth for the host:
+    /// both the API transports (`GhClient::from_credential_with_host`)
+    /// and git-ops' clone-URL / auth-header rewrites resolve the host
+    /// through here, so the API and git can never end up addressing
+    /// different hosts (the bug where the inbox polled the enterprise
+    /// server but `git clone` still hit github.com with the enterprise
+    /// token). A scheme prefix or trailing slash a user pastes into the
+    /// config is stripped so every caller's `https://{host}/…` stays
+    /// well-formed.
+    pub fn github_host(&self) -> Option<String> {
+        let raw = self.providers.github.host.as_deref()?.trim();
+        let bare = raw
+            .strip_prefix("https://")
+            .or_else(|| raw.strip_prefix("http://"))
+            .unwrap_or(raw)
+            .trim_end_matches('/');
+        (!bare.is_empty()).then(|| bare.to_string())
     }
 
     /// Drop the `load()` cache so the next call re-reads the file.
@@ -2529,6 +2970,19 @@ fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
 /// mention:
 ///   allowed_logins: [alice, bob]
 /// ```
+///
+/// # Security
+///
+/// Widening this list is a **trust decision**, not just a convenience.
+/// An allowed login can, by writing `@lazybox` in an issue or comment,
+/// cause lazybox to spawn an autonomous agent whose prompt is built from
+/// that issue's title/body — text the triggering user controls. That
+/// agent runs in a worktree with full `git`/`gh` and the host's GitHub
+/// credentials. Unless you set `agent.autonomous_skip_permissions`
+/// explicitly, a mention from a login *other than you* keeps its
+/// permission prompts on rather than running unattended (see
+/// [`AgentSection::autonomous_skip`]). Only add logins you would trust
+/// to run commands on your machine.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct MentionConfig {
@@ -2651,6 +3105,27 @@ impl MergeOnGreenConfig {
 pub struct ProvidersConfig {
     pub github: GithubConfig,
     pub linear: LinearConfig,
+    pub jira: JiraConfig,
+}
+
+/// `providers.jira:` block. Credentials stay in the environment
+/// (`LAZYBOX_JIRA_URL` / `LAZYBOX_JIRA_EMAIL` / `LAZYBOX_JIRA_TOKEN`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct JiraConfig {
+    /// Jira project key → GitHub `owner/repo` to clone when working on
+    /// that project's issues. A Jira row's own `repo` is the synthetic
+    /// `jira/<site>`, never a clonable repo; an unmapped project fails
+    /// loudly (and the TUI offers a repo pick) rather than cloning it.
+    ///
+    /// ```yaml
+    /// providers:
+    ///   jira:
+    ///     projects:
+    ///       ENG: acme/widget
+    /// ```
+    #[serde(default)]
+    pub projects: std::collections::BTreeMap<String, String>,
 }
 
 /// `providers.linear:` block.
@@ -2806,6 +3281,11 @@ pub struct GithubConfig {
     /// narrowing; on = "show my involvement everywhere I'm a member".
     #[serde(default)]
     pub include_accessible_repos: bool,
+    /// GitHub Enterprise Server hostname (bare, e.g. `ghe.example.com`).
+    /// Unset = github.com. On an enterprise host, REST is addressed at
+    /// `https://<host>/api/v3` and GraphQL at `https://<host>/api/graphql`.
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 impl Default for GithubConfig {
@@ -2822,6 +3302,7 @@ impl Default for GithubConfig {
             detect_needs_reply: true,
             background_budget_share: 0.55,
             include_accessible_repos: false,
+            host: None,
         }
     }
 }
@@ -3036,6 +3517,23 @@ mod duration_human_opt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_host_normalizes_and_defaults() {
+        // Unset → github.com (None).
+        assert_eq!(Config::default().github_host(), None);
+        // A bare host passes through.
+        let bare = Config::parse("providers:\n  github:\n    host: ghe.example.com\n").unwrap();
+        assert_eq!(bare.github_host().as_deref(), Some("ghe.example.com"));
+        // A pasted scheme + trailing slash is stripped so callers'
+        // `https://{host}/api/v3` stays well-formed (no `https://https://`).
+        let messy =
+            Config::parse("providers:\n  github:\n    host: https://ghe.example.com/\n").unwrap();
+        assert_eq!(messy.github_host().as_deref(), Some("ghe.example.com"));
+        // An empty string is not a host.
+        let empty = Config::parse("providers:\n  github:\n    host: \"\"\n").unwrap();
+        assert_eq!(empty.github_host(), None);
+    }
 
     /// #1183: strict MCP is opt-in — unset inherits the user's MCP
     /// servers, `true` restores the #256 always-strict behavior.
@@ -4146,24 +4644,38 @@ repos:
         Config::invalidate_cache();
     }
 
-    /// Autonomous sessions launch in no-permission mode by default,
-    /// and the toggle round-trips so a paranoid user can flip it off.
+    /// Autonomous skip-permissions is unset by default and resolves from
+    /// who triggered the spawn: the bypass stays for your own work, but
+    /// a foreign trigger keeps prompts on. An explicit toggle overrides
+    /// that and round-trips so a paranoid (or trusting) user can pin it.
     #[test]
-    fn autonomous_skip_permissions_defaults_on_and_round_trips() {
+    fn autonomous_skip_permissions_default_is_trust_aware_and_round_trips() {
         let cfg: Config = serde_yaml::from_str("{}").expect("parse");
-        assert!(
-            cfg.agent.autonomous_skip_permissions,
-            "default is on for autonomous sessions"
+        assert_eq!(
+            cfg.agent.autonomous_skip_permissions, None,
+            "the toggle is unset by default so the trigger's trust can drive it"
         );
+        // Trusted trigger (your own work) → bypass, as before.
+        assert!(cfg.agent.autonomous_skip(false));
+        // Foreign trigger → prompts back on unless pinned.
+        assert!(!cfg.agent.autonomous_skip(true));
 
         let mut paranoid = Config::default();
-        paranoid.agent.autonomous_skip_permissions = false;
+        paranoid.agent.autonomous_skip_permissions = Some(false);
         let written = serde_yaml::to_string(&paranoid).expect("serialize");
         let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
-        assert!(
-            !reparsed.agent.autonomous_skip_permissions,
+        assert_eq!(
+            reparsed.agent.autonomous_skip_permissions,
+            Some(false),
             "flipping the toggle off survives a save/load round-trip"
         );
+        // A pinned `false` wins even for your own trusted work.
+        assert!(!reparsed.agent.autonomous_skip(false));
+
+        let mut pinned_on = Config::default();
+        pinned_on.agent.autonomous_skip_permissions = Some(true);
+        // A pinned `true` keeps the bypass even for a foreign trigger.
+        assert!(pinned_on.agent.autonomous_skip(true));
     }
 
     /// Interactive skip-permissions is off by default and round-trips
@@ -4338,6 +4850,50 @@ repos:
             "space + source order preserved across a round-trip",
         );
         assert!(reparsed.ui.collapsed_spaces.contains("Personal"));
+    }
+
+    /// `agent.metered_spaces` is empty on a fresh config and survives a
+    /// round-trip — the persistence half of the Space-tier metering canary
+    /// (approach C).
+    #[test]
+    fn metered_spaces_default_empty_and_round_trip() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(
+            cfg.agent.metered_spaces.is_empty(),
+            "no metered spaces on a fresh config"
+        );
+
+        let mut cfg = Config::default();
+        cfg.agent.metered_spaces.insert("Obin".into());
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert!(reparsed.agent.metered_spaces.contains("Obin"));
+    }
+
+    /// `source_is_metered` resolves a source label through `ui.spaces` and
+    /// checks `agent.metered_spaces`: an explicit Space assignment, the
+    /// owner-segment auto-seed, and the empty-set fast path.
+    #[test]
+    fn source_is_metered_resolves_through_space_of() {
+        let mut cfg = Config::default();
+        // Empty set: never metered, whatever the source.
+        assert!(!cfg.source_is_metered("obin-ai/platform"));
+
+        // Auto-seeded Space = the `owner` segment: metering the "obin-ai"
+        // Space meters every `obin-ai/*` source without an explicit assignment.
+        cfg.agent.metered_spaces.insert("obin-ai".into());
+        assert!(cfg.source_is_metered("obin-ai/platform"));
+        assert!(cfg.source_is_metered("obin-ai/studio"));
+        assert!(!cfg.source_is_metered("other/repo"));
+
+        // An explicit `ui.spaces` assignment wins over the owner auto-seed:
+        // move `me/dotfiles` into a named "Obin" Space and meter that name.
+        cfg.ui.spaces = vec![SpaceConfig {
+            name: "Obin".into(),
+            sources: vec!["me/dotfiles".into()],
+        }];
+        cfg.agent.metered_spaces.insert("Obin".into());
+        assert!(cfg.source_is_metered("me/dotfiles"));
     }
 
     /// The theme is unset on a fresh config (so the default palette
@@ -4946,6 +5502,22 @@ agents:
     }
 
     #[test]
+    fn global_agent_auto_update_defaults_off_and_parses() {
+        // Absent → off (the safe default; the check still runs, install
+        // waits for the manual action or a per-agent opt-in).
+        assert!(!AgentSection::default().auto_update);
+        let empty: Config = serde_yaml::from_str("{}").expect("parse empty");
+        assert!(!empty.agent.auto_update);
+        // The global switch parses under `agent:`.
+        let yaml = r#"
+agent:
+  auto_update: true
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse global auto_update");
+        assert!(cfg.agent.auto_update);
+    }
+
+    #[test]
     fn custom_agent_entry_builds_spawn_and_resume_argv() {
         let yaml = r#"
 agents:
@@ -5028,5 +5600,190 @@ open_with:
             cfg.open_with[2].args.as_deref(),
             Some(&["{url}".to_string()][..])
         );
+    }
+
+    #[test]
+    fn server_section_defaults_are_sensible() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("empty config");
+        assert_eq!(cfg.server.ring_buffer_bytes(), DEFAULT_RING_BUFFER_BYTES);
+        assert_eq!(
+            cfg.server.cred_cache_ttl_secs(),
+            DEFAULT_CRED_CACHE_TTL_SECS
+        );
+        assert_eq!(
+            cfg.server.polling_backoff_cap_secs(),
+            DEFAULT_POLLING_BACKOFF_CAP_SECS
+        );
+        // Working claims default to ON (#1218 relief valve is opt-out).
+        assert!(cfg.server.working_claims_enabled());
+    }
+
+    #[test]
+    fn server_section_working_claims_can_be_disabled() {
+        let yaml = "server:\n  working_claims_enabled: false";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("valid config");
+        assert!(!cfg.server.working_claims_enabled());
+    }
+
+    #[test]
+    fn server_section_parses_and_clamps_ring_buffer() {
+        let yaml = "server:\n  ring_buffer_bytes: 10485760"; // 10 MiB
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse server section");
+        assert_eq!(cfg.server.ring_buffer_bytes(), 10 * 1024 * 1024);
+
+        // Below minimum clamps up.
+        let yaml = "server:\n  ring_buffer_bytes: 32768"; // 32 KiB < 64 KiB min
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse with clamp");
+        assert_eq!(cfg.server.ring_buffer_bytes(), MIN_RING_BUFFER_BYTES);
+
+        // Above maximum clamps down.
+        let yaml = format!(
+            "server:\n  ring_buffer_bytes: {}",
+            MAX_RING_BUFFER_BYTES + 1
+        );
+        let cfg: Config = serde_yaml::from_str(&yaml).expect("parse with clamp");
+        assert_eq!(cfg.server.ring_buffer_bytes(), MAX_RING_BUFFER_BYTES);
+    }
+
+    #[test]
+    fn server_section_validates_range_errors() {
+        // Ring buffer below minimum should fail validation.
+        let mut cfg: Config = serde_yaml::from_str("{}").expect("empty");
+        cfg.server.ring_buffer_bytes = Some(1024); // 1 KiB < 64 KiB min
+        assert!(
+            cfg.server.validate().is_err(),
+            "should reject ring buffer below minimum"
+        );
+
+        // Ring buffer above maximum should fail validation.
+        let mut cfg: Config = serde_yaml::from_str("{}").expect("empty");
+        cfg.server.ring_buffer_bytes = Some(MAX_RING_BUFFER_BYTES + 1);
+        assert!(
+            cfg.server.validate().is_err(),
+            "should reject ring buffer above maximum"
+        );
+
+        // Valid range passes.
+        let mut cfg: Config = serde_yaml::from_str("{}").expect("empty");
+        cfg.server.ring_buffer_bytes = Some(5 * 1024 * 1024);
+        assert!(
+            cfg.server.validate().is_ok(),
+            "should accept ring buffer in valid range"
+        );
+    }
+
+    #[test]
+    fn server_section_config_load_validates() {
+        // parse() should call validate() and fail if invalid.
+        let yaml = format!("server:\n  ring_buffer_bytes: {}", 500); // Below min
+        assert!(
+            Config::parse(&yaml).is_err(),
+            "parse() should reject invalid server config"
+        );
+
+        // Valid config should parse.
+        let yaml = format!("server:\n  ring_buffer_bytes: {}", 10 * 1024 * 1024);
+        assert!(
+            Config::parse(&yaml).is_ok(),
+            "parse() should accept valid server config"
+        );
+    }
+
+    #[test]
+    fn server_section_credential_cache_ttl_is_tunable() {
+        let yaml = "server:\n  cred_cache_ttl_secs: 600"; // 10 min
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.server.cred_cache_ttl_secs(), 600);
+    }
+
+    #[test]
+    fn server_section_polling_backoff_cap_is_tunable() {
+        let yaml = "server:\n  polling_backoff_cap_secs: 180"; // 3 min
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.server.polling_backoff_cap_secs(), 180);
+    }
+
+    /// #scale proposal A: the source-attention ladder model. A live
+    /// snooze reads as Muted regardless of stored level and auto-
+    /// reverts; resolution honors source-over-Space precedence; the
+    /// map round-trips through YAML with kebab-case levels.
+    #[test]
+    fn source_attention_resolves_and_round_trips() {
+        use chrono::{Duration, TimeZone, Utc};
+        let now = Utc.with_ymd_and_hms(2026, 8, 25, 12, 0, 0).unwrap();
+
+        // Active snooze wins over the stored level; expiry reverts.
+        let snoozed = SourceAttention {
+            level: SourceAttentionLevel::Quiet,
+            snoozed_until: Some(now + Duration::hours(2)),
+        };
+        assert_eq!(snoozed.effective_level(now), SourceAttentionLevel::Muted);
+        assert_eq!(
+            snoozed.effective_level(now + Duration::hours(3)),
+            SourceAttentionLevel::Quiet,
+            "an expired snooze falls back to the stored level"
+        );
+        assert!(snoozed.active_snooze(now).is_some());
+        assert!(snoozed.active_snooze(now + Duration::hours(3)).is_none());
+        assert!(SourceAttention::default().is_default());
+        assert!(!snoozed.is_default());
+
+        // Source entry beats the Space entry; the Space covers the rest.
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(
+            "space:acme".to_string(),
+            SourceAttention {
+                level: SourceAttentionLevel::Digest,
+                snoozed_until: None,
+            },
+        );
+        map.insert(
+            "acme/api".to_string(),
+            SourceAttention {
+                level: SourceAttentionLevel::Muted,
+                snoozed_until: None,
+            },
+        );
+        assert_eq!(
+            effective_source_attention(&map, "acme/api", Some("acme")).level,
+            SourceAttentionLevel::Muted,
+        );
+        assert_eq!(
+            effective_source_attention(&map, "acme/web", Some("acme")).level,
+            SourceAttentionLevel::Digest,
+            "a source without its own entry inherits its Space's"
+        );
+        assert!(
+            effective_source_attention(&map, "other/repo", Some("other")).is_default(),
+            "unlisted sources are Live"
+        );
+
+        // YAML round trip via the ui section.
+        let yaml = "ui:\n  source_attention:\n    acme/api:\n      level: muted\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(
+            cfg.ui.source_attention["acme/api"].level,
+            SourceAttentionLevel::Muted
+        );
+        let dumped = serde_yaml::to_string(&cfg).expect("dump");
+        let back: Config = serde_yaml::from_str(&dumped).expect("reparse");
+        assert_eq!(back.ui.source_attention, cfg.ui.source_attention);
+    }
+
+    /// #scale proposal D: `ui.views` round-trips with the flattened
+    /// lens shape — the YAML a user hand-edits or shares.
+    #[test]
+    fn saved_views_round_trip() {
+        let yaml = "ui:\n  views:\n    - name: hot\n      filters: [ci-failing, \"person:alice\"]\n      sort: recent\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.ui.views.len(), 1);
+        let v = &cfg.ui.views[0];
+        assert_eq!(v.name, "hot");
+        assert_eq!(v.lens.filters, vec!["ci-failing", "person:alice"]);
+        assert_eq!(v.lens.sort.as_deref(), Some("recent"));
+        assert_eq!(v.lens.mailbox, None);
+        let dumped = serde_yaml::to_string(&cfg).expect("dump");
+        let back: Config = serde_yaml::from_str(&dumped).expect("reparse");
+        assert_eq!(back.ui.views, cfg.ui.views);
     }
 }

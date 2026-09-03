@@ -13,7 +13,12 @@ the repository.
 
 lazybox is organized as a **client/daemon split**. The daemon (server) owns all
 state and IO — the PTYs behind embedded terminals, provider polling, and the
-store. The TUI is a thin renderer on top.
+store. A client is a thin renderer on top. The **TUI** is the primary client;
+the same daemon also speaks to a **JSON API gateway** (for scripts and non-
+terminal clients) and to a **desktop client** — a Tauri app with TUI feature
+parity that *attaches to a running daemon* rather than starting its own. The
+desktop client is not yet released as a download, but its attach-to-daemon path
+already ships in the daemon.
 
 By default both halves run in the **same process**, connected by a tokio mpsc
 channel pair, so there is no serialization cost and nothing extra to launch. The
@@ -33,8 +38,9 @@ identical wire code — anything else is told to restart/upgrade together.
 
 ## The crates
 
-lazybox is built from 16 crates (including two vendored libghostty crates),
-split across shared libraries, providers, the daemon, and the client binary.
+lazybox is built from roughly two dozen crates (including two vendored
+libghostty crates), split across shared libraries, providers, the daemon, and
+the client binary.
 The **core** libraries are deliberately layered: core and auth depend on no
 internal crate, and store may depend on core only. That keeps the foundation
 acyclic and each concern independently testable.

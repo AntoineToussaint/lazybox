@@ -33,7 +33,7 @@ workspace — built for developers juggling many PRs and AI coding agents at onc
 
 </div>
 
-<sub>Video not playing? Here's the [animated GIF](demo/hero.gif) and a [static screenshot](demo/hero.png). There's also a fully reproducible `--test` demo — code, not a recording — driven by [`demo/lazybox.tape`](demo/lazybox.tape).</sub>
+<sub>Video not playing? Here's the [animated GIF](demo/hero.gif) and a [static screenshot](demo/hero.png). There's also a fully reproducible `--demo` fleet demo — code, not a recording — driven by [`demo/lazybox.tape`](demo/lazybox.tape).</sub>
 
 ## ✨ Highlights
 
@@ -46,20 +46,32 @@ workspace — built for developers juggling many PRs and AI coding agents at onc
 - **🔌 Source-agnostic** — GitHub and Linear today, surfacing in one inbox behind the same interface, with an optional Slack mirror.
 - **🛰️ Remote-friendly** — a client/daemon split runs over an SSH-forwarded socket for working against a remote box.
 
+## Performance and reliability
+
+**Responsiveness under load:**
+
+- **Async bus-lag recovery** — when clients lag behind the event bus, recovery snapshots are built asynchronously off the serve loop, so the UI never freezes (previously up to 4-second stalls).
+- **Polling backoff** — the scheduler exponentially backs off on empty polls (5s → 10s → ... → 150s max) to reduce idle CPU, resetting to base interval when data arrives. Instant on user refresh.
+- **Lock scope reduction** — provider registry operations are single-acquisition (acquire, copy, release) so slow I/O doesn't serialize unrelated operations. Keystroke dispatch is off the global queue entirely.
+- **Per-terminal event gating** — resync requests are per-terminal, so one congested connection doesn't cascade backpressure to all others.
+
+**Terminal integrity:**
+
+- **Ring buffer validation** — capacity is validated at init (must be nonzero and ≤100 MiB) to catch misconfiguration before it silently loses data.
+- **Per-terminal byte ceiling** — output buffers cap at 64 MiB; crashed agents drop their VT and render a freeze-frame rather than exhausting memory.
+- **DEC-mode sync** — terminal modes (bold, color, charset) stay synchronized between server and client; replays are never torn, and resize events are sequenced with output to prevent mid-redraw corruption.
+- **Archive reconciliation** — archived status is checked per-item during each poll, so reopened PRs and unarchived issues resurface correctly.
+
+For deep dives on these improvements, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
+
 ## Install
 
 Prebuilt binaries (macOS arm64/x86_64 and Linux x86_64):
 
-**Homebrew:**
+**Homebrew** (the supported install path):
 
 ```sh
 brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox && brew install lazybox
-```
-
-**Shell installer:**
-
-```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/AntoineToussaint/lazybox/releases/latest/download/lazybox-tui-installer.sh | sh
 ```
 
 Then `gh auth login` (if you haven't) and run `lazybox`.
@@ -106,7 +118,7 @@ sudo dnf install gcc gcc-c++ pkgconf-pkg-config libcxx-devel libcxxabi-devel
 sudo pacman -S --needed base-devel pkgconf libc++ libc++abi
 ```
 
-Full install options (Homebrew, `curl | sh`, source), build notes, and
+Install details (Homebrew and contributor source builds), build notes, and
 troubleshooting are in the [Quickstart](https://lazybox.ai/docs/tutorials/quickstart/).
 Release history is in [`CHANGELOG.md`](CHANGELOG.md), and private vulnerability
 reports follow [`SECURITY.md`](SECURITY.md).
@@ -201,8 +213,7 @@ The [full keybinding reference](https://lazybox.ai/docs/reference/keybindings/) 
 Pre-1.0, **early-adopter dev mode**. Daily-driver for the author on macOS; Linux
 runs the same code paths but gets less testing. Expect sharp edges, log spam in
 `/tmp/lazybox.log`, and the occasional breaking change. Prebuilt binaries ship
-via the Homebrew tap, the `curl | sh` installer, and GitHub Releases (see
-[Install](#install)).
+via the Homebrew tap (see [Install](#install)).
 
 Run a side-by-side dev instance against its own state with `make dev`
 (`LAZYBOX_HOME=~/.lazybox-dev`) if you want to try lazybox without disturbing your

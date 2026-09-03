@@ -149,6 +149,8 @@ async fn recv_workspace_upsert(client: &mut lazybox_ipc::Client) -> Event {
                 | Event::AutoFixPolicyConfig { .. }
                 | Event::ShellCommandConfig { .. }
                 | Event::AgentAvailabilityConfig { .. }
+                | Event::SnippetKeepMine { .. }
+                | Event::SessionCosts { .. }
         ) {
             return evt;
         }
@@ -1671,6 +1673,37 @@ fn label_spawn_actions_bare_label_uses_agent_default_model() {
     let (agent, model, _) = spawn_agent_fields(&acts[0].1);
     assert_eq!(agent, "claude");
     assert_eq!(model, None);
+}
+
+/// A label spawn's trust flag follows issue authorship: a label on an
+/// issue you authored builds the prompt from your own text (trusted), but
+/// one where you're only the assignee may carry a foreign author's text
+/// and — since the labeller is unknowable — must default to keeping
+/// permission prompts (#1392).
+#[test]
+fn label_spawn_untrusted_flag_follows_issue_authorship() {
+    fn untrusted_of(role: TaskRole) -> bool {
+        let issue = labeled_issue("1", role, "lazybox:codex");
+        let acts = polling::label_spawn_actions(
+            &[issue],
+            &std::collections::HashSet::new(),
+            &lazybox_core::Conventions::default(),
+        );
+        assert_eq!(acts.len(), 1);
+        match &acts[0].1 {
+            polling::ProviderAction::AutoSpawnAgent { untrusted, .. } => *untrusted,
+            _ => panic!("expected AutoSpawnAgent"),
+        }
+    }
+
+    assert!(
+        !untrusted_of(TaskRole::Author),
+        "your own authored issue is trusted"
+    );
+    assert!(
+        untrusted_of(TaskRole::Assignee),
+        "an assigned issue may be foreign-authored — untrusted"
+    );
 }
 
 #[test]
@@ -4253,8 +4286,8 @@ async fn adopt_sessions_carries_user_state_and_activity() {
     )
     .unwrap();
     source_ws.notes = "carry me".into();
-    source_ws.record_sent_snippet("rev".into());
-    source_ws.record_sent_snippet("plan".into());
+    source_ws.record_snippet_delivery("rev".into());
+    source_ws.record_snippet_delivery("plan".into());
     source_ws.merge_activity(&[lazybox_core::Activity {
         author: "alice".into(),
         body: "please rebase".into(),
@@ -4292,9 +4325,9 @@ async fn adopt_sessions_carries_user_state_and_activity() {
     .unwrap();
     assert_eq!(target_ws.notes, "carry me", "notes must follow the adopt");
     assert_eq!(
-        target_ws.sent_snippets,
+        target_ws.sent_snippets.recent().to_vec(),
         vec!["plan", "rev"],
-        "the snippet MRU (the `]N` badge) must follow the adopt",
+        "the snippet MRU must follow the adopt",
     );
     assert!(
         target_ws.activity.iter().any(|a| a.body == "please rebase"),
@@ -5983,6 +6016,7 @@ mod live_collapse_e2e {
                 initial_prompt: None,
                 initial_snippet: None,
                 on_main: false,
+                force_new: false,
             })
             .unwrap();
         let terminal_id = wait_spawned(&mut client).await;
@@ -6610,6 +6644,7 @@ async fn tick_dispatches_auto_spawn_action_after_upsert() {
         prompt: Some("Implement issue".to_string()),
         reason: "@lazybox mention by alice on o/r#101 (issue body)".to_string(),
         dedup_key: None,
+        untrusted: false,
     };
 
     let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
@@ -6664,6 +6699,7 @@ async fn tick_auto_spawn_honors_requested_agent_and_model() {
         prompt: None,
         reason: "@lazybox mention by alice on o/r#202 (issue body)".to_string(),
         dedup_key: None,
+        untrusted: false,
     };
 
     let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {
@@ -6716,6 +6752,7 @@ async fn tick_auto_spawn_falls_back_to_default_for_unknown_agent() {
         prompt: None,
         reason: "@lazybox mention by alice on o/r#203 (issue body)".to_string(),
         dedup_key: None,
+        untrusted: false,
     };
 
     let source: Box<dyn TaskSource> = Box::new(ActionEmittingSource {

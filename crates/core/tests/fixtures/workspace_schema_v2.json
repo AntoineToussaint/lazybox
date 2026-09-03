@@ -1,8 +1,9 @@
 {
-  "schema": 4,
+  "schema": 10,
   "key": "github-acme-widget-7",
   "project_key": "github-acme-widget",
   "local": true,
+  "hopper": null,
   "linked_checkout": "/home/dev/code/acme/widget",
   "name": "Add the frobnicator",
   "branch": "feat/frobnicator",
@@ -366,8 +367,11 @@
     2
   ],
   "snoozed_until": "2026-03-14T18:00:00Z",
+  "snooze_wake": "ci-settled",
+  "woke_at": "2026-03-14T12:30:00Z",
   "auto_merge_on_green": true,
   "track_main": true,
+  "metered": true,
   "base_branch": "main",
   "track_main_behind": true,
   "policies": {
@@ -375,10 +379,13 @@
     "auto_fix_conflict": "Disarm"
   },
   "notes": "remember: bump the changelog",
-  "sent_snippets": [
-    "rev",
-    "fix-ci"
-  ],
+  "sent_snippets": {
+    "total": 2,
+    "recent": [
+      "rev",
+      "fix-ci"
+    ]
+  },
   "cleanup_prompt": "declined",
   "remote": "obin",
   "created_at": "2026-03-14T08:15:00Z",

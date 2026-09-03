@@ -287,12 +287,21 @@ fn server_option_cmds(history_limit: u32) -> Vec<Vec<String>> {
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 32;
 
-/// Wall-clock cap on every tmux subprocess invocation. tmux commands
-/// are local and complete in milliseconds; a tmux server wedged on a
-/// dead socket (or a hung first-start) must surface as an error, not
-/// freeze whichever daemon task awaited it. `kill_on_drop` on the
-/// commands ensures a timed-out tmux child is reaped.
-const TMUX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Wall-clock cap on every tmux subprocess invocation. A tmux server
+/// wedged on a dead socket (or a hung first-start) must surface as an
+/// error, not freeze whichever daemon task awaited it. `kill_on_drop` on
+/// the commands ensures a timed-out tmux child is reaped.
+///
+/// Most tmux commands are local and finish in milliseconds, but two do
+/// not at scale: `list-sessions` over a large fleet and
+/// `capture-pane -S -50000` (a deep scrollback seed) can legitimately
+/// take seconds on a loaded or remote box. An earlier 5s cap turned those
+/// into spurious failures during restart recovery — the initial
+/// `backend.list()` timed out and the whole recovery pass bailed. The
+/// ceiling is generous because the happy path never approaches it (raising
+/// it does not slow normal use); it only gives a slow-but-alive operation
+/// room to finish before being declared dead.
+const TMUX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Per-session state. The DaemonPty is the tmux-attach client that
 /// streams I/O between lazybox and the underlying tmux session.
@@ -718,6 +727,39 @@ fn new_session_args(
     cmd_args
 }
 
+/// Wrap a pane command so it runs with lazybox's launcher dir
+/// ([`lazybox_core::paths::bin_dir`], `<home>/bin`) prepended to `PATH`.
+///
+/// The tmux backend can't carry `PATH` into a pane the way the raw-PTY backend
+/// does. tmux ignores `new-session -e PATH=…` and hands every pane the tmux
+/// *server* process's `PATH` instead — verified empirically: a novel `-e VAR`
+/// reaches the pane, but `-e PATH` is dropped. So the launcher dir is invisible
+/// to agents, and `lazybox log` — which the SessionStart discovery prompt tells
+/// the agent to run by bare name (#1414/#1416) — fails with "command not found"
+/// (silently, since the recommended `… | lazybox log &` form discards it).
+///
+/// Fixing this via the tmux *server*'s PATH would need the server restarted
+/// (it persists across daemon restarts — a one-time `kill-server` that drops
+/// every live session). Instead we prepend inside the pane itself: a tiny `sh`
+/// shim that sets `PATH` from the value the pane inherited and `exec`s the real
+/// command. `exec` leaves no extra process — the pane's process is still the
+/// agent — so state detection, hooks, and kill-by-key are unaffected, and the
+/// fix takes effect the moment the daemon carrying it spawns a session, with no
+/// server restart. The launcher dir is passed as an argument (`$1`), never
+/// interpolated into the script, so a path with shell metacharacters is inert.
+fn prepend_launcher_to_path(argv: &[String]) -> Vec<String> {
+    let bin_dir = lazybox_core::paths::bin_dir();
+    let mut wrapped = vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        "PATH=\"$1:$PATH\"; export PATH; shift; exec \"$@\"".to_string(),
+        "lazybox-path-shim".to_string(),
+        bin_dir.to_string_lossy().into_owned(),
+    ];
+    wrapped.extend(argv.iter().cloned());
+    wrapped
+}
+
 fn tmux_operation(args: &[&str]) -> String {
     // `new-session` carries the agent argv, which can include an internal
     // provider conversation id. Keep it out of errors and timeout logs.
@@ -765,7 +807,11 @@ impl SessionBackend for TmuxBackend {
                 self.ensure_server_options().await;
             }
 
-            let cmd_args = new_session_args(&key, cwd, env, argv);
+            // Wrap the pane command so `<home>/bin` (lazybox's launcher) is on
+            // PATH inside the pane — tmux drops `-e PATH`, so this is the only
+            // way an agent's `lazybox log` resolves. See `prepend_launcher_to_path`.
+            let shimmed_argv = prepend_launcher_to_path(argv);
+            let cmd_args = new_session_args(&key, cwd, env, &shimmed_argv);
             let arg_refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
             self.tmux(&arg_refs).await?;
 
@@ -1428,6 +1474,37 @@ mod tests {
         let last_e = args.iter().rposition(|a| a == "-e").expect("-e present");
         assert!(last_e + 1 < sep, "env flags precede the -- separator");
         assert_eq!(&args[sep + 1..], &argv[..], "argv follows the separator");
+    }
+
+    /// The pane command is wrapped in an `sh` shim that prepends lazybox's
+    /// launcher dir to PATH and `exec`s the real command — the only way an
+    /// agent's `lazybox log` resolves under tmux (which drops `-e PATH`). The
+    /// launcher dir rides as `$1` and the original argv follows unchanged.
+    #[test]
+    fn prepend_launcher_to_path_wraps_command_in_a_path_shim() {
+        let argv = vec!["claude".to_string(), "--flag".to_string()];
+        let wrapped = prepend_launcher_to_path(&argv);
+        let bin_dir = lazybox_core::paths::bin_dir()
+            .to_string_lossy()
+            .into_owned();
+
+        assert_eq!(
+            &wrapped[0..2],
+            &["/bin/sh".to_string(), "-c".to_string()][..]
+        );
+        assert!(
+            wrapped[2].contains("PATH=\"$1:$PATH\"") && wrapped[2].contains("exec \"$@\""),
+            "shim must prepend $1 to PATH and exec the real argv: {}",
+            wrapped[2],
+        );
+        // $0 is a label; $1 is the launcher dir; the original argv follows and
+        // is passed through untouched (so `exec "$@"` runs it after `shift`).
+        assert_eq!(wrapped[4], bin_dir, "launcher dir must be the shim's $1");
+        assert_eq!(
+            &wrapped[5..],
+            &["claude".to_string(), "--flag".to_string()][..],
+            "original argv must follow unchanged",
+        );
     }
 
     /// capture-pane joins lines with bare `\n`; the seed must carriage-

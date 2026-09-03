@@ -9,9 +9,10 @@
 use lazybox_ipc::{
     AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunId, AgentRunRequestId,
     AgentRuntimeMode, AgentState, AgentUsage, Command, Event, HookEvent, HookEventKind,
-    PrincipalId, PromptSource, ProviderCredentialInput, ProviderCredentialMetadata, ProviderQuota,
-    QuotaWindow, RemovableTerminalState, SpawnFallback, TerminalId, TerminalInputIntent,
-    TerminalKind, TerminalSnapshot, UserPrompt, WorktreeStep, WorktreeStepStatus,
+    HopperEntryDraft, PrincipalId, PromptSource, ProviderCredentialInput,
+    ProviderCredentialMetadata, ProviderQuota, QuotaWindow, RemovableTerminalState, SpawnFallback,
+    TerminalId, TerminalInputIntent, TerminalKind, TerminalSnapshot, UserPrompt, WorktreeStep,
+    WorktreeStepStatus,
 };
 use tokio::io::duplex;
 
@@ -26,7 +27,11 @@ fn sample_session_id(value: u128) -> lazybox_core::SessionId {
 }
 
 fn sample_workspace() -> lazybox_core::Workspace {
-    let task = lazybox_core::Task {
+    lazybox_core::Workspace::from_task(sample_task(), sample_time())
+}
+
+fn sample_task() -> lazybox_core::Task {
+    lazybox_core::Task {
         id: lazybox_core::TaskId {
             source: "github".into(),
             key: "o/r#1".into(),
@@ -70,8 +75,7 @@ fn sample_workspace() -> lazybox_core::Workspace {
         parent: None,
         priority: None,
         state_label: None,
-    };
-    lazybox_core::Workspace::from_task(task, sample_time())
+    }
 }
 
 fn sample_project() -> lazybox_core::Project {
@@ -98,6 +102,7 @@ fn all_commands() -> Vec<Command> {
             on_main: false,
             model_alias: Some("L".into()),
             access: lazybox_ipc::AgentRunAccess::ReadOnly,
+            force_new: true,
         },
         Command::Spawn {
             session_key: key.clone(),
@@ -110,6 +115,7 @@ fn all_commands() -> Vec<Command> {
             on_main: true,
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
+            force_new: false,
         },
         Command::Spawn {
             session_key: key.clone(),
@@ -127,6 +133,7 @@ fn all_commands() -> Vec<Command> {
             on_main: false,
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
+            force_new: false,
         },
         Command::CancelSpawn {
             session_key: key.clone(),
@@ -174,6 +181,7 @@ fn all_commands() -> Vec<Command> {
             }),
             resume_latest: true,
             access: lazybox_ipc::AgentRunAccess::Default,
+            model_alias: Some("L".into()),
         },
         Command::StartAgentRun {
             request_id: AgentRunRequestId("request-2".into()),
@@ -186,6 +194,7 @@ fn all_commands() -> Vec<Command> {
             initial_input: None,
             resume_latest: false,
             access: lazybox_ipc::AgentRunAccess::Default,
+            model_alias: None,
         },
         Command::SendAgentInput {
             run_id: AgentRunId(9),
@@ -322,6 +331,7 @@ fn all_commands() -> Vec<Command> {
         Command::Snooze {
             session_key: key.clone(),
             until: sample_time() + chrono::Duration::hours(4),
+            wake: Some(lazybox_core::SnoozeWake::Activity),
         },
         Command::Unsnooze {
             session_key: key.clone(),
@@ -331,6 +341,10 @@ fn all_commands() -> Vec<Command> {
             enabled: true,
         },
         Command::SetTrackMain {
+            session_key: key.clone(),
+            enabled: true,
+        },
+        Command::SetMetered {
             session_key: key.clone(),
             enabled: true,
         },
@@ -366,6 +380,15 @@ fn all_commands() -> Vec<Command> {
         Command::DeleteOrClose {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
         },
+        Command::ClosePr {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+        },
+        Command::ConvertPrToDraft {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+        },
+        Command::MarkPrReady {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+        },
         Command::RequestReviewers {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
             logins: vec!["octocat".into()],
@@ -387,6 +410,9 @@ fn all_commands() -> Vec<Command> {
         },
         Command::FetchRequestableReviewers {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+        },
+        Command::FetchRepoMergeHistory {
+            repo: "o/r".to_string(),
         },
         Command::Refresh,
         Command::CleanWorktrees,
@@ -483,6 +509,28 @@ fn all_commands() -> Vec<Command> {
             client_request_id: "credit-recovery-1".into(),
             continuation_prompt: "Continue the work you were doing.".into(),
         },
+        Command::SaveHopper {
+            entries: vec![HopperEntryDraft {
+                workspace_key: Some(lazybox_core::WorkspaceKey::new("morning-plan")),
+                name: "Write morning plan".into(),
+            }],
+        },
+        Command::AssignHopperProject {
+            workspace_key: lazybox_core::WorkspaceKey::new("morning-plan"),
+            project_key: lazybox_core::ProjectKey::new("github:o/r"),
+        },
+        Command::SetHopperCompleted {
+            workspace_key: lazybox_core::WorkspaceKey::new("morning-plan"),
+            completed: true,
+        },
+        Command::SetSnippetKeepMine {
+            target: "snippet:rev:0123456789abcdef".into(),
+        },
+        Command::GetStats,
+        Command::SetHopperCanceled {
+            workspace_key: lazybox_core::WorkspaceKey::new("morning-plan"),
+            canceled: true,
+        },
         Command::Shutdown,
     ]
 }
@@ -523,6 +571,12 @@ fn all_events() -> Vec<Event> {
             projects: vec![],
             recent_snippets: vec!["rev".into(), "pr".into()],
             dismissed_updates: vec!["release:v0.2.0".into()],
+        },
+        Event::SessionCosts {
+            costs: vec![
+                ("github:o/r#1".into(), 2_000_000),
+                ("github:o/r#2".into(), 250_000),
+            ],
         },
         Event::ViewerIdentities {
             logins: vec![("github".into(), "octocat".into())],
@@ -585,6 +639,22 @@ fn all_events() -> Vec<Event> {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
             pr_label: "o/r#2".into(),
         },
+        Event::PrCloseFailed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            pr_label: "o/r#2".into(),
+            reason: "permission denied".into(),
+        },
+        Event::PrDraftChanged {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            pr_label: "o/r#2".into(),
+            is_draft: true,
+        },
+        Event::PrDraftChangeFailed {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            pr_label: "o/r#2".into(),
+            to_draft: false,
+            reason: "permission denied".into(),
+        },
         Event::IssueDeleted {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
             issue_label: "o/r#1".into(),
@@ -612,6 +682,16 @@ fn all_events() -> Vec<Event> {
         Event::RequestableReviewers {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
             logins: vec!["octocat".into()],
+        },
+        Event::RepoMergeHistory {
+            repo: "o/r".to_string(),
+            entries: vec![sample_task()],
+            error: None,
+        },
+        Event::RepoMergeHistory {
+            repo: "o/r".to_string(),
+            entries: vec![],
+            error: Some("github credentials: not signed in".to_string()),
         },
         {
             let mut session = lazybox_core::WorkspaceSession::new(
@@ -736,6 +816,11 @@ fn all_events() -> Vec<Event> {
             terminal_id: TerminalId(2),
             state: AgentState::Exited { code: Some(9) },
         },
+        Event::AgentState {
+            session_key: key.clone(),
+            terminal_id: TerminalId(2),
+            state: AgentState::AwaitingReset,
+        },
         Event::AgentRunStarted {
             request_id: AgentRunRequestId("request-1".into()),
             run_id: AgentRunId(9),
@@ -809,6 +894,7 @@ fn all_events() -> Vec<Event> {
         },
         Event::AgentSessionUsage {
             agent_id: "codex".into(),
+            session_key: Some(lazybox_core::SessionKey::new("github-acme-widget-7")),
             usage: AgentUsage {
                 input_tokens: Some(1000),
                 output_tokens: Some(200),
@@ -819,6 +905,7 @@ fn all_events() -> Vec<Event> {
         },
         Event::AgentProviderQuota {
             agent_id: "claude".into(),
+            session_key: None,
             quota: ProviderQuota {
                 five_hour: Some(QuotaWindow {
                     utilization_bp: 4512,
@@ -1088,9 +1175,28 @@ fn all_events() -> Vec<Event> {
             stage: lazybox_ipc::AgentCreditRecoveryStage::WaitingForComposer,
         },
         Event::AgentCreditExhausted {
-            session_key: key,
+            session_key: key.clone(),
             terminal_id: TerminalId(12),
             hint: "add credits or switch subscription".into(),
+        },
+        Event::SnippetKeepMine {
+            targets: vec!["snippet:rev:0123456789abcdef".into()],
+        },
+        Event::Stats {
+            buckets: vec![lazybox_ipc::StatBucket {
+                day: "2026-08-25".into(),
+                metric: lazybox_ipc::stats::SESSIONS.into(),
+                value: 3,
+            }],
+        },
+        Event::AgentSessionStarted {
+            session_key: key.clone(),
+        },
+        Event::GithubDiscoveryBehind {
+            behind: true,
+            watched_repos: 30,
+            required_points: 900,
+            allowance: 120,
         },
     ]
 }
@@ -1129,6 +1235,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::Unsnooze { .. } => "Unsnooze",
         Command::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
         Command::SetTrackMain { .. } => "SetTrackMain",
+        Command::SetMetered { .. } => "SetMetered",
         Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
         Command::SetAutoFixPolicies { .. } => "SetAutoFixPolicies",
         Command::PostReply { .. } => "PostReply",
@@ -1139,12 +1246,16 @@ fn command_tag(command: &Command) -> &'static str {
         Command::MergePr { .. } => "MergePr",
         Command::CloseIssue { .. } => "CloseIssue",
         Command::DeleteOrClose { .. } => "DeleteOrClose",
+        Command::ClosePr { .. } => "ClosePr",
+        Command::ConvertPrToDraft { .. } => "ConvertPrToDraft",
+        Command::MarkPrReady { .. } => "MarkPrReady",
         Command::RequestReviewers { .. } => "RequestReviewers",
         Command::AddAssignees { .. } => "AddAssignees",
         Command::SetAssignees { .. } => "SetAssignees",
         Command::SetLabels { .. } => "SetLabels",
         Command::FetchRepoLabels { .. } => "FetchRepoLabels",
         Command::FetchRequestableReviewers { .. } => "FetchRequestableReviewers",
+        Command::FetchRepoMergeHistory { .. } => "FetchRepoMergeHistory",
         Command::CleanWorktrees => "CleanWorktrees",
         Command::InspectWorktrees => "InspectWorktrees",
         Command::InspectWorkspaceDiff { .. } => "InspectWorkspaceDiff",
@@ -1179,6 +1290,12 @@ fn command_tag(command: &Command) -> &'static str {
         Command::DeleteError { .. } => "DeleteError",
         Command::GetResourcePosture => "GetResourcePosture",
         Command::RecoverAgentCredit { .. } => "RecoverAgentCredit",
+        Command::SaveHopper { .. } => "SaveHopper",
+        Command::AssignHopperProject { .. } => "AssignHopperProject",
+        Command::SetHopperCompleted { .. } => "SetHopperCompleted",
+        Command::SetSnippetKeepMine { .. } => "SetSnippetKeepMine",
+        Command::GetStats => "GetStats",
+        Command::SetHopperCanceled { .. } => "SetHopperCanceled",
     }
 }
 
@@ -1189,6 +1306,7 @@ fn command_tag(command: &Command) -> &'static str {
 fn event_tag(event: &Event) -> &'static str {
     match event {
         Event::Snapshot { .. } => "Snapshot",
+        Event::SessionCosts { .. } => "SessionCosts",
         Event::ViewerIdentities { .. } => "ViewerIdentities",
         Event::AutoFixPolicyConfig { .. } => "AutoFixPolicyConfig",
         Event::ShellCommandConfig { .. } => "ShellCommandConfig",
@@ -1205,12 +1323,16 @@ fn event_tag(event: &Event) -> &'static str {
         Event::IssueClosed { .. } => "IssueClosed",
         Event::IssueCloseFailed { .. } => "IssueCloseFailed",
         Event::PrClosed { .. } => "PrClosed",
+        Event::PrCloseFailed { .. } => "PrCloseFailed",
+        Event::PrDraftChanged { .. } => "PrDraftChanged",
+        Event::PrDraftChangeFailed { .. } => "PrDraftChangeFailed",
         Event::IssueDeleted { .. } => "IssueDeleted",
         Event::DeleteOrCloseFailed { .. } => "DeleteOrCloseFailed",
         Event::MergedPrRemovable { .. } => "MergedPrRemovable",
         Event::RemovalCancelled { .. } => "RemovalCancelled",
         Event::RepoLabels { .. } => "RepoLabels",
         Event::RequestableReviewers { .. } => "RequestableReviewers",
+        Event::RepoMergeHistory { .. } => "RepoMergeHistory",
         Event::SessionCreated(_) => "SessionCreated",
         Event::WorktreeProgress { .. } => "WorktreeProgress",
         Event::SessionEnded { .. } => "SessionEnded",
@@ -1278,6 +1400,10 @@ fn event_tag(event: &Event) -> &'static str {
         Event::ResourcePosture(_) => "ResourcePosture",
         Event::AgentCreditRecovery { .. } => "AgentCreditRecovery",
         Event::AgentCreditExhausted { .. } => "AgentCreditExhausted",
+        Event::SnippetKeepMine { .. } => "SnippetKeepMine",
+        Event::Stats { .. } => "Stats",
+        Event::AgentSessionStarted { .. } => "AgentSessionStarted",
+        Event::GithubDiscoveryBehind { .. } => "GithubDiscoveryBehind",
     }
 }
 
@@ -1289,12 +1415,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        79,
+        90,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        89,
+        98,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

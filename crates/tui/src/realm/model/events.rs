@@ -23,6 +23,14 @@ const ACTION_DROPPED_NOTE: &str =
 
 const MOUSE_CAPTURE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How long the cursor must rest on an unfetched PR row before the lazy
+/// `FetchPrDetails` back-fill fires. Long enough that holding `j`
+/// through a crowded sidebar (row-to-row well under 100ms at key-repeat
+/// rate) never fires for the rows crossed; short enough to be
+/// imperceptible on the row the user actually stops on. The run loop's
+/// idle heartbeat (16ms) bounds the firing latency past the threshold.
+pub(super) const PR_DETAILS_DEBOUNCE: Duration = Duration::from_millis(250);
+
 impl<T: TerminalAdapter> Model<T> {
     /// Flush all client-side terminal sequence debts through bounded batch
     /// commands. Snapshot recovery can mark hundreds of terminals at once;
@@ -371,6 +379,20 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         };
         conversion.phase = super::ConversionPhase::Spawning;
+        // A Critic review escalates to the large model tier (`L` — Opus for
+        // Claude): the whole point of a review pass is a *stronger* model
+        // checking the work, so junior-tier work gets a senior review. An
+        // agent with no `L` tier resolves to no `--model` (its own default),
+        // so this is graceful. Continue keeps the working tier — it's
+        // finishing the task, not reviewing it.
+        let (access, model_alias) = match conversion.role {
+            lazybox_core::prompts::AgentHandoffRole::Continue => {
+                (lazybox_ipc::AgentRunAccess::Default, None)
+            }
+            lazybox_core::prompts::AgentHandoffRole::Critic => {
+                (lazybox_ipc::AgentRunAccess::ReadOnly, Some("L".to_string()))
+            }
+        };
         let command = IpcCommand::Spawn {
             session_key: conversion.draft.source.clone(),
             session_id: Some(session_id),
@@ -380,15 +402,9 @@ impl<T: TerminalAdapter> Model<T> {
             initial_prompt: Some(prompt),
             initial_snippet: None,
             on_main: false,
-            model_alias: None,
-            access: match conversion.role {
-                lazybox_core::prompts::AgentHandoffRole::Continue => {
-                    lazybox_ipc::AgentRunAccess::Default
-                }
-                lazybox_core::prompts::AgentHandoffRole::Critic => {
-                    lazybox_ipc::AgentRunAccess::ReadOnly
-                }
-            },
+            model_alias,
+            access,
+            force_new: false,
         };
         self.spawn_follow_to = Some(conversion.draft.source.clone());
         self.last_spawn = Some(command.clone());
@@ -417,11 +433,27 @@ impl<T: TerminalAdapter> Model<T> {
             IpcEvent::AgentUsage { run_id, usage } => {
                 self.sidebar.add_agent_usage(*run_id, usage);
             }
-            IpcEvent::AgentSessionUsage { agent_id, usage } => {
-                self.sidebar.add_agent_session_usage(agent_id, usage);
+            IpcEvent::AgentSessionUsage {
+                agent_id,
+                session_key,
+                usage,
+            } => {
+                self.sidebar
+                    .add_agent_session_usage(agent_id, session_key.as_ref(), usage);
             }
-            IpcEvent::AgentProviderQuota { agent_id, quota } => {
-                self.sidebar.note_provider_quota(agent_id, *quota);
+            // Durable per-session cost replay on connect (#1389): seed the
+            // live tracker so the per-workspace `$ METER · $cost` figure comes
+            // back after a restart instead of resetting to bare `$ METER`.
+            IpcEvent::SessionCosts { costs } => {
+                self.sidebar.hydrate_session_costs(costs);
+            }
+            IpcEvent::AgentProviderQuota {
+                agent_id,
+                session_key,
+                quota,
+            } => {
+                self.sidebar
+                    .note_provider_quota(agent_id, session_key.as_ref(), *quota);
             }
             IpcEvent::AgentTurnFinished { run_id, .. } => {
                 self.sidebar.commit_agent_turn(*run_id);
@@ -930,6 +962,38 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
+        // On a group-header row the right pane shows a repo/Space overview
+        // projected — in `sync_panes` — from workspace + agent data. Unlike
+        // a selected workspace (refreshed in place via `RightPane::on_event`),
+        // that projection only rebuilds when `sync_panes` runs, which the
+        // `needs_pane_sync` gate suppresses for a plain poll. Every event
+        // past the two terminal-output fast-paths above can move those
+        // counts, so request the projection now — otherwise the overview
+        // freezes at whatever it showed when the cursor landed (#1442).
+        if self.right.showing_overview() {
+            self.needs_pane_sync = true;
+        }
+        // An armed leader's which-key popup — and the row index its
+        // `Enter` fires — is derived from the *selected workspace's*
+        // currently-available actions (#1351). A poll that lands
+        // mid-leader can reshape that list under the fixed
+        // `leader_highlight` index, so `Enter` would fire whatever now
+        // sits at that index rather than the row the user navigated to.
+        // Drop the highlight (not the leader) on any event that can
+        // reshape a workspace or move the selection, so a stale `Enter`
+        // disarms harmlessly and the user re-navigates the fresh list.
+        if self.leader_highlight.is_some()
+            && self.leader.pending().is_some()
+            && matches!(
+                event,
+                IpcEvent::WorkspaceUpserted(_)
+                    | IpcEvent::WorkspaceRemoved(_)
+                    | IpcEvent::WorkspaceOutOfScope { .. }
+                    | IpcEvent::Snapshot { .. }
+            )
+        {
+            self.leader_highlight = None;
+        }
         // Fold structured-run token usage into the per-provider running
         // total the header widget shows (#1059). Side-effect only — it
         // never consumes the event, so it must run before the
@@ -1110,6 +1174,9 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::IssueClosed { .. }
                 | IpcEvent::IssueCloseFailed { .. }
                 | IpcEvent::PrClosed { .. }
+                | IpcEvent::PrCloseFailed { .. }
+                | IpcEvent::PrDraftChanged { .. }
+                | IpcEvent::PrDraftChangeFailed { .. }
                 | IpcEvent::IssueDeleted { .. }
                 | IpcEvent::DeleteOrCloseFailed { .. }
                 | IpcEvent::MergedPrRemovable { .. }
@@ -1180,6 +1247,12 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentCreditExhausted { .. }
                 | IpcEvent::WorkspaceCreated { .. }
                 | IpcEvent::ErrorInbox { .. }
+                | IpcEvent::Stats { .. }
+                | IpcEvent::AgentSessionStarted { .. }
+                | IpcEvent::SnippetKeepMine { .. }
+                | IpcEvent::GithubDiscoveryBehind { .. }
+                | IpcEvent::SessionCosts { .. }
+                | IpcEvent::RepoMergeHistory { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -1370,7 +1443,28 @@ impl<T: TerminalAdapter> Model<T> {
             self.dismissed_updates = dismissed_updates.clone();
             self.seed_recent_snippets_from_snapshot(recent_snippets.clone());
             self.snapshot_seen = true;
+            // Drop any stale discovery-behind indicator on (re)connect: the
+            // `behind: false` recovery edge may have fired while this client
+            // was disconnected, and the Snapshot doesn't carry the current
+            // deferral state. Because `behind: true` is a re-sent LEVEL, a
+            // still-active stall re-asserts within one tick; clearing here
+            // just prevents a stuck indicator for a stall that already ended.
+            self.status.discovery_behind = None;
             self.maybe_show_pending_update();
+            // Seed the always-visible "today" header strip (#1344) on every
+            // (re)connect — the initial snapshot, a `--connect` reconnect,
+            // and a broadcast-lag-recovery snapshot all land here. The
+            // daemon keeps it live between snapshots by pushing a fresh
+            // rollup after each accumulator flush.
+            self.send_cmd(IpcCommand::GetStats);
+        }
+
+        // Snippet-override keep-mine acknowledgements ride their own event
+        // right after the snapshot (and re-broadcast on every keep-mine),
+        // so the picker/browser badges reflect the shared, persisted set
+        // across in-process and `--connect` clients (#1312).
+        if let IpcEvent::SnippetKeepMine { targets } = &event {
+            self.snippet_keepmine = targets.clone();
         }
 
         // A broadcast-lag recovery `Snapshot` stands in for the events
@@ -1614,6 +1708,57 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
+        // `g c` reached GitHub and was rejected — the PR was NOT closed.
+        // Persistent error naming the reason (mirrors `IssueCloseFailed`).
+        // The PR stays open/actionable.
+        if let IpcEvent::PrCloseFailed {
+            workspace_key,
+            pr_label,
+            reason,
+        } = &event
+        {
+            self.flash_action_error(
+                workspace_key,
+                action_failure_notice("close", pr_label, reason),
+            );
+            self.redraw = true;
+            return;
+        }
+        // `g f` / `g y` reached GitHub and the PR's draft state flipped.
+        // Flash now; the next poll reconciles the row's badge.
+        if let IpcEvent::PrDraftChanged {
+            workspace_key,
+            pr_label,
+            is_draft,
+        } = &event
+        {
+            self.clear_action_error(workspace_key);
+            if *is_draft {
+                self.flash_info(format!("{pr_label} converted to draft"));
+            } else {
+                self.flash_info(format!("{pr_label} marked ready for review"));
+            }
+            self.redraw = true;
+            return;
+        }
+        // `g f` / `g y` reached GitHub and was rejected — nothing changed.
+        // Persistent error naming the reason and the attempted direction.
+        if let IpcEvent::PrDraftChangeFailed {
+            workspace_key,
+            pr_label,
+            to_draft,
+            reason,
+        } = &event
+        {
+            let verb = if *to_draft {
+                "convert to draft"
+            } else {
+                "mark ready"
+            };
+            self.flash_action_error(workspace_key, action_failure_notice(verb, pr_label, reason));
+            self.redraw = true;
+            return;
+        }
         // `g d` reached GitHub and the issue is gone — hard-deleted, or
         // (when the token lacked the admin rights a delete needs) closed
         // as not-planned. Name the degradation so "delete" never
@@ -1700,7 +1845,29 @@ impl<T: TerminalAdapter> Model<T> {
             // The daemon confirmed the removal — reconcile any optimistic
             // archive/delete of this row (#476).
             self.reconcile_optimistic(key.as_str());
+            // A removal prompt may only exist for a LIVE workspace. One
+            // can sit queued behind another modal while the user archives
+            // or deletes the row; without this, dismissing that modal
+            // later mounts "<PR> was merged — remove workspace?" for a
+            // workspace that no longer exists (#NNN). Deletion retracts
+            // the prompt — the same cancel the reopen path (#552) uses.
+            self.cancel_removal_prompt(key);
+            // Beyond the removal *prompt*, any other modal opened FOR this
+            // workspace (reply, notes, reviewers, assignees, snooze,
+            // policies, conflict-resolve, sidebar context, adopt, the setup
+            // checklist) would otherwise linger as an orphan pointing at a
+            // PR/issue that no longer exists — dismiss it too.
+            self.dismiss_modals_for_removed_workspace(key);
             self.pr_details_fetched.remove(key);
+            // An armed-but-unfired lazy fetch for the removed row would
+            // otherwise fire against a dead workspace on the next tick.
+            if self
+                .pending_pr_details
+                .as_ref()
+                .is_some_and(|(pending, _)| pending == key)
+            {
+                self.pending_pr_details = None;
+            }
             // Drop the confirmed-merge latch — the row is gone, so a
             // stale entry could only leak or mis-patch a re-added key.
             self.merge_confirmed.remove(key);
@@ -1776,6 +1943,34 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
+        // Merge-history reply (#1432) — repaint the open modal with the
+        // fetched merged PRs (or the error). A reply that lands while the
+        // modal is closed, or names a different repo than the open one, is
+        // dropped by `update_merge_history`.
+        if let IpcEvent::RepoMergeHistory {
+            repo,
+            entries,
+            error,
+        } = &event
+        {
+            // `update_merge_history` repaints (via `mount_modal`) only when it
+            // applies — a reply dropped for a closed ledger or a mismatched
+            // repo leaves the screen untouched rather than forcing a redraw.
+            self.update_merge_history(repo.clone(), entries.clone(), error.clone());
+            return;
+        }
+        // Usage-stats snapshot (#1339) — repaint the open stats window and
+        // feed the always-visible "today" header strip (#1344). A snapshot
+        // that lands while the window is closed is dropped by
+        // `update_stats`, but the header strip always consumes it. The
+        // daemon pushes a fresh snapshot after each accumulator flush, so
+        // the strip stays live without polling.
+        if let IpcEvent::Stats { buckets } = &event {
+            self.sidebar.set_today_buckets(buckets.clone());
+            self.update_stats(buckets.clone());
+            self.redraw = true;
+            return;
+        }
         // First-time worktree provisioning progress. A user-initiated
         // spawn drives the spinner + step checklist modal; an autonomous
         // (GitHub label / `@lazybox` mention) spawn is background work
@@ -1819,6 +2014,20 @@ impl<T: TerminalAdapter> Model<T> {
             // optimistic chip edit (reviewers/assignees/labels) on this
             // workspace (#476).
             self.reconcile_optimistic(ws.key.as_str());
+            // An open issue browser (#1436) holds a mount-time snapshot;
+            // rebuild it from the now-updated workspace so a label change
+            // (this client's edit reconciled, or a background poll) is
+            // reflected in the list + preview. No-op when it isn't open.
+            self.refresh_issue_browser();
+            let resume = self
+                .pending_hopper_action
+                .as_ref()
+                .is_some_and(|(key, _)| key == &ws.key && ws.project_key.is_some());
+            if resume && let Some((_, action)) = self.pending_hopper_action.take() {
+                let commands = self.dispatch_action(&action);
+                self.dispatch_cmds(commands);
+                self.flash_info("repo assigned — starting workspace");
+            }
         }
         self.right.on_daemon_event(&event);
         self.terminals.on_daemon_event(&event);
@@ -1946,6 +2155,7 @@ impl<T: TerminalAdapter> Model<T> {
             // Exhaustive on purpose — a new Event variant must be
             // classified here before this compiles.
             IpcEvent::Snapshot { .. }
+            | IpcEvent::SessionCosts { .. }
             | IpcEvent::ViewerIdentities { .. }
             | IpcEvent::AutoFixPolicyConfig { .. }
             | IpcEvent::ShellCommandConfig { .. }
@@ -1964,6 +2174,9 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::IssueClosed { .. }
             | IpcEvent::IssueCloseFailed { .. }
             | IpcEvent::PrClosed { .. }
+            | IpcEvent::PrCloseFailed { .. }
+            | IpcEvent::PrDraftChanged { .. }
+            | IpcEvent::PrDraftChangeFailed { .. }
             | IpcEvent::IssueDeleted { .. }
             | IpcEvent::DeleteOrCloseFailed { .. }
             | IpcEvent::MergedPrRemovable { .. }
@@ -2031,6 +2244,13 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::AgentCreditExhausted { .. }
             | IpcEvent::WorkspaceCreated { .. }
             | IpcEvent::ErrorInbox { .. }
+            | IpcEvent::Stats { .. }
+            | IpcEvent::AgentSessionStarted { .. }
+            | IpcEvent::SnippetKeepMine { .. }
+            // Not a sync ATTEMPT — it's a standing advisory about a
+            // deferred sweep, handled (set/clear) in the main event match.
+            | IpcEvent::GithubDiscoveryBehind { .. }
+            | IpcEvent::RepoMergeHistory { .. }
             | IpcEvent::ResourcePosture(..) => {}
         }
         // Background-poll indicator. Lights up whenever the daemon
@@ -2217,6 +2437,42 @@ impl<T: TerminalAdapter> Model<T> {
                         }
                     }
                 }
+                // New-item discovery is behind (#1391). A STANDING signal,
+                // not a toast: hold it in `status.discovery_behind` so the
+                // footer shows a persistent, self-retracting indicator that
+                // can't be missed. `behind: true` is a LEVEL the daemon
+                // re-sends every deferred tick (so a client subscribing
+                // mid-stall still converges on it), so the one-shot attention
+                // flash is gated to the rising edge — the tick we first see
+                // the level — rather than firing every tick. `behind: false`
+                // retracts it. Never touches poll-health state (this isn't a
+                // failure — the cheap issue-discovery probe keeps surfacing
+                // new issues), so it can't register a phantom failing provider.
+                IpcEvent::GithubDiscoveryBehind {
+                    behind,
+                    watched_repos,
+                    required_points,
+                    allowance,
+                } => {
+                    if *behind {
+                        let state = crate::realm::status_ctx::DiscoveryBehind {
+                            watched_repos: *watched_repos,
+                            required_points: *required_points,
+                            allowance: *allowance,
+                        };
+                        let rising_edge = self.status.discovery_behind.is_none();
+                        if rising_edge {
+                            self.flash(
+                                state.flash_message(),
+                                crate::realm::components::footer::NoticeSeverity::Retryable,
+                            );
+                        }
+                        self.status.discovery_behind = Some(state);
+                        self.redraw = true;
+                    } else if self.status.discovery_behind.take().is_some() {
+                        self.redraw = true;
+                    }
+                }
                 // Deliberately ignored: no poll-indicator / mutation-
                 // failure semantics. Exhaustive on purpose — a new
                 // Event variant must be classified here before this
@@ -2240,6 +2496,9 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::IssueClosed { .. }
                 | IpcEvent::IssueCloseFailed { .. }
                 | IpcEvent::PrClosed { .. }
+                | IpcEvent::PrCloseFailed { .. }
+                | IpcEvent::PrDraftChanged { .. }
+                | IpcEvent::PrDraftChangeFailed { .. }
                 | IpcEvent::IssueDeleted { .. }
                 | IpcEvent::DeleteOrCloseFailed { .. }
                 | IpcEvent::MergedPrRemovable { .. }
@@ -2307,6 +2566,11 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::AgentCreditExhausted { .. }
                 | IpcEvent::WorkspaceCreated { .. }
                 | IpcEvent::ErrorInbox { .. }
+                | IpcEvent::Stats { .. }
+                | IpcEvent::AgentSessionStarted { .. }
+                | IpcEvent::SnippetKeepMine { .. }
+                | IpcEvent::SessionCosts { .. }
+                | IpcEvent::RepoMergeHistory { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -2887,6 +3151,48 @@ impl<T: TerminalAdapter> Model<T> {
         if self.sidebar.tick_working() {
             self.redraw = true;
         }
+        // Watchdog: self-cancel a per-row "spawning" arc no terminating
+        // event ever cleared, mirroring the footer spinner's guard so a
+        // stranded spawn can't spin forever (#1372).
+        if self.sidebar.prune_stale_spawning() {
+            self.redraw = true;
+        }
+    }
+
+    /// Fire the armed lazy PR-details fetch once the cursor has dwelled
+    /// on the same row for `PR_DETAILS_DEBOUNCE`. Armed by
+    /// `sync_panes` when the selection lands on an unfetched PR
+    /// workspace; moving the cursor re-arms for the new row (which
+    /// cancels the old candidate), so holding `j` through a crowded
+    /// sidebar sends at most one request — for the row the cursor
+    /// finally rests on. Called once per run-loop iteration; a cheap
+    /// no-op unless a candidate is armed.
+    pub fn tick_pr_details(&mut self) {
+        let Some((key, armed_at)) = self.pending_pr_details.as_ref() else {
+            return;
+        };
+        if armed_at.elapsed() < PR_DETAILS_DEBOUNCE {
+            return;
+        }
+        // Stale-candidate guard: only fire while the armed row is still
+        // the selection AND still an unfetched PR workspace. (Selection
+        // changes normally re-arm via `sync_panes`, but a removal or a
+        // PR-less re-upsert can invalidate the candidate in place.)
+        let still_current = self
+            .sidebar
+            .selected_workspace()
+            .is_some_and(|w| w.key == *key && w.pr.is_some())
+            && !self.pr_details_fetched.contains(key);
+        let (key, _) = self.pending_pr_details.take().expect("checked above");
+        if !still_current {
+            return;
+        }
+        self.pr_details_fetched.insert(key.clone());
+        tracing::info!(
+            workspace_key = %key.as_str(),
+            "lazy-fetch: requesting PR details",
+        );
+        self.send_cmd(IpcCommand::FetchPrDetails { workspace_key: key });
     }
 
     /// Clear the spawn spinner once a terminal for its target exists in
@@ -2959,6 +3265,11 @@ impl<T: TerminalAdapter> Model<T> {
         let identity = (
             self.sidebar.selected_workspace_key().cloned(),
             self.sidebar.pane_state_rev(),
+            // Disambiguates two header rows, which both have no selected
+            // workspace: without it, a header→header cursor move would
+            // hit the fast-path skip and never re-project the overview
+            // (#1442).
+            self.sidebar.header_group_ident(),
         );
         if self.last_pane_sync_identity.as_ref() == Some(&identity) {
             // Deferred one-shots still honored on the fast path: a
@@ -2988,22 +3299,31 @@ impl<T: TerminalAdapter> Model<T> {
         }
         // Lazy-fetch trigger: when the focused workspace has a PR
         // and we haven't pulled its review-thread activity this
-        // session, kick off the back-fill. The dedupe set prevents
-        // re-firing on every key press / poll event for the same
-        // workspace; `WorkspaceRemoved` clears the entry so a
+        // session, ARM the back-fill — [`Self::tick_pr_details`]
+        // fires it only after the cursor dwells on the row for
+        // `PR_DETAILS_DEBOUNCE`. Firing here directly meant one
+        // Interactive-priority GraphQL request per row crossed while
+        // holding `j`, which self-throttled against the daemon's
+        // request pacer and could park the whole GitHub source.
+        // The dedupe set prevents re-arming a workspace we've
+        // already fetched; `WorkspaceRemoved` clears the entry so a
         // re-added workspace gets a fresh fetch.
-        if let Some(w) = workspace.as_ref()
-            && w.pr.is_some()
-            && !self.pr_details_fetched.contains(&w.key)
-        {
-            self.pr_details_fetched.insert(w.key.clone());
-            tracing::info!(
-                workspace_key = %w.key.as_str(),
-                "lazy-fetch: requesting PR details",
-            );
-            self.send_cmd(IpcCommand::FetchPrDetails {
-                workspace_key: w.key.clone(),
-            });
+        match workspace.as_ref() {
+            Some(w) if w.pr.is_some() && !self.pr_details_fetched.contains(&w.key) => {
+                // Keep the original arm time while the selection is
+                // unchanged: this body re-runs on every daemon event
+                // (pane revision bump), and resetting the dwell clock
+                // each time would starve the fetch under a steady
+                // event stream.
+                let already_armed = self
+                    .pending_pr_details
+                    .as_ref()
+                    .is_some_and(|(key, _)| *key == w.key);
+                if !already_armed {
+                    self.pending_pr_details = Some((w.key.clone(), std::time::Instant::now()));
+                }
+            }
+            _ => self.pending_pr_details = None,
         }
         // Also forward the workspace's persisted SessionLayout to
         // the terminal stack so the user's tile arrangement
@@ -3022,7 +3342,16 @@ impl<T: TerminalAdapter> Model<T> {
             .and_then(|k| self.sidebar.stack_info(k))
             .cloned();
         self.right.set_stack(stack);
+        // On a group-header row there's no workspace to show; feed the
+        // pane a repo / Space overview instead so it isn't a dead panel
+        // (#1442). Cheap: built from already-tracked workspaces.
+        let overview = if workspace.is_none() {
+            self.sidebar.header_overview()
+        } else {
+            None
+        };
         self.right.set_workspace(workspace);
+        self.right.set_overview(overview);
         self.terminals.set_active_session(session_key);
         self.terminals.set_layout(layout);
         // A pinned `w` spawn-follow asked for a specific terminal to be

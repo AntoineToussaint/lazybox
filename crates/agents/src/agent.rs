@@ -87,6 +87,14 @@ pub struct AgentAuthCommands {
     pub status: Vec<String>,
     pub logout: Vec<String>,
     pub login: Vec<String>,
+    /// The provider's explicit "not logged in" token as it appears in
+    /// `status` output — the one agent-specific signal a caller may scan for
+    /// to confirm a login actually took (a re-auth on a shared login skips
+    /// logout, so `login` can exit 0 without truly authenticating). Matched
+    /// whitespace-insensitively and case-folded, so store it in a natural
+    /// form (Claude's `--json` prints `"loggedIn": false`). `None` means the
+    /// caller trusts the exit code alone.
+    pub signed_out_marker: Option<&'static str>,
 }
 
 /// How to give an agent a per-session credential home so an expired token
@@ -219,6 +227,21 @@ pub trait Agent: Send + Sync {
         None
     }
 
+    /// Whether the metering proxy can actually meter this agent's traffic.
+    ///
+    /// Metering works by pointing the provider's base-URL env
+    /// (`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`) at the local proxy. That
+    /// only captures usage if the agent (a) speaks a known provider and (b)
+    /// honors that env var. The default ties meterability to
+    /// [`Agent::llm_provider`] — a provider-less `GenericCli` can't be
+    /// metered. An agent that speaks a provider but ignores the base-URL env
+    /// overrides this to `false` so a metered spawn is never a silent bypass
+    /// (the caller surfaces a "metered-but-not" notice instead of pointing
+    /// the agent at a proxy URL it won't use).
+    fn meterable(&self) -> bool {
+        self.llm_provider().is_some()
+    }
+
     /// Machine-readable runtime supported by this agent, if any.
     ///
     /// This is deliberately separate from [`Agent::spawn`]: a CLI can
@@ -265,6 +288,13 @@ pub trait Agent: Send + Sync {
     /// resets.
     fn clear_context_command(&self) -> Option<&'static str> {
         None
+    }
+
+    /// Whether this agent accepts an explicit MCP-server config file the
+    /// daemon can inject (Claude's `--mcp-config`). Used to wire the lazybox
+    /// coordination MCP server (#1420) into a spawn. Default: no.
+    fn supports_mcp_config(&self) -> bool {
+        false
     }
 
     /// Command + args to spawn a fresh session.
@@ -709,6 +739,9 @@ pub mod builtins {
         fn structured_protocol(&self) -> Option<StructuredAgentProtocol> {
             Some(StructuredAgentProtocol::ClaudeStreamJson)
         }
+        fn supports_mcp_config(&self) -> bool {
+            true
+        }
         fn pty_protocol(&self) -> PtyProtocol {
             PtyProtocol::GUARDED_COMPOSER
         }
@@ -743,9 +776,19 @@ pub mod builtins {
 
         fn auth_commands(&self) -> Option<AgentAuthCommands> {
             Some(AgentAuthCommands {
-                status: vec!["claude".into(), "auth".into(), "status".into()],
+                // Pin `--json`: it is the current default, but the status gate
+                // scans for the JSON `"loggedIn": false` token, so relying on a
+                // version-dependent default output format would silently
+                // disable the gate if Claude ever flips it to text.
+                status: vec![
+                    "claude".into(),
+                    "auth".into(),
+                    "status".into(),
+                    "--json".into(),
+                ],
                 logout: vec!["claude".into(), "auth".into(), "logout".into()],
                 login: vec!["claude".into(), "auth".into(), "login".into()],
+                signed_out_marker: Some("\"loggedIn\": false"),
             })
         }
 
@@ -970,6 +1013,10 @@ pub mod builtins {
                 status: vec!["codex".into(), "login".into(), "status".into()],
                 logout: vec!["codex".into(), "logout".into()],
                 login: vec!["codex".into(), "login".into()],
+                // Codex isolates its login per session (its own CODEX_HOME), so
+                // re-auth does a clean logout+login and never runs the status
+                // gate; exit-code-only would suffice regardless.
+                signed_out_marker: None,
             })
         }
 
@@ -1120,6 +1167,14 @@ pub mod builtins {
         fn llm_provider(&self) -> Option<LlmProvider> {
             Some(LlmProvider::OpenAI)
         }
+        /// `cursor-agent` talks to Cursor's own backend and ignores
+        /// `OPENAI_BASE_URL`, so routing it through the metering proxy
+        /// captures nothing — it would show metered while it isn't. Exclude
+        /// it from metering (it still gets plain gateway injection via
+        /// [`Agent::llm_provider`]).
+        fn meterable(&self) -> bool {
+            false
+        }
         fn spawn(&self, _ctx: &SpawnCtx) -> Vec<String> {
             vec!["cursor-agent".into()]
         }
@@ -1213,6 +1268,27 @@ mod tests {
             super::builtins::Cursor.llm_provider(),
             Some(LlmProvider::OpenAI)
         );
+    }
+
+    #[test]
+    fn meterable_excludes_agents_that_ignore_the_base_url_env() {
+        // Claude/Codex honor their base-URL env → meterable. Cursor speaks a
+        // provider but ignores it → not meterable (would show metered while
+        // it isn't). GenericCli has no provider → not meterable.
+        assert!(Claude.meterable());
+        assert!(super::builtins::Codex.meterable());
+        assert!(
+            !super::builtins::Cursor.meterable(),
+            "cursor-agent ignores OPENAI_BASE_URL, so it can't be metered",
+        );
+        let generic = super::builtins::GenericCli {
+            id: "custom".into(),
+            display_name: "Custom".into(),
+            spawn_cmd: vec!["custom".into()],
+            resume_cmd: None,
+            asking_patterns: vec![],
+        };
+        assert!(!generic.meterable(), "no provider → not meterable");
     }
 
     #[test]

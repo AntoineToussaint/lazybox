@@ -76,6 +76,14 @@ static NEXT_TERMINAL_ID: AtomicU64 = AtomicU64::new(1);
 /// silently reuse a surviving session's id.
 const TERMINAL_ID_HIGH_WATER_KEY: &str = "terminal-id-high-water";
 const SESSION_AGENT_ACCESS_PREFIX: &str = "session-agent-access:";
+/// Session-keyed twin of [`TerminalPersistedField::AgentResume`]. The
+/// backend_key-keyed row survives only a reattach (the tmux session, and thus
+/// its key, outlives the daemon); a respawn under a fresh backend_key — killed
+/// tmux server, reboot, recovery timeout — orphans it exactly as history/draft
+/// orphaned before #1362. Keying the same payload by the stable `SessionId`
+/// lets `restore_persisted_sessions` recover the user's model tier and
+/// no-permission mode when it re-spawns the session.
+const SESSION_AGENT_RESUME_PREFIX: &str = "session-agent-resume:";
 
 /// Every persisted value owned by one backend terminal. Keeping the key
 /// namespace and cleanup inventory in one type prevents a restart feature
@@ -135,6 +143,37 @@ impl TerminalPersistedField {
 
 fn agent_state_key(backend_key: &str, generation: u64) -> String {
     format!("terminal-agent-state:{backend_key}:{generation}")
+}
+
+/// Store-key prefixes for the WORKSPACE-scoped prompt history + composer
+/// draft. Unlike the `terminal-*` rows above (keyed by the per-process,
+/// per-spawn tmux `backend_key`, which changes on every daemon restart), these
+/// are keyed by the STABLE [`SessionKey`] string so the `]]h` history, the
+/// `]]r` recall, and the "you ▸" recap survive a restart that RE-SPAWNS a
+/// dropped session under a brand-new backend_key — not only a reattach that
+/// keeps the old key. The durable PTY scrollback already survives respawn by
+/// keying on the stable session identity; this brings the input side into line
+/// (root cause of the history-orphaned-on-respawn bug).
+const WORKSPACE_MSGS_PREFIX: &str = "workspace-msgs:";
+const WORKSPACE_DRAFT_PREFIX: &str = "workspace-draft:";
+/// KV flag marking the one-time `terminal-*` → `workspace-*` re-key migration
+/// as done, so it never re-runs (and never re-folds already-swept legacy rows).
+const HISTORY_REKEY_FLAG_KEY: &str = "history_rekey_v1_done";
+/// Legacy per-`backend_key` prefixes the one-time migration folds into the
+/// workspace scheme. They mirror `TerminalPersistedField::{UserMessageHistory,
+/// UserMessage, Draft}` with the `:` separator so `strip_prefix` yields the
+/// bare backend_key. `terminal-msg:` never matches a `terminal-msgs:` key (the
+/// char after `terminal-msg` is `s`, not `:`).
+const WORKSPACE_MSGS_LEGACY_PREFIX: &str = "terminal-msgs:";
+const WORKSPACE_DRAFT_LEGACY_PREFIX: &str = "terminal-draft:";
+const LEGACY_SINGLE_MSG_PREFIX: &str = "terminal-msg:";
+
+fn workspace_prompt_history_key(session_key: &str) -> String {
+    format!("{WORKSPACE_MSGS_PREFIX}{session_key}")
+}
+
+fn workspace_draft_key(session_key: &str) -> String {
+    format!("{WORKSPACE_DRAFT_PREFIX}{session_key}")
 }
 
 /// Serializes the seed → allocate → persist sequence of
@@ -283,9 +322,15 @@ fn hook_command_keyfile(exe: &Path, key_path: &Path) -> String {
 /// must still resolve, and the backend key is the identity that
 /// survives while terminal ids are reallocated.
 fn hook_command(exe: &Path, backend_key: &str) -> String {
+    // `--emit-session-context` opts this agent's hook into printing the
+    // lazybox capability blurb on `SessionStart` (Claude adds a hook's stdout
+    // to its context). Only the settings-file path — Claude — carries it;
+    // Codex's argv `hook_command_keyfile` omits it, since it is unverified
+    // whether Codex surfaces a hook's stdout as context. TODO(codex): once
+    // confirmed, seed the same text through the CODEX_HOME lazybox already owns.
     guarded_hook_command(
         exe,
-        &format!(" --backend-key \"{backend_key}\""),
+        &format!(" --backend-key \"{backend_key}\" --emit-session-context"),
         &lazybox_core::paths::hook_log_path(),
     )
 }
@@ -587,6 +632,12 @@ enum StateSource {
     Exit,
     /// A fully confirmed provider-credit recovery leaving its blocked state.
     Recovery,
+    /// The auto-wait policy relabeling a `LimitReached` block to the calm
+    /// `AwaitingReset` after it pressed "Wait" on the agent's behalf.
+    AutoWait,
+    /// The global working-watchdog sweep force-closing a `Working` terminal
+    /// whose per-terminal pump was starved and never promoted it (#1383).
+    Sweep,
 }
 
 /// Result of offering a direct (hook / input / exit) transition. The
@@ -887,6 +938,8 @@ async fn transition_and_broadcast_agent_state(
         StateSource::Exit => "process-exit",
         StateSource::Pty => "pty",
         StateSource::Recovery => "credit-recovery-confirmed",
+        StateSource::AutoWait => "auto-wait-parked",
+        StateSource::Sweep => "global-sweep-force",
     };
     let folded = fold_and_broadcast_agent_state(
         terminals,
@@ -941,6 +994,76 @@ fn wake_poll_for_terminal_kind(config: &ServerConfig, kind: &TerminalKind) {
     if matches!(kind, TerminalKind::Agent(_)) {
         config.poll.wake(false);
     }
+}
+
+/// Relabel a `LimitReached` block to the calm `AwaitingReset` after the
+/// auto-wait policy has pressed "Wait" on the agent's behalf, so the
+/// sidebar/tab surface a quiet 💤 "parked, will resume" badge instead of
+/// the alerting `⏳` (which reads as "needs you"). Daemon-asserted — the
+/// screen scraper never produces `AwaitingReset`, and the state machine
+/// holds it against the lingering limit banner (see
+/// `AgentStateMachine::on_reading`). A no-op unless the terminal is still
+/// exactly `LimitReached` (the candidate guard), so a race that already
+/// moved it on (auto-resumed, exited) can't be clobbered. Returns whether
+/// the calm state was committed.
+pub async fn park_limit_reached_as_awaiting_reset(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+) -> bool {
+    let Some(backend_key) = config.terminal.backend_key_for(terminal_id).await else {
+        return false;
+    };
+    let Some((session_key, _kind)) = config.terminal.terminal_meta_for(terminal_id).await else {
+        return false;
+    };
+    let Some(durability) = agent_state_durability(config, terminal_id, &backend_key).await else {
+        return false;
+    };
+    transition_and_broadcast_agent_state(
+        &config.terminal,
+        &config.bus,
+        &durability,
+        terminal_id,
+        &session_key,
+        StateSource::AutoWait,
+        |current| {
+            (current == Some(lazybox_ipc::AgentState::LimitReached))
+                .then_some(lazybox_ipc::AgentState::AwaitingReset)
+        },
+    )
+    .await
+    .committed
+}
+
+/// Force a stalled `Working` terminal to `Done` from outside its PTY pump —
+/// the global working-watchdog sweep's commit, mirroring the hook path so a
+/// starved pump can't pin `Working` forever (#1383). The candidate guard
+/// compare-and-sets on `Working` under the state lock, so a terminal the pump
+/// or a hook resolved between selection and commit is left untouched. Returns
+/// whether the force committed.
+pub(crate) async fn force_stalled_working_to_done(
+    config: &ServerConfig,
+    agent: &crate::registries::StalledWorkingAgent,
+) -> bool {
+    let Some(durability) =
+        agent_state_durability_from(config, agent.id, &agent.backend_key, Some(agent.generation))
+    else {
+        return false;
+    };
+    transition_and_broadcast_agent_state(
+        &config.terminal,
+        &config.bus,
+        &durability,
+        agent.id,
+        &agent.session_key,
+        StateSource::Sweep,
+        |current| {
+            (current == Some(lazybox_ipc::AgentState::Working))
+                .then_some(lazybox_ipc::AgentState::Done)
+        },
+    )
+    .await
+    .committed
 }
 
 struct CorrelatedCommandOutcome {
@@ -1184,6 +1307,9 @@ async fn handle_spawn_inner(
         access,
         client_request_id,
         origin,
+        force_new,
+        meter,
+        untrusted,
     } = options;
     let access = if matches!(&kind, TerminalKind::Agent(_)) {
         access
@@ -1207,6 +1333,13 @@ async fn handle_spawn_inner(
     // `/tmp/lazybox.log` instead of guessed at (#142).
     let t0 = std::time::Instant::now();
     let cfg = lazybox_config::Config::load().unwrap_or_default();
+    // Whether a *fresh* spawn of this prompt would run unattended
+    // (skip-permissions). Consulted before collapsing a foreign-triggered
+    // prompt onto an existing agent: if a fresh spawn wouldn't bypass but
+    // the live agent already does, injecting would escalate the foreign
+    // text's privileges (#1392).
+    let would_skip_permissions =
+        crate::spawn_plan::skip_permissions_for(autonomous, &cfg, untrusted);
     let priority_model_alias = match &kind {
         TerminalKind::Agent(agent_id) if model_alias.is_none() => {
             priority_alias_for(config, &session_key, &cfg.agent_models(agent_id))
@@ -1284,6 +1417,8 @@ async fn handle_spawn_inner(
                 on_main,
                 access,
                 initial_prompt.as_deref(),
+                untrusted,
+                would_skip_permissions,
             )
             .await
             {
@@ -1292,15 +1427,24 @@ async fn handle_spawn_inner(
             return None;
         }
     };
-    // Singleton enforcement at the daemon (the source of truth for
-    // who's running what). The TUI also intercepts duplicates
-    // client-side for snappy focus-not-spawn behavior, but that
-    // alone fails the moment a second client connects to the same
-    // daemon. The guard here protects the invariant for everyone:
-    // at most one Claude per session, one Codex per session, etc.
-    if let Some(existing) =
-        find_existing_singleton(config, &session_key, &kind, Some(on_main)).await
-    {
+    // Idle-singleton reuse at the daemon (the source of truth for who's
+    // running what). The TUI also intercepts duplicates client-side for
+    // snappy focus-not-spawn behavior, but that alone fails the moment a
+    // second client connects to the same daemon. Normally a spawn onto a
+    // workspace already running this agent-kind focuses the live one
+    // instead of stacking a duplicate.
+    //
+    // `force_new` (the explicit `a c` / `a x` / `a u` keys, #1310) opts a
+    // spawn OUT of this reuse so a second agent can run beside an idle
+    // one. We still *look* — `pre_existing` records what was already
+    // running here so the post-resolution re-check below can tell a
+    // freshly-migrated managed-branch owner (adopt it) apart from the
+    // same idle agent we're deliberately spawning beside (don't collapse).
+    // The concurrent-race collapse (SpawnCoordinator, above) is
+    // unconditional regardless of `force_new`: a genuine double-fire of
+    // the same key still resolves to one backend.
+    let pre_existing = find_existing_singleton(config, &session_key, &kind, Some(on_main)).await;
+    if !force_new && let Some(existing) = pre_existing {
         if terminal_access_for(config, existing).await != access {
             let _ = config.bus.send(Event::provider_error_permanent(
                 "spawn",
@@ -1318,6 +1462,17 @@ async fn handle_spawn_inner(
         // agent is already running silently drops the instruction and
         // the user just gets focused onto an idle terminal.
         if let Some(prompt) = initial_prompt.as_deref() {
+            if refuse_foreign_inject_into_bypass(
+                config,
+                &session_key,
+                existing,
+                untrusted,
+                would_skip_permissions,
+            )
+            .await
+            {
+                return None;
+            }
             // Boxed: `handle_inject_prompt`'s fallback arm can call back
             // into `handle_spawn`, and a recursive async cycle needs one
             // pointer indirection to keep the futures finitely sized.
@@ -1401,25 +1556,53 @@ async fn handle_spawn_inner(
     // before that transfer, when the terminal still belonged to the old
     // workspace key, so re-check now. Without this, `w` correctly preserved
     // the old agent but immediately launched a duplicate beside it.
+    //
+    // Under `force_new` this re-check must NOT resurrect the idle agent the
+    // first check deliberately skipped — only *adopt a terminal that
+    // appeared during resolution* (the managed-branch transfer), which is a
+    // migrated session, not an idle duplicate. Comparing against
+    // `pre_existing` distinguishes the two: a rebadge surfaces a terminal
+    // that wasn't here before resolution.
     if let Some(existing) =
         find_existing_singleton(config, &session_key, &kind, Some(landed_on_main)).await
     {
-        if terminal_access_for(config, existing).await != access {
-            let _ = config.bus.send(Event::provider_error_permanent(
-                "spawn",
-                "an agent with a different host-access policy is already running in this checkout",
-            ));
-            return None;
+        // Adopt the existing terminal when this isn't a deliberate new-agent
+        // spawn, OR when resolution just migrated a managed-branch owner onto
+        // this key. `Some(existing) != pre_existing` is the migration signal:
+        // a rebadge surfaces a terminal that wasn't here before resolution, so
+        // it's THIS work's session — not the idle duplicate a `force_new` spawn
+        // is deliberately starting beside.
+        let migrated_during_resolution = Some(existing) != pre_existing;
+        if !force_new || migrated_during_resolution {
+            if terminal_access_for(config, existing).await != access {
+                let _ = config.bus.send(Event::provider_error_permanent(
+                    "spawn",
+                    "an agent with a different host-access policy is already running in this checkout",
+                ));
+                return None;
+            }
+            if let Some(prompt) = initial_prompt.as_deref() {
+                if refuse_foreign_inject_into_bypass(
+                    config,
+                    &session_key,
+                    existing,
+                    untrusted,
+                    would_skip_permissions,
+                )
+                .await
+                {
+                    return None;
+                }
+                Box::pin(handle_inject_prompt(config, existing, prompt, None, true)).await;
+                record_spawn_snippet(config, existing, &session_key, initial_snippet.as_ref())
+                    .await;
+            }
+            let _ = config.bus.send(Event::TerminalFocusRequested {
+                terminal_id: existing,
+            });
+            outcome.complete();
+            return Some(existing);
         }
-        if let Some(prompt) = initial_prompt.as_deref() {
-            Box::pin(handle_inject_prompt(config, existing, prompt, None, true)).await;
-            record_spawn_snippet(config, existing, &session_key, initial_snippet.as_ref()).await;
-        }
-        let _ = config.bus.send(Event::TerminalFocusRequested {
-            terminal_id: existing,
-        });
-        outcome.complete();
-        return Some(existing);
     }
     // Session + worktree are resolved here — for a fresh issue this is
     // where a cold clone / `git fetch` / setup script gets paid
@@ -1513,6 +1696,44 @@ async fn handle_spawn_inner(
     };
     let plan_error_source = format!("spawn:{kind:?}");
     let repo_env = collect_repo_env(config, &session_key);
+    // Metering opt-in: route this spawn through the metering proxy iff the
+    // per-workspace `$ meter` canary is set OR the workspace's source sits in a
+    // metered Space (`agent.metered_spaces`, approach C). The per-workspace flag
+    // is read straight from the store (single source of truth across restarts);
+    // the Space check resolves the workspace's source through `ui.spaces`. Both
+    // are folded into `meter` here, so `gateway_env_for_agent` — which still
+    // gates on the proxy being enabled/running — needs no change and every
+    // safety property of the canary is preserved.
+    let spawn_ws = load_workspace(config, &WorkspaceKey::new(session_key.as_str()));
+    // A remote-box session runs on the box; the injected proxy base-URL
+    // (`127.0.0.1:<port>`) points at *this* host's loopback, not the box —
+    // so metering it would hand the box a dead URL, not just miss the count.
+    // Never meter a remote workspace (this also overrides `meter_all`, threaded
+    // into `gateway_env_for_agent`).
+    let remote = spawn_ws.as_ref().is_ok_and(|ws| ws.remote.is_some());
+    let meter = !remote
+        && (meter
+            || spawn_ws
+                .as_ref()
+                .map(|ws| ws.metered || workspace_in_metered_space(&cfg, ws))
+                .unwrap_or(false));
+    // #1420: provision the cross-agent coordination MCP for a supporting
+    // agent spawn (Claude). Mints + registers a per-session token and writes
+    // the agent's `--mcp-config` file; `None` for shells, unsupported agents,
+    // read-only launches, or before the MCP listener has started.
+    let mcp_config_path = match (&kind, access) {
+        (TerminalKind::Agent(id), AgentRunAccess::Default) => {
+            config.agents.get(id).and_then(|agent| {
+                crate::mcp::provision_for_spawn(config, &session_key, agent.as_ref())
+            })
+        }
+        _ => None,
+    };
+    // Persist the freshly-minted token so a restart-surviving (tmux) agent's
+    // baked bearer keeps resolving after a daemon restart (#1420).
+    if mcp_config_path.is_some() {
+        crate::mcp::persist_tokens(config).await;
+    }
     let plan = match build_spawn_plan(
         SpawnPlanInput {
             session_key,
@@ -1527,6 +1748,7 @@ async fn handle_spawn_inner(
             repo_env,
             priority_model_alias,
             autonomous,
+            autonomous_untrusted: untrusted,
             landed_on_main,
             model_alias,
             resume,
@@ -1537,10 +1759,16 @@ async fn handle_spawn_inner(
             composing_buffer,
             access,
             shell_command,
+            meter,
+            remote,
+            mcp_config_path,
         },
         &cfg,
         &config.agents,
-    ) {
+    )
+    // NOTE: `meter` above is the per-workspace metering opt-in derived from
+    // the persisted workspace, not a field of the incoming Spawn command.
+    {
         Ok(plan) => plan,
         Err(_) => {
             let _ = config.bus.send(Event::provider_error_permanent(
@@ -1550,6 +1778,16 @@ async fn handle_spawn_inner(
             return None;
         }
     };
+    // The trust-aware default (#1392) withholds the unattended bypass for
+    // a foreign-triggered spawn. Log it so a mention/label spawn sitting
+    // at a permission prompt is explicable rather than a silent hang.
+    if untrusted && plan.flags.autonomous && !plan.flags.no_permission {
+        tracing::info!(
+            session_key = %plan.session_key,
+            "autonomous spawn kept permission prompts: foreign-triggered and \
+             agent.autonomous_skip_permissions is unset (#1392)"
+        );
+    }
     let executed = match execute_spawn_plan(config, plan, workspace_registration_guard, t0).await {
         Ok(SpawnExecutionOutcome::Spawned(executed)) => executed,
         Ok(SpawnExecutionOutcome::Cancelled) => return None,
@@ -2402,7 +2640,17 @@ async fn run_spawn_inject(
         return InjectOutcome::Failed;
     };
 
-    match write_prompt_sequence(config, id, backend_key, encoded_prompt, true, interaction).await {
+    match write_prompt_sequence(
+        config,
+        id,
+        backend_key,
+        encoded_prompt,
+        true,
+        interaction,
+        false,
+    )
+    .await
+    {
         Ok(true) => InjectOutcome::Submitted,
         Ok(false) => InjectOutcome::NeedsHuman,
         Err(PromptWriteError::Initial(error)) => {
@@ -2818,7 +3066,12 @@ async fn recover_untracked_pr_worktree_locked(
 
     let candidates = match config
         .worktree_manager()
-        .managed_worktrees_for_branch(owner, name, &branch)
+        .managed_worktrees_for_branch(
+            owner,
+            name,
+            &branch,
+            lazybox_git_ops::LockPriority::Interactive,
+        )
         .await
     {
         Ok(candidates) => candidates,
@@ -3088,7 +3341,6 @@ async fn reclaim_non_live_managed_holder(
     holder: &Path,
     intended_path: &Path,
 ) -> BranchHolderReclaim {
-    let _ownership_guard = config.worktree_ownership_lock.lock().await;
     reclaim_non_live_managed_holder_locked(config, mgr, owner, repo, branch, holder, intended_path)
         .await
 }
@@ -3102,15 +3354,28 @@ async fn reclaim_non_live_managed_holder_locked(
     holder: &Path,
     intended_path: &Path,
 ) -> BranchHolderReclaim {
-    if managed_worktree_has_live_session_owner(config, holder)
-        || provisioning_worktree_is_claimed(config, holder)
-        || managed_worktree_has_live_main_owner(config, holder).await
+    // Hold lock only for the critical section: ownership checks. Release
+    // immediately before the expensive reclaim operation (which may involve
+    // filesystem I/O and git operations).
     {
-        return BranchHolderReclaim::Preserved;
+        let _ownership_guard = config.worktree_ownership_lock.lock().await;
+        if managed_worktree_has_live_session_owner(config, holder)
+            || provisioning_worktree_is_claimed(config, holder)
+            || managed_worktree_has_live_main_owner(config, holder).await
+        {
+            return BranchHolderReclaim::Preserved;
+        }
     }
+    // Lock released here; expensive reclaim operation follows.
 
     match mgr
-        .reclaim_managed_worktree_if_safe(owner, repo, branch, holder)
+        .reclaim_managed_worktree_if_safe(
+            owner,
+            repo,
+            branch,
+            holder,
+            lazybox_git_ops::LockPriority::Interactive,
+        )
         .await
     {
         Ok(lazybox_git_ops::WorktreeReclaimOutcome::Reclaimed) => {
@@ -3271,6 +3536,21 @@ fn sanitize_branch_component(raw: &str) -> String {
     sanitized.trim_matches('-').to_string()
 }
 
+/// A collision-free sibling name for the `attempt`th retry of a branch that
+/// hit a directory/file conflict: `release` → `release-2` → `release-3` …
+///
+/// The conflict is that git can't hold both a ref `release` and the directory
+/// `release/` that a `release/*` branch requires. Appending `-<n>` keeps the
+/// candidate a *leaf* ref, so it can't re-collide with that same `<branch>/*`
+/// namespace. This is only ever applied to lazybox-cut branches that aren't
+/// yet pushed to a PR (blank `x n` workspaces, freshly branched issues), so a
+/// renamed sibling is a safe, non-destructive recovery from what would
+/// otherwise be an unrecoverable provisioning dead-end — never a rename of a
+/// branch the user is tracking upstream.
+fn disambiguated_branch(branch: &str, attempt: usize) -> String {
+    format!("{branch}-{}", attempt + 1)
+}
+
 fn isolated_branch_for_workspace(
     workspace: &Workspace,
     cfg: &lazybox_config::Config,
@@ -3303,6 +3583,10 @@ fn repo_for_workspace_provision(
         // a clonable GitHub repo — resolve the real one from the team map
         // (or fail loudly) instead of returning `task.repo` verbatim.
         Some(task) if task.id.source == "linear" => linear_repo_for_task(cfg, task).map(Some),
+        // Likewise a Jira issue's `repo` is the synthetic `jira/<site>`.
+        Some(task) if task.id.source == lazybox_jira::SOURCE => {
+            jira_repo_for_task(cfg, task).map(Some)
+        }
         Some(task) => Ok(task.repo.clone()),
         None if lazybox_core::workspace_project_key(workspace)
             .is_some_and(|key| key.source_prefix() == "github") =>
@@ -3380,6 +3664,42 @@ fn linear_repo_for_task(
                 .into(),
         ),
     })
+}
+
+/// Resolve the GitHub repo a Jira issue is worked on in, from the
+/// `providers.jira.projects` map keyed by the issue's project (the
+/// `ENG` of `ENG-123`). An unmapped project fails with the message the
+/// client classifies as `JiraUnmapped` so it can offer the repo picker
+/// instead of a dead-end retry; the project key rides back-quoted for
+/// `WorktreeRecovery::jira_project`.
+fn jira_repo_for_task(
+    cfg: &lazybox_config::Config,
+    task: &Task,
+) -> Result<String, crate::ServerError> {
+    let project = task
+        .id
+        .key
+        .rsplit_once('-')
+        .map(|(project, _)| project)
+        .filter(|p| !p.is_empty());
+    match project {
+        Some(project) => cfg
+            .providers
+            .jira
+            .projects
+            .get(project)
+            .cloned()
+            .ok_or_else(|| {
+                crate::ServerError::Workspace(format!(
+                    "Jira project `{project}` has no repo mapping — set \
+                     providers.jira.projects.{project} in ~/.lazybox/config.yaml"
+                ))
+            }),
+        None => Err(crate::ServerError::Workspace(format!(
+            "Jira issue `{}` has no project key — cannot resolve a repo to work in",
+            task.id.key
+        ))),
+    }
 }
 
 /// The `owner/repo` of a Linear ticket's linked GitHub PR, if any. The
@@ -3622,7 +3942,7 @@ async fn provision_worktree(
             // reuse the one worktree rather than fighting over the branch.
             let on_main_branch = if on_main {
                 Some(
-                    mgr.default_branch(owner, name)
+                    mgr.default_branch(owner, name, lazybox_git_ops::LockPriority::Interactive)
                         .await
                         .map_err(|e| ServerError::Worktree(format!("default_branch: {e}")))?,
                 )
@@ -3708,7 +4028,10 @@ async fn provision_worktree(
                     // provision, when nothing is on disk yet; a probe that
                     // errors is surfaced rather than papered over with a
                     // derive that would then mismatch the branch on disk.
-                    let new_branch = match mgr.existing_worktree_branch(owner, name, target).await {
+                    let mut new_branch = match mgr
+                        .existing_worktree_branch(owner, name, target)
+                        .await
+                    {
                         Ok(Some(branch)) => {
                             tracing::info!(
                                 workspace = workspace.key.as_str(),
@@ -3725,46 +4048,89 @@ async fn provision_worktree(
                             )));
                         }
                     };
-                    let base = mgr.default_branch(owner, name).await.map_err(|e| {
-                        ServerError::Worktree(format!("default_branch lookup: {e}"))
-                    })?;
-                    let mut checkout = mgr
-                        .checkout_new_branch_at(target, owner, name, &new_branch, &base)
-                        .await;
-                    let reclaim = match &checkout {
-                        Err(lazybox_git_ops::GitError::BranchHeldLive { holder, .. }) => Some((
-                            holder.clone(),
-                            reclaim_non_live_managed_holder(
-                                config,
-                                &mgr,
-                                owner,
-                                name,
-                                &new_branch,
-                                holder,
-                                target,
-                            )
-                            .await,
-                        )),
-                        _ => None,
-                    };
-                    match reclaim {
-                        Some((_, BranchHolderReclaim::Reclaimed)) => {
-                            checkout = mgr
-                                .checkout_new_branch_at(target, owner, name, &new_branch, &base)
-                                .await;
+                    let base = mgr
+                        .default_branch(owner, name, lazybox_git_ops::LockPriority::Interactive)
+                        .await
+                        .map_err(|e| {
+                            ServerError::Worktree(format!("default_branch lookup: {e}"))
+                        })?;
+                    // Provision on `new_branch`, disambiguating the name when it
+                    // collides with an existing ref *namespace* instead of a
+                    // single branch — a workspace named `release` derives the
+                    // branch `release`, which git can never create while any
+                    // `release/*` branch exists (a ref `release` and a directory
+                    // `release/` can't coexist). Left unhandled this dead-ends
+                    // the whole spawn in an unrecoverable modal: the daemon's
+                    // safe auto-delete (`git branch -d`) can't clear a real,
+                    // unmerged upstream branch, so a bare retry only replays the
+                    // failure. These branches are lazybox-cut and not yet on a
+                    // PR, so retrying on a leaf sibling (`release-2`) is a safe,
+                    // non-destructive recovery. Bounded so a pathological repo
+                    // can't spin.
+                    const MAX_DF_DISAMBIGUATION: usize = 10;
+                    let preferred_branch = new_branch.clone();
+                    let mut df_attempts = 0;
+                    loop {
+                        let mut checkout = mgr
+                            .checkout_new_branch_at(target, owner, name, &new_branch, &base)
+                            .await;
+                        let reclaim = match &checkout {
+                            Err(lazybox_git_ops::GitError::BranchHeldLive { holder, .. }) => {
+                                Some((
+                                    holder.clone(),
+                                    reclaim_non_live_managed_holder(
+                                        config,
+                                        &mgr,
+                                        owner,
+                                        name,
+                                        &new_branch,
+                                        holder,
+                                        target,
+                                    )
+                                    .await,
+                                ))
+                            }
+                            _ => None,
+                        };
+                        match reclaim {
+                            Some((_, BranchHolderReclaim::Reclaimed)) => {
+                                checkout = mgr
+                                    .checkout_new_branch_at(target, owner, name, &new_branch, &base)
+                                    .await;
+                            }
+                            Some((holder, BranchHolderReclaim::Blocked(blocker))) => {
+                                checkout = Err(lazybox_git_ops::GitError::BranchHeldManaged {
+                                    branch: new_branch.clone(),
+                                    holder,
+                                    blocker,
+                                });
+                            }
+                            _ => {}
                         }
-                        Some((holder, BranchHolderReclaim::Blocked(blocker))) => {
-                            checkout = Err(lazybox_git_ops::GitError::BranchHeldManaged {
-                                branch: new_branch.clone(),
-                                holder,
-                                blocker,
-                            });
+                        match checkout {
+                            Err(lazybox_git_ops::GitError::BranchDirFileConflict {
+                                conflicting,
+                                ..
+                            }) if df_attempts < MAX_DF_DISAMBIGUATION => {
+                                df_attempts += 1;
+                                let next = disambiguated_branch(&preferred_branch, df_attempts);
+                                tracing::info!(
+                                    workspace = workspace.key.as_str(),
+                                    preferred = %preferred_branch,
+                                    %conflicting,
+                                    retry = %next,
+                                    "branch name collides with an existing ref namespace; \
+                                     retrying provisioning on a disambiguated branch",
+                                );
+                                new_branch = next;
+                            }
+                            other => {
+                                break other.map_err(|e| {
+                                    ServerError::Worktree(format!("checkout_new_branch_at: {e}"))
+                                })?;
+                            }
                         }
-                        _ => {}
                     }
-                    checkout.map_err(|e| {
-                        ServerError::Worktree(format!("checkout_new_branch_at: {e}"))
-                    })?
                 }
             };
             (worktree, Some(format!("{owner}/{name}")))
@@ -4368,6 +4734,15 @@ pub(crate) async fn find_existing_singleton(
             t.session_key == *session_key
                 && t.kind.singleton_key().as_deref() == Some(&target)
                 && !t.authenticating
+                // An agent whose process exited is NOT a live singleton: its
+                // terminal can linger (a recovered session whose shell is
+                // alive but whose agent died — `r restart` territory), but
+                // collapsing a bare `w` onto it would inject the prompt into
+                // a dead-agent shell instead of starting the fresh agent the
+                // user asked for (#1310 reuse-only-LIVE, #1372). Skip it so
+                // the daemon and the client's own `work_target` filter agree:
+                // no live agent → spawn fresh.
+                && !matches!(t.agent_state, Some(lazybox_ipc::AgentState::Exited { .. }))
                 && on_main.is_none_or(|want| t.on_main == want)
         })
         .map(|t| t.terminal_id)
@@ -4535,6 +4910,13 @@ pub(crate) async fn deliver_auto_fix_prompt(
     let (_, interaction) = interactions.swap_remove(position);
     drop(interactions);
     let encoded = agent.encode_prompt(&prompt, lazybox_agents::PromptIntent::Submit);
+    // Background the submit-confirm/resend tail (see `write_prompt_sequence`):
+    // this runs INLINE on the serial poll loop, and after the self-confirming
+    // flip was removed (issue #122) a Done agent whose Enter is swallowed would
+    // otherwise stall the loop for the full ~30s resend/backoff. The paste has
+    // landed by the time this returns, so `Delivered` (and the attempt it
+    // records) is still decided synchronously; only the recovery net is
+    // detached.
     match write_prompt_sequence(
         config,
         target.terminal_id,
@@ -4542,6 +4924,7 @@ pub(crate) async fn deliver_auto_fix_prompt(
         encoded,
         true,
         interaction,
+        true,
     )
     .await
     {
@@ -4685,6 +5068,43 @@ const INFLIGHT_COLLAPSE_DEADLINE: Duration = Duration::from_secs(600);
 /// Esc-cancel followed by an immediate re-press can land the retry
 /// while the cancelled claim is still releasing, and a silently
 /// swallowed key press reads as "lazybox ignored me".
+/// Whether to refuse injecting a foreign-triggered (`untrusted`) autonomous
+/// prompt into the live agent `existing` because it is running with
+/// permission prompts disabled while a fresh spawn would NOT bypass. A
+/// running process's `--dangerously-skip-permissions` posture is fixed at
+/// spawn, so collapsing attacker-influenceable text onto it would run
+/// unattended, sidestepping the trust-aware default (#1392). Emits a notice
+/// when it refuses. `false` (proceed) when the prompt is the viewer's own
+/// work, when the user pinned the bypass for foreign work (a fresh spawn
+/// would bypass too), or when the live agent already keeps prompts on.
+async fn refuse_foreign_inject_into_bypass(
+    config: &ServerConfig,
+    session_key: &SessionKey,
+    existing: TerminalId,
+    untrusted: bool,
+    would_skip_permissions: bool,
+) -> bool {
+    if !untrusted || would_skip_permissions {
+        return false;
+    }
+    if !config.terminal.no_permission_for(existing).await {
+        return false;
+    }
+    tracing::warn!(
+        terminal_id = ?existing,
+        %session_key,
+        "refusing to inject a foreign @lazybox prompt into a live \
+         skip-permissions agent (#1392)"
+    );
+    let _ = config.bus.send(Event::provider_error_retryable(
+        "spawn",
+        "declined a foreign @lazybox trigger: its agent is already running \
+         unattended (skip-permissions) and its permission posture can't be \
+         changed on a live process",
+    ));
+    true
+}
+
 async fn collapse_onto_inflight_spawn(
     config: &ServerConfig,
     session_key: &SessionKey,
@@ -4692,6 +5112,8 @@ async fn collapse_onto_inflight_spawn(
     on_main: bool,
     access: AgentRunAccess,
     prompt: Option<&str>,
+    untrusted: bool,
+    would_skip_permissions: bool,
 ) -> bool {
     tracing::info!(
         %session_key,
@@ -4720,6 +5142,17 @@ async fn collapse_onto_inflight_spawn(
         return false;
     }
     if let Some(prompt) = prompt {
+        if refuse_foreign_inject_into_bypass(
+            config,
+            session_key,
+            existing,
+            untrusted,
+            would_skip_permissions,
+        )
+        .await
+        {
+            return false;
+        }
         // Boxed for the same reason as the existing-singleton path in
         // `handle_spawn`: `handle_inject_prompt`'s fallback arm can
         // recurse into `handle_spawn`. (No fallback passed here, so it
@@ -5112,6 +5545,19 @@ fn session_kind_from_terminal(kind: &TerminalKind) -> SessionKind {
         TerminalKind::Shell => SessionKind::Shell,
         TerminalKind::LogTail { path } => SessionKind::LogTail { path: path.clone() },
     }
+}
+
+/// True when `workspace`'s source group (`owner/repo` for GitHub, the project
+/// label for Linear/local) sits in a metered Space (`agent.metered_spaces`,
+/// approach C). Delegates the grouping resolution to
+/// [`lazybox_config::Config::source_is_metered`]. A workspace with no resolvable
+/// source (repo-less, project-less scratch) is never Space-metered — there's
+/// nothing to group.
+fn workspace_in_metered_space(cfg: &lazybox_config::Config, workspace: &Workspace) -> bool {
+    workspace
+        .repo_slug()
+        .map(|label| cfg.source_is_metered(label.as_ref()))
+        .unwrap_or(false)
 }
 
 fn load_workspace(
@@ -5630,10 +6076,15 @@ async fn finish_terminal(
     {
         crate::agent_auth::detect_required(config, terminal_id, failure.reason).await;
     }
-    if matches!(kind, Some(TerminalKind::Agent(_))) {
+    if matches!(kind, Some(TerminalKind::Agent(_)))
+        && let Some(session_key) = session
+    {
+        // History/draft are keyed by the stable workspace session_key now, so
+        // the exit snapshot the recovery cache seeds reads the same rows a
+        // fresh reconnect would.
         let (prompt_history, composing_buffer) = tokio::join!(
-            load_prompt_history(config, backend_key),
-            load_composing_buffer(config, backend_key),
+            load_prompt_history(config, session_key),
+            load_composing_buffer(config, session_key),
         );
         config
             .agent_recovery
@@ -5706,21 +6157,7 @@ async fn finish_terminal(
         .remove(&terminal_id);
     config.terminal.finish_teardown(terminal_id).await;
     let agent_state_generation = claim.agent_state_generation;
-    for field in TerminalPersistedField::ALL {
-        if field == TerminalPersistedField::WorkingClaim {
-            continue;
-        }
-        let key = field.key(backend_key);
-        if let Err(error) = config.store.delete_kv(&key) {
-            tracing::warn!(?terminal_id, %key, %error, "terminal teardown: kv cleanup failed");
-        }
-    }
-    if let Some(generation) = agent_state_generation {
-        let key = agent_state_key(backend_key, generation);
-        if let Err(error) = config.store.delete_kv(&key) {
-            tracing::warn!(?terminal_id, %key, %error, "terminal teardown: agent state cleanup failed");
-        }
-    }
+    sweep_terminal_persisted_fields(config, backend_key, agent_state_generation).await;
     // Release the backend's per-session slot (PTY fds, writer thread,
     // replay ring). The exit has been observed by the time we're here,
     // so this is a pure handle drop — for a self-exited session it's
@@ -5736,6 +6173,22 @@ async fn finish_terminal(
     // tidy. Reconstructed from the id, no bookkeeping needed.
     let _ = std::fs::remove_file(hook_settings_path(terminal_id));
     let _ = std::fs::remove_file(hook_backend_key_path(terminal_id));
+    // #1420: when the last agent terminal for this session ends, revoke its
+    // coordination bearer and drop its on-disk MCP config so a dead session's
+    // token stops resolving (a terminated agent could otherwise keep reading
+    // every live sibling) and its bearer file leaves disk. The claimed
+    // terminal is already non-live, so `running_agent_terminal` returning
+    // `None` means no sibling agent remains in this workspace — guarding on it
+    // keeps a second agent in the same workspace working.
+    if let Some(session_key) = ended_agent_workspace.as_ref()
+        && config
+            .terminal
+            .running_agent_terminal(session_key)
+            .await
+            .is_none()
+    {
+        crate::mcp::deprovision_session(config, session_key).await;
+    }
     config
         .terminal
         .forget_terminal_persistence_lock(backend_key);
@@ -6771,6 +7224,7 @@ async fn write_prompt_sequence(
     encoded: lazybox_agents::EncodedPrompt,
     submit: bool,
     interaction: tokio::sync::OwnedMutexGuard<()>,
+    background_confirm: bool,
 ) -> Result<bool, PromptWriteError> {
     let echo_probes = encoded.echo_probes().to_vec();
     let (initial_write, submit_write) = encoded.into_writes();
@@ -6792,49 +7246,126 @@ async fn write_prompt_sequence(
     .await
     .map_err(PromptWriteError::Initial)?;
 
-    if let (Some(submit_bytes), Some(mut output_events)) = (submit_write, output_events) {
-        let settle_t0 = std::time::Instant::now();
-        let settle = await_paste_settled(
-            &mut output_events,
+    if let (Some(submit_bytes), Some(output_events)) = (submit_write, output_events) {
+        // The initial paste has landed, so the caller's delivery decision is
+        // already settled (only an `Initial` write failure — handled above —
+        // means "not delivered"). What remains is the submit keystroke and its
+        // confirm/resend recovery, which can run the FULL ~30s
+        // resend/backoff window when an Enter is genuinely swallowed (issue
+        // #122). A caller awaiting this inline on a latency-sensitive serial
+        // loop — the poll loop's auto-fix dispatch (`deliver_auto_fix_prompt`)
+        // — would stall every other queued action for that window. Hand the
+        // tail to a detached task there; every other caller already runs in its
+        // own task and awaits the result to gate follow-up work (snippet
+        // recording, credit-recovery success reporting).
+        if background_confirm {
+            let config = config.clone();
+            let backend_key = backend_key.to_string();
+            tokio::spawn(async move {
+                if let Err(error) = settle_submit_and_confirm(
+                    &config,
+                    terminal_id,
+                    &backend_key,
+                    submit,
+                    submit_bytes,
+                    output_events,
+                    echo_probes,
+                    interaction,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        terminal_id = ?terminal_id,
+                        %error,
+                        "backgrounded prompt submit failed after the paste landed",
+                    );
+                }
+            });
+            return Ok(true);
+        }
+        return settle_submit_and_confirm(
+            config,
             terminal_id,
-            &echo_probes,
-            PASTE_QUIET_WINDOW,
-            PASTE_SETTLE_CAP,
+            backend_key,
+            submit,
+            submit_bytes,
+            output_events,
+            echo_probes,
+            interaction,
         )
         .await;
-        tracing::info!(
-            terminal_id = ?terminal_id,
-            trigger = ?settle,
-            settle_ms = settle_t0.elapsed().as_millis(),
-            "prompt paste settled — sending submit keystroke",
-        );
-        let confirm = prepare_submit_confirmation(config, terminal_id).await;
-        terminal_io::write_locked(
-            config,
-            terminal_id,
-            backend_key,
-            &submit_bytes,
-            TerminalInputIntent::Submit,
-        )
-        .await
-        .map_err(PromptWriteError::Submit)?;
-        if submit {
-            mark_done_agent_working(config, terminal_id, backend_key).await;
-        }
-        drop(interaction);
-        return Ok(confirm_prompt_submission(
-            confirm,
-            config,
-            backend_key,
-            &submit_bytes,
-            SUBMIT_CONFIRM_DEADLINE,
-        )
-        .await);
     }
     if submit {
         mark_done_agent_working(config, terminal_id, backend_key).await;
     }
     Ok(true)
+}
+
+/// Second half of [`write_prompt_sequence`] for guarded composers: wait for
+/// the paste to settle, send the Enter, confirm submission (resending the
+/// Enter to recover a swallowed soft-newline, issue #122), and flip a
+/// genuinely-confirmed `Done→Working`. Split out so the poll loop's auto-fix
+/// dispatch can run it detached instead of stalling on the ~30s
+/// resend/backoff window; the `interaction` lock moves in and is released
+/// after the submit write, exactly as when this ran inline.
+///
+/// The optimistic badge flip runs only AFTER confirmation. The confirm loop
+/// treats a `Done→Working` transition as proof the Enter landed
+/// (`await_submit_evidence`), so flipping the badge before it would
+/// manufacture that very evidence on the same bus the loop is listening to —
+/// on a `Done` agent (the normal state of a finished workspace bulk-selected
+/// for new work) the loop then self-confirms and skips the Enter resend that
+/// recovers a swallowed soft-newline. That is why multi-select broadcasts so
+/// often pasted the prompt but never submitted it (issue #122): the recovery
+/// net was disarmed by our own flip.
+async fn settle_submit_and_confirm(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    backend_key: &str,
+    submit: bool,
+    submit_bytes: Vec<u8>,
+    mut output_events: tokio::sync::broadcast::Receiver<Event>,
+    echo_probes: Vec<String>,
+    interaction: tokio::sync::OwnedMutexGuard<()>,
+) -> Result<bool, PromptWriteError> {
+    let settle_t0 = std::time::Instant::now();
+    let settle = await_paste_settled(
+        &mut output_events,
+        terminal_id,
+        &echo_probes,
+        PASTE_QUIET_WINDOW,
+        PASTE_SETTLE_CAP,
+    )
+    .await;
+    tracing::info!(
+        terminal_id = ?terminal_id,
+        trigger = ?settle,
+        settle_ms = settle_t0.elapsed().as_millis(),
+        "prompt paste settled — sending submit keystroke",
+    );
+    let confirm = prepare_submit_confirmation(config, terminal_id).await;
+    terminal_io::write_locked(
+        config,
+        terminal_id,
+        backend_key,
+        &submit_bytes,
+        TerminalInputIntent::Submit,
+    )
+    .await
+    .map_err(PromptWriteError::Submit)?;
+    drop(interaction);
+    let confirmed = confirm_prompt_submission(
+        confirm,
+        config,
+        backend_key,
+        &submit_bytes,
+        SUBMIT_CONFIRM_DEADLINE,
+    )
+    .await;
+    if submit && confirmed {
+        mark_done_agent_working(config, terminal_id, backend_key).await;
+    }
+    Ok(confirmed)
 }
 
 async fn mark_done_agent_working(
@@ -7487,6 +8018,7 @@ pub async fn handle_recover_agent_credit(
             agent.encode_prompt(&continuation_prompt, lazybox_agents::PromptIntent::Submit),
             true,
             interaction,
+            false,
         )
         .await
         {
@@ -7626,7 +8158,15 @@ async fn handle_inject_prompt_inner(
                 .await;
                 return;
             }
+            // No fallback to rewrite into a Spawn. The prompt would
+            // otherwise vanish with only a debug log; surface it so the
+            // user knows to reopen the agent (invariant: user input must
+            // never disappear silently — #1384).
             tracing::debug!("inject_prompt to unknown terminal {terminal_id:?}");
+            let _ = config.bus.send(Event::TerminalInputRejected {
+                terminal_id,
+                message: "the agent terminal is no longer running — reopen it and retry".into(),
+            });
             return;
         }
     };
@@ -7634,6 +8174,10 @@ async fn handle_inject_prompt_inner(
         Some((_session_key, kind)) => kind,
         None => {
             tracing::debug!("inject_prompt: no terminal_meta for {terminal_id:?} — skipping");
+            let _ = config.bus.send(Event::TerminalInputRejected {
+                terminal_id,
+                message: "the agent terminal is no longer running — reopen it and retry".into(),
+            });
             return;
         }
     };
@@ -7649,6 +8193,10 @@ async fn handle_inject_prompt_inner(
         },
         _ => {
             tracing::debug!("inject_prompt: terminal {terminal_id:?} is not an agent — skipping");
+            let _ = config.bus.send(Event::TerminalInputRejected {
+                terminal_id,
+                message: "the prompt could not be delivered — this terminal is not an agent".into(),
+            });
             return;
         }
     };
@@ -7779,6 +8327,7 @@ async fn handle_inject_prompt_inner(
             encoded_prompt,
             submit,
             interaction,
+            false,
         )
         .await
         {
@@ -7916,12 +8465,22 @@ async fn record_confirmed_snippet(
     snippet_key: String,
     prompt: Option<UserPrompt>,
 ) {
+    // Authoritative first: apply and PERSIST the per-workspace delivery
+    // transition (honest count + MRU, one owner) BEFORE announcing
+    // anything, so the `SnippetDelivered` broadcast never claims a
+    // delivery the durable store didn't record. Previously this was four
+    // independent best-effort writes with an unconditional broadcast, so
+    // a failed persist could still light up "Recent" and then vanish on
+    // restart (#463 followup).
+    let workspace_key = WorkspaceKey::new(session_key.as_str().to_string());
+    crate::workspace::record_snippet_delivery(config, &workspace_key, snippet_key.clone()).await;
+
+    // Secondary projections (their own owners), now that the fact is durable.
     if let Some(prompt) = &prompt {
         handle_record_user_message(config, terminal_id, prompt).await;
     }
     client_kv::record_recent_snippet(config, snippet_key.clone()).await;
-    let workspace_key = WorkspaceKey::new(session_key.as_str().to_string());
-    crate::workspace::record_sent_snippet(config, &workspace_key, snippet_key.clone()).await;
+
     let _ = config.bus.send(Event::SnippetDelivered {
         terminal_id,
         session_key,
@@ -8603,8 +9162,42 @@ pub async fn recover_sessions(config: &ServerConfig) {
         }
     };
     let live_keys: std::collections::HashSet<_> = keys.iter().cloned().collect();
-    reconcile_missing_recovered_sessions(config, &live_keys).await;
-    tracing::info!("recovering {} surviving session(s)", keys.len());
+    let total_live = keys.len();
+    tracing::info!("recovering {total_live} surviving session(s)");
+    // The archived set is the durable, authoritative record of "the user got
+    // rid of this workspace" (`x x`). A surviving backend session whose owning
+    // workspace is archived is an orphan the delete couldn't reach — the agent
+    // process had already exited, tearing down its terminal, so the detached
+    // tmux session had no live registry entry to kill. Reattaching it here
+    // would resurrect the deleted workspace from its persisted meta. Read the
+    // set ONCE, strictly: an unreadable
+    // set falls back to reattaching every survivor rather than risk nuking live
+    // work off a transient read failure.
+    let archived_keys = match crate::workspace::load_archived_set_strict(config) {
+        Ok(set) => Some(set),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "recover: archived set unreadable — reattaching all survivors without the archive guard"
+            );
+            None
+        }
+    };
+    // The session-tombstone set is the kill-on-recovery record for *every*
+    // removal reason, including the non-archiving ClosedAuto / Rescope that
+    // deliberately stay out of the archived set (#1377). Read it with the
+    // same fail-open contract: an unreadable set drops only its own guard,
+    // never nukes live work.
+    let tombstoned_keys = match crate::workspace::load_session_tombstones_strict(config) {
+        Ok(set) => Some(set),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "recover: session-tombstone set unreadable — reattaching survivors without the tombstone guard"
+            );
+            None
+        }
+    };
     let attach_permits =
         std::sync::Arc::new(tokio::sync::Semaphore::new(RECOVERY_ATTACH_CONCURRENCY));
     let resource_warning_emitted = std::sync::Arc::new(AtomicBool::new(false));
@@ -8612,6 +9205,32 @@ pub async fn recover_sessions(config: &ServerConfig) {
         let (session_key, kind) = load_terminal_meta(config, &key)
             .await
             .unwrap_or_else(|| (SessionKey::from(""), TerminalKind::Shell));
+        // Honor the archived set before doing any reattach work: if this
+        // survivor's workspace was deleted, kill the orphan backend session and
+        // sweep its persisted per-terminal rows so it can't be reconstructed on
+        // the next restart either. `workspace_is_tombstoned` is the shared
+        // authority — see its doc for why membership alone is insufficient.
+        if workspace_is_tombstoned(
+            config,
+            archived_keys.as_ref(),
+            tombstoned_keys.as_ref(),
+            &session_key,
+        )
+        .await
+        {
+            tracing::info!("recover: killing orphan session for removed workspace {session_key}");
+            if let Err(error) = config.backend.kill(&key).await {
+                tracing::warn!(
+                    backend_key = %key,
+                    %session_key,
+                    %error,
+                    "recover: killing orphan session for archived workspace failed"
+                );
+            }
+            let generation = load_agent_state_generation(config, &key).await;
+            sweep_terminal_persisted_fields(config, &key, generation).await;
+            continue;
+        }
         let access = load_terminal_access(config, &key).await;
         let no_permission = load_no_permission(config, &key).await;
         let mut resume_context = match &kind {
@@ -8646,8 +9265,8 @@ pub async fn recover_sessions(config: &ServerConfig) {
         }
         if let Some(context) = &mut resume_context {
             let (prompt_history, composing_buffer) = tokio::join!(
-                load_prompt_history(config, &key),
-                load_composing_buffer(config, &key),
+                load_prompt_history(config, session_key.as_str()),
+                load_composing_buffer(config, session_key.as_str()),
             );
             context.terminal_id = terminal_id;
             context.session_key = session_key.clone();
@@ -8888,11 +9507,35 @@ pub async fn recover_sessions(config: &ServerConfig) {
             }
         });
     }
+    // Reconcile persisted terminals whose tmux session is GONE (register them
+    // just long enough to commit Exited and release their working-claim).
+    // Deliberately AFTER the live-attach loop above: this pass is heavy — one
+    // backend round-trip plus store teardown per dead row, and a fleet can
+    // carry dozens of them — and under the old 5s launch budget it ran first
+    // and starved the live survivors of their attach before the timeout fired.
+    // Live and dead keys are disjoint by construction (`live_keys` is exactly
+    // what this skips), so ordering the cleanup last only delays it, never
+    // double-registers. Survivors now come back immediately on restart; dead
+    // rows are swept a moment later.
+    reconcile_missing_recovered_sessions(
+        config,
+        &live_keys,
+        archived_keys.as_ref(),
+        tombstoned_keys.as_ref(),
+    )
+    .await;
+    // Registration ran to completion — this pass is no longer cancelled by a
+    // launch-time wall-clock, so every live tmux session above is reattached
+    // (the detached pumps then bind their I/O conduits). Logged so a restart's
+    // recovery is observable end-to-end rather than trailing off silently.
+    tracing::info!("session recovery complete: registered {total_live} live session(s)");
 }
 
 async fn reconcile_missing_recovered_sessions(
     config: &ServerConfig,
     live_keys: &std::collections::HashSet<String>,
+    archived_keys: Option<&std::collections::HashSet<String>>,
+    tombstoned_keys: Option<&std::collections::HashSet<String>>,
 ) {
     let store = config.store.clone();
     let rows = match tokio::task::spawn_blocking(move || store.list_kv_prefix("terminal:")).await {
@@ -8927,6 +9570,19 @@ async fn reconcile_missing_recovered_sessions(
         };
         let session_key = SessionKey::from(parsed.0.as_str());
         let kind = parsed.1;
+        // A dead row whose owning workspace was removed (archived via `x x`, or
+        // collapsed/rescoped — the session-tombstone set covers every reason) is
+        // an orphan the delete couldn't reach — its agent had already exited, so
+        // the row hit neither the live registry nor the delete-time sweep.
+        // Registering it to commit `Exited` here would broadcast a ghost
+        // lifecycle event for a workspace that is already gone. Sweep it
+        // silently instead — no registration, no broadcast. Same
+        // `workspace_is_tombstoned` authority `recover_sessions` uses.
+        if workspace_is_tombstoned(config, archived_keys, tombstoned_keys, &session_key).await {
+            let generation = load_agent_state_generation(config, backend_key).await;
+            sweep_terminal_persisted_fields(config, backend_key, generation).await;
+            continue;
+        }
         let terminal_id = alloc_terminal_id(&*config.store);
         let recovered_agent = if matches!(kind, TerminalKind::Agent(_)) {
             match load_recovered_agent_state(config, backend_key, terminal_id.0).await {
@@ -9008,7 +9664,7 @@ pub(crate) fn encode_terminal_meta_record(
 
 /// Inverse of `persist_terminal_meta`. Returns None when nothing was
 /// previously stored — caller falls back to a placeholder.
-async fn load_terminal_meta(
+pub(crate) async fn load_terminal_meta(
     config: &ServerConfig,
     backend_key: &str,
 ) -> Option<(SessionKey, TerminalKind)> {
@@ -9046,8 +9702,30 @@ pub(crate) async fn persist_agent_resume_context(
         }
     };
     let store = config.store.clone();
-    let key = TerminalPersistedField::AgentResume.key(backend_key);
-    match tokio::task::spawn_blocking(move || store.set_kv(&key, &payload)).await {
+    let backend_scoped = TerminalPersistedField::AgentResume.key(backend_key);
+    // Mirror the payload under the stable session identity so a respawn under a
+    // fresh backend_key can recover it (see `SESSION_AGENT_RESUME_PREFIX`). Only
+    // sessions with an owning id are restorable, so a context without one has no
+    // session-keyed twin to write. One batch so the backend row and its twin
+    // commit atomically — a reader can never see the backend row refreshed while
+    // the twin is stale, and a mid-write failure leaves neither half updated
+    // rather than a backend row pointing at a missing twin.
+    let session_scoped = context.session_id.map(session_agent_resume_key);
+    match tokio::task::spawn_blocking(move || {
+        let mut mutations = vec![StoreMutation::SetKv {
+            key: backend_scoped,
+            value: payload.clone(),
+        }];
+        if let Some(session_scoped) = session_scoped {
+            mutations.push(StoreMutation::SetKv {
+                key: session_scoped,
+                value: payload,
+            });
+        }
+        store.apply_batch(&mutations)
+    })
+    .await
+    {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             tracing::warn!(%error, "persist agent resume context: store write failed")
@@ -9060,8 +9738,29 @@ async fn load_agent_resume_context(
     config: &ServerConfig,
     backend_key: &str,
 ) -> Option<crate::agent_auth::AgentResumeContext> {
-    let store = config.store.clone();
     let key = TerminalPersistedField::AgentResume.key(backend_key);
+    load_resume_context_at(config, key).await
+}
+
+fn session_agent_resume_key(session_id: SessionId) -> String {
+    format!("{SESSION_AGENT_RESUME_PREFIX}{session_id}")
+}
+
+/// Session-keyed counterpart of [`load_agent_resume_context`], consulted by the
+/// respawn path where the old backend_key is gone (see
+/// [`SESSION_AGENT_RESUME_PREFIX`]).
+async fn load_session_agent_resume_context(
+    config: &ServerConfig,
+    session_id: SessionId,
+) -> Option<crate::agent_auth::AgentResumeContext> {
+    load_resume_context_at(config, session_agent_resume_key(session_id)).await
+}
+
+async fn load_resume_context_at(
+    config: &ServerConfig,
+    key: String,
+) -> Option<crate::agent_auth::AgentResumeContext> {
+    let store = config.store.clone();
     let raw = tokio::task::spawn_blocking(move || store.get_kv(&key))
         .await
         .ok()?
@@ -9190,6 +9889,92 @@ async fn load_pty_launch_generation(config: &ServerConfig, backend_key: &str) ->
         .ok()
 }
 
+/// Read the persisted agent-state generation for `backend_key`, used to
+/// address the generation-scoped `terminal-agent-state:*` row when sweeping a
+/// session's durable metadata outside the normal teardown path.
+pub(crate) async fn load_agent_state_generation(
+    config: &ServerConfig,
+    backend_key: &str,
+) -> Option<u64> {
+    let store = config.store.clone();
+    let kv_key = TerminalPersistedField::AgentStateGeneration.key(backend_key);
+    tokio::task::spawn_blocking(move || store.get_kv(&kv_key))
+        .await
+        .ok()?
+        .ok()??
+        .parse()
+        .ok()
+}
+
+/// The single authority both recovery passes consult before acting on a
+/// persisted session: is `session_key`'s workspace a tombstone the user (or an
+/// automatic removal) got rid of? True only when the key is in a removal
+/// record — the permanent archived set (`x x`) OR the session-tombstone set
+/// (written for *every* removal reason, so it also covers the non-archiving
+/// ClosedAuto / Rescope, #1377) — AND its workspace row is definitively gone.
+/// Membership alone is insufficient — keys are reused (`allocate_workspace_key`
+/// hands a slug back once the row drops), so a workspace removed and later
+/// recreated under the same name is fully live while its key still lingers in a
+/// set; only an absent row confirms the deletion actually took. The archived
+/// set stays in the check so keys tombstoned before the tombstone set existed
+/// are still guarded. `recover_sessions` uses this to kill a surviving orphan;
+/// `reconcile_missing_recovered_sessions` uses it to sweep a dead row silently
+/// instead of broadcasting a ghost `Exited`.
+async fn workspace_is_tombstoned(
+    config: &ServerConfig,
+    archived_keys: Option<&std::collections::HashSet<String>>,
+    tombstoned_keys: Option<&std::collections::HashSet<String>>,
+    session_key: &SessionKey,
+) -> bool {
+    let removed = archived_keys.is_some_and(|archived| archived.contains(session_key.as_str()))
+        || tombstoned_keys.is_some_and(|tombstoned| tombstoned.contains(session_key.as_str()));
+    removed && workspace_row_is_absent(config, session_key).await
+}
+
+/// Whether the workspace row for `session_key` is definitively gone — deleted,
+/// or a stub carrying no json. That is the only state in which a surviving
+/// backend session is a resurrection risk: a present row means the workspace
+/// still (or again) exists, so its session must be reattached even if the key
+/// lingers in the permanent archived set. A store read error returns `false`
+/// (treat as present): recovery never kills a session on an ambiguous read.
+async fn workspace_row_is_absent(config: &ServerConfig, session_key: &SessionKey) -> bool {
+    let store = config.store.clone();
+    let key = WorkspaceKey::new(session_key.as_str());
+    match tokio::task::spawn_blocking(move || store.get_workspace(&key)).await {
+        Ok(Ok(Some(record))) => record.workspace_json.is_none(),
+        Ok(Ok(None)) => true,
+        Ok(Err(_)) | Err(_) => false,
+    }
+}
+
+/// Delete every persisted per-terminal kv row owned by `backend_key`: the whole
+/// [`TerminalPersistedField`] inventory (minus `WorkingClaim`, whose teardown is
+/// remote-identity-aware and handled separately) plus the generation-scoped
+/// agent-state row. Shared by terminal teardown and orphan-session recovery so
+/// neither can leave a `terminal-*` row that reconstructs a dead session on the
+/// next restart. Best-effort: a failed delete is logged, not fatal.
+pub(crate) async fn sweep_terminal_persisted_fields(
+    config: &ServerConfig,
+    backend_key: &str,
+    agent_state_generation: Option<u64>,
+) {
+    for field in TerminalPersistedField::ALL {
+        if field == TerminalPersistedField::WorkingClaim {
+            continue;
+        }
+        let key = field.key(backend_key);
+        if let Err(error) = config.store.delete_kv(&key) {
+            tracing::warn!(%backend_key, %key, %error, "terminal meta sweep: kv cleanup failed");
+        }
+    }
+    if let Some(generation) = agent_state_generation {
+        let key = agent_state_key(backend_key, generation);
+        if let Err(error) = config.store.delete_kv(&key) {
+            tracing::warn!(%backend_key, %key, %error, "terminal meta sweep: agent state cleanup failed");
+        }
+    }
+}
+
 async fn initialize_agent_state_generation(
     config: &ServerConfig,
     backend_key: &str,
@@ -9315,40 +10100,34 @@ pub async fn handle_record_user_message(
     terminal_id: TerminalId,
     prompt: &UserPrompt,
 ) {
-    let Some(backend_key) = config.terminal.backend_key_for(terminal_id).await else {
+    // History belongs to the WORKSPACE, not the individual backend terminal, so
+    // resolve the stable session_key and key/serialize on it. A terminal whose
+    // session_key can't be resolved (torn down, never registered) has nowhere
+    // to belong — skip rather than mint an orphan row.
+    let Some((session_key, _)) = config.terminal.terminal_meta_for(terminal_id).await else {
         tracing::trace!("record user message for unknown terminal {terminal_id:?}");
         return;
     };
+    let session_key = session_key.as_str().to_string();
+    // Serialize concurrent writers to the SAME workspace history (two live
+    // terminals in one workspace share the row) so a read-modify-write can't
+    // lose an append. Locking on the session_key rather than the backend_key is
+    // what makes that serialization workspace-wide.
     let _guard = config
         .terminal
-        .lock_terminal_persistence(&backend_key)
+        .lock_terminal_persistence(&session_key)
         .await;
-    if config
-        .terminal
-        .backend_key_for(terminal_id)
-        .await
-        .as_deref()
-        != Some(backend_key.as_str())
-    {
-        tracing::debug!(
-            ?terminal_id,
-            %backend_key,
-            "skip user-message persistence after terminal teardown"
-        );
-        return;
-    }
     let store = config.store.clone();
-    let history_key = TerminalPersistedField::UserMessageHistory.key(&backend_key);
-    let legacy_key = TerminalPersistedField::UserMessage.key(&backend_key);
+    let history_key = workspace_prompt_history_key(&session_key);
     let prompt = prompt.clone();
     let write = tokio::task::spawn_blocking(move || {
-        let mut history = load_prompt_history_blocking(&*store, &history_key, &legacy_key);
+        let mut history = load_prompt_history_blocking(&*store, &history_key);
         history.push(prompt);
         cap_prompt_history(&mut history);
         match serde_json::to_string(&history) {
             Ok(json) => store.set_kv(&history_key, &json),
             Err(e) => {
-                tracing::warn!("persist terminal user message: serialize failed: {e}");
+                tracing::warn!("persist workspace user message: serialize failed: {e}");
                 Ok(())
             }
         }
@@ -9381,14 +10160,14 @@ fn cap_prompt_history(history: &mut Vec<UserPrompt>) {
     }
 }
 
-/// Read the persisted history JSON, falling back to migrating the legacy
-/// single-value `terminal-msg` row into a one-entry `Typed` history when
-/// the new key doesn't exist yet (issue #523). Sync — runs inside the
-/// caller's `spawn_blocking`.
+/// Read the persisted workspace history JSON at `history_key`
+/// (`workspace-msgs:{session_key}`), oldest-first. Sync — runs inside the
+/// caller's `spawn_blocking`. Legacy `terminal-msgs`/`terminal-msg` rows are
+/// folded into the workspace row by the one-time startup migration
+/// (`migrate_prompt_history_to_workspace_keys`), so nothing to migrate here.
 fn load_prompt_history_blocking(
     store: &dyn lazybox_store::Store,
     history_key: &str,
-    legacy_key: &str,
 ) -> Vec<UserPrompt> {
     if let Ok(Some(json)) = store.get_kv(history_key) {
         match serde_json::from_str::<Vec<UserPrompt>>(&json) {
@@ -9396,75 +10175,43 @@ fn load_prompt_history_blocking(
             Err(e) => tracing::warn!("prompt history decode failed, resetting: {e}"),
         }
     }
-    // Migrate the legacy last-prompt row as the first Typed entry. Its
-    // original submit time is gone, so timestamp 0 marks it as "before
-    // history tracking existed" rather than inventing a plausible one.
-    match store.get_kv(legacy_key) {
-        Ok(Some(text)) if !text.trim().is_empty() => vec![UserPrompt {
-            text,
-            timestamp_ms: 0,
-            source: PromptSource::Typed,
-        }],
-        _ => Vec::new(),
-    }
+    Vec::new()
 }
 
-/// Read back the persisted prompt history (migrating the legacy row if
-/// needed), oldest-first. Async since the sync-rusqlite offload (issue
-/// #34's spawn_blocking convention).
-async fn load_prompt_history(config: &ServerConfig, backend_key: &str) -> Vec<UserPrompt> {
+/// Read back the persisted workspace prompt history for `session_key`,
+/// oldest-first. Async since the sync-rusqlite offload (issue #34's
+/// spawn_blocking convention).
+async fn load_prompt_history(config: &ServerConfig, session_key: &str) -> Vec<UserPrompt> {
     let store = config.store.clone();
-    let history_key = TerminalPersistedField::UserMessageHistory.key(backend_key);
-    let legacy_key = TerminalPersistedField::UserMessage.key(backend_key);
-    tokio::task::spawn_blocking(move || {
-        load_prompt_history_blocking(&*store, &history_key, &legacy_key)
-    })
-    .await
-    .unwrap_or_default()
+    let history_key = workspace_prompt_history_key(session_key);
+    tokio::task::spawn_blocking(move || load_prompt_history_blocking(&*store, &history_key))
+        .await
+        .unwrap_or_default()
 }
 
 /// Persist the in-flight composer buffer (typed but not submitted) for
-/// an agent terminal, keyed by backend session key so a half-typed
-/// prompt survives a daemon restart (which reassigns `TerminalId`s but
-/// keeps backend keys). An empty buffer clears the stored draft — the
-/// composer emptied out, so there's nothing to recall. Replayed to
-/// clients in `snapshot_terminals` as `composing_buffer` and recalled
-/// into the composer with `]]r`.
+/// an agent terminal, keyed by the STABLE workspace session_key so a
+/// half-typed prompt survives a daemon restart — including one that
+/// RE-SPAWNS the session under a fresh backend_key, not only a reattach.
+/// An empty buffer clears the stored draft — the composer emptied out, so
+/// there's nothing to recall. Replayed to clients in `snapshot_terminals`
+/// as `composing_buffer` and recalled into the composer with `]]r`.
 pub async fn handle_record_composing_buffer(
     config: &ServerConfig,
     terminal_id: TerminalId,
     buffer: &str,
 ) {
-    let backend_key = match config.terminal.live_backend_key(terminal_id) {
-        Some(key) => key.to_string(),
-        None => match config.terminal.backend_key_for(terminal_id).await {
-            Some(key) => key,
-            None => {
-                tracing::trace!("record composing buffer for unknown terminal {terminal_id:?}");
-                return;
-            }
-        },
+    let Some((session_key, _)) = config.terminal.terminal_meta_for(terminal_id).await else {
+        tracing::trace!("record composing buffer for unknown terminal {terminal_id:?}");
+        return;
     };
+    let session_key = session_key.as_str().to_string();
     let _guard = config
         .terminal
-        .lock_terminal_persistence(&backend_key)
+        .lock_terminal_persistence(&session_key)
         .await;
-    if config
-        .terminal
-        .backend_key_for(terminal_id)
-        .await
-        .as_deref()
-        != Some(backend_key.as_str())
-    {
-        tracing::debug!(
-            ?terminal_id,
-            %backend_key,
-            "skip draft persistence after terminal teardown"
-        );
-        return;
-    }
     let store = config.store.clone();
-    let kv_key = TerminalPersistedField::Draft.key(&backend_key);
+    let kv_key = workspace_draft_key(&session_key);
     let buffer = buffer.to_string();
     let write = tokio::task::spawn_blocking(move || {
         if buffer.is_empty() {
@@ -9476,21 +10223,239 @@ pub async fn handle_record_composing_buffer(
     .await;
     match write {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => tracing::warn!("persist terminal composing buffer: store write failed: {e}"),
-        Err(e) => tracing::warn!("persist terminal composing buffer: store task failed: {e}"),
+        Ok(Err(e)) => tracing::warn!("persist workspace composing buffer: store write failed: {e}"),
+        Err(e) => tracing::warn!("persist workspace composing buffer: store task failed: {e}"),
     }
 }
 
-/// Read back the value `handle_record_composing_buffer` stored, or
-/// `None` when the terminal has no pending draft.
-async fn load_composing_buffer(config: &ServerConfig, backend_key: &str) -> Option<String> {
+/// Read back the value `handle_record_composing_buffer` stored for
+/// `session_key`, or `None` when the workspace has no pending draft.
+async fn load_composing_buffer(config: &ServerConfig, session_key: &str) -> Option<String> {
     let store = config.store.clone();
-    let kv_key = TerminalPersistedField::Draft.key(backend_key);
+    let kv_key = workspace_draft_key(session_key);
     tokio::task::spawn_blocking(move || store.get_kv(&kv_key))
         .await
         .ok()?
         .ok()
         .flatten()
+}
+
+/// One-time re-key of the legacy per-`backend_key` prompt-history / draft rows
+/// (`terminal-msgs:{bk}`, the pre-#523 single `terminal-msg:{bk}`, and
+/// `terminal-draft:{bk}`) onto the STABLE workspace scheme
+/// (`workspace-msgs:{session_key}` / `workspace-draft:{session_key}`).
+///
+/// The backend_key embeds the daemon PID + a per-process counter, so it changed
+/// on every restart; a restart that RE-SPAWNED (rather than reattached) a
+/// session minted a fresh key and orphaned the old rows, blanking the `]]h`
+/// history / "you ▸" recap / `]]r` draft. This folds every legacy row into its
+/// owning workspace (resolved through the `terminal:{bk}` meta row that records
+/// the session_key), so the data lands on a key that survives respawn.
+///
+/// Guarded by a KV flag so it runs exactly once, and resilient: an unparseable
+/// row or an unresolvable backend_key is skipped, never fatal. Multiple
+/// backend_keys can map to one workspace — their entries are concatenated,
+/// sorted by `timestamp_ms` ascending, and capped like a live append. Runs
+/// before recovery so the reattach / respawn passes read the migrated rows.
+pub(crate) async fn migrate_prompt_history_to_workspace_keys(config: &ServerConfig) {
+    let store = config.store.clone();
+    let outcome = tokio::task::spawn_blocking(move || migrate_history_blocking(&*store)).await;
+    match outcome {
+        Ok(Ok(0)) => {}
+        Ok(Ok(migrated)) => {
+            tracing::info!(
+                migrated,
+                "history re-key migration: folded legacy rows into workspaces"
+            )
+        }
+        Ok(Err(e)) => tracing::warn!("history re-key migration: store error: {e}"),
+        Err(e) => tracing::warn!("history re-key migration: task failed: {e}"),
+    }
+}
+
+/// Sync core of [`migrate_prompt_history_to_workspace_keys`]. Returns the number
+/// of legacy rows folded (0 when the guard flag was already set). Broken out so
+/// it can be unit-tested against a `MemoryStore` without a runtime.
+fn migrate_history_blocking(
+    store: &dyn lazybox_store::Store,
+) -> Result<usize, lazybox_store::StoreError> {
+    if store.get_kv(HISTORY_REKEY_FLAG_KEY)?.is_some() {
+        return Ok(0);
+    }
+
+    // Resolve every backend_key → session_key up front from the `terminal:{bk}`
+    // metadata rows (`["<session_key>", <kind>]`). A legacy row whose meta is
+    // gone can't be placed in a workspace, so it's left untouched.
+    let mut backend_to_session: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for (key, value) in store.list_kv_prefix("terminal:")? {
+        let Some(backend_key) = key.strip_prefix("terminal:") else {
+            continue;
+        };
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&value)
+            && let Some(session_key) = parsed.get(0).and_then(serde_json::Value::as_str)
+        {
+            backend_to_session.insert(backend_key.to_string(), session_key.to_string());
+        }
+    }
+
+    #[derive(Default)]
+    struct Folded {
+        history: Vec<UserPrompt>,
+        draft: Option<String>,
+    }
+    let mut folded: std::collections::HashMap<String, Folded> = std::collections::HashMap::new();
+    let mut legacy_keys_to_delete: Vec<String> = Vec::new();
+    let mut migrated_rows = 0usize;
+
+    // `terminal-msgs:{bk}` — the JSON array history (#523).
+    for (key, value) in store.list_kv_prefix(WORKSPACE_MSGS_LEGACY_PREFIX)? {
+        let Some(backend_key) = key.strip_prefix(WORKSPACE_MSGS_LEGACY_PREFIX) else {
+            continue;
+        };
+        let Some(session_key) = backend_to_session.get(backend_key) else {
+            continue;
+        };
+        if let Ok(mut entries) = serde_json::from_str::<Vec<UserPrompt>>(&value) {
+            folded
+                .entry(session_key.clone())
+                .or_default()
+                .history
+                .append(&mut entries);
+        }
+        legacy_keys_to_delete.push(key);
+        migrated_rows += 1;
+    }
+
+    // `terminal-msg:{bk}` — the pre-#523 single last-prompt string. Its submit
+    // time is gone, so timestamp 0 sorts it before any tracked entry.
+    for (key, value) in store.list_kv_prefix(LEGACY_SINGLE_MSG_PREFIX)? {
+        let Some(backend_key) = key.strip_prefix(LEGACY_SINGLE_MSG_PREFIX) else {
+            continue;
+        };
+        let Some(session_key) = backend_to_session.get(backend_key) else {
+            continue;
+        };
+        if !value.trim().is_empty() {
+            folded
+                .entry(session_key.clone())
+                .or_default()
+                .history
+                .push(UserPrompt {
+                    text: value,
+                    timestamp_ms: 0,
+                    source: PromptSource::Typed,
+                });
+        }
+        legacy_keys_to_delete.push(key);
+        migrated_rows += 1;
+    }
+
+    // `terminal-draft:{bk}` — the composer draft. Prefer the first non-empty
+    // draft seen for a workspace (concurrent live drafts for one workspace are
+    // rare, and this only matters until the next composer write overwrites it).
+    for (key, value) in store.list_kv_prefix(WORKSPACE_DRAFT_LEGACY_PREFIX)? {
+        let Some(backend_key) = key.strip_prefix(WORKSPACE_DRAFT_LEGACY_PREFIX) else {
+            continue;
+        };
+        let Some(session_key) = backend_to_session.get(backend_key) else {
+            continue;
+        };
+        if !value.is_empty() {
+            let slot = &mut folded.entry(session_key.clone()).or_default().draft;
+            if slot.is_none() {
+                *slot = Some(value);
+            }
+        }
+        legacy_keys_to_delete.push(key);
+        migrated_rows += 1;
+    }
+
+    let mut mutations: Vec<StoreMutation> = Vec::new();
+    for (session_key, Folded { mut history, draft }) in folded {
+        // Fold onto any workspace row that already exists (idempotency / a prior
+        // partial run) before sorting + capping.
+        let history_key = workspace_prompt_history_key(&session_key);
+        let mut merged = load_prompt_history_blocking(store, &history_key);
+        merged.append(&mut history);
+        merged.sort_by_key(|prompt| prompt.timestamp_ms);
+        cap_prompt_history(&mut merged);
+        if let Ok(json) = serde_json::to_string(&merged) {
+            mutations.push(StoreMutation::SetKv {
+                key: history_key,
+                value: json,
+            });
+        }
+        if let Some(draft) = draft {
+            let draft_key = workspace_draft_key(&session_key);
+            if store.get_kv(&draft_key)?.is_none() {
+                mutations.push(StoreMutation::SetKv {
+                    key: draft_key,
+                    value: draft,
+                });
+            }
+        }
+    }
+    for key in legacy_keys_to_delete {
+        mutations.push(StoreMutation::DeleteKv { key });
+    }
+    mutations.push(StoreMutation::SetKv {
+        key: HISTORY_REKEY_FLAG_KEY.to_string(),
+        value: "1".to_string(),
+    });
+    store.apply_batch(&mutations)?;
+    Ok(migrated_rows)
+}
+
+/// Store mutations that move a workspace's prompt history + draft from one
+/// session_key to another when a live terminal is rebadged (the issue→PR
+/// managed-branch-owner transfer, #upsert). History is now WORKSPACE-scoped, so
+/// unlike the old backend_key scheme — where the key was stable across a
+/// rebadge — the row has to follow the terminal onto its new workspace or the
+/// `]]h` history / recap / draft would blank the moment the PR badge takes over.
+/// Emitted into the SAME `apply_batch` as the workspace + terminal-meta move so
+/// the relabel is atomic; entries merge (concat → time-sort → cap) onto any row
+/// the target already has, and the draft moves only when the target has none.
+pub(crate) fn rebadge_workspace_history_mutations(
+    store: &dyn lazybox_store::Store,
+    from: &str,
+    to: &str,
+) -> Vec<StoreMutation> {
+    if from == to {
+        return Vec::new();
+    }
+    let mut mutations: Vec<StoreMutation> = Vec::new();
+
+    let from_msgs = workspace_prompt_history_key(from);
+    let mut from_history = load_prompt_history_blocking(store, &from_msgs);
+    if !from_history.is_empty() {
+        let to_msgs = workspace_prompt_history_key(to);
+        let mut merged = load_prompt_history_blocking(store, &to_msgs);
+        merged.append(&mut from_history);
+        merged.sort_by_key(|prompt| prompt.timestamp_ms);
+        cap_prompt_history(&mut merged);
+        if let Ok(json) = serde_json::to_string(&merged) {
+            mutations.push(StoreMutation::SetKv {
+                key: to_msgs,
+                value: json,
+            });
+        }
+        mutations.push(StoreMutation::DeleteKv { key: from_msgs });
+    }
+
+    let from_draft = workspace_draft_key(from);
+    if let Ok(Some(draft)) = store.get_kv(&from_draft) {
+        let to_draft = workspace_draft_key(to);
+        if !draft.is_empty() && store.get_kv(&to_draft).ok().flatten().is_none() {
+            mutations.push(StoreMutation::SetKv {
+                key: to_draft,
+                value: draft,
+            });
+        }
+        mutations.push(StoreMutation::DeleteKv { key: from_draft });
+    }
+
+    mutations
 }
 
 #[cfg(test)]
@@ -9500,48 +10465,45 @@ pub(crate) async fn restore_terminal_conversation_state(
     prompt_history: &[UserPrompt],
     composing_buffer: Option<&str>,
 ) {
-    let Some(backend_key) = config.terminal.backend_key_for(terminal_id).await else {
+    let Some((session_key, _)) = config.terminal.terminal_meta_for(terminal_id).await else {
         return;
     };
-    restore_backend_conversation_state(config, &backend_key, prompt_history, composing_buffer)
-        .await;
+    restore_workspace_conversation_state(
+        config,
+        session_key.as_str(),
+        prompt_history,
+        composing_buffer,
+    )
+    .await;
 }
 
 pub(crate) async fn capture_terminal_conversation_state(
     config: &ServerConfig,
     terminal_id: TerminalId,
 ) -> Option<(Vec<UserPrompt>, Option<String>)> {
-    let Some(backend_key) = config.terminal.backend_key_for(terminal_id).await else {
+    let Some((session_key, _)) = config.terminal.terminal_meta_for(terminal_id).await else {
         return None;
     };
+    let session_key = session_key.as_str().to_string();
     let _guard = config
         .terminal
-        .lock_terminal_persistence(&backend_key)
+        .lock_terminal_persistence(&session_key)
         .await;
-    if config
-        .terminal
-        .backend_key_for(terminal_id)
-        .await
-        .as_deref()
-        != Some(backend_key.as_str())
-    {
-        return None;
-    }
     Some(tokio::join!(
-        load_prompt_history(config, &backend_key),
-        load_composing_buffer(config, &backend_key),
+        load_prompt_history(config, &session_key),
+        load_composing_buffer(config, &session_key),
     ))
 }
 
-pub(crate) async fn restore_backend_conversation_state(
+pub(crate) async fn restore_workspace_conversation_state(
     config: &ServerConfig,
-    backend_key: &str,
+    session_key: &str,
     prompt_history: &[UserPrompt],
     composing_buffer: Option<&str>,
 ) {
     let store = config.store.clone();
-    let history_key = TerminalPersistedField::UserMessageHistory.key(backend_key);
-    let draft_key = TerminalPersistedField::Draft.key(backend_key);
+    let history_key = workspace_prompt_history_key(session_key);
+    let draft_key = workspace_draft_key(session_key);
     let prompt_history = prompt_history.to_vec();
     let composing_buffer = composing_buffer.map(str::to_string);
     let _ = tokio::task::spawn_blocking(move || {
@@ -9650,8 +10612,8 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                     )
                 }
             };
-            let history_fut = load_prompt_history(config, &key);
-            let composing_fut = load_composing_buffer(config, &key);
+            let history_fut = load_prompt_history(config, session_key.as_str());
+            let composing_fut = load_composing_buffer(config, session_key.as_str());
             let (snapshot, prompt_history, composing_buffer) =
                 tokio::join!(snapshot_fut, history_fut, composing_fut);
             // `replay_available` reflects whether the snapshot SUCCEEDED, not
@@ -9799,7 +10761,7 @@ pub async fn agent_runtime_snapshot(config: &ServerConfig) -> Vec<AgentTerminalR
     let mut runtimes = Vec::with_capacity(entries.len());
     for (
         terminal_id,
-        backend_key,
+        _backend_key,
         session_key,
         agent_id,
         agent_state,
@@ -9809,7 +10771,9 @@ pub async fn agent_runtime_snapshot(config: &ServerConfig) -> Vec<AgentTerminalR
         model_label,
     ) in entries
     {
-        let last_prompt = load_prompt_history(config, &backend_key).await.pop();
+        let last_prompt = load_prompt_history(config, session_key.as_str())
+            .await
+            .pop();
         runtimes.push(AgentTerminalRuntime {
             terminal_id,
             session_key,
@@ -9987,7 +10951,7 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
     // workspace archived via `x x`, a session removed) before restoring —
     // the durable history has no other GC hook (#468).
     gc_scrollback_files(&workspaces, &lazybox_core::paths::scrollback_dir());
-    gc_session_access_policies(config, &workspaces);
+    gc_session_scoped_terminal_state(config, &workspaces);
 
     // Snapshot live (session_key, kind) pairs so we can dedupe.
     let mut live: std::collections::HashSet<(String, String)> = {
@@ -10071,6 +11035,27 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                 continue;
             }
             let access = load_session_access(config, session.id).await;
+            // The re-spawn mints a fresh backend_key, so the model tier and
+            // no-permission mode the user chose are recovered from the
+            // session-keyed resume twin, not the orphaned backend_key row
+            // (#1386). Access already survives via `load_session_access`;
+            // provider_session_id comes from the workspace below; on-main
+            // sessions never take this path (they persist no session).
+            let resume_twin = match &kind {
+                TerminalKind::Agent(_) => {
+                    load_session_agent_resume_context(config, session.id).await
+                }
+                _ => None,
+            };
+            let model_alias = resume_twin
+                .as_ref()
+                .and_then(|context| context.model_alias.clone());
+            // Restore the exact recorded decision, matching the reattach
+            // (`recover_sessions`) and reauth (`agent_auth`) re-spawns — not a
+            // "true-only" restore, which would silently escalate a session that
+            // ran interactive to unattended if the global `skip_permissions`
+            // default flipped on between the original spawn and this restart.
+            let no_permission_override = resume_twin.as_ref().map(|context| context.no_permission);
             let provider_session_id = match &kind {
                 TerminalKind::Agent(agent_id) => {
                     session.provider_session_ids.get(agent_id).cloned()
@@ -10082,6 +11067,16 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                 kind,
                 workspace.key
             );
+            // The re-spawn mints a BRAND-NEW backend_key, so unlike a reattach
+            // it can't inherit history from the old key. Seed the workspace's
+            // stable prompt history + draft into the spawn so the restored
+            // agent's client snapshot carries the `]]h` view / "you ▸" recap /
+            // `]]r` draft the user had before the restart (root cause of the
+            // history-orphaned-on-respawn bug).
+            let (prompt_history, composing_buffer) = tokio::join!(
+                load_prompt_history(config, session_key.as_str()),
+                load_composing_buffer(config, session_key.as_str()),
+            );
             handle_spawn(
                 config,
                 session_key.clone(),
@@ -10091,6 +11086,10 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
                     resume: true,
                     provider_session_id,
                     access,
+                    model_alias,
+                    no_permission_override,
+                    prompt_history,
+                    composing_buffer,
                     origin: lazybox_ipc::SpawnOrigin::Autonomous(
                         lazybox_ipc::AutonomousTrigger::Restore,
                     ),
@@ -10125,7 +11124,12 @@ pub async fn restore_persisted_sessions(config: &ServerConfig) {
     }
 }
 
-fn gc_session_access_policies(
+/// Sweep the session-keyed durable rows — the access policy and the resume
+/// twin (#1386) — whose owning session no longer appears in any persisted
+/// workspace. Conservative: an unreadable record leaves the keep-set
+/// incomplete, so the sweep bails rather than risk deleting a live session's
+/// state.
+fn gc_session_scoped_terminal_state(
     config: &ServerConfig,
     workspaces: &[lazybox_store::WorkspaceRecord],
 ) {
@@ -10144,17 +11148,19 @@ fn gc_session_access_policies(
                 .map(|session| session.id.to_string()),
         );
     }
-    let Ok(rows) = config.store.list_kv_prefix(SESSION_AGENT_ACCESS_PREFIX) else {
-        return;
-    };
-    for (key, _) in rows {
-        let Some(session_id) = key.strip_prefix(SESSION_AGENT_ACCESS_PREFIX) else {
+    for prefix in [SESSION_AGENT_ACCESS_PREFIX, SESSION_AGENT_RESUME_PREFIX] {
+        let Ok(rows) = config.store.list_kv_prefix(prefix) else {
             continue;
         };
-        if !keep.contains(session_id)
-            && let Err(error) = config.store.delete_kv(&key)
-        {
-            tracing::warn!(%key, %error, "session access-policy cleanup failed");
+        for (key, _) in rows {
+            let Some(session_id) = key.strip_prefix(prefix) else {
+                continue;
+            };
+            if !keep.contains(session_id)
+                && let Err(error) = config.store.delete_kv(&key)
+            {
+                tracing::warn!(%key, %error, "session-scoped terminal-state cleanup failed");
+            }
         }
     }
 }
@@ -11064,6 +12070,7 @@ mod tests {
                 repo_env: vec![("PROJECT_ENV".into(), "test".into())],
                 priority_model_alias: None,
                 autonomous: false,
+                autonomous_untrusted: false,
                 landed_on_main: true,
                 model_alias: None,
                 resume: false,
@@ -11074,6 +12081,9 @@ mod tests {
                 composing_buffer: None,
                 access: AgentRunAccess::Default,
                 shell_command: String::new(),
+                meter: false,
+                remote: false,
+                mcp_config_path: None,
             },
             &lazybox_config::Config::default(),
             &config.agents,
@@ -11244,6 +12254,429 @@ mod tests {
                 ..
             } if id == terminal_id && agent_id == "claude"
         ));
+    }
+
+    // Regression: a live tmux session that survived a restart must be
+    // reattached even when the store also holds many dead terminal rows to
+    // reconcile. The dead-row reconcile used to run FIRST inside a 5s launch
+    // budget and, on a real fleet, burned the whole budget before the
+    // live-attach loop ran — stranding alive agents (invisible in the UI though
+    // their `claude` process kept going). Recovery now attaches survivors first
+    // and sweeps dead rows after, with no wall-clock cancelling the pass.
+    #[tokio::test]
+    async fn recovery_reattaches_live_survivor_before_reconciling_dead_rows() {
+        let backend = crate::backend::MockBackend::new();
+        // The survivor: a live agent session that outlived the daemon.
+        let survivor_key = backend
+            .spawn(
+                &["claude".into()],
+                Some(std::path::Path::new("/tmp")),
+                &[],
+                "work-claude",
+            )
+            .await
+            .expect("spawn survivor backend");
+        let store: std::sync::Arc<dyn lazybox_store::Store> =
+            std::sync::Arc::new(lazybox_store::MemoryStore::new());
+        let seed = ServerConfig::with_store_and_backend(store.clone(), backend.as_backend());
+        let survivor_session = SessionKey::new("github:owner/repo#alive");
+        let survivor_kind = TerminalKind::Agent("claude".into());
+        persist_terminal_meta(&seed, &survivor_key, &survivor_session, &survivor_kind).await;
+
+        // Many dead rows: persisted terminals whose tmux session is gone (never
+        // spawned on this backend). Shells so the reconcile path is pure
+        // register→exit with no agent-state dependence.
+        for n in 0..24 {
+            let dead_key = format!("lazybox-dead-shell-{n}");
+            let dead_session = SessionKey::new(format!("github:owner/repo#dead{n}").as_str());
+            persist_terminal_meta(&seed, &dead_key, &dead_session, &TerminalKind::Shell).await;
+        }
+
+        let restarted = ServerConfig::with_store_and_backend(store, backend.as_backend());
+        recover_sessions(&restarted).await;
+
+        // The live survivor is reattached despite the pile of dead rows.
+        let snapshot = snapshot_terminals(&restarted).await;
+        let survivors: Vec<_> = snapshot
+            .iter()
+            .filter(|t| t.session_key == survivor_session)
+            .collect();
+        assert_eq!(
+            survivors.len(),
+            1,
+            "the live survivor must be reattached even with many dead rows to reconcile"
+        );
+        assert!(matches!(survivors[0].kind, TerminalKind::Agent(ref id) if id == "claude"));
+        // The dead rows are swept, not resurrected as live terminals.
+        assert!(
+            snapshot
+                .iter()
+                .all(|t| !t.session_key.as_str().contains("#dead")),
+            "dead persisted terminals must not surface as live recovered sessions"
+        );
+    }
+
+    // Regression (D3, #1378): the dead-row reconcile pass must honor the
+    // archived set, just as `recover_sessions` does for live survivors. A
+    // persisted `terminal:` row whose workspace the user archived (and whose
+    // workspace row is gone) is a tombstoned orphan — register→Exit would
+    // broadcast a ghost lifecycle event for a workspace that no longer exists.
+    // It must be swept silently. A non-archived dead row still commits Exited,
+    // proving the guard is selective rather than a blanket suppression.
+    #[tokio::test]
+    async fn reconcile_missing_sessions_sweeps_archived_rows_without_broadcasting_exited() {
+        let backend = crate::backend::MockBackend::new();
+        let store: std::sync::Arc<dyn lazybox_store::Store> =
+            std::sync::Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store_and_backend(store.clone(), backend.as_backend());
+
+        // The tombstoned orphan: a persisted row for an archived, row-absent
+        // workspace whose tmux session is already gone (never spawned on this
+        // backend). Shell kind so reconcile is a pure register→exit with no
+        // agent-state dependence.
+        let archived_key = "lazybox-archived-orphan".to_string();
+        let archived_session = SessionKey::new("github:owner/repo#archived");
+        persist_terminal_meta(
+            &config,
+            &archived_key,
+            &archived_session,
+            &TerminalKind::Shell,
+        )
+        .await;
+        assert!(crate::workspace::archive_workspace_key(
+            &config,
+            archived_session.as_str()
+        ));
+
+        // The control: a dead row whose workspace was NOT archived. It must
+        // still commit Exited.
+        let live_key = "lazybox-dead-shell".to_string();
+        let live_session = SessionKey::new("github:owner/repo#dead");
+        persist_terminal_meta(&config, &live_key, &live_session, &TerminalKind::Shell).await;
+
+        // Thread the archived + tombstone sets the way `recover_sessions` does —
+        // the pass no longer re-reads them.
+        let archived_keys = crate::workspace::load_archived_set_strict(&config).ok();
+        let tombstoned_keys = crate::workspace::load_session_tombstones_strict(&config).ok();
+        let mut events = config.bus.subscribe();
+        reconcile_missing_recovered_sessions(
+            &config,
+            &std::collections::HashSet::new(),
+            archived_keys.as_ref(),
+            tombstoned_keys.as_ref(),
+        )
+        .await;
+
+        // Exactly one Exited broadcast — for the control, never the archived
+        // orphan.
+        let mut exited = 0;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event, Event::TerminalExited { .. }) {
+                exited += 1;
+            }
+        }
+        assert_eq!(
+            exited, 1,
+            "only the non-archived dead row may broadcast TerminalExited"
+        );
+
+        // The archived orphan's persisted terminal meta is swept so it cannot
+        // reconstruct a dead session on the next restart either.
+        assert!(
+            store
+                .get_kv(&TerminalPersistedField::Metadata.key(&archived_key))
+                .expect("read archived meta")
+                .is_none(),
+            "the archived orphan's persisted terminal meta must be swept"
+        );
+
+        // Neither dead row surfaces as a live recovered terminal.
+        let snapshot = snapshot_terminals(&config).await;
+        assert!(
+            snapshot.is_empty(),
+            "no dead row may surface as a live recovered terminal"
+        );
+    }
+
+    // Regression (workspace resurrection): the user archives a workspace
+    // (`x x`), quits, and restarts — the deleted workspace must NOT come back.
+    // The failure mode: a tmux session lingered with no live terminal entry
+    // (its agent had exited, tearing down the terminal, but the detached
+    // session survived), so `delete_workspace`'s registry sweep never killed
+    // it. Recovery must consult the persisted archived set, refuse to reattach
+    // the orphan, kill its backend session, and sweep its persisted meta — while
+    // still reattaching a NON-archived survivor (guard against over-killing).
+    #[tokio::test]
+    async fn recovery_kills_orphan_session_for_archived_workspace_but_reattaches_the_rest() {
+        let backend = crate::backend::MockBackend::new();
+        // The orphan: a detached session whose owning workspace the user
+        // archived. On the real box its terminal was already torn down.
+        let archived_key = backend
+            .spawn(
+                &["claude".into()],
+                Some(std::path::Path::new("/tmp")),
+                &[],
+                "archived-agent",
+            )
+            .await
+            .expect("spawn archived backend");
+        // The survivor: a live session for a workspace that is still present.
+        let live_key = backend
+            .spawn(
+                &["claude".into()],
+                Some(std::path::Path::new("/tmp")),
+                &[],
+                "live-agent",
+            )
+            .await
+            .expect("spawn live backend");
+        let store: std::sync::Arc<dyn lazybox_store::Store> =
+            std::sync::Arc::new(lazybox_store::MemoryStore::new());
+        let seed = ServerConfig::with_store_and_backend(store.clone(), backend.as_backend());
+        let archived_session = SessionKey::new("github:owner/repo#archived");
+        let live_session = SessionKey::new("github:owner/repo#live");
+        let kind = TerminalKind::Agent("claude".into());
+        persist_terminal_meta(&seed, &archived_key, &archived_session, &kind).await;
+        persist_terminal_meta(&seed, &live_key, &live_session, &kind).await;
+        // The durable record of "the user got rid of this".
+        assert!(crate::workspace::archive_workspace_key(
+            &seed,
+            archived_session.as_str()
+        ));
+
+        let restarted = ServerConfig::with_store_and_backend(store.clone(), backend.as_backend());
+        recover_sessions(&restarted).await;
+
+        let snapshot = snapshot_terminals(&restarted).await;
+        assert!(
+            snapshot.iter().all(|t| t.session_key != archived_session),
+            "an archived workspace's orphan session must not be reattached"
+        );
+        assert_eq!(
+            snapshot
+                .iter()
+                .filter(|t| t.session_key == live_session)
+                .count(),
+            1,
+            "a non-archived survivor must still be reattached (no over-killing)"
+        );
+
+        // The orphan backend session was killed — it no longer lists as live.
+        assert!(
+            !restarted
+                .backend
+                .list()
+                .await
+                .expect("backend list")
+                .contains(&archived_key),
+            "the orphan backend session for the archived workspace must be killed"
+        );
+        // ...and the live survivor's session remains.
+        assert!(
+            restarted
+                .backend
+                .list()
+                .await
+                .expect("backend list")
+                .contains(&live_key),
+            "the live survivor's backend session must be preserved"
+        );
+
+        // The orphan's persisted per-terminal rows are swept so it cannot be
+        // reconstructed on the NEXT restart either.
+        assert!(
+            store
+                .get_kv(&TerminalPersistedField::Metadata.key(&archived_key))
+                .expect("read archived meta")
+                .is_none(),
+            "the orphan's persisted terminal meta must be swept"
+        );
+        assert!(
+            store
+                .get_kv(&TerminalPersistedField::Metadata.key(&live_key))
+                .expect("read live meta")
+                .is_some(),
+            "the live survivor's persisted terminal meta must be preserved"
+        );
+    }
+
+    // Regression (recreate under an archived key): archiving is permanent
+    // (`archive_workspace_key` only ever inserts) and workspace keys are reused
+    // (`allocate_workspace_key` hands a slug key back once the store row is
+    // gone). So a workspace archived, then recreated under the same name,
+    // carries a key that still lives in the archived set while being fully
+    // live. Recovery must NOT confuse that live session for a deleted-workspace
+    // orphan: with a present workspace row it reattaches, even though the key is
+    // archived. (Without the row-presence check, recovery silently killed the
+    // recreated workspace's session and swept its meta on every restart.)
+    #[tokio::test]
+    async fn recovery_reattaches_recreated_workspace_whose_key_lingers_in_archived_set() {
+        let backend = crate::backend::MockBackend::new();
+        let backend_key = backend
+            .spawn(
+                &["claude".into()],
+                Some(std::path::Path::new("/tmp")),
+                &[],
+                "recreated-agent",
+            )
+            .await
+            .expect("spawn recreated backend");
+        let store: std::sync::Arc<dyn lazybox_store::Store> =
+            std::sync::Arc::new(lazybox_store::MemoryStore::new());
+        let seed = ServerConfig::with_store_and_backend(store.clone(), backend.as_backend());
+        let session_key = SessionKey::new("notes");
+        let kind = TerminalKind::Agent("claude".into());
+        persist_terminal_meta(&seed, &backend_key, &session_key, &kind).await;
+        // The key was archived in a past life...
+        assert!(crate::workspace::archive_workspace_key(
+            &seed,
+            session_key.as_str()
+        ));
+        // ...but a workspace under the same key exists again (recreated by
+        // `x n`, which reused the freed slug key).
+        let workspace = Workspace::empty(WorkspaceKey::new("notes"), "main", Utc::now());
+        seed.store
+            .save_workspace(&WorkspaceRecord {
+                key: workspace.key.as_str().into(),
+                created_at: workspace.created_at,
+                workspace_json: Some(
+                    serde_json::to_string(&workspace).expect("serialize workspace"),
+                ),
+            })
+            .expect("save recreated workspace");
+
+        let restarted = ServerConfig::with_store_and_backend(store.clone(), backend.as_backend());
+        recover_sessions(&restarted).await;
+
+        let snapshot = snapshot_terminals(&restarted).await;
+        assert_eq!(
+            snapshot
+                .iter()
+                .filter(|t| t.session_key == session_key)
+                .count(),
+            1,
+            "a live workspace recreated under a still-archived key must be reattached"
+        );
+        assert!(
+            restarted
+                .backend
+                .list()
+                .await
+                .expect("backend list")
+                .contains(&backend_key),
+            "the recreated workspace's backend session must not be killed"
+        );
+        assert!(
+            store
+                .get_kv(&TerminalPersistedField::Metadata.key(&backend_key))
+                .expect("read recreated meta")
+                .is_some(),
+            "the recreated workspace's persisted terminal meta must be preserved"
+        );
+    }
+
+    // Regression (D2, #1377): a non-archiving removal keeps its resurrection
+    // backstop even when the delete-time orphan sweep fails. An issue collapses
+    // into its PR (`ClosedAuto`), which deletes the row but — unlike `x x` —
+    // does NOT archive it, so a reopened issue can resurface. Its only orphan
+    // protection is the best-effort delete-time `backend.list()` sweep; if that
+    // transiently fails, the detached tmux session survives with no live
+    // terminal. Without the session tombstone, recovery (which keyed only on the
+    // archived set) would reattach it and resurrect the collapsed issue row. The
+    // tombstone is written for every removal reason, so recovery kills the
+    // orphan instead.
+    #[tokio::test]
+    async fn closed_auto_orphan_session_is_not_resurrected_when_delete_time_sweep_failed() {
+        let backend = crate::backend::MockBackend::new();
+        // The orphan: a detached session for the issue that collapsed into its
+        // PR. On the real box its agent had already exited, so there is no live
+        // registry entry for the delete's registry sweep to kill.
+        let orphan_key = backend
+            .spawn(
+                &["claude".into()],
+                Some(std::path::Path::new("/tmp")),
+                &[],
+                "collapsed-issue-agent",
+            )
+            .await
+            .expect("spawn collapsed-issue backend");
+        let store: std::sync::Arc<dyn lazybox_store::Store> =
+            std::sync::Arc::new(lazybox_store::MemoryStore::new());
+        let seed = ServerConfig::with_store_and_backend(store.clone(), backend.as_backend());
+        let key = WorkspaceKey::new("github:owner/repo#123");
+        let session_key = SessionKey::from(key.as_str());
+        let kind = TerminalKind::Agent("claude".into());
+        persist_terminal_meta(&seed, &orphan_key, &session_key, &kind).await;
+        let workspace = Workspace::empty(key.clone(), "main", Utc::now());
+        seed.store
+            .save_workspace(&WorkspaceRecord {
+                key: key.as_str().into(),
+                created_at: workspace.created_at,
+                workspace_json: Some(
+                    serde_json::to_string(&workspace).expect("serialize workspace"),
+                ),
+            })
+            .expect("save collapsed-issue workspace");
+
+        // Fail the very next `backend.list()` — the delete-time orphan sweep —
+        // so it can't reach the survivor. Recovery's later `list()` succeeds.
+        backend.fail_next_lists(1).await;
+        let reclaimed = crate::workspace::WorkspaceLifecycle::new(&seed)
+            .remove(&key, crate::workspace::WorkspaceRemovalReason::ClosedAuto)
+            .await;
+        assert!(
+            reclaimed.is_some(),
+            "the ClosedAuto removal commits even though the orphan sweep's list() failed"
+        );
+
+        // ClosedAuto must NOT archive (a reopened issue has to resurface), yet
+        // the session tombstone was recorded so recovery still guards the orphan.
+        assert!(
+            !crate::workspace::load_archived_set(&seed).contains(session_key.as_str()),
+            "ClosedAuto must not add the key to the inbox-suppression archived set"
+        );
+        assert!(
+            crate::workspace::load_session_tombstones_strict(&seed)
+                .expect("read tombstones")
+                .contains(session_key.as_str()),
+            "every removal reason must record a session tombstone"
+        );
+        // The sweep failed, so the orphan session is still alive going into the
+        // restart — exactly the state that used to resurrect the row.
+        assert!(
+            seed.backend
+                .list()
+                .await
+                .expect("backend list")
+                .contains(&orphan_key),
+            "precondition: the orphan session survived the failed delete-time sweep"
+        );
+
+        let restarted = ServerConfig::with_store_and_backend(store.clone(), backend.as_backend());
+        recover_sessions(&restarted).await;
+
+        // The orphan is killed, not reattached — no resurrected terminal.
+        let snapshot = snapshot_terminals(&restarted).await;
+        assert!(
+            snapshot.iter().all(|t| t.session_key != session_key),
+            "the collapsed issue's orphan session must not be reattached"
+        );
+        assert!(
+            !restarted
+                .backend
+                .list()
+                .await
+                .expect("backend list")
+                .contains(&orphan_key),
+            "recovery must kill the tombstoned orphan session"
+        );
+        assert!(
+            store
+                .get_kv(&TerminalPersistedField::Metadata.key(&orphan_key))
+                .expect("read orphan meta")
+                .is_none(),
+            "the orphan's persisted terminal meta must be swept"
+        );
     }
 
     #[tokio::test]
@@ -11910,7 +13343,7 @@ mod tests {
 
         let claude = lazybox_agents::agent::builtins::Claude;
         assert_eq!(
-            gateway_env_for_agent(&cfg, Some(&claude), true),
+            gateway_env_for_agent(&cfg, Some(&claude), true, false, "sess-x"),
             vec![(
                 "ANTHROPIC_BASE_URL".to_string(),
                 "http://gateway.internal".to_string()
@@ -11922,7 +13355,7 @@ mod tests {
             &lazybox_agents::agent::builtins::Cursor,
         ] {
             assert_eq!(
-                gateway_env_for_agent(&cfg, Some(agent), true),
+                gateway_env_for_agent(&cfg, Some(agent), true, false, "sess-x"),
                 vec![(
                     "OPENAI_BASE_URL".to_string(),
                     "http://gateway.internal".to_string()
@@ -11936,13 +13369,13 @@ mod tests {
         // No gateway configured → nothing for any agent.
         let bare = lazybox_config::Config::default();
         let claude = lazybox_agents::agent::builtins::Claude;
-        assert!(gateway_env_for_agent(&bare, Some(&claude), true).is_empty());
+        assert!(gateway_env_for_agent(&bare, Some(&claude), true, false, "sess-x").is_empty());
 
         let mut cfg = lazybox_config::Config::default();
         cfg.agent.llm_gateway_url = Some("http://gateway.internal".into());
 
         // Non-agent spawn (shell / log tail) passes `None`.
-        assert!(gateway_env_for_agent(&cfg, None, true).is_empty());
+        assert!(gateway_env_for_agent(&cfg, None, true, false, "sess-x").is_empty());
 
         // A GenericCli agent has no inferable provider → no injection.
         let generic = lazybox_agents::agent::builtins::GenericCli {
@@ -11952,35 +13385,116 @@ mod tests {
             resume_cmd: None,
             asking_patterns: vec![],
         };
-        assert!(gateway_env_for_agent(&cfg, Some(&generic), true).is_empty());
+        assert!(gateway_env_for_agent(&cfg, Some(&generic), true, false, "sess-x").is_empty());
 
         // A whitespace-only URL is treated as unset.
         let mut blank = lazybox_config::Config::default();
         blank.agent.llm_gateway_url = Some("   ".into());
-        assert!(gateway_env_for_agent(&blank, Some(&claude), true).is_empty());
+        assert!(gateway_env_for_agent(&blank, Some(&claude), true, false, "sess-x").is_empty());
     }
 
     #[test]
     fn metering_proxy_routes_only_metered_spawns() {
-        // With the proxy enabled and bound, an interactive (metered) spawn
-        // is pointed at the per-agent proxy URL. A structured run passes
-        // `meter = false` and keeps the direct routing, so its usage isn't
-        // counted twice — once via the proxy, once via its stream-json
-        // (#1109).
+        // With the proxy enabled and bound, a spawn that opted in (metered) is
+        // pointed at the per-session proxy URL. A spawn that did NOT opt in
+        // (meter = false) keeps direct routing even though the proxy is
+        // running — so turning the proxy on never redirects a session that
+        // didn't ask, and a structured run isn't counted twice (#1109).
         crate::proxy::set_port(45999);
         let mut cfg = lazybox_config::Config::default();
         cfg.agent.metering_proxy = true;
         let claude = lazybox_agents::agent::builtins::Claude;
 
         assert_eq!(
-            gateway_env_for_agent(&cfg, Some(&claude), true),
+            gateway_env_for_agent(&cfg, Some(&claude), true, false, "github-acme-widget-7"),
             vec![(
                 "ANTHROPIC_BASE_URL".to_string(),
-                "http://127.0.0.1:45999/anthropic/claude".to_string()
+                "http://127.0.0.1:45999/anthropic/claude/github-acme-widget-7".to_string()
             )]
         );
-        // Structured run opts out: no proxy URL, and no gateway configured.
-        assert!(gateway_env_for_agent(&cfg, Some(&claude), false).is_empty());
+        // Opted out: no proxy URL, and no gateway configured.
+        assert!(
+            gateway_env_for_agent(&cfg, Some(&claude), false, false, "github-acme-widget-7")
+                .is_empty()
+        );
+
+        // `meter_all` overrides the per-session opt-in: every spawn routes.
+        cfg.agent.meter_all = true;
+        assert_eq!(
+            gateway_env_for_agent(&cfg, Some(&claude), false, false, "github-acme-widget-7"),
+            vec![(
+                "ANTHROPIC_BASE_URL".to_string(),
+                "http://127.0.0.1:45999/anthropic/claude/github-acme-widget-7".to_string()
+            )]
+        );
+        // …but a remote workspace is never routed even under `meter_all`:
+        // the proxy URL is this host's loopback, unreachable from the box.
+        assert!(
+            gateway_env_for_agent(&cfg, Some(&claude), true, true, "github-acme-widget-7")
+                .is_empty(),
+            "remote spawn must not be handed the local proxy URL",
+        );
+    }
+
+    #[test]
+    fn metering_proxy_skips_unmeterable_agents() {
+        // `cursor-agent` speaks OpenAI but ignores `OPENAI_BASE_URL`, so
+        // routing it through the proxy captures nothing — it would show
+        // metered while it isn't. `meterable() == false` keeps it direct even
+        // when metered, so metering is never a silent bypass.
+        // `port()` is a process-global `OnceLock` (first setter wins), so use
+        // the same value the sibling proxy test sets — assertions here only
+        // depend on the port being present, not its exact number.
+        crate::proxy::set_port(45999);
+        let mut cfg = lazybox_config::Config::default();
+        cfg.agent.metering_proxy = true;
+        cfg.agent.meter_all = true;
+        let cursor = lazybox_agents::agent::builtins::Cursor;
+        assert!(
+            gateway_env_for_agent(&cfg, Some(&cursor), true, false, "github-acme-widget-7")
+                .is_empty(),
+            "cursor-agent ignores the base-URL env, so it is never proxy-routed",
+        );
+        // Claude honors it and is routed under the same config.
+        let claude = lazybox_agents::agent::builtins::Claude;
+        assert!(
+            !gateway_env_for_agent(&cfg, Some(&claude), true, false, "github-acme-widget-7")
+                .is_empty(),
+            "a meterable agent is still routed",
+        );
+    }
+
+    #[test]
+    fn space_metering_meters_every_workspace_in_the_space() {
+        // Approach C: a workspace whose source sits in a metered Space is
+        // routed even without its own `$ meter` flag. Here `obin-ai/platform`
+        // auto-seeds into the "obin-ai" Space (owner segment); metering that
+        // Space name meters the workspace. An unlisted source is untouched, and
+        // an empty set never meters — the same non-redirect guarantee as the
+        // per-workspace canary.
+        let mut task = task_for("github", "obin-ai/platform#1");
+        task.repo = Some("obin-ai/platform".into());
+        let ws = Workspace::from_task(task, chrono::Utc::now());
+
+        let mut cfg = lazybox_config::Config::default();
+        assert!(
+            !workspace_in_metered_space(&cfg, &ws),
+            "empty metered_spaces never meters",
+        );
+
+        cfg.agent.metered_spaces.insert("obin-ai".into());
+        assert!(
+            workspace_in_metered_space(&cfg, &ws),
+            "source in a metered Space is metered",
+        );
+
+        let mut other = task_for("github", "acme/widget#1");
+        other.repo = Some("acme/widget".into());
+        let other_ws = Workspace::from_task(other, chrono::Utc::now());
+        assert!(
+            !workspace_in_metered_space(&cfg, &other_ws),
+            "a source outside the metered Space stays direct",
+        );
     }
 
     #[test]
@@ -13237,8 +14751,17 @@ mod tests {
         let kind = TerminalKind::Agent("claude".into());
         let mut rx = config.bus.subscribe();
         // No claim, no terminal: the winner is already gone.
-        collapse_onto_inflight_spawn(&config, &key, &kind, false, AgentRunAccess::Default, None)
-            .await;
+        collapse_onto_inflight_spawn(
+            &config,
+            &key,
+            &kind,
+            false,
+            AgentRunAccess::Default,
+            None,
+            false,
+            true,
+        )
+        .await;
         match rx.try_recv().expect("a retry notice is broadcast") {
             Event::ProviderError { source, kind, .. } => {
                 assert_eq!(source, "spawn");
@@ -13307,6 +14830,61 @@ mod tests {
             find_existing_singleton(&config, &sk, &kind, None).await,
             Some(tid),
             "the auto-fix `None` lookup finds it on any checkout",
+        );
+    }
+
+    /// #1372: a terminal whose agent has EXITED (killed, or a recovered
+    /// session whose shell survives but whose agent died) is not a live
+    /// singleton. A bare `w` (`force_new: false`) must NOT collapse onto it
+    /// — otherwise the prompt is injected into a dead-agent shell and no
+    /// fresh agent ever starts. The auto-fix `None` lookup must skip it too:
+    /// an exited agent isn't "already working" the PR.
+    #[tokio::test]
+    async fn find_existing_singleton_skips_an_exited_agent() {
+        let config = ServerConfig::in_memory();
+        let sk: SessionKey = "test:ws-exited".into();
+        let kind = TerminalKind::Agent("claude".into());
+        let tid = TerminalId(1);
+
+        config
+            .terminal
+            .register_terminal(
+                tid,
+                "backend-exited-1".to_string(),
+                sk.clone(),
+                kind.clone(),
+            )
+            .await;
+        config
+            .terminal
+            .record_spawn_attributes(tid, None, AgentRunAccess::Default, false, false, None)
+            .await;
+
+        // A live agent is still the reuse target.
+        config
+            .terminal
+            .record_agent_state(tid, lazybox_ipc::AgentState::Working)
+            .await;
+        assert_eq!(
+            find_existing_singleton(&config, &sk, &kind, Some(false)).await,
+            Some(tid),
+            "a live agent is still the reuse target",
+        );
+
+        // Once it exits, the same lookup must NOT find it.
+        config
+            .terminal
+            .record_agent_state(tid, lazybox_ipc::AgentState::Exited { code: Some(137) })
+            .await;
+        assert_eq!(
+            find_existing_singleton(&config, &sk, &kind, Some(false)).await,
+            None,
+            "a dead agent must not be collapsed onto — w spawns fresh",
+        );
+        assert_eq!(
+            find_existing_singleton(&config, &sk, &kind, None).await,
+            None,
+            "the auto-fix lookup treats an exited agent as not working",
         );
     }
 
@@ -13895,9 +15473,10 @@ mod tests {
         );
     }
 
-    /// The legacy single-value `terminal-msg` row migrates into the new
-    /// history as one `Typed` entry the first time the history is read,
-    /// so a prompt recorded before #523 isn't lost on upgrade.
+    /// The legacy single-value `terminal-msg` row is folded into the stable
+    /// `workspace-msgs` row by the one-time startup migration as one `Typed`
+    /// entry (timestamp 0), so a prompt recorded before #523 isn't lost on
+    /// upgrade, and a later live submit appends after it.
     #[tokio::test]
     async fn legacy_last_message_migrates_into_history() {
         let (config, _mock) = ServerConfig::in_memory_with_mock();
@@ -13907,32 +15486,281 @@ mod tests {
             .await
             .unwrap();
         let id = TerminalId(9);
+        let session_key: SessionKey = "acme/widget#2".into();
+        let kind = TerminalKind::Agent("claude".into());
         config
             .terminal
-            .register_terminal(
-                id,
-                key.clone(),
-                "acme/widget#2".into(),
-                TerminalKind::Agent("claude".into()),
-            )
+            .register_terminal(id, key.clone(), session_key.clone(), kind.clone())
             .await;
+        // The migration resolves backend_key → session_key through the durable
+        // `terminal:{bk}` meta row, so seed it alongside the legacy prompt.
+        let (meta_key, meta_payload) =
+            encode_terminal_meta_record(&key, &session_key, &kind).unwrap();
+        config.store.set_kv(&meta_key, &meta_payload).unwrap();
         config
             .store
             .set_kv(&TerminalPersistedField::UserMessage.key(&key), "old prompt")
             .unwrap();
 
-        let migrated = load_prompt_history(&config, &key).await;
+        migrate_prompt_history_to_workspace_keys(&config).await;
+
+        let migrated = load_prompt_history(&config, session_key.as_str()).await;
         assert_eq!(migrated.len(), 1);
         assert_eq!(migrated[0].text, "old prompt");
         assert_eq!(migrated[0].source, PromptSource::Typed);
+        // The legacy row is swept once folded.
+        assert_eq!(
+            config
+                .store
+                .get_kv(&TerminalPersistedField::UserMessage.key(&key))
+                .unwrap(),
+            None,
+        );
 
         // A new submit appends after the migrated entry.
         handle_record_user_message(&config, id, &typed("new prompt")).await;
-        let history = load_prompt_history(&config, &key).await;
+        let history = load_prompt_history(&config, session_key.as_str()).await;
         assert_eq!(
             history.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
             vec!["old prompt", "new prompt"],
         );
+    }
+
+    /// Regression (history-orphaned-on-respawn): a restart that RE-SPAWNS a
+    /// dropped session mints a BRAND-NEW backend_key. Because history is keyed
+    /// by the stable workspace session_key (not the backend_key), the prior
+    /// `]]h` history / "you ▸" recap / `]]r` draft still surface on the fresh
+    /// terminal — the durable scrollback's respawn survival extended to the
+    /// input side.
+    #[tokio::test]
+    async fn history_survives_respawn_under_a_new_backend_key() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let session_key: SessionKey = "acme/widget#7".into();
+        let kind = TerminalKind::Agent("claude".into());
+
+        // First run: a live terminal records history + a draft.
+        let old_key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        let old_id = TerminalId(1);
+        config
+            .terminal
+            .register_terminal(old_id, old_key.clone(), session_key.clone(), kind.clone())
+            .await;
+        handle_record_user_message(&config, old_id, &typed("rebase onto main")).await;
+        handle_record_user_message(&config, old_id, &typed("run the tests")).await;
+        handle_record_composing_buffer(&config, old_id, "half-typed follow up").await;
+
+        // Simulate the session being GONE: the old terminal is forgotten and its
+        // backend_key vanishes (no reattach). No `workspace-*` row is deleted.
+        config.terminal.remove_terminal(old_id).await;
+
+        // Restore-style re-spawn: the SAME workspace comes back under a brand-new
+        // backend_key + terminal id, seeded from the persisted workspace state
+        // exactly as `restore_persisted_sessions` does.
+        let (prompt_history, composing_buffer) = tokio::join!(
+            load_prompt_history(&config, session_key.as_str()),
+            load_composing_buffer(&config, session_key.as_str()),
+        );
+        assert_eq!(
+            prompt_history.len(),
+            2,
+            "history must outlive the old terminal"
+        );
+        assert_eq!(composing_buffer.as_deref(), Some("half-typed follow up"));
+
+        let new_key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "t")
+            .await
+            .unwrap();
+        assert_ne!(new_key, old_key, "respawn must mint a fresh backend_key");
+        let new_id = TerminalId(2);
+        config
+            .terminal
+            .register_terminal(new_id, new_key, session_key.clone(), kind.clone())
+            .await;
+
+        // The fresh terminal's client snapshot carries the prior history + draft.
+        let snapshot = snapshot_terminals(&config).await;
+        let restored = snapshot
+            .iter()
+            .find(|s| s.terminal_id == new_id)
+            .expect("respawned terminal in snapshot");
+        assert_eq!(
+            restored
+                .prompt_history
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["rebase onto main", "run the tests"],
+        );
+        assert_eq!(
+            restored.composing_buffer.as_deref(),
+            Some("half-typed follow up")
+        );
+    }
+
+    /// The one-time re-key migration folds legacy `terminal-msgs`/`terminal-draft`
+    /// rows (keyed by backend_key) into the stable `workspace-*` scheme: entries
+    /// from multiple backend_keys in the SAME workspace are merged, time-sorted,
+    /// and capped; legacy rows are swept; the guard flag is set; and a second run
+    /// is a no-op.
+    #[tokio::test]
+    async fn history_rekey_migration_folds_merges_and_is_idempotent() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let session_key: SessionKey = "acme/widget#9".into();
+        let kind = TerminalKind::Agent("claude".into());
+        let store = &config.store;
+
+        // Two backend_keys that both belong to ONE workspace (an old survivor and
+        // a later respawn), each with its own persisted meta + history slice, and
+        // one draft.
+        for (bk, entries, draft) in [
+            (
+                "lazybox-widget-100-1",
+                vec![("first", 10u64), ("third", 30)],
+                Some("stale draft"),
+            ),
+            (
+                "lazybox-widget-200-1",
+                vec![("second", 20u64)],
+                None::<&str>,
+            ),
+        ] {
+            let (meta_key, meta_payload) =
+                encode_terminal_meta_record(bk, &session_key, &kind).unwrap();
+            store.set_kv(&meta_key, &meta_payload).unwrap();
+            let history: Vec<UserPrompt> = entries
+                .into_iter()
+                .map(|(text, ts)| UserPrompt {
+                    text: text.to_string(),
+                    timestamp_ms: ts,
+                    source: PromptSource::Typed,
+                })
+                .collect();
+            store
+                .set_kv(
+                    &TerminalPersistedField::UserMessageHistory.key(bk),
+                    &serde_json::to_string(&history).unwrap(),
+                )
+                .unwrap();
+            if let Some(draft) = draft {
+                store
+                    .set_kv(&TerminalPersistedField::Draft.key(bk), draft)
+                    .unwrap();
+            }
+        }
+
+        migrate_prompt_history_to_workspace_keys(&config).await;
+
+        // Merged across both backend_keys and sorted by timestamp.
+        let history = load_prompt_history(&config, session_key.as_str()).await;
+        assert_eq!(
+            history.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
+            vec!["first", "second", "third"],
+        );
+        assert_eq!(
+            load_composing_buffer(&config, session_key.as_str())
+                .await
+                .as_deref(),
+            Some("stale draft"),
+        );
+        // Legacy rows swept, guard flag set.
+        assert_eq!(
+            store
+                .get_kv(&TerminalPersistedField::UserMessageHistory.key("lazybox-widget-100-1"))
+                .unwrap(),
+            None,
+        );
+        assert_eq!(
+            store
+                .get_kv(&TerminalPersistedField::Draft.key("lazybox-widget-100-1"))
+                .unwrap(),
+            None,
+        );
+        assert_eq!(
+            store.get_kv(HISTORY_REKEY_FLAG_KEY).unwrap().as_deref(),
+            Some("1")
+        );
+
+        // Idempotent: a second run touches nothing (and doesn't duplicate).
+        migrate_prompt_history_to_workspace_keys(&config).await;
+        let after = load_prompt_history(&config, session_key.as_str()).await;
+        assert_eq!(
+            after.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
+            vec!["first", "second", "third"],
+        );
+    }
+
+    /// The issue→PR rebadge relabels a workspace's history + draft onto the new
+    /// session_key (merging + time-sorting onto anything the target already has,
+    /// and moving the draft only when the target has none), and clears the source
+    /// rows — so the `]]h`/recap/draft follow the terminal onto its PR badge.
+    #[test]
+    fn rebadge_moves_and_merges_workspace_history_and_draft() {
+        use lazybox_store::Store;
+        let store = lazybox_store::MemoryStore::new();
+        let from = "acme/issue#1";
+        let to = "acme/pr#2";
+
+        let seed = |sk: &str, prompts: &[(&str, u64)], draft: Option<&str>| {
+            let history: Vec<UserPrompt> = prompts
+                .iter()
+                .map(|(text, ts)| UserPrompt {
+                    text: (*text).to_string(),
+                    timestamp_ms: *ts,
+                    source: PromptSource::Typed,
+                })
+                .collect();
+            store
+                .set_kv(
+                    &workspace_prompt_history_key(sk),
+                    &serde_json::to_string(&history).unwrap(),
+                )
+                .unwrap();
+            if let Some(draft) = draft {
+                store.set_kv(&workspace_draft_key(sk), draft).unwrap();
+            }
+        };
+        // Source (issue) has history + a draft; the PR already carries an earlier
+        // prompt and no draft.
+        seed(
+            from,
+            &[("issue-early", 10), ("issue-late", 30)],
+            Some("wip"),
+        );
+        seed(to, &[("pr-mid", 20)], None);
+
+        let mutations = rebadge_workspace_history_mutations(&store, from, to);
+        store.apply_batch(&mutations).unwrap();
+
+        // Target row is the time-sorted merge of both; source is cleared.
+        assert_eq!(
+            load_prompt_history_blocking(&store, &workspace_prompt_history_key(to))
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["issue-early", "pr-mid", "issue-late"],
+        );
+        assert!(
+            load_prompt_history_blocking(&store, &workspace_prompt_history_key(from)).is_empty()
+        );
+        assert_eq!(
+            store.get_kv(&workspace_draft_key(to)).unwrap().as_deref(),
+            Some("wip"),
+        );
+        assert_eq!(store.get_kv(&workspace_draft_key(from)).unwrap(), None);
+    }
+
+    /// A rebadge to the same key is a no-op (no self-delete that would drop the
+    /// history).
+    #[test]
+    fn rebadge_to_same_key_is_a_noop() {
+        let store = lazybox_store::MemoryStore::new();
+        assert!(rebadge_workspace_history_mutations(&store, "acme/x#1", "acme/x#1").is_empty());
     }
 
     /// Count-based eviction keeps the history bounded, dropping oldest.
@@ -14458,6 +16286,75 @@ mod tests {
         );
     }
 
+    /// Regression (multi-select broadcast, issue #122 follow-up): injecting
+    /// into a *Done* agent must NOT self-confirm the submit.
+    /// `write_prompt_sequence` used to flip the badge `Done→Working`
+    /// (`mark_done_agent_working`) immediately after the submit write, which
+    /// broadcasts a `Working` transition on the very bus
+    /// `confirm_prompt_submission` treats as proof-of-submission. On the common
+    /// bulk case — fanning new work out to finished (Done) agents — that
+    /// synthetic evidence made the confirm loop return "submitted" and skip the
+    /// Enter resend, so a swallowed soft-newline left the prompt pasted but
+    /// unsent. The optimistic flip now runs only AFTER a genuine confirmation,
+    /// so a Done agent that never actually starts working still gets its Enter
+    /// resent and keeps its honest Done badge meanwhile.
+    #[tokio::test]
+    async fn inject_into_done_agent_does_not_self_confirm_and_resends_enter() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&["claude".into()], None, &[], "done-agent-inject")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(122);
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            SessionKey::new("done-agent-inject"),
+            "claude",
+            Some(lazybox_ipc::AgentState::Done),
+            None,
+        )
+        .await;
+
+        // The agent never emits a genuine `Working` transition — the mock
+        // produces no output, standing in for a swallowed Enter. The only path
+        // to a second `\r` is a real resend firing.
+        handle_inject_prompt(&config, id, "bulk work item", None, true).await;
+
+        // Wait for the initial submit `\r` plus at least one resend `\r`.
+        // Before the fix the self-inflicted Done→Working flip confirmed
+        // immediately and exactly one `\r` (the initial submit) was ever
+        // written.
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let cr_writes = mock
+                    .writes_for(&backend_key)
+                    .await
+                    .into_iter()
+                    .filter(|w| w.as_slice() == b"\r")
+                    .count();
+                if cr_writes >= 2 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect(
+            "a Done agent whose Enter is swallowed must get the Enter RESENT — \
+             the optimistic Done→Working flip must not self-confirm the submit",
+        );
+
+        // The badge must NOT have been optimistically flipped to Working:
+        // submission was never confirmed, so the honest Done state stands.
+        assert_eq!(
+            config.terminal.agent_state_for(id).await,
+            Some(lazybox_ipc::AgentState::Done),
+            "an unconfirmed submit must not manufacture a Working badge",
+        );
+    }
+
     #[tokio::test]
     async fn rejected_submit_retry_emits_typed_terminal_failure() {
         let config = ServerConfig::in_memory_with_mock().0;
@@ -14889,26 +16786,33 @@ mod tests {
     #[test]
     fn skip_permissions_follows_per_kind_toggles() {
         let mut cfg = lazybox_config::Config::default();
-        // Defaults: autonomous on, interactive off.
-        assert!(cfg.agent.autonomous_skip_permissions);
+        // Defaults: autonomous unset (trigger-trust-driven), interactive off.
+        assert_eq!(cfg.agent.autonomous_skip_permissions, None);
         assert!(!cfg.agent.skip_permissions);
 
-        // Autonomous + autonomous-toggle on → bypass.
-        assert!(skip_permissions_for(true, &cfg));
-        // Interactive defaults off → keep the prompt.
-        assert!(!skip_permissions_for(false, &cfg));
+        // Autonomous, trusted trigger (your own work) → bypass (frictionless).
+        assert!(skip_permissions_for(true, &cfg, false));
+        // Autonomous, foreign trigger → prompts back on (#1392).
+        assert!(!skip_permissions_for(true, &cfg, true));
+        // Interactive defaults off → keep the prompt (trust irrelevant).
+        assert!(!skip_permissions_for(false, &cfg, false));
+        assert!(!skip_permissions_for(false, &cfg, true));
 
         // User opts interactive sessions into skip mode.
         cfg.agent.skip_permissions = true;
-        assert!(skip_permissions_for(false, &cfg));
+        assert!(skip_permissions_for(false, &cfg, false));
         // ...and that's independent of the autonomous toggle.
-        assert!(skip_permissions_for(true, &cfg));
+        assert!(skip_permissions_for(true, &cfg, false));
 
-        // Paranoid user flips the autonomous toggle off; interactive
-        // skip is unaffected by it.
-        cfg.agent.autonomous_skip_permissions = false;
-        assert!(!skip_permissions_for(true, &cfg));
-        assert!(skip_permissions_for(false, &cfg));
+        // Paranoid user pins the autonomous toggle off; it wins over the
+        // trusted default and interactive skip is unaffected by it.
+        cfg.agent.autonomous_skip_permissions = Some(false);
+        assert!(!skip_permissions_for(true, &cfg, false));
+        assert!(skip_permissions_for(false, &cfg, false));
+
+        // Trusting user pins it on; it wins even for a foreign trigger.
+        cfg.agent.autonomous_skip_permissions = Some(true);
+        assert!(skip_permissions_for(true, &cfg, true));
     }
 
     #[test]
@@ -15486,6 +17390,23 @@ mod tests {
     }
 
     #[test]
+    fn claude_hook_command_emits_session_context_but_codex_does_not() {
+        // Claude's settings-file hook carries the marker that turns
+        // `SessionStart` into the lazybox capability blurb; Codex's argv hook
+        // omits it (its stdout-as-context behavior is unverified).
+        let claude = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7");
+        assert!(
+            claude.contains("hook-ingest --backend-key \"lzb-sess-7\" --emit-session-context"),
+            "claude hook must carry the session-context marker: {claude}"
+        );
+        let codex = hook_command_keyfile(Path::new("/opt/lazybox"), Path::new("/run/lzb/key-7"));
+        assert!(
+            !codex.contains("--emit-session-context"),
+            "codex hook must not carry the session-context marker: {codex}"
+        );
+    }
+
+    #[test]
     fn hook_command_placeholder_is_guarded_and_flagless() {
         let cmd = hook_command_placeholder(Path::new("/opt/lazybox"));
         assert!(cmd.starts_with("[ -x \"/opt/lazybox\" ]"), "{cmd}");
@@ -15841,6 +17762,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn jira_repo_for_task_resolves_mapped_project() {
+        let mut cfg = lazybox_config::Config::default();
+        cfg.providers
+            .jira
+            .projects
+            .insert("ENG".into(), "acme/widget".into());
+        let mut t = task_for("jira", "ENG-123");
+        t.repo = Some("jira/acme".into());
+        assert_eq!(jira_repo_for_task(&cfg, &t).unwrap(), "acme/widget");
+    }
+
+    /// An unmapped project is a hard error whose wire text the client
+    /// classifies as `JiraUnmapped` and parses the project back out of, so
+    /// the modal offers the repo picker — never a clone of `jira/<site>`.
+    #[test]
+    fn jira_repo_for_task_unmapped_project_errors() {
+        let cfg = lazybox_config::Config::default();
+        let mut t = task_for("jira", "ENG-123");
+        t.repo = Some("jira/acme".into());
+        let message = jira_repo_for_task(&cfg, &t).unwrap_err().to_string();
+        assert_eq!(
+            lazybox_ipc::WorktreeRecovery::classify(&message),
+            lazybox_ipc::WorktreeRecovery::JiraUnmapped,
+        );
+        assert_eq!(
+            lazybox_ipc::WorktreeRecovery::jira_project(&message).as_deref(),
+            Some("ENG"),
+        );
+    }
+
     /// A Linear ticket with no team at all is likewise a hard error.
     #[test]
     fn linear_repo_for_task_teamless_errors() {
@@ -15944,6 +17896,21 @@ mod tests {
     fn derive_branch_for_workspace_uses_workspace_key() {
         let ws = Workspace::empty(WorkspaceKey::new("my-experiment"), "main", Utc::now());
         assert_eq!(derive_branch_for_workspace("", &ws), "my-experiment");
+    }
+
+    /// A directory/file conflict retries on a *leaf* sibling name, counting
+    /// from `-2`. The suffix keeps the candidate out of the `<branch>/*`
+    /// namespace that triggered the conflict, so it can't re-collide the same
+    /// way — the recovery the provisioning loop leans on when a workspace
+    /// named `release` meets an existing `release/*` branch.
+    #[test]
+    fn disambiguated_branch_appends_leaf_suffix() {
+        assert_eq!(disambiguated_branch("release", 1), "release-2");
+        assert_eq!(disambiguated_branch("release", 2), "release-3");
+        assert_eq!(
+            disambiguated_branch("lazybox/issue-42", 1),
+            "lazybox/issue-42-2"
+        );
     }
 
     /// A non-empty prefix namespaces the branch — `lazybox` restores

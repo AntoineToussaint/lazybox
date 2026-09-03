@@ -26,6 +26,7 @@
           "access": "Default",
           "client_request_id": "web-1",
           "cwd": null,
+          "force_new": false,
           "initial_prompt": null,
           "initial_snippet": null,
           "kind": {
@@ -45,6 +46,7 @@
           "access": "Default",
           "client_request_id": "web-2",
           "cwd": null,
+          "force_new": false,
           "initial_prompt": null,
           "initial_snippet": null,
           "kind": "Shell",
@@ -174,11 +176,13 @@
           "cleanup_prompt": "unresolved",
           "created_at": "2023-11-14T22:13:20Z",
           "gh_issues": [],
+          "hopper": null,
           "key": "github-o-r-42",
           "last_viewed_at": null,
           "linear_issues": [],
           "linked_checkout": null,
           "local": false,
+          "metered": false,
           "name": "PR o/r#42",
           "notes": "",
           "policies": {
@@ -233,13 +237,18 @@
           "project_key": "github-o-r",
           "read_indices": [],
           "remote": null,
-          "schema": 4,
+          "schema": 10,
           "seen_count": 0,
-          "sent_snippets": [],
+          "sent_snippets": {
+            "recent": [],
+            "total": 0
+          },
           "sessions": [],
+          "snooze_wake": null,
           "snoozed_until": null,
           "track_main": false,
-          "track_main_behind": false
+          "track_main_behind": false,
+          "woke_at": null
         }
       ]
     }

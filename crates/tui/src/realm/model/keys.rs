@@ -16,6 +16,7 @@
 use super::{
     Id, Model, PaneFocus, TerminalDrag, emit_clipboard_copy, find_action_for_seq,
     find_action_for_stroke, key_event_to_stroke, rect_contains, section_rank, seq_continuations,
+    seq_continuations_available,
 };
 use crate::realm::keymap::realm_key_to_crossterm;
 use lazybox_ipc::Command as IpcCommand;
@@ -36,6 +37,37 @@ impl lazybox_tui_core::dispatch::AgentTerminalView for crate::realm::components:
 }
 
 impl<T: TerminalAdapter> Model<T> {
+    /// [`seq_continuations_available`] plus the one gate pure
+    /// `availability` can't express: a repo-scoped leader action needs
+    /// the cursor *inside a repo group* (#1436). `availability` only sees
+    /// `Option<&Workspace>`, which is `None` alike on a bare repo header
+    /// (where `g i` works — `cursor_repo` walks up to the header) and on a
+    /// Space / Focused header (where it can't). So `BrowseRepoIssues` is
+    /// dropped from the which-key popup when the cursor isn't in a repo
+    /// group, instead of being offered only to flash-reject. Directly
+    /// typing the chord still resolves through the dispatcher's own graceful
+    /// "move onto a repo" flash — the safety net for muscle memory.
+    pub(super) fn leader_continuations<'c>(
+        &'c self,
+        prefix: &lazybox_tui_core::action::KeyStroke,
+        focus: PaneFocus,
+    ) -> Vec<(
+        lazybox_tui_core::action::KeyStroke,
+        &'c lazybox_tui_core::action::CatalogEntry,
+    )> {
+        use lazybox_tui_core::action::ActionKind;
+        let in_repo_group = self.sidebar.cursor_repo().is_some();
+        seq_continuations_available(
+            prefix,
+            focus,
+            &self.catalog,
+            self.sidebar.selected_workspace(),
+        )
+        .into_iter()
+        .filter(|(_, e)| in_repo_group || !matches!(e.kind, ActionKind::BrowseRepoIssues))
+        .collect()
+    }
+
     /// Top-level key handler when no modal is active. Routes Tab,
     /// global escapes, and forwards everything else to the focused
     /// pane wrapper.
@@ -110,7 +142,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // above found no in-group binding for them.
                 if let Some(delta) = popup_nav_delta(&key) {
                     if let Some(rf) = rfocus {
-                        let len = seq_continuations(&prefix, rf, &self.catalog).len();
+                        let len = self.leader_continuations(&prefix, rf).len();
                         if len > 0 {
                             self.leader_highlight =
                                 Some(advance_highlight(self.leader_highlight, delta, len));
@@ -121,7 +153,8 @@ impl<T: TerminalAdapter> Model<T> {
                 if key.code == Key::Enter
                     && let Some(idx) = self.leader_highlight
                     && let Some(rf) = rfocus
-                    && let Some(action) = seq_continuations(&prefix, rf, &self.catalog)
+                    && let Some(action) = self
+                        .leader_continuations(&prefix, rf)
                         .get(idx)
                         .and_then(|(_, entry)| action_from_entry(entry))
                 {
@@ -328,6 +361,37 @@ impl<T: TerminalAdapter> Model<T> {
             && self.matches_inspect_notice(&key)
         {
             self.inspect_notice();
+            return;
+        }
+        // ── Cancel an in-flight spawn (#1372) ───────────────────────
+        // The invariant is that no spawn leaves the UI stuck forever, so
+        // `Esc` must be a way out. Sequenced HERE — after the multi-select
+        // clear, notice-dismiss, and error-inspect above — so it only fires
+        // when `Esc` has nothing else to claim; it never shadows those
+        // meanings, which is why it needs no age threshold (a fixed "stuck"
+        // time would misread a legitimately-slow cold clone as wedged). The
+        // worktree-progress checklist owns its own Esc→cancel (#403); this
+        // covers the spinner with no checklist up (dismissed, a fast spawn,
+        // or a post-provision launch hang). It sends a REAL `CancelSpawn`
+        // so a wedged provision is actually aborted daemon-side (a UI-only
+        // clear would let a slow-but-live spawn strand a phantom terminal
+        // moments later); the daemon's own `Failed(SPAWN_CANCELLED_NOTE)`
+        // for a still-provisioning op is absorbed idempotently. The local
+        // clear gives instant feedback, and the follow pin is dropped so a
+        // later spawn can't inherit it. Yields to a live terminal
+        // (`resolve_focus_for_keys` is None there) and reuses `DismissNotice`.
+        if self.resolve_focus_for_keys().is_some()
+            && self.matches_dismiss_notice(&key)
+            && let Some(session_key) = self.status.spawning_session().cloned()
+        {
+            self.status.clear_spawning();
+            self.sidebar.clear_spawning(&session_key);
+            self.spawn_follow_to = None;
+            self.send_cmd(IpcCommand::CancelSpawn {
+                session_key: session_key.clone(),
+            });
+            self.flash_hint("spawn cancelled");
+            self.redraw = true;
             return;
         }
         match key.code {
@@ -633,6 +697,13 @@ impl<T: TerminalAdapter> Model<T> {
             // `r` case: Reply plus the `r <agent>` family both live in the
             // Workspace section, so `r` arms while `r r` falls back to Reply.
             let direct_rank = action_entry.and_then(|e| section_rank(e.section, rfocus));
+            // Arming is target-agnostic by design: a leader arms from the
+            // keyboard layer regardless of whether any continuation is
+            // actionable for the current selection, and the completed
+            // chord no-ops in `dispatch_action` if nothing applies (see
+            // `leader_g_arms_from_sidebar_without_workspace`). So the
+            // rank is read from the unfiltered continuations — the
+            // `availability` gate lives in the popup/dispatch, not here.
             let leader_rank = seq_continuations(&stroke, rfocus, &self.catalog)
                 .iter()
                 .filter(|(_, entry)| action_from_entry(entry).is_some())
@@ -733,7 +804,10 @@ impl<T: TerminalAdapter> Model<T> {
     /// activity pane is focused on. No-op when there's no body.
     pub(super) fn open_focused_description(&mut self) {
         if let (Some(title), Some(body)) = (self.right.task_body_title(), self.right.task_body()) {
-            self.mount_description_modal(title, body);
+            // The activity pane always reads the *focused* workspace, so
+            // the reader's `a` resolves against the selection (None) — the
+            // pre-#1436 behavior.
+            self.mount_description_modal(title, body, None);
         }
     }
 
@@ -898,6 +972,9 @@ impl<T: TerminalAdapter> Model<T> {
                     initial_prompt: Some(prompt.clone()),
                     initial_snippet: None,
                     on_main: false,
+                    // Reconstructed from an inject fallback — the reuse-eligible
+                    // path, so it must not force a duplicate.
+                    force_new: false,
                 });
             }
         }
@@ -1019,6 +1096,7 @@ impl<T: TerminalAdapter> Model<T> {
             LeaderCmd::Skills => self.mount_skill_picker(String::new()),
             LeaderCmd::RecallPrompt => self.recall_prompt(cmds),
             LeaderCmd::PromptHistory => self.mount_prompt_history_picker(),
+            LeaderCmd::OpenHopper => self.mount_hopper(),
             LeaderCmd::OpenUrls => self.open_terminal_urls(),
             LeaderCmd::ToggleFocusMode => self.toggle_focus_mode(),
             LeaderCmd::ExitToSidebar => self.leave_terminal_to_sidebar(),
@@ -1055,6 +1133,7 @@ impl<T: TerminalAdapter> Model<T> {
             LeaderCmd::Skills => self.sidebar_send_skill(),
             LeaderCmd::RecallPrompt => self.sidebar_recall_prompt(cmds),
             LeaderCmd::PromptHistory => self.sidebar_prompt_history(),
+            LeaderCmd::OpenHopper => self.mount_hopper(),
             LeaderCmd::OpenUrls => self.sidebar_open_urls(),
             // Everything else is terminal-pane scoped and never offered in
             // the sidebar menu; a stray resolution is a no-op.
@@ -1895,6 +1974,13 @@ impl<T: TerminalAdapter> Model<T> {
                 // redundant second click before typing works (#103).
                 let target = if rect_contains(sidebar_rect, m.column, m.row) {
                     Some(PaneFocus::Sidebar)
+                } else if self.right.showing_overview()
+                    && (rect_contains(right_top_rect, m.column, m.row)
+                        || rect_contains(right_bottom_rect, m.column, m.row))
+                {
+                    // The group overview fills the whole right column, so
+                    // both halves route to the Right pane (#1442).
+                    Some(PaneFocus::Right)
                 } else if rect_contains(right_top_rect, m.column, m.row) {
                     Some(PaneFocus::Right)
                 } else if rect_contains(right_bottom_rect, m.column, m.row) {
@@ -1902,8 +1988,18 @@ impl<T: TerminalAdapter> Model<T> {
                 } else {
                     None
                 };
+                // The group overview has no focusable content — its only
+                // interaction is a roster click, which moves the sidebar
+                // cursor. Focusing the (workspace-less) Right pane on an
+                // overview click would strand keyboard focus on an empty
+                // activity feed, so keep focus where it is; the roster
+                // click below still routes because `target` stays `Right`
+                // (#1442).
+                let overview_click =
+                    target == Some(PaneFocus::Right) && self.right.showing_overview();
                 if let Some(focus) = target
                     && self.focus != focus
+                    && !overview_click
                 {
                     self.set_focus(focus);
                     self.redraw = true;
@@ -2129,6 +2225,14 @@ impl<T: TerminalAdapter> Model<T> {
                         }
                         if let Some(msg) = self.right.drain_selection_notice() {
                             self.flash_hint(msg);
+                        }
+                        // A click on an overview roster row moves the
+                        // sidebar cursor onto that workspace (#1442).
+                        if let Some(key) = self.right.take_select_workspace()
+                            && self.sidebar.focus_workspace_key(&key)
+                        {
+                            self.sync_panes();
+                            self.redraw = true;
                         }
                     }
                 }
@@ -2542,9 +2646,11 @@ pub(super) fn action_from_kind(
         ActionKind::ToggleAutoMerge => Action::ToggleAutoMerge,
         ActionKind::ToggleAutoFix => Action::ToggleAutoFix,
         ActionKind::ToggleTrackMain => Action::ToggleTrackMain,
+        ActionKind::ToggleMetering => Action::ToggleMetering,
         ActionKind::ManagePolicies => Action::ManagePolicies,
         ActionKind::Archive => Action::Archive,
         ActionKind::CloseIssue => Action::CloseIssue,
+        ActionKind::CloseAndArchive => Action::CloseAndArchive,
         ActionKind::ResetAgentContext => Action::ResetAgentContext,
         ActionKind::ToggleSnooze => Action::ToggleSnooze,
         ActionKind::LongSnooze => Action::LongSnooze,
@@ -2561,7 +2667,12 @@ pub(super) fn action_from_kind(
         ActionKind::ManageLabels => Action::ManageLabels,
         ActionKind::SyncWorkspace => Action::SyncWorkspace,
         ActionKind::OpenInBrowser => Action::OpenInBrowser,
+        ActionKind::MergeHistory => Action::MergeHistory,
+        ActionKind::BrowseRepoIssues => Action::BrowseRepoIssues,
         ActionKind::DeleteOrClose => Action::DeleteOrClose,
+        ActionKind::ClosePr => Action::ClosePr,
+        ActionKind::ConvertToDraft => Action::ConvertToDraft,
+        ActionKind::MarkReady => Action::MarkReady,
         // Activity-pane cursor jumps (`g` / `Shift-G` under Right
         // focus). Dispatching these through the catalog is what keeps
         // a reflexive `g` in the activity pane from arming the
@@ -2593,6 +2704,10 @@ pub(super) fn action_from_kind(
         ActionKind::MoveGroupDown => Action::MoveGroupDown,
         ActionKind::MoveGroupTop => Action::MoveGroupTop,
         ActionKind::MoveGroupBottom => Action::MoveGroupBottom,
+        ActionKind::SourceSettings => Action::SourceSettings,
+        ActionKind::SaveView => Action::SaveView,
+        ActionKind::OpenViews => Action::OpenViews,
+        ActionKind::AddRepo => Action::AddRepo,
         ActionKind::ToggleFocusWorkspace => Action::ToggleFocusWorkspace,
         ActionKind::SelectWorkspace => Action::SelectWorkspace,
         ActionKind::BroadcastToSelected => Action::BroadcastToSelected,
@@ -2601,6 +2716,8 @@ pub(super) fn action_from_kind(
         ActionKind::OpenSyncStatus => Action::OpenSyncStatus,
         ActionKind::OpenMessages => Action::OpenMessages,
         ActionKind::OpenErrorInbox => Action::OpenErrorInbox,
+        ActionKind::OpenStats => Action::OpenStats,
+        ActionKind::OpenHopper => Action::OpenHopper,
         // DismissNotice is deliberately absent: it's routed through the
         // explicit Esc branch in `handle_pane_key` (which yields to a
         // sidebar multi-select and to a live terminal), not the generic

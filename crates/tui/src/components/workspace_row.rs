@@ -50,6 +50,12 @@ pub struct WorkspaceRowCtx<'a> {
     /// the shared state slot. Highest precedence: it's the most urgent
     /// "act (externally) before this moves" signal.
     pub limit_reached: bool,
+    /// Any agent in this workspace is in `AgentState::AwaitingReset` — the
+    /// calm auto-waiting block (lazybox pressed Wait; it's parked until the
+    /// limit resets). Renders the quiet `💤` glyph. Lower precedence than
+    /// the alerting states and than `working`: it's handled, nothing to act
+    /// on, so an actively working sibling wins the slot.
+    pub awaiting_reset: bool,
     /// Any agent in this workspace is waiting on a provider credit chooser.
     pub credit_exhausted: bool,
     /// Any agent in this workspace is in `AgentState::Working`
@@ -134,12 +140,21 @@ pub struct WorkspaceRowCtx<'a> {
     /// (`Workspace::has_notes` — issue #458). Renders a small ` ✎ ` pill
     /// so the user can see, at a glance, which rows have a scratchpad.
     pub has_notes: bool,
-    /// Count of recently distinct snippets sent to this workspace's agent
-    /// (`Workspace::sent_snippets` — issue #463), bounded by
-    /// `SENT_SNIPPETS_MAX`. Renders a dim ` ]N ` pill; `0` renders nothing.
+    /// Total snippets delivered to this workspace's agent
+    /// (`Workspace::sent_snippets.total()` — issue #463): a monotonic
+    /// count of every delivery, not the size of the capped MRU. Renders a
+    /// dim ` ]N ` pill; `0` renders nothing.
     pub sent_snippet_count: usize,
     /// Visible ticket-tree placement. `None` for rows outside a hierarchy;
     /// roots with children still carry metadata so they get a disclosure.
+    /// The row's source is Quiet / Digest / Muted and the row does NOT
+    /// punch through (#scale): ambient badges (the unread pill) are
+    /// suppressed so a demoted source stops shouting.
+    pub source_quiet: bool,
+    /// An event-conditional snooze fired within `WOKE_WINDOW` (#scale,
+    /// B4): render the wake glyph in the shared state slot so the
+    /// re-entry is announced. Yields to every live agent signal.
+    pub recently_woken: bool,
     pub ticket_tree: Option<lazybox_tui_core::inbox::TicketTreeMeta>,
     /// This workspace's PR is part of a detected stack (issue #969) — its
     /// [`StackPosition`](lazybox_core::StackPosition). Renders a ` ⇗k/N `
@@ -419,15 +434,20 @@ fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 }
 
 fn cell_pr_num(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let Some(n) = ctx.task.and_then(crate::components::task_label::pr_number) else {
+    let Some(task) = ctx.task else {
         return Cell::empty();
     };
-    let label = format!("{n}");
+    // A GitHub key shows its `NNN`; a tracker key (Linear `ENG-123`,
+    // Jira `PROJ-42`) shows the identifier itself — the only handle a
+    // user has on those rows.
+    let Some(label) = crate::components::task_label::task_identifier(task) else {
+        return Cell::empty();
+    };
     let style = if ctx.is_cursor {
         ctx.row_style()
     } else {
         Style::default()
-            .fg(crate::components::task_label::pr_number_color(n))
+            .fg(crate::components::task_label::identifier_color(task))
             .add_modifier(Modifier::BOLD)
     };
     // No `#` prefix: the type glyph in the column to the left already
@@ -496,9 +516,12 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 ///     ended (clean or crash; #356/#357). Not an alert color — a dead
 ///     agent is a fact to notice, not an emergency.
 ///   - `Idle`        → blank.
+///   - `AwaitingReset` → ` 💤 ` (dim) — a static glyph: lazybox pressed
+///     Wait and the agent is parked, sleeping until its limit resets. Calm,
+///     not an alert — nothing for you to do.
 /// Reserved width either way so the kind/title to the right don't
 /// jitter as a row moves between states. Precedence credit-exhausted >
-/// limit-reached > asking > working > done > spawning > exited. `spawning` yields to
+/// limit-reached > asking > working > awaiting-reset > done > spawning > exited. `spawning` yields to
 /// every *live* signal and outranks only the terminal `exited` marker.
 /// That split is exact, not defensive: a terminal's `Working` / `Done` /
 /// `InputNeeded` / `LimitReached` / `CreditExhausted` entry is dropped when it exits (only
@@ -518,12 +541,24 @@ fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         ("?", ctx.theme.warn)
     } else if ctx.working {
         (ctx.working_glyph, ctx.theme.accent)
+    } else if ctx.awaiting_reset {
+        // The calm auto-waiting block: parked until reset, handled — a quiet
+        // 💤 in the dim text color, NOT an alert. Below `working` so a live
+        // sibling's spinner wins; above `done` so a still-parked agent shows
+        // over a merely-finished one.
+        ("💤", ctx.theme.text_dim)
     } else if ctx.done {
         ("✓", ctx.theme.success)
     } else if ctx.spawning {
         (ctx.spawning_glyph, ctx.theme.text_dim)
     } else if ctx.exited {
         ("✗", ctx.theme.text_dim)
+    } else if ctx.recently_woken {
+        // Announced re-entry (#scale, B4): the snooze's wake condition
+        // fired. Single-width glyph on purpose — emoji here would
+        // shear the column grid. Lowest precedence: any live agent
+        // signal outranks the announcement.
+        (if ctx.ascii_glyphs { "w" } else { "↺" }, ctx.theme.accent)
     } else {
         return Cell::empty();
     };
@@ -820,6 +855,12 @@ fn label_text_style(theme: &Theme, hex: &str) -> Style {
 }
 
 fn cell_unread(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    // Quiet/Digest/Muted sources suppress the ambient unread badge
+    // (#scale); punch-through rows keep it (the ctx flag is already
+    // punch-through-aware).
+    if ctx.source_quiet {
+        return Cell::empty();
+    }
     let unread = ctx.workspace.map(|w| w.unread_count()).unwrap_or(0);
     if unread == 0 {
         return Cell::empty();
@@ -1331,6 +1372,31 @@ fn cell_status(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 }
 
 fn cell_time(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    // A snoozed row shows WHEN IT WAKES instead of its last activity —
+    // in the Snoozed mailbox and under the `snoozed` filter lens alike
+    // (#scale: the Snoozed mailbox used to be an undifferentiated list;
+    // "wakes in 3d" is the datum that makes un-snoozing an informed
+    // choice). `⏾` (ascii: `z`) marks the number as a wake time, not an
+    // age.
+    if let Some(w) = ctx.workspace
+        && let Some(until) = w.snoozed_until
+        && until > ctx.now
+    {
+        let glyph = if ctx.ascii_glyphs { "z" } else { "⏾" };
+        let text = format!(
+            "{glyph}{}",
+            crate::components::sidebar::relative_time(ctx.now, until)
+        );
+        let style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            Style::default().fg(ctx.theme.text_dim)
+        };
+        return Cell::new(vec![
+            Span::styled(" ", ctx.row_style()),
+            Span::styled(text, style),
+        ]);
+    }
     let Some(task) = ctx.task else {
         return Cell::empty();
     };
@@ -1440,6 +1506,8 @@ mod tests {
         theme: &'a Theme,
     ) -> WorkspaceRowCtx<'a> {
         WorkspaceRowCtx {
+            recently_woken: false,
+            source_quiet: false,
             workspace: Some(workspace),
             task: Some(task),
             theme,
@@ -1450,6 +1518,7 @@ mod tests {
             max_pr_num_width: 4,
             asking: false,
             limit_reached: false,
+            awaiting_reset: false,
             credit_exhausted: false,
             working: false,
             done: false,
@@ -1867,6 +1936,8 @@ mod tests {
         );
         let theme = theme();
         let ctx = WorkspaceRowCtx {
+            recently_woken: false,
+            source_quiet: false,
             workspace: Some(&ws),
             task: None,
             theme: &theme,
@@ -1877,6 +1948,7 @@ mod tests {
             max_pr_num_width: 2,
             asking: false,
             limit_reached: false,
+            awaiting_reset: false,
             credit_exhausted: false,
             working: false,
             done: false,
@@ -2359,6 +2431,8 @@ mod tests {
         );
         let theme = theme();
         let ctx = WorkspaceRowCtx {
+            recently_woken: false,
+            source_quiet: false,
             workspace: Some(&ws),
             task: None,
             theme: &theme,
@@ -2369,6 +2443,7 @@ mod tests {
             max_pr_num_width: 3,
             asking: false,
             limit_reached: false,
+            awaiting_reset: false,
             credit_exhausted: false,
             working: false,
             done: false,
@@ -2836,15 +2911,19 @@ mod tests {
         let cell = cell_snippet(&ctx);
         assert_eq!(cell.spans[0].content.as_ref(), " ]3 ");
 
-        for index in 0..=lazybox_core::SENT_SNIPPETS_MAX {
-            ws.record_sent_snippet(format!("workflow-{index}"));
+        // Deliver more DISTINCT snippets than the MRU can hold: the MRU
+        // saturates at SENT_SNIPPETS_MAX but the honest count keeps
+        // climbing, so the badge shows every delivery — not the cap.
+        let deliveries = lazybox_core::SENT_SNIPPETS_MAX + 1;
+        for index in 0..deliveries {
+            ws.record_snippet_delivery(format!("workflow-{index}"));
         }
         let mut capped = ctx_for(&ws, &placeholder, &theme);
-        capped.sent_snippet_count = ws.sent_snippets.len();
+        capped.sent_snippet_count = ws.sent_snippets.total();
         assert_eq!(
             cell_snippet(&capped).spans[0].content.as_ref(),
-            " ]12 ",
-            "the rendered badge is the bounded recent-distinct count",
+            format!(" ]{deliveries} ").as_str(),
+            "the badge counts every delivery, past the MRU cap",
         );
     }
 
@@ -2873,6 +2952,32 @@ mod tests {
     /// column collapses (no pills anywhere) the time still reads as
     /// `<title flex padding>` + 1-cell gap + `5m`, not jammed against
     /// the title's last character.
+    #[test]
+    fn snoozed_row_time_cell_shows_wake_time() {
+        let task = make_task("owner/repo#1", "x");
+        let mut ws = Workspace::from_task(task.clone(), fixed_time());
+        ws.snoozed_until = Some(fixed_time() + chrono::Duration::hours(4));
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        let cell = cell_time(&ctx);
+        let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            text.trim(),
+            "⏾4h",
+            "a snoozed row's time column is its wake time, not its age"
+        );
+
+        // Expired snooze → the normal activity timestamp comes back.
+        ws.snoozed_until = Some(fixed_time() - chrono::Duration::hours(1));
+        let ctx = ctx_for(&ws, &task, &theme);
+        let cell = cell_time(&ctx);
+        let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            !text.contains('⏾'),
+            "an expired snooze must not render a wake glyph"
+        );
+    }
+
     #[test]
     fn cell_time_emits_leading_space() {
         let task = make_task("owner/repo#1", "x");
@@ -3692,6 +3797,8 @@ mod tests {
             fixed_time(),
         );
         let ctx_scratch = WorkspaceRowCtx {
+            recently_woken: false,
+            source_quiet: false,
             workspace: Some(&ws_scratch),
             task: None,
             theme: &theme,
@@ -3702,6 +3809,7 @@ mod tests {
             max_pr_num_width: 4,
             asking: false,
             limit_reached: false,
+            awaiting_reset: false,
             credit_exhausted: false,
             working: false,
             done: false,

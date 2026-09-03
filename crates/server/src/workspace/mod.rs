@@ -6,9 +6,10 @@ use crate::polling::{
     load_workspace_offloaded, report_commit_error,
 };
 use chrono::Utc;
-use lazybox_core::{Workspace, WorkspaceKey};
-use lazybox_ipc::Event;
-use lazybox_store::{StoreError, StoreMutation};
+use lazybox_core::{HopperMeta, Workspace, WorkspaceKey};
+use lazybox_ipc::{Event, HopperEntryDraft};
+use lazybox_store::{StoreError, StoreMutation, WorkspaceRecord};
+use std::collections::{HashMap, HashSet};
 
 /// Failure to create a durable workspace record. Creation is a user-issued
 /// command, so callers must propagate this result instead of returning a key
@@ -19,6 +20,377 @@ pub enum CreateWorkspaceError {
     Allocate(#[source] StoreError),
     #[error("persist workspace: {0}")]
     Persist(String),
+}
+
+/// Failure to persist an ordered Hopper edit.
+#[derive(Debug, thiserror::Error)]
+pub enum SaveHopperError {
+    #[error("load workspaces: {0}")]
+    Load(#[source] StoreError),
+    #[error("hopper entry names cannot be empty")]
+    EmptyName,
+    #[error("hopper workspace does not exist: {0}")]
+    Missing(WorkspaceKey),
+    #[error("workspace is not a hopper entry: {0}")]
+    NotHopper(WorkspaceKey),
+    #[error("hopper workspace appeared more than once: {0}")]
+    Duplicate(WorkspaceKey),
+    #[error("serialize hopper workspace {key}: {source}")]
+    Serialize {
+        key: WorkspaceKey,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("persist hopper edit: {0}")]
+    Persist(#[source] StoreError),
+}
+
+/// Atomically create, rename, and reorder the active personal Hopper.
+///
+/// Existing entries omitted by the client are retained after the submitted
+/// rows. That is deliberate: saving text is never an implicit delete.
+pub fn save_hopper(
+    config: &ServerConfig,
+    entries: Vec<HopperEntryDraft>,
+) -> Result<Vec<WorkspaceKey>, SaveHopperError> {
+    let _creation_guard = config.workspace_creations.lock();
+    let records = config
+        .store
+        .list_workspaces()
+        .map_err(SaveHopperError::Load)?;
+    let mut workspaces = HashMap::<WorkspaceKey, Workspace>::new();
+    let mut used = HashSet::<String>::new();
+    for record in records {
+        used.insert(record.key.clone());
+        let Some(json) = record.workspace_json else {
+            continue;
+        };
+        if let Ok(workspace) = Workspace::decode_persisted(&json) {
+            workspaces.insert(workspace.key.clone(), workspace);
+        }
+    }
+
+    let mut ordered = Vec::<Workspace>::new();
+    let mut seen = HashSet::<WorkspaceKey>::new();
+    for (position, draft) in entries.into_iter().enumerate() {
+        let name = draft.name.trim();
+        if name.is_empty() {
+            return Err(SaveHopperError::EmptyName);
+        }
+        let mut workspace = if let Some(key) = draft.workspace_key {
+            if !seen.insert(key.clone()) {
+                return Err(SaveHopperError::Duplicate(key));
+            }
+            let Some(workspace) = workspaces.remove(&key) else {
+                return Err(SaveHopperError::Missing(key));
+            };
+            if workspace.hopper.is_none() {
+                return Err(SaveHopperError::NotHopper(workspace.key));
+            }
+            workspace
+        } else {
+            let base = {
+                let slug = lazybox_core::slug::slugify(name);
+                if slug.is_empty() {
+                    "hopper-item".to_string()
+                } else {
+                    slug
+                }
+            };
+            let mut suffix = 1u32;
+            let key = loop {
+                let candidate = if suffix == 1 {
+                    base.clone()
+                } else {
+                    format!("{base}-{suffix}")
+                };
+                if used.insert(candidate.clone()) {
+                    break WorkspaceKey::new(candidate);
+                }
+                suffix += 1;
+            };
+            seen.insert(key.clone());
+            let mut workspace = Workspace::empty(key, "main", Utc::now());
+            workspace.local = true;
+            workspace.hopper = Some(HopperMeta {
+                position: position as u32,
+                completed_at: None,
+                canceled_at: None,
+            });
+            workspace
+        };
+        workspace.name = name.to_string();
+        let (completed_at, canceled_at) = workspace
+            .hopper
+            .map(|meta| (meta.completed_at, meta.canceled_at))
+            .unwrap_or_default();
+        workspace.hopper = Some(HopperMeta {
+            position: position as u32,
+            completed_at,
+            canceled_at,
+        });
+        ordered.push(workspace);
+    }
+
+    let mut omitted: Vec<Workspace> = workspaces
+        .into_values()
+        .filter(|workspace| workspace.hopper.is_some())
+        .collect();
+    omitted.sort_by_key(|workspace| {
+        (
+            workspace
+                .hopper
+                .map(|meta| meta.position)
+                .unwrap_or(u32::MAX),
+            workspace.created_at,
+            workspace.key.as_str().to_string(),
+        )
+    });
+    for mut workspace in omitted {
+        let (completed_at, canceled_at) = workspace
+            .hopper
+            .map(|meta| (meta.completed_at, meta.canceled_at))
+            .unwrap_or_default();
+        workspace.hopper = Some(HopperMeta {
+            position: ordered.len() as u32,
+            completed_at,
+            canceled_at,
+        });
+        ordered.push(workspace);
+    }
+
+    let mutations = ordered
+        .iter()
+        .map(|workspace| {
+            let json =
+                serde_json::to_string(workspace).map_err(|source| SaveHopperError::Serialize {
+                    key: workspace.key.clone(),
+                    source,
+                })?;
+            Ok(StoreMutation::SaveWorkspace(WorkspaceRecord {
+                key: workspace.key.as_str().to_string(),
+                created_at: workspace.created_at,
+                workspace_json: Some(json),
+            }))
+        })
+        .collect::<Result<Vec<_>, SaveHopperError>>()?;
+    config
+        .store
+        .apply_batch(&mutations)
+        .map_err(SaveHopperError::Persist)?;
+
+    let keys = ordered
+        .iter()
+        .map(|workspace| workspace.key.clone())
+        .collect();
+    for workspace in ordered {
+        let _ = config
+            .bus
+            .send(Event::WorkspaceUpserted(std::sync::Arc::new(workspace)));
+    }
+    Ok(keys)
+}
+
+#[cfg(test)]
+mod hopper_tests {
+    use super::*;
+
+    fn load(config: &ServerConfig, key: &WorkspaceKey) -> Workspace {
+        let record = config
+            .store
+            .get_workspace(key)
+            .expect("read hopper workspace")
+            .expect("hopper workspace exists");
+        Workspace::decode_persisted(
+            record
+                .workspace_json
+                .as_deref()
+                .expect("hopper workspace json"),
+        )
+        .expect("decode hopper workspace")
+    }
+
+    #[test]
+    fn save_hopper_creates_then_renames_and_reorders_stable_workspaces() {
+        let config = ServerConfig::in_memory();
+        let created = save_hopper(
+            &config,
+            vec![
+                HopperEntryDraft {
+                    workspace_key: None,
+                    name: "Write plan".into(),
+                },
+                HopperEntryDraft {
+                    workspace_key: None,
+                    name: "Fix tests".into(),
+                },
+            ],
+        )
+        .expect("create hopper");
+        assert_eq!(created.len(), 2);
+        assert!(load(&config, &created[0]).sessions.is_empty());
+        assert!(load(&config, &created[0]).project_key.is_none());
+
+        save_hopper(
+            &config,
+            vec![
+                HopperEntryDraft {
+                    workspace_key: Some(created[1].clone()),
+                    name: "Fix all tests".into(),
+                },
+                HopperEntryDraft {
+                    workspace_key: Some(created[0].clone()),
+                    name: "Write plan".into(),
+                },
+            ],
+        )
+        .expect("edit hopper");
+
+        let first = load(&config, &created[1]);
+        let second = load(&config, &created[0]);
+        assert_eq!(first.name, "Fix all tests");
+        assert_eq!(first.hopper.expect("hopper metadata").position, 0);
+        assert_eq!(second.hopper.expect("hopper metadata").position, 1);
+    }
+
+    #[test]
+    fn omitted_rows_are_preserved_instead_of_deleted() {
+        let config = ServerConfig::in_memory();
+        let created = save_hopper(
+            &config,
+            vec![
+                HopperEntryDraft {
+                    workspace_key: None,
+                    name: "One".into(),
+                },
+                HopperEntryDraft {
+                    workspace_key: None,
+                    name: "Two".into(),
+                },
+            ],
+        )
+        .expect("create hopper");
+        save_hopper(
+            &config,
+            vec![HopperEntryDraft {
+                workspace_key: Some(created[0].clone()),
+                name: "One renamed".into(),
+            }],
+        )
+        .expect("save partial edit");
+        assert_eq!(load(&config, &created[1]).name, "Two");
+        assert_eq!(
+            load(&config, &created[1])
+                .hopper
+                .expect("hopper metadata")
+                .position,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn project_assignment_is_one_time_and_hopper_only() {
+        let config = ServerConfig::in_memory();
+        let [key] = save_hopper(
+            &config,
+            vec![HopperEntryDraft {
+                workspace_key: None,
+                name: "Ship it".into(),
+            }],
+        )
+        .expect("create hopper")
+        .try_into()
+        .expect("one hopper row");
+        let first = lazybox_core::ProjectKey::local("first");
+        let second = lazybox_core::ProjectKey::local("second");
+        for project in [
+            lazybox_core::Project::new(first.clone(), "first", Utc::now()),
+            lazybox_core::Project::new(second.clone(), "second", Utc::now()),
+        ] {
+            config
+                .store
+                .save_project(&lazybox_store::ProjectRecord {
+                    key: project.key.as_str().to_string(),
+                    created_at: project.created_at,
+                    project_json: Some(serde_json::to_string(&project).expect("serialize project")),
+                })
+                .expect("save project");
+        }
+
+        assign_hopper_project(&config, &key, first.clone()).await;
+        assign_hopper_project(&config, &key, second).await;
+
+        assert_eq!(load(&config, &key).project_key, Some(first));
+    }
+
+    #[tokio::test]
+    async fn completion_is_reversible_and_preserves_workspace_identity() {
+        let config = ServerConfig::in_memory();
+        let [key] = save_hopper(
+            &config,
+            vec![HopperEntryDraft {
+                workspace_key: None,
+                name: "Write release notes".into(),
+            }],
+        )
+        .expect("create hopper")
+        .try_into()
+        .expect("one hopper row");
+
+        set_hopper_completed(&config, &key, true).await;
+        let completed = load(&config, &key);
+        assert!(
+            completed
+                .hopper
+                .expect("hopper metadata")
+                .completed_at
+                .is_some()
+        );
+
+        set_hopper_completed(&config, &key, false).await;
+        let reopened = load(&config, &key);
+        assert_eq!(reopened.key, key);
+        assert!(
+            reopened
+                .hopper
+                .expect("hopper metadata")
+                .completed_at
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_is_reversible_and_mutually_exclusive_with_completion() {
+        let config = ServerConfig::in_memory();
+        let [key] = save_hopper(
+            &config,
+            vec![HopperEntryDraft {
+                workspace_key: None,
+                name: "Try an experiment".into(),
+            }],
+        )
+        .expect("create hopper")
+        .try_into()
+        .expect("one hopper row");
+
+        set_hopper_completed(&config, &key, true).await;
+        set_hopper_canceled(&config, &key, true).await;
+        let canceled = load(&config, &key);
+        let meta = canceled.hopper.expect("hopper metadata");
+        assert!(meta.canceled_at.is_some());
+        assert!(meta.completed_at.is_none());
+
+        set_hopper_canceled(&config, &key, false).await;
+        let reopened = load(&config, &key);
+        assert_eq!(reopened.key, key);
+        assert!(
+            reopened
+                .hopper
+                .expect("hopper metadata")
+                .canceled_at
+                .is_none()
+        );
+    }
 }
 
 /// Create an empty workspace (no PR, no issues) named by the user.
@@ -274,12 +646,22 @@ pub async fn set_snooze(
     config: &ServerConfig,
     key: &WorkspaceKey,
     until: Option<chrono::DateTime<Utc>>,
+    wake: Option<lazybox_core::SnoozeWake>,
 ) {
     let _ws_guard = config.lock_workspace(key.as_str()).await;
     let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
         return;
     };
     workspace.snoozed_until = until;
+    // The wake condition rides the snooze it belongs to: setting a new
+    // snooze replaces it; un-snoozing (until = None) clears it. A
+    // MANUAL un-snooze also clears any woke stamp — the user is
+    // already looking at the row, so announcing the re-entry (#scale)
+    // would be noise.
+    workspace.snooze_wake = if until.is_some() { wake } else { None };
+    if until.is_none() {
+        workspace.woke_at = None;
+    }
     commit_upsert_offloaded_reported(config, key, workspace, "set workspace snooze").await;
 }
 
@@ -317,18 +699,97 @@ pub async fn rename_workspace(config: &ServerConfig, key: &WorkspaceKey, name: S
     commit_upsert_offloaded_reported(config, key, workspace, "rename workspace").await;
 }
 
-/// Record a snippet key as sent to a workspace's agent (issue #463).
-/// Mirrors [`set_notes`]: load, push onto the MRU, commit (which
-/// persists the JSON blob and broadcasts `WorkspaceUpserted` so every
-/// TUI sees the updated per-session snippet history and its sidebar
-/// indicator). Local-only — never synced to any provider.
-pub async fn record_sent_snippet(config: &ServerConfig, key: &WorkspaceKey, snippet_key: String) {
+/// Attach a repo-less Hopper workspace to a tracked project. Provider-backed
+/// workspaces cannot be retargeted through this local-only command, and an
+/// existing assignment is preserved so two clients cannot silently move the
+/// same workspace between repos. The normal upsert echo is the durability
+/// acknowledgement used by the TUI to resume the pending spawn/editor action.
+pub async fn assign_hopper_project(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    project_key: lazybox_core::ProjectKey,
+) {
+    if config
+        .store
+        .get_project(&project_key)
+        .ok()
+        .flatten()
+        .is_none()
+    {
+        return;
+    }
     let _ws_guard = config.lock_workspace(key.as_str()).await;
     let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
         return;
     };
-    workspace.record_sent_snippet(snippet_key);
-    commit_upsert_offloaded_reported(config, key, workspace, "record sent snippet").await;
+    if workspace.hopper.is_none() || workspace.project_key.is_some() {
+        return;
+    }
+    workspace.project_key = Some(project_key);
+    commit_upsert_offloaded_reported(config, key, workspace, "assign hopper project").await;
+}
+
+/// Complete or reopen a Hopper item without touching sessions, terminal
+/// history, or its checkout. Mailbox classification treats the timestamp as
+/// an Inactive marker; clearing it restores the same workspace to Inbox.
+pub async fn set_hopper_completed(config: &ServerConfig, key: &WorkspaceKey, completed: bool) {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return;
+    };
+    let Some(mut hopper) = workspace.hopper else {
+        return;
+    };
+    hopper.completed_at = completed.then(Utc::now);
+    if completed {
+        hopper.canceled_at = None;
+    }
+    workspace.hopper = Some(hopper);
+    commit_upsert_offloaded_reported(config, key, workspace, "set hopper completion").await;
+}
+
+/// Cancel or reopen a Hopper item without deleting its workspace. Cancellation
+/// is mutually exclusive with completion and remains available to the Hopper's
+/// dated history view.
+pub async fn set_hopper_canceled(config: &ServerConfig, key: &WorkspaceKey, canceled: bool) {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return;
+    };
+    let Some(mut hopper) = workspace.hopper else {
+        return;
+    };
+    hopper.canceled_at = canceled.then(Utc::now);
+    if canceled {
+        hopper.completed_at = None;
+    }
+    workspace.hopper = Some(hopper);
+    commit_upsert_offloaded_reported(config, key, workspace, "set hopper cancellation").await;
+}
+
+/// Record a snippet delivery against a workspace (issue #463): the
+/// authoritative, persisted half of the delivery transition. Mirrors
+/// [`set_notes`] — load, apply the single [`Workspace::record_snippet_delivery`]
+/// transition (which bumps the honest count and the MRU together), commit
+/// (persist the JSON blob and broadcast `WorkspaceUpserted` so every TUI
+/// sees the new count + indicator). Local-only — never synced.
+///
+/// Returns whether the workspace existed and the transition was applied.
+/// A `false` means there was no workspace row to record into (e.g. a
+/// session-less broadcast spawn); the caller decides what that implies
+/// for the softer, non-authoritative projections.
+pub async fn record_snippet_delivery(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    snippet_key: String,
+) -> bool {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return false;
+    };
+    workspace.record_snippet_delivery(snippet_key);
+    commit_upsert_offloaded_reported(config, key, workspace, "record snippet delivery").await;
+    true
 }
 
 /// Persist the workspace's "auto-merge on green" arm. Mirrors
@@ -401,6 +862,19 @@ pub async fn set_track_main(config: &ServerConfig, key: &WorkspaceKey, enabled: 
         workspace.track_main_behind = false;
     }
     commit_upsert_offloaded_reported(config, key, workspace, "set track-main preference").await;
+}
+
+/// Persist the workspace's metering opt-in (the `$ meter` canary). Mirrors
+/// [`set_track_main`]: load, set the flag, commit (persists + broadcasts
+/// `WorkspaceUpserted` so the sidebar badge refreshes). The spawn path reads
+/// it back to route the next spawn through the metering proxy.
+pub async fn set_metered(config: &ServerConfig, key: &WorkspaceKey, enabled: bool) {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return;
+    };
+    workspace.metered = enabled;
+    commit_upsert_offloaded_reported(config, key, workspace, "set metering preference").await;
 }
 
 /// Persist the workspace's per-session auto-fix arm for one
@@ -612,7 +1086,7 @@ mod rename_workspace_tests {
 /// treating one SQLITE_BUSY (or a corrupt payload) as an empty set and
 /// then rewriting the row would replace the user's entire archive
 /// history with a single element.
-fn load_archived_set_strict(
+pub(crate) fn load_archived_set_strict(
     config: &ServerConfig,
 ) -> Result<std::collections::HashSet<String>, String> {
     let raw = config
@@ -716,6 +1190,102 @@ pub fn unarchive_workspace_key(config: &ServerConfig, key: &str) -> bool {
         return false;
     }
     config.deleted_workspaces.lock().remove(key);
+    true
+}
+
+/// Strict read of the persisted session-tombstone set, with the same
+/// "no set stored" (`Ok(empty)`) vs "stored but unreadable" (`Err`)
+/// distinction as [`load_archived_set_strict`] — the read-modify-write
+/// callers must not truncate the stored history off a transient
+/// SQLITE_BUSY or a corrupt payload.
+pub(crate) fn load_session_tombstones_strict(
+    config: &ServerConfig,
+) -> Result<std::collections::HashSet<String>, String> {
+    let raw = config
+        .store
+        .get_kv(lazybox_core::KV_KEY_SESSION_TOMBSTONES)
+        .map_err(|e| format!("read failed: {e}"))?;
+    let Some(json) = raw else {
+        return Ok(Default::default());
+    };
+    if json.trim().is_empty() {
+        return Ok(Default::default());
+    }
+    serde_json::from_str::<Vec<String>>(&json)
+        .map(|v| v.into_iter().collect())
+        .map_err(|e| format!("parse failed: {e}"))
+}
+
+/// Record `key` in the session-tombstone set so recovery kills — never
+/// reattaches — any surviving backend session for it. Written on every
+/// removal reason (see `WorkspaceRemovalReason`). Idempotent; returns
+/// false when persistence (or a degraded read) fails, so the caller can
+/// abort the delete rather than commit a removal whose orphan session
+/// would be reattached on the next restart.
+#[must_use]
+pub fn tombstone_session_key(config: &ServerConfig, key: &str) -> bool {
+    let _update_guard = config.archive_updates.lock();
+    let mut set = match load_session_tombstones_strict(config) {
+        Ok(set) => set,
+        Err(e) => {
+            tracing::error!(
+                "tombstone_session_key: existing tombstone set unreadable ({e}) — \
+                 refusing to rewrite it; tombstone of {key} aborted"
+            );
+            return false;
+        }
+    };
+    if !set.insert(key.to_string()) {
+        return true;
+    }
+    let vec: Vec<&String> = set.iter().collect();
+    let Ok(json) = serde_json::to_string(&vec) else {
+        tracing::error!("tombstone_session_key: serialize failed");
+        return false;
+    };
+    if let Err(e) = config
+        .store
+        .set_kv(lazybox_core::KV_KEY_SESSION_TOMBSTONES, &json)
+    {
+        tracing::warn!("tombstone_session_key: set_kv failed: {e}");
+        return false;
+    }
+    true
+}
+
+/// Remove `key` from the session-tombstone set. Called only when a
+/// committed delete is being rolled back, so an aborted removal doesn't
+/// leave a tombstone that would kill the still-present workspace's
+/// session on restart. Same degraded-read contract as
+/// [`tombstone_session_key`].
+#[must_use]
+pub fn untombstone_session_key(config: &ServerConfig, key: &str) -> bool {
+    let _update_guard = config.archive_updates.lock();
+    let mut set = match load_session_tombstones_strict(config) {
+        Ok(set) => set,
+        Err(e) => {
+            tracing::error!(
+                "untombstone_session_key: existing tombstone set unreadable ({e}) — \
+                 refusing to rewrite it; untombstone of {key} aborted"
+            );
+            return false;
+        }
+    };
+    if !set.remove(key) {
+        return true;
+    }
+    let vec: Vec<&String> = set.iter().collect();
+    let Ok(json) = serde_json::to_string(&vec) else {
+        tracing::error!("untombstone_session_key: serialize failed");
+        return false;
+    };
+    if let Err(e) = config
+        .store
+        .set_kv(lazybox_core::KV_KEY_SESSION_TOMBSTONES, &json)
+    {
+        tracing::warn!("untombstone_session_key: set_kv failed: {e}");
+        return false;
+    }
     true
 }
 
@@ -901,6 +1471,17 @@ async fn inspect_workspace_risks(
         .map(|row| (canonical_or_self(&row.path), row))
         .collect();
 
+    // A squash/rebase merge with the head branch auto-deleted leaves the
+    // local tip on a SHA no remote ref reaches, so the git-only unpushed
+    // probe falls back to `origin/HEAD..HEAD` and reports the whole feature
+    // diff as "unpushed". The provider already knows the PR merged even
+    // though git cannot infer it from the squashed history, so that work is
+    // upstream and the probe is a false positive here.
+    let pr_merged = workspace
+        .pr
+        .as_ref()
+        .is_some_and(|pr| pr.state == lazybox_core::TaskState::Merged);
+
     let mut risks = Vec::new();
     for path in paths {
         let Some(row) = by_path.get(&canonical_or_self(&path)) else {
@@ -913,7 +1494,7 @@ async fn inspect_workspace_risks(
         if row.is_safe_to_delete {
             continue;
         }
-        let reasons = workspace_removal_reasons(row, require_stopped);
+        let reasons = workspace_removal_reasons(row, require_stopped, pr_merged);
         if !reasons.is_empty() {
             risks.push(WorkspaceRemovalRisk { path, reasons });
         }
@@ -924,6 +1505,7 @@ async fn inspect_workspace_risks(
 fn workspace_removal_reasons(
     row: &lazybox_git_ops::WorktreeInspection,
     require_stopped: bool,
+    pr_merged: bool,
 ) -> Vec<String> {
     let mut reasons = Vec::new();
     if row.reasons.contains(&lazybox_git_ops::OrphanReason::Locked) {
@@ -935,10 +1517,21 @@ fn workspace_removal_reasons(
     if row.has_uncommitted_changes {
         reasons.push("uncommitted changes".into());
     }
-    if row.has_unpushed_commits {
+    if row.has_unpushed_commits && !pr_merged {
         reasons.push("unpushed commits".into());
     }
-    if reasons.is_empty() && require_stopped && !row.is_safe_to_delete {
+    // The "still active" fallback keys off `is_safe_to_delete`, which folds
+    // in the unpushed flag. When the merged PR suppressed that flag above, a
+    // clean, unlocked, reapable checkout must not be re-blocked here purely
+    // because it was ahead of the (now-gone) remote branch.
+    let safe_to_delete = row.is_safe_to_delete
+        || (pr_merged
+            && row.has_unpushed_commits
+            && row.status_verified
+            && !row.has_uncommitted_changes
+            && !row.reasons.contains(&lazybox_git_ops::OrphanReason::Locked)
+            && row.has_reapable_reason());
+    if reasons.is_empty() && require_stopped && !safe_to_delete {
         reasons.push("checkout is still active".into());
     }
     reasons
@@ -1064,12 +1657,49 @@ mod removal_classification_tests {
             // local-work probes succeeded.
             is_safe_to_delete: false,
         };
-        assert!(workspace_removal_reasons(&row, false).is_empty());
+        assert!(workspace_removal_reasons(&row, false, false).is_empty());
 
         row.status_verified = false;
         assert_eq!(
-            workspace_removal_reasons(&row, false),
+            workspace_removal_reasons(&row, false, false),
             vec!["cleanliness could not be proven"]
+        );
+    }
+
+    #[test]
+    fn merged_pr_suppresses_false_positive_unpushed_reason() {
+        // The squash/rebase-merge shape: worktree is clean and its session is
+        // reapable (branch deleted upstream), but the git-only unpushed probe
+        // reports the whole feature diff as ahead of the vanished remote.
+        let mut row = lazybox_git_ops::WorktreeInspection {
+            path: "/tmp/lazybox-merged-guard".into(),
+            bare_path: Some("/tmp/lazybox-merged-guard.git".into()),
+            branch: Some("feat".into()),
+            session_id: Some("session".into()),
+            reasons: vec![lazybox_git_ops::OrphanReason::BranchDeletedUpstream],
+            size_bytes: 0,
+            last_modified: None,
+            has_uncommitted_changes: false,
+            status_verified: true,
+            has_unpushed_commits: true,
+            is_safe_to_delete: false,
+        };
+
+        // Without the merged signal, the false positive blocks removal —
+        // even under the final `require_stopped` gate.
+        assert_eq!(
+            workspace_removal_reasons(&row, true, false),
+            vec!["unpushed commits"]
+        );
+        // With it, the checkout is cleared for teardown and the "still
+        // active" fallback does not re-block it.
+        assert!(workspace_removal_reasons(&row, true, true).is_empty());
+
+        // Genuine on-disk work is still protected regardless of merge state.
+        row.has_uncommitted_changes = true;
+        assert_eq!(
+            workspace_removal_reasons(&row, true, true),
+            vec!["uncommitted changes"]
         );
     }
 }
@@ -1138,6 +1768,10 @@ async fn reclaim_workspace_worktrees(
     }
 
     tombstone_legacy_remote_host(config, workspace);
+    // Drop the durable meter total so an archived metered workspace doesn't
+    // leave a `meter-cost:` row in the store forever (#1389). The proxy keys
+    // cost by the session key, which is the workspace key string.
+    crate::client_kv::clear_session_cost(&*config.store, workspace.key.as_str());
 
     let cleanup =
         (!paths.is_empty()).then(|| spawn_worktree_removal(config, workspace.key.clone(), paths));
@@ -1183,36 +1817,43 @@ fn spawn_worktree_removal(
             }
         }
         let _done = SignalOnDrop(Some(done_tx));
-        // Serialize with provisioning/adoption while taking the fresh
-        // inspector snapshot. The per-repo lock inside `delete_inspected_if`
-        // closes the final status-to-remove window.
-        let _ownership_guard = config.worktree_ownership_lock.lock().await;
-        let tracked = match collect_tracked_sessions(&config).await {
-            Ok(tracked) => tracked,
-            Err(error) => {
-                tracing::warn!(
-                    workspace = %key,
-                    %error,
-                    "delete_workspace: could not classify tracked worktrees — preserving them",
-                );
-                return;
-            }
-        };
-        let inspections = match mgr.inspect_worktrees(&tracked).await {
-            Ok(inspections) => inspections,
-            Err(error) => {
-                tracing::warn!(
-                    workspace = %key,
-                    %error,
-                    "delete_workspace: deferred safety inspection failed — preserving worktrees",
-                );
-                return;
-            }
-        };
-        let by_path: std::collections::HashMap<_, _> = inspections
-            .into_iter()
-            .map(|row| (canonical_or_self(&row.path), row))
-            .collect();
+        // Hold lock only for the critical section: taking the fresh inspector
+        // snapshot to serialize against provisioning/adoption. Release before
+        // expensive deletion operations. The per-repo lock inside
+        // `delete_inspected_if` re-runs safety probes while held, closing the
+        // final status-to-remove window.
+        let tracked;
+        let by_path: std::collections::HashMap<_, _>;
+        {
+            let _ownership_guard = config.worktree_ownership_lock.lock().await;
+            tracked = match collect_tracked_sessions(&config).await {
+                Ok(tracked) => tracked,
+                Err(error) => {
+                    tracing::warn!(
+                        workspace = %key,
+                        %error,
+                        "delete_workspace: could not classify tracked worktrees — preserving them",
+                    );
+                    return;
+                }
+            };
+            let inspections = match mgr.inspect_worktrees(&tracked).await {
+                Ok(inspections) => inspections,
+                Err(error) => {
+                    tracing::warn!(
+                        workspace = %key,
+                        %error,
+                        "delete_workspace: deferred safety inspection failed — preserving worktrees",
+                    );
+                    return;
+                }
+            };
+            by_path = inspections
+                .into_iter()
+                .map(|row| (canonical_or_self(&row.path), row))
+                .collect();
+        }
+        // Lock released here; expensive deletion operations follow.
 
         for path in paths {
             let Some(row) = by_path.get(&canonical_or_self(&path)) else {
@@ -1511,6 +2152,29 @@ mod reclaim_worktree_tests {
         assert_eq!(reclaimed.worktrees, 0);
         assert_eq!(reclaimed.bytes, 0);
         assert!(cleanup.is_none(), "nothing on disk → no cleanup task");
+    }
+
+    /// #1389: archiving a metered workspace must drop its durable
+    /// `meter-cost:` row, or the total lingers in the store forever and
+    /// re-ships in every future `Event::SessionCosts`.
+    #[tokio::test]
+    async fn reclaim_evicts_the_persisted_meter_cost_row() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("github:o/r#1");
+        let workspace = Workspace::empty(key.clone(), "gone", Utc::now());
+        crate::client_kv::add_session_cost(&config, key.as_str().to_string(), 1_500_000).await;
+        assert_eq!(
+            crate::client_kv::session_costs(&*config.store).len(),
+            1,
+            "precondition: the cost row exists"
+        );
+
+        let _ = reclaim_workspace_worktrees(&config, &workspace).await;
+
+        assert!(
+            crate::client_kv::session_costs(&*config.store).is_empty(),
+            "archiving the workspace evicts its meter-cost row",
+        );
     }
 
     #[tokio::test]
@@ -1836,7 +2500,12 @@ impl<'a> WorkspaceLifecycle<'a> {
             {
                 match config
                     .worktree_manager()
-                    .managed_worktrees_for_branch(owner, repo, &workspace.branch)
+                    .managed_worktrees_for_branch(
+                        owner,
+                        repo,
+                        &workspace.branch,
+                        lazybox_git_ops::LockPriority::Background,
+                    )
                     .await
                 {
                     Ok(worktrees) if worktrees.is_empty() => {}
@@ -1888,6 +2557,11 @@ impl<'a> WorkspaceLifecycle<'a> {
             })
             .filter_map(|(tid, entry)| entry.backend_key.clone().map(|key| (*tid, key)))
             .collect();
+
+        // Backend sessions we handle through the registry path below, so the
+        // post-deletion orphan sweep doesn't re-kill them.
+        let registry_backend_keys: std::collections::HashSet<String> =
+            to_kill.iter().map(|(_, key)| key.clone()).collect();
 
         if !to_kill.is_empty() {
             tracing::info!(
@@ -1958,6 +2632,15 @@ impl<'a> WorkspaceLifecycle<'a> {
                          {detail}. Push, commit/stash, or clean the checkout, then retry"
                         ),
                     ));
+                    // The gate preserves on-disk work, but a detached orphan
+                    // tmux is not on-disk work — killing it loses nothing (the
+                    // worktree files stay). For an explicit archive (whose
+                    // confirm already warns sessions die), reap it now so a
+                    // preserved-but-refused archive can't leave a session that
+                    // the next restart's `recover_sessions` resurrects.
+                    if archive {
+                        kill_orphan_backend_sessions(config, key, &registry_backend_keys).await;
+                    }
                     config.deleted_workspaces.lock().remove(key_str);
                     return None;
                 }
@@ -1970,6 +2653,9 @@ impl<'a> WorkspaceLifecycle<'a> {
                          verified safely: {error}"
                         ),
                     ));
+                    if archive {
+                        kill_orphan_backend_sessions(config, key, &registry_backend_keys).await;
+                    }
                     config.deleted_workspaces.lock().remove(key_str);
                     return None;
                 }
@@ -1978,11 +2664,38 @@ impl<'a> WorkspaceLifecycle<'a> {
 
         // Record the archive only after every requested terminal kill succeeded.
         // Otherwise a transient backend failure both keeps the workspace alive
-        // and blocks the next poll from repairing/re-presenting it.
+        // and blocks the next poll from repairing/re-presenting it. Only the
+        // archiving reasons suppress re-polling; the session tombstone below is
+        // written for every reason.
         if archive && !archive_workspace_key(config, key_str) {
             let _ = config.bus.send(Event::provider_error_retryable(
                 "store",
                 format!("could not archive workspace {key}; it was not deleted"),
+            ));
+            config.deleted_workspaces.lock().remove(key_str);
+            return None;
+        }
+
+        // The session tombstone is the durable kill-on-recovery record for
+        // *every* removal reason — including the non-archiving ClosedAuto /
+        // Rescope, whose only other orphan protection is the best-effort
+        // delete-time sweep below. Written before the row is dropped so a
+        // survivor tmux session is guaranteed a backstop even if that sweep's
+        // `backend.list()` transiently fails (#1377). Failing to persist it
+        // aborts the delete for the same reason a failed archive does.
+        if !tombstone_session_key(config, key_str) {
+            if archive && !unarchive_workspace_key(config, key_str) {
+                tracing::error!(
+                    workspace = %key,
+                    "tombstone abort rollback: could not remove archive record — \
+                     workspace left archived but not deleted",
+                );
+            }
+            let _ = config.bus.send(Event::provider_error_retryable(
+                "store",
+                format!(
+                    "could not record session tombstone for workspace {key}; it was not deleted"
+                ),
             ));
             config.deleted_workspaces.lock().remove(key_str);
             return None;
@@ -1994,7 +2707,21 @@ impl<'a> WorkspaceLifecycle<'a> {
             if !rollback_ok {
                 tracing::error!(
                     workspace = %key,
-                    "delete_workspace rollback: could not remove archive tombstone",
+                    "delete_workspace rollback: could not remove archive record",
+                );
+            }
+            // A session tombstone left behind is inert while the row still
+            // exists: recovery kills a survivor only when its row is ALSO
+            // absent (`recover_sessions`'s row-presence guard), and nothing
+            // else reads the set. So this rollback is best-effort and must not
+            // gate `deleted_workspaces` cleanup — otherwise a store still
+            // rejecting writes here would strand the key in `deleted_workspaces`
+            // and silently kill every later spawn into a workspace that, after
+            // the failed delete, is still present and usable.
+            if !untombstone_session_key(config, key_str) {
+                tracing::error!(
+                    workspace = %key,
+                    "delete_workspace rollback: could not remove session tombstone (inert while the row survives)",
                 );
             }
             let _ = config.bus.send(Event::provider_error_retryable(
@@ -2007,6 +2734,15 @@ impl<'a> WorkspaceLifecycle<'a> {
             return None;
         }
         let _ = config.bus.send(Event::WorkspaceRemoved(key.clone()));
+
+        // Belt-and-suspenders: the registry sweep above only reaches terminals
+        // with a live entry. A detached tmux session with NO registry entry —
+        // its agent exited, tearing down the terminal, but the backend session
+        // survived — would otherwise be re-listed by the next restart's
+        // `recover_sessions` and resurrect this now-deleted workspace. Runs
+        // only after the row is deleted and the key archived, so it can't
+        // affect the safety gates above.
+        kill_orphan_backend_sessions(config, key, &registry_backend_keys).await;
 
         // The row (and its terminals) are gone — reclaim the worktree
         // directories on disk. Without this every teardown that routes
@@ -2046,6 +2782,63 @@ impl<'a> WorkspaceLifecycle<'a> {
             );
         }
         Some(reclaimed)
+    }
+}
+
+/// Kill every detached backend (tmux) session that belongs to `key` but has
+/// no live terminal registry entry, and sweep its persisted per-terminal
+/// rows so it can't be reconstructed. These orphans survive when the agent
+/// process exited (tearing down its terminal) while the detached backend
+/// session lived on; left alone, the next restart's `recover_sessions` lists
+/// them and resurrects the workspace from persisted meta.
+///
+/// `exclude` names backend keys already handled through the live-terminal
+/// registry path so they aren't re-killed. Best-effort: a `backend.list`
+/// failure is logged, never fatal.
+async fn kill_orphan_backend_sessions(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    exclude: &std::collections::HashSet<String>,
+) {
+    let key_str = key.as_str();
+    let backend_keys = match config.backend.list().await {
+        Ok(keys) => keys,
+        Err(e) => {
+            tracing::warn!(
+                workspace = %key,
+                "delete_workspace: backend.list for orphan sweep failed: {e}"
+            );
+            return;
+        }
+    };
+    for backend_key in backend_keys {
+        if exclude.contains(&backend_key) {
+            continue;
+        }
+        let Some((meta_session_key, _)) =
+            crate::spawn_handler::load_terminal_meta(config, &backend_key).await
+        else {
+            continue;
+        };
+        if meta_session_key.as_str() != key_str {
+            continue;
+        }
+        tracing::info!(
+            workspace = %key,
+            %backend_key,
+            "delete_workspace: killing orphan backend session with no live terminal"
+        );
+        if let Err(e) = config.backend.kill(&backend_key).await {
+            tracing::warn!(
+                workspace = %key,
+                %backend_key,
+                "delete_workspace: killing orphan backend session failed: {e}"
+            );
+        }
+        let generation =
+            crate::spawn_handler::load_agent_state_generation(config, &backend_key).await;
+        crate::spawn_handler::sweep_terminal_persisted_fields(config, &backend_key, generation)
+            .await;
     }
 }
 
@@ -2598,6 +3391,163 @@ mod set_auto_merge_on_green_tests {
         assert!(
             !stored_arm(&config, &key),
             "the guard only gates enabling, never disarming"
+        );
+    }
+}
+
+#[cfg(test)]
+mod orphan_backend_session_tests {
+    use super::*;
+
+    // Item 2 of the workspace-resurrection fix: `delete_workspace` must kill a
+    // lingering backend session that owns the workspace but has NO live
+    // terminal registry entry (its agent had exited, tearing down the terminal,
+    // while the detached tmux session survived). Without this, only the durable
+    // archived-set guard in `recover_sessions` catches it on the next restart;
+    // this kills the orphan at delete time and sweeps its persisted meta so it
+    // is never listed again.
+    #[tokio::test]
+    async fn delete_workspace_kills_orphan_backend_session_with_no_live_terminal() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let key = WorkspaceKey::new("github:o/r#orphan");
+        let ws = Workspace::empty(key.clone(), "main", Utc::now());
+        config
+            .store
+            .save_workspace(&WorkspaceRecord {
+                key: key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).expect("serialize workspace")),
+            })
+            .expect("save workspace");
+
+        // A detached backend session for this workspace, with persisted meta but
+        // no live terminal in the registry.
+        let backend_key = config
+            .backend
+            .spawn(&["claude".into()], None, &[], "orphan")
+            .await
+            .expect("spawn orphan backend");
+        let session_key = lazybox_core::SessionKey::from(key.as_str());
+        crate::spawn_handler::persist_terminal_meta(
+            &config,
+            &backend_key,
+            &session_key,
+            &lazybox_ipc::TerminalKind::Agent("claude".into()),
+        )
+        .await;
+        assert!(
+            config.terminal.bookkeeping_is_empty().await,
+            "precondition: the orphan has no live terminal registry entry"
+        );
+
+        assert!(
+            delete_workspace(&config, &key).await.is_some(),
+            "the workspace deletes even though its only session is a registry-less orphan"
+        );
+
+        // The orphan backend session was killed — it no longer lists as live.
+        assert!(
+            !config
+                .backend
+                .list()
+                .await
+                .expect("backend list")
+                .contains(&backend_key),
+            "the orphan backend session must be killed at delete time"
+        );
+        // And its persisted terminal meta was swept.
+        assert!(
+            config
+                .store
+                .get_kv(&format!("terminal:{backend_key}"))
+                .expect("read terminal meta")
+                .is_none(),
+            "the orphan's persisted terminal meta must be swept"
+        );
+    }
+
+    // Fails `delete_workspace`, and — once a delete has been attempted — also
+    // fails the tombstone-set write. Models a store that keeps rejecting writes
+    // through the delete-failure rollback (e.g. a persistent SQLITE_BUSY), so
+    // the session-tombstone rollback set_kv can't succeed.
+    struct WedgeStore {
+        inner: lazybox_store::MemoryStore,
+        delete_attempted: std::sync::atomic::AtomicBool,
+    }
+
+    impl lazybox_store::Store for WedgeStore {
+        fn apply_batch(&self, mutations: &[StoreMutation]) -> Result<(), StoreError> {
+            self.inner.apply_batch(mutations)
+        }
+        fn get_kv(&self, key: &str) -> Result<Option<String>, StoreError> {
+            self.inner.get_kv(key)
+        }
+        fn set_kv(&self, key: &str, value: &str) -> Result<(), StoreError> {
+            if key == lazybox_core::KV_KEY_SESSION_TOMBSTONES
+                && self
+                    .delete_attempted
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(StoreError::Backend("database is locked".into()));
+            }
+            self.inner.set_kv(key, value)
+        }
+        fn delete_kv(&self, key: &str) -> Result<(), StoreError> {
+            self.inner.delete_kv(key)
+        }
+        fn delete_workspace(&self, _key: &WorkspaceKey) -> Result<(), StoreError> {
+            self.delete_attempted
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Err(StoreError::Backend("delete failed".into()))
+        }
+        fn list_workspaces(&self) -> Result<Vec<WorkspaceRecord>, StoreError> {
+            self.inner.list_workspaces()
+        }
+        fn list_projects(&self) -> Result<Vec<lazybox_store::ProjectRecord>, StoreError> {
+            self.inner.list_projects()
+        }
+    }
+
+    // Regression (#1377 review, finding A): a non-archiving removal whose store
+    // delete fails must not strand its key in `deleted_workspaces`. The session
+    // tombstone was written before the (failing) delete; its rollback set_kv
+    // then also fails. A tombstone left behind is inert while the row survives
+    // (recovery kills a survivor only when its row is ALSO absent), so that
+    // rollback must be best-effort — coupling it into the cleanup decision left
+    // the key in `deleted_workspaces`, which makes `cancel_spawn_for_deleted_
+    // workspace` silently kill every later spawn into a workspace that, after
+    // the failed delete, is still present and usable.
+    #[tokio::test]
+    async fn failed_closed_auto_delete_still_clears_the_deleted_workspaces_guard() {
+        let store = std::sync::Arc::new(WedgeStore {
+            inner: lazybox_store::MemoryStore::new(),
+            delete_attempted: std::sync::atomic::AtomicBool::new(false),
+        });
+        let config = ServerConfig::with_store(store.clone());
+        let key = WorkspaceKey::new("github:o/r#123");
+        let ws = Workspace::empty(key.clone(), "main", Utc::now());
+        config
+            .store
+            .save_workspace(&WorkspaceRecord {
+                key: key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).expect("serialize workspace")),
+            })
+            .expect("save workspace");
+
+        let reclaimed = WorkspaceLifecycle::new(&config)
+            .remove(&key, WorkspaceRemovalReason::ClosedAuto)
+            .await;
+        assert!(
+            reclaimed.is_none(),
+            "the removal aborts because the store delete failed"
+        );
+        // The workspace is still present (the delete failed), so it must remain
+        // spawnable — its key must not linger in the in-process delete guard.
+        assert!(
+            !config.deleted_workspaces.lock().contains(key.as_str()),
+            "a failed non-archiving delete must clear the deleted_workspaces guard \
+             even when the tombstone rollback write also fails"
         );
     }
 }

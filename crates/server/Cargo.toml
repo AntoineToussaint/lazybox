@@ -26,6 +26,7 @@ lazybox-git-ops    = { workspace = true }
 lazybox-ipc       = { workspace = true }
 lazybox-agents    = { workspace = true }
 lazybox-linear       = { workspace = true }
+lazybox-jira         = { workspace = true }
 lazybox-slack        = { workspace = true }
 lazybox-tui-core     = { workspace = true }
 
@@ -43,7 +44,17 @@ libc             = "0.2"
 uuid             = { version = "1", features = ["v4"] }
 bytes            = "1"
 hyper            = { version = "1", features = ["server", "http1"] }
-hyper-util       = { version = "0.1", features = ["server", "tokio"] }
+hyper-util       = { version = "0.1", features = ["server", "service", "tokio"] }
+# MCP coordination server (#1420): rmcp's StreamableHttpService is a tower
+# Service wrapped onto the existing hyper stack via TowerToHyperService, so
+# no axum listener of our own. `http` names the request Parts type rmcp
+# stashes in the tool RequestContext, from which we read the bearer.
+rmcp             = { workspace = true }
+http             = { workspace = true }
+# Loopback listener for the MCP server: SO_REUSEADDR so the coordination port
+# can be reused across a daemon restart, letting a reattached agent's baked
+# endpoint URL keep resolving (#1420).
+socket2          = "0.6"
 http-body-util   = { version = "0.1", features = ["channel"] }
 # Outbound leg of the metering proxy (#1062): forwards agent traffic to
 # the real Anthropic/OpenAI upstream and streams the response back. TLS
@@ -59,6 +70,10 @@ tempfile       = "3"
 bincode        = { workspace = true }
 criterion      = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 libghostty-vt  = { workspace = true }
+# End-to-end MCP round trip (#1433): drive the shipping server through a real
+# rmcp client over the streamable-HTTP transport. Test-only client + reqwest
+# transport features, so the shipping tree keeps only the server side.
+rmcp           = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 
 [[bin]]
 name = "generate-desktop-contract"

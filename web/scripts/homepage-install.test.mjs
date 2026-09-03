@@ -9,35 +9,34 @@ assert.ok(stylesheetPath, 'expected the built homepage stylesheet');
 const css = await readFile(new URL(`../dist${stylesheetPath}`, import.meta.url), 'utf8');
 const socialPreview = await readFile(new URL('../public/og.png', import.meta.url));
 
-const brewCommand = 'brew install AntoineToussaint/lazybox/lazybox';
-const installerCommand =
-  "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/AntoineToussaint/lazybox/releases/latest/download/lazybox-tui-installer.sh | sh";
+// `&&` is HTML-escaped to `&amp;&amp;` in the built markup; the raw HTML we read
+// here contains the escaped form, so these constants match what ships.
+const brewCommand =
+  'brew tap AntoineToussaint/lazybox &amp;&amp; brew trust AntoineToussaint/lazybox &amp;&amp; brew install lazybox';
 const sourceCommand =
-  'cargo install --git https://github.com/AntoineToussaint/lazybox --locked lazybox-tui-boot';
+  'git clone https://github.com/AntoineToussaint/lazybox &amp;&amp; cd lazybox &amp;&amp; make setup &amp;&amp; make run';
 
-test('the homepage prioritizes prebuilt installs over the source build', () => {
+test('the homepage leads with the brew-only install and buries the source build', () => {
   const detailsIndex = html.indexOf('<details class="install-more">');
   const brewIndex = html.indexOf(brewCommand);
-  const installerIndex = html.indexOf('Installer script <span>Prebuilt</span>');
-  const sourceIndex = html.indexOf('Advanced / from source');
+  const sourceIndex = html.indexOf('From source <span>Contributors</span>');
 
-  assert.ok(detailsIndex > 0, 'expected alternate install methods to be disclosed');
-  assert.ok(brewIndex > 0 && brewIndex < detailsIndex, 'expected Homebrew before alternate methods');
-  assert.ok(installerIndex > detailsIndex, 'expected the prebuilt installer in alternate methods');
-  assert.ok(sourceIndex > installerIndex, 'expected the source build to be the last method');
+  assert.ok(detailsIndex > 0, 'expected the contributor build to be disclosed behind a details toggle');
+  assert.ok(brewIndex > 0 && brewIndex < detailsIndex, 'expected the brew command before the disclosed build');
+  assert.ok(sourceIndex > detailsIndex, 'expected the source build inside the details disclosure');
   assert.equal(
     html.slice(0, detailsIndex).includes(sourceCommand),
     false,
-    'source install must not appear as the primary command',
+    'source build must not appear as a primary command',
   );
-  assert.ok(
-    html.includes('Compiles the current main branch (HEAD) locally. Requires Rust 1.88+'),
-    'expected the source build requirements',
-  );
+  // No deprecated user-facing installers on the homepage.
+  assert.equal(html.includes('lazybox-tui-installer.sh'), false, 'the curl installer must not be advertised');
+  assert.equal(html.includes('cargo install --git'), false, 'the broken cargo-install path must not be advertised');
+  assert.ok(html.includes('Requires Rust 1.88+'), 'expected the source build requirements');
 });
 
 test('every install method has a copy control for its exact command', () => {
-  for (const command of [brewCommand, installerCommand, sourceCommand]) {
+  for (const command of [brewCommand, sourceCommand]) {
     assert.ok(html.includes(`data-copy="${command}"`), `missing copy control for: ${command}`);
   }
 });
@@ -132,6 +131,91 @@ test('each captions file ships with parseable cues inside its clip', async () =>
     for (const [, start, end] of cues) {
       assert.match(start, timestamp, `bad cue start in ${clip}: ${start}`);
       assert.match(end, timestamp, `bad cue end in ${clip}: ${end}`);
+    }
+  }
+});
+
+// "MM:SS.mmm" or "HH:MM:SS.mmm" → seconds.
+function cueSeconds(stamp) {
+  const parts = stamp.split(':').map(Number);
+  return parts.reduce((acc, n) => acc * 60 + n, 0);
+}
+
+// The playable length of an MP4's video track, read from its sample-table
+// (stts) — the only duration that matches what the browser loops a <video>
+// on. We walk the box tree (moov→trak→mdia→…) rather than byte-scanning for
+// box names, which false-matches inside the compressed mdat; and we sum stts
+// deltas rather than trusting mvhd/mdhd, whose headers can be padded past the
+// real samples (VHS clips 02–05 declare ~3s more than they play).
+function mp4Boxes(buf, start, end) {
+  const out = [];
+  let p = start;
+  while (p + 8 <= end) {
+    const size = buf.readUInt32BE(p);
+    const type = buf.toString('latin1', p + 4, p + 8);
+    let headerSize = 8;
+    let boxEnd;
+    if (size === 1) {
+      boxEnd = p + Number(buf.readBigUInt64BE(p + 8));
+      headerSize = 16;
+    } else if (size === 0) {
+      boxEnd = end;
+    } else {
+      boxEnd = p + size;
+    }
+    if (boxEnd <= p || boxEnd > end) break;
+    out.push({ type, dataStart: p + headerSize, end: boxEnd });
+    p = boxEnd;
+  }
+  return out;
+}
+function mp4Child(buf, box, type) {
+  return mp4Boxes(buf, box.dataStart, box.end).find((b) => b.type === type);
+}
+function videoTrackSeconds(buf) {
+  const moov = mp4Boxes(buf, 0, buf.length).find((b) => b.type === 'moov');
+  assert.ok(moov, 'mp4 has no moov box');
+  for (const trak of mp4Boxes(buf, moov.dataStart, moov.end).filter((b) => b.type === 'trak')) {
+    const mdia = mp4Child(buf, trak, 'mdia');
+    if (!mdia) continue;
+    const hdlr = mp4Child(buf, mdia, 'hdlr');
+    const mdhd = mp4Child(buf, mdia, 'mdhd');
+    if (!hdlr || !mdhd) continue;
+    if (buf.toString('latin1', hdlr.dataStart + 8, hdlr.dataStart + 12) !== 'vide') continue;
+    const version = buf[mdhd.dataStart];
+    const timescale = buf.readUInt32BE(mdhd.dataStart + 4 + (version === 1 ? 16 : 8));
+    const stbl = mp4Child(buf, mp4Child(buf, mdia, 'minf') ?? mdia, 'stbl');
+    const stts = stbl && mp4Child(buf, stbl, 'stts');
+    assert.ok(stts, 'video track has no stts box');
+    let p = stts.dataStart + 4; // version + flags
+    const entries = buf.readUInt32BE(p);
+    p += 4;
+    let units = 0;
+    for (let i = 0; i < entries; i += 1) {
+      units += buf.readUInt32BE(p) * buf.readUInt32BE(p + 4);
+      p += 8;
+    }
+    return units / timescale;
+  }
+  throw new Error('mp4 has no video track');
+}
+
+// The regression guard for the high-res hero swap (#1347): the video content
+// was replaced but the captions weren't, leaving the 01-inbox track with a cue
+// at 00:11.2 over an 8.56s clip — invisible, and narrating a keystroke the clip
+// never performs. Cue text can't be checked automatically, but a cue that ends
+// past the clip is an unambiguous, catchable desync.
+test('no caption cue outlives its demo clip', async () => {
+  for (const clip of demoClips) {
+    const mp4 = await readFile(new URL(`../public/demo/${clip}.mp4`, import.meta.url));
+    const duration = videoTrackSeconds(mp4);
+    const vtt = await readFile(new URL(`../public/demo/${clip}.vtt`, import.meta.url), 'utf8');
+    const cues = [...vtt.matchAll(/^(\S+)\s+-->\s+(\S+)/gm)];
+    for (const [, , end] of cues) {
+      assert.ok(
+        cueSeconds(end) <= duration,
+        `${clip}: caption ends at ${end} (${cueSeconds(end)}s) past the ${duration.toFixed(3)}s clip`,
+      );
     }
   }
 });

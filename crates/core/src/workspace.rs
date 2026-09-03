@@ -105,10 +105,118 @@ impl std::fmt::Display for SessionId {
 /// items past this.
 pub const MAX_ACTIVITY_ITEMS: usize = 500;
 
-/// Cap on [`Workspace::sent_snippets`] — enough to re-orient on what
-/// you've told an agent without letting the MRU grow the workspace JSON
-/// blob unbounded.
+/// Cap on the distinct-recent MRU inside [`SnippetDeliveryLog`] — enough
+/// to re-orient on what you've told an agent without letting the MRU grow
+/// the workspace JSON blob unbounded. Only the MRU is capped; the
+/// delivery *count* is unbounded.
 pub const SENT_SNIPPETS_MAX: usize = 12;
+
+/// A workspace's record of snippets delivered to its agent(s) (#463).
+///
+/// One fact — "a snippet was sent to this workspace's agent" — projected
+/// two ways and *owned together* so they can never disagree:
+///
+/// - [`total`](Self::total): a **monotonic count of every delivery**,
+///   including re-sends of the same key and deliveries past the MRU cap.
+///   This is the honest `]N` sidebar badge — what "sent" actually means.
+/// - [`recent`](Self::recent): an MRU of distinct keys, most-recent
+///   first, de-duplicated and capped at [`SENT_SNIPPETS_MAX`] — "what
+///   I've already told this agent," for cheap re-orientation.
+///
+/// The fields are private and the sole mutator is [`record`](Self::record):
+/// there is no way to bump the count without touching the MRU or vice
+/// versa, so "the badge drifted from reality" is *unrepresentable*.
+/// Before this type existed the badge read `sent_snippets.len()` — a
+/// capped, de-duplicated set rendered as if it were a count, so a re-send
+/// never incremented and the 13th distinct snippet was invisible.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct SnippetDeliveryLog {
+    /// Monotonic count of deliveries — see the type docs.
+    #[serde(default)]
+    total: usize,
+    /// Distinct recent keys, most-recent first, capped at
+    /// [`SENT_SNIPPETS_MAX`].
+    #[serde(default)]
+    recent: Vec<String>,
+}
+
+impl SnippetDeliveryLog {
+    /// The sole transition: record that `key` was delivered to this
+    /// workspace's agent. Increments the monotonic [`total`](Self::total)
+    /// and moves `key` to the front of the [`recent`](Self::recent) MRU
+    /// (de-duplicated, capped). One call, both projections — they cannot
+    /// fall out of step.
+    pub fn record(&mut self, key: String) {
+        self.total = self.total.saturating_add(1);
+        self.recent.retain(|k| k != &key);
+        self.recent.insert(0, key);
+        self.recent.truncate(SENT_SNIPPETS_MAX);
+    }
+
+    /// Total snippets delivered here — the value behind the `]N` badge.
+    pub fn total(&self) -> usize {
+        self.total
+    }
+
+    /// Distinct recent keys, most-recent first.
+    pub fn recent(&self) -> &[String] {
+        &self.recent
+    }
+
+    /// Whether anything has ever been delivered here.
+    pub fn is_empty(&self) -> bool {
+        self.total == 0
+    }
+
+    /// Fold `other` in when two workspaces merge (an issue collapsing
+    /// into its PR): sum the counts, union the MRU with this workspace's
+    /// recency winning ties. A merge is still one delivery history.
+    pub fn absorb(&mut self, other: &SnippetDeliveryLog) {
+        self.total = self.total.saturating_add(other.total);
+        self.recent = merge_sent_snippets(&self.recent, &other.recent);
+    }
+
+    /// Seed a log from a bare, most-recent-first list of keys, counting
+    /// each once. For legacy migration and test fixtures only — real
+    /// deliveries go through [`record`](Self::record).
+    pub fn from_recent(recent: impl IntoIterator<Item = String>) -> Self {
+        let mut log = SnippetDeliveryLog::default();
+        for key in recent {
+            log.recent.retain(|k| k != &key);
+            log.recent.push(key);
+        }
+        log.recent.truncate(SENT_SNIPPETS_MAX);
+        log.total = log.recent.len();
+        log
+    }
+}
+
+/// Migrate a persisted workspace's legacy `sent_snippets` shape in place.
+///
+/// Pre-#463-followup records stored `sent_snippets` as a bare array of
+/// keys (the MRU, no count); the current shape is a `{ total, recent }`
+/// object. The derived `Deserialize` on [`SnippetDeliveryLog`] is
+/// deliberately plain — it must round-trip through **bincode** on the IPC
+/// wire, which rejects the `deserialize_any` a shape-sniffing
+/// (`#[serde(untagged)]`) impl needs. So the array→object migration lives
+/// HERE, in the JSON persistence decode path — the only place a legacy
+/// row is ever read; the wire only ever carries current-build objects.
+/// The count is seeded from the MRU length we know.
+fn migrate_legacy_sent_snippets(value: &mut serde_json::Value) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    if let Some(arr) = obj.get("sent_snippets").and_then(|v| v.as_array())
+        && arr.iter().all(serde_json::Value::is_string)
+    {
+        let recent = arr.clone();
+        obj.insert(
+            "sent_snippets".to_string(),
+            serde_json::json!({ "total": recent.len(), "recent": recent }),
+        );
+    }
+}
 
 /// Stable identity of an activity item used to carry read/seen state
 /// across the re-sort a merge triggers.
@@ -180,7 +288,93 @@ pub enum CleanupPrompt {
 /// - 2: `Session::worktree_branch`.
 /// - 3: `Task::reviews` (submitted reviewers + state).
 /// - 4: `Task::parent` (provider-native ticket hierarchy).
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 4;
+/// - 5: `Workspace::hopper` (personal queue membership + order).
+/// - 6: `HopperMeta::completed_at` (reversible personal completion).
+/// - 7: `Workspace::sent_snippets` becomes [`SnippetDeliveryLog`] — a
+///   `{ total, recent }` object (monotonic count + MRU) instead of a bare
+///   key array. Newer builds read the old array shape; older builds fail
+///   to parse the object and route the row into preserve-and-report,
+///   which is exactly the downgrade protection the stamp exists for.
+/// - 8: `Workspace::snooze_wake` (event-conditional snooze wake, #scale)
+///   and `Workspace::woke_at` (the announced-re-entry stamp). Both
+///   optional with `#[serde(default)]`, so older records read back
+///   cleanly.
+/// - 9: `Workspace::metered` (per-workspace metering-proxy opt-in, the
+///   `$ meter` canary). Optional with `#[serde(default)]`, so older
+///   records read back cleanly (defaulting to unmetered).
+/// - 10: `HopperMeta::canceled_at` (reversible cancellation, distinct
+///   from both completion and destructive deletion).
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 10;
+
+/// How long a workspace counts as "recently woken" after an
+/// event-conditional snooze fires (#scale): within this window the row
+/// sorts to the top of its group and carries the wake pill, so the
+/// re-entry is announced rather than silent. Deliberately short — an
+/// announcement, not a sticky state.
+pub const WOKE_WINDOW: chrono::Duration = chrono::Duration::hours(4);
+
+/// Event that ends a snooze early (#scale, proposal B4): the snooze
+/// returns at its deadline OR when this condition fires, whichever
+/// comes first — Linear's "snooze is never a black hole" semantics.
+/// Evaluated by the daemon's upsert path against the old vs freshly
+/// polled primary task; see [`snooze_wake_due`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+#[serde(rename_all = "kebab-case")]
+pub enum SnoozeWake {
+    /// Any new activity on the task (its `updated_at` advanced).
+    Activity,
+    /// CI left the in-flight states and reached a verdict.
+    CiSettled,
+    /// A review landed: a new submitted review, or the aggregate
+    /// review state turned decisive.
+    ReviewLanded,
+}
+
+/// Does `wake` fire for the transition `old` → `new`? Pure so the
+/// exact wake semantics are unit-tested without a daemon.
+pub fn snooze_wake_due(wake: SnoozeWake, old: &Task, new: &Task) -> bool {
+    match wake {
+        SnoozeWake::Activity => new.updated_at > old.updated_at,
+        SnoozeWake::CiSettled => {
+            new.ci != old.ci
+                && matches!(
+                    new.ci,
+                    crate::CiStatus::Success | crate::CiStatus::Failure | crate::CiStatus::Mixed
+                )
+        }
+        SnoozeWake::ReviewLanded => {
+            new.reviews.len() > old.reviews.len()
+                || (new.review != old.review
+                    && matches!(
+                        new.review,
+                        crate::ReviewStatus::Approved | crate::ReviewStatus::ChangesRequested
+                    ))
+        }
+    }
+}
+
+/// Personal queue metadata for a workspace captured in the Hopper.
+///
+/// The workspace remains the unit of work: this metadata only controls
+/// where it appears in the sidebar and its explicit user-owned ordering.
+/// A hopper workspace may have no project and no sessions until the user
+/// starts work on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct HopperMeta {
+    /// Stable zero-based display order within the active Hopper.
+    pub position: u32,
+    /// Completion moves the item to Inactive without tearing down its
+    /// sessions or checkout. Clearing it reopens the same workspace.
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Cancellation is a reversible lifecycle outcome distinct from both
+    /// completion and destructive deletion. It removes the item from the
+    /// active Hopper while preserving its workspace and history.
+    #[serde(default)]
+    pub canceled_at: Option<DateTime<Utc>>,
+}
 
 /// Serialize hook for [`Workspace::schema`]: always stamp the CURRENT
 /// version on save, regardless of what version the row was loaded at.
@@ -238,6 +432,11 @@ pub struct Workspace {
     /// derived workspaces leave this `false`.
     #[serde(default)]
     pub local: bool,
+    /// Present when this is a user-captured personal Hopper workspace.
+    /// Kept separate from local: imported checkouts and hand-created
+    /// project workspaces are local too, but do not belong in the Hopper.
+    #[serde(default)]
+    pub hopper: Option<HopperMeta>,
     /// When `Some`, this is a **linked (no-worktree) checkout**: the
     /// workspace points directly at an existing clone on disk (a
     /// canonical `~/development/<owner>/<repo>` folder imported via the
@@ -272,6 +471,18 @@ pub struct Workspace {
     pub read_indices: HashSet<usize>,
     #[serde(default)]
     pub snoozed_until: Option<DateTime<Utc>>,
+    /// Event that ends the snooze early (#scale): checked by the
+    /// daemon on every poll of this workspace's primary task. `None`
+    /// = time-only snooze (the pre-#scale behavior).
+    #[serde(default)]
+    pub snooze_wake: Option<SnoozeWake>,
+    /// When an event-conditional snooze last fired (#scale): the
+    /// "announced re-entry" stamp. Rows woken within
+    /// [`WOKE_WINDOW`] sort to the top of their group and carry a
+    /// wake pill, so a snooze ending never reads as a silent
+    /// reappearance. Never set by a manual un-snooze.
+    #[serde(default)]
+    pub woke_at: Option<DateTime<Utc>>,
     /// Per-workspace "auto-merge on green" arm. When `true`, the
     /// **daemon's** polling commit path auto-fires a merge the moment
     /// this workspace's own PR becomes merge-ready (green CI, no
@@ -294,6 +505,15 @@ pub struct Workspace {
     /// reset, so in-progress work is never destroyed.
     #[serde(default)]
     pub track_main: bool,
+    /// Route this workspace's agent LLM traffic through the local metering
+    /// proxy (the per-workspace `$ meter` canary, #per-session cost). Sticky:
+    /// every spawn here — fresh, restart, or re-spawn — is metered while this
+    /// is set, so cost/tokens/rate accrue per workspace without affecting any
+    /// other session. User-toggled, persisted in the workspace JSON blob.
+    /// Effective only when `agent.metering_proxy` is enabled and the proxy is
+    /// running; otherwise inert.
+    #[serde(default)]
+    pub metered: bool,
     /// The resolved default branch this workspace is based on
     /// (`main` / `master` / …), persisted so "track main" doesn't
     /// re-derive it every sweep and so the exact branch survives a
@@ -324,14 +544,14 @@ pub struct Workspace {
     /// upstream-derived state and leave this intact across polls.
     #[serde(default)]
     pub notes: String,
-    /// MRU of snippet shortcut keys sent to this workspace's agent(s)
-    /// (issue #463) — a per-session record of "what I've already told
-    /// this agent" so switching back is cheap. Most-recent first,
-    /// de-duplicated (a re-send moves the key to the front), capped at
-    /// [`SENT_SNIPPETS_MAX`]. Persisted in the workspace JSON blob
-    /// alongside [`Workspace::notes`]; never synced to any provider.
+    /// Record of snippets delivered to this workspace's agent(s) (issue
+    /// #463): the honest `]N` badge count plus an MRU of "what I've
+    /// already told this agent." A single owned value with one
+    /// transition — see [`SnippetDeliveryLog`]. Persisted in the
+    /// workspace JSON blob alongside [`Workspace::notes`]; never synced
+    /// to any provider.
     #[serde(default)]
-    pub sent_snippets: Vec<String>,
+    pub sent_snippets: SnippetDeliveryLog,
     /// Durable answer to the merged/closed cleanup prompt (issue #499).
     /// Serde-defaulted so pre-#499 records read back as `Unresolved`.
     #[serde(default)]
@@ -355,10 +575,12 @@ impl Workspace {
         let branch = branch.into();
         Self {
             schema: WORKSPACE_SCHEMA_VERSION,
+            metered: false,
             name: key.as_str().to_string(),
             key,
             project_key: None,
             local: false,
+            hopper: None,
             linked_checkout: None,
             branch,
             sessions: Vec::new(),
@@ -369,13 +591,15 @@ impl Workspace {
             seen_count: 0,
             read_indices: HashSet::new(),
             snoozed_until: None,
+            snooze_wake: None,
+            woke_at: None,
             auto_merge_on_green: false,
             track_main: false,
             base_branch: None,
             track_main_behind: false,
             policies: crate::AutomationPolicies::default(),
             notes: String::new(),
-            sent_snippets: Vec::new(),
+            sent_snippets: SnippetDeliveryLog::default(),
             cleanup_prompt: CleanupPrompt::default(),
             remote: None,
             created_at: now,
@@ -400,7 +624,13 @@ impl Workspace {
     /// Every load that can lead to a save of the same row must go
     /// through this instead of a bare `serde_json::from_str`.
     pub fn decode_persisted(json: &str) -> Result<Self, WorkspaceDecodeError> {
-        let ws: Self = serde_json::from_str(json)?;
+        // Parse to a Value first so a legacy `sent_snippets` array can be
+        // migrated to the current object shape before typed decode — the
+        // derived `Deserialize` is bincode-safe and can't sniff the old
+        // shape itself (see `migrate_legacy_sent_snippets`).
+        let mut value: serde_json::Value = serde_json::from_str(json)?;
+        migrate_legacy_sent_snippets(&mut value);
+        let ws: Self = serde_json::from_value(value)?;
         if ws.schema > WORKSPACE_SCHEMA_VERSION {
             return Err(WorkspaceDecodeError::NewerSchema {
                 found: ws.schema,
@@ -433,15 +663,12 @@ impl Workspace {
             && workspace_project_key(self).is_some_and(|k| k.source_prefix() == "github")
     }
 
-    /// Record `key` as just-sent to this workspace's agent: move it to
-    /// the front of [`Workspace::sent_snippets`], de-duplicating and
-    /// capping at [`SENT_SNIPPETS_MAX`]. Mirrors the global picker MRU
-    /// but scoped per workspace, so the sidebar can show what you've
-    /// already told each agent (issue #463).
-    pub fn record_sent_snippet(&mut self, key: String) {
-        self.sent_snippets.retain(|k| k != &key);
-        self.sent_snippets.insert(0, key);
-        self.sent_snippets.truncate(SENT_SNIPPETS_MAX);
+    /// Record that a snippet `key` was delivered to this workspace's
+    /// agent — the single per-workspace delivery transition (issue #463).
+    /// Delegates to [`SnippetDeliveryLog::record`], which bumps the
+    /// honest count and the "what I've told this agent" MRU together.
+    pub fn record_snippet_delivery(&mut self, key: String) {
+        self.sent_snippets.record(key);
     }
 
     /// Append a fresh session and return its id. Sessions own a
@@ -524,7 +751,8 @@ impl Workspace {
     ///   replacing, lazy-fetched fields on the existing PR are
     ///   preserved if the incoming task left them empty — see
     ///   `preserve_lazy_pr_fields` for the list.
-    /// - GitHub issue → `gh_issues` (de-duped by `TaskId`).
+    /// - GitHub issue, or any provider-typed issue (Jira, …) → `gh_issues`
+    ///   (de-duped by `TaskId`).
     /// - Linear ticket → `linear_issues` (de-duped by `TaskId`).
     /// - Anything else → silently dropped (we don't have a slot).
     ///
@@ -831,6 +1059,7 @@ impl Workspace {
             key: _,
             project_key: _,
             local: _,
+            hopper: _,
             linked_checkout: _,
             name: _,
             branch: _,
@@ -855,8 +1084,18 @@ impl Workspace {
             // Remote placement belongs to the destination row's own
             // identity — a transfer never inherits the source's box.
             remote: _,
+            // Metering follows the line of work: an issue metered while it
+            // was worked must keep metering after it collapses into its PR.
+            // Carried below (OR'd) so an issue→PR rebadge doesn't silently
+            // stop the meter mid-line-of-work.
+            metered,
             // ── user-owned state: one explicit merge rule each ──
             snoozed_until,
+            // The wake condition rides the snooze it belongs to (below);
+            // a woke stamp is the SOURCE row's history, not the
+            // destination's — never transferred.
+            snooze_wake,
+            woke_at: _,
             auto_merge_on_green,
             track_main,
             base_branch,
@@ -873,7 +1112,17 @@ impl Workspace {
         // just because the folded issue was snoozed.
         if self.snoozed_until.is_some() {
             self.snoozed_until = later_opt(self.snoozed_until, *snoozed_until);
+            // Carry the source's wake condition only when the merge
+            // actually extended a snooze the destination already had —
+            // same never-newly-hide rule as the deadline itself.
+            if self.snooze_wake.is_none() {
+                self.snooze_wake = *snooze_wake;
+            }
         }
+        // Metering follows the work: OR so a metered source keeps the
+        // destination metered across a rebadge/transfer, but never turns a
+        // metered destination off.
+        self.metered |= *metered;
         // merge-on-green is a consequential daemon arm; carry it only
         // where there's actually a PR to merge. Mirrors the UI, which
         // refuses to arm it on a PR-less workspace, so a stray arm can't
@@ -897,8 +1146,9 @@ impl Workspace {
         self.policies.absorb_from(policies);
         // Notes: concatenate so neither scratchpad is lost.
         self.notes = merge_notes(&self.notes, notes);
-        // Snippet MRU: union, destination recency first, capped.
-        self.sent_snippets = merge_sent_snippets(&self.sent_snippets, sent_snippets);
+        // Snippet delivery: sum the counts, union the MRU with the
+        // destination's recency winning ties. A merge is one history.
+        self.sent_snippets.absorb(sent_snippets);
         // Last viewed: the more recent view of either row.
         self.last_viewed_at = later_opt(self.last_viewed_at, *last_viewed_at);
     }
@@ -1027,6 +1277,39 @@ impl Workspace {
             Some(until) => until > now,
             None => false,
         }
+    }
+
+    /// Event-conditional snooze check (#scale, proposal B4): if this
+    /// workspace is snoozed with a wake condition and `incoming` (the
+    /// freshly polled primary task) satisfies it against the currently
+    /// stored task, END the snooze — clear the deadline + condition and
+    /// stamp [`Self::woke_at`] so the re-entry is announced. Returns
+    /// whether it woke. Call BEFORE attaching `incoming` (the old task
+    /// is the comparison baseline).
+    pub fn maybe_wake_on(&mut self, incoming: &Task, now: DateTime<Utc>) -> bool {
+        if !self.is_snoozed(now) {
+            return false;
+        }
+        let Some(wake) = self.snooze_wake else {
+            return false;
+        };
+        let due = self
+            .primary_task()
+            .filter(|old| old.id == incoming.id)
+            .is_some_and(|old| snooze_wake_due(wake, old, incoming));
+        if due {
+            self.snoozed_until = None;
+            self.snooze_wake = None;
+            self.woke_at = Some(now);
+        }
+        due
+    }
+
+    /// Whether an event wake fired within [`WOKE_WINDOW`] — drives the
+    /// wake pill and the top-of-group sort boost.
+    pub fn is_recently_woken(&self, now: DateTime<Utc>) -> bool {
+        self.woke_at
+            .is_some_and(|at| at <= now && now - at < WOKE_WINDOW)
     }
 
     /// On-disk identifier for this workspace's worktrees. Human-
@@ -1191,8 +1474,13 @@ fn classify(task: &Task) -> TaskSlot {
     }
     // Anything else from a known issue-tracking source is treated
     // as an issue. The explicit `/issues/` check catches paths even
-    // if `source` is set to something custom.
-    if task.url.contains("/issues/") || task.id.source == "github" {
+    // if `source` is set to something custom, and a provider that
+    // typed its task `Issue` (Jira's `/browse/KEY` URLs say nothing)
+    // is believed over the URL heuristic.
+    if task.url.contains("/issues/")
+        || task.id.source == "github"
+        || task.kind == Some(crate::TaskKind::Issue)
+    {
         return TaskSlot::GhIssue;
     }
     TaskSlot::Unknown
@@ -2157,6 +2445,24 @@ mod tests {
         let ws = Workspace::from_task(t, now());
         assert!(ws.pr.is_none(), "typed Issue is not routed to the PR slot");
         assert_eq!(ws.gh_issues.len(), 1);
+    }
+
+    #[test]
+    fn classify_routes_typed_issue_from_any_source_to_the_issue_slot() {
+        // A Jira row: `/browse/KEY` URL, source neither github nor
+        // linear. Before the typed-kind check it fell through to
+        // `Unknown` and was dropped, leaving a title-only workspace with
+        // no key, role, status, or parent to nest under.
+        let mut t = issue("jira", "DEMO-954");
+        t.url = "https://example.atlassian.net/browse/DEMO-954".into();
+        t.kind = Some(crate::TaskKind::Issue);
+        let ws = Workspace::from_task(t, now());
+        assert_eq!(ws.gh_issues.len(), 1, "typed issue attaches");
+        assert!(ws.pr.is_none());
+        assert_eq!(
+            ws.primary_task().map(|t| t.id.key.as_str()),
+            Some("DEMO-954")
+        );
     }
 
     #[test]
@@ -3394,54 +3700,113 @@ mod tests {
         assert!(!legacy.has_notes());
     }
 
-    /// `sent_snippets` (#463) is an MRU: a re-send moves the key to the
-    /// front, distinct keys stack newest-first, and the list is capped
-    /// at [`SENT_SNIPPETS_MAX`], dropping the oldest.
+    /// The per-workspace delivery MRU (#463) moves a re-send to the
+    /// front, stacks distinct keys newest-first, and caps at
+    /// [`SENT_SNIPPETS_MAX`], dropping the oldest.
     #[test]
     fn sent_snippets_mru_dedups_and_caps() {
         let mut w = Workspace::from_task(pr("o/r#1"), now());
         assert!(w.sent_snippets.is_empty(), "nothing sent yet");
 
-        w.record_sent_snippet("rev".into());
-        w.record_sent_snippet("plan".into());
-        assert_eq!(w.sent_snippets, vec!["plan", "rev"], "most-recent first");
-
-        w.record_sent_snippet("rev".into());
+        w.record_snippet_delivery("rev".into());
+        w.record_snippet_delivery("plan".into());
         assert_eq!(
-            w.sent_snippets,
+            w.sent_snippets.recent().to_vec(),
+            vec!["plan", "rev"],
+            "most-recent first",
+        );
+
+        w.record_snippet_delivery("rev".into());
+        assert_eq!(
+            w.sent_snippets.recent().to_vec(),
             vec!["rev", "plan"],
             "a re-send moves the key to the front, no duplicate",
         );
 
         for i in 0..SENT_SNIPPETS_MAX {
-            w.record_sent_snippet(format!("k{i}"));
+            w.record_snippet_delivery(format!("k{i}"));
         }
-        assert_eq!(w.sent_snippets.len(), SENT_SNIPPETS_MAX, "capped");
         assert_eq!(
-            w.sent_snippets[0],
+            w.sent_snippets.recent().len(),
+            SENT_SNIPPETS_MAX,
+            "MRU capped",
+        );
+        assert_eq!(
+            w.sent_snippets.recent()[0],
             format!("k{}", SENT_SNIPPETS_MAX - 1),
             "newest at the front",
         );
         assert!(
-            !w.sent_snippets.iter().any(|k| k == "plan"),
+            !w.sent_snippets.recent().iter().any(|k| k == "plan"),
             "the oldest keys evicted past the cap",
         );
     }
 
-    /// `sent_snippets` round-trips through the workspace JSON blob, and a
-    /// pre-#463 record (no key) reads back as an empty list.
+    /// Regression: the `]N` badge counts *every* delivery, not the size
+    /// of the capped, de-duplicated MRU. A re-send increments; a delivery
+    /// past the MRU cap increments. The old badge read
+    /// `sent_snippets.len()` and silently lost both — the wrong count.
     #[test]
-    fn sent_snippets_default_when_absent_from_json() {
+    fn snippet_count_counts_every_delivery_not_the_mru_len() {
         let mut w = Workspace::from_task(pr("o/r#1"), now());
-        w.record_sent_snippet("rev".into());
+        assert_eq!(w.sent_snippets.total(), 0);
+
+        // Three deliveries of the SAME key: MRU stays 1, count is 3.
+        w.record_snippet_delivery("rev".into());
+        w.record_snippet_delivery("rev".into());
+        w.record_snippet_delivery("rev".into());
+        assert_eq!(w.sent_snippets.recent().len(), 1, "MRU de-dups");
+        assert_eq!(w.sent_snippets.total(), 3, "count includes re-sends");
+
+        // Deliver well past the MRU cap: MRU saturates, count keeps going.
+        for i in 0..(SENT_SNIPPETS_MAX * 2) {
+            w.record_snippet_delivery(format!("k{i}"));
+        }
+        assert_eq!(
+            w.sent_snippets.recent().len(),
+            SENT_SNIPPETS_MAX,
+            "MRU stays capped",
+        );
+        assert_eq!(
+            w.sent_snippets.total(),
+            3 + SENT_SNIPPETS_MAX * 2,
+            "count is unbounded — every delivery counted",
+        );
+    }
+
+    /// The delivery log round-trips through the workspace JSON blob, a
+    /// pre-#463 record (field absent) reads back empty, and a legacy
+    /// `sent_snippets` *array* (the pre-count shape) migrates into the
+    /// MRU with the count seeded from the keys we know.
+    #[test]
+    fn sent_snippets_round_trip_and_legacy_migration() {
+        let mut w = Workspace::from_task(pr("o/r#1"), now());
+        w.record_snippet_delivery("rev".into());
         let json = serde_json::to_string(&w).unwrap();
         let back: Workspace = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.sent_snippets, vec!["rev"]);
+        assert_eq!(back.sent_snippets.recent().to_vec(), vec!["rev"]);
+        assert_eq!(back.sent_snippets.total(), 1);
 
+        // Field absent (pre-#463): empty log.
         let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
         value.as_object_mut().unwrap().remove("sent_snippets");
         let legacy: Workspace = serde_json::from_value(value).unwrap();
         assert!(legacy.sent_snippets.is_empty());
+
+        // Legacy array shape migrates into the MRU, count seeded from len.
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("sent_snippets".into(), serde_json::json!(["plan", "rev"]));
+        // Legacy arrays migrate in the persistence decode path, not via a
+        // bare typed deserialize (which is bincode-safe and object-only).
+        let migrated = Workspace::decode_persisted(&value.to_string()).unwrap();
+        assert_eq!(
+            migrated.sent_snippets.recent().to_vec(),
+            vec!["plan", "rev"]
+        );
+        assert_eq!(migrated.sent_snippets.total(), 2, "count seeded from MRU");
     }
 
     /// Populate every user-owned field with a distinctive, non-default
@@ -3460,11 +3825,38 @@ mod tests {
         w.policies
             .set(crate::AutoFixKind::MergeConflict, crate::PolicyArm::Disarm);
         w.notes = "source note".into();
-        w.record_sent_snippet("rev".into());
-        w.record_sent_snippet("plan".into());
+        w.record_snippet_delivery("rev".into());
+        w.record_snippet_delivery("plan".into());
         w.cleanup_prompt = CleanupPrompt::Declined;
         w.last_viewed_at = Some(now() + chrono::Duration::hours(2));
+        w.metered = true;
         w
+    }
+
+    /// #1389: a workspace metered while worked as an issue must keep
+    /// metering after it collapses into its PR — the meter follows the
+    /// line of work, so an issue→PR rebadge can't silently stop it.
+    #[test]
+    fn absorb_user_state_carries_metered_across_a_rebadge() {
+        let mut source = Workspace::empty(WorkspaceKey::new("issue-src"), "scratch", now());
+        source.metered = true;
+
+        let mut pr_target = Workspace::from_task(pr("o/r#1"), now());
+        assert!(!pr_target.metered, "destination starts unmetered");
+        pr_target.absorb_user_state_from(&source);
+        assert!(pr_target.metered, "metered source keeps the PR metered");
+
+        // OR, never turn-off: an unmetered source leaves a metered
+        // destination metered.
+        let mut unmetered_source = Workspace::empty(WorkspaceKey::new("src2"), "scratch", now());
+        unmetered_source.metered = false;
+        let mut metered_target = Workspace::from_task(pr("o/r#2"), now());
+        metered_target.metered = true;
+        metered_target.absorb_user_state_from(&unmetered_source);
+        assert!(
+            metered_target.metered,
+            "a transfer never turns a metered destination off",
+        );
     }
 
     /// The core #554 guarantee for the always-portable fields: notes,
@@ -3482,7 +3874,7 @@ mod tests {
 
         assert_eq!(target.notes, "source note", "notes carried");
         assert_eq!(
-            target.sent_snippets,
+            target.sent_snippets.recent().to_vec(),
             vec!["plan", "rev"],
             "snippet MRU carried in order",
         );
@@ -3500,6 +3892,7 @@ mod tests {
             target.last_viewed_at, source.last_viewed_at,
             "later last-viewed carried",
         );
+        assert!(target.metered, "metered opt-in carried across the transfer");
         // Eligible destination → track-main trio carries.
         assert!(
             target.track_main,
@@ -3598,8 +3991,8 @@ mod tests {
         target.snoozed_until = Some(now() + chrono::Duration::hours(1));
         target.last_viewed_at = Some(now() + chrono::Duration::hours(1));
         target.notes = "target note".into();
-        target.record_sent_snippet("test".into()); // distinct key
-        target.record_sent_snippet("rev".into()); // shared with source
+        target.record_snippet_delivery("test".into()); // distinct key
+        target.record_snippet_delivery("rev".into()); // shared with source
         // Target disarms auto-fix-ci; source armed it — Disarm is stronger.
         target
             .policies
@@ -3621,8 +4014,13 @@ mod tests {
             target.notes, "target note\n\nsource note",
             "both notes kept, destination first",
         );
-        // Union, destination MRU first (rev de-duped, not doubled).
-        assert_eq!(target.sent_snippets, vec!["rev", "test", "plan"]);
+        // Union, destination MRU first (rev de-duped, not doubled); the
+        // count sums both sides' deliveries (2 + 2).
+        assert_eq!(
+            target.sent_snippets.recent().to_vec(),
+            vec!["rev", "test", "plan"]
+        );
+        assert_eq!(target.sent_snippets.total(), 4, "delivery counts sum");
         assert_eq!(
             target.policies.arm(crate::AutoFixKind::CiFailure),
             crate::PolicyArm::Disarm,
@@ -3650,7 +4048,89 @@ mod tests {
         target.absorb_user_state_from(&source);
         // Source retains its own state — re-absorbing must be idempotent.
         assert_eq!(source.notes, "source note");
-        assert_eq!(source.sent_snippets, vec!["plan", "rev"]);
+        assert_eq!(source.sent_snippets.recent().to_vec(), vec!["plan", "rev"]);
         assert_eq!(source.cleanup_prompt, CleanupPrompt::Declined);
+    }
+
+    /// Event-conditional snooze (#scale, B4): each wake condition's
+    /// exact firing semantics, and `maybe_wake_on`'s contract — ends
+    /// the snooze, stamps `woke_at`, guards on task identity, and
+    /// no-ops without a condition or outside a snooze.
+    #[test]
+    fn snooze_wake_conditions_and_lifecycle() {
+        use crate::{CiStatus, ReviewState, ReviewStatus, Reviewer};
+        let old = pr("o/r#1");
+
+        // Activity: any updated_at advance.
+        let mut newer = old.clone();
+        newer.updated_at = old.updated_at + chrono::Duration::minutes(1);
+        assert!(snooze_wake_due(SnoozeWake::Activity, &old, &newer));
+        assert!(!snooze_wake_due(SnoozeWake::Activity, &old, &old.clone()));
+
+        // CiSettled: a verdict, not another in-flight state.
+        let mut pending = old.clone();
+        pending.ci = CiStatus::Pending;
+        let mut running = pending.clone();
+        running.ci = CiStatus::Running;
+        assert!(!snooze_wake_due(SnoozeWake::CiSettled, &pending, &running));
+        let mut green = pending.clone();
+        green.ci = CiStatus::Success;
+        assert!(snooze_wake_due(SnoozeWake::CiSettled, &pending, &green));
+        assert!(
+            !snooze_wake_due(SnoozeWake::CiSettled, &green, &green.clone()),
+            "an unchanged verdict must not re-fire"
+        );
+
+        // ReviewLanded: a new submitted review, or a decisive flip.
+        let mut reviewed = old.clone();
+        reviewed.reviews = vec![Reviewer {
+            login: "alice".into(),
+            state: ReviewState::Approved,
+            is_bot: false,
+        }];
+        assert!(snooze_wake_due(SnoozeWake::ReviewLanded, &old, &reviewed));
+        let mut approved = old.clone();
+        approved.review = ReviewStatus::Approved;
+        assert!(snooze_wake_due(SnoozeWake::ReviewLanded, &old, &approved));
+        let mut pending_review = old.clone();
+        pending_review.review = ReviewStatus::Pending;
+        assert!(
+            !snooze_wake_due(SnoozeWake::ReviewLanded, &old, &pending_review),
+            "a mere review REQUEST is not a landed review"
+        );
+
+        // maybe_wake_on: ends the snooze + stamps woke_at.
+        let mut ws = Workspace::from_task(old.clone(), now());
+        ws.snoozed_until = Some(now() + chrono::Duration::hours(4));
+        ws.snooze_wake = Some(SnoozeWake::Activity);
+        assert!(ws.maybe_wake_on(&newer, now()));
+        assert_eq!(ws.snoozed_until, None);
+        assert_eq!(ws.snooze_wake, None);
+        assert_eq!(ws.woke_at, Some(now()));
+        assert!(ws.is_recently_woken(now()));
+        assert!(
+            !ws.is_recently_woken(now() + WOKE_WINDOW),
+            "the announcement expires with the window"
+        );
+
+        // Guards: no condition → time-only snooze stays put; a
+        // DIFFERENT task's update never wakes; unsnoozed → no-op.
+        let mut plain = Workspace::from_task(old.clone(), now());
+        plain.snoozed_until = Some(now() + chrono::Duration::hours(4));
+        assert!(!plain.maybe_wake_on(&newer, now()));
+        assert!(plain.is_snoozed(now()));
+
+        let mut other = Workspace::from_task(old.clone(), now());
+        other.snoozed_until = Some(now() + chrono::Duration::hours(4));
+        other.snooze_wake = Some(SnoozeWake::Activity);
+        let mut unrelated = pr("o/r#2");
+        unrelated.updated_at = old.updated_at + chrono::Duration::hours(1);
+        assert!(!other.maybe_wake_on(&unrelated, now()));
+        assert!(other.is_snoozed(now()));
+
+        let mut awake = Workspace::from_task(old, now());
+        awake.snooze_wake = Some(SnoozeWake::Activity);
+        assert!(!awake.maybe_wake_on(&newer, now()));
+        assert_eq!(awake.woke_at, None);
     }
 }

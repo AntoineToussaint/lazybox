@@ -5,7 +5,7 @@ description: Every lazybox subcommand, flag, and run mode.
 
 All commands assume a `lazybox` binary on your `PATH` — installed via Homebrew
 (`brew tap AntoineToussaint/lazybox && brew trust AntoineToussaint/lazybox &&
-brew install lazybox`), the `curl | sh` installer, or a source build (see the
+brew install lazybox`) or a contributor source build (see the
 [Quickstart](/docs/tutorials/quickstart/)). From a source checkout without a
 built binary on `PATH`, substitute `cargo run -p lazybox-tui-boot --`.
 
@@ -51,6 +51,7 @@ first.
 | `lazybox --fresh` | Wipe `~/.lazybox/v2/state.db` and re-run the setup wizard |
 | `lazybox --test` | Throwaway tempdir repo with one seeded workspace, no GitHub |
 | `lazybox --connect [socket]` | Connect to a remote daemon over a Unix socket; with no path, defaults to `~/.lazybox/run/daemon.sock` |
+| `lazybox --connect-relay <box-id> --relay <addr> --box-key <hex>` | Attach a TUI to a box reached through a rendezvous relay (encrypted, ciphertext-only tunnel); see [`--connect-relay`](#lazybox---connect-relay) |
 | `lazybox --workspace <key>` | Preselect a workspace on startup |
 | `lazybox --session <id>` | Preselect a session on startup |
 | `lazybox scan [ROOTS...] [--depth N] [--hidden]` | Find existing git clones and linked worktrees without modifying them |
@@ -215,6 +216,99 @@ lazybox account status
 Claim codes and the box private key are never written to `config.yaml`.
 `lazybox device mint` still succeeds for local/self-hosted use when unlinked,
 but warns that a hosted relay may refuse the credential.
+
+## `lazybox --connect-relay`
+
+Attach a TUI to a box reached through a rendezvous relay, rather than a local
+Unix socket. It connects through the relay, runs the end-to-end Noise handshake
+pinned to the box's channel key, and drives the daemon over the encrypted,
+ciphertext-only tunnel. The box side is served by [`lazybox serve`](#lazybox-serve).
+
+```bash
+lazybox --connect-relay <box-id> --relay relay.example.com:9443 --box-key <hex>
+```
+
+| Option | Effect |
+| --- | --- |
+| `<box-id>` | The box to reach (first positional argument). Required. |
+| `--relay <host:port>` | Relay address to dial (or the `LAZYBOX_RELAY` env var). Required. |
+| `--box-key <hex>` | The box's channel (X25519) key to pin the encrypted channel to. Required. |
+| `--smoke` | Run a one-shot encrypted round-trip check and exit instead of launching the TUI. |
+
+## `lazybox sandbox`
+
+Drive a remote dev-box's lifecycle from the CLI. The box, its placement, and the
+socket the connect forward carries come from the [`sandbox`](/docs/reference/configuration/#sandbox)
+config block; each verb's flags override what's set there. The same box is what
+the sidebar `r`-spawn brings up lazily.
+
+| Command | What it does |
+| --- | --- |
+| `lazybox sandbox ensure` | Provision the box (Terraform / provider apply) if it doesn't exist |
+| `lazybox sandbox wake` (alias `start`) | Wake a stopped box |
+| `lazybox sandbox sleep` (alias `stop`) | Stop the box to stop billing compute |
+| `lazybox sandbox status` | Report the box's current lifecycle state |
+| `lazybox sandbox connect` | Bring up the supervised forward carrying the daemon socket + workload ports |
+| `lazybox sandbox rebuild` | Rebuild the box's lazybox daemon in place |
+| `lazybox sandbox destroy` | Tear the box down (confirms first unless `--yes`) |
+
+Every verb accepts `--worktree <key>` to address a specific per-key box (default:
+the one shared box). Verbs also accept the placement/credential overrides that
+mirror the config block (`--provider`, `--project`, `--region`, `--zone`,
+`--template`, `--timeout-seconds`, `--terraform-dir`, `--deployment`, `--user`,
+`--remote-socket`, `--local-socket`, `--ports`, `--service-account-key`,
+`--impersonate-service-account`, `--gcloud-config-dir`).
+
+## `lazybox auth`
+
+Manage provider login credentials stored by lazybox (independent of `gh auth`).
+
+| Command | What it does |
+| --- | --- |
+| `lazybox auth login [github]` | Log in via the GitHub OAuth device flow and store the token |
+| `lazybox auth status` | Show the stored login status |
+| `lazybox auth logout [github]` | Remove the stored token |
+
+The provider defaults to `github`. Linear login is not yet implemented — set
+`LINEAR_API_KEY` or install the `linear` CLI for now.
+
+## `lazybox device`
+
+Manage this box's pairing identity and the credentials paired devices use to
+reach it over a relay.
+
+| Command | What it does |
+| --- | --- |
+| `lazybox device box [--format base64]` | Show this box's pairing identity (box id + public key) |
+| `lazybox device mint --name <name>` | Mint a credential for a new paired device |
+| `lazybox device list` | List paired devices |
+| `lazybox device revoke <id>` | Revoke one device |
+| `lazybox device token <id>` | Reprint a device's pairing token |
+
+## `lazybox workspace`
+
+The agent-facing surface over the running daemon: lets a spawned agent (or a
+script) create a workspace in lazybox itself, not just act on the repo.
+
+```bash
+lazybox workspace create --name "spike auth" --repo owner/repo --agent claude
+```
+
+| Command / option | Effect |
+| --- | --- |
+| `workspace create` | Create a taskless pre-PR workspace by sending `CreateWorkspace` to the daemon |
+| `--name <name>` | Workspace display name. Required (non-empty). |
+| `--project <key>` | Target an existing project by key |
+| `--repo <owner/repo>` | Target a repo (an alternative to `--project`) |
+| `--agent <id>` | Spawn this agent into the fresh workspace so a live session lands in it |
+| `--cwd <path>` | Directory used to infer the project when neither `--project` nor `--repo` is given (default: the process cwd) |
+| `--socket <path>` | Daemon socket to send to (defaults to the standard socket) |
+
+The project resolves from `--project` / `--repo`, else it is inferred from the
+checkout at `--cwd` — so an agent running inside a worktree needs only `--name`.
+Unlike fire-and-forget hooks, a failure exits non-zero: the caller asked for a
+workspace and is told if the daemon was unreachable or the project couldn't be
+resolved.
 
 ## Environment variables
 

@@ -54,7 +54,8 @@ pub fn terminal_leader_reference_rows() -> Vec<(String, String)> {
 // the helpers moved out of mod.rs.
 pub(crate) use helpers::{
     emit_clipboard_copy, find_action_for_seq, find_action_for_stroke, key_event_to_stroke,
-    paint_selection, rect_contains, section_rank, seq_continuations, split_for_footer,
+    paint_selection, rect_contains, section_rank, seq_continuations, seq_continuations_available,
+    split_for_footer,
 };
 
 use crate::PaneId;
@@ -108,6 +109,12 @@ pub enum Id {
     /// `Reply`/`BroadcastText`, so `handle_textarea_submitted` routes
     /// on this id. Target key lives in the `ModalFlow::Notes` flow.
     Notes,
+    /// Ordered personal Hopper editor. Existing lines retain stable
+    /// workspace identities; submit dispatches one atomic SaveHopper.
+    Hopper,
+    /// One-time tracked-project picker shown when a repo-less Hopper row
+    /// first needs a worktree-backed action.
+    HopperProject,
     /// Single-line input prompt for naming a brand-new pre-PR
     /// workspace. Submit → `Command::CreateWorkspace { name }`.
     NewWorkspace,
@@ -158,6 +165,11 @@ pub enum Id {
     /// `ModalFlow::LinearTeamRepo`; `Msg::ChoicePicked` persists
     /// `providers.linear.teams.<team>` and re-provisions the stuck spawn.
     LinearTeamRepo,
+    /// Repo picker for an unmapped Jira project — the Jira twin of
+    /// [`Self::LinearTeamRepo`]. The project lives in
+    /// `ModalFlow::JiraProjectRepo`; the pick persists
+    /// `providers.jira.projects.<project>` and re-provisions the spawn.
+    JiraProjectRepo,
     /// Picker for selecting an editor when 2+ are detected.
     /// Submit → `editors::launch(template, worktree)`.
     Editor,
@@ -245,6 +257,31 @@ pub enum Id {
     /// `Msg::ChoicePicked` reads it + the picked Duration and
     /// dispatches `Command::Snooze`.
     SnoozeDuration,
+    /// `z` on a Repo/Space header (#scale): the source-snooze picker —
+    /// the workspace durations plus "Until I unmute". Target key lives
+    /// in `ModalFlow::SourceSnooze`; resolution applies
+    /// `Sidebar::set_source_attention`.
+    SourceSnooze,
+    /// `x ,` on a Repo/Space header: the attention-level picker
+    /// (live / quiet / digest / muted). Target key lives in
+    /// `ModalFlow::SourceLevel`.
+    SourceLevel,
+    /// `x v` (#scale): single-line name input freezing the current
+    /// lens into `ui.views`. Submit reads `Sidebar::current_lens`.
+    SaveViewName,
+    /// `x V` (#scale): the saved-views picker; rows index into the
+    /// `ModalFlow::ViewPick` stash.
+    ViewPicker,
+    /// `x A` (#scale, proposal F): one-line `owner/repo` input that
+    /// appends to `setup.scopes` — repo subscription without the
+    /// wizard walk.
+    AddRepoName,
+    /// Settings → remove-repos confirm (#scale, proposal F): un-ticking
+    /// scopes deletes their workspaces, so the wizard's Finish defers
+    /// behind this when workspaces are at stake. The pending outcome
+    /// lives in `ModalFlow::ScopeRemovalConfirm`; `Msg::Confirmed(true)`
+    /// runs `finish_setup`.
+    ScopeRemovalConfirm,
     /// Single-line URL input for the "Configure LLM gateway" settings
     /// action. Submit → write the global `agent.llm_gateway_url` to YAML
     /// (empty input clears it).
@@ -336,6 +373,11 @@ pub enum Id {
     /// confirms — a single stray key must not do it; only an explicit
     /// Yes sends `Command::ClearErrors`. Mounted on top of `ErrorInbox`.
     ErrorInboxClearConfirm,
+    /// Usage-stats window (default `Shift-U`, #1339). Read-only day/week
+    /// breakdown (sessions, prompts, merges, turns, tokens, cost) fetched
+    /// via `Command::GetStats`; `tab` toggles today/week, any exit key
+    /// dismisses.
+    Stats,
     /// Spinner + step checklist shown while a first spawn on a fresh
     /// workspace provisions its worktree. Mounted on the first
     /// `WorktreeProgress` daemon event (so an instant resume never
@@ -452,6 +494,20 @@ pub enum Id {
     /// the modal so link clicks open, and the modal dismisses its own
     /// outside-clicks.
     DescriptionModal,
+    /// Repo merge-history ledger (#1432), opened with `g h` on a repo.
+    /// A two-pane list of the cursor repo's recently-merged PRs with a
+    /// live body preview; `Enter` stacks a `DescriptionModal` for the
+    /// full body, `o` opens the PR in the browser. Mounts in a loading
+    /// state and repaints when `Event::RepoMergeHistory` lands (via
+    /// `Model::update_merge_history`).
+    MergeHistory,
+    /// Repo-scoped issue browser (`g i`, #1436). A two-pane picker over
+    /// the repo's tracked issue-workspaces with a live description
+    /// preview; `l`/`r`/`n` stack the existing label / reply / note
+    /// editors on top targeting the highlighted issue, and `Enter` opens
+    /// the `DescriptionModal` reader. Holds its own snapshot state (no
+    /// `ModalFlow`), so the reused editors' flows own the single flow slot.
+    IssueBrowser,
     /// Navigable local worktree diff with an inline review draft.
     DiffReview,
     /// "Ask about this PR" chat (#945), opened with `a` from the
@@ -496,10 +552,12 @@ impl Id {
                 | Id::SyncStatus
                 | Id::Messages
                 | Id::ErrorInbox
+                | Id::Stats
                 | Id::Error
                 | Id::SnippetPicker
                 | Id::SkillPicker
                 | Id::SnippetBrowser
+                | Id::MergeHistory
         )
     }
 
@@ -561,10 +619,21 @@ impl Id {
                 | Id::ThemePicker
                 | Id::FilterMenu
                 | Id::SnoozeDuration
+                | Id::SourceSnooze
+                | Id::SourceLevel
+                | Id::ViewPicker
                 | Id::MoveToSpacePicker
                 | Id::DefaultAgentPicker
                 | Id::DefaultModelPicker
                 | Id::WorkAgentPicker
+                // The issue browser (#1436) is a local navigation/filter
+                // picker. Its `l`/`r`/`n` keys only *open* the label / reply
+                // / note editors (each gated by an explicit submit); its one
+                // immediate-effect key, `o`, opens a URL in the browser —
+                // benign and reversible (closing a tab), never a destructive
+                // or data-losing write. So a retained stale key can't post an
+                // irreversible effect, which is the bar this allowlist sets.
+                | Id::IssueBrowser
         )
     }
 }
@@ -779,10 +848,37 @@ pub(crate) struct RemovalPrompt {
 /// (`deferred_focus_project`, `deferred_focus_terminal`).
 #[derive(Debug, Clone)]
 pub(crate) enum ModalFlow {
+    /// Project picker for a repo-less Hopper workspace. The selected project
+    /// is persisted first; `pending_hopper_action` resumes this action on the
+    /// daemon's authoritative workspace echo.
+    HopperProject {
+        workspace: lazybox_core::WorkspaceKey,
+        action: lazybox_tui_core::action::Action,
+    },
     /// Provider sign-in confirmation or a retry after login failed.
     AgentAuth {
         terminal_id: lazybox_ipc::TerminalId,
         retry: bool,
+    },
+    /// Source-snooze picker target (#scale): a group label
+    /// (`owner/repo`, `linear/TEAM`) or `space:<name>`, plus the
+    /// stored level to preserve across a time-boxed snooze.
+    SourceSnooze {
+        key: String,
+        level: lazybox_config::SourceAttentionLevel,
+    },
+    /// Source-level picker target (`x ,`).
+    SourceLevel { key: String },
+    /// Saved-views picker rows (`x V`, #scale): the views snapshot the
+    /// picker was built from, so resolution can't drift from render
+    /// order.
+    ViewPick {
+        views: Vec<lazybox_config::ViewConfig>,
+    },
+    /// The wizard Finish outcome parked behind the remove-repos
+    /// confirm (#scale, proposal F).
+    ScopeRemovalConfirm {
+        outcome: Box<crate::setup_flow::SetupOutcome>,
     },
     /// Reply textarea → `Command::PostReply`. Carries the target
     /// workspace; consumed by `Msg::TextareaSubmitted`.
@@ -890,6 +986,10 @@ pub(crate) enum ModalFlow {
     /// key the picked `owner/repo` will be persisted under. Consumed by
     /// `Msg::ChoicePicked` → `PickOutcome::MapLinearTeam`.
     LinearTeamRepo { team: String },
+    /// Repo picker for an unmapped Jira project, carrying the project key
+    /// the picked `owner/repo` will be persisted under. Consumed by
+    /// `Msg::ChoicePicked` → `PickOutcome::MapJiraProject`.
+    JiraProjectRepo { project: String },
     /// New-workspace name input, carrying the project to create under.
     NewWorkspaceProject { project: lazybox_core::ProjectKey },
     /// Rename-workspace name input (#744), carrying the workspace to
@@ -1032,6 +1132,16 @@ pub enum Msg {
     Confirmed(bool),
     InputSubmitted(String),
     TextareaSubmitted(String),
+    HopperSubmitted(Vec<lazybox_ipc::HopperEntryDraft>),
+    HopperCompletionRequested {
+        workspace_key: lazybox_core::WorkspaceKey,
+        completed: bool,
+    },
+    HopperCancellationRequested {
+        workspace_key: lazybox_core::WorkspaceKey,
+        canceled: bool,
+    },
+    HopperDeleteRequested(lazybox_core::WorkspaceKey),
     /// A picker (`Choice`, jump/snippet picker, settings palette)
     /// resolved. Each entry is the *typed value* of a picked row —
     /// never a bare positional index into a parallel "shadow Vec" —
@@ -1057,8 +1167,11 @@ pub enum Msg {
     /// Spinner heartbeat from the `HelpAsk` modal.
     HelpSpinnerTick,
     /// `a` pressed in the description reader — open the "Ask about this
-    /// PR" chat for the focused workspace's PR/issue (#945).
-    AskAboutPr,
+    /// PR" chat (#945). The payload names the subject explicitly when the
+    /// reader was opened for a task other than the sidebar selection (the
+    /// issue browser, #1436); `None` resolves against the focused
+    /// workspace as before.
+    AskAboutPr(Option<lazybox_core::SessionKey>),
     /// Question submitted from the `PrChat` modal. The modal stays
     /// mounted; the answer streams back into `Model::pr_chat_convo`.
     PrChatAsked(String, HelpQuestionKind),
@@ -1067,6 +1180,17 @@ pub enum Msg {
     /// `e` pressed in the snippets browser — close it and open the
     /// global snippets YAML in the user's editor (#237).
     OpenSnippetsFile,
+    /// `Ctrl-D` on a snippet row — compare a user override against the
+    /// current built-in body in a reader modal (#1312). Carries the key.
+    SnippetCompare(String),
+    /// `Ctrl-K` on a snippet row — "keep mine": acknowledge the override
+    /// against the current built-in so the "built-in changed" nudge stays
+    /// silenced until the built-in changes again (#1312). Carries the key.
+    SnippetKeepMine(String),
+    /// `Ctrl-A` on a snippet row — "adopt built-in": drop a global user
+    /// override so the (improved) built-in shows through on reload (#1312).
+    /// Carries the key.
+    SnippetAdopt(String),
     /// `a` in the Settings editors panel (#1102) — start the add-editor
     /// input flow (id → launch command).
     EditorAdd,
@@ -1112,6 +1236,18 @@ pub enum Msg {
     /// A link inside the description-reader modal (#448) was clicked —
     /// hand its URL to the platform browser launcher.
     OpenUrl(String),
+    /// `Enter` on a merge-history row (#1432) — stack the markdown reader
+    /// on the selected PR's full body. Carries the reader title and body
+    /// since the Model doesn't hold the modal's row data.
+    MergeHistoryReadBody {
+        title: String,
+        body: String,
+    },
+    /// A detail-pane key in the repo issue browser (`g i`, #1436) — read
+    /// the highlighted issue's full body, or dispatch a label / reply /
+    /// note / open-in-browser against it. The action carries its resolved
+    /// target so a filtered list can't act on the wrong row.
+    IssueBrowserAction(crate::realm::components::issue_browser::IssueBrowserAction),
     /// `i` in the Error Inbox (#831) — draft a pre-filled GitHub issue
     /// for the selected error class in the browser.
     ErrorInboxFileIssue(lazybox_ipc::ErrorInboxRecord),
@@ -1723,6 +1859,9 @@ pub struct Model<T: TerminalAdapter> {
     /// modal does when it resolves. Replaces the old fan of `pending_*`
     /// Options; see [`ModalFlow`]. `None` when no flow modal is armed.
     modal_flow: Option<ModalFlow>,
+    /// Event-fed continuation after a Hopper project pick. It waits for the
+    /// daemon's durable `WorkspaceUpserted` acknowledgement before spawning.
+    pending_hopper_action: Option<(lazybox_core::WorkspaceKey, lazybox_tui_core::action::Action)>,
     /// Provider authentication prompts are daemon-driven and may
     /// arrive while another modal is open, so they wait here until the
     /// current interaction completes.
@@ -1746,6 +1885,13 @@ pub struct Model<T: TerminalAdapter> {
     /// (the reply then disarms it), so it stays out of [`ModalFlow`].
     /// Cleared on mount / submit / dismiss / fetch-failure.
     awaiting_repo_labels: Option<lazybox_core::WorkspaceKey>,
+    /// Repo the currently-open merge-history ledger (#1432) is showing.
+    /// The `FetchRepoMergeHistory` reply is keyed by repo, so this gates
+    /// `update_merge_history`: a reply for any repo other than the one the
+    /// ledger is currently displaying is dropped, so a slow reply for a
+    /// since-reopened repo (or an out-of-order pair) can't repaint the
+    /// ledger with the wrong repo's merges. `None` when no ledger is open.
+    merge_history_repo: Option<String>,
     /// Workspace whose requestable-reviewer set we've asked the daemon
     /// for (`g r` → `Command::FetchRequestableReviewers`), waiting on
     /// the async `Event::RequestableReviewers` reply to mount the
@@ -1834,6 +1980,14 @@ pub struct Model<T: TerminalAdapter> {
     /// Cleared when a workspace is removed (`Event::WorkspaceRemoved`)
     /// so a re-added workspace gets a fresh fetch.
     pr_details_fetched: std::collections::HashSet<lazybox_core::WorkspaceKey>,
+    /// Dwell debounce for the lazy PR-details fetch: the candidate armed
+    /// by [`Self::sync_panes`] when the cursor lands on an unfetched PR
+    /// row, fired by [`Self::tick_pr_details`] only after the cursor has
+    /// rested there for [`events::PR_DETAILS_DEBOUNCE`]. Without this,
+    /// holding `j` through a crowded sidebar fired one Interactive
+    /// GraphQL request per row crossed — enough to trip the client-side
+    /// rate pacer and park the whole GitHub source.
+    pending_pr_details: Option<(lazybox_core::WorkspaceKey, std::time::Instant)>,
     /// Workspace keys whose PR GitHub confirmed as merged (via
     /// `Command::MergePr` → `Event::PrMerged`) but whose next poll hasn't
     /// caught up yet. Held Model-side — not in a single pane — because the
@@ -1886,7 +2040,7 @@ pub struct Model<T: TerminalAdapter> {
     /// `(selected key, sidebar pane revision)` of the last full
     /// `sync_panes` projection — the per-keystroke identity gate
     /// (#1237).
-    last_pane_sync_identity: Option<(Option<lazybox_core::SessionKey>, u64)>,
+    last_pane_sync_identity: Option<(Option<lazybox_core::SessionKey>, u64, Option<String>)>,
     /// Set by a daemon-event handler that needs the panes re-projected
     /// from the (possibly moved) sidebar selection, flushed to a single
     /// `sync_panes` once the whole drain batch is handled. A merge burst
@@ -2007,6 +2161,13 @@ pub struct Model<T: TerminalAdapter> {
     /// `Event::Snapshot` (#548). `show_update_if_new` checks membership so
     /// a dismissed target never re-mounts the startup modal.
     dismissed_updates: Vec<String>,
+    /// Snippet-override "keep mine" acknowledgements
+    /// (`snippet:<key>:<builtin-content-hash>`), seeded from
+    /// `Event::SnippetKeepMine` and updated on each keep-mine action
+    /// (#1312). Classification reads this to decide whether an override
+    /// that differs from the built-in is an intentional up-to-date fork
+    /// (`OverrideCurrent`) or a possibly-stale one (`OverrideStale`).
+    snippet_keepmine: Vec<String>,
     /// The update the build guard found, stashed until the first snapshot
     /// lands so the dismissal check runs against the daemon's authoritative
     /// `dismissed_updates` rather than an empty set (#548). Not a
@@ -2206,7 +2367,7 @@ const RECENT_SNIPPETS_MAX: usize = 5;
 /// migrated from the pre-history single-value recap, whose real submit
 /// time is gone — shown as "earlier". Times in the future (clock skew)
 /// collapse to "just now".
-fn relative_age(timestamp_ms: u64, now_ms: u64) -> String {
+pub(crate) fn relative_age(timestamp_ms: u64, now_ms: u64) -> String {
     if timestamp_ms == 0 {
         return "earlier".to_string();
     }
@@ -2365,10 +2526,12 @@ impl<T: TerminalAdapter> Model<T> {
             preselect: None,
             layout: LayoutCtx::new(),
             modal_flow: None,
+            pending_hopper_action: None,
             auth_prompt_queue: std::collections::VecDeque::new(),
             conversion: None,
             last_reply_body: None,
             awaiting_repo_labels: None,
+            merge_history_repo: None,
             awaiting_requestable_reviewers: None,
             pending_diff_session: None,
             pending_mutations: Vec::new(),
@@ -2383,6 +2546,7 @@ impl<T: TerminalAdapter> Model<T> {
             auto_fix_enabled: lazybox_core::AutoFixSettings::default().enabled,
             shell_command_config: None,
             pr_details_fetched: std::collections::HashSet::new(),
+            pending_pr_details: None,
             merge_confirmed: std::collections::HashSet::new(),
             usage_limit_reset: None,
             usage_limit_count: 0,
@@ -2422,6 +2586,7 @@ impl<T: TerminalAdapter> Model<T> {
             recent_snippets: Vec::new(),
             recent_skills: Vec::new(),
             dismissed_updates: Vec::new(),
+            snippet_keepmine: Vec::new(),
             pending_update: None,
             snapshot_seen: false,
             theme_picker_prev: None,
@@ -2922,11 +3087,25 @@ impl<T: TerminalAdapter> Model<T> {
                 .collect(),
             user_config.ui.spaces.clone(),
             user_config.ui.collapsed_spaces.clone(),
+            user_config.agent.metered_spaces.clone(),
             user_config.setup.default_agent.clone(),
             &user_config.display,
             &ui_defaults,
             user_config.conventions.clone(),
         );
+        // Re-apply the lens (filters / sort / mailbox) the user was
+        // working in when they last quit (#scale) — must follow
+        // `apply_sidebar_config`, which flips the seed gate that lets
+        // subsequent lens changes persist.
+        if let Some(lens) = user_config.ui.last_lens.as_ref() {
+            self.sidebar.seed_lens(lens);
+        }
+        // Per-source attention ladder (#scale): muted / quiet / digest
+        // sources take effect from the first render.
+        if !user_config.ui.source_attention.is_empty() {
+            self.sidebar
+                .seed_source_attention(user_config.ui.source_attention.clone());
+        }
         self.apply_auto_fix_config(
             user_config.auto_fix.enabled,
             user_config.auto_fix.opt_out_labels.clone(),
@@ -2998,6 +3177,22 @@ impl<T: TerminalAdapter> Model<T> {
         &self.sidebar
     }
 
+    /// Test-only: whether the right pane is painting a repo / Space
+    /// overview instead of a workspace (issue #1442).
+    #[doc(hidden)]
+    pub fn __test_showing_overview(&self) -> bool {
+        self.right.showing_overview()
+    }
+
+    /// Test-only: the counts of the projected overview (issue #1442),
+    /// so freshness tests can assert they track background polls.
+    #[doc(hidden)]
+    pub fn __test_overview_counts(
+        &self,
+    ) -> Option<&crate::components::repo_overview::OverviewCounts> {
+        self.right.overview().map(|o| &o.counts)
+    }
+
     /// Apply `~/.lazybox/config.yaml::attention` +
     /// `ui.collapsed_repos` to the sidebar at startup. Must be called
     /// before the first daemon Subscribe so the saved collapse state
@@ -3012,6 +3207,7 @@ impl<T: TerminalAdapter> Model<T> {
         focused_workspaces: Vec<lazybox_core::SessionKey>,
         spaces: Vec<lazybox_config::SpaceConfig>,
         collapsed_spaces: std::collections::BTreeSet<String>,
+        metered_spaces: std::collections::BTreeSet<String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
         ui: &lazybox_config::UiDefaults,
@@ -3033,13 +3229,16 @@ impl<T: TerminalAdapter> Model<T> {
             focused_workspaces,
             spaces,
             collapsed_spaces,
+            metered_spaces,
             default_agent,
             display,
         );
         self.sidebar.set_keep_awake(ui.keep_awake);
+        self.sidebar.set_auto_wait_on_limit(ui.auto_wait_on_limit);
         self.sidebar.set_show_agent_model(ui.show_agent_model);
         self.sidebar.set_usage_summary(ui.usage_summary);
         self.sidebar.set_usage_budgets(ui.usage_budgets.clone());
+        self.sidebar.set_today_summary(ui.today_summary);
         // Stash resolved defaults for model-level knobs (`q-q`
         // window, terminal-escape char, split step) that used to be
         // hardcoded consts.
@@ -3253,12 +3452,35 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// The provider-scoped picker rows fed to `mount_snippet_picker`.
     /// Split out so its test exercises the filter the picker actually shows.
+    /// Each row carries its override-state badge (#1312).
     fn scoped_picker_rows(&self) -> Vec<crate::realm::components::snippet_picker::PickerRow> {
         use crate::realm::components::snippet_picker::PickerRow;
+        let builtins = lazybox_config::Snippets::builtin();
         self.scoped_snippets()
             .into_iter()
-            .map(|(key, snippet)| PickerRow::new(key, snippet))
+            .map(|(key, snippet)| {
+                PickerRow::classified(key, snippet, self.snippet_state(key, snippet, &builtins))
+            })
             .collect()
+    }
+
+    /// Classify one merged-catalog entry against the built-in library and
+    /// the user's keep-mine acknowledgements (#1312). The daemon never
+    /// sees snippet bodies, so this is purely client-side: the shadowed
+    /// built-in body comes from [`lazybox_config::Snippets::builtin`], not
+    /// the merged catalog (which retains only the winning override).
+    pub(crate) fn snippet_state(
+        &self,
+        key: &str,
+        active: &lazybox_config::Snippet,
+        builtins: &lazybox_config::Snippets,
+    ) -> lazybox_config::SnippetState {
+        let builtin = builtins.get(key);
+        let kept = builtin.is_some_and(|b| {
+            let target = lazybox_config::keep_mine_target(key, &b.content_hash());
+            self.snippet_keepmine.iter().any(|t| t == &target)
+        });
+        lazybox_config::classify_snippet(active, builtin, kept)
     }
 
     /// Mount the skills picker (`]]l`, issue #797): the Claude Code skills
@@ -3319,6 +3541,9 @@ impl<T: TerminalAdapter> Model<T> {
                 category: skill.scope.label().to_string(),
                 body: skill.description,
                 origin: String::new(),
+                // Skills aren't overrides of built-in snippets — no badge.
+                badge: String::new(),
+                attention: false,
             })
             .collect();
         let picker = SnippetPicker::new(rows, initial_filter)
@@ -3524,15 +3749,123 @@ impl<T: TerminalAdapter> Model<T> {
         // (#868), so the two surfaces agree on what's relevant here; opened
         // from Settings with no session focused, `scoped_snippets` returns
         // the whole catalog.
+        let builtins = lazybox_config::Snippets::builtin();
         let rows: Vec<BrowserRow> = self
             .scoped_snippets()
             .into_iter()
-            .map(|(k, v)| BrowserRow::new(k, v))
+            .map(|(k, v)| BrowserRow::new(k, v, self.snippet_state(k, v, &builtins)))
             .collect();
         self.mount_modal(
             Id::SnippetBrowser,
             SnippetBrowser::new(rows, self.ui_defaults.terminal_escape_char),
         );
+    }
+
+    /// `Ctrl-D` in the snippet picker: show the highlighted override next to
+    /// the current built-in in a scrollable reader modal so the user can see
+    /// exactly what diverged (#1312). Reuses the markdown reader mounted for
+    /// PR descriptions; dismissing it returns to the picker.
+    fn compare_snippet_override(&mut self, key: &str) {
+        let builtins = lazybox_config::Snippets::builtin();
+        let Some(builtin) = builtins.get(key) else {
+            self.flash_info(format!("`{key}` has no built-in to compare against"));
+            return;
+        };
+        let Some(active) = self.snippets.get(key) else {
+            self.flash_info(format!("`{key}` is not in the catalog"));
+            return;
+        };
+        if active.origin == lazybox_config::SnippetOrigin::BuiltIn {
+            self.flash_info(format!("`{key}` is the built-in — nothing to compare"));
+            return;
+        }
+        let md = format!(
+            "## Your override (`{origin}`)\n\n```\n{yours}\n```\n\n## Current built-in\n\n```\n{builtin_body}\n```\n",
+            origin = active.origin.label(),
+            yours = active.body.trim(),
+            builtin_body = builtin.body.trim(),
+        );
+        self.mount_modal(
+            Id::DescriptionModal,
+            crate::realm::components::markdown_modal::MarkdownModal::new(
+                format!("Compare ]{key}"),
+                md,
+            ),
+        );
+    }
+
+    /// `Ctrl-K` in the snippet picker: acknowledge ("keep mine") the
+    /// highlighted override against the current built-in body, silencing the
+    /// "built-in changed" nudge until the built-in changes again (#1312).
+    fn keep_mine_snippet_override(&mut self, key: &str) {
+        let builtins = lazybox_config::Snippets::builtin();
+        let Some(builtin) = builtins.get(key) else {
+            self.flash_info(format!("`{key}` has no built-in — nothing to keep"));
+            return;
+        };
+        let Some(active) = self.snippets.get(key) else {
+            return;
+        };
+        if !self.snippet_state(key, active, &builtins).is_override() {
+            self.flash_info(format!("`{key}` isn't an override — nothing to keep"));
+            return;
+        }
+        let target = lazybox_config::keep_mine_target(key, &builtin.content_hash());
+        if !self.snippet_keepmine.iter().any(|t| t == &target) {
+            self.snippet_keepmine.push(target.clone());
+        }
+        self.send_cmd(lazybox_ipc::Command::SetSnippetKeepMine { target });
+        self.flash_info(format!("kept `{key}` — built-in-changed nudge silenced"));
+        self.refresh_open_snippet_picker();
+    }
+
+    /// `Ctrl-A` in the snippet picker: "adopt built-in" — drop a *global*
+    /// user override so the (improved) built-in shows through on reload
+    /// (#1312). A repo-local override lives in a shared checked-in file, so
+    /// it's not auto-edited — the user is pointed at the file instead.
+    fn adopt_builtin_snippet(&mut self, key: &str) {
+        if lazybox_config::Snippets::builtin().get(key).is_none() {
+            self.flash_info(format!("`{key}` has no built-in to adopt"));
+            return;
+        }
+        let Some(origin) = self.snippets.get(key).map(|s| s.origin) else {
+            return;
+        };
+        match origin {
+            lazybox_config::SnippetOrigin::BuiltIn => {
+                self.flash_info(format!("`{key}` is already the built-in"));
+            }
+            lazybox_config::SnippetOrigin::Global => {
+                match lazybox_config::Snippets::delete_global_snippet(key) {
+                    Ok(()) => {
+                        self.apply_snippets(lazybox_config::Snippets::load_for_launch_dir(
+                            std::env::current_dir().ok().as_deref(),
+                        ));
+                        self.flash_info(format!(
+                            "adopted built-in `{key}` (dropped your override)"
+                        ));
+                        self.refresh_open_snippet_picker();
+                    }
+                    Err(e) => self.flash_error(format!("couldn't adopt `{key}`: {e}")),
+                }
+            }
+            lazybox_config::SnippetOrigin::Repo | lazybox_config::SnippetOrigin::Unknown => {
+                self.flash_info(format!(
+                    "`{key}` is a repo-local override — edit .lazybox/snippets.yaml to adopt"
+                ));
+            }
+        }
+    }
+
+    /// Re-mount the snippet picker with freshly-classified rows so a
+    /// keep-mine or adopt is reflected immediately (badge cleared, or the
+    /// adopted row now showing the built-in). No-op unless the picker is the
+    /// top modal.
+    fn refresh_open_snippet_picker(&mut self) {
+        if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
+            self.pop_modal();
+            self.mount_snippet_picker(String::new());
+        }
     }
 
     /// Mount the fuzzy workspace switcher (`JumpToWorkspace`). Rows are
@@ -4159,10 +4492,17 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         self.daemon_disconnect_notified = true;
-        self.flash_error(
-            "✗ daemon disconnected — commands are no longer delivered; \
-             restart lazybox (or reconnect with `lazybox --connect …`) to resume",
-        );
+        let message = "✗ daemon disconnected — commands are no longer delivered; \
+             restart lazybox (or reconnect with `lazybox --connect …`) to resume";
+        self.flash_error(message);
+        // Tag it as the persistent connection banner so it (a) stays put
+        // instead of auto-fading like an ordinary error, and (b) can be
+        // retracted by its typed cause on reconnect.
+        if let Some(n) = self.status.notice.as_mut()
+            && n.message == message
+        {
+            n.key = Some(crate::realm::components::footer::NoticeKey::DaemonConnection);
+        }
     }
 
     /// Per-iteration daemon-health check: drain the `send_cmd` failure
@@ -4214,11 +4554,17 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     fn note_daemon_connection_failed(&mut self, message: String) {
+        use crate::realm::components::footer::NoticeKey;
         if self.daemon_disconnect_notified {
             return;
         }
         self.daemon_disconnect_notified = true;
-        self.flash_error(message);
+        self.flash_error(message.clone());
+        if let Some(n) = self.status.notice.as_mut()
+            && n.message == message
+        {
+            n.key = Some(NoticeKey::DaemonConnection);
+        }
     }
 
     /// Raise the one-shot "reconnecting…" banner while the transport
@@ -4234,6 +4580,11 @@ impl<T: TerminalAdapter> Model<T> {
             RECONNECTING_NOTICE,
             crate::realm::components::footer::NoticeSeverity::Auth,
         );
+        if let Some(n) = self.status.notice.as_mut()
+            && n.message == RECONNECTING_NOTICE
+        {
+            n.key = Some(crate::realm::components::footer::NoticeKey::DaemonConnection);
+        }
     }
 
     /// Retract the reconnecting banner once the link is back and refresh
@@ -4244,15 +4595,16 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         self.daemon_reconnecting_notified = false;
-        // Clear the banner only if it's still ours — a real error raised
-        // during the outage must survive.
+        // The link is back: allow a future outage to notify again.
+        self.daemon_disconnect_notified = false;
+        // Retract the connection banner by its typed cause — a real error
+        // raised during the outage carries a different key (or none) and
+        // survives. Covers both the "reconnecting…" banner and a prior
+        // hard connection-failed banner.
         if self
             .status
-            .notice
-            .as_ref()
-            .is_some_and(|n| n.message == RECONNECTING_NOTICE)
+            .resolve_notice(&crate::realm::components::footer::NoticeKey::DaemonConnection)
         {
-            self.status.notice = None;
             self.redraw = true;
         }
         if let Some(build) = self.client.daemon_build() {
@@ -4338,7 +4690,8 @@ impl<T: TerminalAdapter> Model<T> {
         self.status.forget_dismissed_action_error(ws);
         self.flash_error(msg);
         if let Some(n) = self.status.notice.as_mut() {
-            n.workspace = Some(ws.to_string());
+            n.key =
+                Some(crate::realm::components::footer::NoticeKey::WorkspaceAction(ws.to_string()));
         }
     }
 
@@ -4349,24 +4702,18 @@ impl<T: TerminalAdapter> Model<T> {
     /// notice tagged with this workspace; an unrelated error or another
     /// workspace's banner is left alone. Returns true if one cleared.
     pub fn clear_action_error(&mut self, workspace: &lazybox_core::WorkspaceKey) -> bool {
-        use crate::realm::components::footer::NoticeSeverity;
-        // The condition resolved, so drop any dismiss-suppression for
-        // this workspace — a genuinely new failure later must surface
-        // even if it repeats an earlier, already-dismissed message
-        // (#832). Runs even when the banner already faded / was
-        // dismissed (notice is `None`), which the visible-notice clear
-        // below can't reach.
-        self.status
-            .forget_dismissed_action_error(workspace.as_str());
-        if let Some(n) = self.status.notice.as_ref()
-            && n.severity == NoticeSeverity::Permanent
-            && n.workspace.as_deref() == Some(workspace.as_str())
-        {
-            self.status.notice = None;
+        use crate::realm::components::footer::NoticeKey;
+        // Resolve the workspace-action notice through the general
+        // primitive: it forgets the dismiss-suppression for this
+        // workspace (even when the banner already faded / notice is
+        // `None`, #832) and clears a live banner tagged with this key.
+        let cleared = self
+            .status
+            .resolve_notice(&NoticeKey::WorkspaceAction(workspace.as_str().to_string()));
+        if cleared {
             self.redraw = true;
-            return true;
         }
-        false
+        cleared
     }
 
     /// Surface a sticky banner when the daemon we connected to was built
@@ -4377,22 +4724,27 @@ impl<T: TerminalAdapter> Model<T> {
     /// the mismatch.
     /// A matching build is the common case and stays quiet.
     pub fn note_daemon_build(&mut self, daemon_build: &str) {
+        use crate::realm::components::footer::NoticeKey;
         if daemon_build != lazybox_ipc::BUILD_VERSION {
-            self.flash_error(format!(
+            let msg = format!(
                 "{BUILD_MISMATCH_PREFIX}{daemon_build}, client {} — restart the daemon \
                  (`lazybox server stop`) to pick up this build",
                 lazybox_ipc::BUILD_VERSION
-            ));
-        } else if self
-            .status
-            .notice
-            .as_ref()
-            .is_some_and(|n| n.message.starts_with(BUILD_MISMATCH_PREFIX))
-        {
+            );
+            self.flash_error(msg.clone());
+            // Tag the banner with its cause so a later matching-build
+            // connect can retract it by identity, not by matching the
+            // message prefix. Guarded on the message so a suppressed
+            // re-fire (#1245) doesn't mis-tag an unrelated notice.
+            if let Some(n) = self.status.notice.as_mut()
+                && n.message == msg
+            {
+                n.key = Some(NoticeKey::DaemonBuildMismatch);
+            }
+        } else if self.status.resolve_notice(&NoticeKey::DaemonBuildMismatch) {
             // Builds now match — e.g. the daemon was restarted to this
             // build and a reconnect re-checked it. Retract the stale
             // mismatch banner instead of leaving it up forever.
-            self.status.notice = None;
             self.redraw = true;
         }
     }
@@ -4902,6 +5254,7 @@ impl<T: TerminalAdapter> Model<T> {
                     initial_prompt: None,
                     initial_snippet: None,
                     on_main: false,
+                    force_new: false,
                 });
                 self.flash_info(format!(
                     "Provisioning worktree for {workspace_key} — opening in {} when ready…",
@@ -5115,6 +5468,7 @@ impl<T: TerminalAdapter> Model<T> {
             initial_prompt: None,
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         });
         self.flash_info(format!(
             "Provisioning worktree for {workspace_key} — opening in {} when ready…",
@@ -5767,6 +6121,14 @@ impl<T: TerminalAdapter> Model<T> {
                 Some((sp.spinner_glyph(), sp.label()))
             } else if let Some(wait) = self.status.github_rate_limit_wait.as_ref() {
                 Some(("◷", wait.label()))
+            } else if let Some(behind) = self.status.discovery_behind.as_ref() {
+                // Standing advisory (#1391): outranks the ambient
+                // background-poll spinner and the steady box state so a
+                // budget-deferred discovery stall is visible whenever
+                // nothing more urgent (active poll, rate-limit wait) holds
+                // the slot — and it stays until the daemon retracts it,
+                // rather than fading like a toast.
+                Some(("⚠", behind.label()))
             } else if let Some(box_status) = self.status.remote_status_busy() {
                 Some(box_status)
             } else if let Some(bg) = self.status.bg_poll.as_ref() {
@@ -5806,10 +6168,14 @@ impl<T: TerminalAdapter> Model<T> {
         // leader above is the only steady-state gateway hint.
         //
         // Two tiers: `globals` are the escape hatches (`?` help, `q q`
-        // quit) that must stay findable (#100), and `evergreen` is the
-        // low-value tour hint that the footer drops FIRST so
-        // context-relevant bindings survive truncation ahead of it
-        // (#805). Both honor the terminal availability filter.
+        // quit) that must stay findable (#100) — the footer keeps them
+        // LAST under truncation, so they outrank contextual bindings.
+        // `evergreen` holds lower-value discoverability hints (Hopper,
+        // the tour) that the footer drops FIRST, so context-relevant
+        // bindings always survive ahead of them (#805). Hopper is a
+        // discoverability affordance, not an escape hatch: it lives in
+        // `evergreen` so it can never crowd a state-aware contextual hint
+        // off a narrow footer. Both honor the terminal availability filter.
         let make_hint = |def: &lazybox_tui_core::action::ActionDef| crate::pane::Binding {
             keys: def.effective_keys_display(&self.action_key_overrides),
             label: std::borrow::Cow::Borrowed(def.label),
@@ -5825,10 +6191,13 @@ impl<T: TerminalAdapter> Model<T> {
         };
         let evergreen: Vec<crate::pane::Binding> = {
             use lazybox_tui_core::action::{ActionDef, ActionKind};
-            let tour = ActionDef::for_kind(ActionKind::OpenTour);
-            (self.focus != PaneFocus::Terminals || tour.available_in_terminal())
-                .then(|| make_hint(tour))
-                .into_iter()
+            // Ordered Hopper-then-tour: `evergreen` drops from the END, so
+            // the lower-value tour hint is elided before the Hopper hint.
+            [ActionKind::OpenHopper, ActionKind::OpenTour]
+                .map(ActionDef::for_kind)
+                .iter()
+                .filter(|def| self.focus != PaneFocus::Terminals || def.available_in_terminal())
+                .map(|def| make_hint(def))
                 .collect()
         };
         // Effective help key for the overflow cell's "press <key> for
@@ -5891,7 +6260,10 @@ impl<T: TerminalAdapter> Model<T> {
         let (leader_rows, leader_group): (Vec<(String, String)>, Option<&'static str>) =
             if let Some(prefix) = self.leader.pending() {
                 let rfocus = self.resolve_focus_for_keys().unwrap_or(self.focus);
-                let conts = seq_continuations(prefix, rfocus, &self.catalog);
+                // `leader_continuations` adds the repo-group gate that pure
+                // `availability` can't express (#1436) so `g i` doesn't show
+                // on a Space / Focused header where it'd only flash-reject.
+                let conts = self.leader_continuations(prefix, rfocus);
                 let group = conts
                     .iter()
                     .find_map(|(_, e)| lazybox_tui_core::action::leader_group_label(e.kind));
@@ -6080,35 +6452,50 @@ impl<T: TerminalAdapter> Model<T> {
                     activity_mode,
                 );
                 self.sidebar.view_in(left, f);
-                // `right_top` carries the Activity pane; what renders
-                // there depends on the mode. Hidden gave its row to the
-                // terminal stack (zero height); Summary keeps a single
-                // slim count line; Full draws the whole feed.
-                if right_top.height > 0 {
-                    match activity_mode {
-                        ActivityPaneMode::Summary => self.right.view_summary_in(right_top, f),
-                        _ => self.right.view_in(right_top, f),
+                if self.right.showing_overview() {
+                    // Group-header overview (#1442): no terminal to share
+                    // with, so the overview takes the whole right column.
+                    let full = right_top.union(right_bottom);
+                    self.right.view_in(full, f);
+                    full
+                } else {
+                    // `right_top` carries the Activity pane; what renders
+                    // there depends on the mode. Hidden gave its row to the
+                    // terminal stack (zero height); Summary keeps a single
+                    // slim count line; Full draws the whole feed.
+                    if right_top.height > 0 {
+                        match activity_mode {
+                            ActivityPaneMode::Summary => self.right.view_summary_in(right_top, f),
+                            _ => self.right.view_in(right_top, f),
+                        }
                     }
+                    self.terminals.view_in(right_bottom, f);
+                    right_bottom
                 }
-                self.terminals.view_in(right_bottom, f);
-                right_bottom
             };
 
             // Selection highlight overlay. Painted AFTER the terminal
             // widget so the reverse-video pass lands on the just-
-            // rendered cells. Bounded to `right_bottom` so a drag
-            // that strayed into the sidebar / activity panes doesn't
-            // leak the highlight across lazybox's pane chrome —
-            // matches what the user expects from a per-pane
-            // selection (compare to the host terminal's native
-            // selection, which crosses panes).
+            // rendered cells. Clipped to the ANCHOR TILE's own grid
+            // rect — not the whole terminal pane: in a split layout
+            // `right_bottom` spans every tile, and paint_selection's
+            // full-row fill would bleed the reverse-video edge-to-edge
+            // into the neighbouring tile (#1101). The tile clip also
+            // keeps a drag that strayed into the sidebar / activity
+            // panes from leaking across lazybox's chrome; the pane rect
+            // is only the fallback for a terminal with no recorded hit
+            // geometry this frame.
             if let Some(drag) = self.terminal_drag.as_ref() {
                 let (terminal, anchor, focus) = (drag.terminal, drag.anchor, drag.focus);
-                if let Some((start, end)) =
-                    self.terminals
-                        .selection_screen_span(terminal, right_bottom, anchor, focus)
+                let clip = self
+                    .terminals
+                    .tile_grid_rect(terminal)
+                    .unwrap_or(right_bottom);
+                if let Some((start, end)) = self
+                    .terminals
+                    .selection_screen_span(terminal, clip, anchor, focus)
                 {
-                    paint_selection(f.buffer_mut(), right_bottom, start, end);
+                    paint_selection(f.buffer_mut(), clip, start, end);
                 }
             }
 
@@ -6323,6 +6710,17 @@ impl<T: TerminalAdapter> Model<T> {
                     ),
                 }
             }
+            Msg::MergeHistoryReadBody { title, body } => {
+                // Stack the shared markdown reader on top of the merge-history
+                // list; Esc pops it back to the ledger. `None` ask-subject
+                // (#1436): a merged-PR entry isn't necessarily a tracked
+                // workspace, so the reader's `a` resolves against the sidebar
+                // selection as it did before the scoping change.
+                self.mount_description_modal(title, body, None);
+            }
+            Msg::IssueBrowserAction(action) => {
+                self.handle_issue_browser_action(action);
+            }
             Msg::MessagesCleared => {
                 // Wipe the durable history and re-render the window
                 // against the now-empty log (it stays open showing the
@@ -6371,6 +6769,9 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 self.open_snippets_file();
             }
+            Msg::SnippetCompare(key) => self.compare_snippet_override(&key),
+            Msg::SnippetKeepMine(key) => self.keep_mine_snippet_override(&key),
+            Msg::SnippetAdopt(key) => self.adopt_builtin_snippet(&key),
             Msg::EditorAdd => self.start_editor_add(),
             Msg::EditorEdit(id) => self.start_editor_edit(&id),
             Msg::EditorRemove(id) => self.prompt_remove_editor(id),
@@ -6391,6 +6792,82 @@ impl<T: TerminalAdapter> Model<T> {
             Msg::TextareaSubmitted(body) => {
                 let cmds = self.handle_textarea_submitted(body);
                 self.dispatch_cmds(cmds);
+            }
+            Msg::HopperSubmitted(entries) => {
+                if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
+                    self.pop_modal();
+                    self.dispatch_cmds(vec![IpcCommand::SaveHopper { entries }]);
+                    self.flash_info("Hopper saved");
+                }
+            }
+            Msg::HopperCompletionRequested {
+                workspace_key,
+                completed,
+            } => {
+                if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
+                    self.dispatch_cmds(vec![IpcCommand::SetHopperCompleted {
+                        workspace_key,
+                        completed,
+                    }]);
+                    self.flash_info(if completed {
+                        "Hopper item completed"
+                    } else {
+                        "Hopper item reopened"
+                    });
+                }
+            }
+            Msg::HopperCancellationRequested {
+                workspace_key,
+                canceled,
+            } => {
+                if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
+                    self.dispatch_cmds(vec![IpcCommand::SetHopperCanceled {
+                        workspace_key,
+                        canceled,
+                    }]);
+                    self.flash_info(if canceled {
+                        "Hopper item canceled"
+                    } else {
+                        "Hopper item reopened"
+                    });
+                }
+            }
+            Msg::HopperDeleteRequested(workspace_key) => {
+                if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
+                    // Destructive: killing the workspace stops its live
+                    // sessions and drops the row with no undo. The action
+                    // catalog marks this exact operation `Guard::Confirm`,
+                    // so it must not fire from a bare keystroke — a
+                    // reflexive word-delete chord (Ctrl-Backspace) inside a
+                    // text field would otherwise reap a running agent. Pop
+                    // the Hopper (discarding its now-stale local snapshot)
+                    // and route through the same confirm modal every other
+                    // kill uses; a No leaves the workspace intact and the
+                    // next Hopper open rebuilds from authoritative state.
+                    self.pop_modal();
+                    let session_key: lazybox_core::SessionKey = (&workspace_key).into();
+                    if let Some(workspace) = self.sidebar.workspace_by_key(&session_key) {
+                        let prompt = if workspace.sessions.is_empty() {
+                            format!(
+                                "Delete ‘{}’? Its clean managed worktree will be removed; local work is protected.",
+                                workspace.name
+                            )
+                        } else {
+                            format!(
+                                "Delete ‘{}’? {} running session(s) will stop and its clean managed worktree will be removed; local work is protected.",
+                                workspace.name,
+                                workspace.sessions.len()
+                            )
+                        };
+                        self.mount_action_confirm(
+                            lazybox_tui_core::action::Action::Archive,
+                            vec![ActionConfirmTarget::Workspace(session_key)],
+                            Some(prompt),
+                        );
+                    } else {
+                        self.flash_info("workspace is gone — nothing to delete");
+                    }
+                }
             }
             Msg::InputSubmitted(text) => {
                 let cmds = self.handle_input_submitted(text);
@@ -6417,8 +6894,8 @@ impl<T: TerminalAdapter> Model<T> {
                 self.dispatch_cmds(cmds);
             }
             Msg::HelpSpinnerTick => {}
-            Msg::AskAboutPr => {
-                self.open_pr_chat();
+            Msg::AskAboutPr(subject) => {
+                self.open_pr_chat(subject);
             }
             Msg::PrChatAsked(question, kind) => {
                 // The PrChat modal stays mounted — the answer streams

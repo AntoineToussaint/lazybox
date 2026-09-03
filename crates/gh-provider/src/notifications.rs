@@ -196,6 +196,15 @@ pub(crate) struct NotificationsState {
     /// first tick after daemon start always runs a full sweep to
     /// bootstrap the inbox.
     pub(crate) last_full_sweep_at: Option<DateTime<Utc>>,
+    /// When the cheap `author:USER` discovery probe last ran. `None` =
+    /// never (probe on the first eligible tick). Ephemeral — not
+    /// persisted; a restart just probes immediately, which is fine.
+    pub(crate) last_authored_probe_at: Option<std::time::Instant>,
+    /// When the cheap `involves:USER is:issue` discovery probe last ran.
+    /// `None` = never. Ephemeral, same as `last_authored_probe_at`. This
+    /// is the sibling probe that surfaces a brand-new involved issue while
+    /// the heavy full sweep is budget-deferred by the governor (#1391).
+    pub(crate) last_issue_probe_at: Option<std::time::Instant>,
     /// "Skip the cheap heartbeat round-trip and go straight to full
     /// sweep" deadline. Armed by `note_heartbeat_failed` when the
     /// notifications endpoint errors (auth scope missing, REST
@@ -263,6 +272,71 @@ impl NotificationsState {
     /// client.
     pub fn is_full_sweep_due(&self, threshold: std::time::Duration) -> bool {
         self.is_full_sweep_due_at(threshold, Utc::now())
+    }
+
+    /// Whether the cheap `author:USER` discovery probe is due (never run,
+    /// or last run at least `threshold` ago).
+    pub fn is_authored_probe_due(&self, threshold: std::time::Duration) -> bool {
+        match self.last_authored_probe_at {
+            None => true,
+            Some(t) => t.elapsed() >= threshold,
+        }
+    }
+
+    /// Stamp the discovery probe as just-run.
+    pub fn mark_authored_probe_done(&mut self) {
+        self.last_authored_probe_at = Some(std::time::Instant::now());
+    }
+
+    /// Whether the cheap `involves:USER is:issue` discovery probe is due
+    /// (never run, or last run at least `threshold` ago).
+    pub fn is_issue_probe_due(&self, threshold: std::time::Duration) -> bool {
+        match self.last_issue_probe_at {
+            None => true,
+            Some(t) => t.elapsed() >= threshold,
+        }
+    }
+
+    /// Stamp the issue-discovery probe as just-run.
+    pub fn mark_issue_probe_done(&mut self) {
+        self.last_issue_probe_at = Some(std::time::Instant::now());
+    }
+
+    /// Record a notifications-heartbeat failure and decide whether it owes a
+    /// catch-up full sweep. Returns `true` iff this call NEWLY armed the
+    /// catch-up sweep (so the caller can log once per episode).
+    ///
+    /// A **rate-limited** heartbeat — lazybox's own governor pacing, or
+    /// GitHub's secondary (abuse) / primary limit — is deliberately treated
+    /// as a no-op here (#1218). It is not a missed-data OUTAGE: the channel
+    /// is fine, GitHub is just throttling us, so there is nothing to "catch
+    /// up." Arming a heavy full sweep in response fires the largest possible
+    /// request burst into the exact limiter that just blocked us, which
+    /// re-trips GitHub's secondary limit and self-reinforces into a throttle
+    /// blackout where the heartbeat stays circuit-broken and nothing new
+    /// surfaces. Leaving the back-off unarmed also lets the heartbeat resume
+    /// the instant the (short) circuit clears, instead of sitting out the
+    /// full 10-minute outage window. Only a genuine transport failure
+    /// (network / 5xx / auth) backs off and owes the one catch-up sweep.
+    pub fn record_heartbeat_failure(
+        &mut self,
+        rate_limited: bool,
+        deadline: std::time::Instant,
+    ) -> bool {
+        if rate_limited {
+            return false;
+        }
+        let was_armed = self.heartbeat_back_off_until.is_some();
+        self.heartbeat_back_off_until = Some(deadline);
+        if !was_armed {
+            // One catch-up sweep for whatever the dead heartbeat may have
+            // missed; subsequent backed-off ticks stay hot-only (#1218 — a
+            // full sweep every tick for the whole back-off window burned the
+            // most quota during exhaustion).
+            self.backoff_catchup_sweep_due = true;
+            return true;
+        }
+        false
     }
 
     fn is_full_sweep_due_at(&self, threshold: std::time::Duration, now: DateTime<Utc>) -> bool {
@@ -513,6 +587,69 @@ mod tests {
         assert!(future.is_full_reconcile_due_at(std::time::Duration::from_secs(3600), now));
         assert!(future.last_pr_sweep_at_utc.is_none());
         assert!(future.last_merged_sweep_at_utc.is_none());
+    }
+
+    #[test]
+    fn authored_probe_gating_fires_once_per_interval() {
+        let mut state = NotificationsState::default();
+        let interval = std::time::Duration::from_secs(90);
+        // Never run → due immediately.
+        assert!(state.is_authored_probe_due(interval));
+        state.mark_authored_probe_done();
+        // Just ran → not due until the interval elapses.
+        assert!(!state.is_authored_probe_due(interval));
+        // A zero threshold is always due regardless of the stamp.
+        assert!(state.is_authored_probe_due(std::time::Duration::ZERO));
+    }
+
+    #[test]
+    fn issue_probe_gating_fires_once_per_interval() {
+        let mut state = NotificationsState::default();
+        let interval = std::time::Duration::from_secs(90);
+        // Never run → due immediately.
+        assert!(state.is_issue_probe_due(interval));
+        state.mark_issue_probe_done();
+        // Just ran → not due until the interval elapses.
+        assert!(!state.is_issue_probe_due(interval));
+        // A zero threshold is always due regardless of the stamp.
+        assert!(state.is_issue_probe_due(std::time::Duration::ZERO));
+    }
+
+    #[test]
+    fn rate_limited_heartbeat_failure_does_not_arm_a_catchup_sweep() {
+        let mut state = NotificationsState::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        // A rate-limited heartbeat is throttle pacing, not a missed-data
+        // outage: no back-off, no catch-up sweep — otherwise the catch-up
+        // sweep fires a heavy burst into the limiter that just blocked us and
+        // re-trips GitHub's secondary limit into a throttle loop (#1218).
+        assert!(!state.record_heartbeat_failure(true, deadline));
+        assert!(state.heartbeat_back_off_until.is_none());
+        assert!(!state.backoff_catchup_sweep_due);
+    }
+
+    #[test]
+    fn transport_outage_heartbeat_failure_arms_one_catchup_sweep() {
+        let mut state = NotificationsState::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        // A genuine outage (network/5xx/auth) DID lose coverage: back off and
+        // owe exactly one catch-up sweep.
+        assert!(state.record_heartbeat_failure(false, deadline));
+        assert!(state.heartbeat_back_off_until.is_some());
+        assert!(state.backoff_catchup_sweep_due);
+        // Only the first failure of the episode arms it; later ones don't
+        // re-arm (they'd force a full sweep every backed-off tick).
+        assert!(!state.record_heartbeat_failure(false, deadline));
+    }
+
+    #[test]
+    fn issue_and_authored_probes_track_independent_clocks() {
+        let mut state = NotificationsState::default();
+        let interval = std::time::Duration::from_secs(90);
+        // Stamping one probe must not silence the other.
+        state.mark_authored_probe_done();
+        assert!(!state.is_authored_probe_due(interval));
+        assert!(state.is_issue_probe_due(interval));
     }
 
     #[test]

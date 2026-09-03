@@ -76,7 +76,7 @@ impl TestFixture {
 
 /// Drop a PersistedSetup with everything enabled into the kv table so
 /// `setup_flow::run_with_persistence` finds it and skips the screen.
-fn seed_skip_setup(store: &dyn Store) -> anyhow::Result<()> {
+pub(crate) fn seed_skip_setup(store: &dyn Store) -> anyhow::Result<()> {
     let mut p = PersistedSetup::default();
     p.enabled_providers.insert("github".into());
     p.enabled_providers.insert("linear".into());
@@ -176,7 +176,7 @@ fn seed_one_session(store: &dyn Store, worktree: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_git_init(path: &Path) -> anyhow::Result<()> {
+pub(crate) fn run_git_init(path: &Path) -> anyhow::Result<()> {
     let run = |args: &[&str]| -> anyhow::Result<()> {
         let output = Command::new("git")
             .args([

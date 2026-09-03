@@ -141,6 +141,25 @@ The list is authoritative:
   added automatically, so include your own login if you want your mentions to
   keep working alongside your collaborators'.
 
+:::danger[Widening the allowlist is a trust decision]
+An allowed login can, by writing `@lazybox` in an issue or comment, cause
+lazybox to spawn an autonomous agent **whose prompt is built from that issue's
+title and body — text the triggering user controls**. That agent runs in a
+worktree with full `git`/`gh` and your machine's GitHub credentials.
+
+Because of this, a spawn triggered by **someone other than you** — a mention
+written by a collaborator, or a `lazybox:` label on an issue you didn't author
+— keeps its **permission prompts on** by default
+(`agent.autonomous_skip_permissions` is unset) instead of the unattended
+`--dangerously-skip-permissions` bypass. This makes another person's trigger
+ask for approval rather than silently execute attacker-influenceable commands
+on your host. Your **own** mentions and labels stay frictionless.
+
+Set `agent.autonomous_skip_permissions` explicitly (`true` or `false`) to
+override this and pin the behavior in either direction. Only add logins you
+would trust to run commands on your machine.
+:::
+
 ## Notes
 
 - Mention and label triggers are scanned by the full GitHub sweep, not by the

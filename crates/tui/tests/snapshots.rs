@@ -104,6 +104,7 @@ fn star_workspace(s: &mut Sidebar, key: &SessionKey) {
         vec![key.clone()],
         Vec::new(),
         std::collections::BTreeSet::new(),
+        std::collections::BTreeSet::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
     );
@@ -373,6 +374,7 @@ fn focused_group_sizes_columns_per_provider() {
             Vec::new(),
             keys,
             Vec::new(),
+            BTreeSet::new(),
             BTreeSet::new(),
             None,
             &lazybox_config::DisplayConfig::default(),

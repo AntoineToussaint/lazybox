@@ -17,6 +17,28 @@ use crate::{
     editors::{EditorTemplate, OpenWithApp, OpenWithContext},
 };
 
+/// Sentinel duration for the source-snooze picker's "Until I unmute"
+/// row (#scale): resolution maps it to `level = Muted` with no
+/// deadline instead of arithmetic on an absurd span.
+pub const SOURCE_MUTE_SENTINEL: Duration = Duration::MAX;
+
+/// Text payloads for the workspace snooze picker's event-conditional
+/// rows (#scale, B4). Both the picker construction and the resolution
+/// use these constants so they can't drift.
+pub const SNOOZE_WAKE_ACTIVITY: &str = "wake:activity";
+pub const SNOOZE_WAKE_CI: &str = "wake:ci-settled";
+pub const SNOOZE_WAKE_REVIEW: &str = "wake:review-landed";
+
+/// Canonical row order of the `x ,` source-level picker. Resolution
+/// indexes into this, so picker construction MUST list rows in the
+/// same order (both sides use this constant).
+pub const SOURCE_LEVELS: [lazybox_config::SourceAttentionLevel; 4] = [
+    lazybox_config::SourceAttentionLevel::Live,
+    lazybox_config::SourceAttentionLevel::Quiet,
+    lazybox_config::SourceAttentionLevel::Digest,
+    lazybox_config::SourceAttentionLevel::Muted,
+];
+
 /// Payload access needed by [`resolve_pick`]. The renderer owns its picker
 /// payload enum; this trait keeps the pure resolver independent of it.
 pub trait PickPayload {
@@ -110,11 +132,23 @@ pub enum PickFlow {
     },
     StartAgentProject,
     NewWorkspaceRepo,
+    /// One-time project assignment for a repo-less Hopper workspace. The
+    /// action is carried through the picker so the TUI can resume it only
+    /// after the daemon echoes the persisted assignment.
+    HopperProject {
+        workspace: WorkspaceKey,
+        action: Action,
+    },
     /// Repo picker for an unmapped Linear team (#1041). Each row carries a
     /// [`PickPayload::as_text`] `owner/repo`; the pick persists
     /// `providers.linear.teams.<team>` and re-provisions.
     LinearTeamRepo {
         team: String,
+    },
+    /// Repo picker for an unmapped Jira project — the Jira twin of
+    /// [`Self::LinearTeamRepo`]; the pick becomes [`PickOutcome::MapJiraProject`].
+    JiraProjectRepo {
+        project: String,
     },
     Reviewers {
         workspace_key: Option<WorkspaceKey>,
@@ -128,6 +162,28 @@ pub enum PickFlow {
     Snooze {
         session_key: Option<SessionKey>,
         now: DateTime<Utc>,
+    },
+    /// Header `z` on a Repo/Space header (#scale): the source-snooze
+    /// duration picker. Duration rows time-box the mute (the stored
+    /// `level` is preserved so expiry falls back to it); the trailing
+    /// "Until I unmute" row carries [`SOURCE_MUTE_SENTINEL`] and sets
+    /// the level to Muted outright.
+    SourceSnooze {
+        key: String,
+        level: lazybox_config::SourceAttentionLevel,
+        now: DateTime<Utc>,
+    },
+    /// `x ,` source-settings picker: an index into [`SOURCE_LEVELS`].
+    /// Picking any level clears an active source snooze — choosing
+    /// "live" while snoozed must wake the source, not arm a latent
+    /// level under a still-ticking snooze.
+    SourceLevel {
+        key: String,
+    },
+    /// `x V` saved-views picker (#scale, proposal D): each row indexes
+    /// into `views`; the pick applies that view's frozen lens.
+    View {
+        views: Vec<lazybox_config::ViewConfig>,
     },
     Labels {
         workspace_key: Option<WorkspaceKey>,
@@ -209,6 +265,21 @@ pub enum PickOutcome<F> {
         commands: Vec<Command>,
         notice: Option<String>,
     },
+    /// Set one source's attention-ladder entry (#scale): the renderer
+    /// applies it via `Sidebar::set_source_attention` (client state +
+    /// config persistence — no daemon command; the daemon observes the
+    /// config on its next tick).
+    SourceAttention {
+        key: String,
+        entry: lazybox_config::SourceAttention,
+        notice: String,
+    },
+    /// Apply a saved view's lens (#scale, proposal D): the renderer
+    /// seeds + persists it via `Sidebar::apply_lens`.
+    ApplyView {
+        name: String,
+        lens: lazybox_config::LensSection,
+    },
     /// A `Shift-Enter` snippet pick: deliver the body to `terminal_id`
     /// without submitting (compose only) AND mirror it into the client's
     /// composing buffer so the recap + persisted draft stay in step (#791).
@@ -240,6 +311,11 @@ pub enum PickOutcome<F> {
     SaveDefaultModel {
         agent_id: String,
         alias: Option<String>,
+    },
+    AssignHopperProject {
+        workspace: WorkspaceKey,
+        project: lazybox_core::ProjectKey,
+        action: Action,
     },
     DispatchAction {
         session_key: SessionKey,
@@ -274,6 +350,12 @@ pub enum PickOutcome<F> {
     /// stuck Linear spawn (#1041).
     MapLinearTeam {
         team: String,
+        repo: String,
+    },
+    /// Persist `providers.jira.projects.<project> = repo` and re-provision
+    /// the stuck Jira spawn — the Jira twin of [`Self::MapLinearTeam`].
+    MapJiraProject {
+        project: String,
         repo: String,
     },
     Reviewers {
@@ -494,11 +576,28 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                 .unwrap_or(PickOutcome::NoOp),
             None => PickOutcome::NoOp,
         },
+        PickFlow::HopperProject { workspace, action } => picks
+            .first()
+            .and_then(P::project)
+            .map(|project| PickOutcome::AssignHopperProject {
+                workspace,
+                project,
+                action,
+            })
+            .unwrap_or(PickOutcome::NoOp),
         PickFlow::LinearTeamRepo { team } => picks
             .first()
             .and_then(P::as_text)
             .map(|repo| PickOutcome::MapLinearTeam {
                 team,
+                repo: repo.to_string(),
+            })
+            .unwrap_or(PickOutcome::NoOp),
+        PickFlow::JiraProjectRepo { project } => picks
+            .first()
+            .and_then(P::as_text)
+            .map(|repo| PickOutcome::MapJiraProject {
+                project,
                 repo: repo.to_string(),
             })
             .unwrap_or(PickOutcome::NoOp),
@@ -606,19 +705,104 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                 .unwrap_or(PickOutcome::NoOp)
         }
         PickFlow::Snooze { session_key, now } => {
-            match (session_key, picks.first().and_then(P::as_duration)) {
-                (Some(session_key), Some(duration)) => {
+            let Some(session_key) = session_key else {
+                return PickOutcome::NoOp;
+            };
+            if let Some(duration) = picks.first().and_then(P::as_duration) {
+                let until = now
+                    + chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::hours(4));
+                return PickOutcome::Commands {
+                    commands: vec![Command::Snooze {
+                        session_key,
+                        until,
+                        wake: None,
+                    }],
+                    notice: Some(format!("snoozed for {}", duration_label(duration))),
+                };
+            }
+            // Event-conditional rows (#scale, B4): "until <event>" —
+            // wake on the event or at a 1-year cap, whichever first
+            // (the cap only exists so the row can't hide forever if
+            // the event never comes).
+            let wake = picks.first().and_then(P::as_text).and_then(|t| match t {
+                SNOOZE_WAKE_ACTIVITY => Some(lazybox_core::SnoozeWake::Activity),
+                SNOOZE_WAKE_CI => Some(lazybox_core::SnoozeWake::CiSettled),
+                SNOOZE_WAKE_REVIEW => Some(lazybox_core::SnoozeWake::ReviewLanded),
+                _ => None,
+            });
+            match wake {
+                Some(wake) => PickOutcome::Commands {
+                    commands: vec![Command::Snooze {
+                        session_key,
+                        until: now + chrono::Duration::days(365),
+                        wake: Some(wake),
+                    }],
+                    notice: Some(
+                        match wake {
+                            lazybox_core::SnoozeWake::Activity => "snoozed until new activity",
+                            lazybox_core::SnoozeWake::CiSettled => "snoozed until CI settles",
+                            lazybox_core::SnoozeWake::ReviewLanded => {
+                                "snoozed until a review lands"
+                            }
+                        }
+                        .to_string(),
+                    ),
+                },
+                None => PickOutcome::NoOp,
+            }
+        }
+        PickFlow::SourceSnooze { key, level, now } => {
+            match picks.first().and_then(P::as_duration) {
+                Some(d) if d == SOURCE_MUTE_SENTINEL => PickOutcome::SourceAttention {
+                    notice: format!("{key} muted — z on its header unmutes"),
+                    entry: lazybox_config::SourceAttention {
+                        level: lazybox_config::SourceAttentionLevel::Muted,
+                        snoozed_until: None,
+                    },
+                    key,
+                },
+                Some(duration) => {
                     let until = now
                         + chrono::Duration::from_std(duration)
                             .unwrap_or(chrono::Duration::hours(4));
-                    PickOutcome::Commands {
-                        commands: vec![Command::Snooze { session_key, until }],
-                        notice: Some(format!("snoozed for {}", duration_label(duration))),
+                    PickOutcome::SourceAttention {
+                        notice: format!("{key} snoozed for {}", duration_label(duration)),
+                        entry: lazybox_config::SourceAttention {
+                            level,
+                            snoozed_until: Some(until),
+                        },
+                        key,
                     }
                 }
-                _ => PickOutcome::NoOp,
+                None => PickOutcome::NoOp,
             }
         }
+        PickFlow::View { views } => match picks
+            .first()
+            .and_then(P::as_index)
+            .and_then(|i| views.get(i).cloned())
+        {
+            Some(view) => PickOutcome::ApplyView {
+                name: view.name,
+                lens: view.lens,
+            },
+            None => PickOutcome::NoOp,
+        },
+        PickFlow::SourceLevel { key } => match picks
+            .first()
+            .and_then(P::as_index)
+            .and_then(|i| SOURCE_LEVELS.get(i).copied())
+        {
+            Some(level) => PickOutcome::SourceAttention {
+                notice: format!("{key}: {}", level.label()),
+                entry: lazybox_config::SourceAttention {
+                    level,
+                    snoozed_until: None,
+                },
+                key,
+            },
+            None => PickOutcome::NoOp,
+        },
         PickFlow::Labels { workspace_key } => match workspace_key {
             Some(workspace_key) => PickOutcome::Labels {
                 workspace_key,
@@ -665,6 +849,7 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                     initial_snippet: None,
                     on_main: false,
                     access: lazybox_ipc::AgentRunAccess::Default,
+                    force_new: false,
                 };
                 let notice = format!(
                     "Provisioning worktree for {workspace_key} — opening in {} when ready…",
@@ -1067,6 +1252,19 @@ mod tests {
         ));
         assert!(matches!(
             resolve_pick(
+                &[Payload::Project(project_key.clone())],
+                PickFlow::HopperProject {
+                    workspace: workspace_key.clone(),
+                    action: Action::SpawnShell,
+                },
+            ),
+            PickOutcome::AssignHopperProject { workspace, project, action }
+                if workspace == workspace_key
+                    && project == project_key
+                    && action == Action::SpawnShell
+        ));
+        assert!(matches!(
+            resolve_pick(
                 &[Payload::Session(session_key.clone())],
                 PickFlow::HandoffTarget { active: true },
             ),
@@ -1102,6 +1300,29 @@ mod tests {
         ));
         assert!(matches!(
             resolve_pick::<Payload>(&[], PickFlow::LinearTeamRepo { team: "OBI".into() }),
+            PickOutcome::NoOp
+        ));
+    }
+
+    /// The Jira twin: the picked repo maps the project the picker was
+    /// opened for; an empty pick is a no-op.
+    #[test]
+    fn jira_project_repo_pick_maps_the_project() {
+        assert!(matches!(
+            resolve_pick(
+                &[Payload::Text("acme/widget".into())],
+                PickFlow::JiraProjectRepo { project: "ENG".into() },
+            ),
+            PickOutcome::MapJiraProject { project, repo }
+                if project == "ENG" && repo == "acme/widget"
+        ));
+        assert!(matches!(
+            resolve_pick::<Payload>(
+                &[],
+                PickFlow::JiraProjectRepo {
+                    project: "ENG".into()
+                }
+            ),
             PickOutcome::NoOp
         ));
     }
@@ -1434,5 +1655,114 @@ mod tests {
             resolve_pick(&[Payload::Index(9)], PickFlow::OpenWith { apps, ctx }),
             PickOutcome::NoOp
         ));
+    }
+
+    /// Source-attention picker resolution (#scale): a duration row
+    /// time-boxes the snooze preserving the stored level; the
+    /// "Until I unmute" sentinel goes straight to Muted; the level
+    /// picker indexes SOURCE_LEVELS and clears any snooze.
+    #[test]
+    fn source_pickers_resolve_to_attention_entries() {
+        use lazybox_config::SourceAttentionLevel;
+        let now = chrono::Utc::now();
+
+        let outcome = resolve_pick(
+            &[Payload::Duration(Duration::from_secs(3600))],
+            PickFlow::SourceSnooze {
+                key: "o/r".into(),
+                level: SourceAttentionLevel::Quiet,
+                now,
+            },
+        );
+        match outcome {
+            PickOutcome::SourceAttention { key, entry, .. } => {
+                assert_eq!(key, "o/r");
+                assert_eq!(
+                    entry.level,
+                    SourceAttentionLevel::Quiet,
+                    "a timed snooze preserves the stored level for expiry"
+                );
+                assert_eq!(entry.snoozed_until, Some(now + chrono::Duration::hours(1)));
+            }
+            other => panic!("expected SourceAttention, got {other:?}"),
+        }
+
+        let outcome = resolve_pick(
+            &[Payload::Duration(SOURCE_MUTE_SENTINEL)],
+            PickFlow::SourceSnooze {
+                key: "o/r".into(),
+                level: SourceAttentionLevel::Live,
+                now,
+            },
+        );
+        match outcome {
+            PickOutcome::SourceAttention { entry, .. } => {
+                assert_eq!(entry.level, SourceAttentionLevel::Muted);
+                assert_eq!(
+                    entry.snoozed_until, None,
+                    "mute-forever carries no deadline"
+                );
+            }
+            other => panic!("expected SourceAttention, got {other:?}"),
+        }
+
+        let outcome = resolve_pick(
+            &[Payload::Index(2)],
+            PickFlow::SourceLevel { key: "o/r".into() },
+        );
+        match outcome {
+            PickOutcome::SourceAttention { entry, .. } => {
+                assert_eq!(entry.level, SourceAttentionLevel::Digest);
+                assert_eq!(
+                    entry.snoozed_until, None,
+                    "picking a level clears any snooze"
+                );
+            }
+            other => panic!("expected SourceAttention, got {other:?}"),
+        }
+    }
+
+    /// Snooze picker's event-conditional rows (#scale, B4): a wake
+    /// token resolves to Command::Snooze with the condition + the
+    /// 1-year cap; duration rows stay time-only.
+    #[test]
+    fn snooze_wake_rows_resolve_to_conditional_snoozes() {
+        let now = chrono::Utc::now();
+        let key = SessionKey::from("test:ws");
+
+        let outcome = resolve_pick(
+            &[Payload::Text(SNOOZE_WAKE_CI.into())],
+            PickFlow::Snooze {
+                session_key: Some(key.clone()),
+                now,
+            },
+        );
+        match outcome {
+            PickOutcome::Commands { commands, .. } => match commands.as_slice() {
+                [Command::Snooze { until, wake, .. }] => {
+                    assert_eq!(*wake, Some(lazybox_core::SnoozeWake::CiSettled));
+                    assert_eq!(*until, now + chrono::Duration::days(365));
+                }
+                other => panic!("expected one Snooze, got {other:?}"),
+            },
+            other => panic!("expected Commands, got {other:?}"),
+        }
+
+        let outcome = resolve_pick(
+            &[Payload::Duration(Duration::from_secs(3600))],
+            PickFlow::Snooze {
+                session_key: Some(key),
+                now,
+            },
+        );
+        match outcome {
+            PickOutcome::Commands { commands, .. } => match commands.as_slice() {
+                [Command::Snooze { wake, .. }] => {
+                    assert_eq!(*wake, None, "duration rows stay time-only");
+                }
+                other => panic!("expected one Snooze, got {other:?}"),
+            },
+            other => panic!("expected Commands, got {other:?}"),
+        }
     }
 }

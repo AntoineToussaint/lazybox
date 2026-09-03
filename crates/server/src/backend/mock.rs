@@ -41,6 +41,10 @@ struct MockInner {
     /// an error. Lets retry-contract tests fail once without sleeping
     /// through the timeout path.
     snapshot_failures: Mutex<HashMap<String, usize>>,
+    /// Count of upcoming `list()` calls that should return an error. Lets
+    /// tests exercise a transient inventory failure (e.g. the delete-time
+    /// orphan sweep) without a live tmux backend.
+    list_failures: Mutex<usize>,
     /// Per-key count of upcoming `subscribe()` calls that should fail.
     subscribe_failures: Mutex<HashMap<String, usize>>,
     /// Keys whose `snapshot()` should report `complete: false` — a ring
@@ -59,6 +63,10 @@ struct MockInner {
     /// tests hold a spawn "mid-provision" to exercise the in-flight
     /// spawn races (duplicate collapse, Kill serialization).
     spawn_delay: Mutex<Option<std::time::Duration>>,
+    /// Artificial delay applied at the start of every `list()`. Lets tests
+    /// park startup recovery on the backend inventory to prove recovery no
+    /// longer blocks the daemon launch (client_runtime background-recovery).
+    list_delay: Mutex<Option<std::time::Duration>>,
     /// Per-key kill failure injected by lifecycle tests. Real backends keep
     /// their slot on a transport/timeout failure so callers can retry; the
     /// mock must be able to exercise that contract too.
@@ -143,6 +151,30 @@ impl MockBackend {
         // Drop disconnected subscribers as we go; a full (stalled)
         // subscriber keeps its slot but misses this chunk — same
         // drop-on-overflow contract as the real backends.
+        session.subscribers.retain(|tx| {
+            !matches!(
+                tx.try_send(chunk.clone()),
+                Err(mpsc::error::TrySendError::Closed(_))
+            )
+        });
+    }
+
+    /// Inject synthetic output delivered to live subscribers ONLY — NOT
+    /// appended to the replay ring. Models the real backend's window where the
+    /// PTY reader has pushed a chunk onto the live stream but a concurrent
+    /// snapshot of the ring would not yet see it: a snapshot-after-exit reader
+    /// misses this byte, a live-drain reader captures it.
+    pub async fn emit_live_only(&self, key: &str, bytes: impl AsRef<[u8]>) {
+        let bytes = bytes.as_ref().to_vec();
+        let mut map = self.inner.sessions.lock().await;
+        let Some(session) = map.get_mut(key) else {
+            return;
+        };
+        session.last_seq += 1;
+        let chunk = OutputChunk {
+            seq: session.last_seq,
+            bytes,
+        };
         session.subscribers.retain(|tx| {
             !matches!(
                 tx.try_send(chunk.clone()),
@@ -261,6 +293,20 @@ impl MockBackend {
     /// provisioning / agent boot in race tests.
     pub async fn set_spawn_delay(&self, delay: std::time::Duration) {
         *self.inner.spawn_delay.lock().await = Some(delay);
+    }
+
+    /// Make every subsequent `list()` sleep for `delay` before returning —
+    /// a stand-in for a slow/loaded backend inventory in startup-recovery
+    /// tests.
+    pub async fn set_list_delay(&self, delay: std::time::Duration) {
+        *self.inner.list_delay.lock().await = Some(delay);
+    }
+
+    /// Fail the next `count` `list()` calls, then resume normally. Models a
+    /// transient backend inventory failure — e.g. the delete-time orphan
+    /// sweep whose `backend.list()` fails, leaving a survivor session.
+    pub async fn fail_next_lists(&self, count: usize) {
+        *self.inner.list_failures.lock().await = count;
     }
 
     /// Make `kill(key)` fail without closing or removing the session.
@@ -536,6 +582,17 @@ impl SessionBackend for MockBackend {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, BackendError>> + Send + 'a>> {
         Box::pin(async move {
+            let delay = *self.inner.list_delay.lock().await;
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
+            {
+                let mut remaining = self.inner.list_failures.lock().await;
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    return Err(BackendError::Other("injected list failure".into()));
+                }
+            }
             let map = self.inner.sessions.lock().await;
             Ok(map
                 .iter()

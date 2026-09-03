@@ -105,6 +105,9 @@ fn bulk_spawn_command(
         on_main: false,
         model_alias,
         access: lazybox_ipc::AgentRunAccess::Default,
+        // Bulk starts inject into any workspace already running an agent
+        // (#932) — reuse-friendly, so never force a duplicate.
+        force_new: false,
     }
 }
 
@@ -212,7 +215,9 @@ pub(super) fn is_bulk_destructive(action: &lazybox_tui_core::action::Action) -> 
             | Action::MergePr
             | Action::LongSnooze
             | Action::DeleteOrClose
+            | Action::ClosePr
             | Action::CloseIssue
+            | Action::CloseAndArchive
     )
 }
 
@@ -226,7 +231,9 @@ fn bulk_confirmed_verb(action: &lazybox_tui_core::action::Action) -> &'static st
         Action::MergePr => "merged",
         Action::LongSnooze => "snoozed",
         Action::DeleteOrClose => "closed/deleted",
+        Action::ClosePr => "closed",
         Action::CloseIssue => "closed",
+        Action::CloseAndArchive => "closed & killed",
         _ => "applied to",
     }
 }
@@ -290,7 +297,11 @@ impl<T: TerminalAdapter> Model<T> {
                 let until = chrono::Utc::now()
                     + chrono::Duration::from_std(duration)
                         .unwrap_or_else(|_| chrono::Duration::days(365));
-                vec![IpcCommand::Snooze { session_key, until }]
+                vec![IpcCommand::Snooze {
+                    session_key,
+                    until,
+                    wake: None,
+                }]
             }
             Intent::MarkAllRead { session_key } => {
                 vec![IpcCommand::MarkRead { session_key }]
@@ -348,6 +359,7 @@ impl<T: TerminalAdapter> Model<T> {
             | Intent::OpenEditor
             | Intent::SetAutoMergeOnGreen { .. }
             | Intent::SetTrackMain { .. }
+            | Intent::SetMetered { .. }
             | Intent::KillWorkspace { .. }
             | Intent::Unsnooze { .. } => Vec::new(),
         }
@@ -385,25 +397,28 @@ impl<T: TerminalAdapter> Model<T> {
         &mut self,
         action: &lazybox_tui_core::action::Action,
     ) -> Vec<IpcCommand> {
-        use lazybox_tui_core::action::{Action, ActionDef};
-        // `g m` on a single PR lazybox already knows is conflicting is a
-        // doomed dispatch — GitHub would only reject it. Skip straight to
-        // the one-key resolve prompt rather than a merge confirm that can
-        // only fail (#947). Only the single-target case: a `v` bulk merge
-        // (#899) falls through to the fan-out, which already reports each
-        // conflicting PR as skipped in its confirm split.
-        if matches!(action, Action::MergePr) && !self.bulk_active() {
-            let conflict_target = self.sidebar.selected_workspace().and_then(|ws| {
-                ws.pr
-                    .as_ref()
-                    .filter(|pr| pr.mergeable.is_conflicting())
-                    .map(|pr| (ws.key.clone(), pr.id.key.clone()))
+        use lazybox_tui_core::action::ActionDef;
+        if Self::hopper_action_requires_project(action) {
+            let repo_less_hopper = self.sidebar.selected_workspace().and_then(|workspace| {
+                (workspace.hopper.is_some() && workspace.project_key.is_none())
+                    .then(|| workspace.key.clone())
             });
-            if let Some((workspace, pr_label)) = conflict_target {
-                self.mount_conflict_resolve(&workspace, &pr_label);
+            if let Some(workspace) = repo_less_hopper {
+                self.mount_hopper_project_picker(workspace, action.clone());
                 return Vec::new();
             }
         }
+        // The conflict → resolve divert (#947) used to fire HERE, off the
+        // sidebar's *cached* `pr.mergeable` — but that data is a poll stale,
+        // so a conflict GitHub had already cleared still dead-ended into the
+        // resolve prompt (#1394). The client can't call GitHub, so the divert
+        // moved into the daemon's `merge_pr_task`: `g m` now goes through the
+        // normal confirm→send path, the daemon re-fetches this PR's live
+        // state, and a *fresh* conflict comes back as `PrMergeFailed { conflict
+        // }` — which opens `mount_conflict_resolve` (see events.rs). Bulk `v`
+        // merge (#899) still fans out and reports conflicting PRs as skipped in
+        // its confirm split.
+        //
         // Destructive gate, type-system enforced via the catalog.
         // Every destructive action is routed through the unified
         // Confirm modal first; the pending action lives in
@@ -459,6 +474,26 @@ impl<T: TerminalAdapter> Model<T> {
             return Vec::new();
         }
         self.dispatch_action_unchecked(action)
+    }
+
+    fn hopper_action_requires_project(action: &lazybox_tui_core::action::Action) -> bool {
+        use lazybox_tui_core::action::Action;
+        matches!(
+            action,
+            Action::Work
+                | Action::WorkWith(_)
+                | Action::SpawnAgent(_)
+                | Action::WorkTier(_)
+                | Action::SpawnTier(_)
+                | Action::SpawnAgentRemote(_)
+                | Action::SpawnShell
+                | Action::SpawnAgentOnMain(_)
+                | Action::SpawnShellOnMain
+                | Action::OpenEditor
+                | Action::OpenWith
+                | Action::OpenWithApp(_)
+                | Action::ViewDiff
+        )
     }
 
     /// Resolve what a destructive action mounted right now would act
@@ -677,6 +712,46 @@ impl<T: TerminalAdapter> Model<T> {
                     )
                 }
             }
+            Action::ClosePr => {
+                let ready = targets
+                    .iter()
+                    .filter(|t| match t {
+                        ActionConfirmTarget::Workspace(k) => {
+                            self.sidebar.workspace_by_key(k).is_some_and(|ws| {
+                                lazybox_tui_core::action::availability(
+                                    lazybox_tui_core::action::ActionKind::ClosePr,
+                                    Some(ws),
+                                )
+                            })
+                        }
+                        ActionConfirmTarget::Project(_) => false,
+                    })
+                    .count();
+                let skipped = n - ready;
+                let plural = |n: usize| if n == 1 { "" } else { "s" };
+                if ready == 0 {
+                    format!(
+                        "None of the {n} selected have an open PR to close — nothing will happen. {list}"
+                    )
+                } else if skipped == 0 {
+                    format!("Close {ready} PR{} without merging? {list}", plural(ready))
+                } else {
+                    format!(
+                        "Close {ready} of {n} selected PR{} without merging? {skipped} will be skipped (no open PR). {list}",
+                        plural(ready)
+                    )
+                }
+            }
+            // Every selected row was gated on the same open-issue/PR
+            // predicate as delete-or-close, so all N get both the upstream
+            // close and the local archive.
+            Action::CloseAndArchive => {
+                format!(
+                    "Close/delete and archive {n} workspaces? Each issue is deleted \
+                     (or closed as not-planned) or its PR closed without merging, its \
+                     sessions killed, and the row dropped. {list}"
+                )
+            }
             // Only the `is_bulk_destructive` actions reach a bulk confirm;
             // a neutral fallback keeps a future mis-wiring from lying
             // ("Archive N…") about what a different action does.
@@ -792,6 +867,74 @@ impl<T: TerminalAdapter> Model<T> {
                             Vec::new()
                         }
                     },
+                    Action::ClosePr => match workspace.as_ref() {
+                        Some(ws)
+                            if lazybox_tui_core::action::availability(
+                                lazybox_tui_core::action::ActionKind::ClosePr,
+                                Some(ws),
+                            ) =>
+                        {
+                            if let Some(pr) = ws.pr.as_ref() {
+                                self.flash_info(format!(
+                                    "closing PR{}…",
+                                    task_number_suffix(&pr.id.key)
+                                ));
+                            }
+                            vec![IpcCommand::ClosePr {
+                                workspace_key: ws.key.clone(),
+                            }]
+                        }
+                        _ => {
+                            self.flash_info("the PR is no longer open — nothing to close");
+                            Vec::new()
+                        }
+                    },
+                    // The combined `g d` + `x x`: close/delete the item
+                    // upstream AND archive the workspace in one go. Re-check
+                    // the same predicate the keypress was gated on, then emit
+                    // both commands. Archive optimistically (like Action::Archive)
+                    // so the row drops instantly; the daemon's DeleteOrClose is
+                    // best-effort upstream — the local kill is what ends the
+                    // workspace either way.
+                    Action::CloseAndArchive => match workspace.as_ref() {
+                        Some(ws)
+                            if lazybox_tui_core::action::availability(
+                                lazybox_tui_core::action::ActionKind::CloseAndArchive,
+                                Some(ws),
+                            ) =>
+                        {
+                            if let Some(pr) = ws.pr.as_ref() {
+                                self.flash_info(format!(
+                                    "closing PR{} & killing workspace…",
+                                    task_number_suffix(&pr.id.key)
+                                ));
+                            } else {
+                                self.flash_info(format!(
+                                    "deleting issue{} & killing workspace…",
+                                    task_number_suffix(
+                                        ws.gh_issues
+                                            .first()
+                                            .map(|i| i.id.key.as_str())
+                                            .unwrap_or("")
+                                    )
+                                ));
+                            }
+                            let workspace_key = ws.key.clone();
+                            self.optimistic_remove_workspace(session_key);
+                            vec![
+                                IpcCommand::DeleteOrClose { workspace_key },
+                                IpcCommand::Kill {
+                                    session_key: session_key.clone(),
+                                },
+                            ]
+                        }
+                        _ => {
+                            self.flash_info(
+                                "the issue / PR is no longer open — use archive (x x) to just kill the workspace",
+                            );
+                            Vec::new()
+                        }
+                    },
                     Action::LongSnooze => {
                         let intent = crate::intent::resolve_long_snooze(
                             workspace.as_ref(),
@@ -881,6 +1024,8 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_prompt: None,
                         initial_snippet: None,
                         on_main: true,
+                        // `b c` / `b x` / `b u` explicit agent spawn (#1310).
+                        force_new: true,
                     }],
                     Action::SpawnShellOnMain => vec![IpcCommand::Spawn {
                         model_alias: None,
@@ -893,6 +1038,7 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_prompt: None,
                         initial_snippet: None,
                         on_main: true,
+                        force_new: false,
                     }],
                     // A future destructive action that hasn't grown a
                     // targeted arm yet falls back to the legacy
@@ -1098,6 +1244,18 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             });
         }
+        // Close-PR names its exact target — the number + title of the PR
+        // the confirmed keypress closes.
+        if matches!(action, Action::ClosePr) {
+            let sk = target_ws_key.or_else(|| self.sidebar.selected_workspace_key())?;
+            let ws = self.sidebar.workspace_by_key(sk)?;
+            let pr = ws.pr.as_ref()?;
+            return Some(format!(
+                "Close PR {} — \"{}\" — without merging? Reopen on GitHub to undo.",
+                pr.id.key,
+                truncate_title(&pr.title),
+            ));
+        }
         if !matches!(action, Action::Archive) {
             return None;
         }
@@ -1163,6 +1321,7 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_prompt: None,
                         initial_snippet: None,
                         on_main: false,
+                        force_new: false,
                     });
                 }
             }
@@ -1182,6 +1341,9 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_prompt: None,
                         initial_snippet: None,
                         on_main: false,
+                        // Explicit `a c` / `a x` / `a u`: always start a new
+                        // agent, even beside an idle one of the same kind (#1310).
+                        force_new: true,
                     });
                 }
             }
@@ -1200,6 +1362,18 @@ impl<T: TerminalAdapter> Model<T> {
                     );
                     return cmds;
                 };
+                // Fail fast when the box is already known to be erroring
+                // (bad gcp creds, provider unreachable). Sending the spawn
+                // into a dead box would leave the row's optimistic `⇅` tag
+                // spinning with no terminal ever coming — the exact
+                // "spawn forever" this issue forbids (#1372). Surface the
+                // box error instead; `Shift-C` retries the bring-up.
+                if let Some(reason) = self.status.remote_conn.error_reason() {
+                    self.flash_error(format!(
+                        "box error: {reason} — press Shift-C to reconnect before spawning"
+                    ));
+                    return cmds;
+                }
                 // Under a live multi-select the r-spawn fans out like every
                 // other bulk-appropriate spawn (#932) — same plan, each target
                 // routed to (or skipped by) its repo's box per the per-project
@@ -1259,6 +1433,8 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_prompt: None,
                         initial_snippet: None,
                         on_main: false,
+                        // `r c` / `r x` / `r u` mirror `a c` (#1310).
+                        force_new: true,
                     };
                     self.send_to_remote(&remote, spawn);
                     // Optimistic client-side tag so the sidebar row shows
@@ -1288,6 +1464,8 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_prompt: None,
                         initial_snippet: None,
                         on_main: true,
+                        // `b c` / `b x` / `b u` are explicit agent spawns too (#1310).
+                        force_new: true,
                     });
                 }
             }
@@ -1304,6 +1482,7 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_prompt: None,
                         initial_snippet: None,
                         on_main: true,
+                        force_new: false,
                     });
                 }
             }
@@ -1358,6 +1537,8 @@ impl<T: TerminalAdapter> Model<T> {
                         on_main: false,
                         model_alias: Some(alias.clone()),
                         access: lazybox_ipc::AgentRunAccess::Default,
+                        // `a S` / `a M` / `a L` are explicit agent spawns (#1310).
+                        force_new: true,
                     });
                 }
             }
@@ -1432,6 +1613,7 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::UpdateBranch { .. }
                     | Intent::SetAutoMergeOnGreen { .. }
                     | Intent::SetTrackMain { .. }
+                    | Intent::SetMetered { .. }
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }
@@ -1541,6 +1723,7 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::UpdateBranch { .. }
                     | Intent::SetAutoMergeOnGreen { .. }
                     | Intent::SetTrackMain { .. }
+                    | Intent::SetMetered { .. }
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }
@@ -1557,6 +1740,57 @@ impl<T: TerminalAdapter> Model<T> {
                     crate::intent::resolve_collapse_into_pr(issue_workspace.as_ref(), &workspaces);
                 cmds.extend(self.execute_dispatch_intent(intent, issue_workspace.as_ref()));
             }
+            Action::SaveView => {
+                self.mount_save_view_input();
+            }
+            Action::OpenViews => {
+                let views = lazybox_config::Config::load()
+                    .map(|c| c.ui.views)
+                    .unwrap_or_default();
+                if views.is_empty() {
+                    self.flash_hint(
+                        "no saved views yet — set up filters and press x v".to_string(),
+                    );
+                } else {
+                    self.mount_view_picker(views);
+                }
+            }
+            Action::AddRepo => {
+                use crate::realm::components::input::Input;
+                if !matches!(self.modal_stack.last(), Some(super::Id::AddRepoName)) {
+                    let modal = Input::new("Subscribe a GitHub repo (owner/repo)")
+                        .title("Add repo")
+                        .with_validator(|s: &str| {
+                            s.trim()
+                                .split_once('/')
+                                .is_some_and(|(o, r)| !o.is_empty() && !r.is_empty())
+                        });
+                    self.mount_modal(super::Id::AddRepoName, modal);
+                }
+            }
+            Action::SourceSettings => {
+                // Level picker for the source at/above the cursor
+                // (#scale): a Space header targets the Space; anywhere
+                // in a repo group targets the repo (mirrors the
+                // MoveToSpace cursor contract).
+                let source_key = if self.sidebar.cursor_on_space_header() {
+                    self.sidebar.cursor_space().map(|s| format!("space:{s}"))
+                } else {
+                    self.sidebar.cursor_repo()
+                };
+                match source_key {
+                    Some(key) => {
+                        let level = self
+                            .sidebar
+                            .source_attention_for(&key)
+                            .effective_level(chrono::Utc::now());
+                        self.mount_source_level_picker(key, level);
+                    }
+                    None => self.flash_info(
+                        "source attention: move onto a repo or Space first".to_string(),
+                    ),
+                }
+            }
             Action::ToggleSnooze => {
                 // When the workspace is already snoozed, `z` toggles
                 // it off (no picker — that'd be friction). When NOT
@@ -1564,6 +1798,30 @@ impl<T: TerminalAdapter> Model<T> {
                 // pick something meaningful instead of paying the
                 // YAML default every time.
                 let now = chrono::Utc::now();
+                // Header-contextual (#scale): `z` on a Repo/Space
+                // header snoozes/mutes the whole SOURCE — one mental
+                // model at every scale. On an already-demoted header
+                // the same key wakes it, mirroring the workspace
+                // toggle contract.
+                if !self.bulk_active() {
+                    let source_key = if self.sidebar.cursor_on_repo_header() {
+                        self.sidebar.cursor_repo()
+                    } else if self.sidebar.cursor_on_space_header() {
+                        self.sidebar.cursor_space().map(|s| format!("space:{s}"))
+                    } else {
+                        None
+                    };
+                    if let Some(key) = source_key {
+                        let att = self.sidebar.source_attention_for(&key);
+                        if att.effective_level(now) == lazybox_config::SourceAttentionLevel::Muted {
+                            self.sidebar.set_source_attention(&key, Default::default());
+                            self.flash_info(format!("{key} unmuted"));
+                        } else {
+                            self.mount_source_snooze_picker(key, att.level);
+                        }
+                        return cmds;
+                    }
+                }
                 // Bulk (#899): toggle each selected row against its own
                 // current state — snooze the awake, wake the snoozed —
                 // so a mixed selection resolves per-row without a picker.
@@ -1576,7 +1834,11 @@ impl<T: TerminalAdapter> Model<T> {
                         Some(if ws.is_snoozed(now) {
                             IpcCommand::Unsnooze { session_key }
                         } else {
-                            IpcCommand::Snooze { session_key, until }
+                            IpcCommand::Snooze {
+                                session_key,
+                                until,
+                                wake: None,
+                            }
                         })
                     });
                 }
@@ -1623,6 +1885,71 @@ impl<T: TerminalAdapter> Model<T> {
                 let workspace = self.sidebar.selected_workspace().cloned();
                 let intent = crate::intent::resolve_update_branch(workspace.as_ref());
                 cmds.extend(self.execute_dispatch_intent(intent, workspace.as_ref()));
+            }
+            Action::ConvertToDraft => {
+                // Non-destructive (Guard::None) — fires straight through.
+                // Selection-first: a `v` multi-select converts every open,
+                // non-draft PR in the set; otherwise the focused row.
+                let eligible = |ws: &lazybox_core::Workspace| {
+                    lazybox_tui_core::action::availability(
+                        lazybox_tui_core::action::ActionKind::ConvertToDraft,
+                        Some(ws),
+                    )
+                    .then(|| IpcCommand::ConvertPrToDraft {
+                        workspace_key: ws.key.clone(),
+                    })
+                };
+                if self.bulk_active() {
+                    return self.bulk_dispatch(
+                        "converting to draft",
+                        "no open PR to draft",
+                        eligible,
+                    );
+                }
+                if let Some(ws) = self.sidebar.selected_workspace().cloned() {
+                    if let Some(cmd) = eligible(&ws) {
+                        self.flash_info(format!(
+                            "converting PR{} to draft…",
+                            ws.pr
+                                .as_ref()
+                                .map(|pr| task_number_suffix(&pr.id.key))
+                                .unwrap_or_default()
+                        ));
+                        cmds.push(cmd);
+                    } else {
+                        self.flash_info("no open PR to convert to draft");
+                    }
+                }
+            }
+            Action::MarkReady => {
+                // Non-destructive (Guard::None). Selection-first: a `v`
+                // multi-select marks every draft PR in the set ready.
+                let eligible = |ws: &lazybox_core::Workspace| {
+                    lazybox_tui_core::action::availability(
+                        lazybox_tui_core::action::ActionKind::MarkReady,
+                        Some(ws),
+                    )
+                    .then(|| IpcCommand::MarkPrReady {
+                        workspace_key: ws.key.clone(),
+                    })
+                };
+                if self.bulk_active() {
+                    return self.bulk_dispatch("marking ready", "not a draft PR", eligible);
+                }
+                if let Some(ws) = self.sidebar.selected_workspace().cloned() {
+                    if let Some(cmd) = eligible(&ws) {
+                        self.flash_info(format!(
+                            "marking PR{} ready for review…",
+                            ws.pr
+                                .as_ref()
+                                .map(|pr| task_number_suffix(&pr.id.key))
+                                .unwrap_or_default()
+                        ));
+                        cmds.push(cmd);
+                    } else {
+                        self.flash_info("no draft PR to mark ready");
+                    }
+                }
             }
             Action::ToggleAutoMerge => {
                 // Bulk (#899): arm auto-merge-on-green across every
@@ -1681,6 +2008,7 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::MergePr { .. }
                     | Intent::UpdateBranch { .. }
                     | Intent::SetTrackMain { .. }
+                    | Intent::SetMetered { .. }
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }
@@ -1721,6 +2049,59 @@ impl<T: TerminalAdapter> Model<T> {
                     conflict: arm,
                 });
             }
+            Action::ToggleMetering if self.sidebar.cursor_on_space_header() => {
+                // Space-tier toggle (approach C): `x $` on a Space header meters
+                // every workspace under it via `agent.metered_spaces`, persisted
+                // client-side and read by the daemon at spawn. Distinct from the
+                // per-workspace canary below, which the same key drives on a
+                // workspace row.
+                //
+                // Space metering lives in the *client's* config, which a
+                // `--connect` daemon never reads — the per-workspace canary
+                // goes over IPC (`SetMetered`), but this doesn't. Rather than
+                // toggle a flag the remote daemon can't see, refuse with a clear
+                // notice so it isn't a silent no-op (#1389).
+                if self.remote {
+                    self.flash_info(
+                        "Space metering isn't available over --connect (it's a client-side \
+                         setting the daemon can't see); meter individual workspaces with x $ \
+                         instead"
+                            .to_string(),
+                    );
+                } else if let Some((space, enabled)) =
+                    self.sidebar.toggle_space_metering_at_cursor()
+                {
+                    let space = crate::util::notice_slug(&space).into_owned();
+                    let verb = if enabled { "on" } else { "off" };
+                    self.flash_info(format!("$ meter: {verb} for {space} (space)"));
+                }
+            }
+            Action::ToggleMetering => {
+                let workspace = self.sidebar.selected_workspace().cloned();
+                use crate::intent::Intent;
+                match crate::intent::resolve_toggle_metering(workspace.as_ref()) {
+                    Intent::SetMetered {
+                        workspace_key,
+                        enabled,
+                    } => {
+                        let name = workspace
+                            .as_ref()
+                            .map(|w| crate::util::notice_slug(&w.name).into_owned())
+                            .unwrap_or_default();
+                        if enabled {
+                            self.flash_info(format!("$ meter: on for {name}"));
+                        } else {
+                            self.flash_info(format!("$ meter: off for {name}"));
+                        }
+                        cmds.push(IpcCommand::SetMetered {
+                            session_key: lazybox_core::SessionKey::from(&workspace_key),
+                            enabled,
+                        });
+                    }
+                    Intent::Notice(msg) => self.flash_info(msg),
+                    _ => {}
+                }
+            }
             Action::ToggleTrackMain => {
                 let workspace = self.sidebar.selected_workspace().cloned();
                 // Explicit variant list (no `_`): a new Intent variant is
@@ -1756,6 +2137,7 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::MergePr { .. }
                     | Intent::UpdateBranch { .. }
                     | Intent::SetAutoMergeOnGreen { .. }
+                    | Intent::SetMetered { .. }
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }
@@ -1767,10 +2149,13 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Action::ManagePolicies => {
                 // Unified automation-policies menu (issue #363). Surfaces
-                // for any workspace carrying a PR or a GitHub issue; the
-                // menu itself marks which policies apply to PRs vs issues.
+                // for any workspace carrying a PR or a mutation-capable
+                // issue; a read-only issue (Jira) has no GitHub-automation
+                // policy to arm. The menu itself marks which policies apply
+                // to PRs vs issues.
                 if let Some(ws) = self.sidebar.selected_workspace()
-                    && (ws.pr.is_some() || !ws.gh_issues.is_empty())
+                    && (ws.pr.is_some()
+                        || ws.gh_issues.iter().any(|i| i.source_supports_mutations()))
                 {
                     let ws_key = ws.key.clone();
                     self.mount_policy_picker(ws_key);
@@ -1808,6 +2193,12 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Action::OpenErrorInbox => {
                 self.mount_error_inbox();
+            }
+            Action::OpenStats => {
+                self.mount_stats();
+            }
+            Action::OpenHopper => {
+                self.mount_hopper();
             }
             Action::OpenSettings => {
                 self.open_settings();
@@ -1936,15 +2327,18 @@ impl<T: TerminalAdapter> Model<T> {
             Action::AddAssignees => {
                 if let Some(ws) = self.sidebar.selected_workspace() {
                     // Assignment requires a provider assignable id — a
-                    // PR, gh issue, or Linear issue with a node_id.
-                    // Empty pre-PR workspaces don't qualify.
+                    // PR, gh issue, or Linear issue with a node_id — AND a
+                    // provider that can service the write. A read-only
+                    // issue (Jira) carries a node_id but no mutation
+                    // backend, so it doesn't qualify. Empty pre-PR
+                    // workspaces don't qualify either.
                     let has_target = ws.pr.as_ref().map(|p| p.node_id.is_some()).unwrap_or(false)
                         || ws
                             .gh_issues
                             .iter()
                             .chain(ws.linear_issues.iter())
                             .next()
-                            .map(|i| i.node_id.is_some())
+                            .map(|i| i.node_id.is_some() && i.source_supports_mutations())
                             .unwrap_or(false);
                     if has_target {
                         let ws_key = ws.key.clone();
@@ -1953,14 +2347,16 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::ManageLabels => {
-                // Labels require a `Labelable` node id — same as
-                // assignees. Pre-PR scratch workspaces don't qualify.
+                // Labels require a `Labelable` node id AND a mutation-capable
+                // provider — same as assignees. A read-only issue (Jira) has
+                // a node_id but no write backend; pre-PR scratch workspaces
+                // don't qualify.
                 if let Some(ws) = self.sidebar.selected_workspace() {
                     let has_target = ws.pr.as_ref().map(|p| p.node_id.is_some()).unwrap_or(false)
                         || ws
                             .gh_issues
                             .first()
-                            .map(|i| i.node_id.is_some())
+                            .map(|i| i.node_id.is_some() && i.source_supports_mutations())
                             .unwrap_or(false);
                     if !has_target {
                         self.flash_info("no PR / issue to label");
@@ -2011,16 +2407,41 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                 }
             }
+            Action::MergeHistory => {
+                // Repo-scoped (#1432): the "what's been landing here" ledger
+                // for the cursor's repo group — resolves from the sidebar
+                // cursor, so it works on a repo header, a workspace, or a
+                // session row alike. The mount fires the daemon fetch and
+                // shows a loading state until the reply lands.
+                // `cursor_repo` also yields non-GitHub group labels — the
+                // `(no repo)` bucket, a Linear team name — which aren't
+                // `owner/name` and can't be a GitHub merge search. Merge
+                // history is GitHub-only, so require a slug rather than firing
+                // a query that could only come back an error.
+                let repo = self.sidebar.cursor_repo();
+                let Some(repo) = repo.filter(|r| r.contains('/')) else {
+                    self.flash_info(
+                        "merge history is GitHub-only — no GitHub repo under the cursor",
+                    );
+                    return cmds;
+                };
+                self.mount_merge_history_modal(repo.clone());
+                cmds.push(IpcCommand::FetchRepoMergeHistory { repo });
+            }
+            Action::BrowseRepoIssues => {
+                self.mount_issue_browser();
+            }
             Action::SyncWorkspace => {
                 // Bulk (#899): re-poll every selected PR / issue at once;
                 // rows with nothing to sync (no PR, no issue) are skipped
                 // and counted.
                 if self.bulk_active() {
                     return self.bulk_dispatch("synced", "nothing to sync", |ws| {
-                        (ws.pr.is_some() || !ws.gh_issues.is_empty()).then(|| {
-                            IpcCommand::SyncWorkspace {
-                                workspace_key: ws.key.clone(),
-                            }
+                        (ws.pr.is_some()
+                            || !ws.gh_issues.is_empty()
+                            || !ws.linear_issues.is_empty())
+                        .then(|| IpcCommand::SyncWorkspace {
+                            workspace_key: ws.key.clone(),
                         })
                     });
                 }
@@ -2032,13 +2453,34 @@ impl<T: TerminalAdapter> Model<T> {
                 let Some(ws) = self.sidebar.selected_workspace() else {
                     return cmds;
                 };
-                if ws.pr.is_none() && ws.gh_issues.is_empty() {
-                    self.flash_info("nothing to sync on this workspace");
+                // No tracked PR/issue: if the workspace is scoped to a github
+                // repo (a taskless / pre-PR workspace), sync discovers that
+                // repo's open issues + PRs daemon-side; only a workspace with
+                // no repo scope at all has genuinely nothing to sync.
+                let has_repo_scope = ws
+                    .project_key
+                    .as_ref()
+                    .is_some_and(|key| key.unambiguous_github_slug().is_some());
+                if ws.pr.is_none()
+                    && ws.gh_issues.is_empty()
+                    && ws.linear_issues.is_empty()
+                    && !has_repo_scope
+                {
+                    self.flash_info("nothing to sync — this workspace has no PR, issue, or repo");
                     return cmds;
                 }
+                // Repo-discovery only when there's genuinely no tracked entity
+                // (GitHub *or* Linear) — a Linear ticket syncs itself, not the
+                // repo.
+                let syncing_repo =
+                    ws.pr.is_none() && ws.gh_issues.is_empty() && ws.linear_issues.is_empty();
                 let workspace_key = ws.key.clone();
                 cmds.push(IpcCommand::SyncWorkspace { workspace_key });
-                self.flash_hint("syncing…");
+                self.flash_hint(if syncing_repo {
+                    "syncing repo — fetching its open issues & PRs…"
+                } else {
+                    "syncing…"
+                });
             }
             Action::CyclePane => {
                 // The keyboard path normally consumes the chord in
@@ -2592,7 +3034,7 @@ impl<T: TerminalAdapter> Model<T> {
                 );
                 match intent {
                     crate::intent::Intent::SpawnAgent {
-                        workspace_key,
+                        workspace_key: _,
                         agent_id,
                         prompt,
                     } => match (running_terminal, prompt) {
@@ -2606,13 +3048,13 @@ impl<T: TerminalAdapter> Model<T> {
                         // No live agent → spawn one with the prompt.
                         (None, body) => ApplyOutcome::Spawn {
                             step: super::BulkAgentStep::Spawn(bulk_spawn_command(
-                                (&workspace_key).into(),
+                                key.clone(),
                                 lazybox_ipc::TerminalKind::Agent(agent_id),
                                 body,
                                 None,
                                 model_alias,
                             )),
-                            follow: (&workspace_key).into(),
+                            follow: key.clone(),
                         },
                     },
                     // Merged / closed workspace steers to cleanup.
@@ -2808,6 +3250,9 @@ impl<T: TerminalAdapter> Model<T> {
                     on_main: false,
                     model_alias,
                     access: lazybox_ipc::AgentRunAccess::Default,
+                    // `w` / `w w` continue an existing conversation when one is
+                    // live (reuse/inject) — never force a duplicate.
+                    force_new: false,
                 };
                 let command = match terminal_id {
                     Some(terminal_id) => self.rewrite_spawn_to_terminal(spawn, terminal_id),

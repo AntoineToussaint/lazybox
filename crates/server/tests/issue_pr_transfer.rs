@@ -280,6 +280,7 @@ async fn spawn_and_capture(
             initial_prompt: None,
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         })
         .unwrap();
     match wait_for(
@@ -945,6 +946,7 @@ async fn silent_absorb_moves_dead_session_and_real_worktree_to_the_pr() {
                 initial_prompt: None,
                 initial_snippet: None,
                 on_main: false,
+                force_new: false,
             })
             .unwrap();
         wait_for(
@@ -1096,6 +1098,7 @@ async fn collapse_retires_pristine_pr_stub_and_carries_wip_worktree() {
                 initial_prompt: None,
                 initial_snippet: None,
                 on_main: false,
+                force_new: false,
             })
             .unwrap();
         wait_for(

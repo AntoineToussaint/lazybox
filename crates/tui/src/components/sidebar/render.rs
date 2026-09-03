@@ -68,6 +68,63 @@ fn spans_visual_width(spans: &[Span<'_>]) -> usize {
         .sum()
 }
 
+/// USD micros (millionths of a dollar) → `$1.23`.
+fn fmt_cost_micros(micros: i64) -> String {
+    format!("${:.2}", micros as f64 / 1_000_000.0)
+}
+
+/// Style + width-gate the always-visible "today" stats strip (#1344): a
+/// terse `today  3 sessions · 4 merged · $2.14` of the persisted daily
+/// rollup. Like [`usage_line_spans`], whole groups drop rather than clip
+/// when the sidebar is narrow — priority high→low is sessions, merged,
+/// cost, so a tight header keeps the headline accomplishment count and
+/// sheds cost first. Empty when no group fits, which the caller reads as
+/// "no today row" (so the bare `today` label never renders alone).
+fn today_line_spans(
+    stats: &TodayStats,
+    inner_width: usize,
+    theme: &crate::theme::Theme,
+) -> Vec<Span<'static>> {
+    let dim = Style::default().fg(theme.text_dim);
+    let figure = Style::default().add_modifier(Modifier::BOLD);
+    let groups: [Vec<Span<'static>>; 3] = [
+        vec![
+            Span::styled(stats.sessions.to_string(), figure),
+            Span::styled(" sessions", dim),
+        ],
+        vec![
+            Span::styled(stats.merged.to_string(), figure),
+            Span::styled(" merged", dim),
+        ],
+        vec![Span::styled(fmt_cost_micros(stats.cost_micros), figure)],
+    ];
+    let mut out: Vec<Span<'static>> = vec![Span::styled("today", dim)];
+    let mut used = spans_visual_width(&out);
+    let mut any = false;
+    for group in groups {
+        // Two spaces after the label so it reads as a heading; a dim
+        // ` · ` between groups.
+        let sep = if any { 3 } else { 2 };
+        let group_width = spans_visual_width(&group);
+        // The groups are priority-ordered, so stop at the first that
+        // doesn't fit rather than skipping it for a narrower lower-priority
+        // one — a tight header sheds cost before merged before sessions,
+        // never the reverse (unlike the equal-priority `usage_line_spans`).
+        if used + sep + group_width > inner_width {
+            break;
+        }
+        out.push(if any {
+            Span::styled(" · ", dim)
+        } else {
+            Span::raw("  ")
+        });
+        out.extend(group);
+        used += sep + group_width;
+        any = true;
+    }
+    if any { out } else { Vec::new() }
+}
+
 /// Extend a cursor row's highlight to the right edge: pad with blank
 /// cells in the row-background `style` so the selection fill spans the
 /// full `row_budget` instead of hugging the text. Width is measured
@@ -121,6 +178,7 @@ fn agent_state_code(s: &lazybox_ipc::AgentState) -> u64 {
         Exited { code } => 5u64 ^ hash_one(code).rotate_left(8),
         LimitReached => 6,
         CreditExhausted => 7,
+        AwaitingReset => 8,
     }
 }
 
@@ -148,6 +206,45 @@ impl Sidebar {
         } else {
             1
         }
+    }
+
+    /// The "today" strip's spans, or empty when the row is disabled
+    /// (`ui.today_summary` off), no snapshot has landed yet, or nothing
+    /// fits `inner_width`. Mirrors `usage_summaries` as the single
+    /// gate the render + hit-test both read. Today's slice is re-summed
+    /// against the current calendar day here, not cached, so the row
+    /// rolls over at local midnight (#1344).
+    fn today_spans(&self, inner_width: usize, theme: &crate::theme::Theme) -> Vec<Span<'static>> {
+        if !self.today_summary {
+            return Vec::new();
+        }
+        let Some(buckets) = &self.today_buckets else {
+            return Vec::new();
+        };
+        let stats = TodayStats::from_buckets(buckets, self.local_today());
+        today_line_spans(&stats, inner_width, theme)
+    }
+
+    /// Height the always-visible "today" strip adds to the header for a
+    /// pane of this width — `1` when it renders, `0` otherwise (#1344).
+    /// The click hit-tests fold this into their header offset, alongside
+    /// the usage row, so a click still lands on the row actually drawn.
+    pub(super) fn today_row_height(&self, area: Rect) -> u16 {
+        let inner_width = area.width.saturating_sub(2) as usize;
+        let theme = crate::theme::current();
+        if self.today_spans(inner_width, theme).is_empty() {
+            0
+        } else {
+            1
+        }
+    }
+
+    /// Total header rows above the content: the fixed 5 (brand, filter,
+    /// stats, divider, blank) plus the two optional strips. The click
+    /// hit-tests read this so a click resolves to the row actually drawn
+    /// once the usage / today rows shift content down.
+    pub(super) fn header_height(&self, area: Rect) -> u16 {
+        5 + self.usage_row_height(area) + self.today_row_height(area)
     }
 
     pub fn render(&mut self, area: Rect, frame: &mut Frame, focused: bool) {
@@ -535,6 +632,24 @@ impl Sidebar {
                 (false, false) => None,
             }
         });
+        // Metering canary: the focused workspace is routed through the
+        // metering proxy (`$ meter`), so show it plus its accrued per-session
+        // cost the moment any priced usage lands. `$ METER` alone until the
+        // first response is priced (proxy off / unknown model → no cost).
+        let focused_meter = focused_workspace.and_then(|workspace| {
+            if !workspace.metered {
+                return None;
+            }
+            let cost = self.usage.cost_micros_for_session(workspace.key.as_str());
+            Some(if cost > 0 {
+                format!(
+                    " $ METER · {} ",
+                    lazybox_tui_core::usage::format_cost_micros(cost)
+                )
+            } else {
+                " $ METER ".to_string()
+            })
+        });
 
         // Append `group` (with a 2-cell separator once the line is
         // non-empty) only when the whole group still fits `budget`, so a
@@ -591,6 +706,20 @@ impl Sidebar {
                 )],
             );
         }
+        if let Some(label) = focused_meter {
+            try_append(
+                &mut stats_spans,
+                &mut used,
+                budget,
+                vec![Span::styled(
+                    label,
+                    Style::default()
+                        .bg(theme.accent)
+                        .fg(ratatui::style::Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                )],
+            );
+        }
         if ci_failing > 0 {
             try_append(
                 &mut stats_spans,
@@ -642,11 +771,25 @@ impl Sidebar {
             frame.render_widget(Paragraph::new(Line::from(usage_spans)), usage_area);
         }
 
+        // Row 4 (when present) — the always-visible "today" stats strip
+        // (#1344). A terse `today  3 sessions · 4 merged · $2.14` of the
+        // persisted daily rollup (#1339), width-gated the same way as the
+        // usage row: a group that can't fit whole is dropped rather than
+        // sliced. Sits just below the usage row (or row 2 when there is
+        // none) and above the divider, so it reads as header chrome; absent
+        // (`ui.today_summary` off, or no snapshot yet) it takes no space.
+        let today_spans = self.today_spans(inner_width as usize, theme);
+        let today_h: u16 = if today_spans.is_empty() { 0 } else { 1 };
+        if today_h == 1 && area.height >= 4 + usage_h {
+            let today_area = Rect::new(area.x + l_pad, area.y + 3 + usage_h, inner_width, 1);
+            frame.render_widget(Paragraph::new(Line::from(today_spans)), today_area);
+        }
+
         // Divider — thin, accent-tinted while this pane has focus so the
-        // active pane reads at a glance (#286). Sits just under the usage
-        // row (or row 2 when there is none).
-        let divider_y = 3 + usage_h;
-        if area.height >= 4 + usage_h {
+        // active pane reads at a glance (#286). Sits just under the usage /
+        // today rows (or row 2 when there is neither).
+        let divider_y = 3 + usage_h + today_h;
+        if area.height >= 4 + usage_h + today_h {
             let div_area = Rect::new(area.x + l_pad, area.y + divider_y, inner_width, 1);
             let divider = "─".repeat(div_area.width as usize);
             frame.render_widget(
@@ -663,7 +806,7 @@ impl Sidebar {
         // the bottom row, so the list loses one line — the bar is pinned to
         // the bottom (fzf-style) so the repo tree doesn't shift as the user
         // types.
-        let header_height: u16 = 5 + usage_h;
+        let header_height: u16 = 5 + usage_h + today_h;
         let search_bar = self.search.is_some() && area.height > header_height;
         let inner = Rect {
             x: area.x + l_pad,
@@ -675,16 +818,6 @@ impl Sidebar {
         };
 
         let row_budget = inner_width as usize;
-        // Workspace rows are laid out per group, not globally: each repo /
-        // provider group runs its own column pre-pass over just its own
-        // rows. GitHub's `#NNN` and Linear's `TEAM-NNNN` are different
-        // shapes, and their status columns differ (GitHub has CI / review,
-        // Linear doesn't) — a single global layout let one provider's
-        // widest reference bloat the other's column and reserved
-        // provider-specific status columns for groups that never fill them.
-        // Sizing within a group keeps alignment clean where the eye
-        // actually scans (issue #961).
-        let rendered_workspace_lines = self.cached_workspace_lines(row_budget, theme, now, focused);
 
         // Clamp the scroll BEFORE building any rows (2026-08-19 audit,
         // U5), then build ONLY the viewport window. Every `VisibleRow`
@@ -707,6 +840,24 @@ impl Sidebar {
         }
         self.last_viewport = viewport;
         self.rendered_scroll = self.scroll;
+
+        // Workspace rows are laid out per group, not globally: each repo /
+        // provider group runs its own column pre-pass over just its own
+        // rows. GitHub's `#NNN` and Linear's `TEAM-NNNN` are different
+        // shapes, and their status columns differ (GitHub has CI / review,
+        // Linear doesn't) — a single global layout let one provider's
+        // widest reference bloat the other's column and reserved
+        // provider-specific status columns for groups that never fill them.
+        // Sizing within a group keeps alignment clean where the eye
+        // actually scans (issue #961). Only groups intersecting the
+        // viewport window are built at all: the cursor is part of the
+        // line-cache signature, so every j/k used to rebuild the ENTIRE
+        // list — O(total workspaces) per keystroke on a crowded sidebar.
+        // A partially-visible group still lays out ALL its rows, so
+        // column widths stay stable while it scrolls (#22 / #961).
+        let window = self.scroll..self.scroll + viewport;
+        let rendered_workspace_lines =
+            self.cached_workspace_lines(row_budget, theme, now, focused, window);
 
         let lines: Vec<Line> = self
             .visible
@@ -750,6 +901,48 @@ impl Sidebar {
                     }
                     Line::from(spans)
                 }
+                VisibleRow::HopperHeader => {
+                    use crate::components::icons;
+                    let is_cursor = i == self.cursor;
+                    let row_bg = if is_cursor && focused {
+                        Some(theme.row_focused())
+                    } else if is_cursor {
+                        Some(theme.row_unfocused())
+                    } else {
+                        None
+                    };
+                    let count = self
+                        .workspaces
+                        .values()
+                        .filter(|workspace| workspace.hopper.is_some())
+                        .count();
+                    let glyph = if self.ascii_glyphs {
+                        ">"
+                    } else {
+                        icons::HOPPER
+                    };
+                    let mut spans = vec![
+                        Span::styled(
+                            format!("{glyph} "),
+                            row_bg.unwrap_or_default().fg(theme.text_dim),
+                        ),
+                        Span::styled(
+                            "Hopper",
+                            row_bg
+                                .unwrap_or_default()
+                                .fg(theme.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("  {count}"),
+                            row_bg.unwrap_or_default().fg(theme.text_dim),
+                        ),
+                    ];
+                    if let Some(bg) = row_bg {
+                        extend_cursor_fill(&mut spans, row_budget, bg);
+                    }
+                    Line::from(spans)
+                }
                 VisibleRow::SpaceHeader(name) => {
                     // Top tier of the tree (#860): sits above the repo
                     // headers it contains, styled with the accent colour
@@ -780,6 +973,23 @@ impl Sidebar {
                                 .add_modifier(Modifier::BOLD),
                         ),
                     ];
+                    // Space-tier metering badge (approach C): a `$` marks every
+                    // workspace under this Space as metered (`x $` toggles it),
+                    // trailed by the Space's accrued cost once any priced usage
+                    // lands (#1389) — the legible per-Space figure, summed over
+                    // its workspaces and durable across restarts.
+                    if self.metered_spaces.contains(name) {
+                        let cost = self.space_cost_micros(name);
+                        let badge = if cost > 0 {
+                            format!(" $ {}", lazybox_tui_core::usage::format_cost_micros(cost))
+                        } else {
+                            " $".to_string()
+                        };
+                        spans.push(Span::styled(
+                            badge,
+                            row_bg.unwrap_or_default().fg(theme.accent),
+                        ));
+                    }
                     if let Some(bg) = row_bg {
                         extend_cursor_fill(&mut spans, row_budget, bg);
                     }
@@ -806,15 +1016,29 @@ impl Sidebar {
                         Some(bg) => bg,
                         None => Style::default().fg(theme.text_dim),
                     };
+                    // Source-attention ladder (#scale): a demoted (quiet /
+                    // digest / muted) group's header drops the loud
+                    // bold-warn styling — dim, so a wall of muted repos
+                    // reads as background, not work.
+                    let demoted = self
+                        .repo_summaries
+                        .get(name)
+                        .and_then(|s| s.source_attention.as_deref())
+                        .is_some();
+                    let name_style = if demoted {
+                        row_bg
+                            .unwrap_or_default()
+                            .fg(theme.text_dim)
+                            .add_modifier(Modifier::DIM)
+                    } else {
+                        row_bg
+                            .unwrap_or_default()
+                            .fg(theme.warn)
+                            .add_modifier(Modifier::BOLD)
+                    };
                     let mut spans: Vec<Span> = vec![
                         Span::styled(format!("{glyph} "), glyph_style),
-                        Span::styled(
-                            format!("{} {}", icons::REPO, name),
-                            row_bg
-                                .unwrap_or_default()
-                                .fg(theme.warn)
-                                .add_modifier(Modifier::BOLD),
-                        ),
+                        Span::styled(format!("{} {}", icons::REPO, name), name_style),
                     ];
                     // A pin marker on a pinned group — the visual
                     // affordance for the "float to top" order (#760).
@@ -832,6 +1056,31 @@ impl Sidebar {
                         ));
                     }
                     if let Some(s) = self.repo_summaries.get(name) {
+                        // Attention-ladder chip (#scale): name the
+                        // level, the wake time for a time-boxed source
+                        // snooze, and — for a collapsed muted group —
+                        // the count of rows folded behind the residue
+                        // header (muted-but-counted, never invisible).
+                        if let Some(level) = s.source_attention.as_deref() {
+                            let mut chip = match s.source_snooze_until_epoch_ms {
+                                Some(ms) => {
+                                    let until = chrono::DateTime::from_timestamp_millis(ms)
+                                        .unwrap_or_else(chrono::Utc::now);
+                                    format!(
+                                        "  ⏾ wakes {}",
+                                        crate::components::sidebar::relative_time(now, until)
+                                    )
+                                }
+                                None => format!("  ⌀ {level}"),
+                            };
+                            if collapsed && s.active > 0 {
+                                chip.push_str(&format!(" · {}", s.active));
+                            }
+                            spans.push(Span::styled(
+                                chip,
+                                row_bg.unwrap_or_default().fg(theme.text_dim),
+                            ));
+                        }
                         // Active count is redundant — the workspace
                         // rows are visible directly under the header,
                         // so the user can count them. The attention
@@ -1229,11 +1478,16 @@ impl Sidebar {
         row_budget: usize,
         focused: bool,
         now: chrono::DateTime<chrono::Utc>,
+        window: &std::ops::Range<usize>,
     ) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.data_version.hash(&mut h);
         self.cursor.hash(&mut h);
+        // Only viewport-intersecting groups are built, so the cached
+        // lines are only valid for the window they were built against.
+        window.start.hash(&mut h);
+        window.end.hash(&mut h);
         self.working_spinner_frame.hash(&mut h);
         // Relative timestamps ("2h", "3d") only shift at minute granularity,
         // so quantize — otherwise every frame is a fresh second and the cache
@@ -1269,7 +1523,7 @@ impl Sidebar {
         }
         fold.hash(&mut h);
         let mut fold: u64 = 0;
-        for k in &self.spawning {
+        for k in self.spawning.keys() {
             fold = fold.wrapping_add(hash_one(k));
         }
         fold.hash(&mut h);
@@ -1307,8 +1561,9 @@ impl Sidebar {
         theme: &crate::theme::Theme,
         now: chrono::DateTime<chrono::Utc>,
         focused: bool,
+        window: std::ops::Range<usize>,
     ) -> std::rc::Rc<Vec<Option<Line<'static>>>> {
-        let sig = self.workspace_lines_signature(row_budget, focused, now);
+        let sig = self.workspace_lines_signature(row_budget, focused, now, &window);
         if let Some((cached_sig, lines)) = &self.workspace_line_cache {
             if *cached_sig == sig {
                 // Rc, not a deep clone (2026-08-19 audit, U2): a HIT
@@ -1319,8 +1574,9 @@ impl Sidebar {
                 return std::rc::Rc::clone(lines);
             }
         }
-        let lines =
-            std::rc::Rc::new(self.prebuild_workspace_lines(row_budget, theme, now, focused));
+        let lines = std::rc::Rc::new(
+            self.prebuild_workspace_lines(row_budget, theme, now, focused, &window),
+        );
         #[cfg(test)]
         self.workspace_line_builds
             .set(self.workspace_line_builds.get() + 1);
@@ -1351,6 +1607,7 @@ impl Sidebar {
         theme: &crate::theme::Theme,
         now: chrono::DateTime<chrono::Utc>,
         focused: bool,
+        window: &std::ops::Range<usize>,
     ) -> Vec<Option<Line<'static>>> {
         // 1-based jump numbers for the first nine focused workspaces, in
         // sidebar order — the badge that pairs with the `]]<digit>`
@@ -1369,6 +1626,19 @@ impl Sidebar {
         let badges_by_key = self.runner_badges_by_key();
         let models_by_key = self.agent_models_by_key();
         let mut out: Vec<Option<Line<'static>>> = vec![None; self.visible.len()];
+        // Only groups that intersect the viewport window get laid out —
+        // off-screen groups' slots stay `None`, which the consumer never
+        // reads (it walks exactly the window). A group that intersects
+        // is built IN FULL, so its column widths are sized over all of
+        // its rows and stay stable as it scrolls through the viewport
+        // (#22 / #961). Indices in a group are ascending, so the
+        // overlap test is a range check on its endpoints.
+        let intersects = |group: &[usize]| {
+            group
+                .first()
+                .zip(group.last())
+                .is_some_and(|(&first, &last)| first < window.end && last >= window.start)
+        };
         // Partition workspace rows into groups delimited by their
         // top-level container header — a repo group, or the synthetic
         // Focused pin. A `KindHeader` (PRs vs Issues) doesn't split the
@@ -1378,34 +1648,38 @@ impl Sidebar {
         for (i, row) in self.visible.iter().enumerate() {
             match row {
                 VisibleRow::FocusedHeader | VisibleRow::RepoHeader(_) => {
-                    self.render_workspace_group(
-                        &group,
-                        &agent_numbers,
-                        &badges_by_key,
-                        &models_by_key,
-                        row_budget,
-                        theme,
-                        now,
-                        focused,
-                        &mut out,
-                    );
+                    if intersects(&group) {
+                        self.render_workspace_group(
+                            &group,
+                            &agent_numbers,
+                            &badges_by_key,
+                            &models_by_key,
+                            row_budget,
+                            theme,
+                            now,
+                            focused,
+                            &mut out,
+                        );
+                    }
                     group.clear();
                 }
                 VisibleRow::Workspace(_) => group.push(i),
                 _ => {}
             }
         }
-        self.render_workspace_group(
-            &group,
-            &agent_numbers,
-            &badges_by_key,
-            &models_by_key,
-            row_budget,
-            theme,
-            now,
-            focused,
-            &mut out,
-        );
+        if intersects(&group) {
+            self.render_workspace_group(
+                &group,
+                &agent_numbers,
+                &badges_by_key,
+                &models_by_key,
+                row_budget,
+                theme,
+                now,
+                focused,
+                &mut out,
+            );
+        }
         out
     }
 
@@ -1497,8 +1771,7 @@ impl Sidebar {
                     .workspaces
                     .get(k)
                     .and_then(|w| w.primary_task())
-                    .and_then(crate::components::task_label::pr_number)
-                    .map(|n| 1 + n.checked_ilog10().unwrap_or(0) as usize),
+                    .and_then(crate::components::task_label::identifier_width),
                 _ => None,
             })
             .max()
@@ -1537,6 +1810,9 @@ impl Sidebar {
                 limit_reached: workspace.is_some_and(|w| {
                     crate::agent_attention::workspace_is_limit_reached(w, &self.agents)
                 }),
+                awaiting_reset: workspace.is_some_and(|w| {
+                    crate::agent_attention::workspace_is_awaiting_reset(w, &self.agents)
+                }),
                 credit_exhausted: workspace.is_some_and(|w| {
                     crate::agent_attention::workspace_is_credit_exhausted(w, &self.agents)
                 }),
@@ -1572,7 +1848,23 @@ impl Sidebar {
                 track_main: workspace.is_some_and(|w| w.track_main),
                 track_main_behind: workspace.is_some_and(|w| w.track_main && w.track_main_behind),
                 has_notes: workspace.is_some_and(|w| w.has_notes()),
-                sent_snippet_count: workspace.map_or(0, |w| w.sent_snippets.len()),
+                sent_snippet_count: workspace.map_or(0, |w| w.sent_snippets.total()),
+                // Source-attention ladder (#scale): a row in a Quiet /
+                // Digest / Muted source drops its ambient unread badge
+                // unless it punches through (direct address).
+                recently_woken: workspace.is_some_and(|w| w.is_recently_woken(now)),
+                source_quiet: workspace.is_some_and(|w| {
+                    let label = crate::components::visible_rows::group_label(
+                        w,
+                        &self.projects,
+                        &self.workspaces,
+                    );
+                    self.repo_summaries
+                        .get(&label)
+                        .and_then(|s| s.source_attention.as_deref())
+                        .is_some()
+                        && !lazybox_tui_core::inbox::punches_through(w, &self.agents)
+                }),
                 ticket_tree: self.ticket_tree.get(key).copied(),
                 stack: self.stacks.get(key),
                 model_shorts: &self.model_shorts,

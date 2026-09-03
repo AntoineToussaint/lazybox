@@ -662,6 +662,9 @@ impl DesktopCommand {
                 on_main,
                 model_alias,
                 access: lazybox_ipc::AgentRunAccess::Default,
+                // Desktop clients don't yet expose an explicit new-agent
+                // gesture; preserve the reuse-on-spawn behavior (#1310).
+                force_new: false,
             },
             DesktopCommand::SpawnShell {
                 session_key,
@@ -677,6 +680,7 @@ impl DesktopCommand {
                 on_main,
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
+                force_new: false,
             },
             DesktopCommand::CreateWorkspace {
                 name,
@@ -800,7 +804,11 @@ impl DesktopCommand {
                 ci,
                 conflict,
             },
-            DesktopCommand::Snooze { session_key, until } => Command::Snooze { session_key, until },
+            DesktopCommand::Snooze { session_key, until } => Command::Snooze {
+                session_key,
+                until,
+                wake: None,
+            },
             DesktopCommand::Unsnooze { session_key } => Command::Unsnooze { session_key },
             DesktopCommand::SyncWorkspace { session_key } => Command::SyncWorkspace {
                 workspace_key: lazybox_core::WorkspaceKey::new(session_key.as_str()),
@@ -922,9 +930,10 @@ pub enum DesktopEvent {
         status: lazybox_ipc::WorktreeStepStatus,
     },
     /// A workspace mutation (merge / update-branch / close-issue /
-    /// delete-or-close) finished (#816). Maps the daemon's
-    /// `PrMerged` / `PrMergeFailed` / `BranchUpdated` / `IssueClosed` /
-    /// `IssueDeleted` / … outcome events into a single ready-to-show
+    /// delete-or-close / close-PR / draft-toggle) finished (#816). Maps
+    /// the daemon's `PrMerged` / `PrMergeFailed` / `BranchUpdated` /
+    /// `IssueClosed` / `IssueDeleted` / `PrClosed` / `PrCloseFailed` /
+    /// `PrDraftChanged` / `PrDraftChangeFailed` / … outcome events into a single ready-to-show
     /// notice so a fire-and-forget desktop command reports its result
     /// instead of looking like a no-op. `ok` distinguishes success from a
     /// GitHub-rejected attempt (branch protection, required checks,
@@ -1237,6 +1246,42 @@ pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
             workspace_key,
             ok: true,
             message: format!("Closed {pr_label} without merging."),
+        }),
+        Event::PrCloseFailed {
+            workspace_key,
+            pr_label,
+            reason,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: false,
+            message: format!("Close of {pr_label} failed: {reason}"),
+        }),
+        Event::PrDraftChanged {
+            workspace_key,
+            pr_label,
+            is_draft,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: true,
+            message: if is_draft {
+                format!("Converted {pr_label} to draft.")
+            } else {
+                format!("Marked {pr_label} ready for review.")
+            },
+        }),
+        Event::PrDraftChangeFailed {
+            workspace_key,
+            pr_label,
+            to_draft,
+            reason,
+        } => Some(DesktopEvent::WorkspaceActionOutcome {
+            workspace_key,
+            ok: false,
+            message: if to_draft {
+                format!("Convert of {pr_label} to draft failed: {reason}")
+            } else {
+                format!("Mark ready of {pr_label} failed: {reason}")
+            },
         }),
         Event::IssueDeleted {
             workspace_key,

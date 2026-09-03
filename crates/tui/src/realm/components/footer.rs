@@ -41,9 +41,15 @@ use tuirealm::ratatui::widgets::Paragraph;
 pub enum NoticeSeverity {
     /// Transient hiccup. `theme.warn`. Auto-fades.
     Retryable,
-    /// Auth or other actionable error. `theme.warn`. Sticky.
+    /// Auth or other actionable error. `theme.warn`. Sticky — never
+    /// auto-fades (self-clears on the next successful auth).
     Auth,
-    /// Hard failure. `theme.error`. Sticky.
+    /// Hard failure. `theme.error`. Owns the footer slot (a routine flash
+    /// can't displace it) and auto-fades after `PERMANENT_FADE` so no
+    /// error sits in the footer forever — the sole exceptions are the two
+    /// event-resolved system banners (daemon disconnected / build
+    /// mismatch), which stay until their condition clears (see
+    /// [`Notice::is_persistent_system_banner`]).
     Permanent,
     /// Plain informational. `theme.text_dim`. 15s fade.
     Info,
@@ -65,6 +71,31 @@ impl NoticeSeverity {
     }
 }
 
+/// Typed identity of a footer notice — the "what is this notice about"
+/// that lets a later event *resolve* it when its cause clears, rather
+/// than leaving it to sit until the user dismisses it.
+///
+/// Before this existed, only workspace-tagged action toasts carried an
+/// identity (an ad-hoc `Option<String>`), so the #588 self-clear and the
+/// #832 dismiss-suppression were special cases welded to that one shape;
+/// every *other* error (a stale daemon build, a lost connection) had no
+/// identity and so no way to be cleared when resolved — the
+/// never-disappearing footer. A typed key generalizes the identity: any
+/// notice can name its cause and be retracted by [`crate::realm::model::Model`]
+/// through one `resolve_notice` path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoticeKey {
+    /// A merge/close/update/delete GitHub rejected, tagged with the
+    /// workspace it was about. Self-clears on a superseding success and
+    /// carries the bounded action-toast fade (#588).
+    WorkspaceAction(String),
+    /// The connected daemon was built from a different commit than this
+    /// client. Resolves when a matching-build daemon connects.
+    DaemonBuildMismatch,
+    /// The daemon connection dropped. Resolves on reconnect.
+    DaemonConnection,
+}
+
 /// One footer notice — message + severity + when it was set
 /// (for auto-fade).
 #[derive(Debug, Clone)]
@@ -72,10 +103,10 @@ pub struct Notice {
     pub message: String,
     pub severity: NoticeSeverity,
     pub set_at: std::time::Instant,
-    /// Workspace this notice is about, when it names a specific
-    /// PR/issue action (merge/close/update failed). Lets a superseding
-    /// success for the same workspace self-clear a stale error (#588).
-    pub workspace: Option<String>,
+    /// What this notice is *about*, when it has a resolvable cause — so a
+    /// later event can retract it (see [`NoticeKey`]). `None` for a plain
+    /// transient flash with no lifecycle beyond its fade.
+    pub key: Option<NoticeKey>,
     /// How many times this exact notice has fired while on screen. An
     /// identical re-fire (a poll sweep re-emitting the same error)
     /// bumps this instead of resetting `set_at` — the fade clock runs
@@ -91,20 +122,44 @@ impl Notice {
             message: message.into(),
             severity,
             set_at: std::time::Instant::now(),
-            workspace: None,
+            key: None,
             repeats: 1,
+        }
+    }
+
+    /// The workspace this notice is about, if it is a workspace-action
+    /// toast. Convenience over matching [`NoticeKey::WorkspaceAction`].
+    pub fn workspace(&self) -> Option<&str> {
+        match &self.key {
+            Some(NoticeKey::WorkspaceAction(ws)) => Some(ws.as_str()),
+            _ => None,
         }
     }
 
     /// True for an action-error toast — a Permanent failure tagged with
     /// the workspace whose merge/close/update/delete GitHub rejected.
-    /// These carry a bounded auto-fade and self-clear on a superseding
-    /// success (#588). Untagged Permanent banners (daemon disconnected,
-    /// build mismatch, sync failed) are persistent system state and must
-    /// stay until dismissed or resolved — so the fade keys off this, not
-    /// off `Permanent` severity alone.
+    /// Both tagged and untagged Permanent notices now auto-fade on the
+    /// same `PERMANENT_FADE` clock — no error sits in the footer forever.
+    /// This flag only selects the EXTRA behavior a tagged action error
+    /// gets on fade: a workspace-scoped "already dismissed" record so a
+    /// superseding success or an identical re-fire self-clears (#832/#588).
     pub fn is_action_toast(&self) -> bool {
-        self.severity == NoticeSeverity::Permanent && self.workspace.is_some()
+        matches!(self.key, Some(NoticeKey::WorkspaceAction(_)))
+    }
+
+    /// A genuinely-persistent system-state banner that must stay until its
+    /// condition resolves — the daemon connection dropped, or the daemon
+    /// is a build mismatch. These are event-resolved (reconnect / matching
+    /// build), NOT poll-re-fired, so they get no auto-fade: fading one
+    /// would silently drop a live problem indicator with nothing to bring
+    /// it back. Every OTHER Permanent error (spawn/provider/sync failures,
+    /// action toasts) auto-fades — a one-off failure must not own the
+    /// footer forever.
+    pub fn is_persistent_system_banner(&self) -> bool {
+        matches!(
+            self.key,
+            Some(NoticeKey::DaemonConnection | NoticeKey::DaemonBuildMismatch)
+        )
     }
 }
 
@@ -895,6 +950,65 @@ mod tests {
                 "top contextual hint must outlive tour at {w} cols: {row:?}",
             );
         }
+    }
+
+    /// Finding-4 regression: the Hopper hint is a discoverability
+    /// affordance, not an escape hatch. In `globals` it would outrank
+    /// state-aware contextual bindings (globals survive last), so a
+    /// narrow footer would show `Shift-H hopper` while eliding a
+    /// context-relevant hint. Moving it to `evergreen` (which drops
+    /// FIRST) makes it yield to contextual bindings. This pins the tier
+    /// so Hopper can't drift back into `globals`.
+    #[test]
+    fn hopper_hint_belongs_in_evergreen_not_globals() {
+        let keymap = rich_keymap();
+        let hopper = binding("Shift-H", "hopper");
+        let globals_with_hopper = vec![
+            hopper.clone(),
+            binding("?", "ask lazybox"),
+            binding("q q", "quit"),
+        ];
+        let globals = globals_survivors();
+        let evergreen = vec![hopper.clone(), binding("Shift-T", "tour")];
+        // Scan for the widths where, placed in GLOBALS, hopper survives
+        // while a contextual hint has already been elided — the exact
+        // inversion the fix removes. At each such width, placed in
+        // EVERGREEN it must instead yield to the contextual set.
+        let mut exercised = false;
+        for w in 60u16..=140 {
+            let (as_global, _) =
+                render_row_at_evergreen(w, &keymap, &globals_with_hopper, &[], "?", None, None);
+            // The problematic band: hopper (a global) survives AND the top
+            // contextual hint survives, yet a lower-priority contextual
+            // hint has already been elided — i.e. hopper is holding a slot
+            // a contextual binding would otherwise use. (Widths so narrow
+            // that ALL contextual hints are gone aren't the inversion.)
+            let global_inverts = as_global.contains("hopper")
+                && as_global.contains("work on this")
+                && !as_global.contains("filter by role");
+            if !global_inverts {
+                continue;
+            }
+            exercised = true;
+            let (as_evergreen, _) =
+                render_row_at_evergreen(w, &keymap, &globals, &evergreen, "?", None, None);
+            assert!(
+                !as_evergreen.contains("hopper"),
+                "hopper in evergreen must yield to contextual at {w} cols: {as_evergreen:?}",
+            );
+            assert!(
+                as_evergreen.contains("work on this"),
+                "top contextual hint must survive at {w} cols: {as_evergreen:?}",
+            );
+            assert!(
+                as_evergreen.contains("q q"),
+                "quit must survive at {w} cols: {as_evergreen:?}",
+            );
+        }
+        assert!(
+            exercised,
+            "no width exercised the globals inversion — the test is vacuous",
+        );
     }
 
     /// For any width from the globals tail on up, the row never ends

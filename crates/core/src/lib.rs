@@ -12,6 +12,7 @@ pub mod error_class;
 pub mod issue_links;
 pub mod paths;
 pub mod policy;
+pub mod pricing;
 pub mod priority;
 pub mod project;
 pub mod prompts;
@@ -30,8 +31,8 @@ pub use autofix::{
     evaluate_auto_fix, is_auto_fix_opted_out, resolve_auto_fix,
 };
 pub use config::{
-    KV_KEY_ARCHIVED, KV_KEY_LAYOUT, KV_KEY_SETUP, KV_KEY_THEME, LinearScope, PaneLayout,
-    PersistedSetup, ProviderConfig,
+    KV_KEY_ARCHIVED, KV_KEY_LAYOUT, KV_KEY_SESSION_TOMBSTONES, KV_KEY_SETUP, KV_KEY_THEME,
+    LinearScope, PaneLayout, PersistedSetup, ProviderConfig,
 };
 pub use conventions::{CommitStyle, Conventions};
 pub use error_class::{ErrorClass, HttpErrorSignals, classify, classify_message, classify_status};
@@ -41,6 +42,7 @@ pub use policy::{
     approval_policy_blocks, author_gate_blocks, auto_fix_permitted, auto_merge_block_reason,
     merge_block_reason, should_auto_merge, toggled_arm,
 };
+pub use pricing::{ModelPrice, TokenCounts, cost_micros as pricing_cost_micros, price_for};
 pub use priority::{PriorityTier, resolve_priority_tier};
 pub use project::{Project, ProjectKey, github_owner_repo_from_url};
 pub use provider::{
@@ -52,9 +54,10 @@ pub use session_key::SessionKey;
 pub use stack::{StackPosition, detect_stacks};
 pub use task::*;
 pub use workspace::{
-    CleanupPrompt, MAX_ACTIVITY_ITEMS, SENT_SNIPPETS_MAX, Session as WorkspaceSession, SessionId,
-    SessionKind, SessionLayout, SessionRunState, TileDirection, TileTree,
-    WORKING_CLAIM_HEARTBEAT_SECS, WORKING_CLAIM_LABEL_PREFIX, WORKING_CLAIM_TTL_SECS,
-    WORKING_LABEL_NAME, WORKSPACE_SCHEMA_VERSION, Workspace, WorkspaceDecodeError, WorkspaceKey,
-    project_key_for_task, workspace_key_for, workspace_project_key,
+    CleanupPrompt, HopperMeta, MAX_ACTIVITY_ITEMS, SENT_SNIPPETS_MAX, Session as WorkspaceSession,
+    SessionId, SessionKind, SessionLayout, SessionRunState, SnippetDeliveryLog, SnoozeWake,
+    TileDirection, TileTree, WOKE_WINDOW, WORKING_CLAIM_HEARTBEAT_SECS, WORKING_CLAIM_LABEL_PREFIX,
+    WORKING_CLAIM_TTL_SECS, WORKING_LABEL_NAME, WORKSPACE_SCHEMA_VERSION, Workspace,
+    WorkspaceDecodeError, WorkspaceKey, project_key_for_task, snooze_wake_due, workspace_key_for,
+    workspace_project_key,
 };

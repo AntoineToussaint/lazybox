@@ -40,16 +40,17 @@ pub use scheduler::{
 pub(crate) use handlers::resolve_gh_client_result;
 pub use handlers::{
     ProviderHandle, apply_pr_details, handle_add_assignees, handle_clean_worktrees,
-    handle_close_issue, handle_delete_or_close, handle_delete_orphaned_worktree,
-    handle_fetch_pr_details, handle_fetch_repo_labels, handle_fetch_requestable_reviewers,
-    handle_inspect_workspace_diff, handle_inspect_worktrees, handle_merge_pr,
+    handle_close_issue, handle_close_pr, handle_convert_to_draft, handle_delete_or_close,
+    handle_delete_orphaned_worktree, handle_fetch_pr_details, handle_fetch_repo_labels,
+    handle_fetch_repo_merge_history, handle_fetch_requestable_reviewers,
+    handle_inspect_workspace_diff, handle_inspect_worktrees, handle_mark_ready, handle_merge_pr,
     handle_request_reviewers, handle_scan_checkouts, handle_set_assignees, handle_set_labels,
     handle_sync_workspace, handle_update_branch, post_reply, prefetch_top_pr_details,
     remove_merged_workspace,
 };
 pub use mutate::{MutationOutcome, apply_and_commit, fetch_and_apply};
 #[cfg(test)]
-use sources::{GhFetchPlan, gh_fetch_plan, rank_targeted_requests};
+use sources::{GhFetchPlan, gh_fetch_plan, partition_targeted_requests, rank_targeted_requests};
 pub use sources::{
     GhSource, LinearSource, ProviderAction, build_issue_search_qualifiers,
     build_pr_search_qualifiers, default_sources, filter_github_tasks,
@@ -377,6 +378,23 @@ pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnaps
     };
 
     let now = Utc::now();
+    // Source-attention ladder (#scale): the ONE place user curation
+    // reaches the scheduler. The client persists `ui.source_attention`;
+    // `Config::load()` is mtime-cached, so this observes the change on
+    // the tick after the write. A Muted (or source-snoozed) repo's
+    // workspaces classify Cold — clearing every hot/forced signal —
+    // which parks the repo via `suspended_cold` and drops its
+    // notification targets; a Digest repo merely stops forcing itself
+    // into every sweep and never promotes to the hot cadence.
+    let user_cfg = lazybox_config::Config::load().unwrap_or_default();
+    let source_level = |label: &str| {
+        lazybox_config::effective_source_attention(
+            &user_cfg.ui.source_attention,
+            label,
+            Some(&lazybox_config::space_of(label, &user_cfg.ui.spaces)),
+        )
+        .effective_level(now)
+    };
     let mut candidates = Vec::new();
     for record in records {
         let Some(json) = record.workspace_json else {
@@ -395,12 +413,16 @@ pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnaps
             continue;
         };
         let repo = format!("{owner}/{repo_name}");
+        let level = source_level(&repo);
+        let muted = level == lazybox_config::SourceAttentionLevel::Muted;
+        let digest = level == lazybox_config::SourceAttentionLevel::Digest;
         let active = !matches!(
             task.state,
             lazybox_core::TaskState::Closed | lazybox_core::TaskState::Merged
         );
-        let own_open_pr = task.is_pr() && active && task.role == lazybox_core::TaskRole::Author;
-        let cold = workspace.is_snoozed(now) || !active;
+        let own_open_pr =
+            task.is_pr() && active && task.role == lazybox_core::TaskRole::Author && !muted;
+        let cold = workspace.is_snoozed(now) || !active || muted;
         candidates.push(EngagementCandidate {
             workspace_key: workspace.key.clone(),
             target: lazybox_gh::NotificationTarget {
@@ -417,9 +439,9 @@ pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnaps
             repo,
             updated_at: task.updated_at,
             cold,
-            live_agent: live_agent_workspaces.contains(workspace.key.as_str()),
+            live_agent: !muted && live_agent_workspaces.contains(workspace.key.as_str()),
             own_open_pr,
-            sessioned: !workspace.sessions.is_empty(),
+            sessioned: !(muted || digest) && !workspace.sessions.is_empty(),
         });
     }
 
@@ -705,6 +727,50 @@ mod engagement_tier_tests {
     }
 
     #[test]
+    fn hot_targets_skip_the_batch_once_the_server_rejects_it() {
+        let hot_node_ids: std::collections::BTreeMap<_, _> =
+            [(target(2), "PR_two".to_string())].into_iter().collect();
+        let requests = vec![
+            sources::TargetedRequest {
+                target: target(2),
+                flags: sources::TargetedFlags {
+                    hot: true,
+                    notification: false,
+                },
+            },
+            sources::TargetedRequest {
+                target: target(1),
+                flags: sources::TargetedFlags {
+                    hot: false,
+                    notification: true,
+                },
+            },
+        ];
+
+        // Healthy server: the hot target with a cached node id rides the
+        // batched `nodes(ids:)` query, the notification target goes alone.
+        let (batched, individual) =
+            partition_targeted_requests(requests.clone(), &hot_node_ids, true);
+        assert_eq!(batched.len(), 1);
+        assert_eq!(batched[0].0.target.number, 2);
+        assert_eq!(batched[0].1, "PR_two");
+        assert_eq!(individual.len(), 1);
+        assert_eq!(individual[0].target.number, 1);
+
+        // A server that rejects the batch (GHES 3.18): nothing is batched,
+        // hot targets are fetched one at a time and keep their rank.
+        let (batched, individual) = partition_targeted_requests(requests, &hot_node_ids, false);
+        assert!(batched.is_empty());
+        assert_eq!(
+            individual
+                .iter()
+                .map(|request| request.target.number)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+    }
+
+    #[test]
     fn hot_only_ticks_skip_the_notifications_heartbeat() {
         assert_eq!(gh_fetch_plan(false, false), GhFetchPlan::Hot);
         assert_eq!(gh_fetch_plan(false, true), GhFetchPlan::Warm);
@@ -798,6 +864,7 @@ mod engagement_tier_tests {
             &config,
             &cold_key,
             Some(Utc::now() + chrono::Duration::hours(1)),
+            None,
         )
         .await;
         set_focused_workspace(&config, &WorkspaceKey::new("local:other")).await;
@@ -1058,6 +1125,19 @@ pub struct TickState {
     /// Linear cadence is actually due — Linear tickets change far less
     /// often than GitHub CI/PR state (#1032).
     pub(crate) linear_schedule: sources::LinearSchedule,
+    /// Consecutive ticks on which a GitHub full sweep was DUE but the rate
+    /// governor refused to admit it (needs more GraphQL points than the
+    /// per-tick allowance covers). Past ~25 watched repos this can hold
+    /// forever, silently stalling new-issue/PR reconcile discovery (#1391).
+    /// Once the streak crosses [`sources::DISCOVERY_BEHIND_TICKS`] the
+    /// daemon raises one user-visible "discovery behind" advisory; a manual
+    /// refresh or a tick that finally admits the sweep resets it.
+    pub(crate) full_sweep_deferral_streak: u32,
+    /// Whether the "discovery behind" advisory has already been broadcast
+    /// for the current deferral episode, so the notice fires once when the
+    /// stall sets in rather than every tick. Cleared when a sweep is
+    /// admitted (or isn't due), re-arming the notice for a later re-stall.
+    pub(crate) discovery_behind_notified: bool,
 }
 
 impl Default for TickState {
@@ -2800,6 +2880,10 @@ pub fn next_tick_delay_with_hot(
     // heartbeat, and the hot path for 55 minutes on one GitHub hint.
     // The clamp still slows empty ticks (the parked source builds
     // nothing), it just never stops the world.
+    //
+    // NOTE: Tunable via `server.polling_backoff_cap_secs` in config.
+    // This constant is the default; the daemon should read the config
+    // and use that value instead (tracked in #1254).
     const DRIVER_BACKOFF_CAP: Duration = Duration::from_secs(120);
     match retry_after_secs {
         Some(secs) => base.max(Duration::from_secs(secs).min(DRIVER_BACKOFF_CAP)),
@@ -3143,6 +3227,16 @@ fn removal_candidate_state(
     config: &ServerConfig,
     workspace: &Workspace,
 ) -> Option<lazybox_ipc::RemovableTerminalState> {
+    // A removal already in flight owns this workspace: don't nominate it as
+    // a fresh cleanup candidate while `remove()` is tearing it down (the
+    // tombstone is released only if that removal fails or the row is gone).
+    if config
+        .deleted_workspaces
+        .lock()
+        .contains(workspace.key.as_str())
+    {
+        return None;
+    }
     if workspace.cleanup_prompt == lazybox_core::CleanupPrompt::Declined {
         return None;
     }
@@ -3315,7 +3409,10 @@ async fn sync_one_tracked_workspace(
     // whether we resolved it fresh so the commit phase persists it.
     let (base, base_resolved) = match base_branch {
         Some(b) => (b, false),
-        None => match mgr.default_branch(owner, name).await {
+        None => match mgr
+            .default_branch(owner, name, lazybox_git_ops::LockPriority::Background)
+            .await
+        {
             Ok(b) => (b, true),
             Err(e) => {
                 tracing::debug!(workspace = %key, error = %e, "track-main: default branch unresolved");
@@ -3968,8 +4065,14 @@ async fn retire_pr_stub_sessions(
         if on_disk {
             let removed = match repo.as_ref() {
                 Some((owner, name)) => matches!(
-                    mgr.reclaim_managed_worktree_if_safe(owner, name, &pr_ws.branch, &path,)
-                        .await,
+                    mgr.reclaim_managed_worktree_if_safe(
+                        owner,
+                        name,
+                        &pr_ws.branch,
+                        &path,
+                        lazybox_git_ops::LockPriority::Background
+                    )
+                    .await,
                     Ok(lazybox_git_ops::WorktreeReclaimOutcome::Reclaimed)
                 ),
                 // A provisioning fallback can only be retired by an
@@ -5644,9 +5747,40 @@ mod rescope_collapse_tests {
         );
 
         // ...unless the user already answered "keep" (durable decline).
-        let mut declined = Workspace::from_task(merged, Utc::now());
+        let mut declined = Workspace::from_task(merged.clone(), Utc::now());
         declined.cleanup_prompt = lazybox_core::CleanupPrompt::Declined;
         assert_eq!(removal_candidate_state(&config, &declined), None);
+
+        // ...and NOT while a removal is already in flight: `remove()` marks
+        // `deleted_workspaces` before its slow reclaim, so the level-trigger
+        // sweep must not re-nominate a workspace the single removal owner is
+        // already tearing down (orphan-modal race).
+        let in_flight = Workspace::from_task(merged, Utc::now());
+        assert_eq!(
+            removal_candidate_state(&config, &in_flight),
+            Some(lazybox_ipc::RemovableTerminalState::Merged),
+            "a merged PR is a candidate before any removal starts",
+        );
+        config
+            .deleted_workspaces
+            .lock()
+            .insert(in_flight.key.as_str().to_string());
+        assert_eq!(
+            removal_candidate_state(&config, &in_flight),
+            None,
+            "a workspace whose removal is in flight is no longer a cleanup candidate",
+        );
+        // Removal failed / released the tombstone → the row survives and the
+        // level trigger may offer cleanup again.
+        config
+            .deleted_workspaces
+            .lock()
+            .remove(in_flight.key.as_str());
+        assert_eq!(
+            removal_candidate_state(&config, &in_flight),
+            Some(lazybox_ipc::RemovableTerminalState::Merged),
+            "releasing the tombstone (removal failed) re-allows the prompt",
+        );
 
         let open = gh_task(
             "o/r#8",
@@ -6095,11 +6229,11 @@ mod rescope_collapse_tests {
         assert!(!cleared.has_notes());
     }
 
-    /// `record_sent_snippet` prepends onto the workspace's MRU and
-    /// reloads verbatim; a re-send moves the key to the front rather
-    /// than duplicating it (issue #463).
+    /// `record_snippet_delivery` prepends onto the workspace's MRU,
+    /// bumps the honest count, and reloads verbatim; a re-send moves the
+    /// key to the front (no duplicate) yet still counts (issue #463).
     #[tokio::test]
-    async fn record_sent_snippet_persists_as_mru() {
+    async fn record_snippet_delivery_persists_count_and_mru() {
         let store = Arc::new(lazybox_store::MemoryStore::new());
         let config = ServerConfig::with_store(store.clone());
 
@@ -6113,17 +6247,27 @@ mod rescope_collapse_tests {
         let key = ws.key.clone();
         seed(&store, &ws);
 
-        crate::workspace::record_sent_snippet(&config, &key, "rev".into()).await;
-        crate::workspace::record_sent_snippet(&config, &key, "plan".into()).await;
-        let reloaded = load_workspace(&config, &key).expect("workspace survives");
-        assert_eq!(reloaded.sent_snippets, vec!["plan", "rev"], "newest-first");
-
-        crate::workspace::record_sent_snippet(&config, &key, "rev".into()).await;
+        crate::workspace::record_snippet_delivery(&config, &key, "rev".into()).await;
+        crate::workspace::record_snippet_delivery(&config, &key, "plan".into()).await;
         let reloaded = load_workspace(&config, &key).expect("workspace survives");
         assert_eq!(
-            reloaded.sent_snippets,
+            reloaded.sent_snippets.recent().to_vec(),
+            vec!["plan", "rev"],
+            "newest-first",
+        );
+        assert_eq!(reloaded.sent_snippets.total(), 2, "count persists");
+
+        crate::workspace::record_snippet_delivery(&config, &key, "rev".into()).await;
+        let reloaded = load_workspace(&config, &key).expect("workspace survives");
+        assert_eq!(
+            reloaded.sent_snippets.recent().to_vec(),
             vec!["rev", "plan"],
             "a re-send moves the key to the front without duplicating",
+        );
+        assert_eq!(
+            reloaded.sent_snippets.total(),
+            3,
+            "but the re-send still counts",
         );
     }
 
@@ -6393,6 +6537,59 @@ mod unreadable_row_preservation_tests {
             store.get_kv(kv_key).unwrap().as_deref(),
             Some(WRONG_SHAPE_ROW),
             "rescope must preserve (not reap) a row it cannot decode"
+        );
+    }
+
+    /// TOCTOU regression (issue #1385): an `x x` archive that lands AFTER
+    /// the pre-lock archived-set gate but while an upsert is still in flight
+    /// must not resurrect the deleted row. Modeled by seeding the archived
+    /// set (as the under-lock archive would) and driving
+    /// `upsert_into_workspace_key` with no stored row: the re-check under the
+    /// workspace lock must skip rather than rebuild `Workspace::from_task`.
+    #[tokio::test]
+    async fn upsert_skips_a_workspace_archived_after_the_pre_lock_check() {
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        let task = gh_pr_task("o/r#7");
+        let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
+        let kv_key = format!("workspace:{}", key.as_str());
+
+        assert!(
+            crate::workspace::archive_workspace_key(&config, key.as_str()),
+            "seed the archived set"
+        );
+
+        upsert_into_workspace_key(&config, &key, task).await;
+
+        assert_eq!(
+            store.get_kv(&kv_key).unwrap(),
+            None,
+            "an upsert must not resurrect a row archived under the lock"
+        );
+    }
+
+    /// Companion for a non-archiving delete: the `deleted_workspaces`
+    /// tombstone (held across the delete's race window) must also block an
+    /// in-flight upsert, since a plain delete never enters the archived set.
+    #[tokio::test]
+    async fn upsert_skips_a_workspace_with_a_live_delete_tombstone() {
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        let task = gh_pr_task("o/r#8");
+        let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
+        let kv_key = format!("workspace:{}", key.as_str());
+
+        config
+            .deleted_workspaces
+            .lock()
+            .insert(key.as_str().to_string());
+
+        upsert_into_workspace_key(&config, &key, task).await;
+
+        assert_eq!(
+            store.get_kv(&kv_key).unwrap(),
+            None,
+            "an upsert must not resurrect a row with a live delete tombstone"
         );
     }
 }

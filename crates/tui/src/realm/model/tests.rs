@@ -10,6 +10,22 @@
 #[cfg(test)]
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Seed a bare workspace into the sidebar's workspace map so a removal
+/// prompt targeting `key` passes the mount-time liveness gate
+/// (`maybe_mount_next_removal_prompt` drops prompts for unknown
+/// workspaces, preventing an orphaned "remove <gone workspace>?" modal).
+/// File-level so every child test module reaches it as `super::seed_ws`.
+#[cfg(test)]
+fn seed_ws(m: &mut crate::realm::model::Model<tuirealm::terminal::TestTerminalAdapter>, key: &str) {
+    m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+        lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new(key),
+            "main",
+            chrono::Utc::now(),
+        ),
+    )));
+}
+
 #[cfg(test)]
 mod prompt_history_format_tests {
     //! Formatting helpers for the `]]h` prompt-history rows (#523).
@@ -76,7 +92,9 @@ mod agent_auth_recovery_tests {
     #[test]
     fn auth_required_warns_about_other_provider_sessions_and_confirms() {
         let mut model = build_model();
-        // A non-isolated provider still warns that re-auth is machine-wide.
+        // A non-isolated provider still tells the user re-auth touches the
+        // machine-wide login and names the other sessions — but reassures
+        // that a single pane's re-auth no longer signs them out (#1376).
         model.handle_daemon_event(Event::AgentAuthRequired {
             terminal_id: TerminalId(7),
             agent_id: "claude".into(),
@@ -87,17 +105,19 @@ mod agent_auth_recovery_tests {
         });
 
         assert_eq!(model.top_modal(), Some(&Id::AgentAuth));
+        // Strip the vertical modal borders before matching so word-wrap can't
+        // fragment a phrase across a line edge (wrapping breaks on whitespace,
+        // so the copy reads continuously once the `│` columns are gone).
         let screen = rendered_auth_modal(&mut model)
+            .replace('│', " ")
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
         assert!(screen.contains("Claude Code authentication is no longer valid"));
-        // Wrapping can insert the modal border between words, so assert on
-        // fragments that each stay on one line.
         assert!(
-            screen.contains("machine-wide Claude Code login")
-                && screen.contains("may affect 2 other running")
-                && screen.contains("sessions."),
+            screen.contains("shared machine-wide Claude Code login in place")
+                && screen.contains("2 other running Claude Code sessions")
+                && screen.contains("won't be signed out"),
             "{screen}"
         );
         assert!(screen.contains("Sign in and continue"));
@@ -445,6 +465,87 @@ mod effects_tests {
         assert!(model.pending_diff_session.is_none());
     }
 
+    /// `g h` (#1432) mounts the merge-history ledger in its loading state,
+    /// scoped to the cursor's repo, and fires the repo fetch; the reply
+    /// then repaints the still-open ledger.
+    #[test]
+    fn merge_history_mounts_loading_fetches_and_repaints_on_reply() {
+        use lazybox_core::{SessionKind, Workspace, WorkspaceSession};
+        use lazybox_tui_core::action::Action;
+
+        let mut model = build_model();
+        let workspace_key = WorkspaceKey::new("github:o/r#1");
+        let now = chrono::Utc::now();
+        model.handle_daemon_event(lazybox_ipc::Event::ProjectUpserted(Box::new(
+            lazybox_core::Project::new(lazybox_core::ProjectKey::github("o", "r"), "o/r", now),
+        )));
+        let mut workspace = Workspace::empty(workspace_key.clone(), "ws", now);
+        workspace.project_key = Some(lazybox_core::ProjectKey::github("o", "r"));
+        workspace.sessions.push(WorkspaceSession::new(
+            workspace_key.clone(),
+            SessionKind::Shell,
+            "/tmp/ws".into(),
+            now,
+        ));
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
+        let session_key: lazybox_core::SessionKey = (&workspace_key).into();
+        assert!(model.sidebar.focus_workspace_key(&session_key));
+
+        let commands = model.dispatch_action(&Action::MergeHistory);
+        assert!(
+            matches!(
+                commands.as_slice(),
+                [IpcCommand::FetchRepoMergeHistory { repo }] if repo == "o/r"
+            ),
+            "dispatch fetches the cursor repo's merge history: {commands:?}"
+        );
+        assert_eq!(model.modal_stack.last(), Some(&Id::MergeHistory));
+
+        // A late reply for a DIFFERENT repo — a since-reopened ledger, or an
+        // out-of-order pair — is dropped rather than repainting with the
+        // wrong repo's merges. `update_merge_history` repaints only when it
+        // applies, so a dropped reply leaves `redraw` untouched.
+        model.redraw = false;
+        model.handle_daemon_event(lazybox_ipc::Event::RepoMergeHistory {
+            repo: "other/repo".into(),
+            entries: vec![],
+            error: None,
+        });
+        assert!(
+            !model.redraw,
+            "a reply for a different repo than the open ledger must be dropped"
+        );
+
+        // The reply for the ledger's own repo repaints it.
+        model.redraw = false;
+        model.handle_daemon_event(lazybox_ipc::Event::RepoMergeHistory {
+            repo: "o/r".into(),
+            entries: vec![],
+            error: None,
+        });
+        assert_eq!(model.modal_stack.last(), Some(&Id::MergeHistory));
+        assert!(model.redraw, "the matching reply repaints the ledger");
+    }
+
+    /// A merge-history reply that lands while the ledger is closed is
+    /// dropped rather than force-opening a modal.
+    #[test]
+    fn merge_history_reply_is_dropped_when_ledger_is_closed() {
+        let mut model = build_model();
+        assert!(model.modal_stack.is_empty());
+        model.handle_daemon_event(lazybox_ipc::Event::RepoMergeHistory {
+            repo: "o/r".into(),
+            entries: vec![],
+            error: None,
+        });
+        assert!(
+            model.modal_stack.is_empty(),
+            "a reply must not open the ledger on its own"
+        );
+    }
+
     #[test]
     fn view_diff_uses_the_workspace_default_session_when_no_session_row_is_selected() {
         use lazybox_core::{SessionKind, Workspace, WorkspaceSession};
@@ -613,6 +714,90 @@ mod effects_tests {
         assert_eq!(n.severity, NoticeSeverity::Permanent);
         assert!(n.message.contains("sync failed"));
         m
+    }
+
+    /// A budget-deferred discovery stall (#1391) surfaces as a STANDING
+    /// footer indicator that persists until the daemon retracts it — not a
+    /// one-shot toast that fades and is missed. The `behind: true` level is
+    /// re-sent every deferred tick; the attention flash must fire only on
+    /// the rising edge, and `behind: false` must retract the indicator.
+    #[test]
+    fn discovery_behind_is_a_standing_self_clearing_indicator() {
+        use lazybox_ipc::Event as IpcEvent;
+
+        let mut m = build_model();
+        m.status.polling = None;
+
+        // Rising edge: indicator asserted + a one-shot attention flash.
+        m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
+            behind: true,
+            watched_repos: 30,
+            required_points: 900,
+            allowance: 120,
+        });
+        let behind = m
+            .status
+            .discovery_behind
+            .as_ref()
+            .expect("standing indicator asserted");
+        assert_eq!(behind.watched_repos, 30);
+        assert!(
+            m.status.notice.is_some(),
+            "rising edge raises an attention flash"
+        );
+
+        // The daemon re-sends the level every deferred tick. The indicator
+        // must persist, and the flash must NOT re-fire — otherwise the
+        // footer would nag once per tick.
+        m.status.notice = None;
+        m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
+            behind: true,
+            watched_repos: 31,
+            required_points: 930,
+            allowance: 120,
+        });
+        assert!(
+            m.status.discovery_behind.is_some(),
+            "the level keeps the indicator standing"
+        );
+        assert_eq!(
+            m.status.discovery_behind.as_ref().unwrap().watched_repos,
+            31,
+            "the standing figures refresh from the latest level"
+        );
+        assert!(
+            m.status.notice.is_none(),
+            "a re-sent level must not re-flash — only the rising edge does"
+        );
+
+        // Recovery retracts the standing indicator.
+        m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
+            behind: false,
+            watched_repos: 0,
+            required_points: 0,
+            allowance: 0,
+        });
+        assert!(
+            m.status.discovery_behind.is_none(),
+            "the falling edge retracts the indicator"
+        );
+
+        // A (re)connect Snapshot clears a possibly-stale indicator: the
+        // recovery edge may have fired while this client was disconnected,
+        // and the Snapshot carries no deferral state. Safe because the
+        // daemon re-asserts the level within a tick if still behind.
+        m.handle_daemon_event(IpcEvent::GithubDiscoveryBehind {
+            behind: true,
+            watched_repos: 30,
+            required_points: 900,
+            allowance: 120,
+        });
+        assert!(m.status.discovery_behind.is_some());
+        m.handle_daemon_event(empty_snapshot());
+        assert!(
+            m.status.discovery_behind.is_none(),
+            "a reconnect Snapshot must drop a possibly-stale indicator"
+        );
     }
 
     /// Connecting to a daemon built from a different commit raises a
@@ -1038,6 +1223,111 @@ mod effects_tests {
         assert!(
             m.status.notice.is_some(),
             "an undismissed repeat keeps the banner up",
+        );
+    }
+
+    /// #1372: an in-flight spawn must always have a way out. `Esc` (when it
+    /// has nothing else to claim) clears the footer spinner + the row's arc
+    /// AND sends a real `CancelSpawn` so a wedged provision is aborted
+    /// daemon-side, not merely hidden (which would strand a phantom
+    /// terminal). No age threshold — a legitimately-slow cold clone is
+    /// cancellable from its first frame.
+    #[test]
+    fn esc_cancels_an_in_flight_spawn() {
+        use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(100, 30)).expect("model init");
+        m.status.polling = None;
+        let key: lazybox_core::SessionKey =
+            (&lazybox_core::WorkspaceKey::new("github:o/r#1")).into();
+        m.status.note_spawning(
+            "claude",
+            key.clone(),
+            lazybox_ipc::TerminalKind::Agent("claude".into()),
+            0,
+        );
+
+        m.dispatch_key(RealmKey::new(Key::Esc, RealmMods::NONE));
+        assert!(m.status.spawning.is_none(), "Esc clears the spinner");
+        assert!(
+            m.spawn_follow_to.is_none(),
+            "the spawn-follow pin is dropped"
+        );
+        let mut sent = Vec::new();
+        while let Ok(cmd) = server.rx.try_recv() {
+            sent.push(cmd);
+        }
+        assert!(
+            sent.iter().any(|c| matches!(
+                c,
+                lazybox_ipc::Command::CancelSpawn { session_key } if *session_key == key
+            )),
+            "Esc must send a real CancelSpawn, not just hide the spinner: {sent:?}",
+        );
+    }
+
+    /// #1372 ordering (finding #3): `Esc` must not steal from a live notice.
+    /// With a notice up AND a spawn in flight, the first `Esc` dismisses the
+    /// notice and leaves the spawn spinning; a second `Esc` cancels the spawn.
+    #[test]
+    fn esc_dismisses_a_notice_before_cancelling_the_spawn() {
+        use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+
+        let mut m = build_model();
+        m.status.polling = None;
+        let key: lazybox_core::SessionKey =
+            (&lazybox_core::WorkspaceKey::new("github:o/r#1")).into();
+        m.status.note_spawning(
+            "claude",
+            key,
+            lazybox_ipc::TerminalKind::Agent("claude".into()),
+            0,
+        );
+        m.flash_error("something went wrong");
+        assert!(m.status.notice.is_some());
+
+        // First Esc: dismiss the notice, spawn keeps spinning.
+        m.dispatch_key(RealmKey::new(Key::Esc, RealmMods::NONE));
+        assert!(m.status.notice.is_none(), "first Esc clears the notice");
+        assert!(
+            m.status.spawning.is_some(),
+            "the spawn must not be cancelled while a notice was there to dismiss",
+        );
+
+        // Second Esc: now cancel the spawn.
+        m.dispatch_key(RealmKey::new(Key::Esc, RealmMods::NONE));
+        assert!(m.status.spawning.is_none(), "second Esc cancels the spawn");
+    }
+
+    /// #1372: `r c` on a box already known to be erroring (bad gcp creds)
+    /// must fail fast with the box error surfaced, never present as
+    /// "spawning" while the spawn sinks into a dead box.
+    #[test]
+    fn remote_spawn_aborts_fast_when_the_box_errored() {
+        use lazybox_tui_core::action::Action;
+        use lazybox_tui_core::remote::RemoteConnState;
+
+        let mut m = build_model()
+            .with_remote_clients(std::collections::BTreeMap::new(), Some("box".into()));
+        m.status.polling = None;
+        m.status.note_remote_state(RemoteConnState::Error {
+            reason: "gcp creds expired".into(),
+        });
+
+        let cmds = m.dispatch_action(&Action::SpawnAgentRemote("claude".into()));
+        assert!(cmds.is_empty(), "a dead box must not receive a spawn");
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("gcp creds expired")),
+            "the box error is surfaced instead of a spinner: {:?}",
+            m.status.notice.as_ref().map(|n| &n.message),
+        );
+        assert!(
+            m.status.spawning.is_none(),
+            "no spawn spinner is lit for an aborted remote spawn",
         );
     }
 
@@ -1643,6 +1933,47 @@ mod effects_tests {
         }
     }
 
+    /// Regression: a removal prompt for a workspace the client doesn't
+    /// know about (never in the sidebar, or already gone) is DROPPED at
+    /// the mount-time liveness gate rather than shown as an orphaned
+    /// "remove <gone workspace>?" modal. Once the workspace is known, a
+    /// re-emit (the daemon's throttled sweep) mounts normally — so a
+    /// prompt dropped during a brief connect race self-heals.
+    #[test]
+    fn removal_prompt_for_unknown_workspace_is_dropped() {
+        use lazybox_ipc::Event as IpcEvent;
+        let removable = |key: &str| IpcEvent::MergedPrRemovable {
+            workspace_key: WorkspaceKey::new(key),
+            label: key.into(),
+            terminal_state: lazybox_ipc::RemovableTerminalState::Merged,
+            active_terminal_count: 0,
+            has_local_work: false,
+        };
+
+        // Unknown workspace (never seeded): the prompt is dropped, not
+        // mounted, and not left lingering in the queue.
+        let mut m = build_model();
+        m.handle_daemon_event(removable("github:o/r#404"));
+        assert_eq!(
+            m.top_modal(),
+            None,
+            "no orphaned modal for a workspace not in the sidebar",
+        );
+        assert!(
+            m.removal_prompt_queue.is_empty(),
+            "the orphaned prompt is dropped at the gate, not left queued",
+        );
+
+        // Same workspace, now known: a re-emit mounts normally.
+        super::seed_ws(&mut m, "github:o/r#404");
+        m.handle_daemon_event(removable("github:o/r#404"));
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::RemoveOutOfScope),
+            "a known workspace's removal prompt mounts",
+        );
+    }
+
     /// A `MergedPrRemovable` event mounts the removal confirm (reason
     /// `Merged`), and a re-emit for the same workspace doesn't stack a
     /// second prompt — the daemon's level-triggered re-emits (#292)
@@ -1652,6 +1983,8 @@ mod effects_tests {
     fn merged_pr_removable_mounts_confirm_and_dedupes() {
         use lazybox_ipc::Event as IpcEvent;
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         let ev = || IpcEvent::MergedPrRemovable {
             workspace_key: WorkspaceKey::new("github:o/r#1"),
             label: "o/r#1".into(),
@@ -1683,6 +2016,8 @@ mod effects_tests {
     fn removal_cancelled_dismisses_mounted_prompt() {
         use lazybox_ipc::Event as IpcEvent;
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         m.handle_daemon_event(IpcEvent::MergedPrRemovable {
             workspace_key: WorkspaceKey::new("github:o/r#1"),
             label: "o/r#1".into(),
@@ -1707,6 +2042,8 @@ mod effects_tests {
     fn removal_cancelled_neutralizes_buried_prompt() {
         use lazybox_ipc::Event as IpcEvent;
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         m.handle_daemon_event(IpcEvent::MergedPrRemovable {
             workspace_key: WorkspaceKey::new("github:o/r#1"),
             label: "o/r#1".into(),
@@ -1738,6 +2075,8 @@ mod effects_tests {
     fn removal_cancelled_ignores_other_workspace() {
         use lazybox_ipc::Event as IpcEvent;
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         m.handle_daemon_event(IpcEvent::MergedPrRemovable {
             workspace_key: WorkspaceKey::new("github:o/r#1"),
             label: "o/r#1".into(),
@@ -1757,6 +2096,68 @@ mod effects_tests {
         );
     }
 
+    /// A per-workspace modal (here a reply) left open when its workspace is
+    /// removed is dismissed rather than orphaned, so it can't point at a
+    /// PR/issue that no longer exists.
+    #[test]
+    fn workspace_removed_dismisses_a_modal_bound_to_it() {
+        use lazybox_ipc::Event as IpcEvent;
+        let mut m = build_model();
+        let ws = WorkspaceKey::new("github:o/r#1");
+        m.mount_reply(lazybox_core::SessionKey::from(&ws));
+        assert_eq!(m.top_modal(), Some(&Id::Reply));
+
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(ws));
+        assert_eq!(
+            m.top_modal(),
+            None,
+            "a modal for the removed workspace must be dismissed"
+        );
+        assert!(m.modal_flow.is_none(), "and its armed continuation cleared");
+    }
+
+    /// Removing a *different* workspace leaves an open modal untouched — the
+    /// dismissal keys off the modal's own workspace, not any removal.
+    #[test]
+    fn workspace_removed_leaves_an_unrelated_modal() {
+        use lazybox_ipc::Event as IpcEvent;
+        let mut m = build_model();
+        m.mount_reply(lazybox_core::SessionKey::from(&WorkspaceKey::new(
+            "github:o/r#1",
+        )));
+        assert_eq!(m.top_modal(), Some(&Id::Reply));
+
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(WorkspaceKey::new(
+            "github:o/r#2",
+        )));
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::Reply),
+            "an unrelated removal must not dismiss this modal"
+        );
+        assert!(m.modal_flow.is_some());
+    }
+
+    /// The "Setting up workspace" checklist — which carries its own session
+    /// slot and never auto-dismisses on failure — is dropped when its
+    /// workspace is removed, closing the orphaned-checklist path.
+    #[test]
+    fn workspace_removed_dismisses_the_setup_checklist() {
+        use crate::realm::components::worktree_progress::WorktreeProgressState;
+        use lazybox_ipc::Event as IpcEvent;
+        let mut m = build_model();
+        let ws = WorkspaceKey::new("github:o/r#1");
+        m.worktree_progress = Some(WorktreeProgressState::new(lazybox_core::SessionKey::from(
+            &ws,
+        )));
+
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(ws));
+        assert!(
+            m.worktree_progress.is_none(),
+            "a checklist for the removed workspace is dropped"
+        );
+    }
+
     /// Regression for #292: two PRs merging in the same poll produce
     /// two `MergedPrRemovable` events → two modals, one after the
     /// other. The second queues behind the first and mounts as soon as
@@ -1765,6 +2166,8 @@ mod effects_tests {
     fn two_merged_pr_removable_events_serialize_into_two_modals() {
         use lazybox_ipc::Event as IpcEvent;
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         let ev = |n: u64| IpcEvent::MergedPrRemovable {
             workspace_key: WorkspaceKey::new(format!("github:o/r#{n}")),
             label: format!("o/r#{n}"),
@@ -1802,6 +2205,80 @@ mod effects_tests {
             }
             other => panic!("expected active prompt for #2, got {other:?}"),
         }
+    }
+
+    /// Regression: a removal prompt may only exist for a LIVE workspace.
+    /// A prompt can sit queued behind another modal while the user
+    /// archives/deletes the row; without retraction, dismissing that
+    /// modal later mounts "<PR> was merged — remove workspace?" for a
+    /// workspace that no longer exists. `WorkspaceRemoved` must retract
+    /// the queued prompt (the same cancel the reopen path #552 uses).
+    #[test]
+    fn workspace_removed_retracts_a_queued_removal_prompt() {
+        use lazybox_ipc::Event as IpcEvent;
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
+        let ev = |n: u64| IpcEvent::MergedPrRemovable {
+            workspace_key: WorkspaceKey::new(format!("github:o/r#{n}")),
+            label: format!("o/r#{n}"),
+            terminal_state: lazybox_ipc::RemovableTerminalState::Merged,
+            active_terminal_count: 0,
+            has_local_work: false,
+        };
+        // #1's prompt mounts; #2's queues behind it.
+        m.handle_daemon_event(ev(1));
+        m.handle_daemon_event(ev(2));
+        assert_eq!(m.removal_prompt_queue.len(), 1, "#2 queued behind #1");
+
+        // #2 is deleted while its prompt waits in the queue.
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(WorkspaceKey::new(
+            "github:o/r#2",
+        )));
+        assert!(
+            m.removal_prompt_queue.is_empty(),
+            "removal retracts the queued prompt for the gone workspace",
+        );
+        // #1's mounted prompt is untouched — only the gone one is dropped.
+        assert!(
+            matches!(
+                &m.modal_flow,
+                Some(super::super::ModalFlow::RemovalPrompt { workspace, .. })
+                    if workspace.as_str() == "github:o/r#1"
+            ),
+            "an unrelated mounted prompt survives",
+        );
+    }
+
+    /// Regression: `WorkspaceRemoved` also dismisses a removal prompt
+    /// that is already MOUNTED for the gone workspace, and clears its
+    /// flow so a stray `Msg::Confirmed` can't act on a re-added key.
+    #[test]
+    fn workspace_removed_dismisses_the_mounted_removal_prompt() {
+        use lazybox_ipc::Event as IpcEvent;
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
+        let ws = WorkspaceKey::new("github:o/r#1");
+        m.handle_daemon_event(IpcEvent::MergedPrRemovable {
+            workspace_key: ws.clone(),
+            label: "o/r#1".into(),
+            terminal_state: lazybox_ipc::RemovableTerminalState::Merged,
+            active_terminal_count: 0,
+            has_local_work: false,
+        });
+        assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope), "prompt mounted");
+
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(ws));
+        assert_eq!(
+            m.top_modal(),
+            None,
+            "removal dismisses the stale mounted prompt",
+        );
+        assert!(
+            m.modal_flow.is_none(),
+            "and clears its flow so a stray confirm can't fire",
+        );
     }
 
     /// `n` on a merged/closed removal confirm tells the daemon to stop
@@ -1930,6 +2407,66 @@ mod effects_tests {
         }
     }
 
+    /// #1344/#1345: the daemon re-pushes the rollup after every accumulator
+    /// flush, which repaints an open Usage Stats window. A push must NOT
+    /// reset the user's Today⇄Week selection *or* their scroll offset —
+    /// before the fix each rebuild snapped the view back to Today and to the
+    /// top, so an active agent's usage pushes made the Week tab and
+    /// scrolling unusable.
+    #[test]
+    fn stats_push_preserves_the_week_toggle_and_scroll() {
+        use lazybox_ipc::{StatBucket, stats};
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+        use tuirealm::state::{State, StateValue};
+
+        // A short terminal so the deep-dive scrolls (body < content), making
+        // a preserved scroll offset observable rather than clamped to 0.
+        let (client, _server) = lazybox_ipc::channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(80, 14)).expect("model");
+
+        let bucket = |metric: &str, value: i64| StatBucket {
+            day: chrono::Local::now().format("%Y-%m-%d").to_string(),
+            metric: metric.into(),
+            value,
+        };
+        // (week, scroll) as the mounted Stats window reports them.
+        let view_state =
+            |m: &Model<tuirealm::terminal::TestTerminalAdapter>| match m.app.state(&Id::Stats) {
+                Ok(State::Vec(v)) => {
+                    let week = matches!(v.first(), Some(StateValue::Bool(true)));
+                    let scroll = match v.get(1) {
+                        Some(StateValue::U16(n)) => *n,
+                        _ => 0,
+                    };
+                    (week, scroll)
+                }
+                other => panic!("expected a Vec state, got {other:?}"),
+            };
+
+        // Open the window and load an initial snapshot (Today, top of scroll).
+        m.mount_stats();
+        m.handle_daemon_event(lazybox_ipc::Event::Stats {
+            buckets: vec![bucket(stats::SESSIONS, 3)],
+        });
+        assert_eq!(view_state(&m), (false, 0), "loads on Today at the top");
+
+        // User switches to Week and scrolls down two rows.
+        m.dispatch_modal_key(KeyEvent::new(Key::Tab, KeyModifiers::NONE));
+        m.dispatch_modal_key(KeyEvent::new(Key::Down, KeyModifiers::NONE));
+        m.dispatch_modal_key(KeyEvent::new(Key::Down, KeyModifiers::NONE));
+        assert_eq!(view_state(&m), (true, 2), "Week + scrolled down two rows");
+
+        // A daemon push (post-flush) repaints the window — must keep BOTH.
+        m.handle_daemon_event(lazybox_ipc::Event::Stats {
+            buckets: vec![bucket(stats::SESSIONS, 4)],
+        });
+        assert_eq!(
+            view_state(&m),
+            (true, 2),
+            "the post-flush push preserved Week and the scroll offset"
+        );
+    }
+
     /// Issue #312: the issue→PR session-merge prompt now defaults Enter
     /// to Yes — accepting is the expected, non-destructive path (the
     /// prompt only appears because a closing PR was detected).
@@ -1951,13 +2488,15 @@ mod effects_tests {
         );
     }
 
-    /// Issue #525: the workspace-removal prompt is the *event* path — it
-    /// pops unsolicited (a merged/closed task), so its default comes from
-    /// `ui.confirm_default.event` (default No); a stray Enter must not
-    /// force-delete a worktree.
+    /// Every confirm now defaults to Yes for speed — including the
+    /// unsolicited workspace-removal prompt — with the danger conveyed by
+    /// the modal's warning coloring (a destructive confirm) rather than by
+    /// defaulting to No.
     #[test]
-    fn removal_prompt_defaults_to_no_from_event_source() {
+    fn removal_prompt_defaults_to_yes() {
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         m.removal_prompt_queue
             .push_back(super::super::RemovalPrompt {
                 workspace_key: WorkspaceKey::new("github:o/r#1"),
@@ -1970,8 +2509,8 @@ mod effects_tests {
         m.maybe_mount_next_removal_prompt();
         assert_eq!(m.top_modal(), Some(&Id::RemoveOutOfScope));
         assert!(
-            !mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
-            "event-driven removal prompt should default to No",
+            mounted_confirm_default_yes(&m, Id::RemoveOutOfScope),
+            "the removal prompt defaults to Yes (danger shown by coloring)",
         );
     }
 
@@ -1982,6 +2521,8 @@ mod effects_tests {
         use lazybox_config::ConfirmDefault;
 
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         m.ui_defaults.confirm_default.event = ConfirmDefault::Yes;
         m.removal_prompt_queue
             .push_back(super::super::RemovalPrompt {
@@ -1999,20 +2540,22 @@ mod effects_tests {
         );
     }
 
-    /// Issue #312: the clean-worktrees bulk-wipe confirm defaults No.
+    /// The clean-worktrees bulk-wipe confirm now defaults Yes for speed,
+    /// with the danger shown by the destructive warning coloring.
     #[test]
-    fn clean_worktrees_prompt_defaults_to_no() {
+    fn clean_worktrees_prompt_defaults_to_yes() {
         let mut m = build_model();
         m.mount_clean_worktrees_confirm();
         assert!(
-            !mounted_confirm_default_yes(&m, Id::CleanWorktreesConfirm),
-            "clean-worktrees prompt should default to No",
+            mounted_confirm_default_yes(&m, Id::CleanWorktreesConfirm),
+            "clean-worktrees prompt defaults to Yes (danger shown by coloring)",
         );
     }
 
-    /// Issue #312: the inspector's delete-worktree confirm defaults No.
+    /// The inspector's delete-worktree confirm now defaults Yes, with the
+    /// danger shown by the destructive warning coloring.
     #[test]
-    fn inspect_delete_prompt_defaults_to_no() {
+    fn inspect_delete_prompt_defaults_to_yes() {
         let mut m = build_model();
         m.mount_inspect_confirm(lazybox_ipc::WorktreeInspectionDto {
             path: std::path::PathBuf::from("/tmp/worktrees/o-r-feat"),
@@ -2027,8 +2570,8 @@ mod effects_tests {
             is_safe_to_delete: false,
         });
         assert!(
-            !mounted_confirm_default_yes(&m, Id::InspectConfirm),
-            "inspector delete prompt should default to No",
+            mounted_confirm_default_yes(&m, Id::InspectConfirm),
+            "inspector delete prompt defaults to Yes (danger shown by coloring)",
         );
     }
 
@@ -2054,15 +2597,14 @@ mod effects_tests {
         );
     }
 
-    /// Issue #525: a cautious user forcing `destructive_shortcut: no`
-    /// flips even a chord-initiated confirm back to No.
+    /// Every destructive confirm now defaults to Yes for speed — the old
+    /// `destructive_shortcut: no` opt-out no longer flips it to No; the
+    /// danger is conveyed by the modal's warning coloring instead.
     #[test]
-    fn action_confirm_respects_no_shortcut_override() {
-        use lazybox_config::ConfirmDefault;
+    fn destructive_action_confirm_defaults_yes() {
         use lazybox_tui_core::action::Action;
 
         let mut m = build_model();
-        m.ui_defaults.confirm_default.destructive_shortcut = ConfirmDefault::No;
         m.mount_action_confirm(
             Action::Archive,
             vec![super::super::ActionConfirmTarget::Workspace(
@@ -2071,8 +2613,8 @@ mod effects_tests {
             None,
         );
         assert!(
-            !mounted_confirm_default_yes(&m, Id::ActionConfirm),
-            "destructive_shortcut: no forces the confirm back to No",
+            mounted_confirm_default_yes(&m, Id::ActionConfirm),
+            "a destructive Archive confirm defaults to Yes (danger shown by coloring)",
         );
     }
 
@@ -2874,6 +3416,85 @@ snippets:
         let rev = m.snippets.get("rev").expect("rev exists");
         assert_eq!(rev.description, "Review the diff");
         assert_eq!(rev.body, "please review");
+    }
+
+    /// A global override that differs from the built-in classifies as
+    /// stale, and "keep mine" flips it to an intentional up-to-date
+    /// override, recording the built-in-hashed target locally (#1312).
+    #[test]
+    fn snippet_keep_mine_flips_stale_override_to_current() {
+        let mut m = build_model();
+        // Built-in library plus a global `rev` override whose body differs.
+        let overlay = snippets_from_yaml(
+            "keep-mine",
+            "snippets:\n  rev:\n    body: my custom review\n",
+        );
+        m.apply_snippets(lazybox_config::Snippets::merged(
+            lazybox_config::Snippets::builtin(),
+            overlay,
+        ));
+
+        let builtins = lazybox_config::Snippets::builtin();
+        let active = m.snippets.get("rev").expect("rev override").clone();
+        assert_eq!(
+            m.snippet_state("rev", &active, &builtins),
+            lazybox_config::SnippetState::OverrideStale,
+            "an un-acknowledged divergent override is stale",
+        );
+
+        m.keep_mine_snippet_override("rev");
+
+        let target = lazybox_config::keep_mine_target(
+            "rev",
+            &builtins.get("rev").expect("built-in rev").content_hash(),
+        );
+        assert!(
+            m.snippet_keepmine.contains(&target),
+            "keep-mine records the built-in-hashed target locally",
+        );
+        assert_eq!(
+            m.snippet_state("rev", &active, &builtins),
+            lazybox_config::SnippetState::OverrideCurrent,
+            "after keep-mine the override is an intentional, up-to-date fork",
+        );
+    }
+
+    /// "Adopt built-in" drops a global override so the built-in shows
+    /// through on the next catalog load (#1312).
+    #[test]
+    fn snippet_adopt_reports_repo_override_is_not_auto_editable() {
+        let mut m = build_model();
+        // A repo-local override can't be auto-dropped (shared checked-in
+        // file); adopt should decline gracefully rather than edit it.
+        let tmp = std::env::temp_dir().join(format!(
+            "lazybox-adopt-repo-{}/.lazybox",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("snippets.yaml"),
+            "snippets:\n  rev:\n    body: repo rev\n",
+        )
+        .unwrap();
+        let repo = lazybox_config::Snippets::load_from(
+            &tmp.join("snippets.yaml"),
+            lazybox_config::SnippetOrigin::Repo,
+        )
+        .unwrap();
+        m.apply_snippets(lazybox_config::Snippets::merged(
+            lazybox_config::Snippets::builtin(),
+            repo,
+        ));
+
+        // Should not panic and should leave the override in place (repo
+        // files aren't auto-edited).
+        m.adopt_builtin_snippet("rev");
+        assert_eq!(
+            m.snippets.get("rev").expect("rev").origin,
+            lazybox_config::SnippetOrigin::Repo,
+            "a repo-local override is left untouched by adopt",
+        );
+        let _ = std::fs::remove_dir_all(tmp.parent().unwrap());
     }
 
     /// Build a model with N seeded workspaces (`github:o/r#1..N`) and
@@ -4525,6 +5146,72 @@ snippets:
         assert!(model.conversion.is_none());
         let notice = model.status.notice.as_ref().expect("conversion trail");
         assert!(notice.message.contains("→ continue codex"));
+    }
+
+    /// A Critic conversion escalates the reviewer to the large model tier
+    /// (`L`) — a stronger model checks the work — while a Continue keeps the
+    /// working tier (asserted `None` above). The reviewer stays read-only.
+    #[test]
+    fn critic_conversion_spawns_the_reviewer_at_the_large_tier() {
+        use lazybox_core::prompts::AgentHandoffRole;
+        use lazybox_ipc::{
+            AgentRunId, AgentRuntimeMode, Event as IpcEvent, TerminalId, TerminalKind,
+        };
+        use lazybox_tui_core::action::Action;
+
+        let (mut model, mut server, key) = model_with_conversion_source("claude", false);
+        while server.rx.try_recv().is_ok() {}
+
+        model.dispatch_action(&Action::ConvertSession);
+        let commands =
+            model.handle_choice_picked(vec![ChoicePayload::HandoffRole(AgentHandoffRole::Critic)]);
+        let request_id = match &commands[0] {
+            IpcCommand::StartAgentRun { request_id, .. } => request_id.clone(),
+            other => panic!("expected StartAgentRun, got {other:?}"),
+        };
+        let source_session_id = lazybox_core::SessionId::new();
+        model.handle_daemon_event(IpcEvent::AgentRunStarted {
+            request_id,
+            run_id: AgentRunId(21),
+            session_key: key.clone(),
+            session_id: Some(source_session_id),
+            agent: "claude".into(),
+            mode: AgentRuntimeMode::StreamJson,
+        });
+        model.handle_daemon_event(IpcEvent::AgentAssistantTextDelta {
+            run_id: AgentRunId(21),
+            delta: "## Goal\nReview the diff\n\n## Repository state\nsrc/x.rs modified".into(),
+        });
+        model.handle_daemon_event(IpcEvent::AgentTurnFinished {
+            run_id: AgentRunId(21),
+            result: None,
+            session_id: Some("thread-critic".into()),
+            error: None,
+        });
+        // The replacement waits for the singleton source to exit.
+        model.handle_daemon_event(IpcEvent::TerminalExited {
+            terminal_id: TerminalId(7),
+            exit_code: None,
+            last_output: None,
+        });
+
+        let spawn = std::iter::from_fn(|| server.rx.try_recv().ok())
+            .find_map(|command| match command {
+                IpcCommand::Spawn {
+                    kind: TerminalKind::Agent(_),
+                    model_alias,
+                    access,
+                    ..
+                } => Some((model_alias, access)),
+                _ => None,
+            })
+            .expect("fresh critic agent spawned after source exit");
+        assert_eq!(
+            spawn.0.as_deref(),
+            Some("L"),
+            "the critic reviews at the large model tier",
+        );
+        assert_eq!(spawn.1, lazybox_ipc::AgentRunAccess::ReadOnly);
     }
 
     #[test]
@@ -6712,16 +7399,21 @@ mod coalesce_tests {
             dismissed_updates: Vec::new(),
         });
 
+        // A Snapshot also re-seeds the usage-stats strip (#1344); ignore
+        // that GetStats and assert exactly one resync repair command.
+        let resyncs: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok())
+            .filter(|cmd| matches!(cmd, IpcCommand::RequestTerminalResync { .. }))
+            .collect();
+        assert_eq!(resyncs.len(), 1, "exactly one repair request");
         assert!(matches!(
-            server.rx.try_recv(),
-            Ok(IpcCommand::RequestTerminalResync {
+            &resyncs[0],
+            IpcCommand::RequestTerminalResync {
                 requests,
-            }) if requests == vec![lazybox_ipc::TerminalResyncRequest {
+            } if *requests == vec![lazybox_ipc::TerminalResyncRequest {
                 terminal_id: TerminalId(9),
                 required_seq: 17,
             }]
         ));
-        assert!(server.rx.try_recv().is_err(), "exactly one repair request");
     }
 
     /// #1171: a replay-budgeted reconnect snapshot can omit dozens of quiet
@@ -6768,7 +7460,13 @@ mod coalesce_tests {
         let mut commands = 0;
         while let Ok(command) = server.rx.try_recv() {
             let IpcCommand::RequestTerminalResync { requests } = command else {
-                panic!("expected resync batch, got {command:?}");
+                // A Snapshot also re-seeds the usage-stats strip (#1344);
+                // ignore that GetStats, only the resync batches matter here.
+                assert!(
+                    matches!(command, IpcCommand::GetStats),
+                    "expected resync batch or GetStats, got {command:?}"
+                );
+                continue;
             };
             assert!(requests.len() <= lazybox_ipc::FlowControl::MAX_RESYNC_REQUESTS_PER_BATCH);
             total += requests.len();
@@ -7010,10 +7708,15 @@ mod stale_input_tests {
                 | Id::ThemePicker
                 | Id::FilterMenu
                 | Id::SnoozeDuration
+                | Id::SourceSnooze
+                | Id::SourceLevel
+                | Id::ViewPicker
                 | Id::MoveToSpacePicker
                 | Id::DefaultAgentPicker
                 | Id::DefaultModelPicker
-                | Id::WorkAgentPicker => true,
+                | Id::MergeHistory
+                | Id::WorkAgentPicker
+                | Id::IssueBrowser => true,
                 // Drop — confirms (a stale Enter must not confirm).
                 Id::AgentAuth
                 | Id::RemoveOutOfScope
@@ -7027,6 +7730,7 @@ mod stale_input_tests {
                 | Id::BroadcastConfirm
                 | Id::BulkSpawnConfirm
                 | Id::ClaimedSpawnConfirm
+                | Id::ScopeRemovalConfirm
                 | Id::EditorRemoveConfirm
                 | Id::HelpActionConfirm => false,
                 // Drop — destructive-action menus / delete-routing lists.
@@ -7037,6 +7741,7 @@ mod stale_input_tests {
                 // Drop — outward-effect inputs (post/label/deliver).
                 Id::Reply
                 | Id::Notes
+                | Id::Hopper
                 | Id::RequestReviewers
                 | Id::AddAssignees
                 | Id::ManageLabels
@@ -7050,7 +7755,9 @@ mod stale_input_tests {
                 | Id::MoveToSpace
                 | Id::NewProject
                 | Id::NewWorkspaceRepo
+                | Id::HopperProject
                 | Id::LinearTeamRepo
+                | Id::JiraProjectRepo
                 | Id::Editor
                 // Open-with launches an external app — an outward
                 // effect a stale Enter must not trigger.
@@ -7062,6 +7769,8 @@ mod stale_input_tests {
                 | Id::StartAgentProject
                 | Id::LlmGatewayUrl
                 | Id::AddScanRoot
+                | Id::SaveViewName
+                | Id::AddRepoName
                 | Id::BroadcastSnippet
                 | Id::HandoffTarget
                 | Id::ConvertSessionRole
@@ -7079,6 +7788,7 @@ mod stale_input_tests {
                 | Id::SyncStatus
                 | Id::Messages
                 | Id::ErrorInbox
+                | Id::Stats
                 | Id::InspectLoading
                 | Id::WorktreeProgress
                 | Id::DescriptionModal
@@ -7097,6 +7807,8 @@ mod stale_input_tests {
             Id::Polling,
             Id::Reply,
             Id::Notes,
+            Id::Hopper,
+            Id::HopperProject,
             Id::NewWorkspace,
             Id::RenameWorkspace,
             Id::RenameSpace,
@@ -7106,6 +7818,7 @@ mod stale_input_tests {
             Id::NewProject,
             Id::NewWorkspaceRepo,
             Id::LinearTeamRepo,
+            Id::JiraProjectRepo,
             Id::Editor,
             Id::OpenWith,
             Id::EditorsPanel,
@@ -7159,6 +7872,7 @@ mod stale_input_tests {
             Id::HelpActionConfirm,
             Id::WorkAgentPicker,
             Id::DescriptionModal,
+            Id::IssueBrowser,
             Id::DiffReview,
             Id::PrChat,
         ] {
@@ -7625,6 +8339,8 @@ mod modal_input_responsiveness_tests {
     }
 
     fn mount_out_of_scope_confirm(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) {
+        // Known workspace so the prompt passes the mount-time liveness gate.
+        super::seed_ws(m, "github:o/r#1");
         m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
             workspace_key: WorkspaceKey::new("github:o/r#1"),
             label: "o/r#1".into(),
@@ -7866,6 +8582,7 @@ mod modal_input_responsiveness_tests {
     #[test]
     fn escaped_removal_prompt_does_not_nag_again() {
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#42");
         let key = WorkspaceKey::new("github:o/r#42");
         let emit = |m: &mut Model<tuirealm::terminal::TestTerminalAdapter>| {
             m.handle_daemon_event(IpcEvent::MergedPrRemovable {
@@ -8162,6 +8879,103 @@ mod modal_input_responsiveness_tests {
             priority: None,
             state_label: None,
         }
+    }
+
+    /// #1389: `x $` on a Space header over `--connect` must refuse with a
+    /// clear notice instead of silently toggling client-local
+    /// `agent.metered_spaces` the remote daemon never reads. (The remote
+    /// branch skips the real config write, so this test never touches
+    /// `~/.lazybox` — the notice proves the gate fired.)
+    #[test]
+    fn space_metering_toggle_is_refused_over_connect() {
+        use lazybox_core::Workspace;
+        use lazybox_tui_core::action::Action;
+
+        // Two owners so the Space tier renders and "obin-ai" is reachable.
+        let a = Workspace::from_task(
+            repo_task("obin-ai/platform#1", "obin-ai/platform"),
+            chrono::Utc::now(),
+        );
+        let b = Workspace::from_task(
+            repo_task("acme/widget#1", "acme/widget"),
+            chrono::Utc::now(),
+        );
+
+        let mut m = build_model().with_remote();
+        m.handle_daemon_event(lazybox_ipc::Event::Snapshot {
+            workspaces: vec![a, b],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        assert!(
+            m.sidebar.focus_header_row("obin-ai"),
+            "park on the Space header"
+        );
+        assert!(m.sidebar.cursor_on_space_header());
+
+        m.dispatch_action(&Action::ToggleMetering);
+
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .map(|notice| notice.message.clone())
+            .unwrap_or_default();
+        assert!(
+            notice.contains("--connect"),
+            "the refusal names the transport rather than silently no-op'ing: {notice:?}",
+        );
+        assert!(
+            !notice.contains("$ meter: on"),
+            "the Space metering must NOT have been toggled: {notice:?}",
+        );
+    }
+
+    /// `g s` on a Linear-only workspace (a Linear ticket, no GitHub PR /
+    /// issue / repo scope) must dispatch a targeted sync — not refuse with
+    /// "nothing to sync". Before the Linear branch, the gate only counted
+    /// `pr` / `gh_issues` / a github repo slug, so every Linear workspace
+    /// fell through to the refusal and `g s` silently did nothing.
+    #[test]
+    fn sync_workspace_dispatched_for_linear_only_workspace() {
+        use lazybox_core::{SessionKey, TaskId, Workspace};
+        use lazybox_ipc::Command as IpcCommand;
+        use lazybox_tui_core::action::Action;
+
+        let mut model = build_model();
+        let mut linear = repo_task("ENG-1", "acme");
+        linear.id = TaskId {
+            source: "linear".into(),
+            key: "ENG-1".into(),
+        };
+        linear.url = "https://linear.app/acme/issue/ENG-1".into();
+        linear.repo = Some("linear/ENG".into());
+        linear.node_id = Some("uuid-eng-1".into());
+
+        let workspace = Workspace::from_task(linear, chrono::Utc::now());
+        let workspace_key = workspace.key.clone();
+        assert!(workspace.pr.is_none(), "no PR");
+        assert!(workspace.gh_issues.is_empty(), "no gh issue");
+        assert!(
+            !workspace.linear_issues.is_empty(),
+            "the linear-source task lands in linear_issues"
+        );
+        model.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            workspace,
+        )));
+        let session_key: SessionKey = (&workspace_key).into();
+        assert!(model.sidebar.focus_workspace_key(&session_key));
+
+        let cmds = model.dispatch_action(&Action::SyncWorkspace);
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [IpcCommand::SyncWorkspace { workspace_key: k }] if k == &workspace_key
+            ),
+            "a Linear-only workspace must dispatch a targeted sync, got: {cmds:?}"
+        );
     }
 
     /// #1211 journey on a temp `LAZYBOX_HOME`: `x R` on a Space header
@@ -8804,6 +9618,7 @@ mod merge_focus_follow_tests {
             on_main: false,
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
+            force_new: false,
         }]);
 
         assert_eq!(model.top_modal(), Some(&Id::ClaimedSpawnConfirm));
@@ -8825,6 +9640,7 @@ mod merge_focus_follow_tests {
             on_main: false,
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
+            force_new: false,
         }]);
         assert!(matches!(
             model.handle_confirmed(true).as_slice(),
@@ -8861,6 +9677,7 @@ mod merge_focus_follow_tests {
             on_main: false,
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::ReadOnly,
+            force_new: false,
         }]);
 
         assert_ne!(model.top_modal(), Some(&Id::ClaimedSpawnConfirm));
@@ -9360,6 +10177,207 @@ mod merge_focus_follow_tests {
         ));
     }
 
+    /// The issue browser (`g i`, #1436): pressing the chord in a repo
+    /// group mounts `Id::IssueBrowser`, and its detail actions stack the
+    /// reused editors on top targeting the highlighted issue (not the
+    /// sidebar cursor), returning to the browser on dismiss.
+    #[test]
+    fn browse_repo_issues_mounts_and_dispatches_detail_actions() {
+        use crate::realm::components::issue_browser::IssueBrowserAction;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        let mut keys = Vec::new();
+        for key in ["owner/repo#10", "owner/repo#20"] {
+            let mut t = task(key, false, Duration::hours(1));
+            t.body = Some(format!("Body for {key}"));
+            let ws = Workspace::from_task(t, Utc::now());
+            keys.push(ws.key.clone());
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        }
+        let other_key = keys[0].clone(); // #10 — never the sidebar cursor
+        let ws_key = keys[1].clone(); // #20 — the focused workspace
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+
+        m.dispatch_key(KeyEvent::new(Key::Char('g'), KeyModifiers::NONE));
+        m.dispatch_key(KeyEvent::new(Key::Char('i'), KeyModifiers::NONE));
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::IssueBrowser),
+            "g i mounts the issue browser",
+        );
+
+        // Read stacks the #448 markdown reader, then returns to the browser.
+        // The reader is opened for #10 while the sidebar cursor sits on #20,
+        // so its `a` must scope to #10, not the selection (#1436).
+        m.update(Msg::IssueBrowserAction(IssueBrowserAction::Read {
+            subject: SessionKey::from(&other_key),
+            title: "owner/repo#10".into(),
+            body: "Body for owner/repo#10".into(),
+        }));
+        assert_eq!(m.modal_stack.last(), Some(&Id::DescriptionModal));
+        // `a` in the reader → Ask about this PR, scoped to the read issue.
+        m.update(Msg::AskAboutPr(Some(SessionKey::from(&other_key))));
+        assert_eq!(m.modal_stack.last(), Some(&Id::PrChat));
+        assert_eq!(
+            m.pr_chat_subject.as_ref().map(|s| s.task.id.key.as_str()),
+            Some("owner/repo#10"),
+            "the chat is about the issue being read, not the sidebar cursor #20",
+        );
+        m.update(Msg::ModalDismissed); // close PrChat
+        m.update(Msg::ModalDismissed); // close reader
+        assert_eq!(m.modal_stack.last(), Some(&Id::IssueBrowser));
+
+        // Reply targets the issue carried by the action, not the cursor.
+        let target = SessionKey::from(&ws_key);
+        m.update(Msg::IssueBrowserAction(IssueBrowserAction::Reply(
+            target.clone(),
+        )));
+        assert_eq!(m.modal_stack.last(), Some(&Id::Reply));
+        assert!(matches!(
+            &m.modal_flow,
+            Some(super::super::ModalFlow::Reply { target: t }) if *t == target
+        ));
+        m.update(Msg::ModalDismissed);
+        assert_eq!(m.modal_stack.last(), Some(&Id::IssueBrowser));
+
+        // Labels arms the async fetch, and the picker mounts on TOP of the
+        // still-open browser (the relaxed `mount_manage_labels` guard).
+        m.update(Msg::IssueBrowserAction(IssueBrowserAction::Labels(
+            ws_key.clone(),
+        )));
+        assert_eq!(m.awaiting_repo_labels.as_ref(), Some(&ws_key));
+        m.mount_manage_labels(
+            ws_key.clone(),
+            vec![lazybox_core::Label {
+                name: "bug".into(),
+                color: "red".into(),
+            }],
+        );
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::ManageLabels),
+            "the label picker stacks on the issue browser",
+        );
+        m.update(Msg::ModalDismissed);
+        assert_eq!(m.modal_stack.last(), Some(&Id::IssueBrowser));
+    }
+
+    /// The issue browser holds a mount-time snapshot (#1436); when the
+    /// underlying issue's labels change (an in-place edit reconciled, or a
+    /// background poll), an open browser must rebuild rather than keep
+    /// showing the stale chip set — the "edit didn't take" bug.
+    #[test]
+    fn issue_browser_refreshes_when_labels_change_underneath() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        use tuirealm::ratatui::layout::Rect;
+
+        fn labeled(key: &str, label: &str) -> Workspace {
+            let mut t = task(key, false, Duration::hours(1));
+            t.labels = vec![lazybox_core::Label {
+                name: label.into(),
+                color: "ccc".into(),
+            }];
+            Workspace::from_task(t, Utc::now())
+        }
+
+        fn render_browser(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) -> String {
+            let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+            term.draw(|f| m.app.view(&Id::IssueBrowser, f, Rect::new(0, 0, 120, 40)))
+                .unwrap();
+            let buf = term.backend().buffer();
+            (0..buf.area.height)
+                .map(|y| {
+                    (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        let mut m = build_model();
+        let ws = labeled("owner/repo#10", "bug");
+        let key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&key)));
+
+        m.dispatch_key(KeyEvent::new(Key::Char('g'), KeyModifiers::NONE));
+        m.dispatch_key(KeyEvent::new(Key::Char('i'), KeyModifiers::NONE));
+        assert_eq!(m.modal_stack.last(), Some(&Id::IssueBrowser));
+        let before = render_browser(&mut m);
+        assert!(before.contains("[bug]"), "initial label chip: {before}");
+
+        // Same issue re-upserted with a different label — the daemon's
+        // authoritative copy after an edit or a poll. The open browser
+        // must reflect it.
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(labeled(
+            "owner/repo#10",
+            "enhancement",
+        ))));
+        assert_eq!(m.modal_stack.last(), Some(&Id::IssueBrowser));
+        let after = render_browser(&mut m);
+        assert!(
+            after.contains("[enhancement]"),
+            "browser rebuilt with the new label: {after}"
+        );
+        assert!(
+            !after.contains("[bug]"),
+            "the stale mount-time chip is gone: {after}"
+        );
+    }
+
+    /// #1436: the repo-scoped `g i` (browse issues) is gated on the
+    /// cursor being *inside a repo group* — a gate pure `availability`
+    /// can't express (it's `None`-blind between a bare repo header, where
+    /// `g i` works, and a Space / Focused header, where it can't). Raw
+    /// availability offers it with no workspace; `leader_continuations`
+    /// drops it from the which-key popup unless `cursor_repo` resolves.
+    #[test]
+    fn browse_issues_leader_row_needs_a_repo_group() {
+        use lazybox_tui_core::action::{ActionKind, KeyStroke};
+
+        let g = KeyStroke::parse("g").expect("`g` parses");
+        let kinds = |list: Vec<(KeyStroke, &lazybox_tui_core::action::CatalogEntry)>| {
+            list.into_iter().map(|(_, e)| e.kind).collect::<Vec<_>>()
+        };
+
+        let mut m = build_model();
+        // Empty sidebar → the cursor is in no repo group.
+        assert!(m.sidebar.cursor_repo().is_none());
+        // Raw availability still offers browse-issues (it's `unwrap_or(true)`)…
+        let raw = kinds(super::super::helpers::seq_continuations_available(
+            &g,
+            PaneFocus::Sidebar,
+            &m.catalog,
+            None,
+        ));
+        assert!(
+            raw.contains(&ActionKind::BrowseRepoIssues),
+            "raw availability offers g i with no workspace",
+        );
+        // …but the gated popup drops it while `cursor_repo` is None.
+        assert!(
+            !kinds(m.leader_continuations(&g, PaneFocus::Sidebar))
+                .contains(&ActionKind::BrowseRepoIssues),
+            "g i is hidden off a repo group",
+        );
+
+        // With the cursor inside a repo group, it's offered again.
+        let ws = Workspace::from_task(task("owner/repo#7", false, Duration::hours(1)), Utc::now());
+        let key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&key)));
+        assert!(m.sidebar.cursor_repo().is_some());
+        assert!(
+            kinds(m.leader_continuations(&g, PaneFocus::Sidebar))
+                .contains(&ActionKind::BrowseRepoIssues),
+            "g i returns once the cursor is inside a repo group",
+        );
+    }
+
     /// Regression for #160: the daemon's issue→PR merge burst
     /// (`TerminalsRebadged` → `WorkspaceRemoved` → `WorkspaceMerged`)
     /// arrives as one drain batch and must leave the loop responsive —
@@ -9665,6 +10683,7 @@ mod merge_focus_follow_tests {
             on_main: false,
             model_alias: None,
             access: AgentRunAccess::ReadOnly,
+            force_new: false,
         };
 
         assert!(matches!(
@@ -9709,6 +10728,118 @@ mod merge_focus_follow_tests {
         assert!(
             m.spawn_follow_to.is_some(),
             "the spawn arms a follow target so focus lands on the new terminal",
+        );
+    }
+
+    #[test]
+    fn repo_less_hopper_assigns_project_then_resumes_work() {
+        use lazybox_core::{HopperMeta, Project};
+        use lazybox_tui_core::action::Action;
+        use tokio::sync::mpsc;
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(lazybox_ipc::EVENT_CHANNEL_CAPACITY);
+        let client = lazybox_ipc::Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        let project_key = lazybox_core::ProjectKey::local("lazybox");
+        m.handle_daemon_event(IpcEvent::ProjectUpserted(Box::new(Project::new(
+            project_key.clone(),
+            "lazybox",
+            Utc::now(),
+        ))));
+        let mut hopper = Workspace::empty(WorkspaceKey::new("write-tests"), "main", Utc::now());
+        hopper.name = "Write tests".into();
+        hopper.hopper = Some(HopperMeta {
+            position: 0,
+            completed_at: None,
+            canceled_at: None,
+        });
+        let session_key: SessionKey = (&hopper.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(
+            hopper.clone(),
+        )));
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+
+        assert!(m.dispatch_action(&Action::Work).is_empty());
+        assert_eq!(m.modal_stack.last(), Some(&Id::HopperProject));
+        let assign = m.handle_choice_picked(vec![ChoicePayload::Project(project_key.clone())]);
+        assert!(matches!(
+            assign.as_slice(),
+            [IpcCommand::AssignHopperProject { workspace_key, project_key: picked }]
+                if workspace_key == &hopper.key && picked == &project_key
+        ));
+
+        hopper.project_key = Some(project_key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(hopper)));
+        assert!(
+            std::iter::from_fn(|| cmd_rx.try_recv().ok())
+                .any(|command| matches!(command, IpcCommand::Spawn { session_key: key, .. } if key == session_key)),
+            "the original work action resumes after the persisted assignment echo",
+        );
+        assert!(m.pending_hopper_action.is_none());
+    }
+
+    #[test]
+    fn hopper_lifecycle_actions_keep_the_modal_open_for_batching() {
+        use lazybox_core::HopperMeta;
+        use tokio::sync::mpsc;
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(lazybox_ipc::EVENT_CHANNEL_CAPACITY);
+        let client = lazybox_ipc::Client::from_channels(cmd_tx, evt_rx);
+        let mut m = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        let mut hopper = Workspace::empty(WorkspaceKey::new("batch-item"), "main", Utc::now());
+        hopper.name = "Batch item".into();
+        hopper.hopper = Some(HopperMeta {
+            position: 0,
+            completed_at: None,
+            canceled_at: None,
+        });
+        let key = hopper.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(hopper)));
+        m.mount_hopper();
+        while cmd_rx.try_recv().is_ok() {}
+
+        m.update(Msg::HopperCompletionRequested {
+            workspace_key: key.clone(),
+            completed: true,
+        });
+        assert_eq!(m.modal_stack.last(), Some(&Id::Hopper));
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(IpcCommand::SetHopperCompleted { workspace_key, completed: true })
+                if workspace_key == key
+        ));
+
+        m.update(Msg::HopperCancellationRequested {
+            workspace_key: key.clone(),
+            canceled: true,
+        });
+        assert_eq!(m.modal_stack.last(), Some(&Id::Hopper));
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(IpcCommand::SetHopperCanceled { workspace_key, canceled: true })
+                if workspace_key == key
+        ));
+
+        // Deletion is destructive (kills live sessions, no undo), so unlike
+        // done/cancel it does NOT fire from the bare Msg: it pops the Hopper
+        // and mounts the shared confirm modal. No Kill is dispatched until
+        // the user answers Yes — a reflexive Ctrl-Backspace can't reap a
+        // running agent.
+        m.update(Msg::HopperDeleteRequested(key.clone()));
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "delete must wait for confirmation before dispatching Kill"
         );
     }
 
@@ -9789,9 +10920,16 @@ mod merge_focus_follow_tests {
 
         let cmds = m.dispatch_action(&Action::SpawnAgent("claude".into()));
         assert!(
-            cmds.iter()
-                .any(|command| matches!(command, Command::Spawn { .. })),
-            "spawning a sibling agent on a credit-exhausted workspace is never vetoed: {cmds:?}",
+            cmds.iter().any(|command| matches!(
+                command,
+                // #1310: the explicit `a c` key carries force_new so it starts
+                // a second agent instead of collapsing onto an idle sibling.
+                Command::Spawn {
+                    force_new: true,
+                    ..
+                }
+            )),
+            "spawning a sibling agent on a credit-exhausted workspace is never vetoed and forces a new terminal: {cmds:?}",
         );
     }
 
@@ -11131,6 +12269,225 @@ mod merge_focus_follow_tests {
         assert_eq!(m.sidebar.broadcast_selected_count(), 0);
     }
 
+    /// `g s` on a taskless, repo-scoped workspace (no PR/issue of its own —
+    /// e.g. one an agent created) triggers a sync so the daemon discovers
+    /// the repo's open issues + PRs, instead of the old "nothing to sync".
+    /// A workspace with no repo scope at all still has nothing to sync.
+    #[test]
+    fn sync_on_a_taskless_repo_workspace_syncs_the_repo() {
+        use lazybox_ipc::Event as IpcEvent;
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let mut ws = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new("github:o/r#scratch"),
+            "main",
+            chrono::Utc::now(),
+        );
+        ws.project_key = Some(lazybox_core::ProjectKey::github("o", "r"));
+        let key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&key));
+
+        let cmds = m.dispatch_action(&Action::SyncWorkspace);
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [IpcCommand::SyncWorkspace { workspace_key }]
+                    if workspace_key.as_str() == "github:o/r#scratch"
+            ),
+            "a repo-scoped taskless workspace syncs the repo, got {cmds:?}",
+        );
+
+        // No repo scope → genuinely nothing to sync.
+        let bare = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new("local:scratch#1"),
+            "main",
+            chrono::Utc::now(),
+        );
+        let bare_key = SessionKey::from(&bare.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(bare)));
+        assert!(m.sidebar.focus_workspace_key(&bare_key));
+        let cmds = m.dispatch_action(&Action::SyncWorkspace);
+        assert!(
+            cmds.is_empty(),
+            "no repo scope → nothing to sync, got {cmds:?}"
+        );
+    }
+
+    /// The combined close & kill (`x k`): one confirm issues BOTH the
+    /// upstream `DeleteOrClose` and the local `Kill` for the target row,
+    /// and the row drops optimistically — the `g d` + `x x` pair in one
+    /// action.
+    #[test]
+    fn close_and_archive_emits_both_delete_and_kill() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let ws = workspace("owner/repo#1", true, Duration::hours(1)); // an open PR
+        let key = SessionKey::from(&ws.key);
+        let wskey = ws.key.clone();
+        seed_and_select(&mut m, vec![ws]);
+
+        assert!(m.dispatch_action(&Action::CloseAndArchive).is_empty());
+        assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
+        assert!(
+            matches!(
+                &m.modal_flow,
+                Some(ModalFlow::ActionConfirm {
+                    action: Action::CloseAndArchive,
+                    ..
+                })
+            ),
+            "a CloseAndArchive confirm is stashed",
+        );
+
+        let cmds = m.handle_confirmed(true);
+        let mut kinds: Vec<&str> = cmds
+            .iter()
+            .map(|c| match c {
+                IpcCommand::DeleteOrClose { workspace_key } => {
+                    assert_eq!(workspace_key, &wskey);
+                    "delete"
+                }
+                IpcCommand::Kill { session_key } => {
+                    assert_eq!(session_key, &key);
+                    "kill"
+                }
+                other => panic!("unexpected command: {other:?}"),
+            })
+            .collect();
+        kinds.sort();
+        assert_eq!(
+            kinds,
+            vec!["delete", "kill"],
+            "both the upstream close and the local kill fire",
+        );
+        assert!(
+            m.sidebar.workspace_by_key(&key).is_none(),
+            "the row drops optimistically like archive",
+        );
+    }
+
+    /// `x k` is gated like delete-or-close: it needs an open issue/PR (a
+    /// plain archive covers the rest), so a merged PR doesn't offer it.
+    #[test]
+    fn close_and_archive_needs_an_open_issue_or_pr() {
+        use lazybox_tui_core::action::{ActionKind, availability};
+        let open_pr = workspace("owner/repo#1", true, Duration::hours(1));
+        assert!(availability(ActionKind::CloseAndArchive, Some(&open_pr)));
+
+        let mut merged = workspace("owner/repo#2", true, Duration::hours(1));
+        merged.pr.as_mut().expect("pr row").state = lazybox_core::TaskState::Merged;
+        assert!(
+            !availability(ActionKind::CloseAndArchive, Some(&merged)),
+            "nothing left to close → not offered",
+        );
+    }
+
+    /// #1351: the which-key leader popup is workspace-aware. The `g`
+    /// github group must drop its PR-only rows on an issue workspace,
+    /// and the `x` workspace group must drop its issue-only rows on a
+    /// PR — the same `availability` gate the dispatcher and the
+    /// right-click context menu already consult.
+    #[test]
+    fn leader_popup_continuations_are_workspace_contextual() {
+        use super::super::helpers::seq_continuations_available;
+        use lazybox_tui_core::action::{ActionKind, KeyStroke};
+
+        let model = build_model();
+        let g = KeyStroke::parse("g").expect("`g` parses");
+        let x = KeyStroke::parse("x").expect("`x` parses");
+
+        let kinds = |prefix: &KeyStroke, ws: &Workspace| -> Vec<ActionKind> {
+            seq_continuations_available(prefix, PaneFocus::Sidebar, &model.catalog, Some(ws))
+                .into_iter()
+                .map(|(_, e)| e.kind)
+                .collect()
+        };
+
+        let issue = workspace("owner/repo#1", false, Duration::hours(1));
+        let issue_g = kinds(&g, &issue);
+        for pr_only in [
+            ActionKind::MergePr,
+            ActionKind::ClosePr,
+            ActionKind::UpdateBranch,
+            ActionKind::ConvertToDraft,
+            ActionKind::MarkReady,
+            ActionKind::RequestReviewers,
+        ] {
+            assert!(
+                !issue_g.contains(&pr_only),
+                "issue workspace must not advertise {pr_only:?} under `g`",
+            );
+        }
+        // Rows that DO apply to an issue keep the leader alive.
+        assert!(issue_g.contains(&ActionKind::DeleteOrClose));
+        assert!(issue_g.contains(&ActionKind::OpenInBrowser));
+
+        let pr = workspace("owner/repo#2", true, Duration::hours(1));
+        let pr_x = kinds(&x, &pr);
+        for issue_only in [ActionKind::CloseIssue, ActionKind::CollapseIntoPr] {
+            assert!(
+                !pr_x.contains(&issue_only),
+                "PR workspace must not advertise {issue_only:?} under `x`",
+            );
+        }
+        // The PR-only `g` rows show on a PR.
+        let pr_g = kinds(&g, &pr);
+        assert!(pr_g.contains(&ActionKind::MergePr));
+        assert!(pr_g.contains(&ActionKind::ClosePr));
+    }
+
+    /// #1351 regression: because the `g` popup is now workspace-aware, a
+    /// poll that lands mid-leader can reshape the continuation list under
+    /// the fixed highlight index. Pressing `Enter` must not then fire
+    /// whatever slid into that index — the highlight is dropped on the
+    /// reshaping upsert so a stale `Enter` disarms harmlessly.
+    #[test]
+    fn poll_under_armed_leader_drops_stale_highlight() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let open_pr = workspace("owner/repo#1", true, Duration::hours(1));
+        let sk: SessionKey = (&open_pr.key).into();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(open_pr)));
+        assert!(m.sidebar.focus_workspace_key(&sk));
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        while server.rx.try_recv().is_ok() {}
+
+        // Arm `g` and navigate so a row is highlighted.
+        m.dispatch_key(KeyEvent::new(Key::Char('g'), KeyModifiers::NONE));
+        m.dispatch_key(KeyEvent::new(Key::Down, KeyModifiers::NONE));
+        assert_eq!(m.leader_highlight(), Some(0), "a row is highlighted");
+
+        // A poll re-reports the same workspace with its PR now merged —
+        // the PR-only rows (merge/close/update/draft/ready/reviewers/
+        // delete) drop out, so the list this highlight indexed into is
+        // gone.
+        let mut merged = workspace("owner/repo#1", true, Duration::hours(1));
+        merged.pr.as_mut().expect("pr row").state = lazybox_core::TaskState::Merged;
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(merged)));
+        assert_eq!(
+            m.leader_highlight(),
+            None,
+            "the reshaping poll clears the stale highlight",
+        );
+
+        // Enter now disarms without firing a surprise action.
+        m.dispatch_key(KeyEvent::new(Key::Enter, KeyModifiers::NONE));
+        assert!(m.leader_pending().is_none(), "Enter disarms the leader");
+        assert!(m.top_modal().is_none(), "no modal-mounting action fired");
+        assert!(
+            server.rx.try_recv().is_err(),
+            "no command dispatched by the stale Enter",
+        );
+    }
+
     /// #1243: the bulk `g d` confirm renders the mixed close/delete
     /// split — PRs are closed, issues deleted, and ineligible targets
     /// counted as skipped — so Yes is never a blind guess.
@@ -11432,12 +12789,18 @@ mod merge_focus_follow_tests {
         );
     }
 
-    /// Issue #947: `g m` on a PR lazybox already knows is conflicting is
-    /// a doomed dispatch. Instead of a merge confirm that can only fail,
-    /// route straight to the one-key resolve prompt — no `MergePr`
-    /// command leaves.
+    /// Issue #1394: `g m` on a PR whose *cached* mergeable says
+    /// "conflicting" must NOT dead-end into the resolve prompt off stale
+    /// poll data — that conflict may already be cleared on GitHub. The
+    /// client can't re-query GitHub, so `g m` goes through the normal
+    /// merge confirm→send path; the daemon re-checks live state and only
+    /// a *fresh* conflict comes back as `PrMergeFailed { conflict }`,
+    /// which opens the resolve prompt (covered by
+    /// `pr_merge_failed_with_conflict_offers_resolve`). This is the
+    /// successor to the old #947 client short-circuit, which routed off
+    /// stale data.
     #[test]
-    fn g_m_on_a_conflicting_pr_offers_the_resolve_prompt() {
+    fn g_m_on_a_cached_conflicting_pr_does_not_dead_end_into_resolve() {
         use lazybox_tui_core::action::Action;
 
         let mut m = build_model();
@@ -11447,18 +12810,25 @@ mod merge_focus_follow_tests {
         assert!(m.sidebar.focus_workspace_key(&sk));
 
         let cmds = m.dispatch_action(&Action::MergePr);
-        assert!(
-            cmds.is_empty(),
-            "a doomed merge must not dispatch: {cmds:?}",
-        );
+        assert!(cmds.is_empty(), "merge gates on confirm first: {cmds:?}");
+        // The standard destructive merge confirm — NOT the stale-data
+        // conflict-resolve dead-end.
         assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::ActionConfirm),
+            "g m opens the merge confirm even when cached state says conflict",
+        );
+        assert_ne!(
             m.top_modal(),
             Some(&Id::ConflictResolve),
-            "the resolve prompt is offered instead of a merge confirm",
+            "g m must not open the resolve prompt off cached mergeable (#1394)",
         );
         assert!(matches!(
             m.modal_flow,
-            Some(ModalFlow::ConflictResolve { ref workspace }) if *workspace == sk,
+            Some(ModalFlow::ActionConfirm {
+                action: Action::MergePr,
+                ..
+            }),
         ));
     }
 
@@ -13057,7 +14427,8 @@ mod leader_tile_tests {
 
     /// `]]` + `j`/`k` move a highlight through the command popup and keep
     /// the leader armed; `Enter` fires the highlighted command (#343).
-    /// Row 0 is `s` (snippets); `f` (focus mode) is row 5.
+    /// Row 0 is `s` (snippets); the test resolves the focus row by key so
+    /// adding another command before it cannot silently retarget Enter.
     #[test]
     fn terminal_leader_jk_highlight_and_enter_fire() {
         let (mut m, mut server) = build_model_with_terminals(1);
@@ -13079,11 +14450,15 @@ mod leader_tile_tests {
         assert_eq!(m.terminal_leader_highlight(), Some(1));
         m.dispatch_key(RealmKey::new(Key::Char('k'), RealmMods::NONE));
         assert_eq!(m.terminal_leader_highlight(), Some(0));
-        // Menu order: s,l,r,h,u,f,… — step to `focus mode` at index 5.
-        for _ in 0..5 {
+        let focus_index = m
+            .terminal_leader_menu_rows()
+            .iter()
+            .position(|(key, _)| key == "f")
+            .expect("focus-mode row");
+        for _ in 0..focus_index {
             m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
         }
-        assert_eq!(m.terminal_leader_highlight(), Some(5));
+        assert_eq!(m.terminal_leader_highlight(), Some(focus_index));
 
         assert!(!m.focus_mode, "focus mode starts off");
         m.dispatch_key(RealmKey::new(Key::Enter, RealmMods::NONE));
@@ -13132,27 +14507,31 @@ mod leader_tile_tests {
         while server.rx.try_recv().is_ok() {}
         arm_leader(&mut m);
 
-        // Splits menu order: s,l,r,h,u,f,q,`,|,- then the `move tile`
-        // aggregate at index 10, then `x` at index 11. Ten `j` presses
-        // reach index 9.
-        for _ in 0..10 {
+        let rows = m.terminal_leader_menu_rows();
+        let aggregate_index = rows
+            .iter()
+            .position(|(key, _)| key.contains('←'))
+            .expect("move-tile aggregate row");
+        let before = aggregate_index - 1;
+        let after = aggregate_index + 1;
+        for _ in 0..aggregate_index {
             m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
         }
         assert_eq!(
             m.terminal_leader_highlight(),
-            Some(9),
+            Some(before),
             "reached the last row before the aggregate"
         );
         m.dispatch_key(RealmKey::new(Key::Char('j'), RealmMods::NONE));
         assert_eq!(
             m.terminal_leader_highlight(),
-            Some(11),
-            "`j` jumps over the aggregate at index 10"
+            Some(after),
+            "`j` jumps over the aggregate row"
         );
         m.dispatch_key(RealmKey::new(Key::Char('k'), RealmMods::NONE));
         assert_eq!(
             m.terminal_leader_highlight(),
-            Some(9),
+            Some(before),
             "`k` skips it going back too"
         );
     }
@@ -13611,6 +14990,41 @@ mod terminal_url_mouse_tests {
         assert!(
             hstart.0 < rx && hend.0 < rx,
             "the highlight never crosses into the right tile (rx={rx}): {hstart:?} {hend:?}",
+        );
+
+        // Endpoint clamping alone is not enough: `paint_selection` fills the
+        // MIDDLE rows of a multi-row selection edge-to-edge, so a highlight
+        // clipped to the whole terminal pane bleeds those rows into the right
+        // tile even when both endpoints sit left of `rx`. Render the real
+        // overlay (`model.view()`) and compare reverse-video cells in the
+        // right tile WITH the drag vs a no-drag baseline: the selection must
+        // add none. (A bare count would false-positive on the focused tile's
+        // own chrome; the diff isolates the selection's contribution.)
+        let right_reversed = |model: &mut TestModel| -> usize {
+            model.view();
+            let buffer = model.terminal.raw().backend().buffer();
+            let mut count = 0;
+            for row in pane.y..pane.y.saturating_add(pane.height) {
+                for col in rx..pane.x.saturating_add(pane.width) {
+                    if buffer[(col, row)]
+                        .style()
+                        .add_modifier
+                        .contains(tuirealm::ratatui::style::Modifier::REVERSED)
+                    {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        };
+        let with_drag = right_reversed(&mut model);
+        let saved_drag = model.terminal_drag.take();
+        let baseline = right_reversed(&mut model);
+        model.terminal_drag = saved_drag;
+        assert_eq!(
+            with_drag, baseline,
+            "the selection highlight leaked reverse-video into the right tile \
+             (with_drag={with_drag}, baseline={baseline}, rx={rx})",
         );
 
         // Focus divergence mid-gesture must not redirect the copy: if an
@@ -14497,6 +15911,9 @@ mod queued_prompt_drain_tests {
     }
 
     fn queue_removal_prompt(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) {
+        // The workspace must be known for the prompt to pass the
+        // mount-time liveness gate (no orphaned "remove gone workspace?").
+        super::seed_ws(m, "github:o/r#9");
         m.handle_daemon_event(IpcEvent::WorkspaceOutOfScope {
             workspace_key: WorkspaceKey::new("github:o/r#9"),
             label: "o/r#9".into(),
@@ -14508,6 +15925,8 @@ mod queued_prompt_drain_tests {
     #[test]
     fn removal_prompt_mounts_after_a_choice_picker_resolves() {
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         // A snooze picker is open when the daemon prompt arrives.
         m.modal_flow = Some(ModalFlow::Snooze {
             workspace: SessionKey::from("github:o/r#1"),
@@ -14540,6 +15959,8 @@ mod queued_prompt_drain_tests {
     #[test]
     fn removal_prompt_mounts_after_an_input_submit() {
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         // The new-project input is open when the prompt arrives.
         m.modal_stack.push(Id::NewProject);
         queue_removal_prompt(&mut m);
@@ -14556,6 +15977,8 @@ mod queued_prompt_drain_tests {
     #[test]
     fn removal_prompt_mounts_after_a_textarea_submit() {
         let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#1");
+        super::seed_ws(&mut m, "github:o/r#2");
         m.modal_flow = Some(ModalFlow::Reply {
             target: SessionKey::from("github:o/r#1"),
         });
@@ -17169,6 +18592,7 @@ mod worktree_progress_recovery_tests {
             initial_prompt: None,
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         }
     }
 
@@ -17684,6 +19108,7 @@ mod worktree_progress_recovery_tests {
             initial_prompt: Some("fix it".into()),
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         });
         m.handle_daemon_event(IpcEvent::WorktreeProgress {
             session_key,
@@ -17730,6 +19155,7 @@ mod worktree_progress_recovery_tests {
             initial_prompt: Some("fix it".into()),
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         });
         m.handle_daemon_event(IpcEvent::WorktreeProgress {
             session_key,
@@ -19857,7 +21283,7 @@ mod pr_chat_tests {
         let key = seed_pr_workspace(&mut m);
         let _ = drain(&mut server);
 
-        m.open_pr_chat();
+        m.open_pr_chat(None);
         assert_eq!(m.modal_stack.last(), Some(&Id::PrChat));
         let inspected = drain(&mut server).into_iter().any(|cmd| {
             matches!(
@@ -19877,7 +21303,7 @@ mod pr_chat_tests {
         let (mut m, mut server) = build();
         seed_pr_workspace(&mut m);
         let _ = drain(&mut server);
-        m.open_pr_chat();
+        m.open_pr_chat(None);
         let _ = drain(&mut server);
 
         // Diff still pending → the question is held, no run yet.
@@ -19951,7 +21377,7 @@ mod pr_chat_tests {
         let (mut m, mut server) = build();
         seed_pr_workspace(&mut m);
         let _ = drain(&mut server);
-        m.open_pr_chat();
+        m.open_pr_chat(None);
         let _ = drain(&mut server);
 
         let _ = m.handle_pr_chat_question("what changed?".into(), HelpQuestionKind::NewQuestion);
@@ -20003,7 +21429,7 @@ mod pr_chat_tests {
         let (mut m, mut server) = build();
         seed_pr_workspace(&mut m);
         let _ = drain(&mut server);
-        m.open_pr_chat();
+        m.open_pr_chat(None);
         m.pr_chat_diff = Some(Some(sample_diff()));
         let _ = m.handle_pr_chat_question("first?".into(), HelpQuestionKind::NewQuestion);
         let request_id = m.pr_chat_request.clone().expect("start request");
@@ -25270,5 +26696,201 @@ mod focus_layout_tests {
             let restored = *back.get(&TerminalId(1)).expect("exit resize");
             assert_ne!(restored, left, "exit re-fans the PTY size out");
         });
+    }
+}
+
+mod pr_details_debounce_tests {
+    //! Regression (#scale): the lazy `FetchPrDetails` back-fill must not
+    //! fire per row *crossed* while scrolling. `sync_panes` used to send
+    //! one Interactive-priority GraphQL request the instant the cursor
+    //! landed on any unfetched PR row, so holding `j` through a crowded
+    //! sidebar queued hundreds of requests, self-throttled against the
+    //! daemon's request pacer, and could park the whole GitHub source.
+    //! The trigger is now a dwell debounce: `sync_panes` only ARMS a
+    //! candidate; `tick_pr_details` fires it after the cursor has rested
+    //! on the same row for `PR_DETAILS_DEBOUNCE`.
+    use super::super::Model;
+    use super::super::events::PR_DETAILS_DEBOUNCE;
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::{Client, Command as IpcCommand, EVENT_CHANNEL_CAPACITY, Event as IpcEvent};
+    use tokio::sync::mpsc;
+    use tuirealm::ratatui::layout::Size;
+
+    fn model_with_cmd_rx() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        mpsc::UnboundedReceiver<IpcCommand>,
+    ) {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let model = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        (model, cmd_rx)
+    }
+
+    /// Minimal PR workspace: a `/pull/` URL routes the task into the
+    /// workspace's `pr` slot, which is what arms the lazy fetch.
+    fn pr_workspace(key: &str) -> lazybox_core::Workspace {
+        use chrono::Utc;
+        let (path, num) = key.rsplit_once('#').unwrap_or((key, "1"));
+        let task = lazybox_core::Task {
+            author: String::new(),
+            id: lazybox_core::TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: format!("task: {key}"),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/{path}/pull/{num}"),
+            repo: Some("owner/repo".into()),
+            branch: Some("main".into()),
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            merge_blocked: false,
+            approval_policy: Default::default(),
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            kind: None,
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            parent: None,
+            priority: None,
+            state_label: None,
+        };
+        lazybox_core::Workspace::from_task(task, Utc::now())
+    }
+
+    fn detail_fetches(rx: &mut mpsc::UnboundedReceiver<IpcCommand>) -> Vec<String> {
+        let mut keys = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            if let IpcCommand::FetchPrDetails { workspace_key } = cmd {
+                keys.push(workspace_key.as_str().to_string());
+            }
+        }
+        keys
+    }
+
+    /// Force the armed candidate past the dwell threshold, as the other
+    /// time-based model tests do by backdating their `Instant` fields.
+    fn backdate_pending(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) {
+        m.pending_pr_details = m
+            .pending_pr_details
+            .take()
+            .map(|(key, armed)| (key, armed - (PR_DETAILS_DEBOUNCE + PR_DETAILS_DEBOUNCE)));
+    }
+
+    fn seeded_model() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        mpsc::UnboundedReceiver<IpcCommand>,
+        Vec<SessionKey>,
+    ) {
+        let (mut m, cmd_rx) = model_with_cmd_rx();
+        let mut keys = Vec::new();
+        for n in 1..=3 {
+            let ws = pr_workspace(&format!("owner/repo#{n}"));
+            keys.push(SessionKey::from(&ws.key));
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        }
+        (m, cmd_rx, keys)
+    }
+
+    /// Crossing rows sends nothing: each selection change re-arms the
+    /// candidate (cancelling the previous row's), and without dwell the
+    /// tick never fires.
+    #[test]
+    fn scrolling_across_pr_rows_sends_no_detail_fetch() {
+        let (mut m, mut cmd_rx, keys) = seeded_model();
+        for key in &keys {
+            assert!(m.sidebar.focus_workspace_key(key), "row exists");
+            m.sync_panes();
+            m.tick_pr_details();
+        }
+        assert!(
+            detail_fetches(&mut cmd_rx).is_empty(),
+            "no FetchPrDetails may fire while the cursor is moving"
+        );
+        assert!(
+            m.pending_pr_details
+                .as_ref()
+                .is_some_and(|(k, _)| SessionKey::from(k) == keys[2]),
+            "the last row crossed stays armed for the dwell fire"
+        );
+    }
+
+    /// Resting on a row fires exactly one fetch for that row, and only
+    /// once — the fetched set dedupes any later re-visit.
+    #[test]
+    fn dwell_fires_once_for_the_rested_row() {
+        let (mut m, mut cmd_rx, keys) = seeded_model();
+        for key in &keys {
+            assert!(m.sidebar.focus_workspace_key(key), "row exists");
+            m.sync_panes();
+        }
+        backdate_pending(&mut m);
+        m.tick_pr_details();
+        assert_eq!(
+            detail_fetches(&mut cmd_rx),
+            vec![keys[2].to_string()],
+            "exactly one fetch, for the row the cursor rests on"
+        );
+        assert!(m.pending_pr_details.is_none(), "candidate is consumed");
+
+        // Re-visiting the fetched row must not re-arm.
+        assert!(m.sidebar.focus_workspace_key(&keys[0]), "row exists");
+        m.sync_panes();
+        assert!(m.sidebar.focus_workspace_key(&keys[2]), "row exists");
+        m.sync_panes();
+        assert!(
+            m.pending_pr_details
+                .as_ref()
+                .is_none_or(|(k, _)| SessionKey::from(k) != keys[2]),
+            "a fetched workspace never re-arms"
+        );
+    }
+
+    /// A workspace removed while its fetch is armed-but-unfired must not
+    /// fetch against the dead key on the next tick.
+    #[test]
+    fn removed_workspace_cancels_armed_fetch() {
+        let (mut m, mut cmd_rx, keys) = seeded_model();
+        assert!(m.sidebar.focus_workspace_key(&keys[1]), "row exists");
+        m.sync_panes();
+        assert!(m.pending_pr_details.is_some(), "candidate armed");
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(lazybox_core::WorkspaceKey::new(
+            keys[1].to_string(),
+        )));
+        // The removal re-lands the cursor on a NEIGHBORING live row,
+        // which may legitimately arm (and later fire) a fetch for that
+        // row — the invariant is only that the DEAD key never fetches.
+        backdate_pending(&mut m);
+        m.tick_pr_details();
+        assert!(
+            !detail_fetches(&mut cmd_rx).contains(&keys[1].to_string()),
+            "no fetch may fire for a removed workspace"
+        );
     }
 }

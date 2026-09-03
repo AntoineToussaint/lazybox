@@ -38,6 +38,7 @@ pub enum FilterAxis {
     Priority,
     Label,
     LinearState,
+    Person,
 }
 
 impl FilterAxis {
@@ -50,8 +51,25 @@ impl FilterAxis {
             FilterAxis::Priority => "Priority",
             FilterAxis::Label => "Label",
             FilterAxis::LinearState => "Linear state",
+            FilterAxis::Person => "People",
         }
     }
+}
+
+/// Does `login` have any relationship to this task? The union GitHub's
+/// `involves:` qualifier should have been: author ∨ requested reviewer
+/// ∨ submitted reviewer ∨ assignee — one person-token answers
+/// "everything alice touches", with review-requested included (the
+/// role GitHub's own `involves:` famously misses). Case-insensitive,
+/// matching GitHub login semantics.
+pub fn task_involves(task: &lazybox_core::Task, login: &str) -> bool {
+    task.author.eq_ignore_ascii_case(login)
+        || task.reviewers.iter().any(|r| r.eq_ignore_ascii_case(login))
+        || task
+            .reviews
+            .iter()
+            .any(|r| r.login.eq_ignore_ascii_case(login))
+        || task.assignees.iter().any(|a| a.eq_ignore_ascii_case(login))
 }
 
 /// One toggleable predicate over a workspace. Variants are grouped by
@@ -67,6 +85,12 @@ pub enum Filter {
     /// on a currently-live PTY — a workspace with a dormant agent
     /// session still matches even when its runner badge is dark.
     WithAgent,
+    /// A coding agent in this workspace is *currently working* — a LIVE
+    /// PTY reading `AgentState::Working`, not merely a recorded session
+    /// (that's `WithAgent`). Same live source as the sidebar runner
+    /// spinner and the `Shift-F`/attention predicates, so it never reads
+    /// 0 while an agent is actually running.
+    AgentWorking,
     /// Primary GitHub task has at least one active local or remote fleet
     /// claim (including a conservatively preserved legacy claim).
     Claimed,
@@ -97,6 +121,12 @@ pub enum Filter {
     BehindBase,
     /// A large diff — at least `BIG_DIFF_LINES` lines changed.
     BigDiff,
+    /// Currently snoozed (`snoozed_until` in the future). The snoozed
+    /// lens (#scale): toggling it in the `f` menu shows snoozed rows in
+    /// place — `compute_visible` admits them into the Inbox while this
+    /// filter is active — with their wake time, so reverting a snooze
+    /// is `f` → snoozed → `z`, not a mailbox expedition.
+    Snoozed,
     // ── Role ───────────────────────────────────────────────────────
     Author,
     Reviewer,
@@ -116,8 +146,9 @@ impl Filter {
     /// Every fixed filter, in menu order (State, Role, Kind, Priority).
     /// Value-driven axes (Label, Linear state) are enumerated separately
     /// from the candidate set — see [`FilterSet`] and `Sidebar`.
-    pub const ALL: [Filter; 25] = [
+    pub const ALL: [Filter; 27] = [
         Filter::WithAgent,
+        Filter::AgentWorking,
         Filter::Claimed,
         Filter::CiFailing,
         Filter::CiRunning,
@@ -132,6 +163,7 @@ impl Filter {
         Filter::NeedsReply,
         Filter::BehindBase,
         Filter::BigDiff,
+        Filter::Snoozed,
         Filter::Author,
         Filter::Reviewer,
         Filter::Assignee,
@@ -147,6 +179,7 @@ impl Filter {
     pub fn axis(self) -> FilterAxis {
         match self {
             Filter::WithAgent
+            | Filter::AgentWorking
             | Filter::Claimed
             | Filter::CiFailing
             | Filter::CiRunning
@@ -160,7 +193,8 @@ impl Filter {
             | Filter::InProgress
             | Filter::NeedsReply
             | Filter::BehindBase
-            | Filter::BigDiff => FilterAxis::State,
+            | Filter::BigDiff
+            | Filter::Snoozed => FilterAxis::State,
             Filter::Author | Filter::Reviewer | Filter::Assignee | Filter::Mentioned => {
                 FilterAxis::Role
             }
@@ -187,6 +221,7 @@ impl Filter {
     pub fn label(self) -> &'static str {
         match self {
             Filter::WithAgent => "with-agent",
+            Filter::AgentWorking => "working",
             Filter::Claimed => "claimed",
             Filter::CiFailing => "ci-failing",
             Filter::CiRunning => "ci-running",
@@ -201,6 +236,7 @@ impl Filter {
             Filter::NeedsReply => "needs-reply",
             Filter::BehindBase => "behind-base",
             Filter::BigDiff => "big-diff",
+            Filter::Snoozed => "snoozed",
             Filter::Author => "author",
             Filter::Reviewer => "reviewer",
             Filter::Assignee => "assignee",
@@ -223,6 +259,7 @@ impl Filter {
                 .sessions
                 .iter()
                 .any(|s| matches!(s.kind, lazybox_core::SessionKind::Agent { .. })),
+            Filter::AgentWorking => crate::agent_attention::workspace_is_working(w, ctx.agents),
             Filter::Claimed => w.is_claimed(),
             Filter::CiFailing => {
                 task.is_some_and(|t| matches!(t.ci, CiStatus::Failure | CiStatus::Mixed))
@@ -250,6 +287,7 @@ impl Filter {
             Filter::NeedsReply => task.is_some_and(|t| t.needs_reply),
             Filter::BehindBase => task.is_some_and(|t| t.is_behind_base),
             Filter::BigDiff => task.is_some_and(|t| t.additions + t.deletions >= BIG_DIFF_LINES),
+            Filter::Snoozed => w.is_snoozed(ctx.now),
             Filter::Author => task.is_some_and(|t| t.role == TaskRole::Author),
             Filter::Reviewer => task.is_some_and(|t| t.role == TaskRole::Reviewer),
             Filter::Assignee => task.is_some_and(|t| t.role == TaskRole::Assignee),
@@ -265,11 +303,15 @@ impl Filter {
 }
 
 /// Everything [`Filter::matches`] needs beyond the workspace itself:
-/// the sidebar-local agent-state map (for the `asking` predicate).
-/// Bundled so the predicate stays a pure function.
+/// the sidebar-local agent-state map (for the `asking` predicate) and
+/// the evaluation clock (for the `snoozed` predicate — an EXPIRED
+/// `snoozed_until` must read as awake, and stale timestamps are never
+/// cleared in the store). Bundled so the predicate stays a pure
+/// function.
 pub struct FilterCtx<'a> {
     pub w: &'a Workspace,
     pub agents: &'a HashMap<SessionKey, lazybox_ipc::AgentState>,
+    pub now: chrono::DateTime<chrono::Utc>,
 }
 
 /// One row of the filter menu, carrying everything a non-TUI client
@@ -302,12 +344,16 @@ impl Filter {
         agents: &HashMap<SessionKey, lazybox_ipc::AgentState>,
         active: &FilterSet,
     ) -> Vec<FilterMenuItem> {
+        // Menu counts are display-only, so the wall clock here (rather
+        // than a caller-supplied instant) can't skew anything that
+        // persists — and it keeps the desktop's call site unchanged.
+        let now = chrono::Utc::now();
         Filter::ALL
             .into_iter()
             .map(|filter| {
                 let count = candidates
                     .iter()
-                    .filter(|w| filter.matches(&FilterCtx { w, agents }))
+                    .filter(|w| filter.matches(&FilterCtx { w, agents, now }))
                     .count() as u32;
                 FilterMenuItem {
                     filter,
@@ -330,6 +376,9 @@ pub enum FilterEntry {
     Predicate(Filter),
     Label(String),
     LinearState(String),
+    /// A login on the People axis — matched with the
+    /// [`task_involves`] role-union (author ∨ reviewer ∨ assignee).
+    Person(String),
 }
 
 impl FilterEntry {
@@ -338,6 +387,7 @@ impl FilterEntry {
             FilterEntry::Predicate(f) => f.axis(),
             FilterEntry::Label(_) => FilterAxis::Label,
             FilterEntry::LinearState(_) => FilterAxis::LinearState,
+            FilterEntry::Person(_) => FilterAxis::Person,
         }
     }
 
@@ -347,7 +397,45 @@ impl FilterEntry {
             FilterEntry::Predicate(f) => f.label().to_string(),
             FilterEntry::Label(name) => name.clone(),
             FilterEntry::LinearState(name) => name.clone(),
+            FilterEntry::Person(login) => format!("@{login}"),
         }
+    }
+
+    /// Stable string token for persisting this entry in the config's
+    /// `ui.last_lens` (which must stay free of UI-crate types).
+    /// Predicates use their label verbatim; value axes carry a prefix
+    /// so a label literally named "unread" can't be confused with the
+    /// predicate. Round-trips through [`Self::from_token`].
+    pub fn to_token(&self) -> String {
+        match self {
+            FilterEntry::Predicate(f) => f.label().to_string(),
+            FilterEntry::Label(name) => format!("label:{name}"),
+            FilterEntry::LinearState(name) => format!("linear-state:{name}"),
+            FilterEntry::Person(login) => format!("person:{login}"),
+        }
+    }
+
+    /// Parse a persisted lens token. `None` for anything unrecognized —
+    /// a stale token (predicate renamed, hand-edited config) must
+    /// degrade to "that filter is gone", never wedge startup.
+    pub fn from_token(token: &str) -> Option<Self> {
+        if let Some(name) = token.strip_prefix("label:") {
+            return Some(FilterEntry::Label(name.to_string()));
+        }
+        if let Some(name) = token.strip_prefix("linear-state:") {
+            return Some(FilterEntry::LinearState(name.to_string()));
+        }
+        if let Some(login) = token.strip_prefix("person:") {
+            // Normalize to the case-insensitive identity (see
+            // `FilterSet::replace_entries`) so a hand-edited `person:Alice`
+            // token collapses onto the discovered `alice`, not a phantom
+            // second row.
+            return Some(FilterEntry::Person(login.to_ascii_lowercase()));
+        }
+        Filter::ALL
+            .into_iter()
+            .find(|f| f.label() == token)
+            .map(FilterEntry::Predicate)
     }
 }
 
@@ -362,6 +450,8 @@ pub struct FilterSet {
     labels: BTreeSet<String>,
     #[serde(default)]
     linear_states: BTreeSet<String>,
+    #[serde(default)]
+    people: BTreeSet<String>,
 }
 
 impl FilterSet {
@@ -372,11 +462,15 @@ impl FilterSet {
             active: BTreeSet::new(),
             labels: BTreeSet::new(),
             linear_states: BTreeSet::new(),
+            people: BTreeSet::new(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.active.is_empty() && self.labels.is_empty() && self.linear_states.is_empty()
+        self.active.is_empty()
+            && self.labels.is_empty()
+            && self.linear_states.is_empty()
+            && self.people.is_empty()
     }
 
     pub fn toggle(&mut self, f: Filter) {
@@ -385,20 +479,28 @@ impl FilterSet {
         }
     }
 
+    /// Whether one fixed predicate is active. `compute_visible` reads
+    /// this for [`Filter::Snoozed`] to widen mailbox membership.
+    pub fn has(&self, f: Filter) -> bool {
+        self.active.contains(&f)
+    }
+
     /// Replace the whole set with fixed `filters` (an empty iterator
     /// clears everything, including the value axes).
     pub fn replace(&mut self, filters: impl IntoIterator<Item = Filter>) {
         self.active = filters.into_iter().collect();
         self.labels.clear();
         self.linear_states.clear();
+        self.people.clear();
     }
 
     /// Replace the whole set from menu entries (fixed predicates + label
-    /// / Linear-state values). An empty iterator clears all axes.
+    /// / Linear-state / person values). An empty iterator clears all axes.
     pub fn replace_entries(&mut self, entries: impl IntoIterator<Item = FilterEntry>) {
         self.active.clear();
         self.labels.clear();
         self.linear_states.clear();
+        self.people.clear();
         for entry in entries {
             match entry {
                 FilterEntry::Predicate(f) => {
@@ -410,13 +512,25 @@ impl FilterSet {
                 FilterEntry::LinearState(name) => {
                     self.linear_states.insert(name);
                 }
+                FilterEntry::Person(login) => {
+                    // A GitHub login is case-insensitive, so the People
+                    // set's identity is the ASCII-lowercased login — the
+                    // same normalization `task_involves` matches with. The
+                    // menu discovery lowercases its bucket keys to match,
+                    // so an active login and its discovered row are ONE
+                    // entry regardless of the case a token or task field
+                    // carried; without this a `person:Alice` token and a
+                    // discovered `alice` render as two rows, the active one
+                    // showing an unchecked, count-0 duplicate.
+                    self.people.insert(login.to_ascii_lowercase());
+                }
             }
         }
     }
 
     /// Number of active filters across every axis.
     pub fn len(&self) -> usize {
-        self.active.len() + self.labels.len() + self.linear_states.len()
+        self.active.len() + self.labels.len() + self.linear_states.len() + self.people.len()
     }
 
     /// Active fixed filters in [`Filter::ALL`] (menu) order.
@@ -434,6 +548,11 @@ impl FilterSet {
         &self.linear_states
     }
 
+    /// Selected logins (People axis).
+    pub fn people(&self) -> &BTreeSet<String> {
+        &self.people
+    }
+
     /// Whether `entry` is currently active — drives the menu's
     /// pre-checked rows.
     pub fn contains_entry(&self, entry: &FilterEntry) -> bool {
@@ -441,15 +560,17 @@ impl FilterSet {
             FilterEntry::Predicate(f) => self.active.contains(f),
             FilterEntry::Label(name) => self.labels.contains(name),
             FilterEntry::LinearState(name) => self.linear_states.contains(name),
+            FilterEntry::Person(login) => self.people.contains(&login.to_ascii_lowercase()),
         }
     }
 
     /// The header chips for the active filters, in menu order (fixed
-    /// predicates first, then label then Linear-state values).
+    /// predicates first, then label / Linear-state / person values).
     pub fn chips(&self) -> Vec<String> {
         let mut chips: Vec<String> = self.iter().map(|f| f.label().to_string()).collect();
         chips.extend(self.labels.iter().cloned());
         chips.extend(self.linear_states.iter().cloned());
+        chips.extend(self.people.iter().map(|login| format!("@{login}")));
         chips
     }
 
@@ -497,6 +618,18 @@ impl FilterSet {
                 .primary_task()
                 .and_then(|t| t.state_label.as_deref())
                 .is_some_and(|s| self.linear_states.contains(s));
+            if !matched {
+                return false;
+            }
+        }
+        // People axis: OR within — the primary task must involve at
+        // least one selected login (author ∨ reviewer ∨ assignee, the
+        // [`task_involves`] role-union).
+        if !self.people.is_empty() {
+            let matched = ctx
+                .w
+                .primary_task()
+                .is_some_and(|t| self.people.iter().any(|login| task_involves(t, login)));
             if !matched {
                 return false;
             }
@@ -624,12 +757,51 @@ mod tests {
     }
 
     #[test]
+    fn agent_working_matches_live_working_state_not_recorded_sessions() {
+        use lazybox_ipc::AgentState;
+        let ws = workspace_with("owner/repo#1", |_| {});
+        let sk = lazybox_core::SessionKey::from(&ws.key);
+
+        // No live agent state → does not match (this is the case where the
+        // recorded-session `WithAgent` filter reads 0 but a spinner is live).
+        let empty = HashMap::new();
+        assert!(!Filter::AgentWorking.matches(&FilterCtx {
+            w: &ws,
+            agents: &empty,
+            now: now(),
+        }));
+
+        // A live agent reading `Working` → matches.
+        let working = HashMap::from([(sk.clone(), AgentState::Working)]);
+        assert!(Filter::AgentWorking.matches(&FilterCtx {
+            w: &ws,
+            agents: &working,
+            now: now(),
+        }));
+
+        // Every other live state is NOT "working" (idle/done are handled by
+        // their own indicators; asking has the `Asking` filter).
+        for state in [AgentState::Idle, AgentState::Done, AgentState::InputNeeded] {
+            let m = HashMap::from([(sk.clone(), state)]);
+            assert!(
+                !Filter::AgentWorking.matches(&FilterCtx {
+                    w: &ws,
+                    agents: &m,
+                    now: now()
+                }),
+                "{state:?} must not match the working filter"
+            );
+        }
+    }
+
+    #[test]
     fn new_state_predicates_match_their_field() {
         let agents = HashMap::new();
         let matches = |ws: &Workspace, f: Filter| {
             f.matches(&FilterCtx {
                 w: ws,
                 agents: &agents,
+                now: now(),
             })
         };
 
@@ -685,11 +857,13 @@ mod tests {
 
         assert!(Filter::Claimed.matches(&FilterCtx {
             w: &claimed,
-            agents: &agents
+            agents: &agents,
+            now: now(),
         }));
         assert!(!Filter::Claimed.matches(&FilterCtx {
             w: &unclaimed,
-            agents: &agents
+            agents: &agents,
+            now: now(),
         }));
     }
 
@@ -701,6 +875,7 @@ mod tests {
             set.accepts(&FilterCtx {
                 w: ws,
                 agents: &agents,
+                now: now(),
             })
         };
 
@@ -741,6 +916,107 @@ mod tests {
         assert!(set.is_empty());
     }
 
+    /// People axis (#scale): a login matches through the
+    /// `task_involves` role-union — author ∨ requested reviewer ∨
+    /// submitted reviewer ∨ assignee — OR within the axis, AND against
+    /// other axes, and case-insensitively (GitHub login semantics).
+    #[test]
+    fn person_axis_filters_by_role_union() {
+        use lazybox_core::{ReviewState, Reviewer};
+        let agents = HashMap::new();
+        let accepts = |set: &FilterSet, ws: &Workspace| {
+            set.accepts(&FilterCtx {
+                w: ws,
+                agents: &agents,
+                now: now(),
+            })
+        };
+
+        let authored = workspace_with("a", |t| t.author = "Alice".into());
+        let requested = workspace_with("b", |t| t.reviewers = vec!["alice".into()]);
+        let reviewed = workspace_with("c", |t| {
+            t.reviews = vec![Reviewer {
+                login: "alice".into(),
+                state: ReviewState::Approved,
+                is_bot: false,
+            }];
+        });
+        let assigned = workspace_with("d", |t| t.assignees = vec!["alice".into()]);
+        let uninvolved = workspace_with("e", |t| t.author = "bob".into());
+
+        let mut set = FilterSet::new();
+        set.replace_entries([FilterEntry::Person("alice".into())]);
+        for ws in [&authored, &requested, &reviewed, &assigned] {
+            assert!(accepts(&set, ws), "alice involves {:?}", ws.key);
+        }
+        assert!(!accepts(&set, &uninvolved));
+
+        // OR within the axis: alice ∨ bob.
+        set.replace_entries([
+            FilterEntry::Person("alice".into()),
+            FilterEntry::Person("bob".into()),
+        ]);
+        assert!(accepts(&set, &authored));
+        assert!(accepts(&set, &uninvolved));
+
+        // AND across axes: involves alice AND ci-failing.
+        set.replace_entries([
+            FilterEntry::Person("alice".into()),
+            FilterEntry::Predicate(Filter::CiFailing),
+        ]);
+        assert!(!accepts(&set, &authored), "alice's row isn't ci-failing");
+        let failing = workspace_with("f", |t| {
+            t.author = "alice".into();
+            t.ci = CiStatus::Failure;
+        });
+        assert!(accepts(&set, &failing));
+
+        // Chips carry the @ prefix; clearing resets the axis.
+        set.replace_entries([FilterEntry::Person("alice".into())]);
+        assert_eq!(set.chips(), vec!["@alice"]);
+        set.replace_entries(std::iter::empty());
+        assert!(set.is_empty());
+    }
+
+    /// A GitHub login is case-insensitive, so the People axis's identity
+    /// is the lowercased login. A mixed-case entry (a hand-edited
+    /// `person:Alice` lens token round-tripped through `from_token`, or
+    /// any caller passing canonical GitHub casing) must collapse onto that
+    /// identity — stored, matched via `contains_entry`, and displayed as
+    /// one `@alice`, never a second phantom row that a case-sensitive set
+    /// would mint.
+    #[test]
+    fn person_axis_identity_is_case_insensitive() {
+        let mut set = FilterSet::new();
+        set.replace_entries([FilterEntry::Person("Alice".into())]);
+        assert_eq!(
+            set.people().iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            vec!["alice"],
+            "the login is normalized to its lowercase identity on insert"
+        );
+        // `contains_entry` (drives the menu's pre-checked rows) matches
+        // regardless of the query's case, so the discovered `alice` row
+        // reads as active.
+        assert!(set.contains_entry(&FilterEntry::Person("alice".into())));
+        assert!(set.contains_entry(&FilterEntry::Person("ALICE".into())));
+        assert_eq!(set.chips(), vec!["@alice"]);
+
+        // Still matches the task whatever case the field carries.
+        let agents = HashMap::new();
+        let authored = workspace_with("a", |t| t.author = "Alice".into());
+        assert!(set.accepts(&FilterCtx {
+            w: &authored,
+            agents: &agents,
+            now: now(),
+        }));
+
+        // The persisted-token round-trip normalizes too.
+        assert_eq!(
+            FilterEntry::from_token("person:Bob"),
+            Some(FilterEntry::Person("bob".into())),
+        );
+    }
+
     #[test]
     fn priority_predicates_match_the_task_priority() {
         let agents = HashMap::new();
@@ -748,6 +1024,7 @@ mod tests {
             f.matches(&FilterCtx {
                 w: ws,
                 agents: &agents,
+                now: now(),
             })
         };
 
@@ -822,22 +1099,26 @@ mod tests {
         roles.toggle(Filter::Reviewer);
         assert!(roles.accepts(&FilterCtx {
             w: &author_pr,
-            agents: &agents
+            agents: &agents,
+            now: now(),
         }));
         assert!(roles.accepts(&FilterCtx {
             w: &reviewer_issue,
-            agents: &agents
+            agents: &agents,
+            now: now(),
         }));
 
         roles.toggle(Filter::Pr);
         assert!(roles.accepts(&FilterCtx {
             w: &author_pr,
-            agents: &agents
+            agents: &agents,
+            now: now(),
         }));
         assert!(
             !roles.accepts(&FilterCtx {
                 w: &reviewer_issue,
-                agents: &agents
+                agents: &agents,
+                now: now(),
             }),
             "PR-kind axis ANDs, so the reviewer issue is filtered out"
         );

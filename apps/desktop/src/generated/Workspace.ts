@@ -2,8 +2,11 @@
 import type { Activity } from "./Activity";
 import type { AutomationPolicies } from "./AutomationPolicies";
 import type { CleanupPrompt } from "./CleanupPrompt";
+import type { HopperMeta } from "./HopperMeta";
 import type { ProjectKey } from "./ProjectKey";
 import type { Session } from "./Session";
+import type { SnippetDeliveryLog } from "./SnippetDeliveryLog";
+import type { SnoozeWake } from "./SnoozeWake";
 import type { Task } from "./Task";
 import type { WorkspaceKey } from "./WorkspaceKey";
 
@@ -38,6 +41,12 @@ project_key: ProjectKey | null,
  * derived workspaces leave this `false`.
  */
 local: boolean,
+/**
+ * Present when this is a user-captured personal Hopper workspace.
+ * Kept separate from local: imported checkouts and hand-created
+ * project workspaces are local too, but do not belong in the Hopper.
+ */
+hopper: HopperMeta | null,
 /**
  * When `Some`, this is a **linked (no-worktree) checkout**: the
  * workspace points directly at an existing clone on disk (a
@@ -76,6 +85,20 @@ pr: Task | null, gh_issues: Array<Task>, linear_issues: Array<Task>,
  */
 activity: Array<Activity>, seen_count: number, read_indices: Array<number>, snoozed_until: string | null,
 /**
+ * Event that ends the snooze early (#scale): checked by the
+ * daemon on every poll of this workspace's primary task. `None`
+ * = time-only snooze (the pre-#scale behavior).
+ */
+snooze_wake: SnoozeWake | null,
+/**
+ * When an event-conditional snooze last fired (#scale): the
+ * "announced re-entry" stamp. Rows woken within
+ * [`WOKE_WINDOW`] sort to the top of their group and carry a
+ * wake pill, so a snooze ending never reads as a silent
+ * reappearance. Never set by a manual un-snooze.
+ */
+woke_at: string | null,
+/**
  * Per-workspace "auto-merge on green" arm. When `true`, the
  * **daemon's** polling commit path auto-fires a merge the moment
  * this workspace's own PR becomes merge-ready (green CI, no
@@ -99,6 +122,16 @@ auto_merge_on_green: boolean,
  * reset, so in-progress work is never destroyed.
  */
 track_main: boolean,
+/**
+ * Route this workspace's agent LLM traffic through the local metering
+ * proxy (the per-workspace `$ meter` canary, #per-session cost). Sticky:
+ * every spawn here — fresh, restart, or re-spawn — is metered while this
+ * is set, so cost/tokens/rate accrue per workspace without affecting any
+ * other session. User-toggled, persisted in the workspace JSON blob.
+ * Effective only when `agent.metering_proxy` is enabled and the proxy is
+ * running; otherwise inert.
+ */
+metered: boolean,
 /**
  * The resolved default branch this workspace is based on
  * (`main` / `master` / …), persisted so "track main" doesn't
@@ -134,14 +167,14 @@ policies: AutomationPolicies,
  */
 notes: string,
 /**
- * MRU of snippet shortcut keys sent to this workspace's agent(s)
- * (issue #463) — a per-session record of "what I've already told
- * this agent" so switching back is cheap. Most-recent first,
- * de-duplicated (a re-send moves the key to the front), capped at
- * [`SENT_SNIPPETS_MAX`]. Persisted in the workspace JSON blob
- * alongside [`Workspace::notes`]; never synced to any provider.
+ * Record of snippets delivered to this workspace's agent(s) (issue
+ * #463): the honest `]N` badge count plus an MRU of "what I've
+ * already told this agent." A single owned value with one
+ * transition — see [`SnippetDeliveryLog`]. Persisted in the
+ * workspace JSON blob alongside [`Workspace::notes`]; never synced
+ * to any provider.
  */
-sent_snippets: Array<string>,
+sent_snippets: SnippetDeliveryLog,
 /**
  * Durable answer to the merged/closed cleanup prompt (issue #499).
  * Serde-defaulted so pre-#499 records read back as `Unresolved`.

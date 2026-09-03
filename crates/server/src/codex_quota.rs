@@ -224,6 +224,9 @@ pub fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHandle<()>
                 last = Some(quota);
                 let _ = bus.send(lazybox_ipc::Event::AgentProviderQuota {
                     agent_id: CODEX_AGENT_ID.to_string(),
+                    // Sourced from the shared Codex session log, not a proxied
+                    // per-session request — no workspace attribution.
+                    session_key: None,
                     quota,
                 });
             }

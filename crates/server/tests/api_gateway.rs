@@ -69,10 +69,16 @@ impl Agent for FakePtyAgent {
         vec![
             "/bin/sh".into(),
             "-c".into(),
+            // Emit well over one full event-channel's worth of output
+            // (EVENT_CHANNEL_CAPACITY = 2048) so a slow consumer genuinely
+            // overflows the channel and forces an authoritative replay —
+            // the backpressure path under test. The count must stay
+            // comfortably above the capacity; if EVENT_CHANNEL_CAPACITY
+            // grows again, bump this too (the wait loop asserts it).
             "sleep 1; printf '__LB_SIZE__'; stty size; printf '__LB_BEGIN__\\n'; \
-             i=0; while [ \"$i\" -lt 800 ]; do \
+             i=0; while [ \"$i\" -lt 4000 ]; do \
              printf '__LB_OUTPUT__%04d xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n' \"$i\"; \
-             i=$((i + 1)); sleep 0.005; done; printf '__LB_END__\\n'; \
+             i=$((i + 1)); sleep 0.003; done; printf '__LB_END__\\n'; \
              IFS= read -r line; printf '__LB_INPUT__%s\\n' \"$line\"; sleep 30"
                 .into(),
         ]
@@ -693,6 +699,7 @@ fn web_control_contract_fixture_is_current() {
             on_main: false,
             model_alias: None,
             access: Default::default(),
+            force_new: false,
         }),
         "spawn_shell": JsonClientFrame::Command(Command::Spawn {
             session_key,
@@ -705,6 +712,7 @@ fn web_control_contract_fixture_is_current() {
             on_main: false,
             model_alias: None,
             access: Default::default(),
+            force_new: false,
         }),
     });
 
@@ -1477,6 +1485,7 @@ async fn desktop_runtime_real_pty_handles_backpressure_reconnect_replay_and_resy
         on_main: false,
         model_alias: None,
         access: lazybox_ipc::AgentRunAccess::Default,
+        force_new: false,
     });
     let request = Request::builder()
         .method(Method::POST)
@@ -1549,7 +1558,7 @@ async fn desktop_runtime_real_pty_handles_backpressure_reconnect_replay_and_resy
                 .snapshot(&backend_key)
                 .await
                 .expect("snapshot real PTY");
-            if snapshot.last_seq > 512
+            if snapshot.last_seq > lazybox_ipc::EVENT_CHANNEL_CAPACITY as u64
                 && contains_bytes(&snapshot.replay, b"__LB_END__")
                 && contains_bytes(&snapshot.replay, b"__LB_INPUT__desktop-input")
             {
@@ -1569,7 +1578,11 @@ async fn desktop_runtime_real_pty_handles_backpressure_reconnect_replay_and_resy
     let mut saw_recovery = false;
     let mut last_output_seq = 0;
     let mut observed_tail = Vec::new();
-    for _ in 0..700 {
+    // Must exceed EVENT_CHANNEL_CAPACITY (2048): the slow-consumer gap
+    // fills the client channel to its bound, so the backlog of buffered
+    // frames must be fully drained before capacity returns and the
+    // coalesced resync (kind 3) is delivered — the recovery this asserts.
+    for _ in 0..4000 {
         let frame = next_terminal_frame(&mut terminal_body).await;
         assert_eq!(frame.terminal_id, terminal_id);
         if frame.kind == 2 {
@@ -1705,6 +1718,7 @@ async fn web_control_json_loop_drives_a_live_agent_with_bearer_auth() {
         on_main: false,
         model_alias: None,
         access: lazybox_ipc::AgentRunAccess::Default,
+        force_new: false,
     });
     let spawn_request = Request::builder()
         .method(Method::POST)
@@ -2178,6 +2192,7 @@ async fn command_route_returns_the_correlated_terminal_failure() {
         on_main: false,
         model_alias: None,
         access: lazybox_ipc::AgentRunAccess::Default,
+        force_new: false,
     });
     let request = Request::builder()
         .method(Method::POST)
@@ -2710,6 +2725,7 @@ async fn stream_route_can_start_structured_agent_run() {
         }),
         resume_latest: false,
         access: lazybox_ipc::AgentRunAccess::Default,
+        model_alias: None,
     };
     let mut line = serde_json::to_vec(&JsonClientFrame::Command(command)).unwrap();
     line.push(b'\n');

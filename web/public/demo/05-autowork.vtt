@@ -3,20 +3,16 @@ WEBVTT
 NOTE
 "⌨ <chord> — <text>" lines render as a keycap chip + description in the
 overlay; plain lines are context. Drives both the native <track> and the
-styled overlay from one source.
+styled overlay from one source. Cues must fit the clip runtime (~6.4s).
 
 1
-00:00.500 --> 00:03.200
-Tag a GitHub issue @lazybox and it surfaces in the inbox
+00:00.500 --> 00:02.800
+CI, reviews and asking agents surface across every repo
 
 2
-00:03.500 --> 00:06.500
-An agent picks it up and works it in its own worktree
-
-3
-00:06.800 --> 00:09.200
+00:03.000 --> 00:04.600
 ⌨ ! — jump to the agent that needs your input
 
-4
-00:09.500 --> 00:12.400
-Reply once and it keeps going
+3
+00:04.800 --> 00:06.100
+Answer once and it keeps going

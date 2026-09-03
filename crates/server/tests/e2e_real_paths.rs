@@ -276,6 +276,7 @@ fn send_spawn(
             initial_prompt: initial_prompt.map(Into::into),
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         })
         .unwrap();
 }
@@ -379,6 +380,7 @@ async fn e2e_spawn_provisions_a_real_worktree_and_collapse_carries_it_to_the_pr(
                 initial_prompt: None,
                 initial_snippet: None,
                 on_main: false,
+                force_new: false,
             })
             .unwrap();
         assert!(
@@ -1363,7 +1365,7 @@ async fn e2e_pr_spawn_transfers_its_live_managed_branch_owner() {
         );
         persisted_session.worktree_branch = Some(branch.into());
         issue.add_session(persisted_session);
-        issue.record_sent_snippet("review".into());
+        issue.record_snippet_delivery("review".into());
         save_workspace(&config, &issue);
 
         let (mut client, _daemon) = subscribed(config.clone()).await;
@@ -1388,16 +1390,23 @@ async fn e2e_pr_spawn_transfers_its_live_managed_branch_owner() {
             timestamp_ms: 42,
             source: lazybox_ipc::PromptSource::Typed,
         };
+        // History/draft are workspace-scoped (keyed by the stable session_key),
+        // and the issue→PR transfer must carry them onto the PR badge. Seed them
+        // under the issue's workspace key so the rebadge can move them.
+        let issue_seed_key: lazybox_core::SessionKey = (&issue_key).into();
         config
             .store
             .set_kv(
-                &format!("terminal-msgs:{backend}"),
+                &format!("workspace-msgs:{}", issue_seed_key.as_str()),
                 &serde_json::to_string(&vec![remembered_prompt.clone()]).unwrap(),
             )
             .unwrap();
         config
             .store
-            .set_kv(&format!("terminal-draft:{backend}"), "half-typed draft")
+            .set_kv(
+                &format!("workspace-draft:{}", issue_seed_key.as_str()),
+                "half-typed draft",
+            )
             .unwrap();
 
         // Two PRs claim #647, matching the production ambiguity that routed
@@ -1473,7 +1482,7 @@ async fn e2e_pr_spawn_transfers_its_live_managed_branch_owner() {
         assert_eq!(pr_ws.sessions.len(), 1);
         assert_eq!(pr_ws.sessions[0].id, source_session.id);
         assert_eq!(
-            pr_ws.sent_snippets,
+            pr_ws.sent_snippets.recent().to_vec(),
             vec!["review"],
             "workspace snippet history moves with the live session"
         );
@@ -1540,6 +1549,7 @@ async fn e2e_serve_loop_restart_recovers_session_with_deep_scrollback() {
                 initial_prompt: None,
                 initial_snippet: None,
                 on_main: false,
+                force_new: false,
             })
             .unwrap();
         let terminal_id = match wait_for(
@@ -1695,6 +1705,7 @@ async fn live_agent_boots_to_ready(agent: &str, socket: &str) {
             initial_prompt: None,
             initial_snippet: None,
             on_main: false,
+            force_new: false,
         })
         .unwrap();
     let terminal_id = match wait_for(
@@ -1966,6 +1977,7 @@ async fn e2e_live_scroll_fetch_serves_deep_history_without_restart() {
                 initial_prompt: None,
                 initial_snippet: None,
                 on_main: false,
+                force_new: false,
             })
             .unwrap();
         let terminal_id = match wait_for(

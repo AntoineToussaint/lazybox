@@ -19,24 +19,100 @@ pub use inspect::{
     scan_external_checkouts, worktree_is_pristine,
 };
 
+/// Which lane a per-repo lock acquisition belongs to.
+///
+/// User-initiated work (spawn provisioning: fetch + `worktree add`) takes
+/// [`LockPriority::Interactive`]; poll-driven sweeps (fast-forward, cleanup,
+/// rescope, reclaim) take [`LockPriority::Background`]. The guarantee is
+/// bounded, not strict: an interactive acquirer waits behind at most one
+/// in-flight background op on the same repo, never behind a *queue* of them —
+/// which is what a spawn did on the old single FIFO lock when a sweep had
+/// several git-ops stacked ahead of it. Background ops are not starved. The
+/// `RepoLock` implementation documents exactly how the bound is enforced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LockPriority {
+    /// User-initiated, latency-sensitive git work.
+    Interactive,
+    /// Best-effort background sweeps that must not stack up ahead of a spawn.
+    Background,
+}
+
+/// Two-lane per-repo serialization primitive backing [`repo_lock`].
+///
+/// `data` is the real critical section; every acquisition in either lane holds
+/// it, so mutual exclusion on the bare clone is unchanged. Background acquirers
+/// additionally pass through `bg_turnstile` first, so at most one background
+/// acquirer is ever queued on `data`; the rest wait on the turnstile. A held
+/// [`RepoGuard`] releases `data` *before* `bg_turnstile` (drop order), so an
+/// interactive acquirer that is already waiting when a background holder
+/// releases is handed `data` before any turnstile-blocked background acquirer
+/// can re-enter the `data` queue.
+///
+/// The resulting guarantee is bounded, not strict priority: `data` is itself
+/// FIFO, so a background op that has *already* passed the turnstile and parked
+/// on `data` is served ahead of a later-arriving interactive op. The turnstile
+/// caps that to one background op at a time, so an interactive acquirer waits
+/// behind at most one in-flight background op — never a queue. A background op
+/// is never starved: it holds the turnstile only for its own git work, and
+/// once on the `data` queue it is served in FIFO order.
+struct RepoLock {
+    data: Arc<tokio::sync::Mutex<()>>,
+    bg_turnstile: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// Guard returned by [`RepoLock::lock`]. Field order is load-bearing: `_data`
+/// must drop before `_turnstile` so releasing the critical section hands the
+/// lock to a waiting interactive acquirer before any turnstile-blocked
+/// background one can re-enter the `data` queue.
+#[allow(dead_code)] // guards are held for their Drop side-effect, never read.
+struct RepoGuard {
+    _data: tokio::sync::OwnedMutexGuard<()>,
+    _turnstile: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl RepoLock {
+    fn new() -> Self {
+        Self {
+            data: Arc::new(tokio::sync::Mutex::new(())),
+            bg_turnstile: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    async fn lock(&self, priority: LockPriority) -> RepoGuard {
+        match priority {
+            LockPriority::Interactive => RepoGuard {
+                _data: self.data.clone().lock_owned().await,
+                _turnstile: None,
+            },
+            LockPriority::Background => {
+                let turnstile = self.bg_turnstile.clone().lock_owned().await;
+                let data = self.data.clone().lock_owned().await;
+                RepoGuard {
+                    _data: data,
+                    _turnstile: Some(turnstile),
+                }
+            }
+        }
+    }
+}
+
 /// Process-wide per-repo serialization. Keyed by the bare-clone path:
 /// two concurrent cold spawns for the same repo would otherwise race
 /// `git clone --bare` into one directory, and concurrent fetch /
 /// `worktree add` invocations can collide on ref locks inside the
 /// shared bare clone. Every mutating `WorktreeManager` operation
-/// acquires the repo's async mutex first; distinct repos proceed in
-/// parallel.
+/// acquires the repo's lock first; distinct repos proceed in parallel.
 ///
 /// The outer `std::sync::Mutex` only guards the map lookup/insert —
-/// never held across an `.await`. The returned `Arc<tokio::Mutex>`
-/// is what callers hold for the duration of the git work.
-fn repo_lock(bare_path: &Path) -> Arc<tokio::sync::Mutex<()>> {
-    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+/// never held across an `.await`. The returned [`RepoLock`] is what
+/// callers hold (via [`RepoLock::lock`]) for the duration of the git work.
+fn repo_lock(bare_path: &Path) -> Arc<RepoLock> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<RepoLock>>>> = OnceLock::new();
     let map = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
     guard
         .entry(bare_path.to_path_buf())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .or_insert_with(|| Arc::new(RepoLock::new()))
         .clone()
 }
 
@@ -111,6 +187,12 @@ pub enum GitError {
         expected: String,
         actual: String,
     },
+    #[error(
+        "branch '{branch}' can't be created because '{conflicting}' already exists — git can't \
+         hold both a branch and a path named '{branch}' (a directory/file conflict). Delete or \
+         rename '{conflicting}', then retry"
+    )]
+    BranchDirFileConflict { branch: String, conflicting: String },
 }
 
 /// Boxed async result returned by [`GitRunner`] operations.
@@ -404,6 +486,7 @@ pub struct WorktreeManager {
     base_dir: PathBuf,
     progress: Option<Arc<ProgressSink>>,
     github_token: Option<GithubTokenSource>,
+    github_host: Option<String>,
     git: Arc<dyn GitRunner>,
 }
 
@@ -413,6 +496,7 @@ impl WorktreeManager {
             base_dir: base_dir.into(),
             progress: None,
             github_token: None,
+            github_host: None,
             git: Arc::new(BoundedGitRunner),
         }
     }
@@ -436,10 +520,42 @@ impl WorktreeManager {
         self
     }
 
+    /// Point clone URLs and the SSH→HTTPS auth rewrites at a GitHub
+    /// Enterprise Server host (bare hostname, e.g. `ghe.example.com`)
+    /// instead of github.com. `None` keeps github.com.
+    ///
+    /// This is the SAME value the API transport is built with — both the
+    /// daemon and this manager resolve it from
+    /// `lazybox_config::Config::github_host` — so git and the API can
+    /// never target different hosts. Without config threading, a user who
+    /// set only `providers.github.host` polled the enterprise inbox but
+    /// had every worktree clone fall back to `git@github.com:…` and leak
+    /// the enterprise token in a header addressed to github.com.
+    pub fn with_github_host(mut self, host: Option<String>) -> Self {
+        self.github_host = host.filter(|h| !h.is_empty());
+        self
+    }
+
     /// Replace the git command executor.
     pub fn with_git_runner(mut self, runner: Arc<dyn GitRunner>) -> Self {
         self.git = runner;
         self
+    }
+
+    /// The GitHub host to address for clone URLs and auth rewrites:
+    /// the config-threaded value first, then the `LAZYBOX_GITHUB_HOST`
+    /// env var as a fallback for external callers with no config layer
+    /// (and back-compat), else github.com. Both the clone URL and the
+    /// auth header read through here so they cannot disagree.
+    fn github_host(&self) -> String {
+        self.github_host
+            .clone()
+            .or_else(|| {
+                std::env::var("LAZYBOX_GITHUB_HOST")
+                    .ok()
+                    .filter(|h| !h.is_empty())
+            })
+            .unwrap_or_else(|| "github.com".to_string())
     }
 
     /// Extra child-process env for network git operations: the
@@ -448,7 +564,7 @@ impl WorktreeManager {
     async fn network_env(&self) -> Vec<(String, String)> {
         match &self.github_token {
             Some(source) => match source().await {
-                Some(token) if !token.is_empty() => github_auth_env(&token),
+                Some(token) if !token.is_empty() => github_auth_env(&token, &self.github_host()),
                 _ => Vec::new(),
             },
             None => Vec::new(),
@@ -525,7 +641,7 @@ impl WorktreeManager {
         // its config survived (covers rewritten origins — enterprise
         // hosts, local mirrors); fall back to the canonical GitHub
         // URL otherwise.
-        let mut url = format!("git@github.com:{owner}/{repo}.git");
+        let mut url = format!("git@{}:{owner}/{repo}.git", self.github_host());
         if bare_path.exists() {
             // Deleting the bare clone orphans EVERY worktree hanging
             // off it (their gitdir metadata lives under
@@ -755,7 +871,7 @@ impl WorktreeManager {
     ) -> Result<Worktree, GitError> {
         let bare_path = self.bare_clone_path(owner, repo);
         let lock = repo_lock(&bare_path);
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(LockPriority::Interactive).await;
 
         // Return early if a *valid* worktree already exists.
         // Idempotent — lazybox calls this on every session bring-up.
@@ -988,7 +1104,7 @@ impl WorktreeManager {
     ) -> Result<Worktree, GitError> {
         let bare_path = self.bare_clone_path(owner, repo);
         let lock = repo_lock(&bare_path);
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(LockPriority::Interactive).await;
 
         // Same validation as `checkout_at`: only a real worktree of
         // this bare clone short-circuits; an empty leftover dir is
@@ -1167,7 +1283,7 @@ impl WorktreeManager {
         // racing one workspace, but the per-path lock keeps this method
         // correct on its own.
         let lock = repo_lock(wt_path);
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(LockPriority::Interactive).await;
 
         let name = wt_path
             .file_name()
@@ -1220,9 +1336,14 @@ impl WorktreeManager {
     /// present locally yet. Used by the "spawn from issue" path
     /// where the task has no PR branch — we cut a fresh branch
     /// off the default.
-    pub async fn default_branch(&self, owner: &str, repo: &str) -> Result<String, GitError> {
+    pub async fn default_branch(
+        &self,
+        owner: &str,
+        repo: &str,
+        priority: LockPriority,
+    ) -> Result<String, GitError> {
         let lock = repo_lock(&self.bare_clone_path(owner, repo));
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(priority).await;
         let bare_path = self.ensure_bare_clone(owner, repo).await?;
 
         // Pull origin/HEAD if we don't already have it. Tolerate
@@ -1309,7 +1430,7 @@ impl WorktreeManager {
     ) -> Result<TrackSyncOutcome, GitError> {
         let bare_path = self.bare_clone_path(owner, repo);
         let lock = repo_lock(&bare_path);
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(LockPriority::Background).await;
         let bare_path = self.ensure_bare_clone(owner, repo).await?;
 
         // Refresh origin/<base>. Tolerate failure — fall back to the
@@ -1558,7 +1679,7 @@ impl WorktreeManager {
     pub async fn remove(&self, owner: &str, repo: &str, branch: &str) -> Result<(), GitError> {
         let bare_path = self.bare_clone_path(owner, repo);
         let lock = repo_lock(&bare_path);
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(LockPriority::Interactive).await;
         let wt_path = self.worktree_path(owner, repo, branch);
         if wt_path.exists() {
             run_git_in(
@@ -1616,7 +1737,7 @@ impl WorktreeManager {
         F: FnOnce() -> bool + Send,
     {
         let lock = repo_lock(bare_path);
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(LockPriority::Interactive).await;
         if !still_removable() {
             // Re-claimed under the lock — the path now belongs to a live
             // or in-flight session. Leaving it is correct; the new owner's
@@ -1670,7 +1791,7 @@ impl WorktreeManager {
         }
         let bare_path = self.bare_clone_path(owner, repo);
         let lock = repo_lock(&bare_path);
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(LockPriority::Interactive).await;
         if validate_worktree_dir(self.git_runner(), wt_path, &bare_path).await?
             != WorktreeDirState::Valid
         {
@@ -1692,7 +1813,7 @@ impl WorktreeManager {
         worktree_path: &Path,
     ) -> Result<Option<PathBuf>, GitError> {
         let lock = repo_lock(bare_path);
-        let _guard = lock.lock().await;
+        let _guard = lock.lock(LockPriority::Interactive).await;
         if !worktree_path.exists() {
             let _ = run_git_in(self.git_runner(), bare_path, &["worktree", "prune"]).await;
             return Ok(None);
@@ -2360,19 +2481,25 @@ fn canonical_or_self(p: &Path) -> PathBuf {
 /// - `http.<https>.extraheader` carries the token as a Basic auth
 ///   header, the same scheme `gh` and Actions use.
 ///
-/// Everything is scoped to `github.com` — enterprise hosts, local
-/// mirrors and `file://` origins are untouched. The token rides in
-/// the child environment only, never argv, so it can't leak through
-/// process listings or lazybox's own command logging.
-fn github_auth_env(token: &str) -> Vec<(String, String)> {
+/// The rewrites and auth header are scoped to `host` (github.com unless
+/// a GitHub Enterprise Server host was threaded in via
+/// [`WorktreeManager::with_github_host`]); every other origin — local
+/// mirrors, `file://`, a different host — is untouched. The token rides
+/// in the child environment only, never argv, so it can't leak through
+/// process listings or lazybox's own command logging. Taking the host as
+/// an argument (rather than re-reading the env here) keeps it identical
+/// to the clone URL's host, which the same manager resolves.
+fn github_auth_env(token: &str, host: &str) -> Vec<(String, String)> {
     let basic = base64_std(format!("x-access-token:{token}").as_bytes());
+    let auth = format!("AUTHORIZATION: basic {basic}");
+    let instead_of = format!("url.https://{host}/.insteadOf");
+    let ssh_short = format!("git@{host}:");
+    let ssh_long = format!("ssh://git@{host}/");
+    let extraheader = format!("http.https://{host}/.extraheader");
     git_config_env(&[
-        ("url.https://github.com/.insteadOf", "git@github.com:"),
-        ("url.https://github.com/.insteadOf", "ssh://git@github.com/"),
-        (
-            "http.https://github.com/.extraheader",
-            &format!("AUTHORIZATION: basic {basic}"),
-        ),
+        (&instead_of, &ssh_short),
+        (&instead_of, &ssh_long),
+        (&extraheader, &auth),
     ])
 }
 
@@ -2601,7 +2728,8 @@ fn fetch_failure_reason(err: &GitError, authed: bool) -> String {
         GitError::Io(e) => e.to_string(),
         GitError::BranchHeldLive { .. }
         | GitError::BranchHeldManaged { .. }
-        | GitError::WorktreeBranchMismatch { .. } => err.to_string(),
+        | GitError::WorktreeBranchMismatch { .. }
+        | GitError::BranchDirFileConflict { .. } => err.to_string(),
     };
     let line = raw
         .lines()
@@ -2833,6 +2961,42 @@ async fn add_worktree_resilient(
                 .await
                 .map_err(explain_promisor_failure);
         }
+        if let Some(conflicting) = branch_dir_file_conflict(&err) {
+            // A stale local branch occupies the namespace `branch` needs
+            // (e.g. `release/v0.2.102` blocking `release`, or vice-versa).
+            // Try a SAFE delete — `git branch -d` refuses an unmerged or
+            // checked-out branch, so this never discards unpushed work or
+            // takes a branch from a live worktree — then retry the add.
+            // Loop to clear a run of sibling version branches
+            // (`release/v0.2.101`, `…102`, …), bounded so a pathological
+            // repo can't spin. If a conflict can't be cleared safely,
+            // surface a distinct D/F error so the caller reports it (and
+            // a blind retry doesn't just replay the same failure).
+            const MAX_DF_CLEANUP: usize = 32;
+            let mut conflicting = conflicting;
+            for _ in 0..MAX_DF_CLEANUP {
+                if run_git_in(git, bare_path, &["branch", "-d", &conflicting])
+                    .await
+                    .is_err()
+                {
+                    return Err(GitError::BranchDirFileConflict {
+                        branch: branch.to_string(),
+                        conflicting,
+                    });
+                }
+                match git.run_transfer(bare_path, &plain, auth, None).await {
+                    Ok(()) => return Ok(()),
+                    Err(e) => match branch_dir_file_conflict(&e) {
+                        Some(next) => conflicting = next,
+                        None => return Err(explain_promisor_failure(e)),
+                    },
+                }
+            }
+            return Err(GitError::BranchDirFileConflict {
+                branch: branch.to_string(),
+                conflicting,
+            });
+        }
         return Err(explain_promisor_failure(err));
     };
 
@@ -2933,6 +3097,35 @@ fn worktree_missing_but_registered(err: &GitError) -> bool {
         return false;
     };
     msg.contains("missing but already registered worktree")
+}
+
+/// Parse the *existing* conflicting ref out of git's directory/file
+/// (D/F) branch-creation refusal. Creating a branch `release` while
+/// `release/v0.2.102` exists (or vice-versa) fails with
+/// `'refs/heads/release/v0.2.102' exists; cannot create 'refs/heads/release'`
+/// — refs are files on disk, so a name can't be both a leaf and a
+/// directory. Returns the short name of the existing branch that
+/// occupies the namespace (`release/v0.2.102`), or `None` for any other
+/// failure. The short form (no `refs/heads/` prefix) is what
+/// `git branch -d` expects.
+fn branch_dir_file_conflict(err: &GitError) -> Option<String> {
+    let GitError::Command(msg) = err else {
+        return None;
+    };
+    let marker = "exists; cannot create";
+    let idx = msg.find(marker)?;
+    // The existing ref sits in the single-quoted token immediately
+    // before the marker: `… '<existing>' exists; cannot create …`.
+    let before = &msg[..idx];
+    let end = before.rfind('\'')?;
+    let start = before[..end].rfind('\'')? + 1;
+    let existing = before[start..end].trim();
+    Some(
+        existing
+            .strip_prefix("refs/heads/")
+            .unwrap_or(existing)
+            .to_string(),
+    )
 }
 
 /// Whether the worktree at `wt_path` is in a state a background sync
@@ -3978,26 +4171,65 @@ mod auth_env_tests {
     /// in plaintext anywhere in the environment.
     #[test]
     fn github_auth_env_shape() {
-        let env = github_auth_env("sekret-token");
-        let lookup = |key: &str| -> Vec<&str> {
+        let env = github_auth_env("sekret-token", "github.com");
+        let lookup = |env: &[(String, String)], key: &str| -> Vec<String> {
             env.iter()
                 .enumerate()
                 .filter(|(i, (k, _))| {
                     k.starts_with("GIT_CONFIG_KEY_") && env[*i].1 == key && *i % 2 == 1 // keys sit at odd indices after COUNT
                 })
-                .map(|(i, _)| env[i + 1].1.as_str())
+                .map(|(i, _)| env[i + 1].1.clone())
                 .collect()
         };
         assert_eq!(env[0], ("GIT_CONFIG_COUNT".to_string(), "3".to_string()));
-        let instead_of = lookup("url.https://github.com/.insteadOf");
+        let instead_of = lookup(&env, "url.https://github.com/.insteadOf");
         assert_eq!(instead_of, ["git@github.com:", "ssh://git@github.com/"]);
-        let headers = lookup("http.https://github.com/.extraheader");
+        let headers = lookup(&env, "http.https://github.com/.extraheader");
         assert_eq!(headers.len(), 1);
         assert!(headers[0].starts_with("AUTHORIZATION: basic "));
         assert!(
             !env.iter().any(|(_, v)| v.contains("sekret-token")),
             "raw token must never appear in the env values: {env:?}"
         );
+
+        // On an enterprise host the rewrites and the auth header must be
+        // scoped to THAT host — and github.com must be left alone, so a
+        // github.com token can never ride to the enterprise server (or
+        // vice-versa). This is the git half of the config/API host
+        // consistency fix.
+        let ghe = github_auth_env("sekret-token", "ghe.example.com");
+        assert_eq!(
+            lookup(&ghe, "url.https://ghe.example.com/.insteadOf"),
+            ["git@ghe.example.com:", "ssh://git@ghe.example.com/"]
+        );
+        assert_eq!(
+            lookup(&ghe, "http.https://ghe.example.com/.extraheader").len(),
+            1
+        );
+        assert!(
+            lookup(&ghe, "url.https://github.com/.insteadOf").is_empty(),
+            "enterprise auth env must not rewrite github.com: {ghe:?}"
+        );
+    }
+
+    /// The clone URL and the auth-header host resolve through the same
+    /// [`WorktreeManager::github_host`], so a config-threaded enterprise
+    /// host reaches both. Without a host they stay on github.com.
+    #[test]
+    fn github_host_resolves_from_config_thread() {
+        let default_mgr = WorktreeManager::new("/tmp/x");
+        // No config host and (in a clean test env) no LAZYBOX_GITHUB_HOST.
+        if std::env::var("LAZYBOX_GITHUB_HOST").is_err() {
+            assert_eq!(default_mgr.github_host(), "github.com");
+        }
+        let ghe =
+            WorktreeManager::new("/tmp/x").with_github_host(Some("ghe.example.com".to_string()));
+        assert_eq!(ghe.github_host(), "ghe.example.com");
+        // An empty threaded host is treated as unset.
+        let empty = WorktreeManager::new("/tmp/x").with_github_host(Some(String::new()));
+        if std::env::var("LAZYBOX_GITHUB_HOST").is_err() {
+            assert_eq!(empty.github_host(), "github.com");
+        }
     }
 
     /// The env pairs must actually reach the spawned git process:
@@ -4125,6 +4357,120 @@ mod auth_env_tests {
         assert_eq!(format_age(Duration::from_secs(3 * 3600)), "3 hours");
         assert_eq!(format_age(Duration::from_secs(30 * 3600)), "30 hours");
         assert_eq!(format_age(Duration::from_secs(4 * 24 * 3600)), "4 days");
+    }
+}
+
+#[cfg(test)]
+mod repo_lock_tests {
+    use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    type Order = Arc<StdMutex<Vec<&'static str>>>;
+
+    fn spawn_waiter(
+        lock: &Arc<RepoLock>,
+        order: &Order,
+        name: &'static str,
+        priority: LockPriority,
+    ) -> tokio::task::JoinHandle<()> {
+        let lock = lock.clone();
+        let order = order.clone();
+        tokio::spawn(async move {
+            let _guard = lock.lock(priority).await;
+            order.lock().unwrap_or_else(|e| e.into_inner()).push(name);
+        })
+    }
+
+    /// The fast lane: with a background sweep already holding a repo's lock,
+    /// several *more* background acquirers queued behind it, and one
+    /// interactive acquirer arriving last, the interactive one is granted
+    /// first when the holder releases — it jumps the whole background queue.
+    ///
+    /// Pinned to the current-thread runtime: [`park_spawned_tasks`] relies on
+    /// cooperative single-threaded scheduling to know every spawned task has
+    /// reached its `.await` before the holder releases.
+    #[tokio::test(flavor = "current_thread")]
+    async fn interactive_acquirer_jumps_the_background_queue() {
+        let lock = Arc::new(RepoLock::new());
+        let order: Order = Arc::new(StdMutex::new(Vec::new()));
+
+        // A background sweep is mid-flight, holding the lock (so it holds the
+        // turnstile too — every other background acquirer blocks on it).
+        let held = lock.lock(LockPriority::Background).await;
+
+        // Three background acquirers queue up *first*...
+        let bg1 = spawn_waiter(&lock, &order, "bg1", LockPriority::Background);
+        let bg2 = spawn_waiter(&lock, &order, "bg2", LockPriority::Background);
+        let bg3 = spawn_waiter(&lock, &order, "bg3", LockPriority::Background);
+        park_spawned_tasks().await;
+
+        // ...then the interactive acquirer arrives last.
+        let interactive = spawn_waiter(&lock, &order, "interactive", LockPriority::Interactive);
+        park_spawned_tasks().await;
+
+        // Release the sweep's lock; drain the queue.
+        drop(held);
+        for handle in [bg1, bg2, bg3, interactive] {
+            handle.await.expect("waiter task");
+        }
+
+        let order = order.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(order.len(), 4, "every waiter acquired once: {order:?}");
+        assert_eq!(
+            order[0], "interactive",
+            "interactive must win despite queuing last: {order:?}"
+        );
+        assert!(
+            order[1..].iter().all(|n| n.starts_with("bg")),
+            "the three background acquirers follow: {order:?}"
+        );
+    }
+
+    /// The bound the fast lane deliberately does *not* cross. `data` is FIFO,
+    /// so a background op that has already passed the turnstile and parked on
+    /// `data` is served ahead of a *later*-arriving interactive op — priority
+    /// reorders turnstile-blocked waiters, it does not preempt one already in
+    /// the `data` queue. This is what caps an interactive op's wait at one
+    /// in-flight background op rather than making it strictly first.
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_background_op_is_served_before_a_later_interactive() {
+        let lock = Arc::new(RepoLock::new());
+        let order: Order = Arc::new(StdMutex::new(Vec::new()));
+
+        // An interactive op holds the lock; the turnstile is free.
+        let held = lock.lock(LockPriority::Interactive).await;
+
+        // A background op arrives and parks on `data` (turnstile was free).
+        let bg = spawn_waiter(&lock, &order, "bg", LockPriority::Background);
+        park_spawned_tasks().await;
+
+        // A second interactive op arrives *after* the background op is queued.
+        let interactive = spawn_waiter(&lock, &order, "interactive", LockPriority::Interactive);
+        park_spawned_tasks().await;
+
+        drop(held);
+        for handle in [bg, interactive] {
+            handle.await.expect("waiter task");
+        }
+
+        let order = order.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(
+            order.as_slice(),
+            ["bg", "interactive"],
+            "a background op already queued on `data` is served FIFO, ahead of a later interactive: {order:?}"
+        );
+    }
+
+    /// Let every already-spawned task run until it parks on the lock. Relies on
+    /// the current-thread runtime (`flavor = "current_thread"` on the callers):
+    /// yielding hands control to the queued tasks, which each poll once, block
+    /// on the held mutex, and park. On a multi-threaded runtime a task could
+    /// still be unscheduled when the count runs out, so do not change the
+    /// flavor without replacing this with a real readiness barrier.
+    async fn park_spawned_tasks() {
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
     }
 }
 
@@ -4416,7 +4762,7 @@ mod health_probe_tests {
         git(&bare, &["remote", "remove", "origin"]);
 
         let got = mgr
-            .default_branch("acme", "widget")
+            .default_branch("acme", "widget", LockPriority::Interactive)
             .await
             .expect("develop must resolve via the fallback probe");
         assert_eq!(got, "develop");
@@ -4453,7 +4799,7 @@ mod health_probe_tests {
         git(&bare, &["remote", "remove", "origin"]);
 
         let err = mgr
-            .default_branch("acme", "widget")
+            .default_branch("acme", "widget", LockPriority::Interactive)
             .await
             .expect_err("no branch can resolve");
         let msg = err.to_string();
@@ -4968,6 +5314,36 @@ mod resilient_add_tests {
         assert_eq!(branch_already_checked_out_at(&unrelated), None);
     }
 
+    /// The directory/file branch-conflict matcher pulls the *existing*
+    /// conflicting ref out of git's refusal (short form, ready for
+    /// `git branch -d`), and ignores unrelated failures.
+    #[test]
+    fn parses_the_dir_file_conflict_branch() {
+        // The exact shape git emits (the #-reported `release` case).
+        let df = GitError::Command(
+            "Preparing worktree (new branch 'release')\n\
+             fatal: cannot lock ref 'refs/heads/release': 'refs/heads/release/v0.2.102' \
+             exists; cannot create 'refs/heads/release'\n"
+                .into(),
+        );
+        assert_eq!(
+            branch_dir_file_conflict(&df).as_deref(),
+            Some("release/v0.2.102")
+        );
+        // The reverse direction (leaf blocks a namespace) parses too.
+        let reverse = GitError::Command(
+            "fatal: 'refs/heads/release' exists; cannot create 'refs/heads/release/v1'\n".into(),
+        );
+        assert_eq!(
+            branch_dir_file_conflict(&reverse).as_deref(),
+            Some("release")
+        );
+        // Unrelated failures don't match.
+        let unrelated =
+            GitError::Command("fatal: 'feat' is already used by worktree at '/x'\n".into());
+        assert_eq!(branch_dir_file_conflict(&unrelated), None);
+    }
+
     /// The headline #439 case: a nested Claude Code agent worktree
     /// (living *inside* the bare clone) already holds the branch.
     /// Provisioning must resolve it with `--force` — landing lazybox's
@@ -5007,6 +5383,147 @@ mod resilient_add_tests {
             std::fs::read_to_string(nested.join("agent-work.txt")).expect("still readable"),
             "in progress",
             "the agent worktree's files are left in place"
+        );
+    }
+
+    /// A directory/file branch conflict — a stale, mergeable
+    /// `release/v0.2.102` blocking a new `release` branch — is cleared by
+    /// a safe `git branch -d` of the conflicting branch, after which the
+    /// worktree provisions on the requested name. The #-reported case.
+    #[tokio::test]
+    async fn dir_file_branch_conflict_is_cleared_and_provisions() {
+        let (tmp, bare) = local_bare_clone();
+        // A sibling branch at HEAD occupies the `release/` namespace.
+        // It's merged (points at HEAD), so `git branch -d` can drop it.
+        git(&bare, &["branch", "release/v0.2.102", "HEAD"]);
+
+        let target = tmp.path().join("target");
+        add_worktree_resilient(default_git_runner(), &bare, &target, "release", "HEAD", &[])
+            .await
+            .expect("the D/F conflict must be cleared, not fail");
+
+        assert!(target.join(".git").exists(), "target is a real worktree");
+        let branch_exists = |name: &str| {
+            std::process::Command::new("git")
+                .current_dir(&bare)
+                .args([
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{name}"),
+                ])
+                .status()
+                .expect("run git show-ref")
+                .success()
+        };
+        // The conflicting branch was safely removed…
+        assert!(
+            !branch_exists("release/v0.2.102"),
+            "the stale conflicting branch was deleted"
+        );
+        // …and the requested branch now exists.
+        assert!(branch_exists("release"), "the requested branch was created");
+    }
+
+    /// When the conflicting branch can't be safely deleted (unmerged
+    /// local work), the resilient add surfaces a distinct
+    /// [`GitError::BranchDirFileConflict`] rather than a bare `Command`
+    /// error, so the caller can classify it and NOT offer a doomed retry.
+    #[tokio::test]
+    async fn unmergeable_dir_file_conflict_surfaces_typed_error() {
+        let (tmp, bare) = local_bare_clone();
+        // Give `release/v0.2.102` a commit not reachable from HEAD so
+        // `git branch -d` refuses it (would lose work).
+        let holder = tmp.path().join("holder");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                holder.to_str().unwrap(),
+                "-B",
+                "release/v0.2.102",
+                "HEAD",
+            ],
+        );
+        std::fs::write(holder.join("extra.txt"), "unmerged work").expect("write");
+        git(&holder, &["add", "."]);
+        git(&holder, &["commit", "-m", "unmerged commit"]);
+        // Detach the holder so the branch isn't "checked out" (which would
+        // block for a different reason) but remains unmerged.
+        git(&holder, &["checkout", "--detach", "HEAD"]);
+
+        let target = tmp.path().join("target");
+        let err =
+            add_worktree_resilient(default_git_runner(), &bare, &target, "release", "HEAD", &[])
+                .await
+                .expect_err("an unmergeable conflict must not silently succeed");
+        assert!(
+            matches!(err, GitError::BranchDirFileConflict { .. }),
+            "expected a typed D/F conflict, got: {err:?}"
+        );
+    }
+
+    /// The recovery the provisioning loop relies on: when the preferred name
+    /// (`release`) can't be created because a real, unmergeable `release/*`
+    /// branch owns the namespace, a *leaf sibling* (`release-2`) provisions
+    /// cleanly — and the conflicting branch is left untouched (never deleted
+    /// to make room). This is what turns the old unrecoverable dead-end into
+    /// an automatic retry.
+    #[tokio::test]
+    async fn dir_file_conflict_recovers_on_leaf_sibling_branch() {
+        let (tmp, bare) = local_bare_clone();
+        // An unmergeable `release/v0.2.102` — a commit not reachable from HEAD,
+        // detached so it isn't "checked out" — so `git branch -d` refuses it
+        // (exactly the shape of a real, protected upstream release branch).
+        let holder = tmp.path().join("holder");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                holder.to_str().unwrap(),
+                "-B",
+                "release/v0.2.102",
+                "HEAD",
+            ],
+        );
+        std::fs::write(holder.join("extra.txt"), "unmerged work").expect("write");
+        git(&holder, &["add", "."]);
+        git(&holder, &["commit", "-m", "unmerged commit"]);
+        git(&holder, &["checkout", "--detach", "HEAD"]);
+
+        // The bare `release` add still dead-ends (asserted by the sibling test
+        // above); the recovery is to add on the disambiguated leaf name.
+        let target = tmp.path().join("target");
+        add_worktree_resilient(
+            default_git_runner(),
+            &bare,
+            &target,
+            "release-2",
+            "HEAD",
+            &[],
+        )
+        .await
+        .expect("a leaf sibling name provisions past the namespace conflict");
+
+        let branch_exists = |name: &str| {
+            std::process::Command::new("git")
+                .current_dir(&bare)
+                .args([
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{name}"),
+                ])
+                .status()
+                .expect("run git show-ref")
+                .success()
+        };
+        assert!(branch_exists("release-2"), "the sibling branch was created");
+        assert!(
+            branch_exists("release/v0.2.102"),
+            "the conflicting branch must be preserved, never deleted to free the name"
         );
     }
 

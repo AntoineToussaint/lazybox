@@ -239,6 +239,20 @@ pub struct RightPane {
     /// regression test that pins "scrolling never rebuilds the feed."
     #[cfg(test)]
     activity_rebuilds: u32,
+    /// Repo / Space **overview** shown when the sidebar cursor rests on
+    /// a group header instead of a workspace (issue #1442). Set from the
+    /// model alongside `set_workspace(None)`; when present and
+    /// `workspace` is `None`, `render` paints the overview across the
+    /// whole pane instead of the `(no session selected)` placeholder.
+    overview: Option<crate::components::repo_overview::RepoOverview>,
+    /// Absolute screen rows of the overview roster, paired with the
+    /// workspace each row addresses — refreshed on every overview render
+    /// so a click can move the sidebar cursor onto that workspace.
+    overview_hits: Vec<(u16, lazybox_core::SessionKey)>,
+    /// Queued by an overview roster click; drained by the orchestrator,
+    /// which selects the workspace in the sidebar (the pane can't reach
+    /// `Model` itself, mirroring the other `pending_*` handoffs).
+    pending_select_workspace: Option<lazybox_core::SessionKey>,
 }
 
 /// Click-target geometry captured during render. Three regions are
@@ -454,6 +468,9 @@ impl RightPane {
             activity_identity: 0,
             #[cfg(test)]
             activity_rebuilds: 0,
+            overview: None,
+            overview_hits: Vec::new(),
+            pending_select_workspace: None,
         }
     }
 
@@ -856,6 +873,33 @@ impl RightPane {
         self.stack = stack;
     }
 
+    /// Set the repo / Space overview shown on a group-header row (issue
+    /// #1442). Paired with `set_workspace(None)`; ignored visually while
+    /// a workspace is selected.
+    pub fn set_overview(
+        &mut self,
+        overview: Option<crate::components::repo_overview::RepoOverview>,
+    ) {
+        self.overview = overview;
+    }
+
+    /// Whether the pane is currently showing a group overview — the
+    /// model reads this to give the overview the whole right column
+    /// (there's no terminal stack to share with on a header row).
+    pub fn showing_overview(&self) -> bool {
+        self.workspace.is_none() && self.overview.is_some()
+    }
+
+    /// The overview currently projected onto the pane, if any.
+    pub fn overview(&self) -> Option<&crate::components::repo_overview::RepoOverview> {
+        self.overview.as_ref()
+    }
+
+    /// Drain a roster-click workspace selection queued by the overview.
+    pub fn take_select_workspace(&mut self) -> Option<lazybox_core::SessionKey> {
+        self.pending_select_workspace.take()
+    }
+
     pub fn set_workspace(&mut self, workspace: Option<Workspace>) {
         let same = match (&self.workspace, &workspace) {
             (Some(a), Some(b)) => a.key == b.key,
@@ -971,6 +1015,16 @@ impl RightPane {
             cards = ?self.click_hits.activity_cards,
             "right_pane.handle_mouse_click",
         );
+        // Overview roster click (issue #1442): move the sidebar cursor
+        // onto the clicked workspace. Handled first — in overview mode
+        // none of the workspace-shaped click regions below are live.
+        if self.showing_overview() {
+            if let Some((_, key)) = self.overview_hits.iter().find(|(r, _)| *r == row) {
+                self.pending_select_workspace = Some(key.clone());
+                return true;
+            }
+            return false;
+        }
         if let Some((r, url)) = &self.click_hits.header_title
             && *r == row
         {
@@ -2246,6 +2300,8 @@ impl RightPane {
                         initial_prompt: prompt,
                         initial_snippet: None,
                         on_main: false,
+                        // Activity-pane `w` continues a live conversation.
+                        force_new: false,
                     });
                     self.feed.clear_selection();
                 }
@@ -2301,6 +2357,13 @@ impl RightPane {
     }
 
     pub fn render(&mut self, area: Rect, frame: &mut Frame, focused: bool) {
+        // Group-header row (issue #1442): no workspace, but a repo/Space
+        // overview to paint. Takes the whole pane — the workspace-shaped
+        // header/activity scaffold is meaningless here.
+        if self.showing_overview() {
+            self.render_overview(area, frame);
+            return;
+        }
         // Refresh the description-body render memo (#1031) before the
         // layout constraint and the body render both read it — otherwise
         // each re-parses the raw markdown every frame.
@@ -2347,6 +2410,22 @@ impl RightPane {
         }
 
         let _ = self.render_activity(chunks[3], frame, focused);
+    }
+
+    /// Paint the repo / Space overview across the whole pane (issue
+    /// #1442). Records each roster row's absolute screen row in
+    /// `overview_hits` so a click can move the sidebar cursor onto that
+    /// workspace.
+    fn render_overview(&mut self, area: Rect, frame: &mut Frame) {
+        let Some((lines, hits)) = self.overview.as_ref().map(|o| o.lines(area.width)) else {
+            return;
+        };
+        self.overview_hits = hits
+            .into_iter()
+            .filter(|(idx, _)| (*idx as u16) < area.height)
+            .map(|(idx, key)| (area.y + idx as u16, key))
+            .collect();
+        frame.render_widget(Paragraph::new(lines), area);
     }
 
     /// Render the collapsed one-line summary shown in the pane's

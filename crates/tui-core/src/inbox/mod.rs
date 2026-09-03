@@ -21,10 +21,12 @@ mod filter;
 mod model;
 
 pub use attention::{
-    AttentionSignal, INACTIVE_GRACE, attention_gate, mailbox_membership,
+    AttentionSignal, INACTIVE_GRACE, attention_gate, mailbox_membership, punches_through,
     workspace_attention_signals, workspace_needs_attention,
 };
-pub use filter::{Filter, FilterAxis, FilterCtx, FilterEntry, FilterMenuItem, FilterSet};
+pub use filter::{
+    Filter, FilterAxis, FilterCtx, FilterEntry, FilterMenuItem, FilterSet, task_involves,
+};
 pub use model::{
     Mailbox, RepoSummary, SearchState, SortMode, TicketTreeMeta, VisibleRow, WorkspaceKind,
     role_rank,
@@ -94,6 +96,13 @@ pub struct ComputeInputs<'a> {
     /// Provider task ids whose visible ticket descendants are folded.
     pub collapsed_tickets: &'a HashSet<TaskId>,
     pub attention: &'a lazybox_config::AttentionConfig,
+    /// Per-source attention ladder (`ui.source_attention`, #scale):
+    /// group labels / `space:<name>` keys → level + optional snooze.
+    /// Demoted (Muted / source-snoozed) groups sink to the bottom of
+    /// their tier and their rows hide behind the collapsed residue
+    /// header — except rows that [`punches_through`]. An empty map is
+    /// the no-op identity (everything Live).
+    pub source_attention: &'a BTreeMap<String, lazybox_config::SourceAttention>,
     pub agents: &'a HashMap<SessionKey, lazybox_ipc::AgentState>,
     pub now: chrono::DateTime<chrono::Utc>,
     /// Free-text search, or `None`. When `Some` with a non-empty
@@ -108,25 +117,17 @@ const NO_REPO: &str = "(no repo)";
 
 /// Default Space for a source that carries no owner boundary and isn't
 /// explicitly assigned — Linear project labels, the `(no repo)` bucket.
-pub const UNGROUPED_SPACE: &str = "Ungrouped";
+pub const UNGROUPED_SPACE: &str = lazybox_config::UNGROUPED_SPACE;
 
 /// Which Space a source group label (`group_label`'s output) belongs
 /// to. An explicit `ui.spaces` assignment wins; otherwise the owner
 /// segment of an `owner/repo` label auto-seeds an owner-named Space;
 /// everything else falls into [`UNGROUPED_SPACE`]. Pure and total so
-/// both clients derive the same tier (#860).
+/// both clients derive the same tier (#860). Canonical in
+/// `lazybox_config` so the daemon resolves Space-level attention with
+/// the identical rule (#scale).
 pub fn space_of(label: &str, spaces: &[lazybox_config::SpaceConfig]) -> String {
-    for s in spaces {
-        if s.sources.iter().any(|src| src == label) {
-            return s.name.clone();
-        }
-    }
-    if let Some((owner, _)) = label.split_once('/')
-        && !owner.is_empty()
-    {
-        return owner.to_string();
-    }
-    UNGROUPED_SPACE.to_string()
+    lazybox_config::space_of(label, spaces)
 }
 
 /// Assign `source` to the Space named `space`, mutating the persisted
@@ -323,12 +324,20 @@ pub fn rename_space(
 pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     // Step 1: filter by mailbox membership. Uses the cell-tested
     // `mailbox_membership` predicate so snooze/merged/empty cases
-    // can't drift from their unit tests.
+    // can't drift from their unit tests. The snoozed lens (#scale)
+    // widens Inbox membership: with `Filter::Snoozed` active, snoozed
+    // rows are admitted here so the State axis can then select them —
+    // showing every snoozed workspace in place (with its wake time)
+    // instead of two mailbox cycles away. Filters otherwise only
+    // narrow, so this is the one membership decision a filter makes.
+    let snoozed_lens =
+        input.filters.has(filter::Filter::Snoozed) && input.mailbox == Mailbox::Inbox;
     let mailbox_rows: Vec<(&SessionKey, &Workspace)> = input
         .workspaces
         .iter()
         .filter(|(_, w)| {
             mailbox_membership(w, input.mailbox, input.now, input.show_inactive_in_inbox)
+                || (snoozed_lens && w.is_snoozed(input.now))
         })
         .collect();
     let mut filtered: Vec<(&SessionKey, &Workspace)> = mailbox_rows
@@ -338,6 +347,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
             input.filters.accepts(&FilterCtx {
                 w,
                 agents: input.agents,
+                now: input.now,
             })
         })
         // Free-text search. A scoped search (`scope: Some`) filters
@@ -423,6 +433,23 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         .filter_map(|key| filtered_by_key.get(key.as_str()).copied())
         .collect();
 
+    let mut hopper_rows: Vec<(&SessionKey, &Workspace)> = filtered
+        .iter()
+        .copied()
+        .filter(|(key, workspace)| {
+            workspace.hopper.is_some() && !focused_set.contains(key.as_str())
+        })
+        .collect();
+    hopper_rows.sort_by_key(|(key, workspace)| {
+        (
+            workspace
+                .hopper
+                .map(|meta| meta.position)
+                .unwrap_or(u32::MAX),
+            key.as_str(),
+        )
+    });
+
     // Step 2: bucket the non-focused workspaces by project. A
     // workspace's parent project is looked up via
     // `lazybox_core::workspace_project_key` → resolved through the
@@ -431,7 +458,7 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     // orphans whose task.repo failed to derive) land under `(no repo)`.
     let mut by_repo: BTreeMap<String, Vec<(&SessionKey, &Workspace)>> = BTreeMap::new();
     for (k, w) in &filtered {
-        if focused_set.contains(k.as_str()) {
+        if focused_set.contains(k.as_str()) || w.hopper.is_some() {
             continue;
         }
         by_repo
@@ -457,6 +484,13 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
                 .primary_task()
                 .map(|t| t.updated_at)
                 .unwrap_or(b.created_at);
+            // Announced re-entry (#scale, B4): a row whose event-
+            // conditional snooze just fired floats to the top of its
+            // group for WOKE_WINDOW, in EVERY sort mode — a snooze
+            // ending must never be a silent reappearance mid-list.
+            let woke = b
+                .is_recently_woken(input.now)
+                .cmp(&a.is_recently_woken(input.now));
             let recency = b_ts.cmp(&a_ts);
             let tie = ka.as_str().cmp(kb.as_str());
             let role_cmp = || {
@@ -466,11 +500,12 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
             // `WorkspaceKind` derives `Ord` with `Pr < Issue`, so
             // a plain `cmp` does the PR-first ordering.
             let kind_cmp = || WorkspaceKind::classify(a).cmp(&WorkspaceKind::classify(b));
-            match input.sort_mode {
+            let base = match input.sort_mode {
                 SortMode::Recent => recency.then(tie),
                 SortMode::ByRole => role_cmp().then(recency).then(tie),
                 SortMode::ByRoleSplit => kind_cmp().then_with(role_cmp).then(recency).then(tie),
-            }
+            };
+            woke.then(base)
         });
     }
 
@@ -506,6 +541,29 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     }
     ordered_repos.extend(all_repos);
 
+    // Step 4c: attention-demoted (Muted / source-snoozed) groups sink
+    // to the bottom of the list, after every Live/Quiet/Digest group —
+    // a stable partition, so pins-then-alphabetical order is preserved
+    // within each half. Demotion beats pinning: muting a pinned repo
+    // means the user changed their mind about its prominence (#scale).
+    let attention_of = |label: &str| {
+        lazybox_config::effective_source_attention(
+            input.source_attention,
+            label,
+            Some(&space_of(label, input.spaces)),
+        )
+    };
+    let is_demoted = |label: &str| {
+        attention_of(label).effective_level(input.now)
+            == lazybox_config::SourceAttentionLevel::Muted
+    };
+    if !input.source_attention.is_empty() {
+        let (kept, demoted): (Vec<String>, Vec<String>) =
+            ordered_repos.into_iter().partition(|r| !is_demoted(r));
+        ordered_repos = kept;
+        ordered_repos.extend(demoted);
+    }
+
     // Step 5: emit the row tree. Two shapes, chosen by whether the
     // Space tier is active. A source's Space comes from `space_of`
     // (explicit `ui.spaces` assignment, else owner auto-seed). The
@@ -532,7 +590,21 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         );
     }
 
-    // Step 5b: the repo groups (#860). Two shapes, chosen by whether the
+    // Step 5b: the personal Hopper follows Focused and stays outside
+    // repository grouping even after a repo is assigned. Repository is
+    // execution context; Hopper remains the workspace's ownership.
+    if !hopper_rows.is_empty() {
+        visible.push(VisibleRow::HopperHeader);
+        emit_workspace_forest(
+            &hopper_rows,
+            input.collapsed_tickets,
+            &context_only,
+            &mut visible,
+            &mut ticket_tree,
+        );
+    }
+
+    // Step 5c: the repo groups (#860). Two shapes, chosen by whether the
     // Space tier is active. A source's Space comes from `space_of`
     // (explicit `ui.spaces` assignment, else owner auto-seed). The tier
     // only renders when it yields ≥2 distinct Spaces this pass — a lone
@@ -544,7 +616,12 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         .collect();
     let distinct_spaces: BTreeSet<&str> = space_of_repo.iter().map(String::as_str).collect();
 
-    if distinct_spaces.len() < 2 {
+    // The tier renders when it yields ≥2 distinct Spaces, OR when the
+    // user has ANY explicit `ui.spaces` entry (#scale, proposal F):
+    // the old ≥2-only gate silently hid the whole feature from
+    // single-org users — an explicitly-created Space must show up, or
+    // `x m` appears to do nothing.
+    if distinct_spaces.len() < 2 && input.spaces.is_empty() {
         // Even without the Space tier rendered, an explicit source
         // order on the lone Space's config still reorders the flat
         // repo list (#1211) — so `x u`-style moves keep working when
@@ -554,11 +631,17 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         if let Some(space) = distinct_spaces.iter().next()
             && let Some(cfg) = input.spaces.iter().find(|s| s.name == **space)
         {
+            // Demotion (step 4c) survives the explicit source order:
+            // a muted repo sinks below every live one even when the
+            // Space config lists it first.
             flat_repos.sort_by_key(|r| {
-                cfg.sources
-                    .iter()
-                    .position(|src| src == *r)
-                    .unwrap_or(usize::MAX)
+                (
+                    is_demoted(r),
+                    cfg.sources
+                        .iter()
+                        .position(|src| src == *r)
+                        .unwrap_or(usize::MAX),
+                )
             });
         }
         for repo in flat_repos {
@@ -588,6 +671,23 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
                 space_order.push((*s).to_string());
             }
         }
+        // A Space muted at its own tier (`space:<name>`) sinks below
+        // every non-muted Space — same stable partition as step 4c.
+        if !input.source_attention.is_empty() {
+            let space_demoted = |name: &str| {
+                input
+                    .source_attention
+                    .get(&format!("space:{name}"))
+                    .is_some_and(|att| {
+                        att.effective_level(input.now)
+                            == lazybox_config::SourceAttentionLevel::Muted
+                    })
+            };
+            let (kept, demoted): (Vec<String>, Vec<String>) =
+                space_order.into_iter().partition(|s| !space_demoted(s));
+            space_order = kept;
+            space_order.extend(demoted);
+        }
 
         for space in &space_order {
             visible.push(VisibleRow::SpaceHeader(space.clone()));
@@ -606,10 +706,13 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
                 .collect();
             if let Some(cfg) = cfg {
                 repos.sort_by_key(|r| {
-                    cfg.sources
-                        .iter()
-                        .position(|src| src == *r)
-                        .unwrap_or(usize::MAX)
+                    (
+                        is_demoted(r),
+                        cfg.sources
+                            .iter()
+                            .position(|src| src == *r)
+                            .unwrap_or(usize::MAX),
+                    )
                 });
             }
             for repo in repos {
@@ -648,6 +751,23 @@ fn emit_repo_group<'a>(
 ) {
     visible.push(VisibleRow::RepoHeader(repo.to_string()));
     let mut summary = RepoSummary::default();
+    // Source-attention ladder (#scale): resolve this group's effective
+    // level once. Quiet/Digest/Muted suppress the ambient attention
+    // count — only punch-through rows keep counting — and a collapsed
+    // Muted group still emits its punch-through rows below the header
+    // (direct address is never hidden).
+    let source_att = lazybox_config::effective_source_attention(
+        input.source_attention,
+        repo,
+        Some(&space_of(repo, input.spaces)),
+    );
+    let level = source_att.effective_level(input.now);
+    if level != lazybox_config::SourceAttentionLevel::Live {
+        summary.source_attention = Some(level.label().to_string());
+    }
+    summary.source_snooze_until_epoch_ms = source_att
+        .active_snooze(input.now)
+        .map(|until| until.timestamp_millis());
     if let Some(rows) = by_repo.get(repo) {
         summary.active = rows
             .iter()
@@ -657,11 +777,33 @@ fn emit_repo_group<'a>(
             if context_only.contains(*key) {
                 continue;
             }
-            if workspace_needs_attention(w, input.attention, input.agents) {
+            if workspace_needs_attention(w, input.attention, input.agents)
+                && (level == lazybox_config::SourceAttentionLevel::Live
+                    || punches_through(w, input.agents))
+            {
                 summary.attention += 1;
             }
         }
-        if !input.collapsed_repos.contains(repo) {
+        if input.collapsed_repos.contains(repo) {
+            if level == lazybox_config::SourceAttentionLevel::Muted {
+                let punch: Vec<_> = rows
+                    .iter()
+                    .copied()
+                    .filter(|(key, w)| {
+                        !context_only.contains(*key) && punches_through(w, input.agents)
+                    })
+                    .collect();
+                if !punch.is_empty() {
+                    emit_workspace_forest(
+                        &punch,
+                        input.collapsed_tickets,
+                        context_only,
+                        visible,
+                        ticket_tree,
+                    );
+                }
+            }
+        } else {
             // ByRoleSplit drops a `KindHeader` between the PR
             // workspaces and the Issue workspaces of this repo.
             // Step 3 already sorted PRs ahead of issues, so a
@@ -964,6 +1106,28 @@ pub fn pr_number(task: &Task) -> Option<u64> {
     num.parse().ok()
 }
 
+/// What the sidebar's identifier column shows for `task`: the bare PR /
+/// issue number for GitHub-style `owner/repo#N` keys, otherwise the
+/// tracker's own identifier (`ENG-123`, `PROJ-42`). `None` only for an
+/// empty key. Width via [`identifier_width`] so the column can be sized
+/// without allocating on the render hot path.
+pub fn task_identifier(task: &Task) -> Option<String> {
+    if let Some(n) = pr_number(task) {
+        return Some(n.to_string());
+    }
+    let key = task.id.key.as_str();
+    (!key.is_empty()).then(|| key.to_string())
+}
+
+/// Display width of [`task_identifier`] without building the string.
+pub fn identifier_width(task: &Task) -> Option<usize> {
+    if let Some(n) = pr_number(task) {
+        return Some(1 + n.checked_ilog10().unwrap_or(0) as usize);
+    }
+    let key = task.id.key.as_str();
+    (!key.is_empty()).then(|| key.chars().count())
+}
+
 /// Does `query` match `w`? Matches when the query is a case-insensitive
 /// fuzzy (subsequence) match on the workspace's displayed title, OR a
 /// substring match on any of its searchable metadata: PR/issue number,
@@ -972,13 +1136,91 @@ pub fn pr_number(task: &Task) -> Option<u64> {
 /// empty query (after trimming) matches everything — callers guard
 /// against that, but it keeps the function total.
 pub fn search_matches(query: &str, w: &Workspace) -> bool {
-    let q = normalized_query(query).to_lowercase();
-    if q.is_empty() {
+    let raw = normalized_query(query).to_lowercase();
+    if raw.is_empty() {
         return true;
     }
+    // Qualifier grammar (#scale, C2): whitespace-split terms AND
+    // together. A term is `-`-negatable and either field-qualified —
+    // `author:x` `reviewer:x` `assignee:x` `repo:x` `label:x`
+    // `is:pr|issue|draft` `@login` (the involves role-union) — or bare
+    // text. Bare terms re-join into one blob matched exactly like the
+    // pre-grammar behavior (number / repo / labels / people substring,
+    // fuzzy-subsequence title), so a query with no qualifiers is
+    // byte-for-byte the legacy search.
+    let mut bare: Vec<&str> = Vec::new();
+    for term in raw.split_whitespace() {
+        let (negated, term) = match term.strip_prefix('-') {
+            Some(rest) if !rest.is_empty() => (true, rest),
+            _ => (false, term),
+        };
+        match qualified_term_matches(term, w) {
+            // A qualified term must match (or, negated, must NOT).
+            Some(matched) => {
+                if matched == negated {
+                    return false;
+                }
+            }
+            // Not a recognized qualifier: a negated bare term excludes
+            // rows its blob-match would hit; positive ones join the
+            // combined blob below.
+            None => {
+                if negated {
+                    if bare_blob_matches(term, w) {
+                        return false;
+                    }
+                } else {
+                    bare.push(term);
+                }
+            }
+        }
+    }
+    if bare.is_empty() {
+        return true;
+    }
+    bare_blob_matches(&bare.join(" "), w)
+}
+
+/// One field-qualified search term. `None` = not a qualifier (bare
+/// text). Values match case-insensitively by substring; `@login`
+/// matches the [`task_involves`] role-union.
+fn qualified_term_matches(term: &str, w: &Workspace) -> Option<bool> {
+    let task = w.primary_task();
+    if let Some(login) = term.strip_prefix('@').filter(|l| !l.is_empty()) {
+        return Some(task.is_some_and(|t| task_involves(t, login)));
+    }
+    let (field, value) = term.split_once(':')?;
+    if value.is_empty() {
+        return None;
+    }
+    let contains = |hay: &str| hay.to_lowercase().contains(value);
+    Some(match field {
+        "author" => task.is_some_and(|t| contains(&t.author)),
+        "reviewer" => task.is_some_and(|t| {
+            t.reviewers.iter().any(|r| contains(r)) || t.reviews.iter().any(|r| contains(&r.login))
+        }),
+        "assignee" => task.is_some_and(|t| t.assignees.iter().any(|a| contains(a))),
+        "repo" => task.is_some_and(|t| t.repo.as_deref().is_some_and(contains)),
+        "label" => task.is_some_and(|t| t.labels.iter().any(|l| contains(&l.name))),
+        "is" => match value {
+            "pr" => WorkspaceKind::classify(w) == WorkspaceKind::Pr,
+            "issue" => WorkspaceKind::classify(w) == WorkspaceKind::Issue,
+            "draft" => task.is_some_and(|t| t.state == lazybox_core::TaskState::Draft),
+            // Unknown `is:` value — treat as bare text, not a
+            // silently-false filter that empties the sidebar.
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+/// The pre-grammar single-blob match: PR number, repo, labels,
+/// requested people by substring; title (else workspace name) by
+/// fuzzy subsequence.
+fn bare_blob_matches(q: &str, w: &Workspace) -> bool {
     let task = w.primary_task();
     if let Some(n) = task.and_then(pr_number)
-        && n.to_string().contains(&q)
+        && n.to_string().contains(q)
     {
         return true;
     }
@@ -987,10 +1229,10 @@ pub fn search_matches(query: &str, w: &Workspace) -> bool {
         // requested on the task (reviewers / assignees).
         if t.repo
             .as_deref()
-            .is_some_and(|r| r.to_lowercase().contains(&q))
-            || t.labels.iter().any(|l| l.name.to_lowercase().contains(&q))
-            || t.reviewers.iter().any(|r| r.to_lowercase().contains(&q))
-            || t.assignees.iter().any(|a| a.to_lowercase().contains(&q))
+            .is_some_and(|r| r.to_lowercase().contains(q))
+            || t.labels.iter().any(|l| l.name.to_lowercase().contains(q))
+            || t.reviewers.iter().any(|r| r.to_lowercase().contains(q))
+            || t.assignees.iter().any(|a| a.to_lowercase().contains(q))
         {
             return true;
         }
@@ -1000,7 +1242,7 @@ pub fn search_matches(query: &str, w: &Workspace) -> bool {
     let title = task
         .map(|t| t.title.as_str())
         .unwrap_or_else(|| w.name.as_str());
-    is_subsequence(&title.to_lowercase(), &q)
+    is_subsequence(&title.to_lowercase(), q)
 }
 
 /// Whether the active search's scope *covers* workspace `w` — the set of
@@ -1179,6 +1421,8 @@ mod tests {
         static NO_FILTERS: FilterSet = FilterSet::new();
         static NO_SPACES: Vec<lazybox_config::SpaceConfig> = Vec::new();
         static NO_COLLAPSED_SPACES: BTreeSet<String> = BTreeSet::new();
+        static NO_SOURCE_ATTENTION: BTreeMap<String, lazybox_config::SourceAttention> =
+            BTreeMap::new();
         static NO_COLLAPSED_TICKETS: std::sync::LazyLock<HashSet<TaskId>> =
             std::sync::LazyLock::new(HashSet::new);
         ComputeInputs {
@@ -1193,6 +1437,7 @@ mod tests {
             focused_workspaces: &[],
             spaces: &NO_SPACES,
             collapsed_spaces: &NO_COLLAPSED_SPACES,
+            source_attention: &NO_SOURCE_ATTENTION,
             collapsed_tickets: &NO_COLLAPSED_TICKETS,
             attention,
             agents: asking,
@@ -1579,6 +1824,48 @@ mod tests {
         assert!(ka_after_a_header, "ka stays under owner/a");
     }
 
+    #[test]
+    fn hopper_follows_focused_and_stays_out_of_repo_groups() {
+        let mut ws = HashMap::new();
+        let focused = workspace_with_task("focused", Some("owner/a"), 10);
+        ws.insert(SessionKey::from(&focused.key), focused);
+        for (key, position) in [("later", 1), ("first", 0)] {
+            let mut hopper = Workspace::empty(WorkspaceKey::new(key), "main", fixed_time());
+            hopper.name = key.into();
+            hopper.project_key = Some(ProjectKey::github("owner", "a"));
+            hopper.hopper = Some(lazybox_core::HopperMeta {
+                position,
+                completed_at: None,
+                canceled_at: None,
+            });
+            ws.insert(SessionKey::from(&hopper.key), hopper);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        let focus = vec![SessionKey::from("focused")];
+        let mut input = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        input.focused_workspaces = &focus;
+
+        let out = compute_visible(input);
+        assert!(matches!(out.visible[0], VisibleRow::FocusedHeader));
+        assert!(matches!(out.visible[2], VisibleRow::HopperHeader));
+        assert!(matches!(&out.visible[3], VisibleRow::Workspace(key) if key.as_str() == "first"));
+        assert!(matches!(&out.visible[4], VisibleRow::Workspace(key) if key.as_str() == "later"));
+        for hopper_key in ["first", "later"] {
+            assert_eq!(
+                out.visible
+                    .iter()
+                    .filter(|row| matches!(row, VisibleRow::Workspace(key) if key.as_str() == hopper_key))
+                    .count(),
+                1,
+                "hopper rows are never duplicated under their assigned repo"
+            );
+        }
+    }
+
     /// The Focused section renders its rows in focus (Vec) order, and a
     /// star naming a workspace not visible this pass is skipped — the
     /// per-workspace parallel of the pin's skip-absent behavior.
@@ -1868,6 +2155,23 @@ mod tests {
                 .iter()
                 .any(|r| matches!(r, VisibleRow::SpaceHeader(_))),
             "one owner = one Space = no tier"
+        );
+
+        // …but an EXPLICIT `ui.spaces` entry un-suppresses it even at
+        // one distinct Space (#scale, proposal F): a Space the user
+        // created must be visible, or move-to-Space looks broken.
+        let explicit = vec![lazybox_config::SpaceConfig {
+            name: "mine".into(),
+            sources: vec!["owner/a".into(), "owner/b".into()],
+        }];
+        let mut input = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        input.spaces = &explicit;
+        let out = compute_visible(input);
+        assert!(
+            out.visible
+                .iter()
+                .any(|r| matches!(r, VisibleRow::SpaceHeader(name) if name == "mine")),
+            "an explicit Space renders its header even when it is the only one"
         );
     }
 
@@ -2564,6 +2868,289 @@ mod tests {
             t.id.key = "plain-key".into();
         }
         assert_eq!(pr_number(w.primary_task().unwrap()), None);
+    }
+    /// The snoozed lens (#scale): `Filter::Snoozed` in the active set
+    /// widens Inbox membership to admit currently-snoozed rows — and
+    /// the State axis then selects exactly them. Without the filter,
+    /// snooze still always wins (row hidden from Inbox). An EXPIRED
+    /// snooze never matches the lens.
+    #[test]
+    fn snoozed_lens_shows_snoozed_rows_in_the_inbox() {
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+
+        let mut snoozed = workspace_with_task("snoozed", Some("repo"), 5);
+        snoozed.snoozed_until = Some(fixed_time() + Duration::hours(4));
+        let awake = workspace_with_task("awake", Some("repo"), 3);
+        let mut expired = workspace_with_task("expired", Some("repo"), 8);
+        expired.snoozed_until = Some(fixed_time() - Duration::hours(1));
+        let ws: HashMap<SessionKey, Workspace> = [
+            (SessionKey::from("snoozed"), snoozed),
+            (SessionKey::from("awake"), awake),
+            (SessionKey::from("expired"), expired),
+        ]
+        .into();
+
+        let keys = |out: &ComputeOutcome| -> Vec<String> {
+            out.visible
+                .iter()
+                .filter_map(|r| match r {
+                    VisibleRow::Workspace(k) => Some(k.to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        // Default Inbox: snooze always wins; expired snooze is awake.
+        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
+        let visible = keys(&out);
+        assert!(!visible.contains(&"snoozed".to_string()));
+        assert!(visible.contains(&"awake".to_string()));
+        assert!(visible.contains(&"expired".to_string()));
+
+        // Snoozed lens: exactly the currently-snoozed rows.
+        let mut lens = filter::FilterSet::new();
+        lens.toggle(filter::Filter::Snoozed);
+        let mut input = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        input.filters = &lens;
+        let out = compute_visible(input);
+        let visible = keys(&out);
+        assert!(visible.contains(&"snoozed".to_string()));
+        assert!(
+            !visible.contains(&"awake".to_string()),
+            "the State axis narrows to snoozed rows"
+        );
+        assert!(
+            !visible.contains(&"expired".to_string()),
+            "an expired snooze must read as awake, not match the lens"
+        );
+    }
+
+    /// Source-attention ladder (#scale, proposal A): a Muted source
+    /// sinks below live groups (overriding alphabetical order), its
+    /// rows fold behind the collapsed residue header with only
+    /// punch-through rows surfacing, its summary carries the level +
+    /// punch-only attention count — and a time-boxed source snooze
+    /// reads as muted with its wake instant exposed. Space-level
+    /// entries are inherited by member sources.
+    #[test]
+    fn muted_source_sinks_folds_and_punches_through() {
+        use lazybox_config::{SourceAttention, SourceAttentionLevel};
+        let sub = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+
+        // "aaa" sorts before "bbb" alphabetically — the muted sink must
+        // override that. One plain row + one punch-through (review
+        // requested of the viewer) row in the muted repo.
+        let plain = workspace_with_task("plain", Some("aaa"), 5);
+        let mut punch = workspace_with_task("punch", Some("aaa"), 3);
+        {
+            let t = punch.gh_issues.first_mut().expect("task");
+            t.role = TaskRole::Reviewer;
+            t.review = ReviewStatus::Pending;
+        }
+        let live = workspace_with_task("live", Some("bbb"), 1);
+        let ws: HashMap<SessionKey, Workspace> = [
+            (SessionKey::from("plain"), plain),
+            (SessionKey::from("punch"), punch),
+            (SessionKey::from("live"), live),
+        ]
+        .into();
+
+        let mut map: BTreeMap<String, SourceAttention> = BTreeMap::new();
+        map.insert(
+            "aaa".into(),
+            SourceAttention {
+                level: SourceAttentionLevel::Muted,
+                snoozed_until: None,
+            },
+        );
+        // Muting auto-collapses (the sidebar writer does this); mirror it.
+        let collapsed: BTreeSet<String> = ["aaa".to_string()].into();
+
+        let mut input = inputs(&ws, &sub, &collapsed, &att, &asking, &projects);
+        input.source_attention = &map;
+        let out = compute_visible(input);
+
+        let header_pos = |name: &str| {
+            out.visible
+                .iter()
+                .position(|r| matches!(r, VisibleRow::RepoHeader(n) if n == name))
+                .unwrap_or_else(|| panic!("{name} header missing"))
+        };
+        assert!(
+            header_pos("bbb") < header_pos("aaa"),
+            "the muted group sinks below the live one despite sorting first"
+        );
+        let row_visible = |key: &str| {
+            out.visible
+                .iter()
+                .any(|r| matches!(r, VisibleRow::Workspace(k) if k.as_str() == key))
+        };
+        assert!(
+            !row_visible("plain"),
+            "a collapsed muted group folds its plain rows"
+        );
+        assert!(
+            row_visible("punch"),
+            "a review-requested-of-you row punches through the fold"
+        );
+        let summary = &out.summaries["aaa"];
+        assert_eq!(summary.source_attention.as_deref(), Some("muted"));
+        assert_eq!(summary.active, 2);
+        assert_eq!(
+            summary.attention, 1,
+            "only the punch-through row counts toward the muted group's badge"
+        );
+        assert!(
+            out.summaries["bbb"].source_attention.is_none(),
+            "live sources carry no level chip"
+        );
+
+        // A time-boxed source snooze reads as muted and exposes its
+        // wake instant; a Space-level entry covers member sources.
+        let mut map2: BTreeMap<String, SourceAttention> = BTreeMap::new();
+        map2.insert(
+            "bbb".into(),
+            SourceAttention {
+                level: SourceAttentionLevel::Live,
+                snoozed_until: Some(fixed_time() + Duration::hours(6)),
+            },
+        );
+        map2.insert(
+            "space:Ungrouped".into(),
+            SourceAttention {
+                level: SourceAttentionLevel::Quiet,
+                snoozed_until: None,
+            },
+        );
+        let empty_collapsed = BTreeSet::new();
+        let mut input = inputs(&ws, &sub, &empty_collapsed, &att, &asking, &projects);
+        input.source_attention = &map2;
+        let out = compute_visible(input);
+        let bbb = &out.summaries["bbb"];
+        assert_eq!(bbb.source_attention.as_deref(), Some("muted"));
+        assert_eq!(
+            bbb.source_snooze_until_epoch_ms,
+            Some((fixed_time() + Duration::hours(6)).timestamp_millis()),
+        );
+        assert_eq!(
+            out.summaries["aaa"].source_attention.as_deref(),
+            Some("quiet"),
+            "a source without its own entry inherits its Space's level"
+        );
+        assert!(
+            row_visible("plain")
+                || out
+                    .visible
+                    .iter()
+                    .any(|r| matches!(r, VisibleRow::Workspace(k) if k.as_str() == "plain"),),
+            "quiet sources keep their rows visible"
+        );
+    }
+
+    /// Search-qualifier grammar (#scale, C2): field-qualified terms,
+    /// the `@login` involves-union, `is:` kinds, `-` negation, and —
+    /// critically — a qualifier-free query behaving exactly like the
+    /// legacy single-blob search.
+    #[test]
+    fn search_qualifiers_filter_and_negate() {
+        let mut ws = workspace_with_task("q", Some("acme/api"), 5);
+        {
+            let t = ws.gh_issues.first_mut().expect("task");
+            t.title = "Fix login flow".into();
+            t.author = "Alice".into();
+            t.reviewers = vec!["bob".into()];
+            t.assignees = vec!["carol".into()];
+            t.labels = vec![lazybox_core::Label::new("bug")];
+        }
+
+        // Legacy blob behavior is preserved verbatim.
+        assert!(search_matches("login", &ws));
+        assert!(search_matches("bug", &ws));
+        assert!(!search_matches("nomatch", &ws));
+
+        // Field qualifiers, case-insensitive.
+        assert!(search_matches("author:alice", &ws));
+        assert!(!search_matches("author:bob", &ws));
+        assert!(search_matches("reviewer:bob", &ws));
+        assert!(search_matches("assignee:carol", &ws));
+        assert!(search_matches("repo:acme", &ws));
+        assert!(search_matches("label:bug", &ws));
+        assert!(search_matches("is:issue", &ws));
+        assert!(!search_matches("is:pr", &ws));
+
+        // `@login` is the involves role-union.
+        assert!(search_matches("@alice", &ws));
+        assert!(search_matches("@bob", &ws));
+        assert!(search_matches("@carol", &ws));
+        assert!(!search_matches("@mallory", &ws));
+
+        // Terms AND together; negation excludes.
+        assert!(search_matches("author:alice login", &ws));
+        assert!(!search_matches("author:alice nomatch", &ws));
+        assert!(!search_matches("-author:alice", &ws));
+        assert!(search_matches("-author:mallory login", &ws));
+        assert!(!search_matches("-login", &ws));
+
+        // An unknown `is:` value degrades to bare text instead of
+        // silently emptying the sidebar.
+        assert!(!search_matches("is:banana", &ws));
+    }
+
+    /// Announced re-entry (#scale, B4): a row whose event-conditional
+    /// snooze fired within WOKE_WINDOW floats to the top of its group
+    /// in every sort mode; past the window it falls back into place.
+    #[test]
+    fn recently_woken_rows_float_to_the_top_of_their_group() {
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+
+        // "fresh" is more recently updated, so recency alone puts it
+        // first — the woke boost must override that for "woken".
+        let fresh = workspace_with_task("fresh", Some("repo"), 1);
+        let mut woken = workspace_with_task("woken", Some("repo"), 60);
+        woken.woke_at = Some(fixed_time() - Duration::minutes(5));
+        let ws: HashMap<SessionKey, Workspace> = [
+            (SessionKey::from("fresh"), fresh),
+            (SessionKey::from("woken"), woken),
+        ]
+        .into();
+
+        let order = |out: &ComputeOutcome| -> Vec<String> {
+            out.visible
+                .iter()
+                .filter_map(|r| match r {
+                    VisibleRow::Workspace(k) => Some(k.to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let out = compute_visible(inputs(&ws, &sub, &col, &att, &asking, &projects));
+        assert_eq!(
+            order(&out),
+            vec!["woken".to_string(), "fresh".to_string()],
+            "the woken row leads its group despite older activity"
+        );
+
+        // Past the window the boost expires (stale woke_at).
+        let mut ws2 = ws.clone();
+        ws2.get_mut(&SessionKey::from("woken")).unwrap().woke_at =
+            Some(fixed_time() - lazybox_core::WOKE_WINDOW - Duration::minutes(1));
+        let out = compute_visible(inputs(&ws2, &sub, &col, &att, &asking, &projects));
+        assert_eq!(
+            order(&out),
+            vec!["fresh".to_string(), "woken".to_string()],
+            "an expired announcement falls back to normal order"
+        );
     }
 }
 

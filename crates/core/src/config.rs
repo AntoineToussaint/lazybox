@@ -37,6 +37,12 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Linear has only roles, no PR/Issue split:
 /// `role.author`, `role.assignee`, `role.subscriber`, `role.mentioned`.
 ///
+/// ## Jira key schema
+///
+/// Same flat roles as Linear, mapped onto Jira's vocabulary:
+/// `role.assignee` (assigned to me), `role.author` (I reported),
+/// `role.mentioned` (I'm watching — Jira has no first-class mention query).
+///
 /// Unknown keys are ignored at apply time so the option schema can
 /// grow without invalidating saved configs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -85,9 +91,18 @@ impl ProviderConfig {
 
     /// Linear-style role check (no per-type split).
     pub fn allows_linear_role(&self, role: crate::task::TaskRole) -> bool {
+        self.allows_flat_role(role)
+    }
+
+    /// Jira-style role check — the same flat `role.*` keys as Linear.
+    pub fn allows_jira_role(&self, role: crate::task::TaskRole) -> bool {
+        self.allows_flat_role(role)
+    }
+
+    fn allows_flat_role(&self, role: crate::task::TaskRole) -> bool {
         let key = match role {
             crate::task::TaskRole::Author => "role.author",
-            crate::task::TaskRole::Reviewer => return false, // Linear has no reviewer
+            crate::task::TaskRole::Reviewer => return false, // issue trackers have no reviewer
             crate::task::TaskRole::Assignee => "role.assignee",
             crate::task::TaskRole::Mentioned => "role.mentioned",
         };
@@ -161,6 +176,12 @@ impl ProviderConfig {
                 // Assigned-to-me + created-by-me, matching the default
                 // query scope ([`LinearScope::default_scopes`]). Subscriber
                 // / mentioned are off — the noisy signals a user opts into.
+                keys.insert("role.assignee".into());
+                keys.insert("role.author".into());
+            }
+            "jira" => {
+                // Assigned + reported, like Linear. Watching is off: Jira
+                // auto-watches you onto everything you touch.
                 keys.insert("role.assignee".into());
                 keys.insert("role.author".into());
             }
@@ -288,6 +309,18 @@ pub const KV_KEY_LAYOUT: &str = "layout_v2";
 /// `WorkspaceUpserted` would just re-create the row the user
 /// just dismissed. Persistence is per-machine, not synced.
 pub const KV_KEY_ARCHIVED: &str = "archived_workspaces_v1";
+
+/// Set of workspace keys whose backing session must be killed —
+/// never reattached — on the next recovery pass. Written on *every*
+/// workspace removal (all `WorkspaceRemovalReason`s), unlike
+/// [`KV_KEY_ARCHIVED`], which additionally suppresses re-polling and so
+/// is deliberately skipped by non-archiving removals (`ClosedAuto`,
+/// `Rescope`). Splitting the two lets those removals keep their
+/// resurrection backstop — a survivor tmux session that the delete-time
+/// sweep failed to reach is still killed on restart — without also
+/// suppressing a reopened issue from resurfacing. Stored as a
+/// JSON-encoded `Vec<String>`; per-machine, not synced.
+pub const KV_KEY_SESSION_TOMBSTONES: &str = "session_tombstones_v1";
 
 /// Pane layout knobs. Two splitters today: the sidebar's right edge
 /// (left/right split, **as a percentage of the total width**) and the
@@ -442,6 +475,21 @@ mod tests {
         // subscriber flood (#862) stays out even if it were fetched.
         assert!(!c.allows_linear_role(TaskRole::Mentioned));
         assert!(!c.allows_linear_role(TaskRole::Reviewer));
+    }
+
+    #[test]
+    fn default_jira_mirrors_linear_roles() {
+        let c = ProviderConfig::default_for("jira");
+        assert!(c.allows_jira_role(TaskRole::Assignee));
+        assert!(
+            c.allows_jira_role(TaskRole::Author),
+            "reported-by-me on by default"
+        );
+        assert!(
+            !c.allows_jira_role(TaskRole::Mentioned),
+            "watching is opt-in"
+        );
+        assert!(!c.allows_jira_role(TaskRole::Reviewer));
     }
 
     #[test]

@@ -37,12 +37,18 @@ pub struct Confirm {
     /// Last button clicked and when, for double-click detection: which
     /// side (true = Yes) plus the click instant.
     last_click: Option<(bool, Instant)>,
+    /// Whether this confirm guards a destructive / hard-to-undo action
+    /// (archive, merge, delete, close, reset). It does NOT change the
+    /// default button — every confirm defaults to Yes so the user can
+    /// move fast — it colors the modal (warning border + `⚠` title) so
+    /// the danger is unmistakable *before* pressing Enter.
+    destructive: bool,
 }
 
 impl Confirm {
-    /// Build a prompt asking `question`. Defaults `Enter` to yes.
-    /// Call [`Self::default_no`] / [`Self::default_yes`] at the site to
-    /// state the default deliberately rather than leaning on this.
+    /// Build a prompt asking `question`. Defaults `Enter` to Yes, benign
+    /// (no danger coloring). Call [`Self::destructive`] to mark a
+    /// hard-to-undo action.
     pub fn new(question: impl Into<String>) -> Self {
         Self {
             question: question.into(),
@@ -50,19 +56,30 @@ impl Confirm {
             yes_rect: None,
             no_rect: None,
             last_click: None,
+            destructive: false,
         }
     }
 
-    /// Make `Enter` default to "no". Use for destructive / hard-to-undo
-    /// prompts where the safer option is to back out.
-    pub fn default_no(mut self) -> Self {
-        self.selected_yes = false;
+    /// Mark this confirm as guarding a destructive / hard-to-undo action.
+    /// The default stays Yes (fast to accept an action you explicitly
+    /// asked for), but the modal renders with a warning border + `⚠`
+    /// title so you can *see* it can destroy something before you commit.
+    pub fn destructive(mut self) -> Self {
+        self.destructive = true;
+        self.selected_yes = true;
         self
     }
 
-    /// Make `Enter` default to "yes". Use when the confirm is only an
-    /// awareness gate in front of an explicitly-requested, benign action
-    /// and accepting is the expected path.
+    /// Back-compat alias for the destructive marker: previously these
+    /// prompts defaulted to No; they now default to Yes and are
+    /// distinguished by the danger coloring instead. Kept so the call
+    /// sites don't churn.
+    pub fn default_no(self) -> Self {
+        self.destructive()
+    }
+
+    /// Make `Enter` default to "yes" (the default already). Retained for
+    /// call sites that state it explicitly. Benign — no danger coloring.
     pub fn default_yes(mut self) -> Self {
         self.selected_yes = true;
         self
@@ -101,11 +118,29 @@ impl Component for Confirm {
         let modal = Rect::new(x, y, modal_w, modal_h);
 
         frame.render_widget(Clear, modal);
+        // Destructive confirms wear a warning border + `⚠` title so a
+        // hard-to-undo action reads as dangerous at a glance, even though
+        // it still defaults to Yes for speed. Benign confirms keep the
+        // neutral chrome.
+        let (title, border_style) = if self.destructive {
+            (
+                Span::styled(
+                    " ⚠ Confirm ",
+                    Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+                ),
+                Style::default().fg(theme.warn),
+            )
+        } else {
+            (
+                Span::styled(" Confirm ", theme.modal_title()),
+                theme.modal_border(),
+            )
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .title(Span::styled(" Confirm ", theme.modal_title()))
-            .border_style(theme.modal_border());
+            .title(title)
+            .border_style(border_style);
         let inner = block.inner(modal);
         frame.render_widget(block, modal);
 
@@ -312,47 +347,49 @@ mod tests {
         ");
     }
 
-    /// Issue #525: an event-initiated (default-no) confirm highlights the
-    /// No button, so a stray Enter backs out.
+    /// A destructive confirm now DEFAULTS to Yes (fast to accept an
+    /// action you explicitly invoked) — the danger is signaled by the
+    /// warning border + `⚠` title, not by defaulting to No. So Enter
+    /// highlights and completes Yes.
     #[test]
-    fn highlighted_button_snapshot_default_no() {
-        let mut c = Confirm::new("o/r#1 was merged — remove workspace?").default_no();
+    fn destructive_confirm_defaults_yes() {
+        let mut c = Confirm::new("o/r#1 was merged — remove workspace?").destructive();
         insta::assert_snapshot!(highlight_snapshot(&mut c), @r"
-        YES: [Y]es  bold=false
-        NO : [N]o  bold=true
+        YES: [Y]es  bold=true
+        NO : [N]o  bold=false
         ");
     }
 
     #[test]
     fn builders_set_the_initial_default() {
-        // Issue #312: the three builder forms fix which button Enter
-        // fires before any toggle. `new` and `default_yes` highlight
-        // Yes; `default_no` highlights No.
+        // Every builder now defaults Enter to Yes — `new`, `default_yes`,
+        // and the destructive marker (`destructive` / its `default_no`
+        // alias) alike. A destructive action's danger is shown by the
+        // warning coloring, not by defaulting to No, so the user can
+        // move fast.
         assert!(Confirm::new("q").selected_yes());
         assert!(Confirm::new("q").default_yes().selected_yes());
-        assert!(!Confirm::new("q").default_no().selected_yes());
+        assert!(Confirm::new("q").destructive().selected_yes());
+        assert!(Confirm::new("q").default_no().selected_yes());
     }
 
     #[test]
-    fn enter_fires_the_defaulted_side() {
-        // A default-no prompt returns `Confirmed(false)` on a bare
-        // Enter; a default-yes prompt returns `Confirmed(true)`.
-        let mut no = Confirm::new("q").default_no();
-        assert_eq!(
-            no.on(&Event::Keyboard(KeyEvent {
-                code: Key::Enter,
-                modifiers: KeyModifiers::empty(),
-            })),
-            Some(Msg::Confirmed(false)),
-        );
-        let mut yes = Confirm::new("q").default_yes();
-        assert_eq!(
-            yes.on(&Event::Keyboard(KeyEvent {
-                code: Key::Enter,
-                modifiers: KeyModifiers::empty(),
-            })),
-            Some(Msg::Confirmed(true)),
-        );
+    fn enter_fires_yes_for_every_builder() {
+        // Bare Enter returns `Confirmed(true)` for benign, destructive,
+        // and explicit-yes prompts — they all default to Yes now.
+        for mut c in [
+            Confirm::new("q"),
+            Confirm::new("q").default_yes(),
+            Confirm::new("q").destructive(),
+        ] {
+            assert_eq!(
+                c.on(&Event::Keyboard(KeyEvent {
+                    code: Key::Enter,
+                    modifiers: KeyModifiers::empty(),
+                })),
+                Some(Msg::Confirmed(true)),
+            );
+        }
     }
 
     #[test]

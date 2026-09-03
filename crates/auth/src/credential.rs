@@ -45,7 +45,7 @@ impl fmt::Display for Credential {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum CredentialError {
     #[error("credential not found: {0}")]
     NotFound(String),

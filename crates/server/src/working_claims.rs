@@ -354,11 +354,16 @@ async fn sync_remote(
             return false;
         }
         Err(_) => {
+            // Not necessarily GitHub: this 20s cap (MUTATION_TIMEOUT) is
+            // shorter than the client's own 30s PERMIT_WAIT_TIMEOUT, so a
+            // request throttled behind lazybox's rate-budget pacing is cut
+            // off here before its self-throttle error can surface. Don't
+            // blame GitHub for what may be our own backoff (#1218).
             emit_transient_error(
                 config,
                 &record.workspace_key,
                 "synchronize",
-                "GitHub did not respond within 20 seconds",
+                "claim sync timed out after 20s (GitHub slow, or throttled behind lazybox's rate budget)",
             );
             return false;
         }
@@ -566,7 +571,11 @@ async fn cleanup_expired(config: &ServerConfig, now: DateTime<Utc>) {
             if !matches!(result, Ok(Ok(()))) {
                 let reason = match result {
                     Ok(Err(error)) => error.to_string(),
-                    Err(_) => "GitHub did not respond within 20 seconds".into(),
+                    // See note in sync_remote: a 20s timeout here can be our
+                    // own rate-budget pacing, not GitHub (#1218).
+                    Err(_) => {
+                        "claim expiry timed out after 20s (GitHub slow, or throttled behind lazybox's rate budget)".into()
+                    }
                     Ok(Ok(())) => unreachable!(),
                 };
                 emit_transient_error(config, &workspace.key, "expire", &reason);

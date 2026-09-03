@@ -2140,6 +2140,16 @@ impl TerminalStack {
             .copied()
     }
 
+    /// The exact on-screen cell-grid rect the renderer drew for terminal
+    /// `id` in the last frame, or `None` if it wasn't rendered. Callers
+    /// that must confine per-terminal chrome to a single tile — e.g. the
+    /// selection-highlight overlay — clip to this instead of the whole
+    /// terminal pane, so in a split layout the effect can't bleed into a
+    /// neighbouring tile (#1101).
+    pub fn tile_grid_rect(&self, id: TerminalId) -> Option<tuirealm::ratatui::layout::Rect> {
+        self.hit_for(id).map(|hit| hit.grid)
+    }
+
     /// The viewport offset to compose a selection against for `id`: the
     /// offset of the frame the user clicked on (recorded in
     /// [`Self::hit_for`]), falling back to the live VT offset only before
@@ -3450,6 +3460,16 @@ impl TerminalStack {
     pub fn on_event(&mut self, event: &Event) {
         match event {
             Event::Snapshot { terminals, .. } => {
+                // The width the focused pane last rendered at, captured
+                // before the rebuild. It's the fallback size for a focused
+                // terminal that arrives brand new in this snapshot (a
+                // lag-recovery snapshot introducing a not-yet-seen terminal
+                // in the active session), so its eager flush below still
+                // parses at the real pane width rather than the VT default.
+                let prev_focused_size = self
+                    .focused_terminal_id()
+                    .and_then(|id| self.terminals.get(&id))
+                    .and_then(|slot| slot.last_rendered_size);
                 let mut previous = std::mem::take(&mut self.terminals);
                 for snap in terminals {
                     if let Some(replay_fingerprint) = debug_byte_fingerprint(&snap.replay) {
@@ -3561,15 +3581,35 @@ impl TerminalStack {
                 self.clamp_active_tab();
                 self.auto_collapse_on_emptiness();
                 // Eagerly parse only the terminal actually in the
-                // foreground: the `&self` readers (mouse-tracking
-                // probe, alt-screen check) consult its live parser
-                // state between now and the next render, and it's what
-                // the user is looking at. Everything else parses
-                // lazily on first display.
-                if let Some(id) = self.focused_terminal_id()
-                    && let Some(slot) = self.terminals.get_mut(&id)
-                {
-                    slot.flush_pending();
+                // foreground: the `&self` readers (mouse-tracking probe,
+                // alt-screen check) consult its live parser state between
+                // now and the next render, and it's what the user is
+                // looking at. Everything else parses lazily on first
+                // display, at which point `render` sizes the grid before it
+                // flushes — so only this eager path can parse at the wrong
+                // width.
+                //
+                // Size the VT to the width the pane will render at before
+                // flushing, so a cursor-relative redraw in the replay (an
+                // agent status block redrawn with `ESC[<n>A`) lands on the
+                // right rows instead of scrolling stale copies into
+                // reconstructed scrollback (#1405). The width is the
+                // terminal's own last-rendered size, or the pane's if it
+                // arrived brand new this snapshot. With neither known (a
+                // cold client that has never rendered — where `handle_mouse`
+                // early-returns on a zero `last_area`, so the probes can't be
+                // consulted anyway) we defer to the render.
+                if let Some(id) = self.focused_terminal_id() {
+                    let width = previous
+                        .get(&id)
+                        .and_then(|prev| prev.last_rendered_size)
+                        .or(prev_focused_size);
+                    if let Some((cols, rows)) = width
+                        && let Some(slot) = self.terminals.get_mut(&id)
+                    {
+                        slot.vt.ensure_size(cols, rows);
+                        slot.flush_pending();
+                    }
                 }
             }
             Event::TerminalSpawned {
@@ -4281,6 +4321,7 @@ impl TerminalStack {
             // A tile-split shell lands in the workspace's default
             // (isolated) worktree, not the shared main checkout.
             on_main: false,
+            force_new: false,
         });
     }
 
@@ -4625,9 +4666,23 @@ impl TerminalStack {
     /// the user has to parse. Truncates with `…` when the message
     /// overflows the row width — same affordance the empty-state
     /// hint uses elsewhere in this pane.
-    fn render_user_message_recap(frame: &mut Frame, area: Rect, msg: &str) {
+    fn render_user_message_recap(frame: &mut Frame, area: Rect, msg: &str, age: &str) {
         let theme = crate::theme::current();
         let summary = summarize_message(msg);
+        // A relative age ("5m ago") on the right lets the user judge whether
+        // the conversation is stale at a glance, without opening `]]h` (#523).
+        // It's supplementary, so it yields to the message: reserve space only
+        // when the row is wide enough for both, and drop it otherwise.
+        let age_w = age.chars().count() as u16;
+        let age_reserve = if age.is_empty() || area.width < age_w + 12 {
+            0
+        } else {
+            age_w + 2 // one-column gap before the age, one of breathing room
+        };
+        let summary_area = Rect {
+            width: area.width.saturating_sub(age_reserve),
+            ..area
+        };
         let line = ratatui::text::Line::from(vec![
             Span::styled(
                 RECAP_PREFIX,
@@ -4637,8 +4692,22 @@ impl TerminalStack {
             ),
             Span::styled(summary, Style::default().fg(theme.text_dim)),
         ]);
-        let line = crate::components::table::truncate_line(line, area.width as usize);
-        frame.render_widget(Paragraph::new(line), area);
+        let line = crate::components::table::truncate_line(line, summary_area.width as usize);
+        frame.render_widget(Paragraph::new(line), summary_area);
+        if age_reserve > 0 {
+            let age_area = Rect {
+                x: area.x + area.width - age_w,
+                width: age_w,
+                ..area
+            };
+            frame.render_widget(
+                Paragraph::new(ratatui::text::Line::from(Span::styled(
+                    age.to_string(),
+                    Style::default().fg(theme.text_dim),
+                ))),
+                age_area,
+            );
+        }
     }
 
     /// Rows carved off the top of a terminal's body for the pinned
@@ -4691,7 +4760,7 @@ impl TerminalStack {
                 rect
             };
             if recap > 0
-                && let Some(msg) = slot.prompt_history.last().map(|p| p.text.as_str())
+                && let Some(last) = slot.prompt_history.last()
             {
                 let header_rect = Rect {
                     x: rect.x,
@@ -4699,7 +4768,8 @@ impl TerminalStack {
                     width: rect.width,
                     height: 1,
                 };
-                Self::render_user_message_recap(frame, header_rect, msg);
+                let age = crate::realm::model::relative_age(last.timestamp_ms, now_ms());
+                Self::render_user_message_recap(frame, header_rect, &last.text, &age);
             }
             // Reserve the rightmost column of the body as a scrollbar
             // gutter. Held back unconditionally so the PTY width stays
@@ -5095,6 +5165,11 @@ impl TerminalStack {
                 "¢ no credit",
                 Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
             )),
+            // The calm sibling of `LimitReached`: auto-wait pressed Wait and
+            // the agent is parked until reset — handled, nothing for you to
+            // do — so it gets a quiet 💤 in the dim text color, NOT the
+            // alerting bold `warn` the two blocks above use.
+            AgentState::AwaitingReset => Some(("💤 waiting", Style::default().fg(theme.text_dim))),
             // Idle has nothing to act on; `Exited` is surfaced by the
             // `exited` flag above (the process-ended pill lives on the
             // slot, not the live state).
@@ -6509,6 +6584,50 @@ mod selection_offset_tests {
             .selection_point(id, rect, end.0, end.1)
             .expect("focus");
         stack.extract_selection(id, a, b)
+    }
+
+    /// #523: the pinned `you ▸` recap above the agent grid shows the last
+    /// prompt's relative age on the right, so staleness reads at a glance
+    /// without opening `]]h`.
+    #[test]
+    fn recap_row_shows_relative_age_on_the_right() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        const W: u16 = 60;
+        let area = Rect::new(0, 0, W, 1);
+        let mut term = Terminal::new(TestBackend::new(W, 1)).unwrap();
+        term.draw(|f| {
+            TerminalStack::render_user_message_recap(f, area, "review the diff", "5m ago")
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        let row: String = (0..W).map(|x| buf[(x, 0)].symbol()).collect();
+        assert!(row.contains("you ▸"), "prefix present: {row:?}");
+        assert!(row.contains("review the diff"), "message present: {row:?}");
+        assert!(
+            row.trim_end().ends_with("5m ago"),
+            "age is right-aligned: {row:?}"
+        );
+    }
+
+    /// The age is supplementary: on a row too narrow for both, the message
+    /// wins and the age is dropped rather than clipping the prompt.
+    #[test]
+    fn recap_row_drops_age_when_too_narrow() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        const W: u16 = 14;
+        let area = Rect::new(0, 0, W, 1);
+        let mut term = Terminal::new(TestBackend::new(W, 1)).unwrap();
+        term.draw(|f| TerminalStack::render_user_message_recap(f, area, "hello there", "5m ago"))
+            .unwrap();
+        let buf = term.backend().buffer();
+        let row: String = (0..W).map(|x| buf[(x, 0)].symbol()).collect();
+        assert!(
+            !row.contains("5m ago"),
+            "age dropped on a narrow row: {row:?}"
+        );
+        assert!(row.contains("you ▸"), "prefix still present: {row:?}");
     }
 
     #[test]
@@ -8194,12 +8313,20 @@ mod hidden_feed_tests {
     /// terminal synchronously on the UI thread: only the foreground
     /// terminal is fed eagerly; hidden terminals stash their replay in
     /// `pending_feed` and reconstruct the exact grid on first display.
+    /// The foreground terminal is fed eagerly only once its render width
+    /// is known (it rendered before the reconnect) — flushing a fresh
+    /// slot would parse the replay at the VT default and reflow it, the
+    /// scrollback-corrupting path #1405 guards against.
     #[test]
     fn snapshot_defers_hidden_terminal_replays() {
         let sk_a = SessionKey::new("a");
         let sk_b = SessionKey::new("b");
         let mut stack = TerminalStack::new(PaneId::new(0));
         stack.set_active_session(Some(sk_a.clone()));
+        // The foreground terminal already rendered once — the reconnect
+        // precondition that lets its replay flush eagerly at the real width.
+        spawn(&mut stack, TerminalId(1), &sk_a);
+        render(&mut stack);
 
         let snap = |id: u64, sk: &SessionKey, replay: &[u8]| lazybox_ipc::TerminalSnapshot {
             terminal_id: TerminalId(id),
@@ -8261,6 +8388,56 @@ mod hidden_feed_tests {
         // And the eagerly-fed foreground grid was correct all along.
         stack.set_active_session(Some(sk_a));
         assert_eq!(row0(&mut stack), "visible");
+    }
+
+    /// The focused terminal's replay is flushed eagerly so the `&self`
+    /// mouse-tracking / alt-screen probes — which the mouse handler
+    /// consults on input dispatched before the first render — reflect the
+    /// reattached stream's terminal modes immediately. A deferred flush
+    /// would leave those probes reading the VT default (mouse tracking
+    /// off), and a click into a reattached mouse-tracking agent would be
+    /// swallowed as a lazybox selection instead of forwarded.
+    #[test]
+    fn snapshot_eager_flush_exposes_focused_terminal_modes_before_render() {
+        let sk = SessionKey::new("a");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.set_active_session(Some(sk.clone()));
+        // Rendered once before the reconnect, so the pane width is known.
+        spawn(&mut stack, TerminalId(1), &sk);
+        render(&mut stack);
+
+        stack.on_event(&Event::Snapshot {
+            workspaces: vec![],
+            terminals: vec![lazybox_ipc::TerminalSnapshot {
+                terminal_id: TerminalId(1),
+                session_key: sk.clone(),
+                kind: TerminalKind::Agent("claude".into()),
+                // SGR mouse tracking on (`?1002h`/`?1006h`), as vim/Claude do.
+                replay: b"\x1b[?1002h\x1b[?1006hediting\r\n".to_vec(),
+                last_seq: 1,
+                replay_available: true,
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+                prompt_history: Vec::new(),
+                composing_buffer: None,
+                agent_state: None,
+                authenticating: false,
+            }],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+
+        assert!(
+            stack.terminals[&TerminalId(1)].pending_feed.is_empty(),
+            "the focused terminal's replay must flush eagerly, not defer"
+        );
+        assert!(
+            stack.terminal_tracks_mouse(TerminalId(1)),
+            "mouse tracking from the reconnect replay must be visible to the \
+             &self probe before the first render"
+        );
     }
 
     #[test]

@@ -48,6 +48,7 @@ lazybox-store    = { workspace = true }
 lazybox-gh       = { workspace = true }
 lazybox-slack    = { workspace = true }
 lazybox-linear   = { workspace = true }
+lazybox-jira     = { workspace = true }
 lazybox-ipc      = { workspace = true }
 lazybox-identity = { workspace = true }
 lazybox-e2e-channel = { workspace = true }

@@ -44,6 +44,7 @@ pub mod event_forward;
 pub mod keep_awake;
 pub mod lifecycle;
 pub mod local_gateway;
+pub mod mcp;
 
 /// Run one store operation on the blocking pool (#1237). The single
 /// SQLite connection mutex must never be held from a tokio worker: a
@@ -67,14 +68,17 @@ pub mod proxy;
 pub mod pty;
 pub mod registries;
 mod resource_limits;
+pub mod session_cost;
 pub mod session_reaper;
 pub mod slack;
 pub mod socket_service;
 pub mod spawn_handler;
 mod spawn_plan;
+pub mod stats_accumulator;
 mod terminal_commands;
 mod terminal_io;
 mod working_claims;
+mod working_watchdog;
 pub mod workspace;
 
 use crate::backend::{RawPtyBackend, SessionBackend, TmuxBackend};
@@ -435,6 +439,12 @@ pub struct ServerConfig {
     /// worktree removals) so shutdown can wait for them — see
     /// `register_maintenance_latch` / `drain_maintenance_tasks`.
     pub(crate) maintenance_done: Arc<parking_lot::Mutex<Vec<tokio::sync::oneshot::Receiver<()>>>>,
+    /// MCP cross-agent coordination runtime (#1420): the per-session bearer
+    /// → `SessionKey` registry the MCP server reads to identify a tool caller,
+    /// and the bound endpoint URL set once [`mcp::start`] runs. Shared (Arc)
+    /// so the spawn path can register a token per agent and the listener can
+    /// resolve it. Inert until a listener starts and an agent spawns.
+    pub mcp: Arc<mcp::McpRuntime>,
 }
 
 impl ServerConfig {
@@ -501,7 +511,7 @@ impl ServerConfig {
             identity_dir,
             keystore,
         ));
-        config.working_claims_enabled = true;
+        config.working_claims_enabled = user_config.server.working_claims_enabled();
         Ok(config)
     }
 
@@ -571,6 +581,7 @@ impl ServerConfig {
             worktree_ownership_lock: Arc::new(Mutex::new(())),
             provisioning_worktree_claims: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             maintenance_done: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            mcp: Arc::new(mcp::McpRuntime::default()),
         }
     }
 
@@ -616,8 +627,8 @@ impl ServerConfig {
     }
 
     pub(crate) fn worktree_manager(&self) -> lazybox_git_ops::WorktreeManager {
-        lazybox_git_ops::WorktreeManager::new(self.worktree_root.path.clone()).with_github_token(
-            Arc::new(|| {
+        lazybox_git_ops::WorktreeManager::new(self.worktree_root.path.clone())
+            .with_github_token(Arc::new(|| {
                 Box::pin(async {
                     lazybox_gh::credential_chain()
                         .resolve(lazybox_gh::SOURCE)
@@ -625,8 +636,15 @@ impl ServerConfig {
                         .ok()
                         .map(|c| c.into_token())
                 })
-            }),
-        )
+            }))
+            // Same host the API transport is built with (see the four
+            // `from_credential_with_host` sites) so git remotes/auth and
+            // the API never address different hosts. `load()` is cached.
+            .with_github_host(
+                lazybox_config::Config::load()
+                    .unwrap_or_default()
+                    .github_host(),
+            )
     }
 
     /// Serialize a workspace's load-modify-save cycle. Every mutation
@@ -1005,6 +1023,14 @@ impl Server {
                         }
                         lazybox_ipc::Command::InjectPrompt { .. } => "InjectPrompt",
                         lazybox_ipc::Command::RecoverAgentCredit { .. } => "RecoverAgentCredit",
+                        lazybox_ipc::Command::SaveHopper { .. } => "SaveHopper",
+                        lazybox_ipc::Command::AssignHopperProject { .. } => {
+                            "AssignHopperProject"
+                        }
+                        lazybox_ipc::Command::SetHopperCompleted { .. } => {
+                            "SetHopperCompleted"
+                        }
+                        lazybox_ipc::Command::SetHopperCanceled { .. } => "SetHopperCanceled",
                         lazybox_ipc::Command::MarkRead { .. } => "MarkRead",
                         lazybox_ipc::Command::FocusWorkspace { .. } => "FocusWorkspace",
                         lazybox_ipc::Command::ActivateWorkspace { .. } => "ActivateWorkspace",
@@ -1017,11 +1043,15 @@ impl Server {
                         lazybox_ipc::Command::UpdateBranch { .. } => "UpdateBranch",
                         lazybox_ipc::Command::CloseIssue { .. } => "CloseIssue",
                         lazybox_ipc::Command::DeleteOrClose { .. } => "DeleteOrClose",
+                        lazybox_ipc::Command::ClosePr { .. } => "ClosePr",
+                        lazybox_ipc::Command::ConvertPrToDraft { .. } => "ConvertPrToDraft",
+                        lazybox_ipc::Command::MarkPrReady { .. } => "MarkPrReady",
                         lazybox_ipc::Command::ConfirmMerge { .. } => "ConfirmMerge",
                         lazybox_ipc::Command::Snooze { .. } => "Snooze",
                         lazybox_ipc::Command::Unsnooze { .. } => "Unsnooze",
                         lazybox_ipc::Command::SetAutoMergeOnGreen { .. } => "SetAutoMergeOnGreen",
                         lazybox_ipc::Command::SetTrackMain { .. } => "SetTrackMain",
+                        lazybox_ipc::Command::SetMetered { .. } => "SetMetered",
                         lazybox_ipc::Command::SetAutoFixPolicy { .. } => "SetAutoFixPolicy",
                         lazybox_ipc::Command::SetAutoFixPolicies { .. } => "SetAutoFixPolicies",
                         lazybox_ipc::Command::Kill { .. } => "Kill",
@@ -1039,6 +1069,9 @@ impl Server {
                         lazybox_ipc::Command::FetchRepoLabels { .. } => "FetchRepoLabels",
                         lazybox_ipc::Command::FetchRequestableReviewers { .. } => {
                             "FetchRequestableReviewers"
+                        }
+                        lazybox_ipc::Command::FetchRepoMergeHistory { .. } => {
+                            "FetchRepoMergeHistory"
                         }
                         lazybox_ipc::Command::SetSessionLayout { .. } => "SetSessionLayout",
                         lazybox_ipc::Command::StartAgentRun { .. } => "StartAgentRun",
@@ -1063,6 +1096,7 @@ impl Server {
                         lazybox_ipc::Command::SetNotes { .. } => "SetNotes",
                         lazybox_ipc::Command::DeliverSnippet { .. } => "DeliverSnippet",
                         lazybox_ipc::Command::SetUpdateDismissal { .. } => "SetUpdateDismissal",
+                        lazybox_ipc::Command::SetSnippetKeepMine { .. } => "SetSnippetKeepMine",
                         lazybox_ipc::Command::ResumeAgent { .. } => "ResumeAgent",
                         lazybox_ipc::Command::ReauthenticateAgent { .. } => {
                             "ReauthenticateAgent"
@@ -1076,6 +1110,7 @@ impl Server {
                         lazybox_ipc::Command::ClearErrors => "ClearErrors",
                         lazybox_ipc::Command::DeleteError { .. } => "DeleteError",
                         lazybox_ipc::Command::GetResourcePosture => "GetResourcePosture",
+                        lazybox_ipc::Command::GetStats => "GetStats",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` and `RecordComposingBuffer` fire on every
@@ -1340,6 +1375,7 @@ async fn build_and_send_lag_recovery_snapshot(
             let load_errors = workspaces.errors.len() + projects.errors.len();
             let mut terminals = spawn_handler::snapshot_terminals(&config).await;
             budget_snapshot_replay(&mut terminals);
+            let snippet_keepmine = client_kv.snippet_keepmine;
             let recovery = Event::Snapshot {
                 workspaces: workspaces.values,
                 terminals,
@@ -1356,6 +1392,13 @@ async fn build_and_send_lag_recovery_snapshot(
             if load_errors > 0 {
                 let _ = tx.send(storage_recovery_event(load_errors));
             }
+            // Re-sync snippet keep-mine acknowledgements after the snapshot
+            // and its recovery notice (#1312), mirroring the fresh-subscribe
+            // ordering so a consumer expecting the storage warning to follow
+            // the snapshot isn't disturbed.
+            let _ = tx.send(Event::SnippetKeepMine {
+                targets: snippet_keepmine,
+            });
             config.event_metrics.record_bus_lag_recovery();
         }
         Err(e) => {
@@ -1557,6 +1600,8 @@ pub async fn dispatch_command(
                     })
                     .collect::<Vec<_>>()
             };
+            let snippet_keepmine = client_kv.snippet_keepmine;
+            let session_costs = client_kv.session_costs;
             let _ = tx.send(Event::Snapshot {
                 workspaces: workspaces.values,
                 terminals,
@@ -1572,11 +1617,14 @@ pub async fn dispatch_command(
                     terminal_ids: restart_required,
                 });
             }
-            // A fresh subscriber may have missed removal prompts emitted
-            // before it connected (broadcast is fire-and-forget) — reset
-            // the reprompt throttle so the tick kicked below re-offers
-            // any still-unresolved merged/closed workspace right away.
-            polling::mark_removal_prompts_for_replay(config).await;
+            // Note: A fresh subscriber may have missed removal prompts emitted
+            // before it connected (broadcast is fire-and-forget) — however,
+            // clearing the global throttle would affect OTHER connected clients
+            // who already dismissed or handled these modals (#1267 zombie modals).
+            // Instead, rely on the store-persisted cleanup_prompt state: workspaces
+            // with cleanup_prompt = Declined skip reprompting, and fresh clients
+            // will see unresolved removals within the next poll cycle (~15s for hot
+            // set) or 5-minute reprompt window. The wakeup below ensures timely refresh.
             // Kick a fresh poll so the freshly-opened TUI refreshes within
             // a few seconds instead of waiting out the current sleep.
             config.poll.wake(true);
@@ -1624,6 +1672,21 @@ pub async fn dispatch_command(
                     lazybox_core::AutoFixSettings::default()
                 }
             };
+            // Snippet keep-mine acknowledgements are post-snapshot
+            // scaffolding like ViewerIdentities — sent after the snapshot and
+            // its recovery/restart notices so consumers that expect those to
+            // immediately follow the snapshot aren't disturbed, but BEFORE
+            // AutoFixPolicyConfig so that stays the end-of-replay marker (#1312).
+            let _ = tx.send(Event::SnippetKeepMine {
+                targets: snippet_keepmine,
+            });
+            // Durable per-session meter totals (#1389): replay them as the same
+            // kind of post-snapshot scaffolding so the per-workspace
+            // `$ METER · $cost` figure survives a restart. Kept before
+            // AutoFixPolicyConfig so that stays the end-of-replay marker.
+            let _ = tx.send(Event::SessionCosts {
+                costs: session_costs,
+            });
             // Keep the auto-fix policy as the last post-subscribe push so
             // existing consumers can use it as the end-of-replay marker.
             let _ = tx.send(Event::AutoFixPolicyConfig {
@@ -1642,6 +1705,7 @@ pub async fn dispatch_command(
             on_main,
             model_alias,
             access,
+            force_new,
         } => {
             // A spawn carrying a pre-built work prompt is an autonomous
             // "work on this" launch — run it unattended (skip permissions,
@@ -1665,6 +1729,7 @@ pub async fn dispatch_command(
                     access,
                     client_request_id,
                     origin: lazybox_ipc::SpawnOrigin::Interactive,
+                    force_new,
                     ..Default::default()
                 },
             )
@@ -1788,6 +1853,7 @@ pub async fn dispatch_command(
             initial_input,
             resume_latest,
             access,
+            model_alias,
         } => {
             agent_runs::handle_start_agent_run(
                 config,
@@ -1801,6 +1867,7 @@ pub async fn dispatch_command(
                 initial_input,
                 resume_latest,
                 access,
+                model_alias,
             )
             .await;
         }
@@ -1922,13 +1989,46 @@ pub async fn dispatch_command(
         lazybox_ipc::Command::CreateProject { name } => {
             workspace::create_local_project(config, &name);
         }
-        lazybox_ipc::Command::Snooze { session_key, until } => {
+        lazybox_ipc::Command::SaveHopper { entries } => {
+            if let Err(error) = workspace::save_hopper(config, entries) {
+                tracing::error!(error = %error, "save hopper failed");
+                let _ = config
+                    .bus
+                    .send(lazybox_ipc::Event::provider_error_permanent(
+                        "hopper",
+                        format!("Hopper was not saved: {error}"),
+                    ));
+            }
+        }
+        lazybox_ipc::Command::AssignHopperProject {
+            workspace_key,
+            project_key,
+        } => {
+            workspace::assign_hopper_project(config, &workspace_key, project_key).await;
+        }
+        lazybox_ipc::Command::SetHopperCompleted {
+            workspace_key,
+            completed,
+        } => {
+            workspace::set_hopper_completed(config, &workspace_key, completed).await;
+        }
+        lazybox_ipc::Command::SetHopperCanceled {
+            workspace_key,
+            canceled,
+        } => {
+            workspace::set_hopper_canceled(config, &workspace_key, canceled).await;
+        }
+        lazybox_ipc::Command::Snooze {
+            session_key,
+            until,
+            wake,
+        } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            workspace::set_snooze(config, &key, Some(until)).await;
+            workspace::set_snooze(config, &key, Some(until), wake).await;
         }
         lazybox_ipc::Command::Unsnooze { session_key } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
-            workspace::set_snooze(config, &key, None).await;
+            workspace::set_snooze(config, &key, None, None).await;
         }
         lazybox_ipc::Command::SetNotes { session_key, notes } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
@@ -1955,6 +2055,13 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::SetUpdateDismissal { target } => {
             client_kv::set_update_dismissal(config, target).await;
+        }
+        lazybox_ipc::Command::SetSnippetKeepMine { target } => {
+            // Persist, then broadcast the updated set so every attached
+            // client (in-process or `--connect`) silences the nudge for the
+            // kept override, matching the update-dismissal flow (#1312).
+            let targets = client_kv::set_snippet_keepmine(config, target).await;
+            let _ = config.bus.send(Event::SnippetKeepMine { targets });
         }
         lazybox_ipc::Command::ResumeAgent { terminal_id } => {
             agent_auth::resume_agent(config, terminal_id).await;
@@ -1987,6 +2094,13 @@ pub async fn dispatch_command(
         } => {
             let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
             workspace::set_track_main(config, &key, enabled).await;
+        }
+        lazybox_ipc::Command::SetMetered {
+            session_key,
+            enabled,
+        } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            workspace::set_metered(config, &key, enabled).await;
         }
         lazybox_ipc::Command::SetAutoFixPolicy {
             session_key,
@@ -2096,6 +2210,15 @@ pub async fn dispatch_command(
         lazybox_ipc::Command::DeleteOrClose { workspace_key } => {
             polling::handle_delete_or_close(config, workspace_key).await;
         }
+        lazybox_ipc::Command::ClosePr { workspace_key } => {
+            polling::handle_close_pr(config, workspace_key).await;
+        }
+        lazybox_ipc::Command::ConvertPrToDraft { workspace_key } => {
+            polling::handle_convert_to_draft(config, workspace_key).await;
+        }
+        lazybox_ipc::Command::MarkPrReady { workspace_key } => {
+            polling::handle_mark_ready(config, workspace_key).await;
+        }
         lazybox_ipc::Command::FetchPrDetails { workspace_key } => {
             polling::handle_fetch_pr_details(config, workspace_key).await;
         }
@@ -2131,6 +2254,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::FetchRequestableReviewers { workspace_key } => {
             polling::handle_fetch_requestable_reviewers(config, workspace_key).await;
+        }
+        lazybox_ipc::Command::FetchRepoMergeHistory { repo } => {
+            polling::handle_fetch_repo_merge_history(config, repo).await;
         }
         lazybox_ipc::Command::CleanWorktrees => {
             polling::handle_clean_worktrees(config).await;
@@ -2181,6 +2307,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::GetResourcePosture => {
             broadcast_resource_posture(config).await;
+        }
+        lazybox_ipc::Command::GetStats => {
+            stats_accumulator::handle_get(config).await;
         }
         lazybox_ipc::Command::Shutdown => {
             unreachable!("Shutdown is loop control, intercepted by the serve loop")

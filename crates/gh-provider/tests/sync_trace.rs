@@ -150,7 +150,8 @@ async fn capture_prefetch_trace() {
     let tasks = client
         .fetch_all_prs(None)
         .await
-        .expect("fetch_all_prs succeeds");
+        .expect("fetch_all_prs succeeds")
+        .tasks;
 
     // Same selection the handler makes: score, drop the 0-score
     // (score == 1, no actionable signal) rows, highest first, take N.

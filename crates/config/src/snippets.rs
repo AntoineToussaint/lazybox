@@ -647,7 +647,11 @@ impl Snippets {
                      test that would have caught the original problem. When you're done, \
                      re-run the build, tests, and linter to confirm the tree is green, then \
                      commit with a clear message that says what was wrong and why the \
-                     change is the real fix, staging only the files you touched. Lead with \
+                     change is the real fix, staging only the files you touched, and push \
+                     the branch. Committing AND pushing every fix is part of the \
+                     deliverable, not optional: a fix left uncommitted — or committed but \
+                     unpushed — is lost the moment the worktree is cleaned up, so never end \
+                     with changes stranded in the working tree. Lead with \
                      the detail — each finding, what you changed, and why it's the real \
                      cause, at its `file:line` — then close with a human-readable summary: \
                      fixed (count plus a headline list), each finding you left with its \

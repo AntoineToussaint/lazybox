@@ -990,7 +990,6 @@ pub async fn tick(config: &ServerConfig, sources: &[Box<dyn TaskSource>]) -> Tic
 /// error every 60s spams the TUI with identical hint-bar churn. We
 /// only re-broadcast when the error message (or success/failure
 /// classification) actually changes for a given source.
-#[derive(Default)]
 pub struct TickState {
     last_error: std::collections::HashMap<String, String>,
     /// Per-source backoff deadlines (#1218). A retry-after hint parks
@@ -1059,6 +1058,26 @@ pub struct TickState {
     /// Linear cadence is actually due — Linear tickets change far less
     /// often than GitHub CI/PR state (#1032).
     pub(crate) linear_schedule: sources::LinearSchedule,
+}
+
+impl Default for TickState {
+    fn default() -> Self {
+        Self {
+            last_error: Default::default(),
+            source_backoff_until: Default::default(),
+            // Base cadence is 1x; empty polls double it, data resets to it.
+            // Deriving `Default` would seed 0.0, which never doubles and
+            // leaves the backoff permanently disabled (#1218-polling-backoff).
+            backoff_multiplier: 1.0,
+            prompted_out_of_scope: Default::default(),
+            prefetched_pr_details: Default::default(),
+            round_robin: Default::default(),
+            unknown_mergeable_probes: Default::default(),
+            retryable_streak: Default::default(),
+            implicit_gh_scopes: None,
+            linear_schedule: Default::default(),
+        }
+    }
 }
 
 impl TickState {

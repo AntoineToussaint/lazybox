@@ -1057,7 +1057,6 @@ pub async fn tick(config: &ServerConfig, sources: &[Box<dyn TaskSource>]) -> Tic
 /// error every 60s spams the TUI with identical hint-bar churn. We
 /// only re-broadcast when the error message (or success/failure
 /// classification) actually changes for a given source.
-#[derive(Default)]
 pub struct TickState {
     last_error: std::collections::HashMap<String, String>,
     /// Per-source backoff deadlines (#1218). A retry-after hint parks
@@ -1068,6 +1067,11 @@ pub struct TickState {
     /// driver-level sleep is clamped to a small multiple of the tick
     /// interval; this map carries the full deadline.
     pub(crate) source_backoff_until: std::collections::HashMap<String, std::time::Instant>,
+    /// Exponential backoff multiplier for empty polls (#1218-polling-backoff).
+    /// Starts at 1.0, doubles on consecutive empty polls (no tasks fetched),
+    /// resets to 1.0 when data arrives. Capped at 30.0 to avoid excessive sleep
+    /// even during long idle periods.
+    backoff_multiplier: f64,
     /// Workspace keys we've already broadcast `WorkspaceOutOfScope`
     /// for. Without this, every 60s tick would re-prompt the user
     /// about the same workspace (they said "no" once, that's
@@ -1136,7 +1140,50 @@ pub struct TickState {
     pub(crate) discovery_behind_notified: bool,
 }
 
+impl Default for TickState {
+    fn default() -> Self {
+        Self {
+            last_error: Default::default(),
+            source_backoff_until: Default::default(),
+            // Base cadence is 1x; empty polls double it, data resets to it.
+            // Deriving `Default` would seed 0.0, which never doubles and
+            // leaves the backoff permanently disabled (#1218-polling-backoff).
+            backoff_multiplier: 1.0,
+            prompted_out_of_scope: Default::default(),
+            prefetched_pr_details: Default::default(),
+            round_robin: Default::default(),
+            unknown_mergeable_probes: Default::default(),
+            retryable_streak: Default::default(),
+            implicit_gh_scopes: None,
+            linear_schedule: Default::default(),
+            full_sweep_deferral_streak: Default::default(),
+            discovery_behind_notified: Default::default(),
+        }
+    }
+}
+
 impl TickState {
+    /// Update the exponential backoff multiplier based on whether the
+    /// poll returned any data. Empty polls double the multiplier (capped
+    /// at 30x), while polls with data reset it to 1.0.
+    pub(crate) fn update_backoff(&mut self, polled_count: usize, any_source_succeeded: bool) {
+        if any_source_succeeded && polled_count == 0 {
+            // Empty poll: double the multiplier, cap at 30x
+            const MAX_BACKOFF: f64 = 30.0;
+            self.backoff_multiplier = (self.backoff_multiplier * 2.0).min(MAX_BACKOFF);
+        } else if polled_count > 0 {
+            // Data arrived: reset to base
+            self.backoff_multiplier = 1.0;
+        }
+        // If no source succeeded (all errored), leave the multiplier as-is
+        // to avoid re-triggering backoff on transient failures
+    }
+
+    /// Get the current exponential backoff multiplier.
+    pub(crate) fn backoff_multiplier(&self) -> f64 {
+        self.backoff_multiplier
+    }
+
     /// Broadcast a `ProviderError` for `source_key` unless it merely
     /// repeats the failure already surfaced for that source this session.
     ///
@@ -1648,6 +1695,72 @@ mod rate_limit_wait_tests {
             std::time::Duration::from_secs(120),
             "the loop sleeps at most the cap; the parked source carries the full deadline"
         );
+    }
+
+    /// #1218-polling-backoff: exponential backoff on empty polls reduces
+    /// CPU during idle periods. Consecutive empty polls double the
+    /// multiplier, capped at 30x. Data resets to 1x.
+    #[test]
+    fn empty_polls_trigger_exponential_backoff() {
+        let mut state = TickState::default();
+        assert_eq!(state.backoff_multiplier(), 1.0);
+
+        // First empty poll: doubles to 2x
+        state.update_backoff(0, true);
+        assert_eq!(state.backoff_multiplier(), 2.0);
+
+        // Second empty poll: doubles to 4x
+        state.update_backoff(0, true);
+        assert_eq!(state.backoff_multiplier(), 4.0);
+
+        // Third empty poll: doubles to 8x
+        state.update_backoff(0, true);
+        assert_eq!(state.backoff_multiplier(), 8.0);
+
+        // Five more to hit 256x, but capped at 30x
+        for _ in 0..5 {
+            state.update_backoff(0, true);
+        }
+        assert_eq!(state.backoff_multiplier(), 30.0, "backoff capped at 30x");
+
+        // Further empty polls stay at cap
+        state.update_backoff(0, true);
+        assert_eq!(state.backoff_multiplier(), 30.0);
+    }
+
+    #[test]
+    fn data_resets_backoff_multiplier() {
+        let mut state = TickState::default();
+        // Build up backoff
+        state.update_backoff(0, true);
+        state.update_backoff(0, true);
+        state.update_backoff(0, true);
+        assert_eq!(state.backoff_multiplier(), 8.0);
+
+        // Data arrives: resets to 1x
+        state.update_backoff(1, true);
+        assert_eq!(state.backoff_multiplier(), 1.0);
+    }
+
+    #[test]
+    fn failed_polls_preserve_backoff() {
+        let mut state = TickState::default();
+        // Build up backoff
+        state.update_backoff(0, true);
+        state.update_backoff(0, true);
+        assert_eq!(state.backoff_multiplier(), 4.0);
+
+        // Source failure (any_source_succeeded = false): preserves backoff
+        state.update_backoff(0, false);
+        assert_eq!(
+            state.backoff_multiplier(),
+            4.0,
+            "backoff preserved on source failure"
+        );
+
+        // Still no data on next successful try: continues doubling
+        state.update_backoff(0, true);
+        assert_eq!(state.backoff_multiplier(), 8.0);
     }
 
     /// A plain retryable transient (5xx, network) is NOT a self-throttle —
@@ -2624,6 +2737,17 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
             } else {
                 next_in.max(MIN_TICK_GAP)
             };
+            // Apply exponential backoff multiplier for empty polls (#1218-polling-backoff)
+            let backoff_multiplier = {
+                let state = config.poll.tick_state.lock().await;
+                state.backoff_multiplier()
+            };
+            let next_in = if backoff_multiplier > 1.0 {
+                let ms = (next_in.as_millis() as f64 * backoff_multiplier) as u128;
+                Duration::from_millis(ms as u64)
+            } else {
+                next_in
+            };
             if summary.retry_after_secs.is_some() {
                 tracing::warn!(
                     "polling: backing off {}s before next tick (rate-limit hint)",
@@ -2641,13 +2765,15 @@ pub fn spawn(config: ServerConfig, interval: Duration) -> tokio::task::JoinHandl
             // the actual wait (longer when backing off), and whether a
             // rate-limit hint forced the gap open.
             tracing::info!(
-                "polling: tick #{tick_n} next tick in {}s (base interval {}s{})",
+                "polling: tick #{tick_n} next tick in {}s (base interval {}s{backoff_note})",
                 next_in.as_secs(),
                 interval.as_secs(),
-                if next_in > interval {
-                    " — backing off"
+                backoff_note = if backoff_multiplier > 1.0 {
+                    format!(" — backing off ({:.1}x)", backoff_multiplier)
+                } else if next_in > interval {
+                    " — backing off".to_string()
                 } else {
-                    ""
+                    String::new()
                 },
             );
         }
@@ -3015,6 +3141,8 @@ async fn run_tick_inner(
             }
         }
     };
+    // Update exponential backoff based on poll results (#1218-polling-backoff)
+    state.update_backoff(outcome.polled.len(), outcome.any_source_succeeded);
     let summary = TickSummary {
         retry_after_secs: outcome.retry_after_secs,
         saw_unknown_mergeable: outcome.saw_unknown_mergeable,

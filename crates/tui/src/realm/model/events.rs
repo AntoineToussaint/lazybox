@@ -3254,6 +3254,11 @@ impl<T: TerminalAdapter> Model<T> {
         let identity = (
             self.sidebar.selected_workspace_key().cloned(),
             self.sidebar.pane_state_rev(),
+            // Disambiguates two header rows, which both have no selected
+            // workspace: without it, a header→header cursor move would
+            // hit the fast-path skip and never re-project the overview
+            // (#1442).
+            self.sidebar.header_group_ident(),
         );
         if self.last_pane_sync_identity.as_ref() == Some(&identity) {
             // Deferred one-shots still honored on the fast path: a
@@ -3326,7 +3331,16 @@ impl<T: TerminalAdapter> Model<T> {
             .and_then(|k| self.sidebar.stack_info(k))
             .cloned();
         self.right.set_stack(stack);
+        // On a group-header row there's no workspace to show; feed the
+        // pane a repo / Space overview instead so it isn't a dead panel
+        // (#1442). Cheap: built from already-tracked workspaces.
+        let overview = if workspace.is_none() {
+            self.sidebar.header_overview()
+        } else {
+            None
+        };
         self.right.set_workspace(workspace);
+        self.right.set_overview(overview);
         self.terminals.set_active_session(session_key);
         self.terminals.set_layout(layout);
         // A pinned `w` spawn-follow asked for a specific terminal to be

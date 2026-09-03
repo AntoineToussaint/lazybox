@@ -1974,6 +1974,13 @@ impl<T: TerminalAdapter> Model<T> {
                 // redundant second click before typing works (#103).
                 let target = if rect_contains(sidebar_rect, m.column, m.row) {
                     Some(PaneFocus::Sidebar)
+                } else if self.right.showing_overview()
+                    && (rect_contains(right_top_rect, m.column, m.row)
+                        || rect_contains(right_bottom_rect, m.column, m.row))
+                {
+                    // The group overview fills the whole right column, so
+                    // both halves route to the Right pane (#1442).
+                    Some(PaneFocus::Right)
                 } else if rect_contains(right_top_rect, m.column, m.row) {
                     Some(PaneFocus::Right)
                 } else if rect_contains(right_bottom_rect, m.column, m.row) {
@@ -2208,6 +2215,14 @@ impl<T: TerminalAdapter> Model<T> {
                         }
                         if let Some(msg) = self.right.drain_selection_notice() {
                             self.flash_hint(msg);
+                        }
+                        // A click on an overview roster row moves the
+                        // sidebar cursor onto that workspace (#1442).
+                        if let Some(key) = self.right.take_select_workspace()
+                            && self.sidebar.focus_workspace_key(&key)
+                        {
+                            self.sync_panes();
+                            self.redraw = true;
                         }
                     }
                 }

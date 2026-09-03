@@ -2433,3 +2433,70 @@ prose.\n\nThird paragraph with yet more content to guarantee multiple rows.";
         );
     }
 }
+
+#[cfg(test)]
+mod overview_tests {
+    use super::super::{PaneId, RightPane};
+    use crate::components::repo_overview::{OverviewCounts, OverviewKind, RepoOverview, RosterRow};
+    use lazybox_core::{SessionKey, TaskState};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    fn overview(key: &SessionKey) -> RepoOverview {
+        RepoOverview {
+            kind: OverviewKind::Repo,
+            title: "o/r".into(),
+            counts: OverviewCounts {
+                workspaces: 1,
+                open_prs: 1,
+                ..Default::default()
+            },
+            roster: vec![RosterRow {
+                key: key.clone(),
+                title: "Fix the thing".into(),
+                number: Some(7),
+                is_pr: true,
+                state: Some(TaskState::Open),
+                agent: None,
+                unread: 0,
+                repo: "o/r".into(),
+            }],
+            roster_total: 1,
+            rollup: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn overview_takes_over_when_no_workspace() {
+        let mut pane = RightPane::new(PaneId::new(0));
+        let key = SessionKey::from("o/r#7");
+        assert!(!pane.showing_overview(), "no overview by default");
+        pane.set_overview(Some(overview(&key)));
+        assert!(pane.showing_overview(), "overview shows with no workspace");
+    }
+
+    #[test]
+    fn roster_click_queues_workspace_selection() {
+        let mut pane = RightPane::new(PaneId::new(0));
+        let key = SessionKey::from("o/r#7");
+        let ov = overview(&key);
+        // The roster row's line index is where its click maps; with the
+        // render origin at y=0 that line index is the absolute row.
+        let (_lines, hits) = ov.lines(80);
+        let (roster_line, _) = hits[0].clone();
+        pane.set_overview(Some(ov));
+
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| pane.render(Rect::new(0, 0, 80, 24), f, true))
+            .unwrap();
+
+        // A click off the roster selects nothing.
+        assert!(!pane.handle_mouse_click(2, 0));
+        assert_eq!(pane.take_select_workspace(), None);
+
+        // A click on the roster row queues that workspace's selection.
+        assert!(pane.handle_mouse_click(4, roster_line as u16));
+        assert_eq!(pane.take_select_workspace(), Some(key));
+    }
+}

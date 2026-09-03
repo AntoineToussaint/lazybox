@@ -2383,3 +2383,46 @@ fn remote_client_applies_config_and_keeps_local_stars() {
         "the remote snapshot must not prune the laptop's star"
     );
 }
+
+/// #1442: on a repo-header row the right pane paints a repo overview
+/// instead of the dead `(no session selected)` placeholder, and yields
+/// back to the workspace pane when the cursor returns to a workspace.
+#[test]
+fn repo_header_shows_overview_not_dead_pane() {
+    let (client, _server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let ws = Workspace::from_task(task_with_pr("o/r#1"), Utc::now());
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![ws],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+
+    // Walk to the top of the sidebar — the repo header.
+    for _ in 0..4 {
+        m.dispatch_key(key(Key::Char('k')));
+    }
+    assert!(
+        m.__test_sidebar().cursor_on_repo_header(),
+        "cursor should rest on the repo header",
+    );
+    assert!(
+        m.__test_showing_overview(),
+        "a repo header renders the overview, not a dead pane",
+    );
+
+    // Step back down onto the workspace — the overview yields.
+    for _ in 0..4 {
+        m.dispatch_key(key(Key::Char('j')));
+    }
+    assert!(
+        m.__test_sidebar().selected_workspace().is_some(),
+        "cursor back on a workspace",
+    );
+    assert!(
+        !m.__test_showing_overview(),
+        "a real workspace hides the overview",
+    );
+}

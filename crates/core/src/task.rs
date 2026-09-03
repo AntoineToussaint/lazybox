@@ -702,6 +702,20 @@ impl Task {
             .collect()
     }
 
+    /// Whether this task's source provider can service the mutating
+    /// actions lazybox offers on it — close, delete, assign, label, and
+    /// the automation-policies menu. GitHub and Linear have mutation
+    /// backends (the daemon's `ProviderHandle` / `build_provider_for_workspace`);
+    /// read-only providers such as Jira do not, so callers must gate
+    /// those affordances off rather than mount a (often GitHub-worded)
+    /// confirm whose only outcome is a `no provider registered` failure
+    /// notice. Keyed on `source` — the same id the daemon's mutation
+    /// routers dispatch on — so a new mutating provider opts in here.
+    pub fn source_supports_mutations(&self) -> bool {
+        let source = self.id.source.as_str();
+        source == crate::GITHUB_SOURCE || source == crate::LINEAR_SOURCE
+    }
+
     /// True when this task represents a pull/merge request rather
     /// than an issue/ticket. Centralizes the URL-shape heuristic so
     /// new providers (Bitbucket, GitLab, …) extend ONE place instead
@@ -1151,6 +1165,24 @@ mod status_tag_tests {
             !task.has_working_claim(),
             "a Linear workflow label is not a GitHub fleet claim"
         );
+    }
+
+    #[test]
+    fn source_supports_mutations_only_for_writable_providers() {
+        let mut task = base();
+        // GitHub and Linear both have a daemon mutation backend.
+        task.id.source = crate::GITHUB_SOURCE.to_string();
+        assert!(task.source_supports_mutations());
+        task.id.source = crate::LINEAR_SOURCE.to_string();
+        assert!(task.source_supports_mutations());
+        // Jira is read-only: attaching its issue must not light up
+        // close/delete/assign/label affordances that can only fail.
+        task.id.source = "jira".to_string();
+        assert!(!task.source_supports_mutations());
+        // An unknown/custom source is treated as read-only until it
+        // opts in here.
+        task.id.source = "slack".to_string();
+        assert!(!task.source_supports_mutations());
     }
 
     #[test]

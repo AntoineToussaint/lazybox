@@ -3120,6 +3120,12 @@ pub enum WorktreeRecovery {
     /// re-provision (issue #1041). The team key is recovered from the
     /// message via [`Self::linear_team`].
     LinearUnmapped,
+    /// A Jira issue's project has no `providers.jira.projects` mapping, so
+    /// provisioning can't resolve a repo to clone. Same recovery as
+    /// [`Self::LinearUnmapped`]: the client picks a repo for the project,
+    /// persists the mapping, and re-provisions. The project key is
+    /// recovered from the message via [`Self::jira_project`].
+    JiraUnmapped,
     /// B14/B17: disk, permission, or generic I/O error (out of space,
     /// read-only mount, `git init` half-write). Retryable once the
     /// filesystem problem is cleared.
@@ -3163,7 +3169,11 @@ impl WorktreeRecovery {
         // picker fallback needs this distinct from the generic pre-git
         // config errors so the modal can offer a repo pick.
         if message.contains("has no repo mapping") {
-            return Self::LinearUnmapped;
+            return if message.contains("Jira project `") {
+                Self::JiraUnmapped
+            } else {
+                Self::LinearUnmapped
+            };
         }
         // B11 — malformed repo string, caught before any git runs.
         if message.contains("is not owner/name") {
@@ -3246,6 +3256,7 @@ impl WorktreeRecovery {
         match self {
             Self::BadRepo
             | Self::LinearUnmapped
+            | Self::JiraUnmapped
             | Self::DefaultBranchUnresolved
             | Self::BranchMissing
             | Self::Transient => WorktreeStep::Fetch,
@@ -3296,9 +3307,9 @@ impl WorktreeRecovery {
     /// Whether the modal can offer a one-keypress **repo pick**: an
     /// unmapped Linear team, where the fix is to choose the repo its
     /// tickets should use and persist the mapping, then re-provision
-    /// (issue #1041). Only `LinearUnmapped`.
+    /// (issue #1041). `LinearUnmapped` and its Jira twin.
     pub fn picks_repo(&self) -> bool {
-        matches!(self, Self::LinearUnmapped)
+        matches!(self, Self::LinearUnmapped | Self::JiraUnmapped)
     }
 
     /// The Linear team key named in a `LinearUnmapped` message. The daemon
@@ -3306,9 +3317,20 @@ impl WorktreeRecovery {
     /// the client needs it to persist `providers.linear.teams.<team>`.
     /// `None` when the message has no such quoted team.
     pub fn linear_team(message: &str) -> Option<String> {
-        let after = message.split_once("Linear team `")?.1;
-        let team = after.split_once('`')?.0.trim();
-        (!team.is_empty()).then(|| team.to_string())
+        Self::back_quoted_after(message, "Linear team `")
+    }
+
+    /// The Jira project key named in a `JiraUnmapped` message (``Jira
+    /// project `ENG` has no repo mapping…``); the client persists
+    /// `providers.jira.projects.<project>` under it.
+    pub fn jira_project(message: &str) -> Option<String> {
+        Self::back_quoted_after(message, "Jira project `")
+    }
+
+    fn back_quoted_after(message: &str, marker: &str) -> Option<String> {
+        let after = message.split_once(marker)?.1;
+        let key = after.split_once('`')?.0.trim();
+        (!key.is_empty()).then(|| key.to_string())
     }
 
     /// Whether the modal can offer a one-keypress **jump** to the live
@@ -3380,6 +3402,10 @@ impl WorktreeRecovery {
             Self::LinearUnmapped => {
                 "This Linear team has no repo mapping. Press r to pick the repo its \
                  tickets use — lazybox remembers the choice."
+            }
+            Self::JiraUnmapped => {
+                "This Jira project has no repo mapping. Press r to pick the repo its \
+                 issues use — lazybox remembers the choice."
             }
             Self::Disk => "Disk or permission error. Free space or fix permissions, then press r.",
             Self::BranchDirFileConflict => {
@@ -4090,6 +4116,12 @@ mod worktree_recovery_tests {
                 WorktreeStep::Fetch,
             ),
             (
+                "Jira project `ENG` has no repo mapping — set providers.jira.projects.ENG \
+                 in ~/.lazybox/config.yaml",
+                WorktreeRecovery::JiraUnmapped,
+                WorktreeStep::Fetch,
+            ),
+            (
                 "init_standalone_at: I/O error: No space left on device (os error 28)",
                 WorktreeRecovery::Disk,
                 WorktreeStep::WorktreeAdd,
@@ -4214,6 +4246,7 @@ mod worktree_recovery_tests {
             WorktreeRecovery::BranchMissing,
             WorktreeRecovery::BadRepo,
             WorktreeRecovery::LinearUnmapped,
+            WorktreeRecovery::JiraUnmapped,
         ] {
             assert!(!c.retryable(), "{c:?} needs a manual fix first");
         }
@@ -4274,6 +4307,28 @@ mod worktree_recovery_tests {
     /// not retryable/recreatable/jumpable, but `picks_repo`, and the team
     /// key is recovered from the daemon's back-quoted phrasing so the
     /// client can persist the mapping.
+    #[test]
+    fn jira_unmapped_offers_a_repo_pick_and_names_the_project() {
+        let c = WorktreeRecovery::JiraUnmapped;
+        assert!(c.picks_repo());
+        assert!(!c.retryable() && !c.recreatable() && !c.jump_to_holder());
+        let message = "Jira project `ENG` has no repo mapping — set providers.jira.projects.ENG \
+                       in ~/.lazybox/config.yaml";
+        assert_eq!(WorktreeRecovery::classify(message), c);
+        assert_eq!(
+            WorktreeRecovery::jira_project(message).as_deref(),
+            Some("ENG")
+        );
+        // The two trackers' extractors don't read each other's messages.
+        assert_eq!(WorktreeRecovery::linear_team(message), None);
+        assert_eq!(
+            WorktreeRecovery::jira_project(
+                "Linear team `OBI` has no repo mapping and the ticket has no linked GitHub PR"
+            ),
+            None
+        );
+    }
+
     #[test]
     fn linear_unmapped_offers_a_repo_pick_and_names_the_team() {
         let c = WorktreeRecovery::LinearUnmapped;

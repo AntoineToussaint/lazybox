@@ -3105,6 +3105,27 @@ impl MergeOnGreenConfig {
 pub struct ProvidersConfig {
     pub github: GithubConfig,
     pub linear: LinearConfig,
+    pub jira: JiraConfig,
+}
+
+/// `providers.jira:` block. Credentials stay in the environment
+/// (`LAZYBOX_JIRA_URL` / `LAZYBOX_JIRA_EMAIL` / `LAZYBOX_JIRA_TOKEN`).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct JiraConfig {
+    /// Jira project key → GitHub `owner/repo` to clone when working on
+    /// that project's issues. A Jira row's own `repo` is the synthetic
+    /// `jira/<site>`, never a clonable repo; an unmapped project fails
+    /// loudly (and the TUI offers a repo pick) rather than cloning it.
+    ///
+    /// ```yaml
+    /// providers:
+    ///   jira:
+    ///     projects:
+    ///       ENG: acme/widget
+    /// ```
+    #[serde(default)]
+    pub projects: std::collections::BTreeMap<String, String>,
 }
 
 /// `providers.linear:` block.

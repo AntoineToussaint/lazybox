@@ -7757,6 +7757,7 @@ mod stale_input_tests {
                 | Id::NewWorkspaceRepo
                 | Id::HopperProject
                 | Id::LinearTeamRepo
+                | Id::JiraProjectRepo
                 | Id::Editor
                 // Open-with launches an external app — an outward
                 // effect a stale Enter must not trigger.
@@ -7817,6 +7818,7 @@ mod stale_input_tests {
             Id::NewProject,
             Id::NewWorkspaceRepo,
             Id::LinearTeamRepo,
+            Id::JiraProjectRepo,
             Id::Editor,
             Id::OpenWith,
             Id::EditorsPanel,

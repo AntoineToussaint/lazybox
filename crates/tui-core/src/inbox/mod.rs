@@ -1106,6 +1106,28 @@ pub fn pr_number(task: &Task) -> Option<u64> {
     num.parse().ok()
 }
 
+/// What the sidebar's identifier column shows for `task`: the bare PR /
+/// issue number for GitHub-style `owner/repo#N` keys, otherwise the
+/// tracker's own identifier (`ENG-123`, `PROJ-42`). `None` only for an
+/// empty key. Width via [`identifier_width`] so the column can be sized
+/// without allocating on the render hot path.
+pub fn task_identifier(task: &Task) -> Option<String> {
+    if let Some(n) = pr_number(task) {
+        return Some(n.to_string());
+    }
+    let key = task.id.key.as_str();
+    (!key.is_empty()).then(|| key.to_string())
+}
+
+/// Display width of [`task_identifier`] without building the string.
+pub fn identifier_width(task: &Task) -> Option<usize> {
+    if let Some(n) = pr_number(task) {
+        return Some(1 + n.checked_ilog10().unwrap_or(0) as usize);
+    }
+    let key = task.id.key.as_str();
+    (!key.is_empty()).then(|| key.chars().count())
+}
+
 /// Does `query` match `w`? Matches when the query is a case-insensitive
 /// fuzzy (subsequence) match on the workspace's displayed title, OR a
 /// substring match on any of its searchable metadata: PR/issue number,

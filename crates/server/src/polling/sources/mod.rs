@@ -3591,11 +3591,19 @@ pub(super) async fn sources_for_with_engagement(
     }
 
     if setup.enabled_providers.contains(lazybox_jira::SOURCE) {
-        match lazybox_jira::JiraClient::from_env() {
-            Ok(client) => sources.push(Box::new(jira::JiraSource::new(client))),
-            // A missing env var is a setup state, not a fault — log
-            // once per tick at info, matching the Linear path above.
-            Err(e) => tracing::info!("{e}"),
+        let roles =
+            lazybox_jira::JiraRoles::from_filter(&setup.provider_config(lazybox_jira::SOURCE));
+        if roles.is_empty() {
+            // Every role unticked is the "skip this provider" gesture the
+            // filter screen documents; nothing to ask Jira for.
+            tracing::info!("jira: no roles ticked in setup — skipping");
+        } else {
+            match lazybox_jira::JiraClient::from_env() {
+                Ok(client) => sources.push(Box::new(jira::JiraSource::new(client, roles))),
+                // A missing env var is a setup state, not a fault — log
+                // once per tick at info, matching the Linear path above.
+                Err(e) => tracing::info!("{e}"),
+            }
         }
     }
 

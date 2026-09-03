@@ -3073,10 +3073,13 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
             .map(|w| w.project_key.is_some() || w.pr.is_some() || !w.gh_issues.is_empty())
             .unwrap_or(true),
         // The policies menu surfaces on any workspace carrying a PR or a
-        // GitHub issue — the "tag this PR/issue" surface (issue #363).
-        // The menu itself marks which policies apply to PRs vs issues.
+        // mutation-capable issue — the "tag this PR/issue" surface (issue
+        // #363). Every policy it toggles (merge-on-green, auto-fix,
+        // GitHub-native auto-merge) is a GitHub-automation concept, so a
+        // read-only issue (Jira) has nothing the menu can arm. The menu
+        // itself marks which policies apply to PRs vs issues.
         ActionKind::ManagePolicies => workspace
-            .map(|w| w.pr.is_some() || !w.gh_issues.is_empty())
+            .map(|w| w.pr.is_some() || w.gh_issues.iter().any(|i| i.source_supports_mutations()))
             .unwrap_or(false),
         // Targeted re-poll only has something to fetch when the
         // workspace owns a GitHub entity — a PR or a linked issue.
@@ -3144,7 +3147,10 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
                         .iter()
                         .chain(w.linear_issues.iter())
                         .next()
-                        .is_some_and(|i| i.state != lazybox_core::TaskState::Closed)
+                        .is_some_and(|i| {
+                            i.state != lazybox_core::TaskState::Closed
+                                && i.source_supports_mutations()
+                        })
             })
             .unwrap_or(false),
         // Resolves by workspace kind: close the PR while it's still
@@ -3160,10 +3166,9 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
                         | lazybox_core::TaskState::InReview
                         | lazybox_core::TaskState::Draft
                 ),
-                None => w
-                    .gh_issues
-                    .first()
-                    .is_some_and(|i| i.state != lazybox_core::TaskState::Closed),
+                None => w.gh_issues.first().is_some_and(|i| {
+                    i.state != lazybox_core::TaskState::Closed && i.source_supports_mutations()
+                }),
             })
             .unwrap_or(false),
         // Same gate as DeleteOrClose — the combined action only makes
@@ -4115,6 +4120,41 @@ mod tests {
         // A PR present → act on the PR instead, not the issue.
         ws.pr = Some(task("acme/widget#8"));
         assert!(!availability(ActionKind::CloseIssue, Some(&ws)));
+
+        // A read-only issue (Jira) attaches to `gh_issues` too now
+        // (workspace::classify routes any typed Issue there), but it has
+        // no mutation backend — the daemon dead-ends on `no provider
+        // registered for workspace prefix jira`. Regression guard: every
+        // GitHub-issue mutation must be UNAVAILABLE on a read-only source
+        // so the UI never mounts a (GitHub-worded) confirm that can only
+        // fail.
+        let mut jira_ws =
+            Workspace::empty(WorkspaceKey("jira-DEMO-954".into()), "main", Utc::now());
+        let mut jira = task("DEMO-954");
+        jira.id.source = "jira".into();
+        jira.kind = Some(lazybox_core::TaskKind::Issue);
+        jira.url = "https://acme.atlassian.net/browse/DEMO-954".into();
+        jira_ws.attach_task(jira);
+        assert!(
+            !jira_ws.gh_issues.is_empty() && jira_ws.pr.is_none(),
+            "the jira issue must land in the gh_issues slot for this to be a real guard",
+        );
+        assert!(
+            !availability(ActionKind::CloseIssue, Some(&jira_ws)),
+            "read-only jira issue offers no close",
+        );
+        assert!(
+            !availability(ActionKind::DeleteOrClose, Some(&jira_ws)),
+            "read-only jira issue offers no delete/close",
+        );
+        assert!(
+            !availability(ActionKind::CloseAndArchive, Some(&jira_ws)),
+            "combined close+archive follows DeleteOrClose",
+        );
+        assert!(
+            !availability(ActionKind::ManagePolicies, Some(&jira_ws)),
+            "no github-automation policy applies to a jira issue",
+        );
     }
 
     #[test]

@@ -434,15 +434,20 @@ fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 }
 
 fn cell_pr_num(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let Some(n) = ctx.task.and_then(crate::components::task_label::pr_number) else {
+    let Some(task) = ctx.task else {
         return Cell::empty();
     };
-    let label = format!("{n}");
+    // A GitHub key shows its `NNN`; a tracker key (Linear `ENG-123`,
+    // Jira `PROJ-42`) shows the identifier itself — the only handle a
+    // user has on those rows.
+    let Some(label) = crate::components::task_label::task_identifier(task) else {
+        return Cell::empty();
+    };
     let style = if ctx.is_cursor {
         ctx.row_style()
     } else {
         Style::default()
-            .fg(crate::components::task_label::pr_number_color(n))
+            .fg(crate::components::task_label::identifier_color(task))
             .add_modifier(Modifier::BOLD)
     };
     // No `#` prefix: the type glyph in the column to the left already

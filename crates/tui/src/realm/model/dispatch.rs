@@ -2149,10 +2149,13 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Action::ManagePolicies => {
                 // Unified automation-policies menu (issue #363). Surfaces
-                // for any workspace carrying a PR or a GitHub issue; the
-                // menu itself marks which policies apply to PRs vs issues.
+                // for any workspace carrying a PR or a mutation-capable
+                // issue; a read-only issue (Jira) has no GitHub-automation
+                // policy to arm. The menu itself marks which policies apply
+                // to PRs vs issues.
                 if let Some(ws) = self.sidebar.selected_workspace()
-                    && (ws.pr.is_some() || !ws.gh_issues.is_empty())
+                    && (ws.pr.is_some()
+                        || ws.gh_issues.iter().any(|i| i.source_supports_mutations()))
                 {
                     let ws_key = ws.key.clone();
                     self.mount_policy_picker(ws_key);
@@ -2324,15 +2327,18 @@ impl<T: TerminalAdapter> Model<T> {
             Action::AddAssignees => {
                 if let Some(ws) = self.sidebar.selected_workspace() {
                     // Assignment requires a provider assignable id — a
-                    // PR, gh issue, or Linear issue with a node_id.
-                    // Empty pre-PR workspaces don't qualify.
+                    // PR, gh issue, or Linear issue with a node_id — AND a
+                    // provider that can service the write. A read-only
+                    // issue (Jira) carries a node_id but no mutation
+                    // backend, so it doesn't qualify. Empty pre-PR
+                    // workspaces don't qualify either.
                     let has_target = ws.pr.as_ref().map(|p| p.node_id.is_some()).unwrap_or(false)
                         || ws
                             .gh_issues
                             .iter()
                             .chain(ws.linear_issues.iter())
                             .next()
-                            .map(|i| i.node_id.is_some())
+                            .map(|i| i.node_id.is_some() && i.source_supports_mutations())
                             .unwrap_or(false);
                     if has_target {
                         let ws_key = ws.key.clone();
@@ -2341,14 +2347,16 @@ impl<T: TerminalAdapter> Model<T> {
                 }
             }
             Action::ManageLabels => {
-                // Labels require a `Labelable` node id — same as
-                // assignees. Pre-PR scratch workspaces don't qualify.
+                // Labels require a `Labelable` node id AND a mutation-capable
+                // provider — same as assignees. A read-only issue (Jira) has
+                // a node_id but no write backend; pre-PR scratch workspaces
+                // don't qualify.
                 if let Some(ws) = self.sidebar.selected_workspace() {
                     let has_target = ws.pr.as_ref().map(|p| p.node_id.is_some()).unwrap_or(false)
                         || ws
                             .gh_issues
                             .first()
-                            .map(|i| i.node_id.is_some())
+                            .map(|i| i.node_id.is_some() && i.source_supports_mutations())
                             .unwrap_or(false);
                     if !has_target {
                         self.flash_info("no PR / issue to label");

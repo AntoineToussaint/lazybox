@@ -4,24 +4,29 @@
 
 use super::super::{PolledScope, TaskSource};
 use lazybox_core::Task;
-use lazybox_jira::JiraClient;
+use lazybox_jira::{JiraClient, JiraRoles};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) struct JiraSource {
     client: JiraClient,
+    /// The involvement roles ticked in setup (`role.*` keys), which the
+    /// provider turns into the search JQL. Never empty here — the
+    /// builder skips the source when nothing is ticked.
+    roles: JiraRoles,
     /// Set by the last [`TaskSource::fetch`]: `true` when Jira signalled
-    /// more assigned issues than that fetch returned. Read afterwards by
+    /// more matching issues than that fetch returned. Read afterwards by
     /// [`TaskSource::polled_scope`] (the trait calls them in that order)
     /// to decide whether the fetch was authoritative.
     last_truncated: AtomicBool,
 }
 
 impl JiraSource {
-    pub(crate) fn new(client: JiraClient) -> Self {
+    pub(crate) fn new(client: JiraClient, roles: JiraRoles) -> Self {
         Self {
             client,
+            roles,
             last_truncated: AtomicBool::new(false),
         }
     }
@@ -32,7 +37,7 @@ impl TaskSource for JiraSource {
         lazybox_jira::SOURCE
     }
 
-    /// Authoritative ONLY when the last fetch saw the whole assignee set.
+    /// Authoritative ONLY when the last fetch saw the whole matching set.
     /// When it was truncated (Jira returned a `nextPageToken`), report
     /// "no coverage" — an empty [`PolledScope::Repos`] — so rescope
     /// preserves every stored Jira row this tick. Claiming `Exhaustive`
@@ -52,10 +57,10 @@ impl TaskSource for JiraSource {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<Task>, lazybox_core::ProviderError>> + Send + 'a>>
     {
         Box::pin(async move {
-            let assigned = self.client.fetch_assigned().await?;
+            let involved = self.client.fetch_involved(&self.roles).await?;
             self.last_truncated
-                .store(assigned.truncated, Ordering::Relaxed);
-            Ok(assigned.tasks)
+                .store(involved.truncated, Ordering::Relaxed);
+            Ok(involved.tasks)
         })
     }
 }

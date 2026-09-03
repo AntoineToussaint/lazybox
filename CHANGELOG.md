@@ -12,6 +12,20 @@ contain explicitly documented compatibility changes.
   lookup selecting both `mergeStateStatus` and `reviewDecision` trips it); the
   targeted refresh now falls back to per-target fetches, and after three
   consecutive rejections skips the batch until the next Shift-R refresh.
+- **Jira rows are real rows, with roles and hierarchy.** Jira tasks were
+  dropped at the workspace door (no slot for a `/browse/KEY` issue), leaving
+  title-only rows with no key, role, or status. They now attach like any
+  issue; the sidebar's identifier column shows the tracker key (`PROJ-42`,
+  and Linear's `ENG-123`) where a GitHub row shows its number; setup offers
+  the same flat roles as Linear (assigned to me / I reported / watching,
+  default assigned + reported) and the JQL follows the ticks; and each
+  issue's ancestors (epic, and whatever Jira Premium stacks above it) are
+  fetched by key so stories nest under their epic under its parent, up to the
+  root. Jira rows group per site (`jira/<site>`) rather than per project,
+  since a hierarchy routinely spans projects. Opening a workspace on a Jira
+  row resolves its repo from `providers.jira.projects.<KEY>`; an unmapped
+  project offers the same repo picker an unmapped Linear team does, instead
+  of trying to clone `jira/<site>` from GitHub.
 
 ## [0.1.14] - 2026-09-01
 

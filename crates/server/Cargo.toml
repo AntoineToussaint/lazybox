@@ -70,6 +70,10 @@ tempfile       = "3"
 bincode        = { workspace = true }
 criterion      = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 libghostty-vt  = { workspace = true }
+# End-to-end MCP round trip (#1433): drive the shipping server through a real
+# rmcp client over the streamable-HTTP transport. Test-only client + reqwest
+# transport features, so the shipping tree keeps only the server side.
+rmcp           = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 
 [[bin]]
 name = "generate-desktop-contract"

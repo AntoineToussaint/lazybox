@@ -388,10 +388,10 @@ impl BackgroundSweepForecast {
 }
 
 #[derive(Debug)]
-struct PrFetchOutcome {
-    tasks: Vec<Task>,
-    partial_failure: Option<String>,
-    retry_after_secs: Option<u64>,
+pub struct PrFetchOutcome {
+    pub tasks: Vec<Task>,
+    pub partial_failure: Option<String>,
+    pub retry_after_secs: Option<u64>,
 }
 
 impl PrFetchOutcome {
@@ -411,7 +411,7 @@ impl PrFetchOutcome {
         }
     }
 
-    fn is_complete(&self) -> bool {
+    pub fn is_complete(&self) -> bool {
         self.partial_failure.is_none()
     }
 }
@@ -3406,7 +3406,7 @@ impl GhClient {
     pub async fn fetch_all_prs(
         &self,
         since: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> Result<Vec<Task>, GhError> {
+    ) -> Result<PrFetchOutcome, GhError> {
         // Per-call wall-clock timer so the log can quantify the
         // parallelization win and so a regression jumps out in
         // `grep "fetch_all_prs: completed" /tmp/lazybox.log`. Cheap;
@@ -3526,6 +3526,7 @@ impl GhClient {
         let mut watched_fetched = 0usize;
         let mut existing: std::collections::HashSet<String> =
             tasks.iter().map(|t| t.id.key.clone()).collect();
+        let mut branch_failures: Vec<String> = Vec::new();
 
         match reviewer_res {
             Ok(rev_tasks) => {
@@ -3545,6 +3546,7 @@ impl GhClient {
             }
             Err(e) => {
                 tracing::warn!("review-requested branch failed: {e}");
+                branch_failures.push(format!("review-requested branch: {e}"));
             }
         }
 
@@ -3570,6 +3572,7 @@ impl GhClient {
             }
             Err(e) => {
                 tracing::warn!("recently-merged sweep failed: {e}");
+                branch_failures.push(format!("recently-merged sweep: {e}"));
             }
         }
 
@@ -3587,6 +3590,7 @@ impl GhClient {
                 Err(e) => {
                     tracing::warn!("Watch query failed for {repo}: {e}");
                     watch_failures += 1;
+                    branch_failures.push(format!("watch-repo {repo}: {e}"));
                 }
             }
         }
@@ -3628,7 +3632,14 @@ impl GhClient {
                 count: self.watch_repos.len(),
             });
         }
-        Ok(tasks)
+        // If any optional branch failed, return partial coverage so the
+        // caller knows not to rely on an exhaustive result.
+        if branch_failures.is_empty() {
+            Ok(PrFetchOutcome::complete(tasks))
+        } else {
+            let failure_msg = branch_failures.join("; ");
+            Ok(PrFetchOutcome::partial(tasks, failure_msg, None))
+        }
     }
 
     /// Round-robin variant of `fetch_all_prs`. Instead of one big
@@ -4368,7 +4379,7 @@ impl GhClient {
         }
         let pr_fut = async {
             if want_prs {
-                self.fetch_all_prs(None).await.map(PrFetchOutcome::complete)
+                self.fetch_all_prs(None).await
             } else {
                 Ok(PrFetchOutcome::complete(Vec::new()))
             }
@@ -4418,7 +4429,7 @@ impl GhClient {
         }
         let pr_fut = async {
             if want_prs {
-                self.fetch_all_prs(None).await.map(PrFetchOutcome::complete)
+                self.fetch_all_prs(None).await
             } else {
                 Ok(PrFetchOutcome::complete(Vec::new()))
             }
@@ -4493,9 +4504,7 @@ impl GhClient {
                 // Global sweep on this tick — same payload as the
                 // pre-round-robin path. The per-repo fan-out is
                 // skipped because the global already covers it.
-                self.fetch_all_prs(pr_since)
-                    .await
-                    .map(PrFetchOutcome::complete)
+                self.fetch_all_prs(pr_since).await
             } else {
                 self.fetch_prs_for_repos(repos).await
             }
@@ -4534,7 +4543,7 @@ impl GhClient {
         }
         let pr_fut = async {
             if want_prs {
-                self.fetch_all_prs(None).await.map(PrFetchOutcome::complete)
+                self.fetch_all_prs(None).await
             } else {
                 Ok(PrFetchOutcome::complete(Vec::new()))
             }
@@ -5428,7 +5437,10 @@ impl lazybox_core::TaskProvider for GhClient {
     }
 
     async fn fetch_tasks(&self) -> Result<Vec<lazybox_core::Task>, lazybox_core::ProviderError> {
-        self.fetch_all_prs(None).await.map_err(Into::into)
+        self.fetch_all_prs(None)
+            .await
+            .map(|outcome| outcome.tasks)
+            .map_err(Into::into)
     }
 
     fn username(&self) -> Option<&str> {
@@ -6889,6 +6901,54 @@ mod tests {
             "field 'foo' does not exist".to_string(),
         ));
         assert!(!perm.is_retryable() && !perm.is_auth());
+    }
+
+    /// `PrFetchOutcome::partial` captures partial failures during
+    /// `fetch_all_prs` so the polling layer can rescope correctly
+    /// (issue #1255). When any optional branch (reviewer, merged,
+    /// watched) fails, the outcome marks itself as partial even when
+    /// the main search succeeds, so `rescope` preserves workspaces
+    /// that might still be in scope despite the transient failure.
+    #[test]
+    fn pr_fetch_outcome_tracks_partial_failures() {
+        // Case 1: complete success — all branches succeeded.
+        let tasks = Vec::new();
+        let complete = PrFetchOutcome::complete(tasks.clone());
+        assert!(
+            complete.is_complete(),
+            "all branches OK → complete coverage"
+        );
+        assert_eq!(complete.tasks.len(), 0);
+        assert_eq!(complete.partial_failure, None);
+
+        // Case 2: partial failure — reviewer branch failed, main succeeded.
+        let partial = PrFetchOutcome::partial(
+            tasks,
+            "review-requested branch: network error".to_string(),
+            None,
+        );
+        assert!(
+            !partial.is_complete(),
+            "optional branch failed → partial coverage"
+        );
+        assert_eq!(
+            partial.partial_failure,
+            Some("review-requested branch: network error".to_string())
+        );
+        assert!(
+            partial.retry_after_secs.is_none(),
+            "no rate-limit hint when optional branch fails"
+        );
+
+        // Case 3: partial failure with retry hint (if a sub-branch gave one).
+        let partial_with_retry =
+            PrFetchOutcome::partial(vec![], "merged sweep: rate limited".to_string(), Some(60));
+        assert!(!partial_with_retry.is_complete());
+        assert_eq!(
+            partial_with_retry.partial_failure,
+            Some("merged sweep: rate limited".to_string())
+        );
+        assert_eq!(partial_with_retry.retry_after_secs, Some(60));
     }
 
     /// Spin up a tiny TCP server that answers every request with the

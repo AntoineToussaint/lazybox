@@ -107,6 +107,12 @@ impl Terminals {
         self.inner.terminal_is_agent(id)
     }
 
+    /// Whether any tracked terminal runs an agent (#1460, the coach's
+    /// "an agent came up" goal).
+    pub fn has_agent_terminal(&self) -> bool {
+        self.inner.has_agent_terminal()
+    }
+
     pub fn terminal_agent_state(&self, id: TerminalId) -> Option<lazybox_ipc::AgentState> {
         self.inner.terminal_agent_state(id)
     }

@@ -35,6 +35,7 @@
 //! - **Trait impl + key routing** — rewrite. `Pane::handle_key
 //!   → PaneOutcome` becomes `AppComponent::on(&Event) → Option<Msg>`.
 
+pub(crate) mod coach;
 pub mod components;
 pub mod keymap;
 pub(crate) mod layout;

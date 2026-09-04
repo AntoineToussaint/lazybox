@@ -1865,6 +1865,14 @@ impl TerminalStack {
             .is_some_and(|slot| matches!(slot.kind, TerminalKind::Agent(_)))
     }
 
+    /// Whether any tracked terminal — in any workspace — runs an agent.
+    /// The coach's "an agent came up" goal (#1460) reads this.
+    pub fn has_agent_terminal(&self) -> bool {
+        self.terminals
+            .values()
+            .any(|slot| matches!(slot.kind, TerminalKind::Agent(_)))
+    }
+
     pub(crate) fn terminal_agent_id(&self, id: TerminalId) -> Option<&str> {
         match &self.terminals.get(&id)?.kind {
             TerminalKind::Agent(agent_id) => Some(agent_id.as_str()),

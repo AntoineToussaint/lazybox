@@ -224,7 +224,9 @@ name a workspace, spawn the default agent — one flow, any pane),
 `]` browse snippets (read-only catalog; `e` there opens the YAML),
 `Shift-R` refresh, `Ctrl-L` force a full repaint (recovery for a
 stale/garbled screen; resize and focus-regain also repaint
-automatically), `Shift-T` tour, `Shift-D` sync status, `Shift-M`
+automatically), `Shift-T` coach (the onboarding coach rail — one
+objective at a time, gated on you doing it; press again to end it,
+`Ctrl-n` skips a step), `Shift-D` sync status, `Shift-M`
 messages log (a scrollable, `c`-clearable history of recent footer
 notices; #309), `Esc` dismiss the current footer notice regardless of
 severity — severity only drives auto-fade, never dismissability, and

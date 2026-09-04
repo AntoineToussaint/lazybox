@@ -1206,12 +1206,6 @@ showing keybinding search only",
         // route the "no" decision correctly.
         let top = self.modal_stack.last().cloned();
         self.pop_modal();
-        if top == Some(Id::SnippetPicker)
-            && let Some(ModalFlow::TourSnippet { return_step, .. }) = self.modal_flow.take()
-        {
-            self.mount_tour_at(return_step);
-            return Vec::new();
-        }
         // Cancelling any modal drops its [`ModalFlow`] continuation.
         // This one line replaces the ~two-dozen per-variant clears that
         // used to be here (each `pending_* = None`) — a missed one was
@@ -1911,10 +1905,10 @@ showing keybinding search only",
             }
         }
         // First-run users land here after completing the
-        // wizard — surface the feature tour now (no-op when
-        // it's already been seen, or when this Finish came
-        // from a partial Settings flow on a returning user).
-        self.maybe_mount_tour();
+        // wizard — surface the coach now (no-op when it's
+        // already been seen, or when this Finish came from a
+        // partial Settings flow on a returning user).
+        self.maybe_start_coach();
     }
 
     /// The repos whose workspaces the scopes REMOVED by `outcome` (vs

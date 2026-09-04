@@ -3761,8 +3761,8 @@ impl Sidebar {
         self.pane_state_rev
     }
 
-    /// Test-only: number of workspace rows in the current visible list.
-    #[cfg(test)]
+    /// Number of workspace rows in the current visible list (after the
+    /// active filter / search / mailbox lens).
     pub fn visible_workspace_count(&self) -> usize {
         self.visible
             .iter()

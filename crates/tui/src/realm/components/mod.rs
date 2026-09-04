@@ -26,6 +26,7 @@ pub mod merge_history_modal;
 pub mod messages;
 pub mod polling;
 pub mod pr_chat;
+pub mod practice_banner;
 pub mod prompt_history_picker;
 pub mod right;
 pub mod scrollable;

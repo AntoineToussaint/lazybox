@@ -1640,6 +1640,12 @@ pub struct Model<T: TerminalAdapter> {
     /// server-side actions (shell PTY, agents) and machine-local ones
     /// (browser open, notifications) stay available. See #742.
     remote: bool,
+    /// True when this client drives a *practice* daemon (`lazybox
+    /// practice`, #1459) — a sandboxed, simulated inbox. Draws the
+    /// permanent practice banner so the session can never be mistaken for
+    /// the real inbox. Purely cosmetic on the client; isolation is enforced
+    /// at boot by the sandboxed `LAZYBOX_HOME`.
+    practice: bool,
     /// Watches the inbound daemon-event channel depth after each
     /// drain. A backlog that climbs tick-over-tick means the TUI is
     /// consuming slower than the daemon produces — the signature of a
@@ -2512,6 +2518,7 @@ impl<T: TerminalAdapter> Model<T> {
             remote_require_connect: false,
             event_backlog: helpers::BacklogMonitor::default(),
             remote: false,
+            practice: false,
             redraw: true,
             quit: false,
             setup: SetupCtx::new(),
@@ -2752,6 +2759,14 @@ impl<T: TerminalAdapter> Model<T> {
     /// the first daemon Snapshot lands.
     pub fn with_preselect(mut self, p: Preselect) -> Self {
         self.preselect = Some(p);
+        self
+    }
+
+    /// Mark this client as driving a *practice* daemon (`lazybox practice`,
+    /// #1459). Draws the permanent practice banner so the simulated inbox can
+    /// never be mistaken for the real one.
+    pub fn with_practice(mut self) -> Self {
+        self.practice = true;
         self
     }
 
@@ -6557,6 +6572,7 @@ impl<T: TerminalAdapter> Model<T> {
         let coach_active = self.coach.is_some();
         let coach_spot = self.coach.as_ref().map(|c| c.current_spot());
         let coach_ascii = self.coach_ascii;
+        let practice = self.practice;
         // Split the `terminal.draw` cost into *build* (walking the widget
         // tree into the back buffer — CPU) vs *flush* (diffing + writing
         // the frame to stdout — I/O that blocks on the host terminal).
@@ -6568,7 +6584,18 @@ impl<T: TerminalAdapter> Model<T> {
         let draw_start = std::time::Instant::now();
         let build_end: std::cell::Cell<Option<std::time::Instant>> = std::cell::Cell::new(None);
         let _ = self.terminal.draw(|f| {
-            let area = f.area();
+            // Practice mode (#1459): carve the top row for the permanent
+            // banner before anything else lays out, so every screen — panes,
+            // focus mode, modals behind it — sits below it and it can never be
+            // mistaken for the real inbox.
+            let area = if practice {
+                let (banner, rest) =
+                    crate::realm::components::practice_banner::split_for_banner(f.area());
+                crate::realm::components::practice_banner::render(f, banner);
+                rest
+            } else {
+                f.area()
+            };
             captured_area = area;
             let (pane_area, footer_area) = split_for_footer(area);
             let (pane_area, coach_area) = split_coach(pane_area, coach_active);

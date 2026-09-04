@@ -584,6 +584,189 @@ pub async fn run(bus: broadcast::Sender<Event>, stage: Stage, settle: Duration, 
     }
 }
 
+// ── Reactor ──────────────────────────────────────────────────────────────
+
+/// The practice-mode **reactor** (#1459): what turns the scripted movie into
+/// a simulator. Where [`run`] plays a fixed timeline, the reactor *subscribes
+/// to the daemon bus* and makes the world respond to what the user actually
+/// does — spawn an agent and it comes alive; type a reply and it answers.
+///
+/// It runs only in practice mode. `--demo` keeps its scripted [`fleet_scenario`]
+/// and no reactor, so the two never both drive the same terminal.
+///
+/// ## Why a bus subscriber, not a command tap
+///
+/// The daemon exposes no command-observer hook — a second component sees only
+/// the [`Event`]s a command's handlers broadcast (`config.bus.subscribe()`),
+/// exactly as the working-watchdog and auto-wait tasks do. So the reactor
+/// keys off `TerminalSpawned` to bring a fresh agent to life. User *input*,
+/// though, is a `Command::Write` that broadcasts no event — a real gap in the
+/// daemon→client contract this harness exists to surface — so replies are
+/// detected by polling the [`MockBackend`]'s recorded writes, the one place
+/// that input lands with no backend process to echo it.
+pub struct Reactor {
+    config: ServerConfig,
+    mock: MockBackend,
+    rx: broadcast::Receiver<Event>,
+    /// Agent terminals the reactor has taken over, keyed by terminal id.
+    tracked: HashMap<TerminalId, TrackedAgent>,
+}
+
+struct TrackedAgent {
+    session_key: SessionKey,
+    backend_key: String,
+    /// Count of backend writes already answered, so a poll only reacts to
+    /// input that arrived since the last reply.
+    answered_writes: usize,
+}
+
+impl Reactor {
+    pub fn new(config: ServerConfig, mock: MockBackend) -> Self {
+        let rx = config.bus.subscribe();
+        Self {
+            config,
+            mock,
+            rx,
+            tracked: HashMap::new(),
+        }
+    }
+
+    /// Drive the reactor until the bus closes (daemon shutdown). Interleaves
+    /// bus events (new agent terminals) with a slow poll of recorded input
+    /// (user replies), so neither starves the other.
+    pub async fn run(mut self) {
+        let mut poll = tokio::time::interval(Duration::from_millis(250));
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                event = self.rx.recv() => match event {
+                    Ok(event) => self.on_event(event).await,
+                    Err(broadcast::error::RecvError::Closed) => return,
+                    // A lagged reactor just misses a beat; the next spawn
+                    // still gets picked up.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                },
+                _ = poll.tick() => self.poll_replies().await,
+            }
+        }
+    }
+
+    async fn on_event(&mut self, event: Event) {
+        // Only agent spawns get a reaction; a plain shell is left to the user.
+        let Event::TerminalSpawned {
+            terminal_id,
+            session_key,
+            kind: TerminalKind::Agent(_),
+            ..
+        } = event
+        else {
+            return;
+        };
+        if self.tracked.contains_key(&terminal_id) {
+            return;
+        }
+        let Some(backend_key) = self.config.terminal.backend_key_for(terminal_id).await else {
+            return;
+        };
+        // Anything already written to the session at spawn (an injected
+        // initial prompt) is not a user reply — start the counter past it.
+        let answered_writes = self.mock.writes_for(&backend_key).await.len();
+        self.tracked.insert(
+            terminal_id,
+            TrackedAgent {
+                session_key: session_key.clone(),
+                backend_key: backend_key.clone(),
+                answered_writes,
+            },
+        );
+        self.play(
+            terminal_id,
+            session_key,
+            backend_key,
+            AGENT_INTRO,
+            AgentState::InputNeeded,
+        );
+    }
+
+    /// Scan tracked agents for input that arrived since the last reply and,
+    /// where the user has submitted a line, answer it.
+    async fn poll_replies(&mut self) {
+        // Collect first so we don't hold a borrow across the async plays.
+        let mut answers: Vec<(TerminalId, SessionKey, String, Vec<u8>)> = Vec::new();
+        for (tid, agent) in self.tracked.iter_mut() {
+            let writes = self.mock.writes_for(&agent.backend_key).await;
+            if writes.len() <= agent.answered_writes {
+                continue;
+            }
+            let fresh = &writes[agent.answered_writes..];
+            // Only respond once the user has committed a line — a bare
+            // submit (Enter) or any newline in the fresh bytes.
+            let submitted = fresh
+                .iter()
+                .any(|w| w.iter().any(|b| *b == b'\r' || b'\n' == *b));
+            if !submitted {
+                continue;
+            }
+            agent.answered_writes = writes.len();
+            let echo: Vec<u8> = fresh.concat();
+            answers.push((*tid, agent.session_key.clone(), agent.backend_key.clone(), echo));
+        }
+        for (tid, key, backend_key, echo) in answers {
+            // The mock backend has no child to echo the keystrokes, so a
+            // real PTY's cooked-mode echo is reproduced here before the
+            // reply — otherwise the line the user typed never appears.
+            self.mock.emit(&backend_key, &echo).await;
+            self.play(tid, key, backend_key, AGENT_REPLY, AgentState::Done);
+        }
+    }
+
+    /// Flip the agent to `Working`, stream `lines` into its terminal over a
+    /// short window, then settle to `end`. Detached so the reactor loop keeps
+    /// servicing other agents while one is "thinking".
+    fn play(
+        &self,
+        terminal_id: TerminalId,
+        session_key: SessionKey,
+        backend_key: String,
+        lines: &'static [&'static str],
+        end: AgentState,
+    ) {
+        let bus = self.config.bus.clone();
+        let mock = self.mock.clone();
+        tokio::spawn(async move {
+            let working = |state| Event::AgentState {
+                session_key: session_key.clone(),
+                terminal_id,
+                state,
+            };
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            let _ = bus.send(working(AgentState::Working));
+            for line in lines {
+                tokio::time::sleep(Duration::from_millis(280)).await;
+                mock.emit(&backend_key, line.as_bytes()).await;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let _ = bus.send(working(end));
+        });
+    }
+}
+
+/// Canned first-contact transcript a freshly-spawned practice agent streams,
+/// ending on a prompt so the user is invited to reply.
+const AGENT_INTRO: &[&str] = &[
+    "\x1b[38;5;208m✻\x1b[0m Waking up in the practice sandbox…\r\n",
+    "  \x1b[36m⎿\x1b[0m Read the workspace (nothing here is real)\r\n",
+    "\x1b[32m●\x1b[0m I've had a look. \x1b[1mWhat would you like me to do?\x1b[0m\r\n",
+    "  Type a message and press Enter — you can't break anything.\r\n",
+];
+
+/// Canned reply a practice agent streams after the user submits a line.
+const AGENT_REPLY: &[&str] = &[
+    "\r\n\x1b[38;5;208m✻\x1b[0m On it…\r\n",
+    "  \x1b[36m⎿\x1b[0m (practice) pretending to edit files\r\n",
+    "\x1b[32m●\x1b[0m Done — in a real session I'd have pushed a commit and opened a PR.\r\n",
+];
+
 /// The built-in "fleet" scenario: brings the seeded inbox to life — several
 /// agents working across repos, one asking, one done, one rate-limited — with
 /// live terminals streaming canned Claude/Codex output for the focus-mode
@@ -853,6 +1036,119 @@ mod tests {
         assert!(
             in_snapshot,
             "recovery Snapshot includes the terminal — durability gap closed"
+        );
+    }
+
+    /// Drain the bus until `pred` matches an event or `deadline` elapses.
+    async fn wait_for_event(
+        rx: &mut broadcast::Receiver<Event>,
+        deadline: Duration,
+        mut pred: impl FnMut(&Event) -> bool,
+    ) -> bool {
+        let stop = tokio::time::Instant::now() + deadline;
+        loop {
+            let left = stop.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            match tokio::time::timeout(left, rx.recv()).await {
+                Ok(Ok(ev)) if pred(&ev) => return true,
+                Ok(Ok(_)) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(broadcast::error::RecvError::Closed)) | Err(_) => return false,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn reactor_brings_a_spawned_agent_to_life_and_answers_a_reply() {
+        // The heart of "simulator, not movie" (#1459 criterion 5): with the
+        // reactor running, the user's own spawn brings the agent to life, and
+        // a submitted reply gets answered — all on the real daemon paths, no
+        // script driving these terminals.
+        use lazybox_ipc::{Command, EventSender, TerminalInputIntent};
+
+        let fx = DemoFixture::seed().unwrap();
+        let mock = MockBackend::new();
+        let config = ServerConfig::with_store_and_backend(fx.store.clone(), mock.as_backend());
+        let mut rx = config.bus.subscribe();
+        tokio::spawn(Reactor::new(config.clone(), mock.clone()).run());
+
+        let (tx, _keep) = mpsc::unbounded_channel();
+        let sink = EventSender::from_unbounded(tx);
+        let key = fx.workspaces[0].key.clone();
+        lazybox_server::dispatch_command(
+            &config,
+            &sink,
+            Command::Spawn {
+                session_key: key.clone(),
+                session_id: None,
+                client_request_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: Some(fx.repo.path().to_string_lossy().into_owned()),
+                initial_prompt: None,
+                initial_snippet: None,
+                on_main: false,
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+                force_new: true,
+            },
+        )
+        .await;
+
+        // The reactor spun the fresh agent up and settled it on a question.
+        let asked = wait_for_event(&mut rx, Duration::from_secs(8), |ev| {
+            matches!(
+                ev,
+                Event::AgentState {
+                    state: AgentState::InputNeeded,
+                    ..
+                }
+            )
+        })
+        .await;
+        assert!(asked, "reactor flips a spawned agent to InputNeeded");
+
+        let tid = config.terminal.terminal_ids().await[0];
+        let backend_key = config.terminal.backend_key_for(tid).await.unwrap();
+        let intro = config.backend.snapshot(&backend_key).await.unwrap().replay;
+        assert!(
+            String::from_utf8_lossy(&intro).contains("practice sandbox"),
+            "the intro transcript streamed into the terminal"
+        );
+
+        // The user replies; the reactor answers and marks the agent Done.
+        lazybox_server::dispatch_command(
+            &config,
+            &sink,
+            Command::Write {
+                terminal_id: tid,
+                bytes: b"look at the failing test\r".to_vec(),
+                intent: TerminalInputIntent::Submit,
+            },
+        )
+        .await;
+
+        let done = wait_for_event(&mut rx, Duration::from_secs(8), |ev| {
+            matches!(
+                ev,
+                Event::AgentState {
+                    state: AgentState::Done,
+                    ..
+                }
+            )
+        })
+        .await;
+        assert!(done, "reactor answers a reply and settles the agent to Done");
+
+        let replay = config.backend.snapshot(&backend_key).await.unwrap().replay;
+        let text = String::from_utf8_lossy(&replay);
+        assert!(
+            text.contains("look at the failing test"),
+            "the user's typed line was echoed back into the terminal"
+        );
+        assert!(
+            text.contains("pushed a commit"),
+            "the agent's canned reply streamed after the user's line"
         );
     }
 

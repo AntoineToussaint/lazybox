@@ -1072,9 +1072,10 @@ impl<T: TerminalAdapter> Model<T> {
     /// `dispatch_action_confirmed`, so its eligibility re-check and
     /// optimistic UI are unchanged; a target that yields no command
     /// (gone, or no longer eligible — merged, conflicted) is counted as
-    /// skipped. The multi-select is cleared and a single aggregate
-    /// summary replaces the per-target chatter. Iterates the *snapshot*
-    /// captured at mount, never the live selection.
+    /// skipped. The multi-select survives (#1449) so the same set can be
+    /// acted on again (`g d` then `x x`); a single aggregate summary,
+    /// naming the still-live selection, replaces the per-target chatter.
+    /// Iterates the *snapshot* captured at mount, never the live selection.
     pub(crate) fn dispatch_action_confirmed_bulk(
         &mut self,
         action: &lazybox_tui_core::action::Action,
@@ -1095,12 +1096,11 @@ impl<T: TerminalAdapter> Model<T> {
                 cmds.extend(produced);
             }
         }
-        // Preserve the marks when nothing acted (every target had
-        // regressed / gone ineligible under the modal) so the user can
-        // retry — the same no-op-survives rule `bulk_dispatch` follows.
-        if acted > 0 {
-            self.sidebar.clear_broadcast_selection();
-        }
+        // The selection survives a bulk action so the same set can be
+        // acted on again — the common finishing chain is two actions over
+        // one set (`g d` then `x x`; #1449). It clears only on `Esc`, or
+        // when a row leaves the projection (the `recompute_visible` prune
+        // handles that — an archived row's mark prunes with it).
         self.flash_bulk_summary(bulk_confirmed_verb(action), "ineligible", acted, &skipped);
         self.redraw = true;
         cmds
@@ -1108,9 +1108,9 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Fan a per-workspace IPC command over the active `v` multi-select
     /// (#899). `build` yields the command for an eligible workspace or
-    /// `None` to skip it; the shared loop collects commands, clears the
-    /// selection when anything acted, and flashes a
-    /// "<done> N · M skipped (<why>)" summary. Only called when
+    /// `None` to skip it; the shared loop collects commands, keeps the
+    /// selection live (#1449) so the set can be acted on again, and
+    /// flashes a "<done> N · M skipped (<why>)" summary. Only called when
     /// [`bulk_active`](Self::bulk_active) — the single-row path stays in
     /// each action's own arm so its bespoke UX (pickers, optimistic
     /// redraws) is unchanged.
@@ -1132,9 +1132,6 @@ impl<T: TerminalAdapter> Model<T> {
             }
         }
         let acted = cmds.len();
-        if acted > 0 {
-            self.sidebar.clear_broadcast_selection();
-        }
         self.flash_bulk_summary(done, why_skip, acted, &skipped);
         self.redraw = true;
         cmds
@@ -1155,11 +1152,18 @@ impl<T: TerminalAdapter> Model<T> {
                 truncate_affected_list(skipped),
             ));
         }
-        let summary = if parts.is_empty() {
+        let mut summary = if parts.is_empty() {
             format!("nothing to {done}")
         } else {
             parts.join(" · ")
         };
+        // The selection now survives a bulk action (#1449), so name it —
+        // otherwise a still-live selection is invisible state and the next
+        // keypress acts on a set the user thought was gone.
+        let still = self.sidebar.visible_broadcast_selected_count();
+        if still > 0 {
+            summary.push_str(&format!(" · {still} still selected"));
+        }
         self.flash_info(summary);
     }
 

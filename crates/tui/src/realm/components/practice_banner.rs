@@ -53,7 +53,7 @@ pub fn render(frame: &mut Frame, area: Rect) {
 }
 
 /// Carve the top row of `area` for the banner, returning `(banner, rest)`.
-/// Mirrors [`crate::realm::model::helpers::split_for_footer`] so the banner
+/// Mirrors `crate::realm::model::helpers::split_for_footer` so the banner
 /// composes with the footer split without either knowing about the other.
 pub fn split_for_banner(area: Rect) -> (Rect, Rect) {
     if area.height < 2 {

@@ -15429,6 +15429,359 @@ mod terminal_url_mouse_tests {
         );
     }
 
+    fn left(model: &mut TestModel, kind: MouseEventKind, col: u16, row: u16) {
+        model.handle_mouse(MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        });
+    }
+
+    /// Count the reverse-video cells the selection overlay paints inside
+    /// `pane`, isolating the selection's contribution from chrome/cursor by
+    /// comparing against a run with the selection lifted.
+    fn reversed_in_pane(model: &mut TestModel, pane: Rect) -> usize {
+        use tuirealm::ratatui::style::Modifier;
+        model.view();
+        let buffer = model.terminal.raw().backend().buffer();
+        let mut n = 0;
+        for row in pane.y..pane.y.saturating_add(pane.height) {
+            for col in pane.x..pane.x.saturating_add(pane.width) {
+                if buffer[(col, row)]
+                    .style()
+                    .add_modifier
+                    .contains(Modifier::REVERSED)
+                {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// Double-click in the terminal selects the word under the pointer,
+    /// leaves a resting reverse-video highlight (not a drag), and a
+    /// keystroke dismisses it (#1451). The copied text is what
+    /// `word_span_at` returns for the clicked cell.
+    #[test]
+    fn double_click_selects_word_and_highlights_until_a_keystroke() {
+        let (mut model, _server, _opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, b"run src/main.rs now\r\n".to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+        let id = model.terminals.focused_terminal_id().expect("focused");
+
+        // The word the gesture will copy, mapped through the rendered frame.
+        let (word, _, _) = model
+            .terminals
+            .word_span_at(id, pane, x + 8, y)
+            .expect("a word under the pointer");
+        assert_eq!(
+            word, "src/main.rs",
+            "grid col 8 sits inside the path, which selects whole",
+        );
+
+        // A real double-click: down, up, down at the same cell.
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 8,
+            y,
+        );
+        left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 8, y);
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 8,
+            y,
+        );
+
+        assert!(
+            model.terminal_drag.is_none(),
+            "a double-click installs a resting selection, not a drag",
+        );
+        assert!(
+            model.terminal_selection.is_some(),
+            "the double-click leaves a resting word selection",
+        );
+
+        // The word's cells render reverse-video: lifting the selection
+        // drops exactly the path's 11 cells (single row).
+        let with_sel = reversed_in_pane(&mut model, pane);
+        let saved = model.terminal_selection.take();
+        let baseline = reversed_in_pane(&mut model, pane);
+        model.terminal_selection = saved;
+        assert_eq!(
+            with_sel - baseline,
+            "src/main.rs".len(),
+            "the highlight reverse-videos exactly the selected word",
+        );
+
+        // A keystroke to the PTY dismisses the resting highlight.
+        model.dispatch_key(RealmKey::new(Key::Char('x'), RealmMods::NONE));
+        assert!(
+            model.terminal_selection.is_none(),
+            "typing dismisses the word highlight",
+        );
+    }
+
+    /// Triple-click selects the whole line and installs a resting
+    /// highlight (#1451). The copied text is the joined line.
+    #[test]
+    fn triple_click_selects_the_whole_line() {
+        let (mut model, _server, _opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, b"the whole line here\r\nnext\r\n".to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+        let id = model.terminals.focused_terminal_id().expect("focused");
+
+        // Any column on the row yields the whole line.
+        let (line, _, _) = model
+            .terminals
+            .line_span_at(id, pane, x + 5, y)
+            .expect("a line under the pointer");
+        assert_eq!(line, "the whole line here");
+
+        // Down, up, down, up, down — three presses at the same cell.
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Left),
+        ] {
+            left(&mut model, kind, x + 5, y);
+        }
+
+        assert!(
+            model.terminal_drag.is_none(),
+            "a triple-click installs a resting selection, not a drag",
+        );
+        assert!(
+            model.terminal_selection.is_some(),
+            "the triple-click leaves a resting line selection",
+        );
+    }
+
+    /// A click that leaves the terminal resets its multi-click counter, so
+    /// bouncing out to the sidebar and straight back to the same cell reads
+    /// as a fresh single click (a drag anchor), not a continued
+    /// triple-click that would select and copy the whole line (#1451).
+    #[test]
+    fn leaving_the_terminal_resets_the_multi_click_counter() {
+        let (mut model, _server, _opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, b"the whole line here\r\n".to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+        let area = model.layout.last_area;
+        let (sidebar, _rt, _rb) = model.effective_pane_rects(area);
+
+        // A double-click in the terminal.
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 5,
+            y,
+        );
+        left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 5, y);
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 5,
+            y,
+        );
+        left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 5, y);
+        assert!(model.terminal_selection.is_some(), "double-click selected");
+
+        // Bounce out to the sidebar, then back to the SAME terminal cell.
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            sidebar.x + 1,
+            sidebar.y + 1,
+        );
+        left(
+            &mut model,
+            MouseEventKind::Up(MouseButton::Left),
+            sidebar.x + 1,
+            sidebar.y + 1,
+        );
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 5,
+            y,
+        );
+
+        // The return click is a fresh single click: it starts a drag anchor
+        // and installs no resting line selection.
+        assert!(
+            model.terminal_drag.is_some(),
+            "the return click starts a fresh drag, not a continued multi-click",
+        );
+        assert!(
+            model.terminal_selection.is_none(),
+            "the return single click cleared the old selection and made no new one",
+        );
+    }
+
+    /// A resting selection is pinned to a specific terminal; once that
+    /// terminal is no longer displayed (switched tab / workspace), the
+    /// highlight paints nothing rather than bleeding a stale reverse-video
+    /// band onto whatever terminal now fills the pane (#1451).
+    #[test]
+    fn resting_selection_does_not_bleed_onto_another_terminal() {
+        let (mut model, _server, _opened) = build_model(2);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, b"alpha bravo charlie\r\n".to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+
+        // Double-click a word in the active tab (terminal 1).
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 2,
+            y,
+        );
+        left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 2, y);
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 2,
+            y,
+        );
+        let sel = model.terminal_selection.expect("a word selection");
+        assert_eq!(sel.terminal, TerminalId(1));
+
+        // Switch to the other tab: terminal 1 is no longer rendered.
+        model.terminals.set_active_tab(1);
+        feed(&mut model, 2, b"unrelated output\r\n".to_vec());
+        model.view();
+        assert_eq!(
+            model.terminals.tile_grid_rect(TerminalId(1)),
+            None,
+            "terminal 1 must be off-screen for this test to mean anything",
+        );
+
+        // With the stale selection present vs lifted, the pane paints the
+        // same reverse-video cells — the off-screen selection adds none.
+        let with_sel = reversed_in_pane(&mut model, pane);
+        let saved = model.terminal_selection.take();
+        let baseline = reversed_in_pane(&mut model, pane);
+        model.terminal_selection = saved;
+        assert_eq!(
+            with_sel, baseline,
+            "a selection for an off-screen terminal must not paint (with={with_sel}, baseline={baseline})",
+        );
+    }
+
+    /// A wheel scroll over the terminal dismisses a resting highlight so it
+    /// can't clamp to a stray edge band once its rows leave the viewport
+    /// (#1451).
+    #[test]
+    fn wheel_scroll_dismisses_a_resting_selection() {
+        let (mut model, _server, _opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, b"alpha bravo charlie\r\n".to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 2,
+            y,
+        );
+        left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 2, y);
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 2,
+            y,
+        );
+        assert!(model.terminal_selection.is_some(), "double-click selected");
+
+        model.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: x + 2,
+            row: y,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(
+            model.terminal_selection.is_none(),
+            "a wheel scroll clears the resting selection",
+        );
+    }
+
+    /// A double-click on a soft-wrapped token selects it whole — the URL
+    /// that spilled onto a second row copies as one contiguous string,
+    /// reusing the soft-wrap stitching (#1451). The display formatter
+    /// would break it at the wrap, so `word_span_at` reads the joined
+    /// bytes directly.
+    #[test]
+    fn double_click_selects_a_soft_wrapped_url_whole() {
+        let (mut model, _server, _opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        let url = format!("https://wrapped.example.com/{}", "a".repeat(160));
+        feed(&mut model, 1, format!("{url}\r\n").into_bytes());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+        let id = model.terminals.focused_terminal_id().expect("focused");
+
+        // Click on the continuation row (y+1), well inside the wrapped run.
+        let (word, _, _) = model
+            .terminals
+            .word_span_at(id, pane, x + 2, y + 1)
+            .expect("a word under the pointer");
+        assert_eq!(word, url, "the wrapped URL selects as one contiguous token");
+
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 2,
+            y + 1,
+        );
+        left(
+            &mut model,
+            MouseEventKind::Up(MouseButton::Left),
+            x + 2,
+            y + 1,
+        );
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 2,
+            y + 1,
+        );
+        assert!(
+            model.terminal_selection.is_some(),
+            "the double-click leaves a resting selection spanning both rows",
+        );
+    }
+
     #[test]
     fn right_click_opens_plain_url_through_model_launcher() {
         let (mut model, _server, opened) = build_model(1);

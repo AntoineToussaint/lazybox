@@ -392,6 +392,32 @@ impl Terminals {
         self.inner.extract_selection(id, anchor, focus)
     }
 
+    /// Forward `word_span_at` — the screen-absolute grid span of the word
+    /// under a crossterm `(col, row)`, for the double-click select+copy
+    /// gesture (#1451).
+    pub fn word_span_at(
+        &mut self,
+        id: TerminalId,
+        rect: tuirealm::ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+    ) -> Option<crate::components::terminal_stack::SelectionSpan> {
+        self.inner.word_span_at(id, rect, col, row)
+    }
+
+    /// Forward `line_span_at` — the screen-absolute grid span of the whole
+    /// soft-wrap-joined line under a crossterm `(col, row)`, for the
+    /// triple-click select+copy gesture (#1451).
+    pub fn line_span_at(
+        &mut self,
+        id: TerminalId,
+        rect: tuirealm::ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+    ) -> Option<crate::components::terminal_stack::SelectionSpan> {
+        self.inner.line_span_at(id, rect, col, row)
+    }
+
     /// Project a screen-absolute selection span back to terminal `id`'s
     /// on-screen crossterm cells currently visible in `rect`, for the
     /// reverse-video highlight overlay. `None` when `id` is unknown.

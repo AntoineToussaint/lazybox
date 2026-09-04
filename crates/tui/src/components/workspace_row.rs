@@ -173,6 +173,13 @@ pub struct WorkspaceRowCtx<'a> {
     /// so the user can see *what* matched — the vim `/pattern` cue (#1099).
     /// Already `#`-stripped and trimmed by the caller.
     pub highlight_query: Option<&'a str>,
+    /// Source group label to render as a dim `repo · ` prefix ahead of the
+    /// title (#1450). `Some` only for rows in the synthetic `★ Focused`
+    /// section, which are lifted out of their repo group and so carry no
+    /// repo header to say where they came from; the label is the same one
+    /// [`group_label`](lazybox_tui_core::inbox::group_label) gives the row's
+    /// repo header elsewhere. `None` for rows shown under their own header.
+    pub repo_prefix: Option<String>,
 }
 
 impl<'a> WorkspaceRowCtx<'a> {
@@ -626,6 +633,15 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let labels = label_spans(ctx);
     let tail = labels.len();
     let mut spans = ticket_tree_prefix(ctx);
+    // A `★ Focused` row is lifted out of its repo group, so it has no repo
+    // header to say where it came from — name the source inline (#1450).
+    // Dim, so it reads as a cue on the title rather than competing with it.
+    if let Some(repo) = &ctx.repo_prefix {
+        spans.push(Span::styled(
+            format!("{repo} · "),
+            ctx.row_style().fg(ctx.theme.text_dim),
+        ));
+    }
     spans.extend(title_spans(
         ctx.raw_title(),
         ctx.highlight_query,
@@ -1542,6 +1558,7 @@ mod tests {
             stack: None,
             model_shorts: empty_shorts(),
             highlight_query: None,
+            repo_prefix: None,
         }
     }
 
@@ -1972,6 +1989,7 @@ mod tests {
             stack: None,
             model_shorts: empty_shorts(),
             highlight_query: None,
+            repo_prefix: None,
         };
         assert_eq!(cell_type(&ctx).width(), 0);
     }
@@ -1986,6 +2004,30 @@ mod tests {
         let ctx = ctx_for(&ws, &task, &theme);
         let cell = cell_title(&ctx);
         assert_eq!(cell.spans[0].content.as_ref(), "[CI] cache post-job upload");
+    }
+
+    #[test]
+    fn cell_title_prepends_dim_repo_prefix_when_set() {
+        let task = make_task("owner/repo#1", "Fix the thing");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.repo_prefix = Some("owner/repo".into());
+        let cell = cell_title(&ctx);
+        assert_eq!(cell.spans[0].content.as_ref(), "owner/repo · ");
+        assert_eq!(cell.spans[0].style.fg, Some(theme.text_dim));
+        // The title itself still follows, unchanged.
+        assert_eq!(cell.spans[1].content.as_ref(), "Fix the thing");
+    }
+
+    #[test]
+    fn cell_title_has_no_repo_prefix_by_default() {
+        let task = make_task("owner/repo#1", "Fix the thing");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        let cell = cell_title(&ctx);
+        assert_eq!(cell.spans[0].content.as_ref(), "Fix the thing");
     }
 
     #[test]
@@ -2467,6 +2509,7 @@ mod tests {
             stack: None,
             model_shorts: empty_shorts(),
             highlight_query: None,
+            repo_prefix: None,
         };
         assert_eq!(cell_title(&ctx).spans[0].content.as_ref(), "lonely");
     }
@@ -3833,6 +3876,7 @@ mod tests {
             stack: None,
             model_shorts: empty_shorts(),
             highlight_query: None,
+            repo_prefix: None,
         };
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx_task), build_row(&ctx_scratch)];

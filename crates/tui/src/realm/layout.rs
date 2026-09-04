@@ -250,9 +250,10 @@ impl LayoutCtx {
         if column == 0 {
             return false;
         }
-        let fitted = fit_activity_height((Rect::default(), right_top, right_bottom), natural, false)
-            .1
-            .height;
+        let fitted =
+            fit_activity_height((Rect::default(), right_top, right_bottom), natural, false)
+                .1
+                .height;
         self.right_top_pct = clamp_pct((fitted as i32 * 100 / column as i32) as i16);
         self.activity_user_resized = true;
         self.persist();
@@ -869,7 +870,12 @@ mod tests {
         // 100×50 area, 25% default → right_top ≈ 12 rows. Content only
         // needs 6: shrink to 6 and hand the other rows to the terminal.
         let c = ctx();
-        let rects = pane_areas(area(), c.sidebar_pct, c.right_top_pct, c.sidebar_user_resized);
+        let rects = pane_areas(
+            area(),
+            c.sidebar_pct,
+            c.right_top_pct,
+            c.sidebar_user_resized,
+        );
         let (_, right_top, right_bottom) = rects;
         let column = right_top.height + right_bottom.height;
         let (sidebar, top, bottom) = fit_activity_height(rects, 6, false);
@@ -889,7 +895,12 @@ mod tests {
         // Content that overflows the percentage keeps the percentage —
         // the fit never grows the row into the terminal.
         let c = ctx();
-        let rects = pane_areas(area(), c.sidebar_pct, c.right_top_pct, c.sidebar_user_resized);
+        let rects = pane_areas(
+            area(),
+            c.sidebar_pct,
+            c.right_top_pct,
+            c.sidebar_user_resized,
+        );
         let unfitted = rects.1.height;
         let (_, top, bottom) = fit_activity_height(rects, 999, false);
         assert_eq!(top.height, unfitted, "row keeps its percentage");
@@ -903,12 +914,20 @@ mod tests {
         // the majority.
         let mut c = ctx();
         c.right_top_pct = 60;
-        let rects = pane_areas(area(), c.sidebar_pct, c.right_top_pct, c.sidebar_user_resized);
+        let rects = pane_areas(
+            area(),
+            c.sidebar_pct,
+            c.right_top_pct,
+            c.sidebar_user_resized,
+        );
         let (_, right_top, right_bottom) = rects;
         let column = right_top.height + right_bottom.height;
         let cap = column * ACTIVITY_MAX_PCT / 100;
         let (_, top, _) = fit_activity_height(rects, 999, false);
-        assert_eq!(top.height, cap, "capped at {ACTIVITY_MAX_PCT}% of the column");
+        assert_eq!(
+            top.height, cap,
+            "capped at {ACTIVITY_MAX_PCT}% of the column"
+        );
         assert!(top.height < right_top.height, "the cap shrank the 60% row");
     }
 
@@ -917,7 +936,12 @@ mod tests {
         // With `user_set`, the percentage is honored verbatim — blank
         // rows and all — regardless of how little content there is.
         let c = ctx();
-        let rects = pane_areas(area(), c.sidebar_pct, c.right_top_pct, c.sidebar_user_resized);
+        let rects = pane_areas(
+            area(),
+            c.sidebar_pct,
+            c.right_top_pct,
+            c.sidebar_user_resized,
+        );
         assert_eq!(fit_activity_height(rects, 3, true), rects);
     }
 

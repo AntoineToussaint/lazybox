@@ -428,13 +428,16 @@ fn handle_daemon_event_applies_preselect_on_first_snapshot() {
 fn click_in_right_pane_changes_focus() {
     let mut m = build_model();
     // Splash modal blocks the run loop's crossterm path, but tests
-    // bypass that. Click somewhere clearly in the right column.
+    // bypass that. Click clearly inside the activity pane. With no
+    // workspace selected the pane content-fits to a few rows (#1469), so
+    // click near its top — row 2 is inside the fitted pane and clear of
+    // the horizontal splitter's ±1 hit zone at its bottom edge.
     let area = Rect::new(0, 0, 100, 30);
     m.dispatch_mouse_in(
         MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 80, // > 40% of 100 → outside sidebar
-            row: 5,     // < 25% of 30 → in right-top
+            row: 2,     // inside the content-fitted activity pane
             modifiers: CtKeyModifiers::empty(),
         },
         area,
@@ -462,14 +465,16 @@ fn click_outside_search_dismisses_it() {
     assert!(m.sidebar().search_editing(), "search is capturing keys");
 
     // Render so the search-bar / chip hit rects are populated, then
-    // click well into the right column (outside the search input).
+    // click well into the right column (outside the search input). Row 2
+    // is inside the content-fitted activity pane (#1469) and clear of the
+    // horizontal splitter's ±1 hit zone at its bottom edge.
     m.view();
     let area = Rect::new(0, 0, 100, 30);
     m.dispatch_mouse_in(
         MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 80,
-            row: 5,
+            row: 2,
             modifiers: CtKeyModifiers::empty(),
         },
         area,

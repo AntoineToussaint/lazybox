@@ -2578,15 +2578,15 @@ mod natural_height_tests {
     fn activity_count_drives_height_before_first_paint() {
         // No frame rendered yet, so the ActivityBuffer is empty and the
         // measurement falls back to the raw activity count: 4 header + 1
-        // separator + 0 body + (2 comments + 3 activity chrome rows).
+        // separator + 0 body + (comments + 3 activity chrome rows).
         assert_eq!(
             pane_with(Some(ws_with_n_comments(2))).natural_height(),
-            4 + 1 + 0 + (2 + 3)
+            4 + 1 + (2 + 3)
         );
         // Each extra comment adds exactly one row.
         assert_eq!(
             pane_with(Some(ws_with_n_comments(10))).natural_height(),
-            4 + 1 + 0 + (10 + 3)
+            4 + 1 + (10 + 3)
         );
     }
 }

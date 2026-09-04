@@ -2404,7 +2404,7 @@ impl RightPane {
     /// description-body constraint + the activity feed. Drives
     /// `layout::fit_activity_height` (#1469), which shrinks the reserved
     /// row down to this. Activity lines come from the memoized
-    /// [`ActivityBuffer`]; before the first paint (no buffer yet) it
+    /// `ActivityBuffer`; before the first paint (no buffer yet) it
     /// falls back to the raw activity count. The activity block is
     /// floored at the `Constraint::Min(3)` `render` guarantees, so a
     /// fitted pane keeps the shape the renderer promises.

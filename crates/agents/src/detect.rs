@@ -147,9 +147,17 @@ pub const CLAUDE_BLOCKING_INTERSTITIAL_PHRASES: &[&str] = &[
 ///   `Usage limit reached · continuing automatically at 3:10pm · esc or
 ///    type to cancel`
 /// "individual spend limit" / "session limit resets" are neither "usage"
-/// nor "weekly"/"monthly", so the earlier phrases missed them;
-/// "continuing automatically" is the distinctive auto-continue anchor that
-/// no ordinary output produces as a live footer.
+/// nor "weekly"/"monthly", so the earlier phrases missed them. Both new
+/// entries stay full, banner-specific fragments for the same reason every
+/// other phrase here does: a single match flips state to `LimitReached`
+/// (which blocks prompt injection and can fire the opt-in auto-`Wait`
+/// keystroke), so a bare noun like "spend limit" — ordinary vocabulary for
+/// an agent working on billing / cost-cap code — must NOT be a trigger. The
+/// auto-continue footer needs no phrase of its own: the spend/session
+/// banner already carries the two fragments above, and the plain
+/// "Usage limit reached · continuing automatically …" variant matches
+/// "usage limit reached". Its reset time is still recovered in
+/// [`parse_usage_limit_reset`] via the `automatically at <time>` fallback.
 pub const CLAUDE_USAGE_LIMIT_PHRASES: &[&str] = &[
     "usage limit reached",
     "reached your usage limit",
@@ -157,9 +165,7 @@ pub const CLAUDE_USAGE_LIMIT_PHRASES: &[&str] = &[
     "hit your usage limit",
     "hit your weekly limit",
     "hit your individual spend limit",
-    "spend limit",
     "session limit resets",
-    "continuing automatically",
     "/rate-limit-options",
 ];
 
@@ -182,9 +188,10 @@ pub const CLAUDE_USAGE_LIMIT_PHRASES: &[&str] = &[
 /// unrecognised phrasing (`resets tomorrow`) yields `None` rather than a
 /// garbled hint. The auto-continue banner (#1452) carries no `resets`
 /// word — it states the reset as `continuing automatically at 3:10pm` — so
-/// `automatically at <time>` is tried as a fallback. The block still
-/// surfaces without a countdown: the documented degraded path where no
-/// usage API exists.
+/// `automatically at <time>` is tried as a fallback, the LAST parseable
+/// occurrence winning so a stale scrollback mention can't shadow the live
+/// footer. The block still surfaces without a countdown: the documented
+/// degraded path where no usage API exists.
 pub fn parse_usage_limit_reset(recent_output: &[u8]) -> Option<String> {
     let s = strip_ansi_lossy(recent_output);
     let compact = compact_lower(&s);
@@ -198,10 +205,15 @@ pub fn parse_usage_limit_reset(recent_output: &[u8]) -> Option<String> {
         .find_map(|(i, kw)| reset_token(&compact[i + kw.len()..]))
         // The auto-continue banner (#1452) carries no `resets` word — it
         // states the reset time as `continuing automatically at 3:10pm`.
+        // Take the LAST parseable occurrence: the live footer is the
+        // bottom-most line, so an earlier "automatically <time>" in prose
+        // scrollback (`the deploy continues automatically 2h after merge`)
+        // must not shadow it.
         .or_else(|| {
             compact
                 .match_indices("automatically")
-                .find_map(|(i, kw)| reset_token(&compact[i + kw.len()..]))
+                .filter_map(|(i, kw)| reset_token(&compact[i + kw.len()..]))
+                .last()
         })
 }
 
@@ -2406,6 +2418,32 @@ mod tests {
             parse_usage_limit_reset(auto.as_bytes()),
             Some("3:10pm".into()),
         );
+
+        // The `automatically at <time>` fallback takes the LAST parseable
+        // occurrence, so a stale-scrollback "automatically <time>" above the
+        // live footer can't shadow the real reset time.
+        let noisy = "the deploy continues automatically 2h after merge\n\
+             Usage limit reached · continuing automatically at 3:10pm · esc to cancel";
+        assert_eq!(
+            parse_usage_limit_reset(noisy.as_bytes()),
+            Some("3:10pm".into()),
+        );
+    }
+
+    #[test]
+    fn spend_limit_prose_while_working_is_not_limit_reached() {
+        // A bare "spend limit" was NOT added as a trigger phrase precisely
+        // so an agent working on billing / cost-cap code (or on #1452
+        // itself) isn't misread. Full tmux repaint delivers the prose
+        // mention AND the live status bar in one chunk; the same-chunk rule
+        // nulls the work anchor, so a broad trigger phrase here would flip
+        // to LimitReached and block prompt injection. It must stay Working.
+        let buf = "I'll enforce the spend limit in the billing module now.\n\
+                   ✻ Working… (5s · ↓ 200 tokens · esc to interrupt)";
+        assert_eq!(
+            claude_state_chunked(buf.as_bytes(), 0),
+            Some(AgentState::Working),
+        );
     }
 
     #[test]
@@ -2431,11 +2469,11 @@ mod tests {
             claude_state(stale_weekly.as_bytes()),
             Some(AgentState::Idle)
         );
-        // #1452: the broad new "spend limit" wording gets the same gate — a
-        // finished turn whose prose merely mentioned a spend limit, now at
-        // rest, must not flash a spurious block.
+        // #1452: the spend-limit banner wording gets the same gate — a
+        // finished turn whose prose merely mentioned the individual spend
+        // limit, now at rest, must not flash a spurious block.
         let stale_spend =
-            "I set the spend limit earlier so you won't overrun it.\n? for shortcuts";
+            "You've hit your individual spend limit earlier today.\n? for shortcuts";
         assert_eq!(claude_state(stale_spend.as_bytes()), Some(AgentState::Idle));
     }
 

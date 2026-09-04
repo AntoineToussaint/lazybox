@@ -14,9 +14,9 @@
 //! modules can see their parent's private items.
 
 use super::{
-    Id, Model, PaneFocus, TerminalDrag, emit_clipboard_copy, find_action_for_seq,
-    find_action_for_stroke, key_event_to_stroke, rect_contains, section_rank, seq_continuations,
-    seq_continuations_available,
+    Id, Model, PaneFocus, TerminalDrag, TerminalSelection, emit_clipboard_copy,
+    find_action_for_seq, find_action_for_stroke, key_event_to_stroke, rect_contains, section_rank,
+    seq_continuations, seq_continuations_available,
 };
 use crate::realm::keymap::realm_key_to_crossterm;
 use lazybox_ipc::Command as IpcCommand;
@@ -830,6 +830,11 @@ impl<T: TerminalAdapter> Model<T> {
                 // Tab gates above won't see this key as a cycle
                 // trigger anymore.
                 self.terminal_user_typed_since_focus = true;
+                // A keystroke dismisses a resting word/line highlight —
+                // the emulator idiom (#1451).
+                if self.terminal_selection.take().is_some() {
+                    self.redraw = true;
+                }
                 self.terminals.handle_key_direct(ct, &mut cmds);
             }
         }
@@ -2233,15 +2238,18 @@ impl<T: TerminalAdapter> Model<T> {
                         }
                     }
                     // Lazybox-side selection start: any left-click that
-                    // landed in the terminal pane. The anchor is pinned
-                    // in screen-absolute grid coords so it survives the
-                    // viewport auto-scrolling under an edge drag; a
-                    // press-release with no cell change (`dragged` never
-                    // set) is treated as a plain click in the Up handler.
-                    // The drag binds to the tile under the press (falling
-                    // back to the focused tile at a seam/chrome miss), and
-                    // every later mapping composes against that terminal —
-                    // so the selection can't spill into a neighbour (#1101).
+                    // landed in the terminal pane. A single click pins a
+                    // drag anchor (screen-absolute grid coords so it
+                    // survives viewport auto-scroll; a press-release with no
+                    // cell change is treated as a plain click in the Up
+                    // handler). A double-click selects and copies the word
+                    // under the pointer, a triple-click the whole
+                    // soft-wrap-joined line — the emulator idiom, made
+                    // available with capture on (#1451). The gesture binds
+                    // to the tile under the press (falling back to the
+                    // focused tile at a seam/chrome miss), and every mapping
+                    // composes against that terminal — so a selection can't
+                    // spill into a neighbour (#1101).
                     if focus == PaneFocus::Terminals
                         && matches!(button, crossterm::event::MouseButton::Left)
                         && claim_for_selection
@@ -2249,22 +2257,64 @@ impl<T: TerminalAdapter> Model<T> {
                             .terminals
                             .tile_at(m.column, m.row)
                             .or_else(|| self.terminals.focused_terminal_id())
-                        && let Some(anchor) = self.terminals.selection_point(
+                    {
+                        // A new left-press in the terminal always drops any
+                        // resting word/line highlight; a double/triple then
+                        // installs a fresh one below.
+                        if self.terminal_selection.take().is_some() {
+                            self.redraw = true;
+                        }
+                        let clicks = self.note_terminal_click(m.column, m.row);
+                        if clicks >= 2 {
+                            // A word/line select supersedes the anchor the
+                            // preceding single click dropped.
+                            self.terminal_drag = None;
+                            let span = if clicks == 2 {
+                                self.terminals.word_span_at(
+                                    terminal,
+                                    right_bottom_rect,
+                                    m.column,
+                                    m.row,
+                                )
+                            } else {
+                                self.terminals.line_span_at(
+                                    terminal,
+                                    right_bottom_rect,
+                                    m.column,
+                                    m.row,
+                                )
+                            };
+                            if let Some((text, anchor, focus_pt)) = span
+                                && !text.trim().is_empty()
+                            {
+                                emit_clipboard_copy(&text);
+                                self.flash_hint(format!(
+                                    "copied {} to clipboard",
+                                    if clicks == 2 { "word" } else { "line" }
+                                ));
+                                self.terminal_selection = Some(TerminalSelection {
+                                    terminal,
+                                    anchor,
+                                    focus: focus_pt,
+                                });
+                            }
+                            self.redraw = true;
+                        } else if let Some(anchor) = self.terminals.selection_point(
                             terminal,
                             right_bottom_rect,
                             m.column,
                             m.row,
-                        )
-                    {
-                        self.terminal_drag = Some(TerminalDrag {
-                            terminal,
-                            down: (m.column, m.row),
-                            anchor,
-                            focus: anchor,
-                            rect: right_bottom_rect,
-                            pointer: (m.column, m.row),
-                            dragged: false,
-                        });
+                        ) {
+                            self.terminal_drag = Some(TerminalDrag {
+                                terminal,
+                                down: (m.column, m.row),
+                                anchor,
+                                focus: anchor,
+                                rect: right_bottom_rect,
+                                pointer: (m.column, m.row),
+                                dragged: false,
+                            });
+                        }
                     } else {
                         let _ = button;
                     }
@@ -2538,6 +2588,24 @@ impl<T: TerminalAdapter> Model<T> {
         if edge_scroll_delta(rect, pointer.1) != 0 {
             self.drive_terminal_drag(pointer.0, pointer.1);
         }
+    }
+
+    /// Record a terminal left-press and return the consecutive-click count
+    /// at this cell: 1 (single), 2 (double → word), ≥3 (triple → line).
+    /// A press at a different cell, or after the double-click window
+    /// lapsed, restarts the count at 1 (#1451).
+    pub(super) fn note_terminal_click(&mut self, col: u16, row: u16) -> u8 {
+        let now = std::time::Instant::now();
+        let count = match self.terminal_click {
+            Some((c, r, t, n))
+                if c == col && r == row && t.elapsed() <= crate::realm::DOUBLE_CLICK_WINDOW =>
+            {
+                n.saturating_add(1)
+            }
+            _ => 1,
+        };
+        self.terminal_click = Some((col, row, now, count));
+        count
     }
 }
 

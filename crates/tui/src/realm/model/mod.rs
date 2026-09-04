@@ -1501,6 +1501,18 @@ struct TerminalDrag {
     dragged: bool,
 }
 
+/// A finished terminal selection with no live gesture behind it — the
+/// double / triple-click word / line copy (#1451). Endpoints are
+/// screen-absolute grid points (see [`TerminalStack::selection_point`]),
+/// pinned to the tile the click landed in, so the reverse-video
+/// highlight tracks the text as the viewport scrolls.
+#[derive(Debug, Clone, Copy)]
+struct TerminalSelection {
+    terminal: lazybox_ipc::TerminalId,
+    anchor: (u16, u32),
+    focus: (u16, u32),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ShellCommandConfig {
     command: String,
@@ -1814,6 +1826,18 @@ pub struct Model<T: TerminalAdapter> {
     /// scrollback (#432). On Up the whole span is extracted from
     /// libghostty's grid and copied to the host clipboard via OSC 52.
     terminal_drag: Option<TerminalDrag>,
+    /// Persistent terminal selection from a double / triple-click (#1451).
+    /// Unlike a drag it has no live gesture keeping it alive, so it's kept
+    /// here and painted every frame (screen-absolute, so it stays glued to
+    /// its text as output scrolls) until the next terminal click or
+    /// keystroke clears it.
+    terminal_selection: Option<TerminalSelection>,
+    /// Click bookkeeping for terminal double / triple-click detection:
+    /// `(col, row, when, count)`. A press at the same cell within
+    /// `DOUBLE_CLICK_WINDOW` increments `count` (1 = single, 2 = word,
+    /// ≥3 = line). Separate from `last_click` (the sidebar / activity
+    /// double-click), which only needs a 2-state pair.
+    terminal_click: Option<(u16, u16, std::time::Instant, u8)>,
     /// `]]` escape latch: first press of the escape char arms; a second
     /// within the window arms the `]]` *leader* (see `terminal_leader_armed`)
     /// instead of forwarding to the PTY. Armed from the terminal pane and,
@@ -2531,6 +2555,8 @@ impl<T: TerminalAdapter> Model<T> {
             mouse_capture_requester,
             url_opener: Box::new(crate::editors::open_url),
             terminal_drag: None,
+            terminal_selection: None,
+            terminal_click: None,
             preselect: None,
             layout: LayoutCtx::new(),
             modal_flow: None,
@@ -6497,8 +6523,19 @@ impl<T: TerminalAdapter> Model<T> {
             // panes from leaking across lazybox's chrome; the pane rect
             // is only the fallback for a terminal with no recorded hit
             // geometry this frame.
-            if let Some(drag) = self.terminal_drag.as_ref() {
-                let (terminal, anchor, focus) = (drag.terminal, drag.anchor, drag.focus);
+            // A live drag takes precedence over a resting double/triple-click
+            // selection — they are never both meaningful, and a fresh drag
+            // clears the resting one at mouse-down anyway (#1451).
+            let painted = self
+                .terminal_drag
+                .as_ref()
+                .map(|d| (d.terminal, d.anchor, d.focus))
+                .or_else(|| {
+                    self.terminal_selection
+                        .as_ref()
+                        .map(|s| (s.terminal, s.anchor, s.focus))
+                });
+            if let Some((terminal, anchor, focus)) = painted {
                 let clip = self
                     .terminals
                     .tile_grid_rect(terminal)

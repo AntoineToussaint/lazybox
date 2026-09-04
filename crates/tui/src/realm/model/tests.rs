@@ -15283,6 +15283,169 @@ mod terminal_url_mouse_tests {
         );
     }
 
+    fn left(model: &mut TestModel, kind: MouseEventKind, col: u16, row: u16) {
+        model.handle_mouse(MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        });
+    }
+
+    /// Count the reverse-video cells the selection overlay paints inside
+    /// `pane`, isolating the selection's contribution from chrome/cursor by
+    /// comparing against a run with the selection lifted.
+    fn reversed_in_pane(model: &mut TestModel, pane: Rect) -> usize {
+        use tuirealm::ratatui::style::Modifier;
+        model.view();
+        let buffer = model.terminal.raw().backend().buffer();
+        let mut n = 0;
+        for row in pane.y..pane.y.saturating_add(pane.height) {
+            for col in pane.x..pane.x.saturating_add(pane.width) {
+                if buffer[(col, row)].style().add_modifier.contains(Modifier::REVERSED) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// Double-click in the terminal selects the word under the pointer,
+    /// leaves a resting reverse-video highlight (not a drag), and a
+    /// keystroke dismisses it (#1451). The copied text is what
+    /// `word_span_at` returns for the clicked cell.
+    #[test]
+    fn double_click_selects_word_and_highlights_until_a_keystroke() {
+        let (mut model, _server, _opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, b"run src/main.rs now\r\n".to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+        let id = model.terminals.focused_terminal_id().expect("focused");
+
+        // The word the gesture will copy, mapped through the rendered frame.
+        let (word, _, _) = model
+            .terminals
+            .word_span_at(id, pane, x + 8, y)
+            .expect("a word under the pointer");
+        assert_eq!(
+            word, "src/main.rs",
+            "grid col 8 sits inside the path, which selects whole",
+        );
+
+        // A real double-click: down, up, down at the same cell.
+        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 8, y);
+        left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 8, y);
+        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 8, y);
+
+        assert!(
+            model.terminal_drag.is_none(),
+            "a double-click installs a resting selection, not a drag",
+        );
+        assert!(
+            model.terminal_selection.is_some(),
+            "the double-click leaves a resting word selection",
+        );
+
+        // The word's cells render reverse-video: lifting the selection
+        // drops exactly the path's 11 cells (single row).
+        let with_sel = reversed_in_pane(&mut model, pane);
+        let saved = model.terminal_selection.take();
+        let baseline = reversed_in_pane(&mut model, pane);
+        model.terminal_selection = saved;
+        assert_eq!(
+            with_sel - baseline,
+            "src/main.rs".len(),
+            "the highlight reverse-videos exactly the selected word",
+        );
+
+        // A keystroke to the PTY dismisses the resting highlight.
+        model.dispatch_key(RealmKey::new(Key::Char('x'), RealmMods::NONE));
+        assert!(
+            model.terminal_selection.is_none(),
+            "typing dismisses the word highlight",
+        );
+    }
+
+    /// Triple-click selects the whole line and installs a resting
+    /// highlight (#1451). The copied text is the joined line.
+    #[test]
+    fn triple_click_selects_the_whole_line() {
+        let (mut model, _server, _opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, b"the whole line here\r\nnext\r\n".to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+        let id = model.terminals.focused_terminal_id().expect("focused");
+
+        // Any column on the row yields the whole line.
+        let (line, _, _) = model
+            .terminals
+            .line_span_at(id, pane, x + 5, y)
+            .expect("a line under the pointer");
+        assert_eq!(line, "the whole line here");
+
+        // Down, up, down, up, down — three presses at the same cell.
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Left),
+        ] {
+            left(&mut model, kind, x + 5, y);
+        }
+
+        assert!(
+            model.terminal_drag.is_none(),
+            "a triple-click installs a resting selection, not a drag",
+        );
+        assert!(
+            model.terminal_selection.is_some(),
+            "the triple-click leaves a resting line selection",
+        );
+    }
+
+    /// A double-click on a soft-wrapped token selects it whole — the URL
+    /// that spilled onto a second row copies as one contiguous string,
+    /// reusing the soft-wrap stitching (#1451). The display formatter
+    /// would break it at the wrap, so `word_span_at` reads the joined
+    /// bytes directly.
+    #[test]
+    fn double_click_selects_a_soft_wrapped_url_whole() {
+        let (mut model, _server, _opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        let url = format!("https://wrapped.example.com/{}", "a".repeat(160));
+        feed(&mut model, 1, format!("{url}\r\n").into_bytes());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+        let id = model.terminals.focused_terminal_id().expect("focused");
+
+        // Click on the continuation row (y+1), well inside the wrapped run.
+        let (word, _, _) = model
+            .terminals
+            .word_span_at(id, pane, x + 2, y + 1)
+            .expect("a word under the pointer");
+        assert_eq!(word, url, "the wrapped URL selects as one contiguous token");
+
+        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 2, y + 1);
+        left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 2, y + 1);
+        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 2, y + 1);
+        assert!(
+            model.terminal_selection.is_some(),
+            "the double-click leaves a resting selection spanning both rows",
+        );
+    }
+
     #[test]
     fn right_click_opens_plain_url_through_model_launcher() {
         let (mut model, _server, opened) = build_model(1);

@@ -2412,7 +2412,10 @@ mod tests {
         // composer that demotes the matched phrase to stale scrollback.
         let auto =
             "Usage limit reached · continuing automatically at 3:10pm · esc or type to cancel";
-        assert_eq!(claude_state(auto.as_bytes()), Some(AgentState::LimitReached));
+        assert_eq!(
+            claude_state(auto.as_bytes()),
+            Some(AgentState::LimitReached)
+        );
         assert!(!claude_ready_for_prompt(auto.as_bytes()));
         assert_eq!(
             parse_usage_limit_reset(auto.as_bytes()),
@@ -2472,8 +2475,7 @@ mod tests {
         // #1452: the spend-limit banner wording gets the same gate — a
         // finished turn whose prose merely mentioned the individual spend
         // limit, now at rest, must not flash a spurious block.
-        let stale_spend =
-            "You've hit your individual spend limit earlier today.\n? for shortcuts";
+        let stale_spend = "You've hit your individual spend limit earlier today.\n? for shortcuts";
         assert_eq!(claude_state(stale_spend.as_bytes()), Some(AgentState::Idle));
     }
 

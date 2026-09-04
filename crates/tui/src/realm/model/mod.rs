@@ -3177,7 +3177,11 @@ impl<T: TerminalAdapter> Model<T> {
         // Seed progressive feature tips (#115): the opt-out flag plus
         // the ids already shown so they never repeat.
         self.set_tips(user_config.ui.show_tips, user_config.ui.tips_seen.clone());
-        self.set_splits(user_config.ui.sidebar_pct, user_config.ui.right_top_pct);
+        self.set_splits(
+            user_config.ui.sidebar_pct,
+            user_config.ui.right_top_pct,
+            user_config.ui.activity_user_resized,
+        );
     }
 
     /// Test-only: read access to the sidebar pane, so the boot-path
@@ -5194,15 +5198,26 @@ impl<T: TerminalAdapter> Model<T> {
     /// Override the initial sidebar / right-top split percentages
     /// from `~/.lazybox/config.yaml::ui`. Each value is clamped to
     /// `[SPLIT_MIN, SPLIT_MAX]`. `None` keeps the default.
-    pub fn with_splits(mut self, sidebar_pct: Option<u16>, right_top_pct: Option<u16>) -> Self {
-        self.set_splits(sidebar_pct, right_top_pct);
+    pub fn with_splits(
+        mut self,
+        sidebar_pct: Option<u16>,
+        right_top_pct: Option<u16>,
+        activity_user_resized: Option<bool>,
+    ) -> Self {
+        self.set_splits(sidebar_pct, right_top_pct, activity_user_resized);
         self
     }
 
     /// In-place form of [`Self::with_splits`], used by the shared
     /// `apply_client_config` boot wiring (#1244).
-    pub fn set_splits(&mut self, sidebar_pct: Option<u16>, right_top_pct: Option<u16>) {
-        self.layout.apply_persisted(sidebar_pct, right_top_pct);
+    pub fn set_splits(
+        &mut self,
+        sidebar_pct: Option<u16>,
+        right_top_pct: Option<u16>,
+        activity_user_resized: Option<bool>,
+    ) {
+        self.layout
+            .apply_persisted(sidebar_pct, right_top_pct, activity_user_resized);
     }
 
     /// True when an editor launch must be declined because this client

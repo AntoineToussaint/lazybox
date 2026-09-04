@@ -564,7 +564,19 @@ impl<T: TerminalAdapter> Model<T> {
                     Key::Down => (0, self.ui_defaults.split_step_percent),
                     _ => (0, 0),
                 };
-                if self.layout.nudge_splits(dx, dy) {
+                // A vertical nudge takes manual control of the Activity
+                // row. Adopt the height the fit is currently showing first,
+                // so the nudge grows/shrinks from what's on screen instead
+                // of jumping to the (larger) percentage the fit had been
+                // overriding.
+                let mut changed = false;
+                if dy != 0 {
+                    changed |= self
+                        .layout
+                        .adopt_fitted_activity_height(self.right.natural_height());
+                }
+                changed |= self.layout.nudge_splits(dx, dy);
+                if changed {
                     self.redraw = true;
                 }
                 return;

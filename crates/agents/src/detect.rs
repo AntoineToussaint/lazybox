@@ -138,12 +138,28 @@ pub const CLAUDE_BLOCKING_INTERSTITIAL_PHRASES: &[&str] = &[
 /// uses "hit" rather than "reached" and a "weekly" period, and drops the
 /// user into the `/rate-limit-options` numbered menu — none of which the
 /// original three phrases caught, so the block read as a generic chooser.
+///
+/// The newer spend-limit / session-limit banners (#1452) drop the numbered
+/// chooser entirely for an auto-continue footer
+/// (`Continuing automatically at 3:10pm · esc to cancel`):
+///   `You've hit your individual spend limit · … · your session limit
+///    resets 3:10pm (America/New_York)`
+///   `Usage limit reached · continuing automatically at 3:10pm · esc or
+///    type to cancel`
+/// "individual spend limit" / "session limit resets" are neither "usage"
+/// nor "weekly"/"monthly", so the earlier phrases missed them;
+/// "continuing automatically" is the distinctive auto-continue anchor that
+/// no ordinary output produces as a live footer.
 pub const CLAUDE_USAGE_LIMIT_PHRASES: &[&str] = &[
     "usage limit reached",
     "reached your usage limit",
     "monthly limit reached",
     "hit your usage limit",
     "hit your weekly limit",
+    "hit your individual spend limit",
+    "spend limit",
+    "session limit resets",
+    "continuing automatically",
     "/rate-limit-options",
 ];
 
@@ -164,8 +180,11 @@ pub const CLAUDE_USAGE_LIMIT_PHRASES: &[&str] = &[
 /// time letters, stopping at the first byte outside that set — so the
 /// trailing `∙` / newline / `❯ 1. wait` never bleeds in, and an
 /// unrecognised phrasing (`resets tomorrow`) yields `None` rather than a
-/// garbled hint. The block still surfaces without a countdown: the
-/// documented degraded path where no usage API exists.
+/// garbled hint. The auto-continue banner (#1452) carries no `resets`
+/// word — it states the reset as `continuing automatically at 3:10pm` — so
+/// `automatically at <time>` is tried as a fallback. The block still
+/// surfaces without a countdown: the documented degraded path where no
+/// usage API exists.
 pub fn parse_usage_limit_reset(recent_output: &[u8]) -> Option<String> {
     let s = strip_ansi_lossy(recent_output);
     let compact = compact_lower(&s);
@@ -177,6 +196,13 @@ pub fn parse_usage_limit_reset(recent_output: &[u8]) -> Option<String> {
     compact
         .match_indices("resets")
         .find_map(|(i, kw)| reset_token(&compact[i + kw.len()..]))
+        // The auto-continue banner (#1452) carries no `resets` word — it
+        // states the reset time as `continuing automatically at 3:10pm`.
+        .or_else(|| {
+            compact
+                .match_indices("automatically")
+                .find_map(|(i, kw)| reset_token(&compact[i + kw.len()..]))
+        })
 }
 
 /// Month abbreviations a date-style reset leads with (`resets Aug 30 at
@@ -2350,6 +2376,39 @@ mod tests {
     }
 
     #[test]
+    fn spend_limit_auto_continue_banner_reads_as_limit_reached() {
+        // #1452: the newer individual-spend-limit block drops the numbered
+        // Wait/Exit chooser for an auto-continue footer. "individual spend
+        // limit" / "session limit resets" match none of the older phrases,
+        // so the block read as generic Idle output. It must classify as
+        // `LimitReached`, and the reset time is mined from `resets 3:10pm`.
+        let blocked = "You've hit your individual spend limit · run /usage-credits to ask your\n\
+             admin for a higher limit · your session limit resets 3:10pm (America/New_York)\n\
+             Continuing automatically at 3:10pm · esc to cancel";
+        assert_eq!(
+            claude_state(blocked.as_bytes()),
+            Some(AgentState::LimitReached),
+        );
+        assert!(!claude_ready_for_prompt(blocked.as_bytes()));
+        assert_eq!(
+            parse_usage_limit_reset(blocked.as_bytes()),
+            Some("3:10pm".into()),
+        );
+
+        // The auto-continue variant of the plain usage-limit banner: the
+        // `esc or type to cancel` footer must NOT be read as a resting
+        // composer that demotes the matched phrase to stale scrollback.
+        let auto =
+            "Usage limit reached · continuing automatically at 3:10pm · esc or type to cancel";
+        assert_eq!(claude_state(auto.as_bytes()), Some(AgentState::LimitReached));
+        assert!(!claude_ready_for_prompt(auto.as_bytes()));
+        assert_eq!(
+            parse_usage_limit_reset(auto.as_bytes()),
+            Some("3:10pm".into()),
+        );
+    }
+
+    #[test]
     fn a_usage_limit_phrase_above_a_resting_composer_is_stale_scrollback() {
         // Regression for the false-positive the review caught: a finished
         // turn whose OUTPUT merely mentioned a usage limit, now at rest
@@ -2372,6 +2431,12 @@ mod tests {
             claude_state(stale_weekly.as_bytes()),
             Some(AgentState::Idle)
         );
+        // #1452: the broad new "spend limit" wording gets the same gate — a
+        // finished turn whose prose merely mentioned a spend limit, now at
+        // rest, must not flash a spurious block.
+        let stale_spend =
+            "I set the spend limit earlier so you won't overrun it.\n? for shortcuts";
+        assert_eq!(claude_state(stale_spend.as_bytes()), Some(AgentState::Idle));
     }
 
     #[test]

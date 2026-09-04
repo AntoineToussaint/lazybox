@@ -1059,7 +1059,7 @@ mod tests {
                 &tx,
                 Event::TerminalOutput {
                     terminal_id: TerminalId(t),
-                    bytes: vec![b'x'],
+                    bytes: vec![b'x'].into(),
                     first_seq: 1,
                     seq: 1,
                 },

@@ -1525,11 +1525,13 @@ showing keybinding search only",
                 }) = self.modal_flow.take()
                 {
                     if yes {
-                        self.sidebar.clear_broadcast_selection();
+                        // Selection survives the spawn so the same set can
+                        // be acted on again (#1449); Esc / a projection
+                        // prune are the only clears.
                         if let Some(target) = follow {
                             self.spawn_follow_to = Some(target);
                         }
-                        self.flash_info(summary);
+                        self.flash_bulk_outcome(summary);
                         self.redraw = true;
                         cmds.extend(self.run_bulk_agent_steps(steps));
                     } else {

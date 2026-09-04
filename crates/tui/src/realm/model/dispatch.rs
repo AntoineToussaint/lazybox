@@ -1152,14 +1152,21 @@ impl<T: TerminalAdapter> Model<T> {
                 truncate_affected_list(skipped),
             ));
         }
-        let mut summary = if parts.is_empty() {
+        let summary = if parts.is_empty() {
             format!("nothing to {done}")
         } else {
             parts.join(" · ")
         };
-        // The selection now survives a bulk action (#1449), so name it —
-        // otherwise a still-live selection is invisible state and the next
-        // keypress acts on a set the user thought was gone.
+        self.flash_bulk_outcome(summary);
+    }
+
+    /// Flash a bulk-outcome summary and name the still-live multi-select
+    /// (#1449). Every bulk path now keeps its selection so a set can be
+    /// acted on more than once; the count keeps that from being state the
+    /// next keypress acts on unseen. Shared by the fan-out
+    /// (`bulk_dispatch` / `dispatch_action_confirmed_bulk`) and the
+    /// agent-spawn / broadcast paths so all bulk notices read the same.
+    pub(super) fn flash_bulk_outcome(&mut self, mut summary: String) {
         let still = self.sidebar.visible_broadcast_selected_count();
         if still > 0 {
             summary.push_str(&format!(" · {still} still selected"));
@@ -2746,13 +2753,12 @@ impl<T: TerminalAdapter> Model<T> {
         let summary = bulk_agent_summary(&plan);
         if plan.spawned == 0 {
             // No heavy spawns — run the plan (injects, or nothing) now.
-            if plan.injected > 0 {
-                self.sidebar.clear_broadcast_selection();
-            }
+            // The selection survives so the same set can be acted on again
+            // (#1449); it clears only on Esc or when a row leaves the view.
             if let Some(follow) = plan.follow {
                 self.spawn_follow_to = Some(follow);
             }
-            self.flash_info(summary);
+            self.flash_bulk_outcome(summary);
             self.redraw = true;
             return self.run_bulk_agent_steps(plan.steps);
         }
@@ -2850,18 +2856,14 @@ impl<T: TerminalAdapter> Model<T> {
         self.run_broadcast_plan(plan)
     }
 
-    /// Materialize a broadcast plan: clear the multi-select when anything
-    /// was delivered or started (but not when every target was skipped, so
-    /// a retry keeps the marks), flash the outcome summary, and run the
-    /// steps. Broadcast never follows focus (fire-and-stay), so
+    /// Materialize a broadcast plan: flash the outcome summary (keeping the
+    /// multi-select live so the same set can be acted on again, #1449) and
+    /// run the steps. Broadcast never follows focus (fire-and-stay), so
     /// `spawn_follow_to` is left untouched. Shared by the immediate and
     /// post-confirm paths so both materialize identically.
     fn run_broadcast_plan(&mut self, plan: BulkAgentPlan) -> Vec<IpcCommand> {
         let summary = broadcast_summary(&plan);
-        if plan.injected > 0 || plan.spawned > 0 {
-            self.sidebar.clear_broadcast_selection();
-        }
-        self.flash_info(summary);
+        self.flash_bulk_outcome(summary);
         self.redraw = true;
         self.run_bulk_agent_steps(plan.steps)
     }

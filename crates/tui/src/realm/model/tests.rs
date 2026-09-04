@@ -4531,12 +4531,12 @@ snippets:
     }
 
     /// `Shift-B` resolves its targets from the sidebar multi-select at
-    /// mount time, and a delivered broadcast clears the selection —
-    /// the same contract as the activity pane's `w`. A broadcast that
-    /// reached nobody keeps the marks so the user can retry after
-    /// spawning an agent.
+    /// mount time, and a delivered broadcast now KEEPS the selection
+    /// (#1449) so the same set can be acted on again — the same contract
+    /// as every other bulk action. A broadcast that reached nobody also
+    /// keeps the marks so the user can retry after spawning an agent.
     #[test]
-    fn broadcast_clears_selection_after_delivery_but_not_after_all_skipped() {
+    fn broadcast_keeps_selection_after_delivery_and_after_all_skipped() {
         let (mut m, keys) = model_with_broadcast_targets(&[
             Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
             None,
@@ -4564,7 +4564,7 @@ snippets:
             "all-skipped send must not clear the marks",
         );
 
-        // Delivered broadcast: selection clears.
+        // Delivered broadcast: selection survives (#1449).
         let expected_targets = m.sidebar.selected_broadcast_keys();
         m.mount_broadcast_picker();
         assert_eq!(
@@ -4588,8 +4588,8 @@ snippets:
         );
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            0,
-            "successful send consumes the selection",
+            2,
+            "successful send keeps the selection live for a follow-up (#1449)",
         );
     }
 
@@ -12187,6 +12187,54 @@ mod merge_focus_follow_tests {
         );
     }
 
+    /// #1449: an inject-only bulk `w w` (every target already runs an
+    /// agent, so it never gates on a spawn confirm) keeps the selection
+    /// live and names it in the notice — the immediate `dispatch_bulk_agent`
+    /// path used to consume it on `injected > 0`.
+    #[test]
+    fn bulk_inject_only_work_keeps_selection_and_names_it() {
+        use lazybox_ipc::{TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        for (i, tid) in [(1u64, 21u64), (2, 22)] {
+            let ws = workspace(&format!("owner/repo#{i}"), true, Duration::hours(i as i64));
+            let key: SessionKey = (&ws.key).into();
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                model_label: None,
+                terminal_id: TerminalId(tid),
+                session_key: key.clone(),
+                kind: TerminalKind::Agent("claude".into()),
+                no_permission: false,
+                on_main: false,
+            });
+            assert!(m.sidebar.focus_workspace_key(&key));
+            m.sidebar.toggle_broadcast_select();
+        }
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+
+        // All targets live → no spawn confirm, injects run immediately.
+        let cmds = m.dispatch_action(&Action::Work);
+        assert_eq!(
+            cmds.iter()
+                .filter(|c| matches!(c, IpcCommand::InjectPrompt { .. }))
+                .count(),
+            2,
+            "one inject per live selected agent: {cmds:?}",
+        );
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            2,
+            "the inject-only path keeps the selection live (#1449)",
+        );
+        let msg = &m.status.notice.as_ref().expect("summary flashed").message;
+        assert!(
+            msg.contains("2 still selected"),
+            "the spawn/inject summary names the surviving selection: {msg}",
+        );
+    }
+
     /// A bulk `a c` spawn gates behind a "start N agents?" confirm (#836);
     /// confirming emits the snapshotted spawns (acceptance #4).
     #[test]
@@ -12214,7 +12262,11 @@ mod merge_focus_follow_tests {
                 ..
             }
         )));
-        assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            2,
+            "selection survives the bulk spawn so the set can be acted on again (#1449)",
+        );
     }
 
     /// A bulk `w w` with no live agents plans a contextual spawn per row
@@ -12324,7 +12376,11 @@ mod merge_focus_follow_tests {
             "a live agent is injected tier-less — its model can't be changed: {cmds:?}",
         );
 
-        assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            3,
+            "selection survives the bulk spawn/inject so the set can be reused (#1449)",
+        );
     }
 
     /// #1077 headline acceptance: for N selected workspaces, a snippet
@@ -12405,12 +12461,13 @@ mod merge_focus_follow_tests {
         );
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            0,
-            "selection clears after delivery"
+            3,
+            "selection survives delivery so the same set can be reused (#1449)"
         );
 
-        // --- `w w` fan-out over the same selection ---
-        select_all(&mut m);
+        // --- `w w` fan-out over the SAME surviving selection (#1449) ---
+        // No re-select: the marks from the snippet delivery are still live,
+        // which is exactly the chain #1449 enables (act on one set twice).
         let work_cmds = m.dispatch_action(&Action::Work);
         let mut work_targets: Vec<u64> = work_cmds
             .iter()

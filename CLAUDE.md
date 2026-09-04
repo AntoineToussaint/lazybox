@@ -348,10 +348,15 @@ running an agent; `g m` merge, `g u` update-branch, `z` snooze,
 `x x` archive, `m` mark-read, `g s` sync, `g g` arm-auto-merge,
 `g d` delete-or-close, and `x c` close-issue apply per target,
 running the eligible ones and summarizing what was
-skipped and why. Destructive bulk actions confirm with the count + an
-affected list + the eligible/skipped split (e.g. "Merge 3 of 5
-selected PRs?", "Close 3 PRs without merging and delete 1 issue?"),
-snapshotting the selection at mount so a poll under
+skipped and why. The selection **survives a bulk action** (#1449) so a
+set can be acted on more than once — the common finishing chain is `g d`
+then `x x` over the *same* rows — and every bulk summary names the
+still-live selection (`… · N still selected`); it clears only on `Esc`
+or when a row leaves the projection (the `recompute_visible` prune, so an
+archived row's mark prunes with it). Destructive bulk actions confirm
+with the count + an affected list + the eligible/skipped split (e.g.
+"Merge 3 of 5 selected PRs?", "Close 3 PRs without merging and delete 1
+issue?"), snapshotting the selection at mount so a poll under
 the modal can't redirect them. Inherently single-target actions stay
 focused-only: open editor (`e`), rename (`x R`), view diff,
 open-in-browser (`g o`),

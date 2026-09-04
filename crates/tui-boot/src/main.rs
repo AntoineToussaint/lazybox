@@ -1248,9 +1248,7 @@ async fn run_practice(
     // resolves inside the temp dir, and is deleted when `_sandbox` drops.
     let _sandbox = practice::PracticeSandbox::enter()?;
     let fixture = scenario::DemoFixture::seed()?;
-    eprintln!(
-        "practice: sandboxed simulator — nothing is written to your real ~/.lazybox"
-    );
+    eprintln!("practice: sandboxed simulator — nothing is written to your real ~/.lazybox");
     // No scripted steps: the reactor owns the agent terminals, reacting to the
     // user's own spawns and replies.
     boot_scenario_world(fixture, Vec::new(), ScenarioMode::Reactive, preselect).await

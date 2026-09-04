@@ -93,8 +93,14 @@ mod tests {
     #[test]
     fn banner_names_practice_and_the_exit() {
         let (line, _) = render_row(80);
-        assert!(line.contains("PRACTICE MODE"), "banner missing label: {line:?}");
-        assert!(line.contains("Ctrl-C to exit"), "banner missing exit hint: {line:?}");
+        assert!(
+            line.contains("PRACTICE MODE"),
+            "banner missing label: {line:?}"
+        );
+        assert!(
+            line.contains("Ctrl-C to exit"),
+            "banner missing exit hint: {line:?}"
+        );
     }
 
     #[test]
@@ -118,7 +124,10 @@ mod tests {
     fn narrow_row_still_shows_the_label() {
         // Too narrow for the right-aligned exit hint, but the label survives.
         let (line, _) = render_row(30);
-        assert!(line.contains("PRACTICE"), "narrow banner dropped the label: {line:?}");
+        assert!(
+            line.contains("PRACTICE"),
+            "narrow banner dropped the label: {line:?}"
+        );
     }
 
     #[test]

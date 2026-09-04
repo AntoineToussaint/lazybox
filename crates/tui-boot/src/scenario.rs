@@ -1169,7 +1169,10 @@ mod tests {
             )
         })
         .await;
-        assert!(done, "reactor answers a reply and settles the agent to Done");
+        assert!(
+            done,
+            "reactor answers a reply and settles the agent to Done"
+        );
 
         let replay = config.backend.snapshot(&backend_key).await.unwrap().replay;
         let text = String::from_utf8_lossy(&replay);
@@ -1276,7 +1279,9 @@ mod tests {
         let text: String =
             String::from_utf8_lossy(&config.backend.snapshot(&backend_key).await.unwrap().replay)
                 .into_owned();
-        let intro_end = text.find("you can't break anything").expect("intro streamed");
+        let intro_end = text
+            .find("you can't break anything")
+            .expect("intro streamed");
         let reply_start = text.find("pushed a commit").expect("reply streamed");
         assert!(
             intro_end < reply_start,

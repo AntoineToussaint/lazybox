@@ -632,16 +632,25 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // when the row is too narrow (see `Cell::atomic_tail`).
     let labels = label_spans(ctx);
     let tail = labels.len();
-    let mut spans = ticket_tree_prefix(ctx);
     // A `★ Focused` row is lifted out of its repo group, so it has no repo
     // header to say where it came from — name the source inline (#1450).
-    // Dim, so it reads as a cue on the title rather than competing with it.
-    if let Some(repo) = &ctx.repo_prefix {
-        spans.push(Span::styled(
-            format!("{repo} · "),
-            ctx.row_style().fg(ctx.theme.text_dim),
-        ));
-    }
+    // Dim so it reads as a cue rather than competing with the title, but
+    // legible (no forced dim) on the cursor row, mirroring the title and
+    // the tree prefix. It leads the cell as an atomic head so a narrow
+    // pane sheds it whole rather than truncating the title behind it.
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let head = if let Some(repo) = &ctx.repo_prefix {
+        let prefix_style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            ctx.row_style().fg(ctx.theme.text_dim)
+        };
+        spans.push(Span::styled(format!("{repo} · "), prefix_style));
+        1
+    } else {
+        0
+    };
+    spans.extend(ticket_tree_prefix(ctx));
     spans.extend(title_spans(
         ctx.raw_title(),
         ctx.highlight_query,
@@ -649,7 +658,7 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         ctx.theme,
     ));
     spans.extend(labels);
-    Cell::new(spans).atomic_tail(tail)
+    Cell::new(spans).atomic_tail(tail).atomic_head(head)
 }
 
 /// Split a title into styled spans, underlining the first case-insensitive
@@ -2028,6 +2037,53 @@ mod tests {
         let ctx = ctx_for(&ws, &task, &theme);
         let cell = cell_title(&ctx);
         assert_eq!(cell.spans[0].content.as_ref(), "Fix the thing");
+    }
+
+    /// #1450 regression: the original fix put the `repo · ` prefix ahead
+    /// of the title in the same cell, and right-edge truncation then ate
+    /// the title and left only the prefix on a narrow pane. The prefix is
+    /// now a droppable atomic head, so it sheds whole and the title stays.
+    #[test]
+    fn focused_prefix_never_evicts_the_title_on_a_narrow_pane() {
+        let task = make_task("owner/repo#1", "Fix the thing");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        // A long owner/repo that, ahead of the title, would have shoved it
+        // off the row entirely.
+        ctx.repo_prefix = Some("AntoineToussaint/lazybox".into());
+        let columns = build_columns(4);
+        let lines = crate::components::table::render_table(&[build_row(&ctx)], &columns, 30);
+        let text = line_text(&lines[0]);
+        assert!(
+            text.contains("Fix the thing"),
+            "the title must stay whole, not be crowded out by the prefix: {text:?}",
+        );
+        assert!(
+            !text.contains("AntoineToussaint"),
+            "the long repo prefix must shed, not swallow the title: {text:?}",
+        );
+    }
+
+    /// #1450: on the cursor row the prefix must stay legible — no forced
+    /// dim fg, which reads as low-contrast grey over the highlight fill.
+    /// Mirrors how `cell_title`/`ticket_tree_prefix` suppress dimming on
+    /// the cursor row.
+    #[test]
+    fn focused_prefix_is_legible_not_dimmed_on_the_cursor_row() {
+        let task = make_task("owner/repo#1", "Fix the thing");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.repo_prefix = Some("owner/repo".into());
+        ctx.is_cursor = true;
+        let cell = cell_title(&ctx);
+        assert_eq!(cell.spans[0].content.as_ref(), "owner/repo · ");
+        assert_ne!(
+            cell.spans[0].style.fg,
+            Some(theme.text_dim),
+            "cursor-row prefix must not be forced to the dim fg",
+        );
     }
 
     #[test]

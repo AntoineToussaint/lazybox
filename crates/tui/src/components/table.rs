@@ -273,11 +273,19 @@ pub fn compute_widths(
 /// column. The sidebar's title cell uses it for the trailing label
 /// chips (#329) — the chips render when there's room but drop cleanly,
 /// after the status pill, when there isn't.
+///
+/// `atomic_head` is the mirror image for LEADING spans: the first N are
+/// a droppable unit, excluded from the protected floor and shed whole
+/// before the protected body is ever sliced. The title cell uses it for
+/// the dim `repo · ` source prefix on `★ Focused` rows (#1450) — the cue
+/// is worthless if it evicts the very title it annotates, so it must
+/// yield to the title on a narrow pane rather than truncate it away.
 #[derive(Debug, Clone, Default)]
 pub struct Cell {
     pub spans: Vec<ratatui::text::Span<'static>>,
     pub fill_style: Option<ratatui::style::Style>,
     pub atomic_tail: usize,
+    pub atomic_head: usize,
 }
 
 impl Cell {
@@ -286,6 +294,7 @@ impl Cell {
             spans,
             fill_style: None,
             atomic_tail: 0,
+            atomic_head: 0,
         }
     }
 
@@ -294,6 +303,7 @@ impl Cell {
             spans: vec![span],
             fill_style: None,
             atomic_tail: 0,
+            atomic_head: 0,
         }
     }
 
@@ -314,6 +324,20 @@ impl Cell {
         self
     }
 
+    /// Mark the first `n` spans as an atomic, droppable head (see the
+    /// struct doc). Clamped to the span count. Chainable.
+    pub fn atomic_head(mut self, n: usize) -> Self {
+        self.atomic_head = n.min(self.spans.len());
+        self
+    }
+
+    /// Start index of the protected body — the first span past the
+    /// atomic head, never crossing the body end so head+tail can't
+    /// overlap into a reversed range.
+    fn body_start(&self) -> usize {
+        self.atomic_head.min(self.spans.len() - self.atomic_tail)
+    }
+
     /// Total visible width of the cell — sum of all span widths in
     /// display cells (not bytes). Uses unicode-width via
     /// `crate::util::visual_width` so multi-byte glyphs count once.
@@ -324,14 +348,15 @@ impl Cell {
             .sum()
     }
 
-    /// Width of the cell excluding its atomic tail — what a flex column
-    /// is protected to. The tail renders opportunistically (when slack
-    /// remains) but never forces a sibling column to shed.
+    /// Width of the cell excluding its atomic head AND tail — what a flex
+    /// column is protected to. The head/tail render opportunistically
+    /// (when slack remains) but never force a sibling column to shed, nor
+    /// shield space from the protected body they wrap.
     pub fn floor_width(&self) -> usize {
-        let head = self.spans.len() - self.atomic_tail;
-        self.spans
+        let start = self.body_start();
+        let end = self.spans.len() - self.atomic_tail;
+        self.spans[start..end]
             .iter()
-            .take(head)
             .map(|s| crate::util::visual_width(s.content.as_ref()))
             .sum()
     }
@@ -533,34 +558,54 @@ fn render_row(row: &Row, columns: &[Column], widths: &[usize]) -> ratatui::text:
                 fill_style,
             );
         } else {
-            // Over-wide. A droppable atomic tail (e.g. the title's label
-            // chips) is shed WHOLE before any slicing — cutting into it
-            // would leave a dangling `[depend…`. If the head then fits,
-            // it renders cleanly with no `…` (the tail simply collapses,
-            // like the old reserved label column did). Only when the head
-            // itself overflows do we char-truncate it with a trailing `…`.
-            let head_end = cell.spans.len() - cell.atomic_tail;
-            let head_w = cell.floor_width();
-            if cell.atomic_tail > 0 && head_w <= *target_w {
-                let pad = *target_w - head_w;
+            // Over-wide. Droppable wrappers — the trailing atomic tail
+            // (the title's label chips) and the leading atomic head (the
+            // `★ Focused` repo prefix) — are shed WHOLE before the
+            // protected body is ever sliced; cutting into one would leave
+            // a dangling `[depend…` or a repo prefix that swallowed the
+            // title it annotates (#1450). Only when the body itself
+            // overflows do we char-truncate it with a trailing `…`.
+            let body_start = cell.body_start();
+            let body_end = cell.spans.len() - cell.atomic_tail;
+            let body_w = cell.floor_width();
+            let head_w: usize = cell.spans[..body_start]
+                .iter()
+                .map(|s| crate::util::visual_width(s.content.as_ref()))
+                .sum();
+            // Head + body fits: keep the head, drop only the tail.
+            if head_w + body_w <= *target_w {
+                let pad = *target_w - (head_w + body_w);
                 push_padded(
                     &mut spans,
-                    cell.spans.iter().take(head_end).cloned(),
+                    cell.spans.iter().take(body_end).cloned(),
                     pad,
                     align,
                     fill_style,
                 );
                 continue;
             }
-            // Truncate: walk head spans until we've consumed `target_w - 1`
-            // cells, then push a `…` to mark the cut. Truncation
-            // always clips on the right edge regardless of align —
-            // a right-aligned over-wide cell is an unusual case and
-            // clipping the left would lose the high-signal end (e.g.
-            // a status pill's label).
+            // Body alone fits: drop the head too so the title stays whole
+            // rather than being crowded out by its own source prefix.
+            if body_start > 0 && body_w <= *target_w {
+                let pad = *target_w - body_w;
+                push_padded(
+                    &mut spans,
+                    cell.spans[body_start..body_end].iter().cloned(),
+                    pad,
+                    align,
+                    fill_style,
+                );
+                continue;
+            }
+            // Truncate: walk body spans (the head is already dropped)
+            // until we've consumed `target_w - 1` cells, then push a `…`
+            // to mark the cut. Truncation always clips on the right edge
+            // regardless of align — a right-aligned over-wide cell is an
+            // unusual case and clipping the left would lose the high-signal
+            // end (e.g. a status pill's label).
             let mut consumed = 0usize;
             let budget = target_w.saturating_sub(1);
-            for span in cell.spans.iter().take(head_end) {
+            for span in cell.spans[body_start..body_end].iter() {
                 let span_w = crate::util::visual_width(span.content.as_ref());
                 if consumed + span_w <= budget {
                     spans.push(span.clone());
@@ -817,6 +862,55 @@ mod tests {
             .collect();
         let widths = compute_widths(&cols, &cell_widths, 25);
         assert_eq!(widths[0], 15, "droppable column must survive a short head");
+    }
+
+    /// The atomic head (e.g. a `★ Focused` `repo · ` prefix) is shed
+    /// WHOLE before the protected body is sliced — so the body renders
+    /// clean and padded, never truncated behind its own prefix (#1450).
+    #[test]
+    fn atomic_head_sheds_whole_when_body_fits() {
+        let cols = [Column::fixed(6)];
+        let cell = Cell::new(vec![Span::raw("repo · "), Span::raw("title")]).atomic_head(1);
+        let lines = render_table(&[Row::new(vec![cell])], &cols, 6);
+        let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        // Prefix dropped whole; the full title survives with padding.
+        assert_eq!(joined, "title ");
+    }
+
+    /// When even the body overflows, the head is still dropped whole and
+    /// the BODY is char-truncated with `…` — the title is what the reader
+    /// keeps, never a prefix that swallowed it.
+    #[test]
+    fn atomic_head_dropped_then_body_truncated() {
+        let cols = [Column::fixed(4)];
+        let cell = Cell::new(vec![Span::raw("repo · "), Span::raw("title")]).atomic_head(1);
+        let lines = render_table(&[Row::new(vec![cell])], &cols, 4);
+        let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        // "tit" + "…" — the title truncated, no prefix fragment.
+        assert_eq!(joined, "tit…");
+    }
+
+    /// A flex column is protected only to its body width: the atomic head
+    /// must not inflate the floor and shed a lower-priority sibling to
+    /// reserve space it may drop. Fixed(15) + flex(min 20); the cell's
+    /// head is 40 and its body is 5. Floor = min(body 5, 20) = 5, so
+    /// 15 + 5 = 20 ≤ 25 and the fixed column survives. Had the 40-cell
+    /// head counted toward the floor, it would have dropped it.
+    #[test]
+    fn atomic_head_excluded_from_flex_floor() {
+        let cols = [Column::fixed(15).priority(1), Column::flex(20)];
+        let cell = Cell::new(vec![
+            Span::raw("a-very-long-leading-atomic-head-prefix · "),
+            Span::raw("short"),
+        ])
+        .atomic_head(1);
+        let rows = [Row::new(vec![Cell::from_span(Span::raw("x")), cell])];
+        let cell_widths: Vec<Vec<usize>> = rows
+            .iter()
+            .map(|r| r.cells.iter().map(|c| c.floor_width()).collect())
+            .collect();
+        let widths = compute_widths(&cols, &cell_widths, 25);
+        assert_eq!(widths[0], 15, "droppable column must survive a short body");
     }
 
     /// Render truncates over-wide cells with an ellipsis.

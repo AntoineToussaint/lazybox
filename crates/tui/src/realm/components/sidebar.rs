@@ -124,8 +124,9 @@ impl Sidebar {
         self.inner.recompute_count()
     }
 
-    /// Test-only: number of workspace rows currently in the visible list.
-    #[cfg(test)]
+    /// Number of workspace rows currently in the visible list — the
+    /// coach uses it to avoid launching over an inbox with nothing to
+    /// act on (#1460).
     pub fn visible_workspace_count(&self) -> usize {
         self.inner.visible_workspace_count()
     }

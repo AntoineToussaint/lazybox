@@ -3282,24 +3282,37 @@ impl<T: TerminalAdapter> Model<T> {
         self.auto_tour_pending = pending;
     }
 
-    /// Start the coach now if it's armed. Idempotent — starting clears
-    /// the flag, so this is safe to call from multiple boot paths
-    /// (returning-user startup and first-run wizard finish).
+    /// Try to auto-start the armed coach. Deliberately *not* fired
+    /// unconditionally: the whole curriculum (look at a task → work on
+    /// it → step out → come back → jump) is unsatisfiable with an empty
+    /// inbox, so launching then would strand a first-run user (no repos,
+    /// or a poll that hasn't landed yet) on step 1 forever. The arm is
+    /// kept until there's a workspace to act on and no modal is up, so
+    /// the coach appears the moment the inbox has something in it — and
+    /// never over a blank sidebar. Called at boot and each tick.
     pub fn maybe_start_coach(&mut self) {
-        if self.auto_tour_pending {
-            self.auto_tour_pending = false;
-            let at = self.coach_resume_step;
-            self.start_coach(at);
+        if !self.auto_tour_pending || self.coach.is_some() {
+            return;
         }
+        if !self.modal_stack.is_empty() || self.sidebar.visible_workspace_count() == 0 {
+            return;
+        }
+        self.auto_tour_pending = false;
+        let at = self.coach_resume_step;
+        self.start_coach(at);
     }
 
     /// Toggle the coach from the coach shortcut / `?`: end it if it's
     /// up, else re-run it from the top. An explicit re-run always
-    /// restarts at step 1, unlike the auto-launch which resumes.
+    /// restarts at step 1, unlike the auto-launch which resumes. With an
+    /// empty inbox there's nothing the curriculum can act on, so say so
+    /// rather than opening an unsatisfiable rail.
     pub(crate) fn toggle_coach(&mut self) {
         self.auto_tour_pending = false;
         if self.coach.is_some() {
             self.end_coach();
+        } else if self.sidebar.visible_workspace_count() == 0 {
+            self.flash_info("track a repo or start a workspace first, then re-run the coach");
         } else {
             self.start_coach(0);
         }
@@ -3314,6 +3327,7 @@ impl<T: TerminalAdapter> Model<T> {
             self.catalog.clone(),
             step,
             self.coach_ascii,
+            self.ui_defaults.terminal_escape_char,
             cursor,
         ));
         self.redraw = true;
@@ -3364,6 +3378,10 @@ impl<T: TerminalAdapter> Model<T> {
     /// coach when the last step completes. See `tick_tips` for the
     /// surrounding tick discipline.
     pub fn tick_coach(&mut self) {
+        // A boot-time arm may have been withheld because the inbox was
+        // still empty (see `maybe_start_coach`); retry each tick so the
+        // coach appears once the first poll lands a workspace.
+        self.maybe_start_coach();
         if self.coach.is_none() {
             return;
         }
@@ -6485,6 +6503,7 @@ impl<T: TerminalAdapter> Model<T> {
         // closure's disjoint `&mut self.coach` render borrow is free.
         let coach_active = self.coach.is_some();
         let coach_spot = self.coach.as_ref().map(|c| c.current_spot());
+        let coach_ascii = self.coach_ascii;
         // Split the `terminal.draw` cost into *build* (walking the widget
         // tree into the back buffer — CPU) vs *flush* (diffing + writing
         // the frame to stdout — I/O that blocks on the host terminal).
@@ -6577,7 +6596,7 @@ impl<T: TerminalAdapter> Model<T> {
                         crate::realm::coach::Spot::None => None,
                     };
                     if let Some(rect) = target {
-                        crate::realm::coach::spotlight(f, rect);
+                        crate::realm::coach::spotlight(f, rect, coach_ascii);
                     }
                 }
                 terminal_rect

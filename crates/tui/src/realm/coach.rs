@@ -25,6 +25,7 @@
 use lazybox_tui_core::action::{ActionKind, CatalogEntry};
 use std::time::{Duration, Instant};
 use tuirealm::ratatui::Frame;
+use tuirealm::ratatui::buffer::Buffer;
 use tuirealm::ratatui::layout::Rect;
 use tuirealm::ratatui::prelude::*;
 use tuirealm::ratatui::widgets::Paragraph;
@@ -33,13 +34,20 @@ use tuirealm::ratatui::widgets::Paragraph;
 /// auto-advances, so the "that's it —" confirmation is legible.
 pub(crate) const SUCCESS_DWELL: Duration = Duration::from_millis(2600);
 
-/// One segment of an objective/success line. `Key`/`Agents` resolve
-/// against the live catalog at render time so the shown binding is
-/// always the user's effective one.
+/// How long a step may sit unsatisfied before the rail offers a hand
+/// (#1460 stuck-detection) rather than sitting there being right.
+pub(crate) const STUCK_AFTER: Duration = Duration::from_secs(25);
+
+/// One segment of an objective/success line. `Key` resolves against the
+/// live catalog at render time so the shown binding is always the user's
+/// effective one; `TermExit` renders the terminal escape-leader exit
+/// (`]]q` by default), which is owned by the terminal latch rather than
+/// the catalog and so can't be a `Key`.
 #[derive(Debug, Clone, Copy)]
 enum Seg {
     Text(&'static str),
     Key(ActionKind),
+    TermExit,
 }
 
 /// The pane a step is talking about — the spotlight target. The Model
@@ -83,7 +91,7 @@ struct Step {
     goal: Goal,
 }
 
-use Seg::{Key, Text};
+use Seg::{Key, TermExit, Text};
 
 /// The curriculum — six objectives in the order a real first session
 /// runs. Snippets, multi-repo fan-out, Spaces, focus layouts and the
@@ -113,7 +121,7 @@ const STEPS: &[Step] = &[
     Step {
         objective: &[
             Text("Talk to the agent, then press "),
-            Key(ActionKind::CyclePane),
+            TermExit,
             Text(" to step back to the inbox."),
         ],
         success: "The session keeps running while you're away — nothing is lost.",
@@ -200,6 +208,10 @@ pub(crate) struct Coach {
     step: usize,
     catalog: Vec<CatalogEntry>,
     ascii: bool,
+    /// `ui.terminal_escape_char` — the leader whose double-press (`]]`)
+    /// escapes a live terminal, so the terminal-exit step can teach the
+    /// gesture that actually works there rather than a PTY-swallowed key.
+    escape_char: char,
     /// The sidebar cursor when the current step began, so `Opened` can
     /// detect movement.
     baseline_cursor: usize,
@@ -209,20 +221,30 @@ pub(crate) struct Coach {
     jumped: bool,
     /// When the current step's goal fired; drives the success dwell.
     satisfied_at: Option<Instant>,
+    /// When the current step began; drives the stuck hint.
+    step_started_at: Instant,
     skip_btn: Option<Rect>,
     end_btn: Option<Rect>,
 }
 
 impl Coach {
-    pub(crate) fn new(catalog: Vec<CatalogEntry>, step: usize, ascii: bool, cursor: usize) -> Self {
+    pub(crate) fn new(
+        catalog: Vec<CatalogEntry>,
+        step: usize,
+        ascii: bool,
+        escape_char: char,
+        cursor: usize,
+    ) -> Self {
         Self {
             step: step.min(STEP_COUNT - 1),
             catalog,
             ascii,
+            escape_char,
             baseline_cursor: cursor,
             entered_terminal: false,
             jumped: false,
             satisfied_at: None,
+            step_started_at: Instant::now(),
             skip_btn: None,
             end_btn: None,
         }
@@ -297,6 +319,15 @@ impl Coach {
             .is_some_and(|at| at.elapsed() >= SUCCESS_DWELL)
     }
 
+    /// Whether the current step has sat unsatisfied long enough to offer
+    /// a hand (#1460 stuck-detection). Never fires on the informational
+    /// step (nothing to be stuck on) or once the goal is met.
+    pub(crate) fn stuck(&self) -> bool {
+        !self.is_satisfied()
+            && STEPS[self.step].goal != Goal::Info
+            && self.step_started_at.elapsed() >= STUCK_AFTER
+    }
+
     /// Move to the next step, re-baselining its per-step tracking to
     /// `cursor`. Returns `true` when there is no next step — the coach
     /// is finished and the caller should end it.
@@ -309,6 +340,7 @@ impl Coach {
         self.entered_terminal = false;
         self.jumped = false;
         self.satisfied_at = None;
+        self.step_started_at = Instant::now();
         false
     }
 
@@ -316,7 +348,9 @@ impl Coach {
     /// hit-boxes.
     pub(crate) fn on_click(&self, col: u16, row: u16) -> CoachClick {
         let hit = |b: Option<Rect>| {
-            b.is_some_and(|r| col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height)
+            b.is_some_and(|r| {
+                col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+            })
         };
         if hit(self.end_btn) {
             CoachClick::End
@@ -335,7 +369,9 @@ impl Coach {
     /// the catalog. A referenced key the user has unbound collapses to
     /// nothing rather than a stale literal.
     fn objective_spans(&self, theme: &crate::theme::Theme) -> Vec<Span<'static>> {
-        let key = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
+        let key = Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD);
         let body = Style::default().fg(theme.text_strong);
         let mut spans = Vec::new();
         for seg in STEPS[self.step].objective {
@@ -345,6 +381,10 @@ impl Coach {
                     if let Some(k) = self.key_display(*kind) {
                         spans.push(Span::styled(k, key));
                     }
+                }
+                TermExit => {
+                    let c = self.escape_char;
+                    spans.push(Span::styled(format!("{c}{c}q"), key));
                 }
             }
         }
@@ -432,6 +472,14 @@ impl Coach {
                 format!(" · advancing {}", self.glyph("→", "->")),
                 Style::default().fg(theme.success),
             );
+        } else if self.stuck() {
+            let help = self.key_display(ActionKind::OpenHelp).unwrap_or_default();
+            push(
+                &mut spans,
+                &mut x,
+                format!(" · stuck? {help} to ask, or skip"),
+                Style::default().fg(theme.error),
+            );
         } else if let Some(label) = self.spot_label() {
             push(
                 &mut spans,
@@ -444,24 +492,55 @@ impl Coach {
     }
 }
 
-/// Accent-frame a pane rect as the current step's spotlight target.
-/// Drawn as a border-only overlay after the pane renders, so it recolors
-/// the pane's own frame to the accent without clearing its content.
-pub(crate) fn spotlight(f: &mut Frame, rect: Rect) {
-    use tuirealm::ratatui::widgets::{Block, BorderType, Borders};
+/// Accent-frame a pane rect as the current step's spotlight target,
+/// drawn over the pane after it renders. The panes lazybox draws have
+/// no full border of their own (the sidebar's top row is its header, the
+/// terminal paints PTY cells edge-to-edge), so a `Block`-border overlay
+/// would *overwrite* that content. Instead this only ever recolors the
+/// perimeter: a blank edge cell becomes a frame glyph in the accent, and
+/// a cell that already holds content keeps its glyph and just gains an
+/// accent background — the frame never occludes what the user is meant
+/// to be reading. `ascii` picks box glyphs honoring `display.ascii_glyphs`.
+pub(crate) fn spotlight(f: &mut Frame, rect: Rect, ascii: bool) {
     if rect.width < 2 || rect.height < 2 {
         return;
     }
     let theme = crate::theme::current();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Double)
-        .border_style(
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        );
-    f.render_widget(block, rect);
+    let (h, v, tl, tr, bl, br) = if ascii {
+        ("-", "|", "+", "+", "+", "+")
+    } else {
+        ("─", "│", "┌", "┐", "└", "┘")
+    };
+    let x0 = rect.x;
+    let x1 = rect.x + rect.width - 1;
+    let y0 = rect.y;
+    let y1 = rect.y + rect.height - 1;
+    let buf = f.buffer_mut();
+    let area = buf.area;
+    let frame_cell = |buf: &mut Buffer, x: u16, y: u16, glyph: &str| {
+        if x < area.left() || x >= area.right() || y < area.top() || y >= area.bottom() {
+            return;
+        }
+        let cell = &mut buf[(x, y)];
+        if cell.symbol().trim().is_empty() {
+            cell.set_symbol(glyph);
+            cell.set_fg(theme.accent);
+        } else {
+            cell.set_bg(theme.accent);
+        }
+    };
+    frame_cell(buf, x0, y0, tl);
+    frame_cell(buf, x1, y0, tr);
+    frame_cell(buf, x0, y1, bl);
+    frame_cell(buf, x1, y1, br);
+    for x in (x0 + 1)..x1 {
+        frame_cell(buf, x, y0, h);
+        frame_cell(buf, x, y1, h);
+    }
+    for y in (y0 + 1)..y1 {
+        frame_cell(buf, x0, y, v);
+        frame_cell(buf, x1, y, v);
+    }
 }
 
 #[cfg(test)]
@@ -484,7 +563,7 @@ mod tests {
     }
 
     fn coach() -> Coach {
-        Coach::new(default_catalog(), 0, false, 0)
+        Coach::new(default_catalog(), 0, false, ']', 0)
     }
 
     fn snap(focus: CoachFocus, cursor: usize, agent_running: bool) -> CoachSnapshot {
@@ -511,11 +590,17 @@ mod tests {
                         );
                         hints += 1;
                     }
+                    // The terminal-exit gesture is the escape leader, not
+                    // a catalog action; it still teaches a key.
+                    TermExit => hints += 1,
                     Text(_) => {}
                 }
             }
         }
-        assert!(hints >= STEPS.len(), "each step should teach at least one key");
+        assert!(
+            hints >= STEPS.len(),
+            "each step should teach at least one key"
+        );
     }
 
     /// Under every shipped keymap preset, every referenced action still
@@ -532,7 +617,7 @@ mod tests {
                 .iter()
                 .map(|(a, k)| (a.as_str(), k.as_str()))
                 .collect::<Vec<_>>();
-            let c = Coach::new(catalog(&["claude"], &overrides), 0, false, 0);
+            let c = Coach::new(catalog(&["claude"], &overrides), 0, false, ']', 0);
             for step in STEPS {
                 for seg in step.objective {
                     if let Key(kind) = seg {
@@ -608,13 +693,19 @@ mod tests {
 
     #[test]
     fn resume_step_is_clamped_into_range() {
-        let c = Coach::new(default_catalog(), 999, false, 0);
+        let c = Coach::new(default_catalog(), 999, false, ']', 0);
         assert_eq!(c.step_index(), STEP_COUNT - 1);
     }
 
     #[test]
     fn key_hints_follow_remaps() {
-        let c = Coach::new(catalog(&["claude"], &[("work", "Ctrl-y")]), 1, false, 0);
+        let c = Coach::new(
+            catalog(&["claude"], &[("work", "Ctrl-y")]),
+            1,
+            false,
+            ']',
+            0,
+        );
         assert_eq!(c.key_display(ActionKind::Work).as_deref(), Some("Ctrl-y"));
     }
 
@@ -625,7 +716,7 @@ mod tests {
         // A 2-row rail on an 80-col, 22-row terminal (the old deck's
         // clip point, #600) plus ascii glyphs.
         for ascii in [false, true] {
-            let mut c = Coach::new(default_catalog(), 0, ascii, 0);
+            let mut c = Coach::new(default_catalog(), 0, ascii, ']', 0);
             let mut term = Terminal::new(TestBackend::new(80, 22)).unwrap();
             term.draw(|f| c.render(f, Rect::new(0, 20, 80, 2))).unwrap();
             let buf = term.backend().buffer().clone();
@@ -648,5 +739,92 @@ mod tests {
         assert_eq!(c.on_click(skip.x, skip.y), CoachClick::SkipStep);
         assert_eq!(c.on_click(end.x, end.y), CoachClick::End);
         assert_eq!(c.on_click(0, 0), CoachClick::None);
+    }
+
+    /// The terminal-exit step must teach `]]q` (the escape leader, which
+    /// actually leaves a live terminal), following the configured escape
+    /// char — never `CyclePane`/Tab, which the PTY swallows once the user
+    /// has typed to the agent (#1460 F1).
+    #[test]
+    fn terminal_exit_step_teaches_the_escape_leader_following_config() {
+        let theme = crate::theme::current();
+        for esc in [']', '\\'] {
+            // Step index 2 = the "step back to the inbox" objective.
+            let c = Coach::new(default_catalog(), 2, false, esc, 0);
+            let text: String = c
+                .objective_spans(theme)
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect();
+            assert!(
+                text.contains(&format!("{esc}{esc}q")),
+                "exit gesture missing for esc {esc:?}: {text:?}",
+            );
+            assert!(
+                !text.contains("Tab"),
+                "must not teach the PTY-swallowed Tab: {text:?}",
+            );
+        }
+    }
+
+    /// The spotlight must never overwrite a pane's content — the panes it
+    /// frames have no border of their own, so a `Block`-border overlay
+    /// would eat the sidebar header / terminal edge cells (#1460 F2).
+    #[test]
+    fn spotlight_never_overwrites_pane_content() {
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        let mut term = Terminal::new(TestBackend::new(20, 6)).unwrap();
+        term.draw(|f| {
+            // Fill the top row edge-to-edge, like a sidebar header.
+            f.render_widget(
+                Paragraph::new("ABCDEFGHIJKLMNOPQRST"),
+                Rect::new(0, 0, 20, 1),
+            );
+            spotlight(f, Rect::new(0, 0, 20, 6), false);
+        })
+        .unwrap();
+        let buf = term.backend().buffer().clone();
+        let top: String = (0..20).map(|x| buf[(x, 0)].symbol().to_string()).collect();
+        assert_eq!(
+            top, "ABCDEFGHIJKLMNOPQRST",
+            "spotlight overwrote header content"
+        );
+        // A blank interior edge cell becomes a frame glyph instead.
+        assert_eq!(buf[(0, 3)].symbol(), "│");
+    }
+
+    /// The spotlight frame honors `display.ascii_glyphs` (#1460 F3).
+    #[test]
+    fn spotlight_honors_ascii_glyphs() {
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        let mut term = Terminal::new(TestBackend::new(10, 5)).unwrap();
+        term.draw(|f| spotlight(f, Rect::new(0, 0, 10, 5), true))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        assert_eq!(buf[(0, 0)].symbol(), "+", "ascii corner");
+        assert_eq!(buf[(0, 2)].symbol(), "|", "ascii vertical edge");
+        assert_eq!(buf[(4, 0)].symbol(), "-", "ascii horizontal edge");
+    }
+
+    /// A step that sits unsatisfied long enough offers a hand, resets on
+    /// advance, and never fires on the informational step (#1460 F5).
+    #[test]
+    fn stuck_fires_after_idle_and_resets() {
+        let mut c = coach();
+        assert!(!c.stuck());
+        c.step_started_at = Instant::now() - STUCK_AFTER;
+        assert!(c.stuck());
+        // Satisfying the goal clears stuck.
+        assert!(c.observe(&snap(CoachFocus::Activity, 0, false)));
+        assert!(!c.stuck());
+        // Advancing re-baselines the timer.
+        c.advance(0);
+        assert!(!c.stuck());
+        // The informational last step never reports stuck.
+        let mut last = Coach::new(default_catalog(), STEP_COUNT - 1, false, ']', 0);
+        last.step_started_at = Instant::now() - STUCK_AFTER;
+        assert!(!last.stuck());
     }
 }

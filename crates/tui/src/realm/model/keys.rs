@@ -1866,11 +1866,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // every pane rect, so like the footer this is the only
                 // handler that claims the click.
                 if matches!(button, crossterm::event::MouseButton::Left) {
-                    match self
-                        .coach
-                        .as_ref()
-                        .map(|c| c.on_click(m.column, m.row))
-                    {
+                    match self.coach.as_ref().map(|c| c.on_click(m.column, m.row)) {
                         Some(crate::realm::coach::CoachClick::SkipStep) => {
                             self.coach_skip_step();
                             return;

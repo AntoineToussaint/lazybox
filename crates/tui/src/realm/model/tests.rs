@@ -3324,6 +3324,29 @@ snippets:
         );
     }
 
+    /// The whole curriculum is unsatisfiable with an empty inbox, so the
+    /// armed coach must wait for a workspace to act on rather than
+    /// stranding a first-run user (no repos) on step 1 (#1460 F4).
+    #[test]
+    fn coach_waits_for_a_workspace_before_launching() {
+        // Empty inbox: armed, but no workspace → no launch.
+        let mut m = build_model();
+        assert_eq!(m.sidebar.visible_workspace_count(), 0);
+        m.set_auto_tour(true);
+        m.maybe_start_coach();
+        assert!(m.coach.is_none(), "must not launch over an empty inbox");
+        // Manual invoke over an empty inbox is a no-op too, not a stall.
+        m.toggle_coach();
+        assert!(m.coach.is_none(), "manual invoke over empty inbox is inert");
+
+        // Once a workspace exists, the still-armed coach launches.
+        let mut m2 = model_with_terminal();
+        assert!(m2.sidebar.visible_workspace_count() > 0);
+        m2.set_auto_tour(true);
+        m2.maybe_start_coach();
+        assert!(m2.coach.is_some(), "coach launches once there's a task");
+    }
+
     /// Workspace attribution is not part of the client command: the daemon
     /// derives it from the live terminal, so a client cannot credit a
     /// different workspace before delivery succeeds.

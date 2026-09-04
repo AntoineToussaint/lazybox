@@ -65,7 +65,7 @@ Act on the focused workspace. Available from the sidebar **and** the activity pa
 | `Enter` | open | Focus the workspace's activity / terminal. |
 | `s` | shell | Open a shell in the workspace's worktree. |
 | `e` | editor | Open the worktree in the configured editor. |
-| `Shift-V` | review diff | Review the worktree's staged, unstaged, and untracked changes; search or annotate lines and send the draft to the running agent. |
+| `Shift-V` | visual select | Arm a vim-style visual sweep: j/k (and arrows) grow / shrink the multi-select range from the anchor, no Shift-arrow encoding needed. |
 | `m` | mark read | Mark every activity row on the focused workspace read. |
 | `z` | snooze | Snooze the workspace for ~4h (toggle). |
 | `Shift-A` | toggle auto-fix | Arm or disarm auto-fix for the focused PR. |
@@ -209,6 +209,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | `g c` | close PR *(confirmed first)* |
 | `g f` | convert to draft |
 | `g y` | mark ready |
+| `g v` | review diff |
 
 ### `x` — workspace
 

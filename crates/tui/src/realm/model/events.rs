@@ -238,6 +238,9 @@ impl<T: TerminalAdapter> Model<T> {
             // doesn't leave a stale burst that suppresses the next
             // genuine shortcut.
             self.sidebar_burst.reset();
+            // Visual-select is per-pane (its anchor lives in the pane it
+            // was armed in), so leaving that pane ends the sweep (#1448).
+            self.visual_select = false;
         }
         self.focus = focus;
         self.set_focus_attr();

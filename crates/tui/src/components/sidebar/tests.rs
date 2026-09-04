@@ -3964,6 +3964,42 @@ mod broadcast_select_tests {
         );
     }
 
+    /// Visual select (#1448): arming marks the cursor row and anchors
+    /// the sweep here, so a following `extend_selection` grows from it
+    /// and reversing back toward it shrinks — the same anchor semantics
+    /// Shift-↑/↓ uses, driven from a plain key.
+    #[test]
+    fn begin_visual_select_anchors_then_grows_and_shrinks() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha"), ("2", "Beta"), ("3", "Gamma")]);
+        let order: Vec<SessionKey> = sb
+            .visible_rows()
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(sb.focus_workspace_key(&order[0]));
+
+        // Arm on the first row: it's marked, nothing else is.
+        assert_eq!(sb.begin_visual_select(), Some(1));
+        assert!(sb.is_broadcast_selected(&order[0]));
+        assert_eq!(sb.selected_broadcast_keys(), vec![order[0].clone()]);
+
+        // j/k now grow the range from the anchor.
+        sb.extend_selection(1);
+        sb.extend_selection(1);
+        assert_eq!(sb.selected_broadcast_keys(), order);
+
+        // Reversing back toward the anchor shrinks it (the anchor stays).
+        sb.extend_selection(-1);
+        assert_eq!(
+            sb.selected_broadcast_keys(),
+            order[..2].to_vec(),
+            "over-sweep reverses off the last row",
+        );
+    }
+
     /// A removed workspace drops out of the selection so a later
     /// broadcast can't target a ghost.
     #[test]

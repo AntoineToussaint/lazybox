@@ -285,6 +285,62 @@ impl<T: TerminalAdapter> Model<T> {
             self.hint_no_permission_focus();
             return;
         }
+        // ── Visual-select sweep (V + j/k), #1448 ────────────────────
+        // Encoding-independent twin of the Shift-↑/↓ range grab: once
+        // `V` arms the mode, plain j/k (and arrows) drive the same
+        // `extend_selection` anchor/grow/shrink in the focused pane, so
+        // a contiguous selection is reachable on terminals that don't
+        // report Shift on arrows. Sequenced before the Esc chain so `Esc`
+        // both drops the selection AND disarms the mode (the Esc chain's
+        // clear-only step would leave it armed). A second `V` disarms and
+        // keeps the marks; any other key ends the mode and falls through
+        // so the action fires on the marked set; a pane change ends it in
+        // `set_focus`.
+        if self.visual_select {
+            let dir = match key.code {
+                Key::Up | Key::Char('k') if key.modifiers.is_empty() => Some(-1),
+                Key::Down | Key::Char('j') if key.modifiers.is_empty() => Some(1),
+                _ => None,
+            };
+            if let Some(dir) = dir {
+                self.q_latch.disarm();
+                let count = match self.focus {
+                    PaneFocus::Sidebar => Some(self.sidebar.extend_selection(dir)),
+                    PaneFocus::Right => self.right.extend_activity_selection(dir),
+                    PaneFocus::Terminals => None,
+                };
+                if let Some(n) = count {
+                    self.flash_info(format!("visual select — {n} marked · Esc cancels"));
+                }
+                self.sync_panes();
+                self.redraw = true;
+                return;
+            }
+            if key.code == Key::Esc && key.modifiers.is_empty() {
+                self.visual_select = false;
+                self.q_latch.disarm();
+                match self.focus {
+                    PaneFocus::Sidebar => {
+                        self.sidebar.clear_broadcast_selection();
+                    }
+                    PaneFocus::Right => self.right.clear_activity_selection(),
+                    PaneFocus::Terminals => {}
+                }
+                self.sync_panes();
+                self.redraw = true;
+                return;
+            }
+            if self.matches_visual_select(&key) {
+                self.visual_select = false;
+                self.q_latch.disarm();
+                self.flash_hint("visual select off");
+                self.redraw = true;
+                return;
+            }
+            // Any other key ends the mode and falls through, so the
+            // action fires on whatever the sweep marked.
+            self.visual_select = false;
+        }
         // ── Esc chain: clear the multi-select (#1243) ───────────────
         // Esc resolves through an explicit ordered chain: leader /
         // `]]` cancels (above) → THIS clear-selection step → dismiss
@@ -1561,6 +1617,13 @@ impl<T: TerminalAdapter> Model<T> {
         )
     }
 
+    /// Whether `key` is one of the effective `VisualSelect` chords
+    /// (default `V`, remappable via `ui.action_keys.visual_select`).
+    /// Used while the sweep is armed so a second `V` toggles it off.
+    fn matches_visual_select(&self, key: &RealmKey) -> bool {
+        self.matches_single_key_binding(lazybox_tui_core::action::ActionKind::VisualSelect, key)
+    }
+
     /// Shared matcher for the explicit-branch actions that read their
     /// chord from the catalog: true when `key` equals any single-`Key`
     /// alternative of `kind`'s effective binding.
@@ -2711,6 +2774,7 @@ pub(super) fn action_from_kind(
         ActionKind::ToggleFocusWorkspace => Action::ToggleFocusWorkspace,
         ActionKind::SelectWorkspace => Action::SelectWorkspace,
         ActionKind::BroadcastToSelected => Action::BroadcastToSelected,
+        ActionKind::VisualSelect => Action::VisualSelect,
         ActionKind::OpenHelp => Action::OpenHelp,
         ActionKind::OpenTour => Action::OpenTour,
         ActionKind::OpenSyncStatus => Action::OpenSyncStatus,

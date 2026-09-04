@@ -291,6 +291,16 @@ impl Right {
         self.inner.clear_activity_selection();
     }
 
+    /// See `RightPane::begin_activity_visual_select`.
+    pub fn begin_activity_visual_select(&mut self) -> Option<usize> {
+        self.inner.begin_activity_visual_select()
+    }
+
+    /// See `RightPane::extend_activity_selection`.
+    pub fn extend_activity_selection(&mut self, dir: isize) -> Option<usize> {
+        self.inner.extend_activity_selection(dir)
+    }
+
     /// Whether the pane has anything worth showing for the current
     /// workspace. The orchestrator reads this to decide whether to
     /// render the Activity pane at all (hiding it gives the space to

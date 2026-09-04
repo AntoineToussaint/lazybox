@@ -7792,14 +7792,14 @@ mod resync_tests {
         let mut stack = shell_stack(id, &sk);
         stack.on_event(&Event::TerminalOutput {
             terminal_id: id,
-            bytes: b"ok".to_vec(),
+            bytes: b"ok".to_vec().into(),
             first_seq: 1,
             seq: 1,
         });
         // A gap desyncs the pane and sends one request.
         stack.on_event(&Event::TerminalOutput {
             terminal_id: id,
-            bytes: b"torn".to_vec(),
+            bytes: b"torn".to_vec().into(),
             first_seq: 3,
             seq: 3,
         });
@@ -7864,7 +7864,7 @@ mod resync_tests {
         let mut stack = shell_stack(id, &sk);
         stack.on_event(&Event::TerminalOutput {
             terminal_id: id,
-            bytes: b"stale\r\n".to_vec(),
+            bytes: b"stale\r\n".to_vec().into(),
             first_seq: 1,
             seq: 5,
         });
@@ -10745,7 +10745,7 @@ mod agent_crash_tests {
         let mut stack = active_stack(2, &sk, TerminalKind::Agent("codex".into()));
         stack.on_event(&Event::AgentAuthOutput {
             terminal_id: TerminalId(2),
-            bytes: b"provider login screen".to_vec(),
+            bytes: b"provider login screen".to_vec().into(),
             first_seq: 1,
             seq: 1,
         });
@@ -10824,7 +10824,7 @@ mod agent_crash_tests {
         });
         stack.on_event(&Event::AgentAuthOutput {
             terminal_id: TerminalId(2),
-            bytes: b"provider login".to_vec(),
+            bytes: b"provider login".to_vec().into(),
             first_seq: 1,
             seq: 1,
         });

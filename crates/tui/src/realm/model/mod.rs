@@ -1537,6 +1537,13 @@ pub struct Model<T: TerminalAdapter> {
     /// clears it. Toggled by `.` (sidebar) or `]]f` (terminal);
     /// `]]<digit>` jumps straight to a specific agent.
     focus_mode: bool,
+    /// Visual-select mode (#1448): while `true`, plain `j`/`k` (and
+    /// arrows) drive the multi-select `extend_selection` sweep in the
+    /// focused pane (sidebar or activity) instead of moving the cursor —
+    /// an encoding-independent alternative to Shift-↑/↓. Armed by the
+    /// `VisualSelect` action (`V`); cleared by `Esc`, a second `V`, an
+    /// action key, or a pane-focus change.
+    visual_select: bool,
     /// Focus-mode multi-workspace layout (#1258). Active only while
     /// `focus_mode` is on; `Single` renders exactly the historical
     /// one-fullscreen-terminal focus mode. Cycled by `]]v`, persisted
@@ -2466,6 +2473,7 @@ impl<T: TerminalAdapter> Model<T> {
             viewer_logins: std::collections::HashMap::new(),
             focus: PaneFocus::Sidebar,
             focus_mode: false,
+            visual_select: false,
             focus_layout: lazybox_config::FocusLayout::Single,
             focus_pane: 0,
             focus_pane_slots: [None, None, None, None],

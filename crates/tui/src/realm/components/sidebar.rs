@@ -496,6 +496,11 @@ impl Sidebar {
         self.inner.extend_selection(dir)
     }
 
+    /// See `Sidebar::begin_visual_select`.
+    pub fn begin_visual_select(&mut self) -> Option<usize> {
+        self.inner.begin_visual_select()
+    }
+
     /// See `Sidebar::extend_selection_to`.
     pub fn extend_selection_to(&mut self, area: Rect, click_row: u16) -> bool {
         self.inner.extend_selection_to(area, click_row)

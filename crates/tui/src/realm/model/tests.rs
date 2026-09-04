@@ -9855,6 +9855,105 @@ mod merge_focus_follow_tests {
         assert_eq!(cmds.len(), 3, "one UpdateBranch per selected PR");
     }
 
+    /// End-to-end #1448: `V` arms visual-select and plain `j` (no Shift
+    /// on the arrow) sweeps a contiguous range, driving the same
+    /// `extend_selection` as Shift-↑/↓ — the encoding-independent path.
+    /// A normal action then fans out across the marked set.
+    #[test]
+    fn visual_select_key_then_j_sweeps_range_and_action_fans_out() {
+        use lazybox_tui_core::action::Action;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        let mut a = workspace("owner/repo#1", true, Duration::hours(1));
+        a.pr.as_mut().unwrap().is_behind_base = true;
+        let mut b = workspace("owner/repo#2", true, Duration::hours(2));
+        b.pr.as_mut().unwrap().is_behind_base = true;
+        let mut c = workspace("owner/repo#3", true, Duration::hours(3));
+        c.pr.as_mut().unwrap().is_behind_base = true;
+        let top_key = a.key.clone();
+        for ws in [a, b, c] {
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        }
+
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        // Anchor on the top (newest) row, then arm and sweep downward.
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&top_key)));
+        m.dispatch_key(KeyEvent::new(Key::Char('V'), KeyModifiers::SHIFT));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            1,
+            "arming marks the cursor row",
+        );
+        for _ in 0..8 {
+            m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        }
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            3,
+            "V + plain j sweeps every contiguous row",
+        );
+
+        let cmds = m.dispatch_action(&Action::UpdateBranch);
+        assert_eq!(cmds.len(), 3, "one UpdateBranch per selected PR");
+    }
+
+    /// `Esc` while visual-select is armed cancels the mode AND drops the
+    /// selection (#1448); a second `V` disarms but keeps the marks.
+    #[test]
+    fn visual_select_esc_cancels_and_second_v_disarms() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        let a = workspace("owner/repo#1", true, Duration::hours(1));
+        let b = workspace("owner/repo#2", true, Duration::hours(2));
+        let top_key = a.key.clone();
+        for ws in [a, b] {
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        }
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&top_key)));
+
+        // Arm + grow, then Esc: mode off and selection cleared.
+        m.dispatch_key(KeyEvent::new(Key::Char('V'), KeyModifiers::SHIFT));
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+        m.dispatch_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "Esc drops the swept selection",
+        );
+        // Esc also disarmed the mode: a plain `j` now navigates (no extend).
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "j no longer extends once the mode is off",
+        );
+
+        // Re-arm, grow, then a second `V` disarms but keeps the marks.
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&top_key)));
+        m.dispatch_key(KeyEvent::new(Key::Char('V'), KeyModifiers::SHIFT));
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        let marked = m.sidebar.broadcast_selected_count();
+        assert_eq!(marked, 2);
+        m.dispatch_key(KeyEvent::new(Key::Char('V'), KeyModifiers::SHIFT));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            marked,
+            "a second V keeps the marks",
+        );
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            marked,
+            "with the mode off, j stops extending",
+        );
+    }
+
     #[test]
     fn merge_while_viewing_issue_follows_focus_to_pr() {
         let mut m = build_model();
@@ -16482,6 +16581,53 @@ mod activity_pane_visibility_tests {
         let mut m = build_model();
         seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
         assert!(m.activity_pane_visible());
+    }
+
+    /// #1448: visual-select works in the activity pane too — `V` arms
+    /// the sweep and plain `j` grows the row multi-select from the
+    /// anchor, and `Esc` cancels + clears it.
+    #[test]
+    fn visual_select_sweeps_the_activity_pane_rows() {
+        let mut m = build_model();
+        let mut w = empty_ws("github:o/r#1");
+        for body in ["one", "two", "three"] {
+            w.activity.push(lazybox_core::Activity {
+                author: "alice".into(),
+                body: body.into(),
+                created_at: Utc::now(),
+                kind: lazybox_core::ActivityKind::Comment,
+                node_id: None,
+                path: None,
+                line: None,
+                diff_hunk: None,
+                thread_id: None,
+            });
+        }
+        seed(&mut m, vec![w]);
+        m.focus = PaneFocus::Right;
+        m.set_focus_attr();
+
+        // Arm on the top row, then sweep down with plain j (no Shift).
+        m.dispatch_key(KeyEvent::new(Key::Char('V'), KeyModifiers::SHIFT));
+        assert_eq!(
+            m.right.selected_activity_indices(),
+            vec![0],
+            "arming marks the cursor row",
+        );
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        assert_eq!(
+            m.right.selected_activity_indices(),
+            vec![0, 1, 2],
+            "V + plain j sweeps the activity rows without Shift-arrow",
+        );
+
+        // Esc cancels the mode and drops the selection.
+        m.dispatch_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        assert!(
+            m.right.selected_activity_indices().is_empty(),
+            "Esc clears the swept activity selection",
+        );
     }
 
     #[test]

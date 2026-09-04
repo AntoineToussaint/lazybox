@@ -1254,6 +1254,33 @@ impl RightPane {
         self.feed.clear_selection();
     }
 
+    /// Arm a visual-select sweep in the activity pane (#1448): mark the
+    /// cursor row and anchor here. Returns the selected count, or `None`
+    /// when there's no expanded activity to sweep.
+    pub fn begin_activity_visual_select(&mut self) -> Option<usize> {
+        let ws = self.workspace.as_ref()?;
+        if self.activity_collapsed || ws.activity.is_empty() {
+            return None;
+        }
+        Some(self.feed.begin_visual_select())
+    }
+
+    /// Extend the activity-pane multi-select by one row in `dir` (−1 up,
+    /// +1 down) — the visual sweep's grow/shrink step (#1448). Returns
+    /// the selected count, or `None` when there's no expanded activity.
+    pub fn extend_activity_selection(&mut self, dir: isize) -> Option<usize> {
+        let last = {
+            let ws = self.workspace.as_ref()?;
+            if self.activity_collapsed || ws.activity.is_empty() {
+                return None;
+            }
+            ws.activity.len().saturating_sub(1)
+        };
+        let n = self.feed.extend_selection(dir, last);
+        self.clamp_scroll_to_cursor();
+        Some(n)
+    }
+
     /// The counterpart-link row for the header — the task this workspace
     /// is paired with — as `(prefix, label, url)`. Bidirectional and
     /// provider-aware (#567, #922):

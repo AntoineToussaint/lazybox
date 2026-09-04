@@ -617,6 +617,14 @@ impl LazyboxMcp {
         if text.is_empty() {
             return Err(McpError::invalid_request("notification text is empty", None));
         }
+        if text.len() > MAX_NOTIFY_BYTES {
+            return Err(McpError::invalid_request(
+                format!(
+                    "notification text exceeds {MAX_NOTIFY_BYTES} bytes (send a distilled instruction, not raw output)"
+                ),
+                None,
+            ));
+        }
         let target = SessionKey::from(workspace);
         if &target == caller {
             return Err(McpError::invalid_request(
@@ -645,11 +653,7 @@ impl LazyboxMcp {
         let injected =
             crate::spawn_handler::handle_inject_prompt(&self.config, terminal_id, text, None, submit);
         match tokio::time::timeout(NOTIFY_TIMEOUT, injected).await {
-            Ok(()) => Ok(json_result(serde_json::json!({
-                "accepted": true,
-                "workspace": workspace,
-                "submitted": submit,
-            }))),
+            Ok(()) => Ok(json_result(notify_handoff_payload(workspace, submit))),
             Err(_) => Ok(CallToolResult::error(vec![ContentBlock::text(
                 "notify timed out acquiring the target agent terminal".to_string(),
             )])),
@@ -657,7 +661,7 @@ impl LazyboxMcp {
     }
 
     #[tool(
-        description = "Actively push an instruction into another agent's session by its workspace key (from list_sessions) — a direct poke, not the pull-based blackboard. Delivers through the same settle-gated inject the TUI uses, so it never lands in a permission/chooser prompt. submit=true (default) pastes and runs it; submit=false leaves it in the target's composer for its operator to review first."
+        description = "Actively push an instruction into another agent's session by its workspace key (from list_sessions) — a direct poke, not the pull-based blackboard. Delivers through the same settle-gated inject the TUI uses, so it never lands in a permission/chooser prompt. submit=true (default) pastes and runs it; submit=false leaves it in the target's composer for its operator to review first. Returns once the message is handed off, which is NOT a confirmation the target read or ran it — a target parked at a permission prompt drops it silently. Verify with read_session when delivery matters."
     )]
     async fn notify_session(
         &self,
@@ -668,6 +672,22 @@ impl LazyboxMcp {
         self.notify_session_payload(&caller, &args.workspace, &args.text, args.submit)
             .await
     }
+}
+
+/// The `notify_session` success payload. `handle_inject_prompt` returns once
+/// the injection is *registered*, not delivered: a target parked at a
+/// permission/credit prompt drops it, and that outcome surfaces only on the
+/// daemon's `/v1/events` stream, which an MCP caller does not consume. So this
+/// reports hand-off — never confirmed delivery — and points the caller at the
+/// one channel it *can* use to verify: reading the target back.
+fn notify_handoff_payload(workspace: &str, submit: bool) -> serde_json::Value {
+    serde_json::json!({
+        "handed_off": true,
+        "workspace": workspace,
+        "submit_requested": submit,
+        "delivery_confirmed": false,
+        "note": "Handed to the target's settle-gated inject; not a confirmation it was read or run. If the target was at a permission prompt the message is dropped silently. Verify with read_session when delivery matters.",
+    })
 }
 
 /// Wrap a JSON value as a successful single-text tool result.
@@ -1013,9 +1033,20 @@ fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<(
 }
 
 /// Upper bound on how long `notify_session` waits for the settle-gated inject
-/// to register, matching the JSON gateway's inject timeout so a wedged
-/// per-terminal lock can't pin the tool call open forever.
+/// to register, so a wedged per-terminal lock can't pin the tool call open
+/// forever. Set to the JSON gateway's *default* inject timeout
+/// (`GatewayOptions::command_timeout`) for parity with the sibling caller.
+/// Must stay comfortably above `handle_inject_prompt`'s own 120s
+/// `INJECT_INPUT_DEADLINE`, or a legitimately slow composer would be cut off
+/// here before the inject path gets its full window — do not shorten below it.
 const NOTIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Largest accepted `notify_session` body, in bytes. A notify is a distilled
+/// instruction to a sibling agent — the same kind of content as a blackboard
+/// note — so it shares [`MAX_NOTE_BYTES`]; the cap keeps a runaway agent from
+/// pasting megabytes into another session's PTY. The gateway's `/v1/agents/inject`
+/// is bounded too, by its command-frame size (`MAX_COMMAND_FRAME_BYTES`).
+const MAX_NOTIFY_BYTES: usize = MAX_NOTE_BYTES;
 
 /// kv prefix under which every blackboard note lives.
 const NOTE_KV_PREFIX: &str = "lazybox:note:";
@@ -1250,6 +1281,42 @@ mod tests {
                 .notify_session_payload(&me, me.as_str(), "hello", true)
                 .await
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_session_rejects_oversized_text() {
+        // A notify is a distilled instruction, not raw output: a body past the
+        // cap is rejected rather than pasted megabytes into another PTY.
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let caller = SessionKey::from("a");
+        let huge = "x".repeat(MAX_NOTIFY_BYTES + 1);
+        assert!(
+            handler
+                .notify_session_payload(&caller, "b", &huge, true)
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn notify_handoff_payload_never_claims_confirmed_delivery() {
+        // The registered-not-delivered contract: the success payload must not
+        // read as "the target got it", since a target at a permission prompt
+        // silently drops the inject and no async channel tells the MCP caller.
+        let payload = notify_handoff_payload("github:acme/widget#1", true);
+        assert_eq!(payload["handed_off"], true);
+        assert_eq!(payload["delivery_confirmed"], false);
+        assert_eq!(payload["submit_requested"], true);
+        // The prior wording ("accepted") invited exactly the misread this fix
+        // removes — it must be gone.
+        assert!(payload.get("accepted").is_none(), "{payload}");
+        assert!(
+            payload["note"]
+                .as_str()
+                .expect("note")
+                .contains("read_session"),
+            "the caller must be pointed at the one channel that can verify"
         );
     }
 

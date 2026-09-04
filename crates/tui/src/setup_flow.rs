@@ -732,8 +732,7 @@ impl SetupRunner {
                 // never showed can't have been un-ticked, so it must
                 // survive the confirm rather than be swept away (and
                 // its workspaces deleted with it).
-                let offered_orgs: BTreeSet<String> =
-                    items.iter().map(|s| s.id.clone()).collect();
+                let offered_orgs: BTreeSet<String> = items.iter().map(|s| s.id.clone()).collect();
                 // Snapshot which picked orgs were ALREADY subscribed
                 // (org-level or via any narrowed repo) BEFORE this edit.
                 // We only force the repo-narrowing step for orgs the
@@ -1722,7 +1721,10 @@ mod tests {
             .get("github")
             .cloned()
             .unwrap_or_default();
-        assert!(after.contains("github:acme"), "offered+ticked org dropped: {after:?}");
+        assert!(
+            after.contains("github:acme"),
+            "offered+ticked org dropped: {after:?}"
+        );
         assert!(
             after.contains("github:rust-lang/cargo"),
             "un-offered OSS repo dropped: {after:?}"

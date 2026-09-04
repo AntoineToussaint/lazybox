@@ -1959,9 +1959,7 @@ showing keybinding search only",
             let Some(repo) = w.primary_task().and_then(|t| t.repo.as_deref()) else {
                 continue;
             };
-            if removed.iter().any(|s| covers(s, repo))
-                && !new_set.iter().any(|s| covers(s, repo))
-            {
+            if removed.iter().any(|s| covers(s, repo)) && !new_set.iter().any(|s| covers(s, repo)) {
                 *per_repo.entry(repo.to_string()).or_default() += 1;
             }
         }

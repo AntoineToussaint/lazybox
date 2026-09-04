@@ -47,15 +47,17 @@ mod scope_removal_prompt_tests {
 
     #[test]
     fn caps_the_list_and_trails_with_a_more_count() {
-        let repos: Vec<(String, usize)> =
-            (0..9).map(|i| (format!("org/repo{i}"), 1)).collect();
+        let repos: Vec<(String, usize)> = (0..9).map(|i| (format!("org/repo{i}"), 1)).collect();
         let prompt = format_scope_removal_prompt(&repos, 9);
         assert_eq!(
             prompt.matches("workspace(s)\n").count(),
             6,
             "only the first 6 repos should be listed: {prompt}"
         );
-        assert!(prompt.contains("  +3 more\n"), "missing overflow trailer: {prompt}");
+        assert!(
+            prompt.contains("  +3 more\n"),
+            "missing overflow trailer: {prompt}"
+        );
     }
 }
 

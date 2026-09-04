@@ -1447,7 +1447,7 @@ impl Sidebar {
     }
 
     /// Arm a visual-select sweep (#1448) on the cursor row: mark it and
-    /// anchor the sweep here, so the next [`extend_selection`] grows /
+    /// anchor the sweep here, so the next [`Self::extend_selection`] grows /
     /// shrinks from this row exactly like the Shift-↑/↓ path. Returns the
     /// visible-and-selected count, or `None` when the cursor isn't on a
     /// workspace / session row (nothing to sweep).

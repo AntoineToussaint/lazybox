@@ -331,7 +331,7 @@ pub enum Action {
     BroadcastToSelected,
     /// Arm "visual select": an encoding-independent alternative to the
     /// Shift-↑/↓ sweep (#1448). Once armed, plain `j`/`k` (and arrows)
-    /// drive the same anchor/grow/shrink [`SelectWorkspace`] extend, so
+    /// drive the same anchor/grow/shrink [`Action::SelectWorkspace`] extend, so
     /// a contiguous range is reachable on terminals that don't report
     /// Shift on arrows. `Esc` cancels; any action key fires on the set.
     /// Works from the sidebar and the activity pane alike.

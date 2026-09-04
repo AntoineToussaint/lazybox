@@ -125,8 +125,8 @@ impl ActivityFeed {
     }
 
     /// Arm a visual-select sweep (#1448) on the cursor row: mark it and
-    /// anchor here so the next [`extend_selection`] grows / shrinks from
-    /// this row. The activity-pane twin of `Sidebar::begin_visual_select`.
+    /// anchor here so the next [`Self::extend_selection`] grows / shrinks
+    /// from this row. The activity-pane twin of `Sidebar::begin_visual_select`.
     pub fn begin_visual_select(&mut self) -> usize {
         self.selected.insert(self.cursor);
         self.sweep = Some((self.cursor, self.cursor));

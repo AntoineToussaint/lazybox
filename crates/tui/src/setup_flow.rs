@@ -723,6 +723,17 @@ impl SetupRunner {
                 // org and lose every prior narrowed subscription.
                 let picked_orgs: BTreeSet<String> = picked.iter().map(|s| s.id.clone()).collect();
                 let prefixes: Vec<String> = picked_orgs.iter().map(|o| format!("{o}/")).collect();
+                // Owners the picker actually offered. `list_scopes()`
+                // only offers your own login plus orgs you're a member
+                // of — never the owners you merely subscribe to (OSS
+                // repos, orgs past the first membership page, orgs the
+                // token can't see). "Not picked" is a real un-tick only
+                // for an owner that WAS on offer; an owner the picker
+                // never showed can't have been un-ticked, so it must
+                // survive the confirm rather than be swept away (and
+                // its workspaces deleted with it).
+                let offered_orgs: BTreeSet<String> =
+                    items.iter().map(|s| s.id.clone()).collect();
                 // Snapshot which picked orgs were ALREADY subscribed
                 // (org-level or via any narrowed repo) BEFORE this edit.
                 // We only force the repo-narrowing step for orgs the
@@ -752,10 +763,15 @@ impl SetupRunner {
                     .entry(provider_id.clone())
                     .or_default();
                 // Keep entries belonging to picked orgs (the org
-                // itself, or any repo under it). Drop everything
-                // else — that's how un-ticking an org cleans up.
+                // itself, or any repo under it), plus every entry whose
+                // owner the picker never offered. Drop only offered-but-
+                // un-ticked owners — that's how un-ticking an org cleans
+                // up without touching owners the picker couldn't show.
                 existing.retain(|id| {
-                    picked_orgs.contains(id) || prefixes.iter().any(|p| id.starts_with(p))
+                    let owner = id.split_once('/').map(|(o, _)| o).unwrap_or(id.as_str());
+                    !offered_orgs.contains(owner)
+                        || picked_orgs.contains(id)
+                        || prefixes.iter().any(|p| id.starts_with(p))
                 });
                 // For each newly-picked org with no narrowed repos
                 // yet, add the org-level subscription so the repo
@@ -1657,6 +1673,63 @@ mod tests {
             runner.pending_repo_pickers.is_empty(),
             "kept-but-unchanged org should not re-walk its repos: {:?}",
             runner.pending_repo_pickers
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn keeps_scopes_the_picker_never_offered() {
+        // Regression (#1474): the orgs picker is built from
+        // `list_scopes()`, which only offers your own login + orgs
+        // you're a member of — never the owners you merely subscribe
+        // to (OSS repos, orgs past page 1, orgs the token can't see).
+        // Those were never on offer, can never be ticked, and used to
+        // be swept away on every confirm (deleting their workspaces).
+        // Confirming the ONE org the picker offered must leave the
+        // un-offered subscriptions untouched.
+        let mut prior: BTreeSet<String> = BTreeSet::new();
+        prior.insert("github:acme".into());
+        prior.insert("github:rust-lang/cargo".into());
+        prior.insert("github:torvalds".into());
+        let mut outcome = SetupOutcome::default_enabled(report());
+        outcome.selected_scopes.insert("github".into(), prior);
+
+        let mut runner = SetupRunner {
+            accumulator: outcome,
+            scope_providers: BTreeSet::new(),
+            pending_filters: VecDeque::new(),
+            pending_scopes: VecDeque::new(),
+            pending_repo_pickers: VecDeque::new(),
+            expecting: ExpectingStep::ScopePickFor("github".into()),
+            current_choice: None,
+            edit_scopes: false,
+        };
+        // The picker only lists `acme` (the sole membership org).
+        let items = vec![Scope {
+            id: "github:acme".into(),
+            label: "acme".into(),
+            parent: None,
+            kind: lazybox_core::ScopeKind::Org,
+            private: false,
+        }];
+        runner.current_choice = Some(CurrentChoice::ScopePick(items));
+
+        // Confirm with `acme` still ticked (index 0) — no change.
+        let _step = runner.step_choice_picked(vec![0]);
+
+        let after = runner
+            .accumulator
+            .selected_scopes
+            .get("github")
+            .cloned()
+            .unwrap_or_default();
+        assert!(after.contains("github:acme"), "offered+ticked org dropped: {after:?}");
+        assert!(
+            after.contains("github:rust-lang/cargo"),
+            "un-offered OSS repo dropped: {after:?}"
+        );
+        assert!(
+            after.contains("github:torvalds"),
+            "un-offered user owner dropped: {after:?}"
         );
     }
 

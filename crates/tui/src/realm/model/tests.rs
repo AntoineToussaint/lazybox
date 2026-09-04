@@ -27,6 +27,39 @@ fn seed_ws(m: &mut crate::realm::model::Model<tuirealm::terminal::TestTerminalAd
 }
 
 #[cfg(test)]
+mod scope_removal_prompt_tests {
+    //! The safe-unsubscribe confirm names its targets (#1474).
+    use super::super::inputs::format_scope_removal_prompt;
+
+    #[test]
+    fn names_each_repo_with_its_workspace_count() {
+        let repos = vec![
+            ("obin-ai/lazybox".to_string(), 12),
+            ("acme/api".to_string(), 4),
+        ];
+        let prompt = format_scope_removal_prompt(&repos, 16);
+        assert!(prompt.contains("Removing 2 repo(s) DELETES their 16 workspace(s)"));
+        assert!(prompt.contains("  obin-ai/lazybox — 12 workspace(s)"));
+        assert!(prompt.contains("  acme/api — 4 workspace(s)"));
+        assert!(prompt.contains("press z on its"));
+        assert!(!prompt.contains("more"));
+    }
+
+    #[test]
+    fn caps_the_list_and_trails_with_a_more_count() {
+        let repos: Vec<(String, usize)> =
+            (0..9).map(|i| (format!("org/repo{i}"), 1)).collect();
+        let prompt = format_scope_removal_prompt(&repos, 9);
+        assert_eq!(
+            prompt.matches("workspace(s)\n").count(),
+            6,
+            "only the first 6 repos should be listed: {prompt}"
+        );
+        assert!(prompt.contains("  +3 more\n"), "missing overflow trailer: {prompt}");
+    }
+}
+
+#[cfg(test)]
 mod prompt_history_format_tests {
     //! Formatting helpers for the `]]h` prompt-history rows (#523).
     use super::super::{relative_age, summarize_prompt};

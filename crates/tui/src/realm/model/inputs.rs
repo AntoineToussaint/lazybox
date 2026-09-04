@@ -1835,16 +1835,12 @@ showing keybinding search only",
                 // currently have workspaces, interpose a confirm that
                 // names the damage and points at mute (the
                 // non-destructive hide) before anything persists.
-                let doomed = self.removed_scope_workspace_count(&outcome);
+                let doomed_repos = self.removed_scope_workspaces(&outcome);
+                let doomed: usize = doomed_repos.iter().map(|(_, count)| count).sum();
                 if doomed > 0 {
                     use crate::realm::components::confirm::Confirm;
                     self.unmount_setup_modal();
-                    let prompt = format!(
-                        "Removing these repos DELETES their {doomed} workspace(s) — \
-                         notes, read state, and stars included. To just quiet a \
-                         repo without losing anything, press z on its header \
-                         (mute) instead. Remove and delete?",
-                    );
+                    let prompt = format_scope_removal_prompt(&doomed_repos, doomed);
                     self.set_modal_flow(ModalFlow::ScopeRemovalConfirm {
                         outcome: Box::new(outcome),
                     });
@@ -1921,28 +1917,32 @@ showing keybinding search only",
         self.maybe_mount_tour();
     }
 
-    /// How many workspaces the scopes REMOVED by `outcome` (vs the
-    /// cached persisted setup) currently hold (#scale, proposal F).
-    /// Zero when nothing is removed, when there is no cached baseline
-    /// (first run), or when the new scope set is empty — empty scopes
-    /// mean "all", which deletes nothing.
-    fn removed_scope_workspace_count(&self, outcome: &crate::setup_flow::SetupOutcome) -> usize {
+    /// The repos whose workspaces the scopes REMOVED by `outcome` (vs
+    /// the cached persisted setup) currently hold, each with its live
+    /// workspace count, loudest first (#scale, proposal F). Empty when
+    /// nothing is removed, when there is no cached baseline (first
+    /// run), or when the new scope set is empty — empty scopes mean
+    /// "all", which deletes nothing.
+    fn removed_scope_workspaces(
+        &self,
+        outcome: &crate::setup_flow::SetupOutcome,
+    ) -> Vec<(String, usize)> {
         let Some(old) = self
             .setup
             .persisted
             .as_ref()
             .and_then(|p| p.selected_scopes.get("github"))
         else {
-            return 0;
+            return Vec::new();
         };
         let new = outcome.selected_scopes.get("github");
         let new_set = new.cloned().unwrap_or_default();
         if new_set.is_empty() {
-            return 0;
+            return Vec::new();
         }
         let removed: Vec<&String> = old.iter().filter(|s| !new_set.contains(*s)).collect();
         if removed.is_empty() {
-            return 0;
+            return Vec::new();
         }
         let covers = |scope: &str, repo: &str| -> bool {
             match scope.strip_prefix("github:") {
@@ -1953,15 +1953,22 @@ showing keybinding search only",
                 None => false,
             }
         };
-        self.sidebar
-            .workspace_iter()
-            .filter(|(_, w)| {
-                let Some(repo) = w.primary_task().and_then(|t| t.repo.as_deref()) else {
-                    return false;
-                };
-                removed.iter().any(|s| covers(s, repo)) && !new_set.iter().any(|s| covers(s, repo))
-            })
-            .count()
+        let mut per_repo: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for (_, w) in self.sidebar.workspace_iter() {
+            let Some(repo) = w.primary_task().and_then(|t| t.repo.as_deref()) else {
+                continue;
+            };
+            if removed.iter().any(|s| covers(s, repo))
+                && !new_set.iter().any(|s| covers(s, repo))
+            {
+                *per_repo.entry(repo.to_string()).or_default() += 1;
+            }
+        }
+        let mut out: Vec<(String, usize)> = per_repo.into_iter().collect();
+        // Loudest first; repo name breaks ties so the order is stable.
+        out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        out
     }
 
     /// Unmount whatever's at `Id::Setup` (or `Id::Splash` if the
@@ -1994,6 +2001,29 @@ showing keybinding search only",
         }
         self.redraw = true;
     }
+}
+
+/// Build the safe-unsubscribe confirm prompt (#1474). It names every
+/// affected repo with its workspace count, loudest first, capped so the
+/// buttons can't be pushed off a short terminal.
+pub(super) fn format_scope_removal_prompt(repos: &[(String, usize)], total: usize) -> String {
+    const CAP: usize = 6;
+    let mut prompt = format!(
+        "Removing {} repo(s) DELETES their {total} workspace(s) — \
+         notes, read state, and stars included:\n\n",
+        repos.len(),
+    );
+    for (repo, count) in repos.iter().take(CAP) {
+        prompt.push_str(&format!("  {repo} — {count} workspace(s)\n"));
+    }
+    if repos.len() > CAP {
+        prompt.push_str(&format!("  +{} more\n", repos.len() - CAP));
+    }
+    prompt.push_str(
+        "\nTo just quiet a repo without losing anything, press z on its \
+         header (mute) instead. Remove and delete?",
+    );
+    prompt
 }
 
 fn format_diff_review_prompt(

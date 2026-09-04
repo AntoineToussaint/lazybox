@@ -11895,7 +11895,11 @@ mod merge_focus_follow_tests {
 
         let cmds = m.dispatch_action(&Action::SyncWorkspace);
         assert_eq!(cmds.len(), 2);
-        assert_eq!(m.sidebar.broadcast_selected_count(), 2, "survives the action");
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            2,
+            "survives the action"
+        );
 
         m.dispatch_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
         assert_eq!(

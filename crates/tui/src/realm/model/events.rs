@@ -3087,12 +3087,21 @@ impl<T: TerminalAdapter> Model<T> {
         let Some(workspace_key) = self.awaiting_assignable_users.take() else {
             return;
         };
-        let has_participants = !self
-            .gather_candidate_logins_inclusive(&workspace_key)
-            .is_empty();
+        // Whether the picker will have anything to show without the
+        // fetched pool: existing assignees (seeded unconditionally by
+        // `mount_add_assignees`) or interaction-derived participants.
+        let has_fallback = self
+            .sidebar
+            .workspace_iter()
+            .find(|(k, _)| k.as_str() == workspace_key.as_str())
+            .and_then(|(_, w)| w.primary_task())
+            .is_some_and(|t| !t.assignees.is_empty())
+            || !self
+                .gather_candidate_logins_inclusive(&workspace_key)
+                .is_empty();
         self.mount_add_assignees(workspace_key, Vec::new());
         let mounted = matches!(self.modal_stack.last(), Some(Id::AddAssignees));
-        if mounted && has_participants {
+        if mounted && has_fallback {
             self.flash_hint("assignable users unavailable — showing task participants only");
         } else {
             self.flash_error(format!("✗ couldn't load assignable users — {message}"));

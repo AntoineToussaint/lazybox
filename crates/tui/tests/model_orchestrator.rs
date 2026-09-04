@@ -1945,6 +1945,58 @@ fn ga_on_fresh_issue_fetches_assignable_pool_and_mounts_picker() {
     );
 }
 
+/// #1478 self-assign + no-drop: the assignees picker must (a) offer the
+/// viewer as a candidate — assigning yourself is a primary triage action,
+/// unlike reviewers where the viewer is excluded — and (b) pre-tick every
+/// existing assignee (the viewer included) so an untouched submit doesn't
+/// silently drop them, since `SetAssignees` treats the picks as the full
+/// desired set.
+#[test]
+fn ga_offers_viewer_and_preticks_existing_assignees() {
+    let (client, mut server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    m.viewer_logins.insert("github".into(), "me".into());
+    let mut task = task_with_issue("o/r#9", "assigned to me + alice", None);
+    task.node_id = Some("ISSUE_node".into());
+    task.assignees = vec!["me".into(), "alice".into()];
+    let ws = Workspace::from_task(task, Utc::now());
+    let ws_key = ws.key.clone();
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![ws],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    while server.rx.try_recv().is_ok() {}
+
+    m.dispatch_key(key(Key::Char('g')));
+    m.dispatch_key(key(Key::Char('a')));
+    // The fetched pool includes the viewer (GitHub returns assignable
+    // users, self included).
+    m.handle_daemon_event(IpcEvent::AssignableUsers {
+        workspace_key: ws_key,
+        logins: vec!["me".into(), "alice".into(), "bob".into()],
+    });
+    assert_eq!(m.top_modal(), Some(&Id::AddAssignees));
+
+    let screen = render_to_string(&mut m);
+    // The viewer is selectable (self-assign) and pre-ticked (existing
+    // assignee), so an untouched submit keeps them.
+    assert!(
+        screen.contains("[x] @me"),
+        "viewer must be a candidate AND pre-ticked so they aren't dropped:\n{screen}",
+    );
+    assert!(
+        screen.contains("[x] @alice"),
+        "existing assignee must be pre-ticked:\n{screen}",
+    );
+    assert!(
+        screen.contains("[ ] @bob"),
+        "a non-assignee from the pool is offered unticked:\n{screen}",
+    );
+}
+
 /// #1478 empty-pool path: a repo that exposes no assignable users (and no
 /// local candidates) must land on the framed empty-state modal, not a bare
 /// flash.

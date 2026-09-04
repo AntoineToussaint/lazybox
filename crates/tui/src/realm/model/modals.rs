@@ -944,29 +944,32 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         self.awaiting_assignable_users = None;
-        // Include existing assignees in the candidate list (they're
-        // pre-checked below) so the user can untick to remove. Fetched
-        // pool first, then the interaction-derived candidates, deduped —
-        // both drop the viewer already.
-        let interaction = self.gather_candidate_logins_inclusive(&workspace_key);
-        let excluded: std::collections::HashSet<String> =
-            self.viewer_logins.values().cloned().collect();
-        let mut candidates: Vec<String> = Vec::new();
-        for login in fetched.into_iter().chain(interaction) {
-            if !login.is_empty() && !excluded.contains(&login) && !candidates.contains(&login) {
-                candidates.push(login);
-            }
-        }
-        // Pre-tick the currently-assigned logins. `with_selected_by`
-        // walks the items and sets the selected bit for any match.
-        let existing: std::collections::HashSet<String> = self
+        // Unlike reviewers (no self-review, so the viewer is excluded),
+        // assigning yourself is a primary triage action — the viewer must
+        // be a candidate. It arrives via the fetched assignable-user pool
+        // on the happy path; no explicit viewer exclusion here.
+        //
+        // The currently-assigned logins go FIRST and unconditionally:
+        // `Command::SetAssignees` submits the picked set as the *full
+        // desired set*, so any existing assignee not present in the picker
+        // would be silently removed. Seeding them (and pre-ticking them
+        // below) means an untouched submit is a no-op and an existing
+        // assignee — the viewer included — is never dropped, even when the
+        // fetch failed and `fetched` is empty.
+        let existing_vec: Vec<String> = self
             .sidebar
             .workspace_iter()
             .find(|(k, _)| k.as_str() == workspace_key.as_str())
             .and_then(|(_, w)| w.primary_task().map(|t| t.assignees.clone()))
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
+            .unwrap_or_default();
+        let existing: std::collections::HashSet<String> = existing_vec.iter().cloned().collect();
+        let interaction = self.gather_candidate_logins_inclusive(&workspace_key);
+        let mut candidates: Vec<String> = Vec::new();
+        for login in existing_vec.into_iter().chain(fetched).chain(interaction) {
+            if !login.is_empty() && !candidates.contains(&login) {
+                candidates.push(login);
+            }
+        }
         self.set_modal_flow(ModalFlow::AssigneesRequest {
             workspace: workspace_key,
         });

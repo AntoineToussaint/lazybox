@@ -1185,13 +1185,20 @@ pub struct UiSection {
     /// its argument. None = the OS default browser.
     pub browser: Option<String>,
     /// Whether the user has already seen the in-app feature tour.
-    /// Set `true` the first time the tour is dismissed or finished
+    /// Set `true` the first time the coach is ended or completed
     /// so it doesn't re-launch on every boot; re-invocable on demand
-    /// via the tour shortcut regardless. Defaults to `false` so a
-    /// brand-new install (or one upgraded into the tour feature)
+    /// via the coach shortcut regardless. Defaults to `false` so a
+    /// brand-new install (or one upgraded into the coach feature)
     /// gets the walkthrough once.
     #[serde(default)]
     pub tour_seen: bool,
+    /// The coach step a returning user should resume at (#1460). The
+    /// coach persists its position as the user advances so quitting
+    /// mid-walkthrough resumes where they left off rather than
+    /// restarting; a skipped step advances this past it so it never
+    /// returns uninvited. Clamped to the curriculum length on load.
+    #[serde(default)]
+    pub coach_step: usize,
     /// Whether the progressive feature-discovery tips are enabled.
     /// Tips surface occasionally as a dim, auto-fading footer hint
     /// keyed off current state (agent waiting, failing CI, in a
@@ -1340,6 +1347,7 @@ impl Default for UiSection {
             action_keys: std::collections::BTreeMap::new(),
             browser: None,
             tour_seen: false,
+            coach_step: 0,
             show_tips: true,
             tips_seen: Vec::new(),
             terminal_new_layout: NewTerminalLayout::default(),

@@ -398,6 +398,7 @@ impl<T: TerminalAdapter> Model<T> {
         action: &lazybox_tui_core::action::Action,
     ) -> Vec<IpcCommand> {
         use lazybox_tui_core::action::ActionDef;
+        self.note_coach_action(action);
         if Self::hopper_action_requires_project(action) {
             let repo_less_hopper = self.sidebar.selected_workspace().and_then(|workspace| {
                 (workspace.hopper.is_some() && workspace.project_key.is_none())
@@ -2192,7 +2193,7 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_help_ask();
             }
             Action::OpenTour => {
-                self.mount_tour();
+                self.toggle_coach();
             }
             Action::OpenSyncStatus => {
                 self.mount_sync_status();

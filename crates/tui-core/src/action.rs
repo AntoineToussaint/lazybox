@@ -380,7 +380,7 @@ pub enum Action {
     ForceRedraw,
     /// Open Ask Lazybox (`?`): live keymap search plus conversational help.
     OpenHelp,
-    /// Launch the in-app feature tour / guided walkthrough.
+    /// Start (or re-run) the onboarding coach rail (#1460).
     OpenTour,
     /// Open the debug / sync-status window (Shift+D).
     OpenSyncStatus,
@@ -1009,8 +1009,8 @@ impl ActionDef {
             ActionKind::OpenTour => &Self {
                 kind: ActionKind::OpenTour,
                 default_keys: "Shift-T",
-                label: "tour",
-                describe: "Launch the guided onboarding walkthrough (start from scratch, inbox, agents, snippet workflows + memory, juggling sessions, config).",
+                label: "coach",
+                describe: "Start (or re-run) the onboarding coach — a slim rail that gives you one objective at a time and confirms when you actually do it. Press again to end it.",
                 section: Section::Global,
             },
             ActionKind::OpenSyncStatus => &Self {

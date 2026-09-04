@@ -55,7 +55,7 @@ pub fn terminal_leader_reference_rows() -> Vec<(String, String)> {
 pub(crate) use helpers::{
     emit_clipboard_copy, find_action_for_seq, find_action_for_stroke, key_event_to_stroke,
     paint_selection, rect_contains, section_rank, seq_continuations, seq_continuations_available,
-    split_for_footer,
+    split_coach, split_for_footer,
 };
 
 use crate::PaneId;
@@ -349,11 +349,6 @@ pub enum Id {
     /// injects an explicit "Use the `<skill>` skill." instruction through
     /// the same settle-gated path snippets use. See `mount_skill_picker`.
     SkillPicker,
-    /// In-app feature tour (issue #146). Stepped walkthrough card,
-    /// launched on first run (gated by `ui.tour_seen`) and on demand
-    /// via the tour shortcut. `Msg::TourFinished` marks it seen +
-    /// pops. See `realm::components::tour`.
-    Tour,
     /// Debug / sync-status window (default `Shift-D`). Read-only,
     /// scrollable view of recent provider-sync outcomes built from
     /// `self.status.sync`. No pending state — dismiss just pops it.
@@ -1043,14 +1038,6 @@ pub(crate) enum ModalFlow {
     EditorForm { stage: EditorFormStage },
     /// Editors-panel remove confirm (#1102): the id awaiting a yes/no.
     EditorRemoveConfirm { id: String },
-    /// The tour handed control to the real snippet picker. A confirmed
-    /// delivery resumes at `success_step`; cancelling or rejecting the
-    /// delivery returns to `return_step`.
-    TourSnippet {
-        terminal: lazybox_ipc::TerminalId,
-        return_step: usize,
-        success_step: usize,
-    },
     /// Remote-sandbox onboarding (#1112). Carries the accumulating
     /// [`crate::sandbox_flow::SandboxDraft`]; each answer advances its
     /// stage and re-mounts the next `Sandbox*` modal until the final
@@ -1123,11 +1110,6 @@ impl HelpQuestionKind {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Msg {
     SplashConfirmed,
-    /// The feature tour was dismissed or finished — mark it seen so
-    /// it doesn't re-launch, and pop the modal.
-    TourFinished,
-    TourTrySnippet,
-    TourRepeatSnippet,
     AppClose,
     Confirmed(bool),
     InputSubmitted(String),
@@ -2245,11 +2227,22 @@ pub struct Model<T: TerminalAdapter> {
     /// stashed at mount so a pick can't land on a drifted default.
     pub(crate) default_model_agent: Option<String>,
     /// Set at startup from `ui.tour_seen` (inverted): `true` means
-    /// the feature tour should auto-launch once the panes are
-    /// visible. Cleared the moment the tour mounts so it never
-    /// double-fires; manual `Shift-T` invocation ignores it. See
-    /// `maybe_mount_tour` / `mount_tour`.
+    /// the onboarding coach should auto-launch once the panes are
+    /// visible. Cleared the moment the coach starts so it never
+    /// double-fires; manual coach-key invocation ignores it. See
+    /// `maybe_start_coach` / `start_coach`.
     auto_tour_pending: bool,
+    /// The active onboarding coach rail (#1460), or `None` when it's
+    /// not running. A docked strip, not a modal: it's carved out of the
+    /// pane area in `view()` and never occludes a pane. See `coach`.
+    coach: Option<crate::realm::coach::Coach>,
+    /// `display.ascii_glyphs`, cached so the coach rail can pick ASCII
+    /// fallbacks without re-reading config.
+    coach_ascii: bool,
+    /// The coach step a returning user resumes at, from `ui.coach_step`
+    /// (clamped). `start_coach`'s auto-launch path reads it; an explicit
+    /// re-run restarts from the top instead.
+    coach_resume_step: usize,
     /// Progressive feature-discovery tips (#115). `tips_enabled`
     /// mirrors `ui.show_tips` (opt-out); `tips_seen` mirrors
     /// `ui.tour_seen` but per-tip (ids already surfaced, persisted so
@@ -2614,6 +2607,9 @@ impl<T: TerminalAdapter> Model<T> {
             pr_chat_held_question: None,
             default_model_agent: None,
             auto_tour_pending: false,
+            coach: None,
+            coach_ascii: false,
+            coach_resume_step: 0,
             tips_enabled: false,
             tips_seen: Vec::new(),
             tip_shown_this_session: false,
@@ -3169,8 +3165,14 @@ impl<T: TerminalAdapter> Model<T> {
         // and override-induced chord collisions surface as a footer
         // warning + messages-log details instead of failing silently.
         self.surface_keymap_warnings(keymap_warnings);
-        // Arm the feature tour for anyone who hasn't seen it; the boot
-        // path decides when (if ever) to mount it.
+        // Arm the onboarding coach for anyone who hasn't seen it; the
+        // boot path decides when (if ever) to start it. The resume
+        // position + ascii glyphs feed the rail when it launches.
+        self.coach_ascii = user_config.display.ascii_glyphs;
+        self.coach_resume_step = user_config
+            .ui
+            .coach_step
+            .min(crate::realm::coach::STEP_COUNT - 1);
         self.set_auto_tour(!user_config.ui.tour_seen);
         // Seed progressive feature tips (#115): the opt-out flag plus
         // the ids already shown so they never repeat.
@@ -3271,65 +3273,139 @@ impl<T: TerminalAdapter> Model<T> {
         self.auto_fix_opt_out_labels = opt_out_labels;
     }
 
-    /// Arm the auto-launch of the feature tour. `main.rs` passes
+    /// Arm the auto-launch of the onboarding coach. `main.rs` passes
     /// `!ui.tour_seen` so a brand-new install (or one upgraded into
-    /// the feature) gets the walkthrough once. `maybe_mount_tour`
+    /// the feature) gets the walkthrough once. `maybe_start_coach`
     /// consumes the flag at the right moment (after setup, or at
     /// startup for returning users).
     pub fn set_auto_tour(&mut self, pending: bool) {
         self.auto_tour_pending = pending;
     }
 
-    /// Launch the tour now if it's armed. Idempotent — mounting
-    /// clears the flag, so this is safe to call from multiple boot
-    /// paths (returning-user startup and first-run wizard finish).
-    pub fn maybe_mount_tour(&mut self) {
+    /// Start the coach now if it's armed. Idempotent — starting clears
+    /// the flag, so this is safe to call from multiple boot paths
+    /// (returning-user startup and first-run wizard finish).
+    pub fn maybe_start_coach(&mut self) {
         if self.auto_tour_pending {
-            self.mount_tour();
+            self.auto_tour_pending = false;
+            let at = self.coach_resume_step;
+            self.start_coach(at);
         }
     }
 
-    /// Mount the feature-tour overlay. Used by the `Shift-T` shortcut
-    /// (always) and by `maybe_mount_tour` (when armed). Clears the
-    /// auto-launch flag so it can't re-fire.
-    pub(crate) fn mount_tour(&mut self) {
-        self.mount_tour_at(0);
-    }
-
-    pub(crate) fn mount_tour_at(&mut self, step: usize) {
-        use crate::realm::components::tour::Tour;
+    /// Toggle the coach from the coach shortcut / `?`: end it if it's
+    /// up, else re-run it from the top. An explicit re-run always
+    /// restarts at step 1, unlike the auto-launch which resumes.
+    pub(crate) fn toggle_coach(&mut self) {
         self.auto_tour_pending = false;
-        if matches!(self.modal_stack.last(), Some(Id::Tour)) {
-            return;
+        if self.coach.is_some() {
+            self.end_coach();
+        } else {
+            self.start_coach(0);
         }
-        self.mount_modal(Id::Tour, Tour::at_step(step, self.catalog.clone()));
     }
 
-    fn start_tour_snippet_exercise(&mut self, return_step: usize, success_step: usize) {
-        let Some(terminal) = self.terminals.active_terminal_id() else {
-            self.flash_info("open an agent terminal to try this — or press → to skip");
+    /// Start the coach rail at `step`, seeding its per-step baseline
+    /// from the current sidebar cursor.
+    pub(crate) fn start_coach(&mut self, step: usize) {
+        self.auto_tour_pending = false;
+        let cursor = self.sidebar.cursor();
+        self.coach = Some(crate::realm::coach::Coach::new(
+            self.catalog.clone(),
+            step,
+            self.coach_ascii,
+            cursor,
+        ));
+        self.redraw = true;
+    }
+
+    /// Advance the coach past the current step (the keyboard / click
+    /// skip). Ending the coach when there's no next step.
+    pub(crate) fn coach_skip_step(&mut self) {
+        let cursor = self.sidebar.cursor();
+        let Some(coach) = self.coach.as_mut() else {
             return;
         };
-        if !self.terminals.terminal_is_agent(terminal) {
-            self.flash_info("the tour exercise needs an agent terminal — or press → to skip");
-            return;
+        let finished = coach.advance(cursor);
+        let step = coach.step_index();
+        self.persist_coach_step(step);
+        if finished {
+            self.end_coach();
         }
-        if return_step == crate::realm::components::tour::REPEAT_SNIPPET_STEP
-            && self.recent_snippets.is_empty()
-        {
-            self.flash_info("send a snippet first — or press → to skip this exercise");
-            return;
-        }
-        self.pop_modal();
-        self.set_modal_flow(ModalFlow::TourSnippet {
-            terminal,
-            return_step,
-            success_step,
-        });
-        self.mount_snippet_picker(String::new());
+        self.redraw = true;
     }
 
-    /// Persist `ui.tour_seen = true` so the tour stops auto-launching.
+    /// End the coach (skip-all / completion): persist `ui.tour_seen` so
+    /// it won't auto-launch again, and drop the rail.
+    pub(crate) fn end_coach(&mut self) {
+        if self.coach.take().is_some() {
+            self.mark_tour_seen();
+            self.redraw = true;
+        }
+    }
+
+    /// Note a real dispatched action the coach's goals care about (a
+    /// jump-to-signal). Called from `dispatch_action`.
+    pub(crate) fn note_coach_action(&mut self, action: &lazybox_tui_core::action::Action) {
+        use lazybox_tui_core::action::Action;
+        let Some(coach) = self.coach.as_mut() else {
+            return;
+        };
+        if matches!(
+            action,
+            Action::JumpToAsking | Action::JumpToFailingCi | Action::JumpToWorkspace
+        ) {
+            coach.note_jump();
+        }
+    }
+
+    /// Fold real model state into the coach each tick: advance a
+    /// satisfied step once its success line has lingered, ending the
+    /// coach when the last step completes. See `tick_tips` for the
+    /// surrounding tick discipline.
+    pub fn tick_coach(&mut self) {
+        if self.coach.is_none() {
+            return;
+        }
+        let snap = self.coach_snapshot();
+        let cursor = self.sidebar.cursor();
+        let coach = self.coach.as_mut().expect("coach present");
+        let just = coach.observe(&snap);
+        let advanced = (!just && coach.ready_to_advance()).then(|| coach.advance(cursor));
+        let step = coach.step_index();
+        if just || advanced.is_some() {
+            self.redraw = true;
+        }
+        if let Some(finished) = advanced {
+            self.persist_coach_step(step);
+            if finished {
+                self.end_coach();
+            }
+        }
+    }
+
+    /// Build the real-state snapshot the coach's goals read.
+    fn coach_snapshot(&self) -> crate::realm::coach::CoachSnapshot {
+        use crate::realm::coach::CoachFocus;
+        let focus = match self.focus {
+            PaneFocus::Sidebar => CoachFocus::Sidebar,
+            PaneFocus::Right => CoachFocus::Activity,
+            PaneFocus::Terminals => CoachFocus::Terminal,
+        };
+        crate::realm::coach::CoachSnapshot {
+            focus,
+            cursor: self.sidebar.cursor(),
+            agent_running: self.terminals.has_agent_terminal(),
+        }
+    }
+
+    /// Persist the coach's resume position so quitting mid-walkthrough
+    /// resumes where the user left off. Best-effort like `mark_tour_seen`.
+    fn persist_coach_step(&self, step: usize) {
+        lazybox_config::Config::save_with_async(move |c| c.ui.coach_step = step);
+    }
+
+    /// Persist `ui.tour_seen = true` so the coach stops auto-launching.
     /// Best-effort: a write failure just means it may re-prompt next
     /// boot, which is harmless.
     fn mark_tour_seen(&mut self) {
@@ -6403,6 +6479,12 @@ impl<T: TerminalAdapter> Model<T> {
             };
         let mut captured_area = Rect::default();
         let mut footer_overflow: Option<Rect> = None;
+        // The coach rail (#1460) is carved out of the pane area inside
+        // the draw closure so it never occludes a pane. Resolve its
+        // active/spotlight state out here (immutable borrow) so the
+        // closure's disjoint `&mut self.coach` render borrow is free.
+        let coach_active = self.coach.is_some();
+        let coach_spot = self.coach.as_ref().map(|c| c.current_spot());
         // Split the `terminal.draw` cost into *build* (walking the widget
         // tree into the back buffer — CPU) vs *flush* (diffing + writing
         // the frame to stdout — I/O that blocks on the host terminal).
@@ -6417,6 +6499,7 @@ impl<T: TerminalAdapter> Model<T> {
             let area = f.area();
             captured_area = area;
             let (pane_area, footer_area) = split_for_footer(area);
+            let (pane_area, coach_area) = split_coach(pane_area, coach_active);
             let right_bottom = if focus_mode {
                 let (header, body) = focus_mode_areas(pane_area);
                 crate::realm::components::focus_header::render(
@@ -6464,7 +6547,7 @@ impl<T: TerminalAdapter> Model<T> {
                     activity_mode,
                 );
                 self.sidebar.view_in(left, f);
-                if self.right.showing_overview() {
+                let terminal_rect = if self.right.showing_overview() {
                     // Group-header overview (#1442): no terminal to share
                     // with, so the overview takes the whole right column.
                     let full = right_top.union(right_bottom);
@@ -6483,7 +6566,21 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                     self.terminals.view_in(right_bottom, f);
                     right_bottom
+                };
+                // Coach spotlight (#1460): accent-frame the pane the
+                // current step is pointing at, over the just-rendered
+                // pane border.
+                if let Some(spot) = coach_spot {
+                    let target = match spot {
+                        crate::realm::coach::Spot::Sidebar => Some(left),
+                        crate::realm::coach::Spot::Terminal => Some(terminal_rect),
+                        crate::realm::coach::Spot::None => None,
+                    };
+                    if let Some(rect) = target {
+                        crate::realm::coach::spotlight(f, rect);
+                    }
                 }
+                terminal_rect
             };
 
             // Selection highlight overlay. Painted AFTER the terminal
@@ -6567,6 +6664,16 @@ impl<T: TerminalAdapter> Model<T> {
                 crate::realm::components::which_key::render_quit_hint(f, area, &keys);
             }
 
+            // Coach rail (#1460): drawn into its carved-out band below
+            // the panes and above the footer, so it never occludes a
+            // pane. Below the modal stack — a modal is a deliberate,
+            // temporary takeover the coach shouldn't fight.
+            if let Some(rail) = coach_area
+                && let Some(coach) = self.coach.as_mut()
+            {
+                coach.render(f, rail);
+            }
+
             // Modal stack last (highest z-order).
             if let Some(top) = self.modal_stack.last() {
                 self.app.view(top, f, area);
@@ -6615,22 +6722,6 @@ impl<T: TerminalAdapter> Model<T> {
                     // without a runner, just pop it.
                     self.pop_modal();
                 }
-            }
-            Msg::TourFinished => {
-                self.mark_tour_seen();
-                self.pop_modal();
-            }
-            Msg::TourTrySnippet => {
-                self.start_tour_snippet_exercise(
-                    crate::realm::components::tour::SEND_SNIPPET_STEP,
-                    crate::realm::components::tour::REPEAT_SNIPPET_STEP,
-                );
-            }
-            Msg::TourRepeatSnippet => {
-                self.start_tour_snippet_exercise(
-                    crate::realm::components::tour::REPEAT_SNIPPET_STEP,
-                    crate::realm::components::tour::REPEAT_SNIPPET_STEP + 1,
-                );
             }
             Msg::AppClose => {
                 self.quit = true;

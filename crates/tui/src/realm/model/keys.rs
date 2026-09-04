@@ -97,6 +97,31 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
+        // ── Coach rail meta-controls (#1460) ────────────────────────
+        // The coach advances on real actions, so it must be nearly
+        // transparent to input. Its only keyboard controls are two
+        // fixed chords that reach it only in a navigation pane (a live
+        // terminal owns Ctrl-n/Ctrl-e for the inner program) and never
+        // while a leader is armed: Ctrl-n skips the current step,
+        // Ctrl-e ends the coach. Both are also clickable on the rail.
+        if self.coach.is_some()
+            && self.focus != PaneFocus::Terminals
+            && self.leader.pending().is_none()
+            && !self.terminal_leader_armed
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            match key.code {
+                Key::Char('n') => {
+                    self.coach_skip_step();
+                    return;
+                }
+                Key::Char('e') => {
+                    self.end_coach();
+                    return;
+                }
+                _ => {}
+            }
+        }
         // ── Leader-chord completion (issues #126, #102) ─────────────
         // When a leader prefix is armed, THIS key completes the
         // sequence — resolved before anything else so the second press
@@ -1835,6 +1860,27 @@ impl<T: TerminalAdapter> Model<T> {
                     self.mount_help_ask();
                     self.redraw = true;
                     return;
+                }
+                // A left-click on the coach rail's skip / end tokens
+                // (#1460). The rail sits in its own carved band outside
+                // every pane rect, so like the footer this is the only
+                // handler that claims the click.
+                if matches!(button, crossterm::event::MouseButton::Left) {
+                    match self
+                        .coach
+                        .as_ref()
+                        .map(|c| c.on_click(m.column, m.row))
+                    {
+                        Some(crate::realm::coach::CoachClick::SkipStep) => {
+                            self.coach_skip_step();
+                            return;
+                        }
+                        Some(crate::realm::coach::CoachClick::End) => {
+                            self.end_coach();
+                            return;
+                        }
+                        _ => {}
+                    }
                 }
                 let right_click_span =
                     matches!(button, crossterm::event::MouseButton::Right).then(|| {

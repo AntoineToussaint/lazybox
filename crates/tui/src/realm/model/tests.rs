@@ -3297,60 +3297,31 @@ snippets:
         assert_eq!(m.recent_snippets, vec!["ls"]);
     }
 
+    /// The coach shortcut starts the rail as a non-modal (it never
+    /// enters the modal stack), and a dispatched jump action satisfies
+    /// the "notice work / jump to it" step — the coach reads real
+    /// dispatched actions, not keypresses (#1460).
     #[test]
-    fn tour_sends_and_repeats_through_the_real_picker() {
-        use crate::realm::components::tour::SEND_SNIPPET_STEP;
+    fn coach_starts_non_modal_and_notes_jump_actions() {
+        use lazybox_tui_core::action::Action;
 
-        let mut m = model_with_active_terminal_and_snippet(
-            "tour",
-            "\nsnippets:\n  rev:\n    description: Review\n    body: review the diff\n",
-            lazybox_ipc::TerminalKind::Agent("claude".into()),
+        let mut m = model_with_terminal();
+        assert!(m.coach.is_none());
+        m.toggle_coach();
+        assert!(m.coach.is_some(), "coach shortcut starts the rail");
+        assert!(
+            m.modal_stack.is_empty(),
+            "the coach is a docked rail, never a modal"
         );
-        m.modal_stack.clear();
-        m.mount_tour_at(SEND_SNIPPET_STEP);
-        m.update(Msg::TourTrySnippet);
-        assert_eq!(m.top_modal(), Some(&Id::SnippetPicker));
 
-        let first = m.handle_choice_picked(vec![ChoicePayload::Text("rev".into())]);
-        assert!(matches!(
-            first.as_slice(),
-            [IpcCommand::DeliverSnippet { .. }]
-        ));
-        assert!(m.recent_snippets.is_empty());
-        m.handle_daemon_event(lazybox_ipc::Event::SnippetDelivered {
-            terminal_id: lazybox_ipc::TerminalId(1),
-            session_key: "github:o/r#1".into(),
-            snippet_key: "rev".into(),
-            prompt: Some(lazybox_ipc::UserPrompt {
-                text: "review the diff".into(),
-                timestamp_ms: 611,
-                source: lazybox_ipc::PromptSource::Snippet {
-                    key: "rev".into(),
-                    category: String::new(),
-                },
-            }),
-        });
-        assert_eq!(m.top_modal(), Some(&Id::Tour));
-        assert_eq!(m.recent_snippets, vec!["rev"]);
-
-        m.update(Msg::TourRepeatSnippet);
-        assert_eq!(m.top_modal(), Some(&Id::SnippetPicker));
-        let repeat = m.handle_choice_picked(vec![ChoicePayload::Text("rev".into())]);
-        assert!(matches!(
-            repeat.as_slice(),
-            [IpcCommand::DeliverSnippet {
-                snippet_key,
-                ..
-            }] if snippet_key == "rev"
-        ));
-        m.handle_daemon_event(lazybox_ipc::Event::SnippetDelivered {
-            terminal_id: lazybox_ipc::TerminalId(1),
-            session_key: "github:o/r#1".into(),
-            snippet_key: "rev".into(),
-            prompt: None,
-        });
-        assert_eq!(m.top_modal(), Some(&Id::Tour));
-        assert!(m.modal_flow.is_none());
+        // Re-seat at the jump step and dispatch a jump: its goal fires.
+        m.start_coach(4);
+        m.note_coach_action(&Action::JumpToAsking);
+        let snap = m.coach_snapshot();
+        assert!(
+            m.coach.as_mut().expect("coach present").observe(&snap),
+            "a dispatched jump action completes the jump step"
+        );
     }
 
     /// Workspace attribution is not part of the client command: the daemon
@@ -7833,7 +7804,6 @@ mod stale_input_tests {
                 | Id::Error
                 | Id::Update
                 | Id::Polling
-                | Id::Tour
                 | Id::SyncStatus
                 | Id::Messages
                 | Id::ErrorInbox
@@ -7897,7 +7867,6 @@ mod stale_input_tests {
             Id::ConflictResolve,
             Id::SnippetPicker,
             Id::SkillPicker,
-            Id::Tour,
             Id::SyncStatus,
             Id::Messages,
             Id::ErrorInbox,

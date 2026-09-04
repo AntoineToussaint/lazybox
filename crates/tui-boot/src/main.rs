@@ -1971,9 +1971,9 @@ async fn run_embedded_realm(
             model.start_setup_wizard(report, sources);
         } else {
             // Returning user — setup already done, so there's no
-            // wizard to finish behind. Surface the tour now if it
+            // wizard to finish behind. Surface the coach now if it
             // hasn't been seen (e.g. an upgrade into this feature).
-            model.maybe_mount_tour();
+            model.maybe_start_coach();
         }
         if let Some(update) = available_update {
             model.show_update_if_new(update);

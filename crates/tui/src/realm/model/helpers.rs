@@ -441,6 +441,32 @@ pub(crate) fn keymap_config_warnings(
     warnings
 }
 
+/// Rows the coach rail occupies when it's up (#1460): objective +
+/// controls. Carved out of the pane area so the rail never overlaps a
+/// pane.
+pub(crate) const COACH_ROWS: u16 = 2;
+
+/// Carve the coach rail off the bottom of `area` (just above the
+/// footer) when the coach is `active` and enough rows remain for the
+/// panes underneath. Returns `(pane_area, Some(rail))` when it fits,
+/// `(area, None)` otherwise — the rail degrades to nothing on a tiny
+/// terminal rather than squeezing the panes into unusability.
+pub(crate) fn split_coach(area: Rect, active: bool) -> (Rect, Option<Rect>) {
+    if !active || area.height < COACH_ROWS + 6 {
+        return (area, None);
+    }
+    let pane = Rect {
+        height: area.height - COACH_ROWS,
+        ..area
+    };
+    let rail = Rect {
+        y: area.y + area.height - COACH_ROWS,
+        height: COACH_ROWS,
+        ..area
+    };
+    (pane, Some(rail))
+}
+
 /// Carve the bottom row off for the footer. Returns
 /// (pane_area, footer_area) — `pane_area` is what the three panes
 /// fill; `footer_area` is the 1-row hint/status line at the bottom.
@@ -1476,6 +1502,7 @@ pub(super) fn run_loop_step<T: TerminalAdapter>(
     model.tick_notice();
     model.tick_remote_notices();
     model.tick_tips();
+    model.tick_coach();
     model.tick_right();
     model.tick_working();
     model.tick_pr_details();

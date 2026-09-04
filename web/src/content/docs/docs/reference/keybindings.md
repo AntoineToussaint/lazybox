@@ -34,7 +34,7 @@ Work from any non-terminal pane. A focused terminal forwards keys to the PTY; pr
 | `t` | theme | Open the theme picker — arrow through the built-in palettes with a live preview, Enter to keep one. |
 | `]` | snippets | Browse the snippet workflow library — every `]]s<key>` shortcut with its description and body, so you can see what's available without already knowing the key. |
 | `?` | ask lazybox | Search the live keymap or ask how to use lazybox in plain language. |
-| `Shift-T` | tour | Launch the guided onboarding walkthrough (start from scratch, inbox, agents, snippet workflows + memory, juggling sessions, config). |
+| `Shift-T` | coach | Start (or re-run) the onboarding coach — a slim rail that gives you one objective at a time and confirms when you actually do it. |
 | `Shift-D` | sync diagnostics | Show recent provider-sync outcomes, last poll times, and errors. |
 | `Shift-M` | messages | Open the messages log — a scrollable, clearable history of recent footer notices, so an error that flashed and faded is still readable. |
 | `Shift-E` | errors | Open the Error Inbox — the daemon's durable, deduplicated error store (survives restart), grouped by class with counts. |

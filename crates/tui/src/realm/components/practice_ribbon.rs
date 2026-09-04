@@ -7,8 +7,10 @@
 //! that the simulator must be impossible to confuse with the real inbox —
 //! so this bar sits above every pane in a loud color, states plainly that
 //! nothing here is real, and always names the key that leaves. It is the
-//! visible half of the isolation guarantee (the daemon behind it serves a
-//! throwaway in-memory store, so there is nothing real to touch).
+//! visible half of the isolation guarantee; the enforcing half is that the
+//! practice flag can only be set with a `PracticeIsolation` proof (the
+//! home has been redirected to a throwaway dir, and the store is in-memory),
+//! so this bar can't be shown over a session that writes real state.
 //!
 //! Pure render — the quit key is passed in from `Model::view`.
 
@@ -72,7 +74,10 @@ mod tests {
             text.contains("not your real inbox"),
             "ribbon must disclaim real state"
         );
-        assert!(text.contains("q q to leave"), "ribbon must name the quit key");
+        assert!(
+            text.contains("q q to leave"),
+            "ribbon must name the quit key"
+        );
     }
 
     fn render_to_string(w: u16, quit_keys: &str) -> String {

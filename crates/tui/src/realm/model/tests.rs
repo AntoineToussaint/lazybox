@@ -27780,10 +27780,15 @@ mod practice_chrome_tests {
 
     #[test]
     fn practice_session_paints_the_ribbon() {
+        // Minting the isolation proof sets the process-global home
+        // override, so serialize against the other LAZYBOX_HOME mutators;
+        // the guard reverts it at end of scope.
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_guard, proof) = lazybox_core::paths::redirect_home_for_practice(std::env::temp_dir());
         let (client, _server) = channel::pair();
         let mut m = Model::new_for_test(client, Size::new(120, 30))
             .expect("model")
-            .with_practice();
+            .with_practice(proof);
         m.view();
         let out = screen(&m);
         assert!(out.contains("PRACTICE"), "practice ribbon missing:\n{out}");

@@ -5660,6 +5660,39 @@ mod getting_started_tests {
         });
         assert!(!sb.is_getting_started());
     }
+
+    /// The `lazybox practice` nudge must render ABOVE the orientation
+    /// hints (`? / ⇧T / ⇧R`): the panel clips from the bottom on a short
+    /// pane, so the more valuable discovery must not be the first thing
+    /// lost (#1458).
+    #[test]
+    fn getting_started_shows_practice_above_orientation_hints() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut sb = Sidebar::new(PaneId::new(1));
+        assert!(sb.is_getting_started());
+        let backend = TestBackend::new(48, 60);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .expect("draw");
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        let row_of = |needle: &str| rows.iter().position(|r| r.contains(needle));
+        let practice = row_of("lazybox practice").expect("practice nudge rendered");
+        let refresh = row_of("refresh inbox").expect("orientation hint rendered");
+        assert!(
+            practice < refresh,
+            "practice nudge (row {practice}) must sit above the orientation hints (row {refresh})"
+        );
+    }
 }
 
 mod work_target_tests {

@@ -1222,12 +1222,14 @@ async fn run_demo(
     practice: bool,
 ) -> anyhow::Result<()> {
     // Practice mode redirects the whole lazybox home to a throwaway dir so
-    // nothing (config, store, runtime) touches the user's real state; held
-    // for the life of the session (#1458). `--demo` keeps the real home so
-    // screenshots reflect the user's theme.
-    let _practice_home = practice
-        .then(scenario::isolate_practice_home)
-        .transpose()?;
+    // nothing (config, store, runtime) touches the user's real state (#1458).
+    // `_practice_home` is held for the life of the session (drop reverts the
+    // home + deletes the dir); `practice_proof` is the token `with_practice`
+    // requires, so chrome and isolation are inseparable. `--demo` keeps the
+    // real home so screenshots reflect the user's theme.
+    let practice = practice.then(scenario::isolate_practice_home).transpose()?;
+    let practice_proof = practice.as_ref().map(|(_home, proof)| *proof);
+    let _practice_home = practice.map(|(home, _proof)| home);
     let fixture = scenario::DemoFixture::seed()?;
     let repos: std::collections::BTreeSet<&str> =
         fixture.workspaces.iter().map(|w| w.repo.as_str()).collect();
@@ -1279,8 +1281,8 @@ async fn run_demo(
     let snippets = fixture.snippets.clone();
     tokio::task::spawn_blocking(move || {
         let mut model = lazybox_tui::realm::Model::new(client, snippets)?;
-        if practice {
-            model = model.with_practice();
+        if let Some(proof) = practice_proof {
+            model = model.with_practice(proof);
         }
         if let Some(p) = preselect {
             model = model.with_preselect(p);

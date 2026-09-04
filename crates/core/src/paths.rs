@@ -36,9 +36,56 @@
 //! `tmux -L lazybox-dev attach` shows the dev one — no cross-talk.
 
 use std::path::PathBuf;
+use std::sync::RwLock;
+
+/// In-process home override for the practice world (`lazybox practice`,
+/// #1458). Takes precedence over `LAZYBOX_HOME`. This is a lock rather
+/// than an env var on purpose: the practice session sets it *after* the
+/// async runtime is already up, and mutating the environment there is a
+/// data race against any concurrent `getenv` (`set_var` is `unsafe` for
+/// exactly this reason). A lock is safe to set at any time.
+static PRACTICE_HOME: RwLock<Option<PathBuf>> = RwLock::new(None);
+
+fn practice_home_override() -> Option<PathBuf> {
+    PRACTICE_HOME
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Zero-sized proof that the lazybox home has been redirected to an
+/// isolated practice directory. It is minted ONLY by
+/// [`redirect_home_for_practice`], so code that turns on practice-mode
+/// chrome (`Model::with_practice`) must first have isolated the home —
+/// the "unmistakable, consequence-free" invariant can't drift from the
+/// thing that renders it (#1458).
+#[derive(Clone, Copy)]
+pub struct PracticeIsolation(());
+
+/// Undoes the home redirect when dropped, so the override never leaks
+/// past the practice session (or, in tests, past the case that set it).
+#[must_use = "hold this for the life of the practice session; dropping it reverts the home"]
+pub struct PracticeHomeGuard(());
+
+impl Drop for PracticeHomeGuard {
+    fn drop(&mut self) {
+        *PRACTICE_HOME.write().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// Redirect every lazybox path (config, store, runtime) under `dir` for
+/// the life of the returned guard, and hand back proof it happened. The
+/// caller owns the throwaway directory and holds the guard for the whole
+/// session; when both drop, the override reverts and the directory is
+/// removed. See [`PracticeIsolation`].
+pub fn redirect_home_for_practice(dir: PathBuf) -> (PracticeHomeGuard, PracticeIsolation) {
+    *PRACTICE_HOME.write().unwrap_or_else(|e| e.into_inner()) = Some(dir);
+    (PracticeHomeGuard(()), PracticeIsolation(()))
+}
 
 /// Profile root. Defaults to `$HOME/.lazybox`; override with
-/// `LAZYBOX_HOME`.
+/// `LAZYBOX_HOME`, or — for the isolated practice world — the in-process
+/// [`redirect_home_for_practice`] override, which wins over both.
 ///
 /// **Why an env var, not a CLI flag.** The polling task, the daemon
 /// socket-service, the spawn handler, and the config loader all
@@ -48,6 +95,9 @@ use std::path::PathBuf;
 /// and works for every subcommand (`lazybox`, `lazybox server start`,
 /// `lazybox server api`) without per-subcommand wiring.
 pub fn home() -> PathBuf {
+    if let Some(dir) = practice_home_override() {
+        return dir;
+    }
     if let Ok(dir) = std::env::var("LAZYBOX_HOME")
         && !dir.is_empty()
     {
@@ -271,6 +321,20 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _g = EnvGuard::set("LAZYBOX_HOME", "/tmp/lazybox-test-xyz");
         assert_eq!(home(), PathBuf::from("/tmp/lazybox-test-xyz"));
+    }
+
+    #[test]
+    fn practice_override_wins_over_env_and_reverts_on_drop() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = EnvGuard::set("LAZYBOX_HOME", "/tmp/lazybox-real-home");
+        let practice = PathBuf::from("/tmp/lazybox-practice-xyz");
+        {
+            let (_guard, _proof) = redirect_home_for_practice(practice.clone());
+            assert_eq!(home(), practice, "practice override must beat LAZYBOX_HOME");
+        }
+        // Dropping the guard reverts to the env value — the override never
+        // leaks past the session that set it.
+        assert_eq!(home(), PathBuf::from("/tmp/lazybox-real-home"));
     }
 
     #[test]

@@ -1643,9 +1643,10 @@ pub struct Model<T: TerminalAdapter> {
     /// True when this session is the isolated **practice world** (`lazybox
     /// practice`) rather than the user's real inbox. It renders an
     /// unmistakable chrome ribbon so the simulator can never be confused
-    /// with real state, and it is set by the boot entrypoint — the daemon
-    /// behind it serves an in-memory store over a throwaway repo, so
-    /// nothing here touches the real config, store, or any remote (#1458).
+    /// with real state. Set only via [`Self::with_practice`], which
+    /// requires a `PracticeIsolation` proof — so the chrome can never be
+    /// shown without the home actually having been redirected first, the
+    /// two can't drift apart (#1458).
     practice: bool,
     /// Watches the inbound daemon-event channel depth after each
     /// drain. A backlog that climbs tick-over-tick means the TUI is
@@ -2776,9 +2777,12 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Mark this session as the isolated practice world (`lazybox
-    /// practice`). Turns on the unmistakable chrome ribbon; see the
-    /// `practice` field (#1458).
-    pub fn with_practice(mut self) -> Self {
+    /// practice`) and turn on the unmistakable chrome ribbon. Requires a
+    /// [`lazybox_core::paths::PracticeIsolation`] proof, which is minted
+    /// only by redirecting the home to a throwaway dir — so the "nothing
+    /// real to touch" chrome can't be shown on a session that still writes
+    /// to the real config (#1458). See the `practice` field.
+    pub fn with_practice(mut self, _proof: lazybox_core::paths::PracticeIsolation) -> Self {
         self.practice = true;
         self
     }

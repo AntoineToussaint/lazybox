@@ -55,6 +55,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use lazybox_core::paths;
 use lazybox_core::{
     CiStatus, Label, Mergeable, ReviewStatus, SessionKey, SessionKind, Task, TaskId, TaskRole,
     TaskState, Workspace, WorkspaceSession,
@@ -67,27 +68,38 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use tokio::sync::{broadcast, mpsc};
 
-/// Point `LAZYBOX_HOME` at a throwaway directory so the practice world
-/// (`lazybox practice`, #1458) writes nothing to the user's real config,
-/// store, or runtime state. The daemon's store is already an in-memory
-/// `MemoryStore`, but UI-state persistence (theme, stars, pins,
+/// Redirect the whole lazybox home to a throwaway directory so the
+/// practice world (`lazybox practice`, #1458) writes nothing to the user's
+/// real config, store, or runtime state. The daemon's store is already an
+/// in-memory `MemoryStore`, but UI-state persistence (theme, stars, pins,
 /// `tour_seen`, …) resolves through `paths::config_yaml()` — redirecting
-/// the home isolates all of it in one move. The returned `TempDir` owns
-/// the directory; hold it for the life of the session (drop = delete).
+/// the home isolates all of it in one move.
 ///
-/// This is a dedicated practice *process*, so mutating the process-global
-/// env is appropriate; it is set once at the top of `run_demo` before the
-/// daemon or model touch any path.
-pub fn isolate_practice_home() -> anyhow::Result<TempDir> {
-    let home = tempfile::Builder::new()
+/// Returns the [`PracticeHome`] guard (hold it for the life of the
+/// session — dropping it reverts the home and deletes the directory) and
+/// the [`PracticeIsolation`] proof that `Model::with_practice` requires,
+/// so chrome and isolation are minted together and cannot drift apart.
+pub fn isolate_practice_home() -> anyhow::Result<(PracticeHome, paths::PracticeIsolation)> {
+    let dir = tempfile::Builder::new()
         .prefix("lazybox-practice-")
         .tempdir()
         .map_err(|e| anyhow::anyhow!("create practice home: {e}"))?;
-    // SAFETY: called at process start on the practice path, before the
-    // daemon/model threads are spawned; nothing reads `LAZYBOX_HOME`
-    // concurrently at this point.
-    unsafe { std::env::set_var("LAZYBOX_HOME", home.path()) };
-    Ok(home)
+    let (guard, proof) = paths::redirect_home_for_practice(dir.path().to_path_buf());
+    Ok((
+        PracticeHome {
+            _override: guard,
+            _dir: dir,
+        },
+        proof,
+    ))
+}
+
+/// Owns the practice session's throwaway home. Field order matters:
+/// `_override` reverts the home redirect *before* `_dir` deletes the
+/// directory, so no path resolves to a dir mid-deletion during teardown.
+pub struct PracticeHome {
+    _override: paths::PracticeHomeGuard,
+    _dir: TempDir,
 }
 
 /// A seeded workspace plus the handles the scenario script needs to address
@@ -759,33 +771,22 @@ mod tests {
         );
     }
 
-    /// `isolate_practice_home` redirects every real-state path under a
-    /// throwaway dir, so config / store / runtime writes during a practice
-    /// session can't reach the user's real home (criterion #4). Asserting
-    /// path *resolution* (a pure function of the env just set) is race-free:
-    /// no other test mutates `LAZYBOX_HOME`.
+    /// `isolate_practice_home` builds a throwaway home and mints the
+    /// isolation proof together with the guard, so a practice session
+    /// can't get chrome without isolation (#1458). The dir lives while the
+    /// guard is held and is deleted on drop, so nothing leaks past the
+    /// session. (The redirect-vs-`home()` semantics are proven race-free
+    /// in `lazybox_core::paths`; asserting them here would read the shared
+    /// override and race sibling tests, so this stays local to the guard.)
     #[test]
-    fn practice_home_redirects_config_and_store_paths() {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var_os("LAZYBOX_HOME");
-
-        let home = isolate_practice_home().expect("isolated home");
-        let root = home.path();
-        assert!(
-            lazybox_core::paths::config_yaml().starts_with(root),
-            "config must resolve under the practice home"
-        );
-        assert!(
-            lazybox_core::paths::state_db().starts_with(root),
-            "store must resolve under the practice home"
-        );
-
-        // Restore so sibling tests keep seeing the real home.
-        match prev {
-            Some(v) => unsafe { std::env::set_var("LAZYBOX_HOME", v) },
-            None => unsafe { std::env::remove_var("LAZYBOX_HOME") },
-        }
+    fn isolate_practice_home_owns_a_throwaway_dir_deleted_on_drop() {
+        let root = {
+            let (guard, _proof) = isolate_practice_home().expect("isolated home");
+            let dir = guard._dir.path().to_path_buf();
+            assert!(dir.is_dir(), "a real throwaway home is created");
+            dir
+        };
+        assert!(!root.exists(), "the throwaway practice dir must be deleted");
     }
 
     #[tokio::test]

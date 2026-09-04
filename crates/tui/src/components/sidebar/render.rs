@@ -1358,17 +1358,20 @@ impl Sidebar {
             hint("s", "shell"),
             hint("e", "editor"),
             Line::raw(""),
-            Line::from(Span::styled(" new here?", prose)),
-            hint("?", "Ask Lazybox"),
-            hint("⇧T", "tour"),
-            hint("⇧R", "refresh inbox"),
-            Line::raw(""),
+            // Above the orientation hints below: on a short pane the panel
+            // clips from the bottom, and a safe place to practice is the
+            // more valuable thing for a new user to still see (#1458).
             Line::from(Span::styled(" want a safe place to", prose)),
-            Line::from(Span::styled(" practise first? quit and", prose)),
+            Line::from(Span::styled(" practice first? quit and", prose)),
             Line::from(vec![
                 Span::styled(" run ", prose),
                 Span::styled("lazybox practice", key),
             ]),
+            Line::raw(""),
+            Line::from(Span::styled(" new here?", prose)),
+            hint("?", "Ask Lazybox"),
+            hint("⇧T", "tour"),
+            hint("⇧R", "refresh inbox"),
         ];
         frame.render_widget(Paragraph::new(lines), inner);
     }

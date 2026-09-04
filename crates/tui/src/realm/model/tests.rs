@@ -45,6 +45,36 @@ mod scope_removal_prompt_tests {
         assert!(!prompt.contains("more"));
     }
 
+    /// `Confirm` truncates the question from the BOTTOM (buttons are
+    /// pinned to the modal's last row). So on a short terminal the repo
+    /// list must be the thing that falls off — never the DELETES
+    /// warning, the mute escape hatch, or the question. Freeze that
+    /// ordering: every decision-critical phrase precedes the first repo
+    /// row in the string.
+    #[test]
+    fn decision_critical_text_precedes_the_truncatable_list() {
+        let repos = vec![
+            ("obin-ai/lazybox".to_string(), 12),
+            ("acme/api".to_string(), 4),
+        ];
+        let prompt = format_scope_removal_prompt(&repos, 16);
+        let first_repo = prompt.find("  obin-ai/lazybox").expect("repo list present");
+        for phrase in [
+            "DELETES their 16 workspace(s)",
+            "press z on its",
+            "Remove and delete?",
+        ] {
+            let at = prompt
+                .find(phrase)
+                .unwrap_or_else(|| panic!("missing {phrase:?}"));
+            assert!(
+                at < first_repo,
+                "{phrase:?} must come before the repo list so it survives \
+                 bottom-up truncation: {prompt}"
+            );
+        }
+    }
+
     #[test]
     fn caps_the_list_and_trails_with_a_more_count() {
         let repos: Vec<(String, usize)> = (0..9).map(|i| (format!("org/repo{i}"), 1)).collect();

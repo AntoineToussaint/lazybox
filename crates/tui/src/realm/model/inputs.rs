@@ -2002,13 +2002,23 @@ showing keybinding search only",
 }
 
 /// Build the safe-unsubscribe confirm prompt (#1474). It names every
-/// affected repo with its workspace count, loudest first, capped so the
-/// buttons can't be pushed off a short terminal.
+/// affected repo with its workspace count, loudest first, capped at
+/// `CAP` with a `+N more` trailer.
+///
+/// The decision-critical text — the DELETES magnitude, the `z`-to-mute
+/// escape hatch, and the question — comes FIRST, with the repo list
+/// last. `Confirm` pins the Y/N buttons to the modal's bottom row and
+/// renders the question top-down, truncating any overflow from the
+/// bottom (`confirm.rs`). So on a terminal too short for the whole
+/// prompt it's the repo names that fall off, never the warning or the
+/// mute hint.
 pub(super) fn format_scope_removal_prompt(repos: &[(String, usize)], total: usize) -> String {
     const CAP: usize = 6;
     let mut prompt = format!(
         "Removing {} repo(s) DELETES their {total} workspace(s) — \
-         notes, read state, and stars included:\n\n",
+         notes, read state, and stars included. To just quiet a repo \
+         without losing anything, press z on its header (mute) instead.\n\n\
+         Remove and delete?\n\nAffected repos:\n",
         repos.len(),
     );
     for (repo, count) in repos.iter().take(CAP) {
@@ -2017,10 +2027,6 @@ pub(super) fn format_scope_removal_prompt(repos: &[(String, usize)], total: usiz
     if repos.len() > CAP {
         prompt.push_str(&format!("  +{} more\n", repos.len() - CAP));
     }
-    prompt.push_str(
-        "\nTo just quiet a repo without losing anything, press z on its \
-         header (mute) instead. Remove and delete?",
-    );
     prompt
 }
 

@@ -210,10 +210,15 @@ bearer, so an unauthenticated caller on the port gets nothing. Beyond that:
   restart-surviving agent keeps working (see §7b). Verified by unit tests
   plus an end-to-end HTTP round trip through the transport (auth accepted /
   rejected).
-- **Phase 1 — notes blackboard:** `post_note` / `read_notes` over kv
+- **Phase 1 — notes blackboard: ✅ landed.** `post_note` / `read_notes` over kv
   (`lazybox:note:*`), with per-scope pruning. This is the primary medium.
-- **Phase 2 — push + growth:** `notify_session` (wrap existing inject);
-  optional `tags`-driven structure once usage justifies it.
+- **Phase 2 — push: ✅ landed.** `notify_session` wraps the existing
+  settle-gated inject (`handle_inject_prompt`, the same path `/v1/agents/inject`
+  and the TUI's send-to-session use) as one MCP tool, closing the two-way bus.
+  A self-notify is rejected (it would inject into the caller's own composer and
+  could loop); a target with no live agent comes back as an error tool result.
+  The optional `tags`-driven structuring of notes stays deferred until usage
+  justifies it.
 
 The Phase 0 integration questions from §7a resolved in code: `rmcp`'s
 streamable-HTTP service wraps onto the **existing hyper stack** via

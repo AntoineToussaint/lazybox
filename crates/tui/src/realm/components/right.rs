@@ -63,6 +63,13 @@ impl Right {
         self.inner.showing_overview()
     }
 
+    /// Rows the Activity pane would fill at its natural content height —
+    /// what `layout::fit_activity_height` shrinks the reserved row to
+    /// (#1469).
+    pub fn natural_height(&self) -> u16 {
+        self.inner.natural_height()
+    }
+
     /// The projected overview, if any (read by the model's tests).
     pub fn overview(&self) -> Option<&crate::components::repo_overview::RepoOverview> {
         self.inner.overview()

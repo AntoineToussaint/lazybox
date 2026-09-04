@@ -1123,6 +1123,12 @@ pub struct UiSection {
     /// Right-top (activity) row height as a percentage of the
     /// right column. None = use the default (25%).
     pub right_top_pct: Option<u16>,
+    /// True once the user has deliberately chosen the activity row's
+    /// height (a splitter drag or Shift-↑/↓). When set, `right_top_pct`
+    /// is honored verbatim instead of being shrunk to fit content. None
+    /// = never resized, so the content-fit still applies.
+    #[serde(default)]
+    pub activity_user_resized: Option<bool>,
     /// How long the cursor must sit on an unread activity row
     /// before the daemon auto-marks it read. None = 1 second (the
     /// historical default). Yazi-ish: long enough to scan past,
@@ -1329,6 +1335,7 @@ impl Default for UiSection {
             theme: None,
             sidebar_pct: None,
             right_top_pct: None,
+            activity_user_resized: None,
             auto_mark_delay: None,
             quit_double_tap_window: None,
             terminal_escape_char: None,

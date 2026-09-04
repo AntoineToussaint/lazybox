@@ -53,6 +53,13 @@ pub(crate) struct LayoutCtx {
     /// is still applied so a fresh user on a wide monitor doesn't
     /// get a 160-col sidebar staring back at them.
     pub sidebar_user_resized: bool,
+    /// True iff the user has explicitly chosen the Activity row's
+    /// height (a splitter drag or Shift-↑/↓). When true, the
+    /// content-fit shrink (`fit_activity_height`) is skipped and the
+    /// percentage is honored verbatim, blank rows and all — the same
+    /// "default ≠ user-chosen" rule `sidebar_user_resized` applies to
+    /// the sidebar width.
+    pub activity_user_resized: bool,
 }
 
 impl LayoutCtx {
@@ -63,6 +70,7 @@ impl LayoutCtx {
             last_area: Rect::default(),
             active_drag: None,
             sidebar_user_resized: false,
+            activity_user_resized: false,
         }
     }
 
@@ -79,12 +87,24 @@ impl LayoutCtx {
     /// reasserted on every launch; users who want a deliberately
     /// wider sidebar nudge it at runtime (Shift-Right or drag), which
     /// flips the flag in-session.
-    pub fn apply_persisted(&mut self, sidebar_pct: Option<u16>, right_top_pct: Option<u16>) {
+    pub fn apply_persisted(
+        &mut self,
+        sidebar_pct: Option<u16>,
+        right_top_pct: Option<u16>,
+        activity_user_resized: Option<bool>,
+    ) {
         if let Some(s) = sidebar_pct {
             self.sidebar_pct = clamp_pct(s as i16);
         }
         if let Some(t) = right_top_pct {
             self.right_top_pct = clamp_pct(t as i16);
+        }
+        // Unlike the sidebar's absolute-column cap (which is deliberately
+        // reasserted every launch), a deliberately-resized activity row
+        // must survive a restart: the persisted percentage alone would be
+        // re-shrunk by the content-fit.
+        if let Some(resized) = activity_user_resized {
+            self.activity_user_resized = resized;
         }
     }
 
@@ -153,6 +173,11 @@ impl LayoutCtx {
                 false
             }
             DragTarget::ActivityTerminals => {
+                // Grabbing the splitter is a deliberate height choice —
+                // mark it on the first movement so the content-fit shrink
+                // stops fighting the pointer (the pane tracks the drag
+                // rather than snapping back to its fitted height).
+                self.activity_user_resized = true;
                 let (_, right_top_rect, right_bottom_rect) = pane_areas(
                     self.last_area,
                     self.sidebar_pct,
@@ -189,6 +214,11 @@ impl LayoutCtx {
                 // width, default-cap doesn't apply" signal.
                 self.sidebar_user_resized = true;
             }
+            if new_top != self.right_top_pct {
+                // Shift-↑/↓ is an explicit height choice — honor it
+                // verbatim and stop fitting the Activity row to content.
+                self.activity_user_resized = true;
+            }
             self.sidebar_pct = new_sidebar;
             self.right_top_pct = new_top;
             self.persist();
@@ -197,13 +227,51 @@ impl LayoutCtx {
         false
     }
 
-    /// Best-effort save of the current split percentages.
+    /// Adopt the height the content-fit is currently *displaying* as the
+    /// manual height: snap `right_top_pct` to it, mark the row user-set,
+    /// and persist. Called when a Shift-↑/↓ nudge first takes manual
+    /// control, so the nudge that follows grows / shrinks from what's on
+    /// screen instead of jumping back to the stored percentage the fit had
+    /// been overriding — without this, a Shift-↑ meant to shrink a fitted
+    /// pane would instead *grow* it to the full percentage. No-op (returns
+    /// `false`) once the user already took manual control, or before the
+    /// viewport is known. Returns `true` when it adopted a new height.
+    pub fn adopt_fitted_activity_height(&mut self, natural: u16) -> bool {
+        if self.activity_user_resized {
+            return false;
+        }
+        let (_, right_top, right_bottom) = pane_areas(
+            self.last_area,
+            self.sidebar_pct,
+            self.right_top_pct,
+            self.sidebar_user_resized,
+        );
+        let column = right_top.height + right_bottom.height;
+        if column == 0 {
+            return false;
+        }
+        let fitted =
+            fit_activity_height((Rect::default(), right_top, right_bottom), natural, false)
+                .1
+                .height;
+        self.right_top_pct = clamp_pct((fitted as i32 * 100 / column as i32) as i16);
+        self.activity_user_resized = true;
+        self.persist();
+        true
+    }
+
+    /// Best-effort save of the current split percentages. The activity
+    /// row's user-resized flag rides along so a deliberate height survives
+    /// a restart — persisting the percentage without it would let the
+    /// content-fit re-cap the value the user chose.
     pub fn persist(&self) {
         let s = self.sidebar_pct;
         let t = self.right_top_pct;
+        let activity_resized = self.activity_user_resized;
         lazybox_config::Config::save_with_async(move |c| {
             c.ui.sidebar_pct = Some(s);
             c.ui.right_top_pct = Some(t);
+            c.ui.activity_user_resized = Some(activity_resized);
         });
     }
 }
@@ -276,6 +344,48 @@ pub(crate) fn pane_areas(
 /// carrying the counts that matter (new activity / failing CI) above
 /// the terminal.
 pub(crate) const ACTIVITY_SUMMARY_HEIGHT: u16 = 1;
+
+/// Cap on the Activity row's share of the right column when it's being
+/// fit to content (#1469). Even a chatty feed keeps the majority of the
+/// column with the agent's terminal.
+pub(crate) const ACTIVITY_MAX_PCT: u16 = 40;
+
+/// Shrink the Activity row (`right_top`) to the rows its content would
+/// actually fill (`natural`), handing what it gives up to the terminal
+/// stack (`right_bottom`) below. Runs before [`apply_activity_mode`], so
+/// `Summary` / `Hidden` (which replace the height outright) are
+/// unaffected.
+///
+/// - **Only ever shrinks.** A pane whose content overflows its
+///   percentage keeps the percentage — a `natural` above the current
+///   height is ignored.
+/// - **Capped at [`ACTIVITY_MAX_PCT`]** of the right column, so a chatty
+///   feed can't crowd the terminal even when the percentage is set high.
+/// - **Skipped once the user has chosen a height** (`user_set`): a
+///   deliberate drag / Shift-↑↓ is honored verbatim, blank rows and all.
+pub(crate) fn fit_activity_height(
+    rects: (Rect, Rect, Rect),
+    natural: u16,
+    user_set: bool,
+) -> (Rect, Rect, Rect) {
+    let (sidebar, right_top, right_bottom) = rects;
+    if user_set {
+        return rects;
+    }
+    let column = right_top.height + right_bottom.height;
+    let cap = (column as u32 * ACTIVITY_MAX_PCT as u32 / 100) as u16;
+    let fitted = natural.min(right_top.height).min(cap);
+    let top = Rect {
+        height: fitted,
+        ..right_top
+    };
+    let bottom = Rect {
+        y: right_top.y + fitted,
+        height: right_top.height + right_bottom.height - fitted,
+        ..right_bottom
+    };
+    (sidebar, top, bottom)
+}
 
 /// Resize the activity row for the pane's [`ActivityPaneMode`], handing
 /// whatever it gives up to the terminal stack below it:
@@ -448,15 +558,15 @@ mod tests {
     fn apply_persisted_clamps_into_legal_range() {
         let mut c = LayoutCtx::new();
         // Below min → clamped up.
-        c.apply_persisted(Some(0), Some(0));
+        c.apply_persisted(Some(0), Some(0), None);
         assert_eq!(c.sidebar_pct, SPLIT_MIN);
         assert_eq!(c.right_top_pct, SPLIT_MIN);
         // Above max → clamped down.
-        c.apply_persisted(Some(99), Some(99));
+        c.apply_persisted(Some(99), Some(99), None);
         assert_eq!(c.sidebar_pct, SPLIT_MAX);
         assert_eq!(c.right_top_pct, SPLIT_MAX);
         // None leaves the existing value alone.
-        c.apply_persisted(None, None);
+        c.apply_persisted(None, None, None);
         assert_eq!(c.sidebar_pct, SPLIT_MAX);
     }
 
@@ -469,7 +579,7 @@ mod tests {
         // screen. The cap must reassert across launches; only an
         // explicit runtime nudge / drag lifts it.
         let mut c = LayoutCtx::new();
-        c.apply_persisted(Some(40), None);
+        c.apply_persisted(Some(40), None, None);
         assert!(!c.sidebar_user_resized);
         // On a 250-cell ultrawide, 40% × 250 = 100 cells, which the
         // cap allows; the test for the actual cap kicking in lives
@@ -753,5 +863,162 @@ mod tests {
             c.hit_test_splitter(v_x, 10, sidebar, hidden_top, false),
             Some(DragTarget::SidebarRight),
         );
+    }
+
+    #[test]
+    fn fit_activity_shrinks_a_nearly_empty_pane_to_content() {
+        // 100×50 area, 25% default → right_top ≈ 12 rows. Content only
+        // needs 6: shrink to 6 and hand the other rows to the terminal.
+        let c = ctx();
+        let rects = pane_areas(
+            area(),
+            c.sidebar_pct,
+            c.right_top_pct,
+            c.sidebar_user_resized,
+        );
+        let (_, right_top, right_bottom) = rects;
+        let column = right_top.height + right_bottom.height;
+        let (sidebar, top, bottom) = fit_activity_height(rects, 6, false);
+        assert_eq!(sidebar, rects.0, "sidebar untouched");
+        assert_eq!(top.height, 6, "activity row fits its content");
+        assert_eq!(top.y, right_top.y);
+        assert_eq!(bottom.y, right_top.y + 6, "terminal takes over below");
+        assert_eq!(
+            top.height + bottom.height,
+            column,
+            "column height is conserved"
+        );
+    }
+
+    #[test]
+    fn fit_activity_only_ever_shrinks() {
+        // Content that overflows the percentage keeps the percentage —
+        // the fit never grows the row into the terminal.
+        let c = ctx();
+        let rects = pane_areas(
+            area(),
+            c.sidebar_pct,
+            c.right_top_pct,
+            c.sidebar_user_resized,
+        );
+        let unfitted = rects.1.height;
+        let (_, top, bottom) = fit_activity_height(rects, 999, false);
+        assert_eq!(top.height, unfitted, "row keeps its percentage");
+        assert_eq!(bottom, rects.2, "terminal is untouched");
+    }
+
+    #[test]
+    fn fit_activity_caps_at_the_max_pct() {
+        // A tall persisted percentage (60%) with a chatty feed is still
+        // capped at ACTIVITY_MAX_PCT of the column so the terminal keeps
+        // the majority.
+        let mut c = ctx();
+        c.right_top_pct = 60;
+        let rects = pane_areas(
+            area(),
+            c.sidebar_pct,
+            c.right_top_pct,
+            c.sidebar_user_resized,
+        );
+        let (_, right_top, right_bottom) = rects;
+        let column = right_top.height + right_bottom.height;
+        let cap = column * ACTIVITY_MAX_PCT / 100;
+        let (_, top, _) = fit_activity_height(rects, 999, false);
+        assert_eq!(
+            top.height, cap,
+            "capped at {ACTIVITY_MAX_PCT}% of the column"
+        );
+        assert!(top.height < right_top.height, "the cap shrank the 60% row");
+    }
+
+    #[test]
+    fn fit_activity_is_skipped_once_the_user_chose_a_height() {
+        // With `user_set`, the percentage is honored verbatim — blank
+        // rows and all — regardless of how little content there is.
+        let c = ctx();
+        let rects = pane_areas(
+            area(),
+            c.sidebar_pct,
+            c.right_top_pct,
+            c.sidebar_user_resized,
+        );
+        assert_eq!(fit_activity_height(rects, 3, true), rects);
+    }
+
+    #[test]
+    fn dragging_the_horizontal_splitter_marks_the_activity_row_user_set() {
+        let mut c = ctx();
+        assert!(!c.activity_user_resized);
+        c.update_drag(DragTarget::ActivityTerminals, 60, 30);
+        assert!(
+            c.activity_user_resized,
+            "a splitter drag opts the row out of content-fit"
+        );
+    }
+
+    #[test]
+    fn shift_up_down_marks_the_activity_row_user_set() {
+        let mut c = ctx();
+        assert!(!c.activity_user_resized);
+        // A vertical nudge changes right_top_pct → user-set.
+        assert!(c.nudge_splits(0, SPLIT_STEP));
+        assert!(c.activity_user_resized);
+        // A horizontal-only nudge leaves the activity flag alone.
+        let mut c2 = ctx();
+        assert!(c2.nudge_splits(SPLIT_STEP, 0));
+        assert!(!c2.activity_user_resized);
+    }
+
+    #[test]
+    fn adopt_fitted_activity_height_snaps_pct_to_the_displayed_height() {
+        // 100×50 area, 25% default → right_top ≈ 12 rows. Content only
+        // needs 10 rows, so the fit displays 10 = 20% of the 50-row
+        // column. Adopting must set the stored pct to 20, not leave it at
+        // the overridden 25, and mark the row user-set.
+        let mut c = ctx();
+        assert!(c.adopt_fitted_activity_height(10));
+        assert_eq!(c.right_top_pct, 20);
+        assert!(c.activity_user_resized);
+        // Once the user has manual control it's a no-op — a later fit
+        // measurement can't move the height they chose.
+        c.right_top_pct = 33;
+        assert!(!c.adopt_fitted_activity_height(5));
+        assert_eq!(c.right_top_pct, 33, "manual height is left untouched");
+    }
+
+    #[test]
+    fn first_shift_up_shrinks_a_fitted_pane_instead_of_growing_it() {
+        // Regression (#1469 review): the stored percentage (25%) was
+        // decoupled from the fitted display height (20% for 10 rows of a
+        // 50-row column). A Shift-↑ meant to shrink nudged 25→22, and
+        // turning the fit off then *grew* the pane from the fitted 20% to
+        // 22%. Adopting the fitted height first makes the nudge shrink from
+        // what's on screen: 20 → 17.
+        let mut c = ctx();
+        c.adopt_fitted_activity_height(10); // mirrors the key handler
+        assert_eq!(c.right_top_pct, 20);
+        assert!(c.nudge_splits(0, -SPLIT_STEP)); // Shift-Up
+        assert_eq!(
+            c.right_top_pct,
+            20 - SPLIT_STEP as u16,
+            "shrinks below the fitted height rather than growing past it"
+        );
+    }
+
+    #[test]
+    fn apply_persisted_restores_the_activity_user_resized_flag() {
+        // A deliberately-resized activity row must survive a restart: the
+        // persisted percentage alone would be re-shrunk by the content-fit
+        // (unlike the sidebar's cap, which is reasserted each launch).
+        let mut c = LayoutCtx::new();
+        assert!(!c.activity_user_resized);
+        c.apply_persisted(Some(50), Some(50), Some(true));
+        assert!(c.activity_user_resized, "restored user-resized intent");
+        // None leaves the current flag untouched (mid-session reloads).
+        c.apply_persisted(None, None, None);
+        assert!(c.activity_user_resized);
+        // An explicit false clears it.
+        c.apply_persisted(None, None, Some(false));
+        assert!(!c.activity_user_resized);
     }
 }

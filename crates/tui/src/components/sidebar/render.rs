@@ -1362,6 +1362,13 @@ impl Sidebar {
             hint("?", "Ask Lazybox"),
             hint("⇧T", "tour"),
             hint("⇧R", "refresh inbox"),
+            Line::raw(""),
+            Line::from(Span::styled(" want a safe place to", prose)),
+            Line::from(Span::styled(" practise first? quit and", prose)),
+            Line::from(vec![
+                Span::styled(" run ", prose),
+                Span::styled("lazybox practice", key),
+            ]),
         ];
         frame.render_widget(Paragraph::new(lines), inner);
     }

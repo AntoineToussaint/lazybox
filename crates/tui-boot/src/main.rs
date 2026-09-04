@@ -340,6 +340,8 @@ repos, change agents, or edit roles.
 
 Getting started:
   lazybox                     launch the inbox (default)
+  lazybox practice            learn lazybox in an isolated, seeded practice inbox
+                              — a live sandbox, no GitHub, no risk to real state
   lazybox --test              try the UI on a throwaway seeded workspace, no GitHub
   lazybox --help, -h          show this help
   lazybox --version, -V       print the version
@@ -482,12 +484,16 @@ async fn main() -> anyhow::Result<()> {
         wipe_state_db();
     }
     if demo_mode {
-        return run_demo(preselect).await;
+        // `--demo` is the un-chromed screenshot/VHS entry into the same
+        // synthetic world; `lazybox practice` (below) is the onboarding
+        // entry, which adds the practice ribbon.
+        return run_demo(preselect, false).await;
     }
     if test_mode {
         return run_test(preselect).await;
     }
     match args.first().map(String::as_str) {
+        Some("practice") => run_demo(preselect, true).await,
         Some("server") => server_subcommand(&args[1..]).await,
         Some("account") => account_cli::account_subcommand(&args[1..]).await,
         Some("serve") => serve::serve_subcommand(&args[1..]).await,
@@ -1211,7 +1217,17 @@ async fn run_test(preselect: Option<lazybox_tui::realm::model::Preselect>) -> an
 /// and the bus → client relay), so this is the production event path fed
 /// synthetic events, not a bypass. See `scenario.rs` for the harness and its
 /// documented interface gaps.
-async fn run_demo(preselect: Option<lazybox_tui::realm::model::Preselect>) -> anyhow::Result<()> {
+async fn run_demo(
+    preselect: Option<lazybox_tui::realm::model::Preselect>,
+    practice: bool,
+) -> anyhow::Result<()> {
+    // Practice mode redirects the whole lazybox home to a throwaway dir so
+    // nothing (config, store, runtime) touches the user's real state; held
+    // for the life of the session (#1458). `--demo` keeps the real home so
+    // screenshots reflect the user's theme.
+    let _practice_home = practice
+        .then(scenario::isolate_practice_home)
+        .transpose()?;
     let fixture = scenario::DemoFixture::seed()?;
     let repos: std::collections::BTreeSet<&str> =
         fixture.workspaces.iter().map(|w| w.repo.as_str()).collect();
@@ -1263,6 +1279,9 @@ async fn run_demo(preselect: Option<lazybox_tui::realm::model::Preselect>) -> an
     let snippets = fixture.snippets.clone();
     tokio::task::spawn_blocking(move || {
         let mut model = lazybox_tui::realm::Model::new(client, snippets)?;
+        if practice {
+            model = model.with_practice();
+        }
         if let Some(p) = preselect {
             model = model.with_preselect(p);
         }

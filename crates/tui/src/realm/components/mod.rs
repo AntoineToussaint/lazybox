@@ -25,6 +25,7 @@ pub mod markdown_modal;
 pub mod merge_history_modal;
 pub mod messages;
 pub mod polling;
+pub mod practice_ribbon;
 pub mod pr_chat;
 pub mod prompt_history_picker;
 pub mod right;

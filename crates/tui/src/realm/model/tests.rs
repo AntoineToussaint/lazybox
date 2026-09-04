@@ -27759,3 +27759,49 @@ mod pr_details_debounce_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod practice_chrome_tests {
+    use super::super::*;
+    use lazybox_ipc::channel;
+    use tuirealm::ratatui::layout::Size;
+
+    fn screen(m: &Model<tuirealm::terminal::TestTerminalAdapter>) -> String {
+        let buf = m.terminal.raw().backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|row| {
+                (0..buf.area.width)
+                    .map(|col| buf[(col, row)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn practice_session_paints_the_ribbon() {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 30))
+            .expect("model")
+            .with_practice();
+        m.view();
+        let out = screen(&m);
+        assert!(out.contains("PRACTICE"), "practice ribbon missing:\n{out}");
+        assert!(
+            out.contains("not your real inbox"),
+            "ribbon must disclaim real state:\n{out}"
+        );
+    }
+
+    #[test]
+    fn real_session_never_paints_the_ribbon() {
+        let (client, _server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 30)).expect("model");
+        m.view();
+        let out = screen(&m);
+        assert!(
+            !out.contains("PRACTICE"),
+            "the real inbox must not show the practice ribbon:\n{out}"
+        );
+    }
+}

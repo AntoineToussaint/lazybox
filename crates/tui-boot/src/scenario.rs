@@ -67,6 +67,29 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use tokio::sync::{broadcast, mpsc};
 
+/// Point `LAZYBOX_HOME` at a throwaway directory so the practice world
+/// (`lazybox practice`, #1458) writes nothing to the user's real config,
+/// store, or runtime state. The daemon's store is already an in-memory
+/// `MemoryStore`, but UI-state persistence (theme, stars, pins,
+/// `tour_seen`, …) resolves through `paths::config_yaml()` — redirecting
+/// the home isolates all of it in one move. The returned `TempDir` owns
+/// the directory; hold it for the life of the session (drop = delete).
+///
+/// This is a dedicated practice *process*, so mutating the process-global
+/// env is appropriate; it is set once at the top of `run_demo` before the
+/// daemon or model touch any path.
+pub fn isolate_practice_home() -> anyhow::Result<TempDir> {
+    let home = tempfile::Builder::new()
+        .prefix("lazybox-practice-")
+        .tempdir()
+        .map_err(|e| anyhow::anyhow!("create practice home: {e}"))?;
+    // SAFETY: called at process start on the practice path, before the
+    // daemon/model threads are spawned; nothing reads `LAZYBOX_HOME`
+    // concurrently at this point.
+    unsafe { std::env::set_var("LAZYBOX_HOME", home.path()) };
+    Ok(home)
+}
+
 /// A seeded workspace plus the handles the scenario script needs to address
 /// it: its `SessionKey` (for `AgentState` / terminal events), its display
 /// repo, and the built `Workspace` itself so a scenario can re-upsert a
@@ -718,6 +741,51 @@ mod tests {
         let ws: Workspace = serde_json::from_str(rows[0].workspace_json.as_ref().unwrap()).unwrap();
         assert_eq!(ws.session_count(), 1, "one shell session");
         assert!(ws.primary_task().is_some(), "classified as a real task");
+    }
+
+    /// The seeded store is a private in-memory store, not the user's real
+    /// on-disk one — epic #1458 acceptance criterion #4 (nothing written to
+    /// the real store). Two independent seeds must not share writes; a
+    /// shared on-disk backend would.
+    #[test]
+    fn seeded_store_is_private_and_in_memory() {
+        let a = DemoFixture::seed().expect("fixture a");
+        let b = DemoFixture::seed().expect("fixture b");
+        a.store.set_kv("practice-probe", "a").expect("set kv");
+        assert_eq!(
+            b.store.get_kv("practice-probe").expect("get kv"),
+            None,
+            "a write to one practice store must never reach another (or the real store)"
+        );
+    }
+
+    /// `isolate_practice_home` redirects every real-state path under a
+    /// throwaway dir, so config / store / runtime writes during a practice
+    /// session can't reach the user's real home (criterion #4). Asserting
+    /// path *resolution* (a pure function of the env just set) is race-free:
+    /// no other test mutates `LAZYBOX_HOME`.
+    #[test]
+    fn practice_home_redirects_config_and_store_paths() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os("LAZYBOX_HOME");
+
+        let home = isolate_practice_home().expect("isolated home");
+        let root = home.path();
+        assert!(
+            lazybox_core::paths::config_yaml().starts_with(root),
+            "config must resolve under the practice home"
+        );
+        assert!(
+            lazybox_core::paths::state_db().starts_with(root),
+            "store must resolve under the practice home"
+        );
+
+        // Restore so sibling tests keep seeing the real home.
+        match prev {
+            Some(v) => unsafe { std::env::set_var("LAZYBOX_HOME", v) },
+            None => unsafe { std::env::remove_var("LAZYBOX_HOME") },
+        }
     }
 
     #[tokio::test]

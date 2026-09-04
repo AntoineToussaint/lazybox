@@ -1640,6 +1640,13 @@ pub struct Model<T: TerminalAdapter> {
     /// server-side actions (shell PTY, agents) and machine-local ones
     /// (browser open, notifications) stay available. See #742.
     remote: bool,
+    /// True when this session is the isolated **practice world** (`lazybox
+    /// practice`) rather than the user's real inbox. It renders an
+    /// unmistakable chrome ribbon so the simulator can never be confused
+    /// with real state, and it is set by the boot entrypoint — the daemon
+    /// behind it serves an in-memory store over a throwaway repo, so
+    /// nothing here touches the real config, store, or any remote (#1458).
+    practice: bool,
     /// Watches the inbound daemon-event channel depth after each
     /// drain. A backlog that climbs tick-over-tick means the TUI is
     /// consuming slower than the daemon produces — the signature of a
@@ -2512,6 +2519,7 @@ impl<T: TerminalAdapter> Model<T> {
             remote_require_connect: false,
             event_backlog: helpers::BacklogMonitor::default(),
             remote: false,
+            practice: false,
             redraw: true,
             quit: false,
             setup: SetupCtx::new(),
@@ -2764,6 +2772,14 @@ impl<T: TerminalAdapter> Model<T> {
         // workspaces; local stars absent from it are not stale, so the
         // snapshot-time prune must never fire here (#1244).
         self.sidebar.set_snapshot_prune(false);
+        self
+    }
+
+    /// Mark this session as the isolated practice world (`lazybox
+    /// practice`). Turns on the unmistakable chrome ribbon; see the
+    /// `practice` field (#1458).
+    pub fn with_practice(mut self) -> Self {
+        self.practice = true;
         self
     }
 
@@ -6557,6 +6573,16 @@ impl<T: TerminalAdapter> Model<T> {
         let coach_active = self.coach.is_some();
         let coach_spot = self.coach.as_ref().map(|c| c.current_spot());
         let coach_ascii = self.coach_ascii;
+        // Practice-mode chrome (#1458): an unmistakable top ribbon naming
+        // the quit key, so the simulator can never be mistaken for the real
+        // inbox. Resolved outside the draw closure (it reads `self`).
+        let practice_ribbon: Option<String> = self.practice.then(|| {
+            lazybox_tui_core::action::ActionDef::for_kind(
+                lazybox_tui_core::action::ActionKind::Quit,
+            )
+            .effective_keys_display(&self.action_key_overrides)
+            .into_owned()
+        });
         // Split the `terminal.draw` cost into *build* (walking the widget
         // tree into the back buffer — CPU) vs *flush* (diffing + writing
         // the frame to stdout — I/O that blocks on the host terminal).
@@ -6568,7 +6594,19 @@ impl<T: TerminalAdapter> Model<T> {
         let draw_start = std::time::Instant::now();
         let build_end: std::cell::Cell<Option<std::time::Instant>> = std::cell::Cell::new(None);
         let _ = self.terminal.draw(|f| {
-            let area = f.area();
+            // Reserve the top row for the practice ribbon before anything
+            // else claims the space, so the panes/footer below never
+            // overlap it and mouse hit-testing (against `captured_area`)
+            // stays aligned with the shrunk pane region.
+            let area = match &practice_ribbon {
+                Some(quit_keys) if f.area().height > 2 => {
+                    let full = f.area();
+                    let ribbon = Rect::new(full.x, full.y, full.width, 1);
+                    crate::realm::components::practice_ribbon::render(f, ribbon, quit_keys);
+                    Rect::new(full.x, full.y + 1, full.width, full.height - 1)
+                }
+                _ => f.area(),
+            };
             captured_area = area;
             let (pane_area, footer_area) = split_for_footer(area);
             let (pane_area, coach_area) = split_coach(pane_area, coach_active);

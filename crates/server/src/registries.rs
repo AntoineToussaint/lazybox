@@ -4,7 +4,7 @@ use lazybox_ipc::{AgentCreditRecoveryStage, AgentRunAccess, AgentState, Terminal
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, watch};
 
 /// Typed inputs consumed by the per-terminal turn clock. Producers no longer
 /// arbitrate hook-vs-PTY authority with unrelated wall clocks (#1169).
@@ -1454,6 +1454,13 @@ pub struct SpawnCoordinator {
     pub(crate) prompt_submit_signals: Arc<Mutex<HashMap<TerminalId, Arc<Notify>>>>,
     /// Enforces one readiness-gated injection per terminal.
     pub(crate) pending_prompt_injections: Arc<parking_lot::Mutex<HashSet<TerminalId>>>,
+    /// Holds keyboard→PTY writes for a terminal whose spawn-time context
+    /// injection has not yet been submitted, so the injected brief is
+    /// guaranteed to reach the agent before any racing user keystroke (#1444).
+    /// A `watch` value of `true` means the injection has completed and the gate
+    /// is open; the entry's absence means no gate is active.
+    pub(crate) spawn_inject_gates:
+        Arc<parking_lot::Mutex<HashMap<TerminalId, watch::Receiver<bool>>>>,
     /// Closes the provisioning gap before terminal maps can enforce singleton spawns.
     /// Each claim carries its cancellation signal and whether it targets
     /// the shared main checkout.
@@ -1501,6 +1508,49 @@ impl SpawnCoordinator {
     /// Report whether prompt-submission confirmation has no registered waiters.
     pub async fn prompt_confirmations_are_empty(&self) -> bool {
         self.prompt_submit_signals.lock().await.is_empty()
+    }
+
+    /// Open the spawn-injection input gate for a terminal (#1444). Held open
+    /// until the returned guard drops — which every completion path of the
+    /// inject task reaches (success, rejection, terminal exit, timeout, or
+    /// task cancellation) via `Drop`. While open, `wait_for_inject_gate` parks
+    /// keyboard→PTY writes for this terminal so the injected brief lands first.
+    pub(crate) fn open_inject_gate(&self, id: TerminalId) -> SpawnInjectGate {
+        let (done, rx) = watch::channel(false);
+        self.spawn_inject_gates.lock().insert(id, rx);
+        SpawnInjectGate {
+            terminal_id: id,
+            done,
+            gates: self.spawn_inject_gates.clone(),
+        }
+    }
+
+    /// Park until a terminal's spawn-time injection has been submitted, the
+    /// gate is not open, or `cap` elapses. Bounded so a lost inject task can
+    /// never wedge input indefinitely: it fails open.
+    pub(crate) async fn wait_for_inject_gate(&self, id: TerminalId, cap: std::time::Duration) {
+        let Some(mut rx) = self.spawn_inject_gates.lock().get(&id).cloned() else {
+            return;
+        };
+        let _ = tokio::time::timeout(cap, rx.wait_for(|done| *done)).await;
+    }
+}
+
+/// Keeps a terminal's spawn-injection input gate open until dropped. Moved
+/// into the background inject task so the gate closes exactly when injection
+/// finishes, releasing any keyboard writes parked behind it (#1444).
+pub(crate) struct SpawnInjectGate {
+    terminal_id: TerminalId,
+    done: watch::Sender<bool>,
+    gates: Arc<parking_lot::Mutex<HashMap<TerminalId, watch::Receiver<bool>>>>,
+}
+
+impl Drop for SpawnInjectGate {
+    fn drop(&mut self) {
+        // Release parked writers still holding a cloned receiver, then retire
+        // the entry so later writers take the no-gate fast path.
+        let _ = self.done.send(true);
+        self.gates.lock().remove(&self.terminal_id);
     }
 }
 

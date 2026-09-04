@@ -1737,6 +1737,7 @@ async fn handle_spawn_inner(
     if mcp_config_path.is_some() {
         crate::mcp::persist_tokens(config).await;
     }
+    let will_inject = initial_prompt.is_some();
     let plan = match build_spawn_plan(
         SpawnPlanInput {
             session_key,
@@ -1791,6 +1792,14 @@ async fn handle_spawn_inner(
              agent.autonomous_skip_permissions is unset (#1392)"
         );
     }
+    // Hold keyboard→PTY writes for this terminal until the spawn-time context
+    // injection has been submitted (#1444). Opened before `execute_spawn_plan`
+    // broadcasts `TerminalSpawned` — the moment a client can auto-focus the
+    // fresh terminal and start forwarding keystrokes — so a racing `Write` can
+    // never slip ahead of, or interleave with, the injected brief. Moved into
+    // the inject task below; dropped here on an early-return failure, which
+    // reopens the (now-defunct) terminal to input.
+    let mut inject_gate = will_inject.then(|| config.spawn.open_inject_gate(terminal_id));
     let executed = match execute_spawn_plan(config, plan, workspace_registration_guard, t0).await {
         Ok(SpawnExecutionOutcome::Spawned(executed)) => executed,
         Ok(SpawnExecutionOutcome::Cancelled) => return None,
@@ -2469,7 +2478,12 @@ async fn handle_spawn_inner(
         let config_for_inject = config.clone();
         let snippet_for_inject = initial_snippet.clone();
         let session_key_for_inject = session_key.clone();
+        let inject_gate = inject_gate.take();
         tokio::spawn(async move {
+            // Closes the input gate on every exit path of this task (#1444):
+            // once injection is submitted (or fails), the keyboard writes
+            // parked behind it are released to the PTY.
+            let _inject_gate = inject_gate;
             let outcome = run_spawn_inject(
                 &config_for_inject,
                 id,
@@ -7011,6 +7025,16 @@ pub(crate) async fn handle_write_batch(
     writes: &[Vec<u8>],
     intent: TerminalInputIntent,
 ) -> bool {
+    // Park keyboard→PTY input behind an in-flight spawn-time context injection
+    // (#1444). This runs on the per-terminal FIFO I/O lane, so a burst of
+    // keystrokes typed into a freshly-spawned agent stays queued in order and
+    // is delivered only after the injected brief has been submitted — never
+    // ahead of or interleaved with it. A no-op once the gate is closed (the
+    // common case) or was never opened (spawns without an initial prompt).
+    config
+        .spawn
+        .wait_for_inject_gate(terminal_id, INJECT_GATE_HOLD_CAP)
+        .await;
     let total: usize = writes.iter().map(Vec::len).sum();
     let mut joined = Vec::with_capacity(total);
     for bytes in writes {
@@ -7134,6 +7158,15 @@ pub(crate) async fn handle_write_batch(
 /// so resolution is normally seconds; the bound only stops an abandoned
 /// prompt from leaking the waiter task indefinitely.
 const INJECT_INPUT_DEADLINE: Duration = Duration::from_secs(120);
+
+/// Upper bound a keyboard write parks behind an in-flight spawn injection
+/// (#1444). The gate's guard closes it synchronously when the inject task
+/// finishes by any path, so this cap only matters if that task is lost; it
+/// sits above the injection's own worst case (`HARD_DEADLINE` +
+/// `PENDING_READY_CAP` + paste/submit) so a legitimately slow inject — a
+/// loaded box or a cold first-time worktree — is still awaited, never cut
+/// short into leaking the very keystrokes this gate exists to hold.
+const INJECT_GATE_HOLD_CAP: Duration = Duration::from_secs(90);
 
 /// How long a deferred inject waits between forcing a live re-read of the
 /// agent's screen (issue #869). The loop is level-triggered: each tick pokes
@@ -13046,6 +13079,97 @@ mod tests {
             Some(lazybox_ipc::AgentState::Working),
             "the first logical write remains a one-key chooser answer"
         );
+    }
+
+    #[tokio::test]
+    async fn spawn_inject_gate_holds_user_writes_until_injection_submits() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (config, mock) = ServerConfig::in_memory_with_mock();
+            let backend_key = mock
+                .spawn(&[], None, &[], "inject-gate")
+                .await
+                .expect("spawn");
+            let terminal_id = TerminalId(1444);
+            config
+                .terminal
+                .register_terminal(
+                    terminal_id,
+                    backend_key.clone(),
+                    SessionKey::new("github:o/r#1444"),
+                    TerminalKind::Agent("claude".into()),
+                )
+                .await;
+
+            // A spawn-with-injection opens the gate before `TerminalSpawned`.
+            let gate = config.spawn.open_inject_gate(terminal_id);
+
+            // A racing keystroke — focus auto-moved to the fresh terminal —
+            // must not reach the PTY while the injection is still pending.
+            let write_config = config.clone();
+            let user_write = tokio::spawn(async move {
+                handle_write_batch(
+                    &write_config,
+                    terminal_id,
+                    &[b"ww".to_vec()],
+                    TerminalInputIntent::Compose,
+                )
+                .await
+            });
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(
+                mock.writes_for(&backend_key).await.is_empty(),
+                "a keystroke racing a spawn injection must stay parked, not reach the PTY"
+            );
+            assert!(!user_write.is_finished());
+
+            // The injection submits its brief, then the gate closes.
+            terminal_io::write_live(
+                &config,
+                terminal_id,
+                &backend_key,
+                b"brief\r",
+                TerminalInputIntent::Submit,
+            )
+            .await
+            .expect("inject write");
+            drop(gate);
+
+            assert!(user_write.await.expect("write task"));
+            assert_eq!(
+                mock.writes_for(&backend_key).await,
+                vec![b"brief\r".to_vec(), b"ww".to_vec()],
+                "the injected brief must reach the agent before the parked keystrokes",
+            );
+        })
+        .await
+        .expect("test deadline exceeded");
+    }
+
+    #[tokio::test]
+    async fn writes_flow_freely_without_a_spawn_inject_gate() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock.spawn(&[], None, &[], "no-gate").await.expect("spawn");
+        let terminal_id = TerminalId(1445);
+        config
+            .terminal
+            .register_terminal(
+                terminal_id,
+                backend_key.clone(),
+                SessionKey::new("github:o/r#1445"),
+                TerminalKind::Agent("claude".into()),
+            )
+            .await;
+
+        handle_write_batch(
+            &config,
+            terminal_id,
+            &[b"hi".to_vec()],
+            TerminalInputIntent::Compose,
+        )
+        .await;
+
+        assert_eq!(mock.writes_for(&backend_key).await, vec![b"hi".to_vec()]);
     }
 
     #[tokio::test]

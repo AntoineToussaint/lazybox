@@ -615,7 +615,10 @@ impl LazyboxMcp {
     ) -> Result<CallToolResult, McpError> {
         let text = text.trim();
         if text.is_empty() {
-            return Err(McpError::invalid_request("notification text is empty", None));
+            return Err(McpError::invalid_request(
+                "notification text is empty",
+                None,
+            ));
         }
         if text.len() > MAX_NOTIFY_BYTES {
             return Err(McpError::invalid_request(
@@ -650,8 +653,13 @@ impl LazyboxMcp {
         // once the injection is *registered*, but registration waits on the
         // per-terminal interaction lock a concurrent write can hold. A wedged
         // lock must not pin the tool call open forever.
-        let injected =
-            crate::spawn_handler::handle_inject_prompt(&self.config, terminal_id, text, None, submit);
+        let injected = crate::spawn_handler::handle_inject_prompt(
+            &self.config,
+            terminal_id,
+            text,
+            None,
+            submit,
+        );
         match tokio::time::timeout(NOTIFY_TIMEOUT, injected).await {
             Ok(()) => Ok(json_result(notify_handoff_payload(workspace, submit))),
             Err(_) => Ok(CallToolResult::error(vec![ContentBlock::text(
@@ -1677,7 +1685,10 @@ mod tests {
             .expect("notify_session");
         assert_eq!(notified.is_error, Some(true));
         let notified_text = notified.content[0].as_text().expect("text").text.clone();
-        assert!(notified_text.contains("no running agent"), "{notified_text}");
+        assert!(
+            notified_text.contains("no running agent"),
+            "{notified_text}"
+        );
 
         client.cancel().await.ok();
     }

@@ -2524,3 +2524,69 @@ mod overview_tests {
         assert_eq!(pane.take_select_workspace(), Some(key));
     }
 }
+
+#[cfg(test)]
+mod natural_height_tests {
+    //! `natural_height` is what `layout::fit_activity_height` shrinks the
+    //! reserved Activity row down to (#1469): header + separator +
+    //! description body + activity feed, floored at the renderer's
+    //! `Constraint::Min(3)` activity guarantee.
+    use super::super::{PaneId, RightPane};
+    use chrono::Utc;
+    use lazybox_core::{Activity, ActivityKind, Workspace, WorkspaceKey};
+
+    fn empty_ws() -> Workspace {
+        Workspace::empty(WorkspaceKey::new("github:o/r#1"), "main", Utc::now())
+    }
+
+    fn ws_with_n_comments(n: usize) -> Workspace {
+        let mut w = empty_ws();
+        for i in 0..n {
+            w.activity.push(Activity {
+                author: format!("u{i}"),
+                body: "x".into(),
+                created_at: Utc::now(),
+                kind: ActivityKind::Comment,
+                node_id: None,
+                path: None,
+                line: None,
+                diff_hunk: None,
+                thread_id: None,
+            });
+        }
+        w
+    }
+
+    fn pane_with(ws: Option<Workspace>) -> RightPane {
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(ws);
+        pane
+    }
+
+    #[test]
+    fn empty_workspace_is_header_plus_collapsed_activity() {
+        // 4 header + 1 separator + 0 body + 1 collapsed-activity row.
+        assert_eq!(pane_with(Some(empty_ws())).natural_height(), 6);
+    }
+
+    #[test]
+    fn no_workspace_collapses_to_the_same_min_shape() {
+        assert_eq!(pane_with(None).natural_height(), 6);
+    }
+
+    #[test]
+    fn activity_count_drives_height_before_first_paint() {
+        // No frame rendered yet, so the ActivityBuffer is empty and the
+        // measurement falls back to the raw activity count: 4 header + 1
+        // separator + 0 body + (2 comments + 3 activity chrome rows).
+        assert_eq!(
+            pane_with(Some(ws_with_n_comments(2))).natural_height(),
+            4 + 1 + 0 + (2 + 3)
+        );
+        // Each extra comment adds exactly one row.
+        assert_eq!(
+            pane_with(Some(ws_with_n_comments(10))).natural_height(),
+            4 + 1 + 0 + (10 + 3)
+        );
+    }
+}

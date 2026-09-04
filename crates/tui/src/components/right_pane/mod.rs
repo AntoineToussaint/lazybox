@@ -2383,6 +2383,59 @@ impl RightPane {
         }
     }
 
+    /// Rows the header block reserves: crumbs + pill/title + branch +
+    /// reviewers (4), plus one row for an originating-issue line (#567)
+    /// and one for a PR's diffstat (#997) when present. A method — not an
+    /// inline in `render` — so the height reservation there and
+    /// `natural_height`'s measurement read the identical number and can't
+    /// drift.
+    fn header_height(&self) -> u16 {
+        let has_origin = self.originating_issue().is_some();
+        let show_diffstat = self
+            .workspace
+            .as_ref()
+            .and_then(|w| w.primary_task())
+            .is_some_and(|t| t.is_pr());
+        4 + u16::from(has_origin) + u16::from(show_diffstat)
+    }
+
+    /// The rows the pane would fill given unlimited height, laid out
+    /// exactly as [`Self::render`]: header + separator + the
+    /// description-body constraint + the activity feed. Drives
+    /// `layout::fit_activity_height` (#1469), which shrinks the reserved
+    /// row down to this. Activity lines come from the memoized
+    /// [`ActivityBuffer`]; before the first paint (no buffer yet) it
+    /// falls back to the raw activity count. The activity block is
+    /// floored at the `Constraint::Min(3)` `render` guarantees, so a
+    /// fitted pane keeps the shape the renderer promises.
+    pub fn natural_height(&self) -> u16 {
+        let body_rows = match self.task_body_constraint() {
+            Constraint::Length(n) | Constraint::Max(n) => n,
+            _ => 0,
+        };
+        let activity_rows = if self.activity_collapsed {
+            1
+        } else {
+            let lines = self
+                .activity_buffer
+                .as_ref()
+                .map(|b| b.cards.len() as u16)
+                .unwrap_or_else(|| {
+                    self.workspace
+                        .as_ref()
+                        .map(|w| w.activity.len() as u16)
+                        .unwrap_or(0)
+                });
+            // Header + divider + spacer (the 3 chrome rows `render_activity`
+            // draws), then one row per virtual line. Floors at 3.
+            lines.saturating_add(3)
+        };
+        self.header_height()
+            .saturating_add(1)
+            .saturating_add(body_rows)
+            .saturating_add(activity_rows)
+    }
+
     pub fn render(&mut self, area: Rect, frame: &mut Frame, focused: bool) {
         // Group-header row (issue #1442): no workspace, but a repo/Space
         // overview to paint. Takes the whole pane — the workspace-shaped
@@ -2413,7 +2466,7 @@ impl RightPane {
             .as_ref()
             .and_then(|w| w.primary_task())
             .is_some_and(|t| t.is_pr());
-        let header_height = 4 + u16::from(origin.is_some()) + u16::from(show_diffstat);
+        let header_height = self.header_height();
         let chunks = Layout::vertical([
             Constraint::Length(header_height), // header (crumbs, pill, branch, [issue])
             Constraint::Length(1),             // separator

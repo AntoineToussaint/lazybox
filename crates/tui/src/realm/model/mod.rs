@@ -2329,7 +2329,9 @@ pub struct Preselect {
     pub session_id_raw: Option<String>,
 }
 
-use crate::realm::layout::{LayoutCtx, apply_activity_mode, focus_mode_areas, pane_areas};
+use crate::realm::layout::{
+    LayoutCtx, apply_activity_mode, fit_activity_height, focus_mode_areas, pane_areas,
+};
 use crate::realm::setup_ctx::{SettingsAction, SetupCtx};
 use crate::realm::status_ctx::StatusCtx;
 use lazybox_config::ActivityPaneMode;
@@ -6083,7 +6085,12 @@ impl<T: TerminalAdapter> Model<T> {
             self.layout.right_top_pct,
             self.layout.sidebar_user_resized,
         );
-        apply_activity_mode(rects, self.activity_pane_mode())
+        let fitted = fit_activity_height(
+            rects,
+            self.right.natural_height(),
+            self.layout.activity_user_resized,
+        );
+        apply_activity_mode(fitted, self.activity_pane_mode())
     }
 
     /// Keep focus off the Activity pane while it's hidden — Tab,
@@ -6105,6 +6112,11 @@ impl<T: TerminalAdapter> Model<T> {
         let sidebar_pct = self.layout.sidebar_pct;
         let right_top_pct = self.layout.right_top_pct;
         let sidebar_user_resized = self.layout.sidebar_user_resized;
+        let activity_user_resized = self.layout.activity_user_resized;
+        // Fit the Activity row to its content (#1469) before the draw
+        // closure — computing it there would borrow all of `self` and
+        // clash with the disjoint `&mut self.{sidebar,right}` borrows.
+        let activity_natural = self.right.natural_height();
         // Computed outside the draw closure: calling a `&self` method
         // inside it would capture all of `self` and clash with the
         // disjoint `&mut self.sidebar` / `self.right` borrows below.
@@ -6460,7 +6472,11 @@ impl<T: TerminalAdapter> Model<T> {
                 body
             } else {
                 let (left, right_top, right_bottom) = apply_activity_mode(
-                    pane_areas(pane_area, sidebar_pct, right_top_pct, sidebar_user_resized),
+                    fit_activity_height(
+                        pane_areas(pane_area, sidebar_pct, right_top_pct, sidebar_user_resized),
+                        activity_natural,
+                        activity_user_resized,
+                    ),
                     activity_mode,
                 );
                 self.sidebar.view_in(left, f);

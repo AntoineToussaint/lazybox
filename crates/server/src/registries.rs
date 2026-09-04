@@ -1458,8 +1458,7 @@ pub struct SpawnCoordinator {
     /// injection has not yet been submitted, so the injected brief is
     /// guaranteed to reach the agent before any racing user keystroke (#1444).
     /// Absent once injection settles.
-    pub(crate) spawn_inject_gates:
-        Arc<parking_lot::Mutex<HashMap<TerminalId, Arc<InjectGate>>>>,
+    pub(crate) spawn_inject_gates: Arc<parking_lot::Mutex<HashMap<TerminalId, Arc<InjectGate>>>>,
     /// Lock-free count of live inject gates, so the keyboard hot path skips
     /// the map — and all gate work — entirely when nothing is spawning.
     pub(crate) active_inject_gates: Arc<AtomicUsize>,
@@ -1552,7 +1551,11 @@ impl SpawnCoordinator {
     /// Returns true when there is no gate or it has released (proceed with the
     /// write), false when it is still holding after `poll` (the caller
     /// re-evaluates its own release conditions and calls again).
-    pub(crate) async fn wait_for_inject_gate(&self, id: TerminalId, poll: std::time::Duration) -> bool {
+    pub(crate) async fn wait_for_inject_gate(
+        &self,
+        id: TerminalId,
+        poll: std::time::Duration,
+    ) -> bool {
         let gate = self.spawn_inject_gates.lock().get(&id).cloned();
         let Some(gate) = gate else {
             return true;

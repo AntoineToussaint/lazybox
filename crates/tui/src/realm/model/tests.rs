@@ -15302,7 +15302,11 @@ mod terminal_url_mouse_tests {
         let mut n = 0;
         for row in pane.y..pane.y.saturating_add(pane.height) {
             for col in pane.x..pane.x.saturating_add(pane.width) {
-                if buffer[(col, row)].style().add_modifier.contains(Modifier::REVERSED) {
+                if buffer[(col, row)]
+                    .style()
+                    .add_modifier
+                    .contains(Modifier::REVERSED)
+                {
                     n += 1;
                 }
             }
@@ -15337,9 +15341,19 @@ mod terminal_url_mouse_tests {
         );
 
         // A real double-click: down, up, down at the same cell.
-        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 8, y);
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 8,
+            y,
+        );
         left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 8, y);
-        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 8, y);
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 8,
+            y,
+        );
 
         assert!(
             model.terminal_drag.is_none(),
@@ -15430,16 +15444,41 @@ mod terminal_url_mouse_tests {
         let (sidebar, _rt, _rb) = model.effective_pane_rects(area);
 
         // A double-click in the terminal.
-        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 5, y);
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 5,
+            y,
+        );
         left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 5, y);
-        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 5, y);
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 5,
+            y,
+        );
         left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 5, y);
         assert!(model.terminal_selection.is_some(), "double-click selected");
 
         // Bounce out to the sidebar, then back to the SAME terminal cell.
-        left(&mut model, MouseEventKind::Down(MouseButton::Left), sidebar.x + 1, sidebar.y + 1);
-        left(&mut model, MouseEventKind::Up(MouseButton::Left), sidebar.x + 1, sidebar.y + 1);
-        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 5, y);
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            sidebar.x + 1,
+            sidebar.y + 1,
+        );
+        left(
+            &mut model,
+            MouseEventKind::Up(MouseButton::Left),
+            sidebar.x + 1,
+            sidebar.y + 1,
+        );
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 5,
+            y,
+        );
 
         // The return click is a fresh single click: it starts a drag anchor
         // and installs no resting line selection.
@@ -15469,9 +15508,19 @@ mod terminal_url_mouse_tests {
         let (x, y) = body_origin(&model, pane, 1);
 
         // Double-click a word in the active tab (terminal 1).
-        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 2, y);
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 2,
+            y,
+        );
         left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 2, y);
-        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 2, y);
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 2,
+            y,
+        );
         let sel = model.terminal_selection.expect("a word selection");
         assert_eq!(sel.terminal, TerminalId(1));
 
@@ -15511,9 +15560,19 @@ mod terminal_url_mouse_tests {
         let pane = render(&mut model);
         let (x, y) = body_origin(&model, pane, 1);
 
-        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 2, y);
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 2,
+            y,
+        );
         left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 2, y);
-        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 2, y);
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 2,
+            y,
+        );
         assert!(model.terminal_selection.is_some(), "double-click selected");
 
         model.handle_mouse(MouseEvent {
@@ -15553,9 +15612,24 @@ mod terminal_url_mouse_tests {
             .expect("a word under the pointer");
         assert_eq!(word, url, "the wrapped URL selects as one contiguous token");
 
-        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 2, y + 1);
-        left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 2, y + 1);
-        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 2, y + 1);
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 2,
+            y + 1,
+        );
+        left(
+            &mut model,
+            MouseEventKind::Up(MouseButton::Left),
+            x + 2,
+            y + 1,
+        );
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 2,
+            y + 1,
+        );
         assert!(
             model.terminal_selection.is_some(),
             "the double-click leaves a resting selection spanning both rows",

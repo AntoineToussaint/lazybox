@@ -2489,10 +2489,10 @@ impl TerminalStack {
     /// double-click gesture (#1451). Returns the word's text plus its
     /// screen-absolute grid span `(anchor, focus)` for the highlight.
     /// Boundaries hold alphanumerics plus the connectors in
-    /// [`is_word_char`] together, so a path (`src/a.rs`) or URL selects
+    /// `is_word_char` together, so a path (`src/a.rs`) or URL selects
     /// whole; the run is widened across a soft-wrap group so a token that
     /// spilled onto the next row still selects entire (mirrors
-    /// [`Self::target_in_body`]'s stitching). The text is read straight
+    /// `target_in_body`'s stitching). The text is read straight
     /// from the row bytes — soft wraps join with no break, which the
     /// selection formatter won't do. `None` when the pointer sits on
     /// whitespace or the grid can't be read.
@@ -7007,7 +7007,9 @@ mod selection_offset_tests {
     /// 3 is grid row 0 and screen col 1 is grid col 0.
     fn select_word(stack: &mut TerminalStack, rect: Rect, col: u16, row: u16) -> Option<String> {
         let id = stack.focused_terminal_id().expect("focused");
-        stack.word_span_at(id, rect, col, row).map(|(text, _, _)| text)
+        stack
+            .word_span_at(id, rect, col, row)
+            .map(|(text, _, _)| text)
     }
 
     #[test]
@@ -7028,7 +7030,11 @@ mod selection_offset_tests {
         let mut stack = stack_with(TerminalKind::Shell, None, &["run src/main.rs now"]);
         // Grid col 0 ('r' of "run") is screen col 1.
         let text = select_word(&mut stack, Rect::new(0, 0, 80, 30), 1, 3);
-        assert_eq!(text.as_deref(), Some("run"), "a bare word stops at the space");
+        assert_eq!(
+            text.as_deref(),
+            Some("run"),
+            "a bare word stops at the space"
+        );
     }
 
     #[test]
@@ -7037,7 +7043,9 @@ mod selection_offset_tests {
         // Grid col 3 is the space after "run" (screen col 4).
         let id = stack.focused_terminal_id().unwrap();
         assert!(
-            stack.word_span_at(id, Rect::new(0, 0, 80, 30), 4, 3).is_none(),
+            stack
+                .word_span_at(id, Rect::new(0, 0, 80, 30), 4, 3)
+                .is_none(),
             "double-clicking whitespace selects nothing",
         );
     }
@@ -7060,8 +7068,9 @@ mod selection_offset_tests {
 
     #[test]
     fn is_word_char_holds_paths_and_urls_together() {
-        for c in ['a', 'Z', '9', '_', '-', '.', '/', ':', '@', '~', '?', '=', '&', '#', '%', '+']
-        {
+        for c in [
+            'a', 'Z', '9', '_', '-', '.', '/', ':', '@', '~', '?', '=', '&', '#', '%', '+',
+        ] {
             assert!(is_word_char(c), "{c:?} should be a word char");
         }
         for c in [' ', '\t', '(', ')', '"', '\'', ',', ';', '|'] {
@@ -7079,9 +7088,17 @@ mod selection_offset_tests {
             (String::new(), Vec::new(), false),
             (String::new(), Vec::new(), false),
         ];
-        assert_eq!(wrap_group(&rows, 1), (0, 2), "middle of a group spans it all");
+        assert_eq!(
+            wrap_group(&rows, 1),
+            (0, 2),
+            "middle of a group spans it all"
+        );
         assert_eq!(wrap_group(&rows, 0), (0, 2), "the head still spans forward");
-        assert_eq!(wrap_group(&rows, 3), (3, 3), "an unwrapped row is its own group");
+        assert_eq!(
+            wrap_group(&rows, 3),
+            (3, 3),
+            "an unwrapped row is its own group"
+        );
     }
 
     /// U1 regression (2026-08-19 audit): with no VT mutation between

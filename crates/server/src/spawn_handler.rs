@@ -7025,16 +7025,7 @@ pub(crate) async fn handle_write_batch(
     writes: &[Vec<u8>],
     intent: TerminalInputIntent,
 ) -> bool {
-    // Park keyboard→PTY input behind an in-flight spawn-time context injection
-    // (#1444). This runs on the per-terminal FIFO I/O lane, so a burst of
-    // keystrokes typed into a freshly-spawned agent stays queued in order and
-    // is delivered only after the injected brief has been submitted — never
-    // ahead of or interleaved with it. A no-op once the gate is closed (the
-    // common case) or was never opened (spawns without an initial prompt).
-    config
-        .spawn
-        .wait_for_inject_gate(terminal_id, INJECT_GATE_HOLD_CAP)
-        .await;
+    hold_for_spawn_injection(config, terminal_id).await;
     let total: usize = writes.iter().map(Vec::len).sum();
     let mut joined = Vec::with_capacity(total);
     for bytes in writes {
@@ -7159,14 +7150,57 @@ pub(crate) async fn handle_write_batch(
 /// prompt from leaking the waiter task indefinitely.
 const INJECT_INPUT_DEADLINE: Duration = Duration::from_secs(120);
 
-/// Upper bound a keyboard write parks behind an in-flight spawn injection
-/// (#1444). The gate's guard closes it synchronously when the inject task
-/// finishes by any path, so this cap only matters if that task is lost; it
-/// sits above the injection's own worst case (`HARD_DEADLINE` +
-/// `PENDING_READY_CAP` + paste/submit) so a legitimately slow inject — a
-/// loaded box or a cold first-time worktree — is still awaited, never cut
+/// Absolute backstop on how long a keyboard write parks behind an in-flight
+/// spawn injection (#1444). Every ordinary release happens far sooner — the
+/// inject task's guard drops on completion, a `Close` preempts, and an agent
+/// prompt exempts input — so this only guards against a genuinely lost inject
+/// task. It sits comfortably above the injection's own total worst case
+/// (`HARD_DEADLINE` 10s + `PENDING_READY_CAP` 60s + paste settle 2s +
+/// `confirm_prompt_submission` ~30s ≈ 102s) so a legitimately slow inject — a
+/// loaded box or a cold first-time worktree — is always awaited, never cut
 /// short into leaking the very keystrokes this gate exists to hold.
-const INJECT_GATE_HOLD_CAP: Duration = Duration::from_secs(90);
+const INJECT_GATE_HOLD_CAP: Duration = Duration::from_secs(180);
+
+/// How often a parked write re-checks its early-release conditions (the agent
+/// turning to a user-facing prompt, or a `Close`). Short enough that release
+/// feels immediate; the wake path is event-driven, so this is only the
+/// staleness bound on the prompt re-check, not a busy loop.
+const INJECT_GATE_POLL: Duration = Duration::from_millis(250);
+
+/// Park keyboard→PTY input behind an in-flight spawn-time context injection so
+/// the injected brief reaches the agent before any racing keystroke (#1444).
+/// Runs on the per-terminal FIFO I/O lane, so held writes stay ordered and
+/// land only after injection submits. Releases early — never deadlocking —
+/// when the agent is itself waiting on the user (a trust / permission /
+/// chooser prompt only a keystroke clears; holding it would deadlock the
+/// readiness-gated injection, which is waiting for that same prompt to clear)
+/// or a `Close` has been admitted for the terminal.
+async fn hold_for_spawn_injection(config: &ServerConfig, terminal_id: TerminalId) {
+    if !config.spawn.any_inject_gate_active() {
+        return;
+    }
+    let cap_at = tokio::time::Instant::now() + INJECT_GATE_HOLD_CAP;
+    loop {
+        if !config.spawn.inject_gate_holding(terminal_id) {
+            return;
+        }
+        if config.terminal.agent_state_for(terminal_id).await
+            == Some(lazybox_ipc::AgentState::InputNeeded)
+        {
+            return;
+        }
+        if config
+            .spawn
+            .wait_for_inject_gate(terminal_id, INJECT_GATE_POLL)
+            .await
+        {
+            return;
+        }
+        if tokio::time::Instant::now() >= cap_at {
+            return;
+        }
+    }
+}
 
 /// How long a deferred inject waits between forcing a live re-read of the
 /// agent's screen (issue #869). The loop is level-triggered: each tick pokes
@@ -8599,6 +8633,9 @@ pub async fn handle_close(
                 message: format!("could not close source terminal: {e}"),
             });
         }
+        // The kill failed and the session lives on; re-arm the injection gate
+        // the admitted Close had released so ordering resumes (#1444).
+        config.spawn.clear_close_requested(terminal_id);
         return false;
     }
     config.agent_recovery.forget(terminal_id).await;
@@ -13144,6 +13181,98 @@ mod tests {
         })
         .await
         .expect("test deadline exceeded");
+    }
+
+    #[tokio::test]
+    async fn spawn_inject_gate_releases_input_when_agent_awaits_user() {
+        // A spawn that stops at a trust / permission / chooser prompt reports
+        // InputNeeded and only a keystroke clears it. Holding that keystroke
+        // would deadlock: the readiness-gated injection waits for the prompt to
+        // clear, which waits for the very input being held. The gate must let
+        // it through even though the injection never completes (#1444).
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let (config, mock) = ServerConfig::in_memory_with_mock();
+            let backend_key = mock
+                .spawn(&[], None, &[], "inject-gate-prompt")
+                .await
+                .expect("spawn");
+            let terminal_id = TerminalId(1446);
+            config
+                .terminal
+                .register_terminal(
+                    terminal_id,
+                    backend_key.clone(),
+                    SessionKey::new("github:o/r#1446"),
+                    TerminalKind::Agent("claude".into()),
+                )
+                .await;
+            config
+                .terminal
+                .record_agent_state(terminal_id, lazybox_ipc::AgentState::InputNeeded)
+                .await;
+
+            // Gate stays open for the whole test — release must come from the
+            // prompt exemption, not the guard dropping.
+            let _gate = config.spawn.open_inject_gate(terminal_id);
+
+            handle_write_batch(
+                &config,
+                terminal_id,
+                &[b"2".to_vec()],
+                TerminalInputIntent::Compose,
+            )
+            .await;
+
+            assert_eq!(
+                mock.writes_for(&backend_key).await,
+                vec![b"2".to_vec()],
+                "a prompt answer must reach the agent even while injection is pending"
+            );
+            assert!(
+                config.spawn.inject_gate_holding(terminal_id),
+                "the gate is still held — the write was let through by the exemption, not a release"
+            );
+        })
+        .await
+        .expect("deadlocked holding input behind a prompt the injection waits on");
+    }
+
+    #[tokio::test]
+    async fn spawn_inject_gate_releases_input_on_close_request() {
+        // `]]x` must never queue behind an in-flight injection: an admitted
+        // Close releases the hold so the terminal can be killed promptly (#1444).
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let (config, mock) = ServerConfig::in_memory_with_mock();
+            let backend_key = mock
+                .spawn(&[], None, &[], "inject-gate-close")
+                .await
+                .expect("spawn");
+            let terminal_id = TerminalId(1447);
+            config
+                .terminal
+                .register_terminal(
+                    terminal_id,
+                    backend_key.clone(),
+                    SessionKey::new("github:o/r#1447"),
+                    TerminalKind::Agent("claude".into()),
+                )
+                .await;
+
+            let _gate = config.spawn.open_inject_gate(terminal_id);
+            config.spawn.note_close_requested(terminal_id);
+
+            handle_write_batch(
+                &config,
+                terminal_id,
+                &[b"ww".to_vec()],
+                TerminalInputIntent::Compose,
+            )
+            .await;
+
+            assert_eq!(mock.writes_for(&backend_key).await, vec![b"ww".to_vec()]);
+        })
+        .await
+        .expect("an admitted Close did not release the injection hold");
     }
 
     #[tokio::test]

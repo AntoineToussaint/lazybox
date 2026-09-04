@@ -3,8 +3,8 @@ use lazybox_core::{SessionId, SessionKey};
 use lazybox_ipc::{AgentCreditRecoveryStage, AgentRunAccess, AgentState, TerminalId, TerminalKind};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{Mutex, Notify, watch};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use tokio::sync::{Mutex, Notify};
 
 /// Typed inputs consumed by the per-terminal turn clock. Producers no longer
 /// arbitrate hook-vs-PTY authority with unrelated wall clocks (#1169).
@@ -1457,10 +1457,12 @@ pub struct SpawnCoordinator {
     /// Holds keyboard→PTY writes for a terminal whose spawn-time context
     /// injection has not yet been submitted, so the injected brief is
     /// guaranteed to reach the agent before any racing user keystroke (#1444).
-    /// A `watch` value of `true` means the injection has completed and the gate
-    /// is open; the entry's absence means no gate is active.
+    /// Absent once injection settles.
     pub(crate) spawn_inject_gates:
-        Arc<parking_lot::Mutex<HashMap<TerminalId, watch::Receiver<bool>>>>,
+        Arc<parking_lot::Mutex<HashMap<TerminalId, Arc<InjectGate>>>>,
+    /// Lock-free count of live inject gates, so the keyboard hot path skips
+    /// the map — and all gate work — entirely when nothing is spawning.
+    pub(crate) active_inject_gates: Arc<AtomicUsize>,
     /// Closes the provisioning gap before terminal maps can enforce singleton spawns.
     /// Each claim carries its cancellation signal and whether it targets
     /// the shared main checkout.
@@ -1510,47 +1512,134 @@ impl SpawnCoordinator {
         self.prompt_submit_signals.lock().await.is_empty()
     }
 
-    /// Open the spawn-injection input gate for a terminal (#1444). Held open
-    /// until the returned guard drops — which every completion path of the
-    /// inject task reaches (success, rejection, terminal exit, timeout, or
-    /// task cancellation) via `Drop`. While open, `wait_for_inject_gate` parks
+    /// Open the spawn-injection input gate for a terminal (#1444). Held until
+    /// the returned guard drops — which every completion path of the inject
+    /// task reaches (success, rejection, terminal exit, timeout, or
+    /// cancellation) via `Drop`. While held, `wait_for_inject_gate` parks
     /// keyboard→PTY writes for this terminal so the injected brief lands first.
-    pub(crate) fn open_inject_gate(&self, id: TerminalId) -> SpawnInjectGate {
-        let (done, rx) = watch::channel(false);
-        self.spawn_inject_gates.lock().insert(id, rx);
-        SpawnInjectGate {
+    pub(crate) fn open_inject_gate(&self, id: TerminalId) -> SpawnInjectGuard {
+        let gate = Arc::new(InjectGate {
+            injected: AtomicBool::new(false),
+            close_requested: AtomicBool::new(false),
+            wake: Notify::new(),
+        });
+        self.spawn_inject_gates.lock().insert(id, gate.clone());
+        self.active_inject_gates.fetch_add(1, Ordering::AcqRel);
+        SpawnInjectGuard {
             terminal_id: id,
-            done,
+            gate,
             gates: self.spawn_inject_gates.clone(),
+            active: self.active_inject_gates.clone(),
         }
     }
 
-    /// Park until a terminal's spawn-time injection has been submitted, the
-    /// gate is not open, or `cap` elapses. Bounded so a lost inject task can
-    /// never wedge input indefinitely: it fails open.
-    pub(crate) async fn wait_for_inject_gate(&self, id: TerminalId, cap: std::time::Duration) {
-        let Some(mut rx) = self.spawn_inject_gates.lock().get(&id).cloned() else {
-            return;
+    /// True while any spawn injection is holding input, so the keyboard hot
+    /// path can skip all gate work when nothing is spawning.
+    pub(crate) fn any_inject_gate_active(&self) -> bool {
+        self.active_inject_gates.load(Ordering::Acquire) != 0
+    }
+
+    /// True while THIS terminal's injection is still holding its input gate
+    /// (present and not yet released).
+    pub(crate) fn inject_gate_holding(&self, id: TerminalId) -> bool {
+        self.spawn_inject_gates
+            .lock()
+            .get(&id)
+            .is_some_and(|gate| !gate.releasable())
+    }
+
+    /// Park up to `poll` for this terminal's injection gate to release.
+    /// Returns true when there is no gate or it has released (proceed with the
+    /// write), false when it is still holding after `poll` (the caller
+    /// re-evaluates its own release conditions and calls again).
+    pub(crate) async fn wait_for_inject_gate(&self, id: TerminalId, poll: std::time::Duration) -> bool {
+        let gate = self.spawn_inject_gates.lock().get(&id).cloned();
+        let Some(gate) = gate else {
+            return true;
         };
-        let _ = tokio::time::timeout(cap, rx.wait_for(|done| *done)).await;
+        if gate.releasable() {
+            return true;
+        }
+        let notified = gate.wake.notified();
+        tokio::pin!(notified);
+        // Enrol before the final pre-park check so a release that fires in the
+        // gap still wakes us rather than being missed.
+        notified.as_mut().enable();
+        if gate.releasable() {
+            return true;
+        }
+        tokio::select! {
+            _ = notified => gate.releasable(),
+            _ = tokio::time::sleep(poll) => false,
+        }
+    }
+
+    /// Release parked writes for a terminal whose `Close` has been admitted, so
+    /// `]]x` is never queued behind an in-flight injection (#1444). Called from
+    /// the command router, not the (possibly parked) per-terminal lane worker.
+    pub(crate) fn note_close_requested(&self, id: TerminalId) {
+        if let Some(gate) = self.spawn_inject_gates.lock().get(&id) {
+            gate.close_requested.store(true, Ordering::Release);
+            gate.wake.notify_waiters();
+        }
+    }
+
+    /// Re-arm the gate after a close that failed and left the session live, so
+    /// the still-running injection keeps its inject-before-input ordering.
+    pub(crate) fn clear_close_requested(&self, id: TerminalId) {
+        if let Some(gate) = self.spawn_inject_gates.lock().get(&id) {
+            gate.close_requested.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// Shared state behind a terminal's spawn-injection input gate (#1444). A
+/// parked write is released as soon as either condition below holds.
+pub(crate) struct InjectGate {
+    /// The injection has finished — submitted, or given up — so the brief has
+    /// already reached (or will never reach) the agent.
+    injected: AtomicBool,
+    /// A `Close` was admitted for this terminal: the escape hatch releases
+    /// parked writes so a kill is never queued behind the injection. Reset if
+    /// that close then fails and the session lives on.
+    close_requested: AtomicBool,
+    /// Wakes parked writers to re-evaluate the release conditions.
+    wake: Notify,
+}
+
+impl InjectGate {
+    fn releasable(&self) -> bool {
+        self.injected.load(Ordering::Acquire) || self.close_requested.load(Ordering::Acquire)
     }
 }
 
 /// Keeps a terminal's spawn-injection input gate open until dropped. Moved
-/// into the background inject task so the gate closes exactly when injection
-/// finishes, releasing any keyboard writes parked behind it (#1444).
-pub(crate) struct SpawnInjectGate {
+/// into the background inject task so the gate releases exactly when injection
+/// finishes, by any path, freeing any keyboard writes parked behind it (#1444).
+pub(crate) struct SpawnInjectGuard {
     terminal_id: TerminalId,
-    done: watch::Sender<bool>,
-    gates: Arc<parking_lot::Mutex<HashMap<TerminalId, watch::Receiver<bool>>>>,
+    gate: Arc<InjectGate>,
+    gates: Arc<parking_lot::Mutex<HashMap<TerminalId, Arc<InjectGate>>>>,
+    active: Arc<AtomicUsize>,
 }
 
-impl Drop for SpawnInjectGate {
+impl Drop for SpawnInjectGuard {
     fn drop(&mut self) {
-        // Release parked writers still holding a cloned receiver, then retire
-        // the entry so later writers take the no-gate fast path.
-        let _ = self.done.send(true);
-        self.gates.lock().remove(&self.terminal_id);
+        self.gate.injected.store(true, Ordering::Release);
+        self.gate.wake.notify_waiters();
+        {
+            let mut gates = self.gates.lock();
+            // Retire only our own entry: a later spawn that reused this id
+            // (however unlikely with monotonic ids) owns a different gate we
+            // must not evict.
+            if gates
+                .get(&self.terminal_id)
+                .is_some_and(|gate| Arc::ptr_eq(gate, &self.gate))
+            {
+                gates.remove(&self.terminal_id);
+            }
+        }
+        self.active.fetch_sub(1, Ordering::AcqRel);
     }
 }
 

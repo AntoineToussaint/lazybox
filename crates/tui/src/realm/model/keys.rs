@@ -304,12 +304,7 @@ impl<T: TerminalAdapter> Model<T> {
             };
             if let Some(dir) = dir {
                 self.q_latch.disarm();
-                let count = match self.focus {
-                    PaneFocus::Sidebar => Some(self.sidebar.extend_selection(dir)),
-                    PaneFocus::Right => self.right.extend_activity_selection(dir),
-                    PaneFocus::Terminals => None,
-                };
-                if let Some(n) = count {
+                if let Some(n) = self.visual_extend(dir) {
                     self.flash_info(format!("visual select — {n} marked · Esc cancels"));
                 }
                 self.sync_panes();
@@ -319,13 +314,7 @@ impl<T: TerminalAdapter> Model<T> {
             if key.code == Key::Esc && key.modifiers.is_empty() {
                 self.visual_select = false;
                 self.q_latch.disarm();
-                match self.focus {
-                    PaneFocus::Sidebar => {
-                        self.sidebar.clear_broadcast_selection();
-                    }
-                    PaneFocus::Right => self.right.clear_activity_selection(),
-                    PaneFocus::Terminals => {}
-                }
+                self.visual_clear_selection();
                 self.sync_panes();
                 self.redraw = true;
                 return;
@@ -1622,6 +1611,30 @@ impl<T: TerminalAdapter> Model<T> {
     /// Used while the sweep is armed so a second `V` toggles it off.
     fn matches_visual_select(&self, key: &RealmKey) -> bool {
         self.matches_single_key_binding(lazybox_tui_core::action::ActionKind::VisualSelect, key)
+    }
+
+    /// Extend the armed visual-select sweep by one row in the focused
+    /// pane (#1448). Returns the visible-selected count for the notice,
+    /// or `None` when the focus has no sweepable list.
+    pub(super) fn visual_extend(&mut self, dir: isize) -> Option<usize> {
+        match self.focus {
+            PaneFocus::Sidebar => Some(self.sidebar.extend_selection(dir)),
+            PaneFocus::Right => self.right.extend_activity_selection(dir),
+            PaneFocus::Terminals => None,
+        }
+    }
+
+    /// Drop the multi-select in whichever pane the visual sweep was
+    /// armed in (#1448) — the `Esc`-cancel counterpart of
+    /// [`visual_extend`](Self::visual_extend).
+    pub(super) fn visual_clear_selection(&mut self) {
+        match self.focus {
+            PaneFocus::Sidebar => {
+                self.sidebar.clear_broadcast_selection();
+            }
+            PaneFocus::Right => self.right.clear_activity_selection(),
+            PaneFocus::Terminals => {}
+        }
     }
 
     /// Shared matcher for the explicit-branch actions that read their

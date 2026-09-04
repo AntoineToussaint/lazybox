@@ -10745,7 +10745,7 @@ mod agent_crash_tests {
         let mut stack = active_stack(2, &sk, TerminalKind::Agent("codex".into()));
         stack.on_event(&Event::AgentAuthOutput {
             terminal_id: TerminalId(2),
-            bytes: b"provider login screen".to_vec().into(),
+            bytes: b"provider login screen".to_vec(),
             first_seq: 1,
             seq: 1,
         });
@@ -10824,7 +10824,7 @@ mod agent_crash_tests {
         });
         stack.on_event(&Event::AgentAuthOutput {
             terminal_id: TerminalId(2),
-            bytes: b"provider login".to_vec().into(),
+            bytes: b"provider login".to_vec(),
             first_seq: 1,
             seq: 1,
         });

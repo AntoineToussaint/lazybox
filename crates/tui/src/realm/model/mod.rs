@@ -5103,6 +5103,10 @@ impl<T: TerminalAdapter> Model<T> {
             component,
             vec![Sub::new(EventClause::Any, SubClause::Always)],
         );
+        // A modal captures the keyboard, so an armed visual-select sweep
+        // must not survive it (see `push_modal`) — the mode would come
+        // back live after the modal closes and eat the next j/k (#1448).
+        self.visual_select = false;
         self.modal_stack.push(id.clone());
         let _ = self.app.active(&id);
         self.redraw = true;

@@ -414,6 +414,30 @@ mod scroll_does_not_rebuild_tests {
             .unwrap();
     }
 
+    /// #1448: arming visual-select declines (returns `None`) when there's
+    /// nothing to sweep — no workspace, or a collapsed section — so the
+    /// caller can nudge instead of silently swallowing the key. It arms
+    /// (marks the cursor row) only when the section has visible rows.
+    #[test]
+    fn begin_activity_visual_select_declines_when_nothing_to_sweep() {
+        let mut pane = RightPane::new(PaneId::new(0));
+        assert_eq!(pane.begin_activity_visual_select(), None, "no workspace");
+
+        pane.set_workspace(Some(ws_with_n_activities(3)));
+        assert_eq!(
+            pane.begin_activity_visual_select(),
+            Some(1),
+            "expanded rows → arms on the cursor row",
+        );
+
+        pane.set_activity_collapsed(true);
+        assert_eq!(
+            pane.begin_activity_visual_select(),
+            None,
+            "collapsed section → nothing to sweep",
+        );
+    }
+
     #[test]
     fn scrolling_reuses_the_cached_buffer() {
         let mut pane = RightPane::new(PaneId::new(0));

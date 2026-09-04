@@ -9954,6 +9954,92 @@ mod merge_focus_follow_tests {
         );
     }
 
+    /// #1448 regression: a visual-select sweep must not survive a modal.
+    /// A modal steals the keyboard (keys route to it, not
+    /// `handle_pane_key`), so if the mode stayed armed it would resurface
+    /// live when the modal closed and turn the next `j` into a stray
+    /// extend. Mounting any modal ends the sweep.
+    #[test]
+    fn visual_select_disarms_when_a_modal_mounts() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        let a = workspace("owner/repo#1", true, Duration::hours(1));
+        let b = workspace("owner/repo#2", true, Duration::hours(2));
+        let top_key = a.key.clone();
+        for ws in [a, b] {
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        }
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&top_key)));
+
+        m.dispatch_key(KeyEvent::new(Key::Char('V'), KeyModifiers::SHIFT));
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+        assert!(m.visual_select, "armed before the modal");
+
+        // An (unsolicited) modal mounts and is dismissed.
+        m.push_modal(Id::Help);
+        assert!(!m.visual_select, "mounting a modal ends the sweep");
+        m.pop_modal();
+
+        // The next `j` navigates — it does not extend the selection.
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            2,
+            "j no longer extends after the modal closed",
+        );
+    }
+
+    /// #1448 regression: a daemon event that moves focus off the anchored
+    /// workspace (here a removal of the focused row) ends the sweep, so
+    /// the next j/k doesn't silently re-anchor on an unrelated workspace.
+    /// A routine same-workspace poll must NOT disarm — covered by the
+    /// other sweep tests, which upsert repeatedly while armed.
+    #[test]
+    fn visual_select_disarms_when_a_poll_moves_focus_off_the_anchor() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        let a = workspace("owner/repo#1", true, Duration::hours(1));
+        let b = workspace("owner/repo#2", true, Duration::hours(2));
+        let a_key = a.key.clone();
+        let top_key = a.key.clone();
+        for ws in [a, b] {
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        }
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&top_key)));
+
+        // Arm on the focused row without moving the cursor.
+        m.dispatch_key(KeyEvent::new(Key::Char('V'), KeyModifiers::SHIFT));
+        assert_eq!(m.sidebar.broadcast_selected_count(), 1);
+        assert!(m.visual_select);
+
+        // A poll removes the focused workspace → focus relocates → disarm.
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(a_key));
+        assert!(
+            !m.visual_select,
+            "focus moved off the anchor, so the sweep ended",
+        );
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "the removed anchor is pruned from the selection",
+        );
+
+        // The next `j` navigates rather than starting a fresh sweep.
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "j no longer extends once the sweep ended",
+        );
+    }
+
     #[test]
     fn merge_while_viewing_issue_follows_focus_to_pr() {
         let mut m = build_model();
@@ -16627,6 +16713,28 @@ mod activity_pane_visibility_tests {
         assert!(
             m.right.selected_activity_indices().is_empty(),
             "Esc clears the swept activity selection",
+        );
+    }
+
+    /// #1448: `V` with nothing to sweep (a collapsed activity section)
+    /// does not arm the mode — the dispatch nudges instead of silently
+    /// swallowing the key, and no stray sweep is left armed.
+    #[test]
+    fn visual_select_does_not_arm_with_nothing_to_sweep() {
+        let mut m = build_model();
+        seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        m.focus = PaneFocus::Right;
+        m.set_focus_attr();
+        // Collapse the section so there are no rows to sweep.
+        m.dispatch_key(KeyEvent::new(Key::Enter, KeyModifiers::NONE));
+        m.dispatch_key(KeyEvent::new(Key::Char('V'), KeyModifiers::SHIFT));
+        assert!(
+            !m.visual_select,
+            "V must not arm when the activity section is collapsed",
+        );
+        assert!(
+            m.right.selected_activity_indices().is_empty(),
+            "and it marks nothing",
         );
     }
 

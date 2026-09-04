@@ -2648,6 +2648,12 @@ impl<T: TerminalAdapter> Model<T> {
                     ));
                     self.sync_panes();
                     self.redraw = true;
+                } else {
+                    // Nothing sweepable under the cursor — a repo/Space
+                    // header row, or a collapsed / empty activity pane.
+                    // Nudge instead of silently swallowing the key (#1448).
+                    self.flash_hint("visual select — nothing here to sweep");
+                    self.redraw = true;
                 }
             }
             Action::SendToSession => {

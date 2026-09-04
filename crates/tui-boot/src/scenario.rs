@@ -77,8 +77,9 @@ use tokio::sync::{broadcast, mpsc};
 ///
 /// Returns the [`PracticeHome`] guard (hold it for the life of the
 /// session — dropping it reverts the home and deletes the directory) and
-/// the [`PracticeIsolation`] proof that `Model::with_practice` requires,
-/// so chrome and isolation are minted together and cannot drift apart.
+/// the [`PracticeIsolation`](paths::PracticeIsolation) proof that
+/// `Model::with_practice` requires, so chrome and isolation are minted
+/// together and cannot drift apart.
 pub fn isolate_practice_home() -> anyhow::Result<(PracticeHome, paths::PracticeIsolation)> {
     let dir = tempfile::Builder::new()
         .prefix("lazybox-practice-")

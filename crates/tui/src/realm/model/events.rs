@@ -238,6 +238,9 @@ impl<T: TerminalAdapter> Model<T> {
             // doesn't leave a stale burst that suppresses the next
             // genuine shortcut.
             self.sidebar_burst.reset();
+            // Visual-select is per-pane (its anchor lives in the pane it
+            // was armed in), so leaving that pane ends the sweep (#1448).
+            self.visual_select = false;
         }
         self.focus = focus;
         self.set_focus_attr();
@@ -383,7 +386,25 @@ impl<T: TerminalAdapter> Model<T> {
     /// the run loop's drain can coalesce a whole batch into one
     /// projection — see `dispatch_daemon_event`.
     pub fn handle_daemon_event(&mut self, event: IpcEvent) {
+        // A visual-select sweep is anchored on the focused pane's current
+        // workspace (#1448). A daemon event that moves focus OFF that
+        // workspace — a removal, a filter-out, a re-sort that relocates the
+        // cursor — invalidates the anchor; keep the mode armed and the next
+        // j/k would silently re-anchor on an unrelated workspace. So if the
+        // focused workspace changes as a result of this event, end the
+        // sweep. Key-driven sweeps never pass through here (they run in
+        // `handle_pane_key`), so this can't cut a live sweep short; a
+        // routine poll that re-upserts the same focused workspace leaves the
+        // key unchanged and the mode intact.
+        let focused_before = self
+            .visual_select
+            .then(|| self.sidebar.selected_workspace_key().cloned());
         self.dispatch_daemon_event(event);
+        if let Some(before) = focused_before
+            && before != self.sidebar.selected_workspace_key().cloned()
+        {
+            self.visual_select = false;
+        }
         self.flush_pane_sync();
     }
 

@@ -38,6 +38,11 @@ pub struct ActivityFeed {
     /// Indices the user has multi-selected with `v`. Default
     /// empty; `f` falls back to the cursor's row when empty.
     selected: HashSet<usize>,
+    /// Live visual-select sweep state (#1448): `(anchor, cursor-at-last-
+    /// extend)`, mirroring the sidebar's `sweep`. `None` between sweeps
+    /// and after a `v` toggle / clear. Lets [`extend_selection`] shrink
+    /// when the cursor reverses back toward the anchor.
+    sweep: Option<(usize, usize)>,
 }
 
 impl ActivityFeed {
@@ -108,12 +113,59 @@ impl ActivityFeed {
     /// new state (true = now selected) so callers can surface a
     /// `✓ Selected` / `✓ Deselected` footer notice.
     pub fn toggle_select(&mut self, idx: usize) -> bool {
+        // An explicit toggle restarts any live sweep — the next extend
+        // re-anchors on the (possibly re-marked) cursor row (#1448).
+        self.sweep = None;
         if self.selected.insert(idx) {
             true
         } else {
             self.selected.remove(&idx);
             false
         }
+    }
+
+    /// Arm a visual-select sweep (#1448) on the cursor row: mark it and
+    /// anchor here so the next [`Self::extend_selection`] grows / shrinks
+    /// from this row. The activity-pane twin of `Sidebar::begin_visual_select`.
+    pub fn begin_visual_select(&mut self) -> usize {
+        self.selected.insert(self.cursor);
+        self.sweep = Some((self.cursor, self.cursor));
+        self.selected.len()
+    }
+
+    /// Extend the multi-select by one row in `dir` (−1 up, +1 down) —
+    /// the encoding-independent visual sweep (#1448), mirroring
+    /// `Sidebar::extend_selection`. `last` is the highest valid index
+    /// (activity length − 1). The sweep is anchored on the row it
+    /// started from: moving away from the anchor marks the landed row,
+    /// reversing back toward it unmarks the departed row (the anchor
+    /// itself always stays). Returns the selected count for the notice.
+    pub fn extend_selection(&mut self, dir: isize, last: usize) -> usize {
+        let cur = self.cursor;
+        let continuing = self.sweep.is_some_and(|(_, l)| l == cur);
+        let anchor = if continuing {
+            self.sweep.map(|(a, _)| a).unwrap_or(cur)
+        } else {
+            cur
+        };
+        self.selected.insert(cur);
+        let landed = if dir < 0 {
+            cur.saturating_sub(1)
+        } else {
+            (cur + 1).min(last)
+        };
+        self.cursor = landed;
+        let toward_anchor =
+            landed == anchor || (landed > anchor.min(cur) && landed < anchor.max(cur));
+        if toward_anchor {
+            if cur != anchor {
+                self.selected.remove(&cur);
+            }
+        } else {
+            self.selected.insert(landed);
+        }
+        self.sweep = Some((anchor, landed));
+        self.selected.len()
     }
 
     /// Replace the selection with exactly `{idx}`. Used by the
@@ -124,6 +176,7 @@ impl ActivityFeed {
     /// `v` (keyboard) keeps the toggle behaviour for explicit
     /// multi-select accumulation.
     pub fn select_only(&mut self, idx: usize) {
+        self.sweep = None;
         self.selected.clear();
         self.selected.insert(idx);
     }
@@ -137,6 +190,7 @@ impl ActivityFeed {
     /// Drop the entire selection. Bound to a UX key + called
     /// automatically on workspace change.
     pub fn clear_selection(&mut self) {
+        self.sweep = None;
         self.selected.clear();
     }
 
@@ -179,6 +233,13 @@ impl ActivityFeed {
                 .map(|i| i + delta)
                 .filter(|&i| i < new_len)
                 .collect();
+            // The visual sweep's anchor / last-cursor shift with the
+            // rows they point at; a component pushed past the end drops
+            // the whole sweep (#1448).
+            self.sweep = self
+                .sweep
+                .map(|(a, l)| (a + delta, l + delta))
+                .filter(|&(a, l)| a < new_len && l < new_len);
             // Cursor likewise shifts so the user's focused row keeps
             // pointing at the same comment they were reading.
             if self.cursor + delta < new_len {
@@ -190,6 +251,7 @@ impl ActivityFeed {
             // Shrinkage — just drop out-of-range indices.
             self.expanded.retain(|&i| i < new_len);
             self.selected.retain(|&i| i < new_len);
+            self.sweep = self.sweep.filter(|&(a, l)| a < new_len && l < new_len);
             if self.cursor >= new_len {
                 self.cursor = new_len.saturating_sub(1);
             }
@@ -204,6 +266,7 @@ impl ActivityFeed {
         self.cursor = 0;
         self.expanded.clear();
         self.selected.clear();
+        self.sweep = None;
     }
 }
 
@@ -386,6 +449,91 @@ mod tests {
         f.toggle_expand(2);
         // Card collapses but stays selected.
         assert!(!f.is_expanded(2));
+        assert!(f.is_selected(2));
+    }
+
+    /// Visual select (#1448): arming marks the cursor row and anchors.
+    #[test]
+    fn begin_visual_select_marks_the_cursor_row() {
+        let mut f = ActivityFeed::new();
+        f.cursor = 2;
+        assert_eq!(f.begin_visual_select(), 1);
+        assert!(f.is_selected(2));
+    }
+
+    /// A downward sweep from the anchor marks a contiguous range.
+    #[test]
+    fn extend_selection_grows_a_contiguous_range() {
+        let mut f = ActivityFeed::new();
+        f.cursor = 1;
+        f.begin_visual_select(); // anchor + mark row 1
+        f.extend_selection(1, 4); // → row 2
+        f.extend_selection(1, 4); // → row 3
+        assert_eq!(f.cursor, 3);
+        assert!(f.is_selected(1));
+        assert!(f.is_selected(2));
+        assert!(f.is_selected(3));
+        assert_eq!(f.selected().len(), 3);
+    }
+
+    /// Reversing back toward the anchor unmarks the departed rows
+    /// (vim linewise shrink); the anchor itself always stays.
+    #[test]
+    fn extend_selection_shrinks_when_reversing_toward_anchor() {
+        let mut f = ActivityFeed::new();
+        f.cursor = 1;
+        f.begin_visual_select();
+        f.extend_selection(1, 4); // 1,2 marked, cursor 2
+        f.extend_selection(1, 4); // 1,2,3 marked, cursor 3
+        f.extend_selection(-1, 4); // reverse: drop 3, cursor 2
+        assert_eq!(f.cursor, 2);
+        assert!(f.is_selected(1));
+        assert!(f.is_selected(2));
+        assert!(!f.is_selected(3));
+    }
+
+    /// Down-sweep caps at `last`; a further extend is a no-op.
+    #[test]
+    fn extend_selection_clamps_at_the_last_row() {
+        let mut f = ActivityFeed::new();
+        f.cursor = 1;
+        f.begin_visual_select();
+        f.extend_selection(1, 2); // → row 2 (last)
+        f.extend_selection(1, 2); // clamped, still row 2
+        assert_eq!(f.cursor, 2);
+        assert!(f.is_selected(1));
+        assert!(f.is_selected(2));
+    }
+
+    /// A `v` toggle restarts the sweep — a following extend re-anchors
+    /// on the new cursor instead of continuing the old range.
+    #[test]
+    fn toggle_select_restarts_the_sweep() {
+        let mut f = ActivityFeed::new();
+        f.cursor = 0;
+        f.begin_visual_select();
+        f.extend_selection(1, 4); // 0,1 marked, cursor 1
+        f.cursor = 3;
+        f.toggle_select(3); // explicit toggle resets the sweep
+        f.extend_selection(-1, 4); // re-anchors on 3, grows up to 2
+        assert!(f.is_selected(2));
+        assert!(f.is_selected(3));
+        // Reversing now (toward the fresh anchor 3) would shrink 2, not 0/1.
+    }
+
+    /// The sweep anchor rides the same index shift as the selection on
+    /// a length change, so a poll mid-sweep doesn't corrupt shrink math.
+    #[test]
+    fn adjust_for_length_change_shifts_the_sweep_anchor() {
+        let mut f = ActivityFeed::new();
+        f.cursor = 0;
+        f.begin_visual_select();
+        f.extend_selection(1, 4); // anchor 0, cursor 1
+        f.adjust_for_length_change(5, 7); // +2 rows at the front
+        // Anchor shifted 0→2, cursor 1→3; a reverse now shrinks correctly.
+        assert_eq!(f.cursor, 3);
+        f.extend_selection(-1, 6); // toward anchor: drop 3
+        assert!(!f.is_selected(3));
         assert!(f.is_selected(2));
     }
 }

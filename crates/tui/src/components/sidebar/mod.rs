@@ -1446,6 +1446,18 @@ impl Sidebar {
         self.visible_broadcast_selected_count()
     }
 
+    /// Arm a visual-select sweep (#1448) on the cursor row: mark it and
+    /// anchor the sweep here, so the next [`Self::extend_selection`] grows /
+    /// shrinks from this row exactly like the Shift-↑/↓ path. Returns the
+    /// visible-and-selected count, or `None` when the cursor isn't on a
+    /// workspace / session row (nothing to sweep).
+    pub fn begin_visual_select(&mut self) -> Option<usize> {
+        let key = self.selected_session_key()?.clone();
+        self.broadcast_selected.insert(key.clone());
+        self.sweep = Some((key.clone(), Some(key)));
+        Some(self.visible_broadcast_selected_count())
+    }
+
     /// Visible index of a workspace's row (its `Workspace` row, or the
     /// first `Session` sub-row when the workspace row itself isn't in
     /// the list). `None` for `None` keys and hidden workspaces.

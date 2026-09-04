@@ -3782,6 +3782,12 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Push a modal.
     pub fn push_modal(&mut self, id: Id) {
+        // A modal steals the keyboard (keys route to it, not
+        // `handle_pane_key`), so an armed visual-select sweep would
+        // otherwise resurface — still armed — after the modal closes,
+        // turning the next j/k into a stray extend. Mounting any modal
+        // ends the sweep (#1448).
+        self.visual_select = false;
         self.modal_stack.push(id.clone());
         let _ = self.app.active(&id);
         self.redraw = true;

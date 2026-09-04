@@ -330,7 +330,13 @@ same-key double-tap `r r` (the leader stashes the shadowed direct
 action). `v` multi-selects the cursor
 workspace; `Shift-↑`/`Shift-↓` extend the selection from the cursor
 (spreadsheet-style contiguous sweep, #932) and `Shift-click` extends
-it to the clicked row (marks survive j/k; `Esc` clears). A live
+it to the clicked row (marks survive j/k; `Esc` clears). `V` arms a
+vim-style **visual-select** sweep (#1448) — an encoding-independent
+alternative to `Shift-↑/↓` for terminals that don't report Shift on
+arrows: while armed, plain `j`/`k` (and arrows) grow / shrink the
+marked range from the anchor, `Esc` cancels (dropping the selection),
+a second `V` disarms (keeping it), and any action key fires on the
+marked set (it also drives the activity pane's row multi-select). A live
 multi-select makes **every bulk-appropriate workspace action** target
 the whole set instead of just the cursor row — selection is the
 primary path, not a special broadcast mode (#932, mechanism from
@@ -427,7 +433,9 @@ scope.
 
 **RightPane (Activity)**: `j/k` or arrows move the row cursor,
 `g/G` top/bottom, `→/l` expand row, `←/h` collapse row, `Enter`
-toggle the section, `Space`/`v` multi-select rows, `w w` work on
+toggle the section, `Space`/`v` multi-select rows (`V` arms the same
+vim-style visual sweep as the sidebar — `j`/`k` grow / shrink the row
+range from the anchor, `Esc` cancels; #1448), `w w` work on
 selection, `d` toggle the PR/issue description teaser (Collapsed ⇄
 Preview); a second `d` on a long — or richly-formatted (tables, fenced
 code, images) — preview, or clicking `+N more lines`, opens the full

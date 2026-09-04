@@ -2631,6 +2631,31 @@ impl<T: TerminalAdapter> Model<T> {
             Action::BroadcastToSelected => {
                 self.mount_broadcast_picker();
             }
+            Action::VisualSelect => {
+                // Arm the encoding-independent sweep (#1448): mark the
+                // cursor row and switch j/k over to extend_selection in
+                // the focused pane. `Esc` / a second `V` / any action key
+                // / a pane change ends it (see handle_pane_key + set_focus).
+                let armed = match self.focus {
+                    PaneFocus::Sidebar => self.sidebar.begin_visual_select(),
+                    PaneFocus::Right => self.right.begin_activity_visual_select(),
+                    PaneFocus::Terminals => None,
+                };
+                if let Some(n) = armed {
+                    self.visual_select = true;
+                    self.flash_info(format!(
+                        "visual select — {n} marked · j/k extend · Esc cancels"
+                    ));
+                    self.sync_panes();
+                    self.redraw = true;
+                } else {
+                    // Nothing sweepable under the cursor — a repo/Space
+                    // header row, or a collapsed / empty activity pane.
+                    // Nudge instead of silently swallowing the key (#1448).
+                    self.flash_hint("visual select — nothing here to sweep");
+                    self.redraw = true;
+                }
+            }
             Action::SendToSession => {
                 let workspace = self.sidebar.selected_workspace().cloned();
                 let captured = workspace.as_ref().and_then(|workspace| {

@@ -30,8 +30,9 @@ not junk:\n\
   - `working` and `lazybox:w:…` mark a task as owned by a running agent \
 (heartbeat-renewed, 1-hour TTL). Removing one lets the fleet double-spawn on a task \
 it now thinks is free.\n\
-  - `no-auto-fix` / `do-not-lazybox` opt a PR out of lazybox's auto-fix. Add one to \
-stop lazybox acting on a PR; remove it to let it resume.\n\
+  - `no-auto-fix` / `do-not-lazybox` opt a PR out of lazybox's auto-fix only (not \
+auto-merge, not `@lazybox`). Add one to stop lazybox auto-fixing a PR; remove it to \
+let it resume.\n\
 \n\
 Standing policies (set in lazybox, not GitHub labels; shown as `ARM` / `FIX` pills) \
 can act on a PR without you: auto-merge-on-green merges it once CI passes, and \

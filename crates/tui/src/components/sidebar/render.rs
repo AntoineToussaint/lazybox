@@ -1645,9 +1645,17 @@ impl Sidebar {
         // group: it stays within one repo, so one provider. Session
         // sub-rows are skipped and don't break the run.
         let mut group: Vec<usize> = Vec::new();
+        // Whether the group currently accumulating is the synthetic
+        // `★ Focused` section — its rows get a dim source prefix (#1450).
+        // The Hopper section is lifted out of repo grouping too, so it
+        // delimits the run just like a repo header; it just carries no
+        // prefix.
+        let mut focused_group = false;
         for (i, row) in self.visible.iter().enumerate() {
             match row {
-                VisibleRow::FocusedHeader | VisibleRow::RepoHeader(_) => {
+                VisibleRow::FocusedHeader
+                | VisibleRow::HopperHeader
+                | VisibleRow::RepoHeader(_) => {
                     if intersects(&group) {
                         self.render_workspace_group(
                             &group,
@@ -1658,10 +1666,12 @@ impl Sidebar {
                             theme,
                             now,
                             focused,
+                            focused_group,
                             &mut out,
                         );
                     }
                     group.clear();
+                    focused_group = matches!(row, VisibleRow::FocusedHeader);
                 }
                 VisibleRow::Workspace(_) => group.push(i),
                 _ => {}
@@ -1677,6 +1687,7 @@ impl Sidebar {
                 theme,
                 now,
                 focused,
+                focused_group,
                 &mut out,
             );
         }
@@ -1701,6 +1712,7 @@ impl Sidebar {
         theme: &crate::theme::Theme,
         now: chrono::DateTime<chrono::Utc>,
         focused: bool,
+        focused_group: bool,
         out: &mut [Option<Line<'static>>],
     ) {
         // Bucket the group's rows by provider (`task.id.source`), keeping
@@ -1732,6 +1744,7 @@ impl Sidebar {
                 theme,
                 now,
                 focused,
+                focused_group,
                 out,
             );
         }
@@ -1751,6 +1764,7 @@ impl Sidebar {
         theme: &crate::theme::Theme,
         now: chrono::DateTime<chrono::Utc>,
         focused: bool,
+        focused_group: bool,
         out: &mut [Option<Line<'static>>],
     ) {
         if indices.is_empty() {
@@ -1869,6 +1883,16 @@ impl Sidebar {
                 stack: self.stacks.get(key),
                 model_shorts: &self.model_shorts,
                 highlight_query,
+                // Focused rows are lifted out of their repo group, so name
+                // their source inline (#1450). Other rows sit under a repo
+                // header already and carry no prefix.
+                repo_prefix: focused_group.then_some(workspace).flatten().map(|w| {
+                    crate::components::visible_rows::group_label(
+                        w,
+                        &self.projects,
+                        &self.workspaces,
+                    )
+                }),
             };
             row_indices.push(i);
             rows.push(build_workspace_row(&ctx));

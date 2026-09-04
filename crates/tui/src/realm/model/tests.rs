@@ -15412,6 +15412,122 @@ mod terminal_url_mouse_tests {
         );
     }
 
+    /// A click that leaves the terminal resets its multi-click counter, so
+    /// bouncing out to the sidebar and straight back to the same cell reads
+    /// as a fresh single click (a drag anchor), not a continued
+    /// triple-click that would select and copy the whole line (#1451).
+    #[test]
+    fn leaving_the_terminal_resets_the_multi_click_counter() {
+        let (mut model, _server, _opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, b"the whole line here\r\n".to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+        let area = model.layout.last_area;
+        let (sidebar, _rt, _rb) = model.effective_pane_rects(area);
+
+        // A double-click in the terminal.
+        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 5, y);
+        left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 5, y);
+        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 5, y);
+        left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 5, y);
+        assert!(model.terminal_selection.is_some(), "double-click selected");
+
+        // Bounce out to the sidebar, then back to the SAME terminal cell.
+        left(&mut model, MouseEventKind::Down(MouseButton::Left), sidebar.x + 1, sidebar.y + 1);
+        left(&mut model, MouseEventKind::Up(MouseButton::Left), sidebar.x + 1, sidebar.y + 1);
+        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 5, y);
+
+        // The return click is a fresh single click: it starts a drag anchor
+        // and installs no resting line selection.
+        assert!(
+            model.terminal_drag.is_some(),
+            "the return click starts a fresh drag, not a continued multi-click",
+        );
+        assert!(
+            model.terminal_selection.is_none(),
+            "the return single click cleared the old selection and made no new one",
+        );
+    }
+
+    /// A resting selection is pinned to a specific terminal; once that
+    /// terminal is no longer displayed (switched tab / workspace), the
+    /// highlight paints nothing rather than bleeding a stale reverse-video
+    /// band onto whatever terminal now fills the pane (#1451).
+    #[test]
+    fn resting_selection_does_not_bleed_onto_another_terminal() {
+        let (mut model, _server, _opened) = build_model(2);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, b"alpha bravo charlie\r\n".to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+
+        // Double-click a word in the active tab (terminal 1).
+        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 2, y);
+        left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 2, y);
+        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 2, y);
+        let sel = model.terminal_selection.expect("a word selection");
+        assert_eq!(sel.terminal, TerminalId(1));
+
+        // Switch to the other tab: terminal 1 is no longer rendered.
+        model.terminals.set_active_tab(1);
+        feed(&mut model, 2, b"unrelated output\r\n".to_vec());
+        model.view();
+        assert_eq!(
+            model.terminals.tile_grid_rect(TerminalId(1)),
+            None,
+            "terminal 1 must be off-screen for this test to mean anything",
+        );
+
+        // With the stale selection present vs lifted, the pane paints the
+        // same reverse-video cells — the off-screen selection adds none.
+        let with_sel = reversed_in_pane(&mut model, pane);
+        let saved = model.terminal_selection.take();
+        let baseline = reversed_in_pane(&mut model, pane);
+        model.terminal_selection = saved;
+        assert_eq!(
+            with_sel, baseline,
+            "a selection for an off-screen terminal must not paint (with={with_sel}, baseline={baseline})",
+        );
+    }
+
+    /// A wheel scroll over the terminal dismisses a resting highlight so it
+    /// can't clamp to a stray edge band once its rows leave the viewport
+    /// (#1451).
+    #[test]
+    fn wheel_scroll_dismisses_a_resting_selection() {
+        let (mut model, _server, _opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, b"alpha bravo charlie\r\n".to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+
+        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 2, y);
+        left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 2, y);
+        left(&mut model, MouseEventKind::Down(MouseButton::Left), x + 2, y);
+        assert!(model.terminal_selection.is_some(), "double-click selected");
+
+        model.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: x + 2,
+            row: y,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(
+            model.terminal_selection.is_none(),
+            "a wheel scroll clears the resting selection",
+        );
+    }
+
     /// A double-click on a soft-wrapped token selects it whole — the URL
     /// that spilled onto a second row copies as one contiguous string,
     /// reusing the soft-wrap stitching (#1451). The display formatter

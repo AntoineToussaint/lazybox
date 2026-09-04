@@ -6525,24 +6525,31 @@ impl<T: TerminalAdapter> Model<T> {
             // geometry this frame.
             // A live drag takes precedence over a resting double/triple-click
             // selection — they are never both meaningful, and a fresh drag
-            // clears the resting one at mouse-down anyway (#1451).
+            // clears the resting one at mouse-down anyway (#1451). A drag may
+            // fall back to the pane rect before its tile's geometry is
+            // recorded (first frame); a resting selection paints ONLY when
+            // its own tile is on screen this frame, so switching to another
+            // workspace can't bleed a stale highlight onto the new
+            // terminal.
             let painted = self
                 .terminal_drag
                 .as_ref()
-                .map(|d| (d.terminal, d.anchor, d.focus))
+                .map(|d| (d.terminal, d.anchor, d.focus, true))
                 .or_else(|| {
                     self.terminal_selection
                         .as_ref()
-                        .map(|s| (s.terminal, s.anchor, s.focus))
+                        .map(|s| (s.terminal, s.anchor, s.focus, false))
                 });
-            if let Some((terminal, anchor, focus)) = painted {
-                let clip = self
-                    .terminals
-                    .tile_grid_rect(terminal)
-                    .unwrap_or(right_bottom);
-                if let Some((start, end)) = self
-                    .terminals
-                    .selection_screen_span(terminal, clip, anchor, focus)
+            if let Some((terminal, anchor, focus, is_drag)) = painted {
+                let clip = match self.terminals.tile_grid_rect(terminal) {
+                    Some(grid) => Some(grid),
+                    None if is_drag => Some(right_bottom),
+                    None => None,
+                };
+                if let Some(clip) = clip
+                    && let Some((start, end)) = self
+                        .terminals
+                        .selection_screen_span(terminal, clip, anchor, focus)
                 {
                     paint_selection(f.buffer_mut(), clip, start, end);
                 }

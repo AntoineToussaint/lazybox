@@ -2106,6 +2106,13 @@ impl<T: TerminalAdapter> Model<T> {
                 if !matches!(target, Some(PaneFocus::Sidebar) | Some(PaneFocus::Right)) {
                     self.last_click = None;
                 }
+                // The inverse for the terminal's own click counter: a click
+                // that left the terminal breaks the double/triple-click run,
+                // so bouncing out to the sidebar and back doesn't read the
+                // return click as a continued multi-click (#1451).
+                if target != Some(PaneFocus::Terminals) {
+                    self.terminal_click = None;
+                }
 
                 // A left-click in the terminal pane ALWAYS starts a
                 // potential lazybox selection — we commit to that
@@ -2480,6 +2487,12 @@ impl<T: TerminalAdapter> Model<T> {
                 }
                 if !rect_contains(right_bottom_rect, m.column, m.row) {
                     return;
+                }
+                // Scrolling dismisses a resting word/line highlight rather
+                // than letting it clamp to a stray edge band once its rows
+                // leave the viewport (#1451).
+                if self.terminal_selection.take().is_some() {
+                    self.redraw = true;
                 }
                 // Scroll the tile UNDER THE CURSOR, not the focused one
                 // (#362) — hover-to-scroll like every tiling terminal.

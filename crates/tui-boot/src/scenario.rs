@@ -613,11 +613,24 @@ pub struct Reactor {
 }
 
 struct TrackedAgent {
-    session_key: SessionKey,
     backend_key: String,
     /// Count of backend writes already answered, so a poll only reacts to
     /// input that arrived since the last reply.
     answered_writes: usize,
+    /// Serialized per-terminal play queue. Each job (intro, or a reply)
+    /// runs to completion — streaming its lines and its final `AgentState`
+    /// — before the next starts, so two beats on the SAME terminal can never
+    /// interleave their output or land their state flips out of order. The
+    /// dedicated task ends when this sender is dropped (terminal untracked).
+    jobs: mpsc::UnboundedSender<PlayJob>,
+}
+
+/// One serialized beat on a terminal: optional cooked-mode echo of the
+/// user's input, a canned transcript, then a settle state.
+struct PlayJob {
+    echo: Option<Vec<u8>>,
+    lines: &'static [&'static str],
+    end: AgentState,
 }
 
 impl Reactor {
@@ -652,48 +665,57 @@ impl Reactor {
     }
 
     async fn on_event(&mut self, event: Event) {
-        // Only agent spawns get a reaction; a plain shell is left to the user.
-        let Event::TerminalSpawned {
-            terminal_id,
-            session_key,
-            kind: TerminalKind::Agent(_),
-            ..
-        } = event
-        else {
-            return;
-        };
+        match event {
+            // A dead terminal (kill / archive / close) drops its play queue —
+            // ending the per-terminal task — and stops us polling a backend key
+            // that no longer exists, so `tracked` can't grow without bound over
+            // a long session.
+            Event::TerminalExited { terminal_id, .. } => {
+                self.tracked.remove(&terminal_id);
+            }
+            // Only agent spawns get a reaction; a plain shell is left as-is.
+            Event::TerminalSpawned {
+                terminal_id,
+                session_key,
+                kind: TerminalKind::Agent(_),
+                ..
+            } => self.on_agent_spawned(terminal_id, session_key).await,
+            _ => {}
+        }
+    }
+
+    async fn on_agent_spawned(&mut self, terminal_id: TerminalId, session_key: SessionKey) {
         if self.tracked.contains_key(&terminal_id) {
             return;
         }
         let Some(backend_key) = self.config.terminal.backend_key_for(terminal_id).await else {
             return;
         };
-        // Anything already written to the session at spawn (an injected
-        // initial prompt) is not a user reply — start the counter past it.
-        let answered_writes = self.mock.writes_for(&backend_key).await.len();
+        let jobs = self.spawn_agent_task(terminal_id, session_key, backend_key.clone());
+        // Start the counter at zero — NOT past whatever is already written.
+        // A `w w`-style spawn injects the user's brief as a write that can
+        // land before OR after this event, so anchoring past it would race and
+        // silently drop the brief. From zero, poll_replies answers the brief
+        // the moment it arrives, whichever side of the spawn it lands.
         self.tracked.insert(
             terminal_id,
             TrackedAgent {
-                session_key: session_key.clone(),
-                backend_key: backend_key.clone(),
-                answered_writes,
+                backend_key,
+                answered_writes: 0,
+                jobs: jobs.clone(),
             },
         );
-        self.play(
-            terminal_id,
-            session_key,
-            backend_key,
-            AGENT_INTRO,
-            AgentState::InputNeeded,
-        );
+        let _ = jobs.send(PlayJob {
+            echo: None,
+            lines: AGENT_INTRO,
+            end: AgentState::InputNeeded,
+        });
     }
 
     /// Scan tracked agents for input that arrived since the last reply and,
-    /// where the user has submitted a line, answer it.
+    /// where the user has submitted a line, queue an answer.
     async fn poll_replies(&mut self) {
-        // Collect first so we don't hold a borrow across the async plays.
-        let mut answers: Vec<(TerminalId, SessionKey, String, Vec<u8>)> = Vec::new();
-        for (tid, agent) in self.tracked.iter_mut() {
+        for agent in self.tracked.values_mut() {
             let writes = self.mock.writes_for(&agent.backend_key).await;
             if writes.len() <= agent.answered_writes {
                 continue;
@@ -703,51 +725,60 @@ impl Reactor {
             // submit (Enter) or any newline in the fresh bytes.
             let submitted = fresh
                 .iter()
-                .any(|w| w.iter().any(|b| *b == b'\r' || b'\n' == *b));
+                .any(|w| w.iter().any(|b| *b == b'\r' || *b == b'\n'));
             if !submitted {
                 continue;
             }
             agent.answered_writes = writes.len();
-            let echo: Vec<u8> = fresh.concat();
-            answers.push((*tid, agent.session_key.clone(), agent.backend_key.clone(), echo));
-        }
-        for (tid, key, backend_key, echo) in answers {
-            // The mock backend has no child to echo the keystrokes, so a
-            // real PTY's cooked-mode echo is reproduced here before the
-            // reply — otherwise the line the user typed never appears.
-            self.mock.emit(&backend_key, &echo).await;
-            self.play(tid, key, backend_key, AGENT_REPLY, AgentState::Done);
+            // The mock backend has no child to echo the keystrokes, so a real
+            // PTY's cooked-mode echo is reproduced here (inside the same job as
+            // the reply, so the echo can't interleave with an intro still
+            // streaming on this terminal).
+            let _ = agent.jobs.send(PlayJob {
+                echo: Some(fresh.concat()),
+                lines: AGENT_REPLY,
+                end: AgentState::Done,
+            });
         }
     }
 
-    /// Flip the agent to `Working`, stream `lines` into its terminal over a
-    /// short window, then settle to `end`. Detached so the reactor loop keeps
-    /// servicing other agents while one is "thinking".
-    fn play(
+    #[cfg(test)]
+    fn tracked_ids(&self) -> Vec<TerminalId> {
+        self.tracked.keys().copied().collect()
+    }
+
+    /// Spawn the dedicated, serialized play task for one terminal and return
+    /// the sender that feeds it. Dropping the sender ends the task.
+    fn spawn_agent_task(
         &self,
         terminal_id: TerminalId,
         session_key: SessionKey,
         backend_key: String,
-        lines: &'static [&'static str],
-        end: AgentState,
-    ) {
+    ) -> mpsc::UnboundedSender<PlayJob> {
+        let (tx, mut rx) = mpsc::unbounded_channel::<PlayJob>();
         let bus = self.config.bus.clone();
         let mock = self.mock.clone();
         tokio::spawn(async move {
-            let working = |state| Event::AgentState {
+            let state = |state| Event::AgentState {
                 session_key: session_key.clone(),
                 terminal_id,
                 state,
             };
-            tokio::time::sleep(Duration::from_millis(350)).await;
-            let _ = bus.send(working(AgentState::Working));
-            for line in lines {
-                tokio::time::sleep(Duration::from_millis(280)).await;
-                mock.emit(&backend_key, line.as_bytes()).await;
+            while let Some(job) = rx.recv().await {
+                if let Some(echo) = job.echo {
+                    mock.emit(&backend_key, &echo).await;
+                }
+                tokio::time::sleep(Duration::from_millis(350)).await;
+                let _ = bus.send(state(AgentState::Working));
+                for line in job.lines {
+                    tokio::time::sleep(Duration::from_millis(280)).await;
+                    mock.emit(&backend_key, line.as_bytes()).await;
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let _ = bus.send(state(job.end));
             }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            let _ = bus.send(working(end));
         });
+        tx
     }
 }
 
@@ -1149,6 +1180,167 @@ mod tests {
         assert!(
             text.contains("pushed a commit"),
             "the agent's canned reply streamed after the user's line"
+        );
+    }
+
+    #[tokio::test]
+    async fn reactor_serializes_an_intro_and_an_early_reply() {
+        // Regression for the play-ordering race: a reply that lands WHILE the
+        // intro is still streaming must not interleave its output with the
+        // intro nor let its `Done` be overtaken by the intro's later
+        // `InputNeeded`. The per-terminal job queue serializes them.
+        use lazybox_ipc::{Command, EventSender, TerminalInputIntent};
+
+        let fx = DemoFixture::seed().unwrap();
+        let mock = MockBackend::new();
+        let config = ServerConfig::with_store_and_backend(fx.store.clone(), mock.as_backend());
+        let mut rx = config.bus.subscribe();
+        tokio::spawn(Reactor::new(config.clone(), mock.clone()).run());
+
+        let (tx, _keep) = mpsc::unbounded_channel();
+        let sink = EventSender::from_unbounded(tx);
+        let key = fx.workspaces[0].key.clone();
+        lazybox_server::dispatch_command(
+            &config,
+            &sink,
+            Command::Spawn {
+                session_key: key.clone(),
+                session_id: None,
+                client_request_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: Some(fx.repo.path().to_string_lossy().into_owned()),
+                initial_prompt: None,
+                initial_snippet: None,
+                on_main: false,
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+                force_new: true,
+            },
+        )
+        .await;
+
+        // Reply IMMEDIATELY — before the intro (~1.6s) can settle.
+        let mut tid = None;
+        for _ in 0..40 {
+            if let Some(found) = config.terminal.terminal_ids().await.first().copied() {
+                tid = Some(found);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let tid = tid.expect("terminal registered");
+        lazybox_server::dispatch_command(
+            &config,
+            &sink,
+            Command::Write {
+                terminal_id: tid,
+                bytes: b"go\r".to_vec(),
+                intent: TerminalInputIntent::Submit,
+            },
+        )
+        .await;
+
+        // Record the order of the settle states for this session.
+        let mut states = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+        while tokio::time::Instant::now() < deadline {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(left, rx.recv()).await {
+                Ok(Ok(Event::AgentState { state, .. })) => {
+                    if matches!(state, AgentState::InputNeeded | AgentState::Done) {
+                        states.push(state);
+                        if matches!(state, AgentState::Done) {
+                            break;
+                        }
+                    }
+                }
+                Ok(Ok(_)) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(_)) | Err(_) => break,
+            }
+        }
+        // Serialized: the intro settles to InputNeeded, THEN the reply settles
+        // to Done — Done is last and never precedes the intro's InputNeeded.
+        assert_eq!(
+            states.last(),
+            Some(&AgentState::Done),
+            "the reply's Done is the final state, not overtaken by the intro: {states:?}"
+        );
+        assert!(
+            states.iter().any(|s| matches!(s, AgentState::InputNeeded)),
+            "the intro still settled to InputNeeded before the reply: {states:?}"
+        );
+
+        // And the transcripts don't interleave: every intro line precedes the
+        // reply.
+        let backend_key = config.terminal.backend_key_for(tid).await.unwrap();
+        let text: String =
+            String::from_utf8_lossy(&config.backend.snapshot(&backend_key).await.unwrap().replay)
+                .into_owned();
+        let intro_end = text.find("you can't break anything").expect("intro streamed");
+        let reply_start = text.find("pushed a commit").expect("reply streamed");
+        assert!(
+            intro_end < reply_start,
+            "intro fully precedes the reply — no interleave: {text:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reactor_untracks_a_terminal_when_it_exits() {
+        // Regression for the unbounded-`tracked` leak: a killed/archived
+        // terminal must be dropped so the reactor stops polling a dead backend
+        // key and the map can't grow without bound over a long session.
+        use lazybox_ipc::{Command, EventSender};
+
+        let fx = DemoFixture::seed().unwrap();
+        let mock = MockBackend::new();
+        let config = ServerConfig::with_store_and_backend(fx.store.clone(), mock.as_backend());
+        let mut reactor = Reactor::new(config.clone(), mock.clone());
+
+        let (tx, _keep) = mpsc::unbounded_channel();
+        let sink = EventSender::from_unbounded(tx);
+        let key = fx.workspaces[0].key.clone();
+        lazybox_server::dispatch_command(
+            &config,
+            &sink,
+            Command::Spawn {
+                session_key: key.clone(),
+                session_id: None,
+                client_request_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: Some(fx.repo.path().to_string_lossy().into_owned()),
+                initial_prompt: None,
+                initial_snippet: None,
+                on_main: false,
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+                force_new: true,
+            },
+        )
+        .await;
+        let tid = config.terminal.terminal_ids().await[0];
+
+        reactor
+            .on_event(Event::TerminalSpawned {
+                terminal_id: tid,
+                session_key: key,
+                kind: TerminalKind::Agent("claude".into()),
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+            })
+            .await;
+        assert_eq!(reactor.tracked_ids(), vec![tid], "spawn tracks the agent");
+
+        reactor
+            .on_event(Event::TerminalExited {
+                terminal_id: tid,
+                exit_code: Some(0),
+                last_output: None,
+            })
+            .await;
+        assert!(
+            reactor.tracked_ids().is_empty(),
+            "an exited terminal is untracked, so tracked can't grow unbounded"
         );
     }
 

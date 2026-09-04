@@ -72,10 +72,20 @@ impl PracticeSandbox {
 
 impl Drop for PracticeSandbox {
     fn drop(&mut self) {
-        // SAFETY: see `enter`. Restore exactly what was there before — an
-        // unset var must go back to unset, not to an empty string (which
-        // `home()` treats as "no override", but which would still leak as a
-        // set-but-empty var to child processes).
+        // Quiesce the background config-persist worker BEFORE touching the env
+        // var. That worker resolves `LAZYBOX_HOME` (`Config::default_path()` →
+        // getenv) on its own thread each time it runs a queued save; restoring
+        // the var here is a setenv, and a concurrent getenv/setenv is undefined
+        // behaviour (why `set_var` is unsafe). A practice star enqueues such a
+        // save, so a star-then-quit could race the restore. Draining the queue
+        // first parks the worker in `recv()` — not in getenv — so the restore
+        // is race-free. Bounded so shutdown stays prompt.
+        let _ = lazybox_config::Config::flush_pending_saves(std::time::Duration::from_secs(2));
+        // SAFETY: see `enter`, plus the flush above removes the only concurrent
+        // env reader. Restore exactly what was there before — an unset var must
+        // go back to unset, not to an empty string (which `home()` treats as
+        // "no override", but which would still leak as a set-but-empty var to
+        // child processes).
         unsafe {
             match &self.previous {
                 Some(value) => std::env::set_var(ENV, value),

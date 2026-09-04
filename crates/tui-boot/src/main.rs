@@ -43,6 +43,7 @@ mod account_cli;
 mod auth_cli;
 mod build_guard;
 mod device_cli;
+mod practice;
 mod relay_e2e;
 mod remote_box;
 mod sandbox;
@@ -340,6 +341,10 @@ repos, change agents, or edit roles.
 
 Getting started:
   lazybox                     launch the inbox (default)
+  lazybox practice            learn lazybox in a sandboxed simulator — a full
+                              inbox where agents work and reply to you, with no
+                              GitHub, no network, and nothing written to your
+                              real ~/.lazybox; press every key with no consequence
   lazybox --test              try the UI on a throwaway seeded workspace, no GitHub
   lazybox --help, -h          show this help
   lazybox --version, -V       print the version
@@ -488,6 +493,7 @@ async fn main() -> anyhow::Result<()> {
         return run_test(preselect).await;
     }
     match args.first().map(String::as_str) {
+        Some("practice") => run_practice(preselect).await,
         Some("server") => server_subcommand(&args[1..]).await,
         Some("account") => account_cli::account_subcommand(&args[1..]).await,
         Some("serve") => serve::serve_subcommand(&args[1..]).await,
@@ -1222,49 +1228,105 @@ async fn run_demo(preselect: Option<lazybox_tui::realm::model::Preselect>) -> an
         repos.into_iter().collect::<Vec<_>>().join(", "),
         fixture.repo.path().display()
     );
+    let steps = scenario::fleet_scenario(&fixture);
+    // `--demo` is the scripted reel: a fixed timeline drives every terminal,
+    // so no reactor (it would double the output on the same slots). Not
+    // sandboxed — a recording deliberately reads the developer's real theme.
+    boot_scenario_world(fixture, steps, ScenarioMode::Scripted, preselect).await
+}
+
+/// `lazybox practice` — the sandboxed, reactive practice simulator (#1459).
+/// Same seeded inbox and mock-backed daemon as `--demo`, but confined to a
+/// throwaway `LAZYBOX_HOME` so nothing touches the real profile, driven by the
+/// reactor instead of a script (so the world responds to what the user does),
+/// and marked with the permanent practice banner.
+async fn run_practice(
+    preselect: Option<lazybox_tui::realm::model::Preselect>,
+) -> anyhow::Result<()> {
+    // Enter the sandbox BEFORE seeding or booting: from here every
+    // `LAZYBOX_HOME`-derived path — including the client's own config writes —
+    // resolves inside the temp dir, and is deleted when `_sandbox` drops.
+    let _sandbox = practice::PracticeSandbox::enter()?;
+    let fixture = scenario::DemoFixture::seed()?;
+    eprintln!("practice: sandboxed simulator — nothing is written to your real ~/.lazybox");
+    // No scripted steps: the reactor owns the agent terminals, reacting to the
+    // user's own spawns and replies.
+    boot_scenario_world(fixture, Vec::new(), ScenarioMode::Reactive, preselect).await
+    // `_sandbox` drops here → LAZYBOX_HOME restored, temp dir removed.
+}
+
+/// Whether the world is driven by a fixed script (`--demo`) or reacts to the
+/// user (`lazybox practice`). Reactive mode also draws the practice banner.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScenarioMode {
+    Scripted,
+    Reactive,
+}
+
+/// Boot the shared scenario machinery: a mock-backed in-process daemon over the
+/// seeded fixture, an optional scripted timeline, and — in reactive mode — the
+/// practice reactor plus the client-side practice chrome. Both `--demo` and
+/// `lazybox practice` go through here (#1459 criterion 6: one implementation).
+async fn boot_scenario_world(
+    fixture: scenario::DemoFixture,
+    steps: Vec<scenario::Step>,
+    mode: ScenarioMode,
+    preselect: Option<lazybox_tui::realm::model::Preselect>,
+) -> anyhow::Result<()> {
     let _ = std::env::set_current_dir(fixture.repo.path());
 
     let (client, server) = channel::pair();
-    // Tier 2: back the daemon with an in-memory MockBackend so the scenario
-    // can spawn REAL daemon terminals (durable across recovery, input-accepting)
-    // and feed them canned output — no real PTY, no agent subprocess.
+    // Back the daemon with an in-memory MockBackend so terminals can be spawned
+    // the REAL way (durable across recovery, input-accepting) and fed canned
+    // output — no real PTY, no agent subprocess.
     let mock = lazybox_server::backend::MockBackend::new();
     let config = ServerConfig::with_store_and_backend(fixture.store.clone(), mock.as_backend());
     // Grab handles BEFORE `config` moves into the daemon: the bus every TUI
-    // subscribes to, and a config clone the scenario uses to issue real spawn
-    // commands and resolve their backend keys.
+    // subscribes to, and config clones the scenario driver and reactor use to
+    // issue real spawns and resolve their backend keys.
     let bus = config.bus.clone();
     let stage_config = config.clone();
+    let reactor_config = config.clone();
     let cwd = fixture.repo.path().to_path_buf();
 
     tokio::spawn(async move {
         if let Err(e) = Server::new(config).serve(server).await {
-            tracing::error!("demo-mode daemon exited: {e}");
+            tracing::error!("scenario daemon exited: {e}");
         }
     });
 
-    // Drive the scripted timeline in the background. The settle delay lets the
-    // TUI's Subscribe → Snapshot land before the first live event, so nothing
-    // is broadcast into the void.
-    let steps = scenario::fleet_scenario(&fixture);
-    let stage = scenario::Stage::Backed {
-        config: stage_config,
-        mock,
-        cwd,
-    };
-    tokio::spawn(scenario::run(
-        bus,
-        stage,
-        std::time::Duration::from_millis(1500),
-        steps,
-    ));
+    // In practice mode, the reactor makes the world respond to the user.
+    if mode == ScenarioMode::Reactive {
+        let reactor = scenario::Reactor::new(reactor_config, mock.clone());
+        tokio::spawn(reactor.run());
+    }
+
+    // Drive any scripted timeline in the background. The settle delay lets the
+    // TUI's Subscribe → Snapshot land before the first live event.
+    if !steps.is_empty() {
+        let stage = scenario::Stage::Backed {
+            config: stage_config,
+            mock,
+            cwd,
+        };
+        tokio::spawn(scenario::run(
+            bus,
+            stage,
+            std::time::Duration::from_millis(1500),
+            steps,
+        ));
+    }
 
     spawn_terminal_restore_on_signal(None);
     let snippets = fixture.snippets.clone();
+    let practice = mode == ScenarioMode::Reactive;
     tokio::task::spawn_blocking(move || {
         let mut model = lazybox_tui::realm::Model::new(client, snippets)?;
         if let Some(p) = preselect {
             model = model.with_preselect(p);
+        }
+        if practice {
+            model = model.with_practice();
         }
         lazybox_tui::realm::model::run_loop_with_model(model)
     })

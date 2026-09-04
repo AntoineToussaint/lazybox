@@ -2362,7 +2362,17 @@ impl<T: TerminalAdapter> Model<T> {
                             .unwrap_or(false);
                     if has_target {
                         let ws_key = ws.key.clone();
-                        self.mount_add_assignees(ws_key);
+                        // Two-step like the reviewer picker (`g r`): ask
+                        // the daemon for the repo's assignable-user pool,
+                        // then mount the picker when `Event::AssignableUsers`
+                        // arrives. Stash the workspace key so the event
+                        // handler knows whether the response is still
+                        // relevant.
+                        self.awaiting_assignable_users = Some(ws_key.clone());
+                        cmds.push(IpcCommand::FetchAssignableUsers {
+                            workspace_key: ws_key,
+                        });
+                        self.flash_hint("loading assignees…");
                     }
                 }
             }

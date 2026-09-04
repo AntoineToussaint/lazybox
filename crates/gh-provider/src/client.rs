@@ -4922,6 +4922,56 @@ impl GhClient {
         Ok(out)
     }
 
+    /// Fetch the accounts assignable on the repo's issues and PRs — the
+    /// repo-level `assignableUsers` pool. No PR number required, so this
+    /// serves issue-only workspaces (the "assign an owner to a fresh
+    /// issue" flow). Paginates 100/page, deduped, bounded at `MAX_PAGES`
+    /// as a runaway backstop like the reviewer fetch.
+    pub async fn list_assignable_users_for_repo(
+        &self,
+        owner: &str,
+        name: &str,
+    ) -> Result<Vec<String>, GhError> {
+        const MAX_PAGES: usize = 10;
+        let mut out: Vec<String> = Vec::new();
+        let mut after: Option<String> = None;
+        for page in 0..MAX_PAGES {
+            self.acquire_or_block("assignable users query")?;
+            let body = graphql::assignable_users_body(owner, name, after.as_deref());
+            let response: graphql::GqlAssignableUsersResponse = self
+                .post_graphql_with_retry("assignable users query", &body)
+                .await?;
+            if let Some(errors) = response.errors {
+                return Err(mutation_error_response("assignable users query", &errors));
+            }
+            let repo = response
+                .data
+                .and_then(|d| d.repository)
+                .ok_or_else(|| GhError::Graphql("list_assignable_users: no data".into()))?;
+            // Read the pagination cursor before `logins()` consumes `repo`.
+            let has_next = repo.assignable_users.page_info.has_next_page;
+            let end_cursor = repo.assignable_users.page_info.end_cursor.clone();
+            for login in repo.logins() {
+                if !out.contains(&login) {
+                    out.push(login);
+                }
+            }
+            match end_cursor {
+                Some(cursor) if has_next => after = Some(cursor),
+                // No further pages, or `hasNextPage` with no cursor
+                // (defensive — never spin without an advancing cursor).
+                _ => return Ok(out),
+            }
+            if page + 1 == MAX_PAGES {
+                tracing::warn!(
+                    "list_assignable_users {owner}/{name}: hit {MAX_PAGES}-page cap ({} users); more assignable users exist but were omitted",
+                    out.len(),
+                );
+            }
+        }
+        Ok(out)
+    }
+
     /// Add labels (by GraphQL node id) to any `Labelable` (PR or
     /// Issue). Empty `label_ids` returns Ok immediately.
     pub async fn add_labels(
@@ -5674,6 +5724,40 @@ impl lazybox_core::TaskProvider for GhClient {
         // — never a `Retryable` whose "retrying" message the picker
         // path never honors.
         self.list_requestable_reviewers_for_pr(owner, name, number)
+            .await
+            .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
+    }
+
+    /// List the accounts assignable on the workspace's PR or issue — the
+    /// repo's `assignableUsers` pool. Resolves `owner/name` from the
+    /// primary task, so it works on issue-only workspaces with no PR.
+    async fn list_assignable_users(
+        &self,
+        workspace: &lazybox_core::Workspace,
+    ) -> Result<Vec<String>, lazybox_core::ProviderError> {
+        let primary = workspace.primary_task().ok_or_else(|| {
+            lazybox_core::ProviderError::permanent(
+                "github",
+                format!("workspace {} has no primary task", workspace.key),
+            )
+        })?;
+        let Some(repo) = primary.repo.as_deref() else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                "primary task has no repo",
+            ));
+        };
+        let Some((owner, name)) = repo.split_once('/') else {
+            return Err(lazybox_core::ProviderError::permanent(
+                "github",
+                format!("can't parse owner/name from `{repo}`"),
+            ));
+        };
+        // A read that feeds the assignees picker (not a mutation): the
+        // client falls back to interaction-derived candidates the instant
+        // this fails, so a rate limit here must surface at once — never a
+        // `Retryable` whose "retrying" message the picker path never honors.
+        self.list_assignable_users_for_repo(owner, name)
             .await
             .map_err(|e| lazybox_core::ProviderError::permanent("github", e.to_string()))
     }

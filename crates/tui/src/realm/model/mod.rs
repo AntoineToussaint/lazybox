@@ -1929,6 +1929,12 @@ pub struct Model<T: TerminalAdapter> {
     /// picker. Same async-mount contract as [`Self::awaiting_repo_labels`]:
     /// armed before any modal, disarmed by the reply / fetch-failure.
     awaiting_requestable_reviewers: Option<lazybox_core::WorkspaceKey>,
+    /// Workspace whose assignable-user set we've asked the daemon for
+    /// (`g a` → `Command::FetchAssignableUsers`), waiting on the async
+    /// `Event::AssignableUsers` reply to mount the picker. Same
+    /// async-mount contract as [`Self::awaiting_requestable_reviewers`]:
+    /// armed before any modal, disarmed by the reply / fetch-failure.
+    awaiting_assignable_users: Option<lazybox_core::WorkspaceKey>,
     /// Exact checkout whose diff response this client is waiting for.
     pending_diff_session: Option<(lazybox_core::WorkspaceKey, lazybox_ipc::WorkspaceDiffTarget)>,
     /// Optimistic mutations applied locally and awaiting the daemon's
@@ -2567,6 +2573,7 @@ impl<T: TerminalAdapter> Model<T> {
             awaiting_repo_labels: None,
             merge_history_repo: None,
             awaiting_requestable_reviewers: None,
+            awaiting_assignable_users: None,
             pending_diff_session: None,
             pending_mutations: Vec::new(),
             removal_prompt_queue: std::collections::VecDeque::new(),

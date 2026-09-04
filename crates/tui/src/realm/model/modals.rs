@@ -913,24 +913,49 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Mount the "assignees" multi-select picker for the workspace's
-    /// PR or issue. Pre-checks the currently-assigned logins so this
-    /// is a "change assignees" UX (toggle to add / untoggle to
-    /// remove) rather than an additive picker — submitting fires
-    /// `Command::SetAssignees`, which diffs against the persisted
-    /// task and runs add + remove mutations as needed.
-    pub(crate) fn mount_add_assignees(&mut self, workspace_key: lazybox_core::WorkspaceKey) {
+    /// PR or issue once the daemon has answered our
+    /// `FetchAssignableUsers` request (`fetched` = the repo's
+    /// assignable-user pool). Merges those with the interaction-derived
+    /// candidates (people already on the task) so the picker is
+    /// populated even on a brand-new issue with no assignees or
+    /// activity, then pre-checks the currently-assigned logins so this
+    /// is a "change assignees" UX (toggle to add / untoggle to remove)
+    /// rather than an additive picker — submitting fires
+    /// `Command::SetAssignees`, which diffs against the persisted task
+    /// and runs add + remove mutations as needed.
+    ///
+    /// Async mount, same contract as [`Self::mount_request_reviewers`]:
+    /// the reply can arrive seconds after `g a`, so any modal already up
+    /// wins and the fetch result is dropped (press `g a` again). On a
+    /// fetch failure the caller passes an empty `fetched`, degrading to
+    /// the interaction-derived candidates alone.
+    pub(crate) fn mount_add_assignees(
+        &mut self,
+        workspace_key: lazybox_core::WorkspaceKey,
+        fetched: Vec<String>,
+    ) {
         use crate::realm::components::choice::Choice;
 
-        if matches!(self.modal_stack.last(), Some(Id::AddAssignees)) {
+        if let Some(top) = self.modal_stack.last() {
+            self.awaiting_assignable_users = None;
+            if !matches!(top, Id::AddAssignees) {
+                self.flash_hint("assignees loaded, but another dialog was open — press g a again");
+            }
             return;
         }
+        self.awaiting_assignable_users = None;
         // Include existing assignees in the candidate list (they're
-        // pre-checked below) so the user can untick to remove. The
-        // old shape filtered them out, making the picker add-only.
-        let candidates = self.gather_candidate_logins_inclusive(&workspace_key);
-        if candidates.is_empty() {
-            self.flash_info("no candidate assignees yet — interact with the task first");
-            return;
+        // pre-checked below) so the user can untick to remove. Fetched
+        // pool first, then the interaction-derived candidates, deduped —
+        // both drop the viewer already.
+        let interaction = self.gather_candidate_logins_inclusive(&workspace_key);
+        let excluded: std::collections::HashSet<String> =
+            self.viewer_logins.values().cloned().collect();
+        let mut candidates: Vec<String> = Vec::new();
+        for login in fetched.into_iter().chain(interaction) {
+            if !login.is_empty() && !excluded.contains(&login) && !candidates.contains(&login) {
+                candidates.push(login);
+            }
         }
         // Pre-tick the currently-assigned logins. `with_selected_by`
         // walks the items and sets the selected bit for any match.
@@ -945,13 +970,26 @@ impl<T: TerminalAdapter> Model<T> {
         self.set_modal_flow(ModalFlow::AssigneesRequest {
             workspace: workspace_key,
         });
-        // Items are bare logins; `@` is display-only, the payload is the
-        // login (#512).
-        let modal = Choice::multi("Assign to", candidates)
-            .title("Assignees (toggle to add/remove)")
-            .label(|l: &String| format!("@{l}"))
-            .payload_for(|l: &String| ChoicePayload::Text(l.clone()))
-            .with_selected_by(move |login: &String| existing.contains(login));
+        // With no candidates, mount the picker with an explanatory empty
+        // state rather than only flashing — mirrors the reviewer picker
+        // (#35). `Choice` sizes itself down when its list is empty so
+        // this never renders as a blank rectangle.
+        let modal = if candidates.is_empty() {
+            Choice::<String>::multi(
+                "No assignable users found.\n\nThis repo exposes no assignable users.",
+                Vec::new(),
+            )
+            .title("Assignees")
+            .label(|s: &String| s.clone())
+        } else {
+            // Items are bare logins; `@` is display-only, the payload is
+            // the login (#512).
+            Choice::multi("Assign to", candidates)
+                .title("Assignees (toggle to add/remove)")
+                .label(|l: &String| format!("@{l}"))
+                .payload_for(|l: &String| ChoicePayload::Text(l.clone()))
+                .with_selected_by(move |login: &String| existing.contains(login))
+        };
         self.mount_modal(Id::AddAssignees, modal);
     }
 

@@ -1382,6 +1382,76 @@ pub struct GqlAssignableUsersConn {
     pub page_info: GqlPageInfo,
 }
 
+/// Fetch the accounts assignable on any of a repository's issues or PRs.
+/// `assignableUsers` is a **repository-level** field, so this serves
+/// issue-only workspaces (no PR number required) as well as PRs — it's
+/// the same pool GitHub's own "Assignees" dropdown draws from. Feeds the
+/// assignees picker so an owner can be assigned to a brand-new issue that
+/// has no assignees or activity yet.
+///
+/// Paginates 100/page via `$after`/`pageInfo`, mirroring the reviewer
+/// query, so a repo with more than 100 collaborators doesn't silently
+/// drop the overflow.
+const ASSIGNABLE_USERS_QUERY: &str = r#"
+query($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    assignableUsers(first: 100, after: $after) {
+      nodes { login }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+  rateLimit {
+    cost
+    limit
+    remaining
+    resetAt
+    used
+  }
+}
+"#;
+
+pub fn assignable_users_body(owner: &str, name: &str, after: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "query": ASSIGNABLE_USERS_QUERY,
+        "variables": {
+            "owner": owner,
+            "name": name,
+            "after": after,
+        },
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlAssignableUsersResponse {
+    pub data: Option<GqlAssignableUsersData>,
+    #[serde(default)]
+    pub errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlAssignableUsersData {
+    pub repository: Option<GqlAssignableUsersRepo>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlAssignableUsersRepo {
+    #[serde(default, rename = "assignableUsers")]
+    pub assignable_users: GqlAssignableUsersConn,
+}
+
+impl GqlAssignableUsersRepo {
+    /// Flatten to the assignable logins, deduped and order-preserving.
+    pub fn logins(self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for u in self.assignable_users.nodes {
+            if !u.login.is_empty() && !out.contains(&u.login) {
+                out.push(u.login);
+            }
+        }
+        out
+    }
+}
+
 /// Per-PR "give me everything heavy" query. Pulls every field the
 /// inbox-scan `SEARCH_QUERY` dropped: full review-thread data, the
 /// full reviews list, top-level comment bodies, status-check
@@ -6012,5 +6082,43 @@ mod tests {
         let resp: GqlRequestableReviewersResponse = serde_json::from_str(json).unwrap();
         let repo = resp.data.unwrap().repository.unwrap();
         assert_eq!(repo.logins(), vec!["solo".to_string()]);
+    }
+
+    #[test]
+    fn assignable_users_body_carries_owner_name_and_cursor() {
+        let body = assignable_users_body("acme", "widget", None);
+        let query = body["query"].as_str().unwrap();
+        assert!(query.contains("assignableUsers"));
+        assert_eq!(body["variables"]["owner"], "acme");
+        assert_eq!(body["variables"]["name"], "widget");
+        assert!(body["variables"]["after"].is_null());
+
+        let paged = assignable_users_body("acme", "widget", Some("CUR2"));
+        assert_eq!(paged["variables"]["after"], "CUR2");
+    }
+
+    #[test]
+    fn assignable_users_response_flattens_and_dedupes() {
+        let json = r#"{
+          "data": {
+            "repository": {
+              "assignableUsers": {
+                "nodes": [ { "login": "octocat" }, { "login": "hubot" }, { "login": "octocat" } ],
+                "pageInfo": { "hasNextPage": true, "endCursor": "CUR2" }
+              }
+            }
+          }
+        }"#;
+        let resp: GqlAssignableUsersResponse = serde_json::from_str(json).unwrap();
+        let repo = resp.data.unwrap().repository.unwrap();
+        assert!(repo.assignable_users.page_info.has_next_page);
+        assert_eq!(
+            repo.assignable_users.page_info.end_cursor.as_deref(),
+            Some("CUR2")
+        );
+        assert_eq!(
+            repo.logins(),
+            vec!["octocat".to_string(), "hubot".to_string()]
+        );
     }
 }

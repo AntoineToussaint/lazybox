@@ -1070,6 +1070,9 @@ impl Server {
                         lazybox_ipc::Command::FetchRequestableReviewers { .. } => {
                             "FetchRequestableReviewers"
                         }
+                        lazybox_ipc::Command::FetchAssignableUsers { .. } => {
+                            "FetchAssignableUsers"
+                        }
                         lazybox_ipc::Command::FetchRepoMergeHistory { .. } => {
                             "FetchRepoMergeHistory"
                         }
@@ -2254,6 +2257,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::FetchRequestableReviewers { workspace_key } => {
             polling::handle_fetch_requestable_reviewers(config, workspace_key).await;
+        }
+        lazybox_ipc::Command::FetchAssignableUsers { workspace_key } => {
+            polling::handle_fetch_assignable_users(config, workspace_key).await;
         }
         lazybox_ipc::Command::FetchRepoMergeHistory { repo } => {
             polling::handle_fetch_repo_merge_history(config, repo).await;

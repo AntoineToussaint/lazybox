@@ -1883,6 +1883,107 @@ fn gr_with_no_candidate_reviewers_shows_framed_empty_state() {
     );
 }
 
+/// Regression for #1478: `g a` on a brand-new issue with zero assignees
+/// and zero activity must fetch the repo's assignable-user pool and mount
+/// the picker from it — the old path mined only the (empty) local snapshot
+/// and dead-ended on a "interact with the task first" flash.
+#[test]
+fn ga_on_fresh_issue_fetches_assignable_pool_and_mounts_picker() {
+    let (client, mut server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let mut task = task_with_issue("o/r#7", "triage me", None);
+    task.node_id = Some("ISSUE_node".into());
+    let ws = Workspace::from_task(task, Utc::now());
+    let ws_key = ws.key.clone();
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![ws],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    while server.rx.try_recv().is_ok() {}
+
+    m.dispatch_key(key(Key::Char('g')));
+    m.dispatch_key(key(Key::Char('a')));
+
+    // `g a` sends the assignable-users fetch (no synchronous mount).
+    let cmds: Vec<_> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+    assert!(
+        cmds.iter().any(|c| matches!(
+            c,
+            lazybox_ipc::Command::FetchAssignableUsers { workspace_key } if workspace_key == &ws_key
+        )),
+        "g a must fetch the assignable-user pool; got {cmds:?}",
+    );
+    assert_eq!(
+        m.top_modal(),
+        None,
+        "g a must not mount synchronously — it waits on the fetch reply",
+    );
+
+    // The daemon answers with a pool that has NO overlap with the (empty)
+    // local snapshot — the whole point of the fix.
+    m.handle_daemon_event(IpcEvent::AssignableUsers {
+        workspace_key: ws_key,
+        logins: vec!["octocat".into(), "hubot".into()],
+    });
+
+    assert_eq!(
+        m.top_modal(),
+        Some(&Id::AddAssignees),
+        "the fetch reply must mount the assignees picker",
+    );
+    let screen = render_to_string(&mut m);
+    assert!(
+        screen.contains("octocat") && screen.contains("hubot"),
+        "picker must be populated from the fetched pool:\n{screen}",
+    );
+    assert!(
+        !screen.contains("interact with the task first"),
+        "the dead-end flash must be gone:\n{screen}",
+    );
+}
+
+/// #1478 empty-pool path: a repo that exposes no assignable users (and no
+/// local candidates) must land on the framed empty-state modal, not a bare
+/// flash.
+#[test]
+fn ga_with_no_assignable_users_shows_framed_empty_state() {
+    let (client, mut server) = channel::pair();
+    let mut m = Model::new_for_test(client, Size::new(120, 40)).unwrap();
+    let mut task = task_with_issue("o/r#8", "lonely issue", None);
+    task.node_id = Some("ISSUE_node".into());
+    let ws = Workspace::from_task(task, Utc::now());
+    let ws_key = ws.key.clone();
+    m.handle_daemon_event(IpcEvent::Snapshot {
+        workspaces: vec![ws],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    while server.rx.try_recv().is_ok() {}
+
+    m.dispatch_key(key(Key::Char('g')));
+    m.dispatch_key(key(Key::Char('a')));
+    m.handle_daemon_event(IpcEvent::AssignableUsers {
+        workspace_key: ws_key,
+        logins: Vec::new(),
+    });
+
+    assert_eq!(
+        m.top_modal(),
+        Some(&Id::AddAssignees),
+        "empty-pool g a must still mount the picker (framed empty state)",
+    );
+    let screen = render_to_string(&mut m);
+    assert!(
+        screen.contains("No assignable users found"),
+        "empty state must explain itself inside its box:\n{screen}",
+    );
+}
+
 // ───────────────────────────────────────────────────────────────────
 // Right-pane chord shadowing regressions: with the activity pane
 // focused, `G` / `z` / `m` used to resolve to the Workspace section's

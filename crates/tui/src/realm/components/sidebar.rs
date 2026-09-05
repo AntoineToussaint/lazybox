@@ -438,6 +438,13 @@ impl Sidebar {
         self.inner.set_inbox_health(health);
     }
 
+    #[cfg(test)]
+    pub(crate) fn inbox_diagnosis(
+        &self,
+    ) -> Option<crate::components::sidebar::InboxDiagnosis> {
+        self.inner.inbox_diagnosis()
+    }
+
     /// Conversation `w` should target on `workspace_key`: one running
     /// conversation wins over `default_agent`; several ask the user
     /// which exact terminal should receive the prompt (#418).

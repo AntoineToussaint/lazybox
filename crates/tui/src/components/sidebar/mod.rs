@@ -2551,20 +2551,6 @@ impl Sidebar {
         self.visible.len()
     }
 
-    /// True when the inbox is genuinely empty — no rows at all on the
-    /// default, unfiltered Inbox view, with no search narrowing it.
-    /// A first-run user with little/no GitHub data lands here, so the
-    /// renderer swaps the blank list for a getting-started panel that
-    /// teaches the next actions (issue #100). A list emptied by an
-    /// active filter, a non-Inbox mailbox, or a search query is NOT
-    /// this case — those are user-driven narrowings, not first-run.
-    pub fn is_getting_started(&self) -> bool {
-        self.visible.is_empty()
-            && self.mailbox == Mailbox::Inbox
-            && self.filters.is_empty()
-            && self.search.as_ref().is_none_or(|s| s.query.is_empty())
-    }
-
     /// Feed the provider/sync facts the empty-inbox doctor needs but the
     /// sidebar can't see for itself. The Model computes these from
     /// `setup.persisted` and `status.sync` and pushes them on provider /

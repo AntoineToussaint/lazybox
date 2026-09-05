@@ -3038,14 +3038,24 @@ impl<T: TerminalAdapter> Model<T> {
             .persisted
             .as_ref()
             .is_some_and(|p| !p.enabled_providers.is_empty());
-        let latest = self.status.sync.latest_per_source();
-        let polled_ok = latest
-            .iter()
-            .any(|e| matches!(e.outcome, SyncOutcome::Ok { .. }));
-        let credential_failure = latest
-            .iter()
-            .find(|e| matches!(&e.outcome, SyncOutcome::Err { kind, .. } if kind == "auth"))
-            .map(|e| e.source.clone());
+        // `recent()` is newest-first, so the first entry seen for a source
+        // is that source's latest outcome — collapse to per-source latest
+        // in one borrowing pass, without cloning the whole log.
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut polled_ok = false;
+        let mut credential_failure: Option<String> = None;
+        for e in self.status.sync.recent() {
+            if !seen.insert(e.source.as_str()) {
+                continue;
+            }
+            match &e.outcome {
+                SyncOutcome::Ok { .. } => polled_ok = true,
+                SyncOutcome::Err { kind, .. } if kind == "auth" => {
+                    credential_failure.get_or_insert_with(|| e.source.clone());
+                }
+                _ => {}
+            }
+        }
         self.sidebar
             .set_inbox_health(crate::components::sidebar::InboxHealth {
                 providers_enabled,

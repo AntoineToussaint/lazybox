@@ -293,6 +293,45 @@ mod effects_tests {
         ));
     }
 
+    /// The empty-inbox doctor's sync facts must track real poll events end
+    /// to end (#1461): an auth error makes the empty inbox a sign-in
+    /// problem, and a *later* successful poll for the same provider must
+    /// clear it — the diagnosis reads each source's LATEST outcome, not a
+    /// stale one. Would have caught a per-source-latest mapping regression.
+    #[test]
+    fn empty_inbox_doctor_tracks_sync_health_across_events() {
+        use crate::components::sidebar::InboxDiagnosis;
+        use lazybox_ipc::{Event, ProviderErrorKind};
+
+        let mut m = build_model();
+        // Fresh model: no providers enabled, nothing polled → first run.
+        assert_eq!(m.sidebar.inbox_diagnosis(), Some(InboxDiagnosis::FirstRun));
+
+        // A GitHub credential failure surfaces as the sign-in diagnosis.
+        m.handle_daemon_event(Event::provider_error(
+            "github",
+            "bad credentials",
+            ProviderErrorKind::Auth,
+        ));
+        assert_eq!(
+            m.sidebar.inbox_diagnosis(),
+            Some(InboxDiagnosis::CredentialFailure {
+                provider: "github".into()
+            }),
+        );
+
+        // A later successful poll for the SAME provider is now its latest
+        // outcome — the stale auth failure must not linger.
+        m.handle_daemon_event(Event::PollCompleted {
+            source: "github".into(),
+            count: 0,
+        });
+        assert_eq!(
+            m.sidebar.inbox_diagnosis(),
+            Some(InboxDiagnosis::NothingOpen),
+        );
+    }
+
     #[test]
     fn diff_review_uses_the_settle_gated_agent_injection_path() {
         use crate::realm::components::diff_review::DiffReviewComment;

@@ -2835,6 +2835,24 @@ pub enum Event {
         required_points: u32,
         allowance: u32,
     },
+    /// The daemon's authoritative keep-awake status, for the `☼ awake`
+    /// sidebar badge (#1485). The daemon owns the sleep inhibitor and
+    /// reads the config that governs it, so — like [`Event::AutoFixPolicyConfig`]
+    /// — it is the authority, not the client's own local config (which
+    /// differs in `--connect` remote mode). `active` is whether the
+    /// inhibitor is currently held (the mode's `should_hold` over the live
+    /// agents); the client paints the badge from it directly rather than
+    /// recomputing from its own config. `on_battery` is `true` only while
+    /// `active` and the machine is on battery, where macOS honours system
+    /// sleep only on AC power and never over a closed lid — so the badge
+    /// reads `☼ awake (AC only)` and can't claim protection the OS isn't
+    /// giving; a non-macOS daemon always reports `false`. Primed once per
+    /// subscribe and re-emitted by the keep-awake watcher when either flag
+    /// changes. Appended last (bincode is ordinal-sensitive).
+    KeepAwakeStatus {
+        active: bool,
+        on_battery: bool,
+    },
 }
 
 /// Daemon resource posture for the Shift-D sync-status screen.

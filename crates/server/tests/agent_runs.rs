@@ -336,6 +336,7 @@ async fn wait_for_started(
             Event::AutoFixPolicyConfig { .. } => {}
             Event::ShellCommandConfig { .. } => {}
             Event::AgentAvailabilityConfig { .. } => {}
+            Event::KeepAwakeStatus { .. } => {}
             Event::SnippetKeepMine { .. } => {}
             Event::SessionCosts { .. } => {}
             other => panic!("expected AgentRunStarted, got {other:?}"),
@@ -703,6 +704,7 @@ async fn source_terminal_ownership_selects_the_exact_session_worktree() {
             Event::AutoFixPolicyConfig { .. }
             | Event::ShellCommandConfig { .. }
             | Event::AgentAvailabilityConfig { .. }
+            | Event::KeepAwakeStatus { .. }
             | Event::SnippetKeepMine { .. } => {}
             other => panic!("expected AgentRunStarted, got {other:?}"),
         }

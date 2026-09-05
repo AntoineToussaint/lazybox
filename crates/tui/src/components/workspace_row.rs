@@ -136,6 +136,19 @@ pub struct WorkspaceRowCtx<'a> {
     /// `⤓` glyph to its warn color so a stuck (dirty/diverged) worktree
     /// reads at a glance. Only meaningful when `track_main`.
     pub track_main_behind: bool,
+    /// This workspace has the per-workspace meter *armed* (`Workspace::metered`,
+    /// toggled with `x $`): while set, its agent spawns route through lazybox's
+    /// local metering proxy — effective only when `agent.metering_proxy` is on
+    /// and the proxy is running, otherwise inert (#1488). Renders a `$` in the
+    /// passive badge cluster — the *durable* cue that the canary is armed,
+    /// matching (and gated on the same field as) the sidebar header's
+    /// ` $ METER ` pill. Before this, that per-workspace signal lived only in
+    /// the header, drawn from the focused row alone, so you couldn't see which
+    /// rows were armed without visiting each one. Reflects the per-workspace
+    /// opt-in only: Space-tier (`agent.metered_spaces`) and blanket
+    /// (`meter_all`) metering don't light it — exactly as they don't light the
+    /// header pill, so the two surfaces can't drift.
+    pub metered: bool,
     /// This workspace carries a non-empty local note
     /// (`Workspace::has_notes` — issue #458). Renders a small ` ✎ ` pill
     /// so the user can see, at a glance, which rows have a scratchpad.
@@ -1095,7 +1108,7 @@ fn pack_badges(cells: impl IntoIterator<Item = Cell>) -> Cell {
 /// The passive-info badge cluster (#813): the low-signal badges the row
 /// carries, packed into one right-aligned cell instead of five anchored
 /// columns (#524). Left → right, least → most consequential: `⎇ local` →
-/// `✎` → `]N` → `⤓main`/`behind` → `FIX`. The two merge-when-green arms
+/// `✎` → `]N` → `⤓main`/`behind` → `$` → `FIX`. The two merge-when-green arms
 /// live in [`cell_merge_arms`] instead, at a higher drop priority, so this
 /// decoration sheds first under width pressure while the arms survive —
 /// the graduated shedding the per-badge priorities gave before the pack.
@@ -1111,6 +1124,7 @@ fn cell_badges(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         cell_notes(ctx),
         cell_snippet(ctx),
         cell_track_main(ctx),
+        cell_metered(ctx),
         cell_fix(ctx),
     ])
 }
@@ -1282,6 +1296,30 @@ fn cell_arm(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         format!(" {} ", crate::components::sidebar::ARM_GLYPH),
         style,
     ))
+}
+
+/// The ` $ ` metering badge (#1488): this workspace has the per-workspace
+/// meter *armed* (`Workspace::metered`, `x $`), so its spawns route through
+/// the metering proxy while it's set — effective only when the proxy is
+/// running, otherwise inert. Like the header's `$ METER` pill, this reflects
+/// the armed opt-in, not confirmed billing: it shows even with the proxy off.
+///
+/// Accent, not warn — metering is *observation*, not an automation that will
+/// act on the PR (`FIX` / `ARM` earn warn). One glyph, packed into the shared
+/// passive cluster like `✎` / `]N` / `⤓main`, so an armed canary is legible
+/// across the whole sidebar rather than only on the focused row.
+fn cell_metered(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    if !ctx.metered {
+        return Cell::empty();
+    }
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default()
+            .fg(ctx.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    };
+    Cell::from_span(Span::styled(" $ ".to_string(), style))
 }
 
 /// The compact `🔧` auto-fix glyph (iconized #1046). Packs into the shared
@@ -1561,6 +1599,7 @@ mod tests {
             auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
+            metered: false,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
@@ -1992,6 +2031,7 @@ mod tests {
             auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
+            metered: false,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
@@ -2559,6 +2599,7 @@ mod tests {
             auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
+            metered: false,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
@@ -2861,6 +2902,65 @@ mod tests {
     }
 
     /// The shared auto-fix column stays compact even on the cursor row.
+    /// #1488: a metered workspace carries a durable `$` on its row. Before
+    /// this the only per-workspace cue was a header pill drawn from the
+    /// focused row, so you couldn't tell which workspaces were metered
+    /// without visiting each one.
+    #[test]
+    fn cell_metered_marks_a_metered_workspace() {
+        let task = make_task("owner/repo#1", "x");
+        let mut ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+
+        // Not metered → nothing, so the column collapses for a sidebar
+        // where no row is metered.
+        let ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(cell_metered(&ctx).width(), 0);
+
+        ws.metered = true;
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.metered = true;
+        let cell = cell_metered(&ctx);
+        assert_eq!(cell_text(&cell), " $ ");
+        assert_eq!(
+            cell.spans[0].style.fg,
+            Some(theme.accent),
+            "metering observes; it doesn't act on the PR the way FIX/ARM do",
+        );
+
+        // On the cursor row the badge inherits the row highlight so the
+        // fill stays legible — same rule every other badge follows.
+        ctx.is_cursor = true;
+        assert_eq!(cell_metered(&ctx).spans[0].style, ctx.row_style());
+    }
+
+    /// The badge rides the shared passive cluster, so it packs with the
+    /// other decorations instead of reserving its own column.
+    #[test]
+    fn metered_badge_packs_into_the_passive_cluster() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.metered = true;
+        ctx.has_notes = true;
+        ctx.auto_fix_ci_armed = true;
+
+        let text = cell_text(&cell_badges(&ctx));
+        assert!(text.contains('$'), "metered badge missing: {text:?}");
+        assert!(text.contains('✎'), "notes badge missing: {text:?}");
+
+        // Ordering (#813 doctrine, least → most consequential): metering is
+        // passive observation, so `$` packs *before* the `FIX` automation
+        // glyph — not after it as the most-consequential badge.
+        let dollar = text.find('$').expect("metered badge present");
+        let fix = text.find('🔧').expect("fix badge present");
+        assert!(
+            dollar < fix,
+            "metered `$` must render before the FIX glyph: {text:?}",
+        );
+    }
+
     #[test]
     fn cell_fix_stays_compact_on_the_cursor_row() {
         let mut task = make_task("owner/repo#1", "x");
@@ -3926,6 +4026,7 @@ mod tests {
             auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
+            metered: false,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,

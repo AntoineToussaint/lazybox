@@ -1000,6 +1000,16 @@ impl TerminalRegistry {
             .any(|entry| !entry.finishing && matches!(entry.agent_state, Some(AgentState::Working)))
     }
 
+    /// Report whether any registered agent is parked waiting on the user
+    /// at a structural prompt (`InputNeeded`). The `keep_awake: asking`
+    /// mode holds the sleep inhibitor for these too — a run parked on a
+    /// question is one keystroke from resuming (#1485).
+    pub async fn any_agent_asking(&self) -> bool {
+        self.lock_entries().await.values().any(|entry| {
+            !entry.finishing && matches!(entry.agent_state, Some(AgentState::InputNeeded))
+        })
+    }
+
     /// Live agent terminals still cached `Working` whose meaningful content
     /// has been at rest for at least `min_stable` — the candidates the global
     /// working-watchdog sweep force-closes when the per-terminal pump's own

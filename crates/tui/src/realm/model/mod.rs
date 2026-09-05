@@ -3336,7 +3336,9 @@ impl<T: TerminalAdapter> Model<T> {
             default_agent,
             display,
         );
-        self.sidebar.set_keep_awake(ui.keep_awake);
+        // Note: the `☼ awake` badge is driven by the daemon's
+        // authoritative `Event::KeepAwakeStatus`, not this client's config
+        // — so nothing to apply here for keep_awake (#1485).
         self.sidebar.set_auto_wait_on_limit(ui.auto_wait_on_limit);
         self.sidebar.set_show_agent_model(ui.show_agent_model);
         self.sidebar.set_usage_summary(ui.usage_summary);

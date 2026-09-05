@@ -1206,6 +1206,14 @@ pub struct GhClient {
     /// requested id set each batch and cleared by `force_full_sweep` so
     /// an explicit refresh always re-fetches.
     hot_freshness: std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, String>>>,
+    /// `owner/name` → the repo's `viewerDefaultMergeMethod`, learned by
+    /// the first merge in that repo. Shared across clones. A merge is
+    /// then ONE request (the mutation) instead of two, which matters
+    /// during a secondary cooldown where interactive requests are
+    /// rationed; a stale entry is invalidated and refetched when the
+    /// mutation is rejected.
+    repo_merge_methods:
+        std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, String>>>,
     /// Consecutive hot batches this server answered with a GraphQL
     /// error. Some GitHub Enterprise Server builds reject the batched
     /// `nodes(ids:)` hot queries outright — GHES 3.18 fails any PR node
@@ -1346,6 +1354,9 @@ impl GhClient {
             hot_freshness: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            repo_merge_methods: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         })
     }
@@ -1379,6 +1390,9 @@ impl GhClient {
             mutation_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             notifications_state: NotificationsState::shared(),
             hot_freshness: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            repo_merge_methods: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
             hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -5644,9 +5658,76 @@ impl GhClient {
         pull_request_node_id: &str,
         expected_head_oid: Option<&str>,
     ) -> Result<(), GhError> {
-        let merge_method = self.pr_merge_method(pull_request_node_id).await?;
+        self.merge_pr_in_repo(None, pull_request_node_id, expected_head_oid)
+            .await
+    }
+
+    /// [`merge_pr`](Self::merge_pr) with the PR's `owner/name` so the
+    /// repo's merge method can be served from (and learned into) the
+    /// per-repo cache. The first merge in a repo pays the lookup; later
+    /// ones are a single mutation. If a cached method is rejected, the
+    /// method is refetched and the merge retried once when it changed.
+    pub async fn merge_pr_in_repo(
+        &self,
+        repo: Option<&str>,
+        pull_request_node_id: &str,
+        expected_head_oid: Option<&str>,
+    ) -> Result<(), GhError> {
+        let cached = repo.and_then(|repo| self.repo_merge_methods.lock().get(repo).cloned());
+        let (merge_method, from_cache) = match cached {
+            Some(method) => (method, true),
+            None => {
+                let method = self.pr_merge_method(pull_request_node_id).await?;
+                if let Some(repo) = repo {
+                    self.repo_merge_methods
+                        .lock()
+                        .insert(repo.to_string(), method.clone());
+                }
+                (method, false)
+            }
+        };
+        match self
+            .merge_pr_with_method(pull_request_node_id, &merge_method, expected_head_oid)
+            .await
+        {
+            Err(GhError::Graphql(error)) if from_cache => {
+                // The cached method may be stale (repo settings changed).
+                // Refetch; retry once only when it actually differs, so a
+                // genuine rejection (conflict, blocked checks) is not
+                // sent twice.
+                let Some(repo) = repo else {
+                    return Err(GhError::Graphql(error));
+                };
+                let fresh = self.pr_merge_method(pull_request_node_id).await?;
+                self.repo_merge_methods
+                    .lock()
+                    .insert(repo.to_string(), fresh.clone());
+                if fresh == merge_method {
+                    return Err(GhError::Graphql(error));
+                }
+                tracing::info!(
+                    "merge {repo}: cached merge method {merge_method} was stale (now {fresh}) — retrying"
+                );
+                self.merge_pr_with_method(pull_request_node_id, &fresh, expected_head_oid)
+                    .await
+            }
+            other => other,
+        }
+    }
+
+    /// The cached merge method for `repo`, if a merge has learned it.
+    pub fn cached_merge_method(&self, repo: &str) -> Option<String> {
+        self.repo_merge_methods.lock().get(repo).cloned()
+    }
+
+    async fn merge_pr_with_method(
+        &self,
+        pull_request_node_id: &str,
+        merge_method: &str,
+        expected_head_oid: Option<&str>,
+    ) -> Result<(), GhError> {
         self.acquire_or_block("mergePullRequest mutation")?;
-        let body = graphql::merge_pr_body(pull_request_node_id, &merge_method, expected_head_oid);
+        let body = graphql::merge_pr_body(pull_request_node_id, merge_method, expected_head_oid);
         let response: graphql::GqlMutationResponse = self
             .post_graphql_with_retry("mergePullRequest mutation", &body)
             .await?;
@@ -5957,7 +6038,10 @@ impl lazybox_core::TaskProvider for GhClient {
                 "PR has no node_id (poll first)",
             ));
         };
-        match self.merge_pr(node_id, expected_head_oid).await {
+        match self
+            .merge_pr_in_repo(pr.repo.as_deref(), node_id, expected_head_oid)
+            .await
+        {
             Ok(()) => Ok(()),
             Err(err) => {
                 // GitHub rejects a merge of an ALREADY-merged PR with a
@@ -8051,6 +8135,9 @@ mod tests {
             hot_freshness: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            repo_merge_methods: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
@@ -9043,6 +9130,32 @@ mod tests {
             .merge_pr("PR_kwDO", None)
             .await
             .expect("merging a squash-only repo must succeed");
+    }
+
+    /// A merge learns the repo's merge method; the next merge in that
+    /// repo is ONE request (the mutation) — what keeps `g m` inside the
+    /// interactive ration during a secondary cooldown.
+    #[tokio::test(flavor = "current_thread")]
+    async fn second_merge_in_a_repo_skips_the_method_lookup() {
+        const METHOD: &str =
+            r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"SQUASH"}}}}"#;
+        const BODY: &str = r#"{"data":{"mergePullRequest":{"pullRequest":{"id":"PR_1","state":"MERGED","merged":true}}}}"#;
+        // Three responses for two merges: method + mutation, then mutation only.
+        let base_uri = spawn_sequenced_response_server(vec![METHOD, BODY, BODY]).await;
+        let client = make_client(&base_uri);
+        assert!(client.cached_merge_method("acme/widgets").is_none());
+        client
+            .merge_pr_in_repo(Some("acme/widgets"), "PR_1", None)
+            .await
+            .expect("first merge");
+        assert_eq!(
+            client.cached_merge_method("acme/widgets").as_deref(),
+            Some("SQUASH")
+        );
+        client
+            .merge_pr_in_repo(Some("acme/widgets"), "PR_2", None)
+            .await
+            .expect("second merge served from the cached method");
     }
 
     /// Issue #998: branch-rule types map to short human names for the

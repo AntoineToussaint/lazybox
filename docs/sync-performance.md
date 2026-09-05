@@ -171,6 +171,23 @@ A config file that fails to parse now surfaces as a permanent GitHub
 provider error naming the file, and `ui.keep_awake` accepts the newer
 mode strings so a newer client cannot brick an older daemon.
 
+### Merging during a rate-limit pause
+
+A secondary-limit cooldown used to make `g m` fail or queue for
+minutes: the governor admitted one interactive request per 20 s
+window, but a merge is three back to back (fresh pre-merge fetch,
+merge-method lookup, mutation), so the mutation itself was refused with
+the whole remaining pause as its retry hint. Now:
+
+- interactive requests get a burst of four per window
+  (`SECONDARY_INTERACTIVE_BURST`), enough for one user action;
+- the repo's merge method is cached per `owner/name` after the first
+  merge, so later merges are a single mutation (a rejected cached
+  method is refetched and retried once when it changed);
+- while the circuit is open, the merge path skips the optional fresh
+  pre-check and merges from the last synced row, spending the ration
+  on the mutation — GitHub still rejects a moved head or a conflict.
+
 ## Engagement tiers
 
 The daemon overlays three engagement tiers on the discovery and

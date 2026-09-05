@@ -2874,6 +2874,15 @@ impl<T: TerminalAdapter> Model<T> {
                 .iter()
                 .any(|id| *id != Id::WorktreeProgress);
             if requested_here && !interactive_modal_up && !self.sidebar.search_editing() {
+                // The jump is involuntary, and `Esc` belongs to the PTY
+                // once we land — so a live multi-select would be
+                // stranded: its `✓` marks stay visible in the sidebar
+                // with no way to clear them from where the user now is
+                // (#1482; #1449 made the selection outlive the bulk action that
+                // spawned these agents). An involuntary move takes the
+                // selection with it; a voluntary `Tab` into the terminal
+                // does not, because the user can Tab back.
+                self.sidebar.clear_broadcast_selection();
                 self.set_focus(PaneFocus::Terminals);
             }
             // Clear any legacy "Spawning…" footer notice that was set

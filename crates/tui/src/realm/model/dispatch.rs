@@ -1168,7 +1168,16 @@ impl<T: TerminalAdapter> Model<T> {
     /// (`bulk_dispatch` / `dispatch_action_confirmed_bulk`) and the
     /// agent-spawn / broadcast paths so all bulk notices read the same.
     pub(super) fn flash_bulk_outcome(&mut self, mut summary: String) {
-        let still = self.sidebar.visible_broadcast_selected_count();
+        // A pending spawn-follow means the first `TerminalSpawned` is
+        // about to pull focus into the new terminal and take the
+        // selection with it (see the `TerminalSpawned` handler), so
+        // claiming rows are "still selected" would be a promise the next
+        // event breaks.
+        let still = if self.spawn_follow_to.is_some() {
+            0
+        } else {
+            self.sidebar.visible_broadcast_selected_count()
+        };
         if still > 0 {
             summary.push_str(&format!(" · {still} still selected"));
         }
@@ -2959,9 +2968,20 @@ impl<T: TerminalAdapter> Model<T> {
         for key in targets {
             match self.apply_one(op, key, model_alias.as_deref()) {
                 ApplyOutcome::Spawn { step, follow } => {
+                    // Only a *local* spawn pins the focus-follow. A
+                    // `SpawnRemote` runs on another box and never produces
+                    // a local `TerminalSpawned`, so arming `spawn_follow_to`
+                    // for it would leave a pin nothing ever consumes: it
+                    // would suppress this bulk's "N still selected" suffix
+                    // (the selection actually survives, focus never left the
+                    // sidebar) and — because it lingers — silently strip the
+                    // suffix off the *next* unrelated bulk summary too
+                    // (#1482; `flash_bulk_outcome` reads `spawn_follow_to`).
+                    if matches!(step, super::BulkAgentStep::Spawn(_)) {
+                        plan.follow.get_or_insert(follow);
+                    }
                     plan.steps.push(step);
                     plan.spawned += 1;
-                    plan.follow.get_or_insert(follow);
                 }
                 ApplyOutcome::Live(step) => {
                     plan.steps.push(step);

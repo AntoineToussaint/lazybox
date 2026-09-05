@@ -12005,6 +12005,111 @@ mod merge_focus_follow_tests {
         );
     }
 
+    /// The stranded-selection fix (#1482): a bulk spawn pulls focus into
+    /// the freshly-spawned terminal, and from there `Esc` belongs to the
+    /// PTY — so the selection #1449 keeps alive would sit in the sidebar
+    /// with no way to clear it. The fix clears the marks *eagerly*, on the
+    /// same involuntary jump that steals focus, so they are never stranded
+    /// (rather than leaving it to an Esc that now types an escape at the
+    /// agent). The load-bearing assertion is therefore the count right
+    /// after the spawn — pre-fix the marks survived it.
+    #[test]
+    fn a_bulk_spawn_that_steals_focus_clears_the_selection() {
+        use lazybox_ipc::{TerminalId, TerminalKind};
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+        let mut m = build_model();
+        let keys = seed_and_select(
+            &mut m,
+            vec![
+                workspace("owner/repo#1", true, Duration::hours(1)),
+                workspace("owner/repo#2", true, Duration::hours(2)),
+            ],
+        );
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+
+        // The bulk spawn lands: the daemon reports the first terminal,
+        // and the client pulls focus to it so the user can type.
+        m.spawn_follow_to = Some(keys[0].clone());
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: keys[0].clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        assert_eq!(m.focus, PaneFocus::Terminals, "spawn pulls focus");
+        // The fix, isolated: the involuntary jump took the selection with
+        // it *at spawn time*, so nothing is stranded behind the PTY. This
+        // is the assertion that fails pre-fix (the marks survived).
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "the spawn that stole focus cleared the selection eagerly",
+        );
+
+        // And because there is nothing left to clear, `Esc` is free to
+        // belong to the PTY: it does not resurrect the marks or bounce
+        // focus back out of the terminal.
+        m.dispatch_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+        assert_eq!(m.focus, PaneFocus::Terminals, "Esc yields to the PTY");
+    }
+
+    /// The other half of the rule: a *voluntary* move into the terminal
+    /// (Tab) leaves the marks alone — the user chose to go there and can
+    /// Tab back to clear. Only the involuntary spawn jump takes them.
+    #[test]
+    fn tabbing_into_a_terminal_keeps_the_selection() {
+        use lazybox_ipc::{TerminalId, TerminalKind};
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+        let mut m = build_model();
+        let keys = seed_and_select(
+            &mut m,
+            vec![
+                workspace("owner/repo#1", true, Duration::hours(1)),
+                workspace("owner/repo#2", true, Duration::hours(2)),
+            ],
+        );
+        // A terminal exists, but this client didn't request it (no
+        // `spawn_follow_to`), so focus stays put and the marks survive.
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: keys[0].clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2, "not our spawn");
+
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        // Walk into the terminal the way a user does — real `Tab` presses
+        // through the pane-cycle path, not a raw `set_focus`. The clear
+        // lives only in the spawn handler, so a voluntary move here must
+        // never touch the marks at any hop.
+        for _ in 0..4 {
+            if m.focus == PaneFocus::Terminals {
+                break;
+            }
+            m.dispatch_key(KeyEvent::new(Key::Tab, KeyModifiers::NONE));
+            assert_eq!(
+                m.sidebar.broadcast_selected_count(),
+                2,
+                "a deliberate Tab keeps the selection",
+            );
+        }
+        assert_eq!(m.focus, PaneFocus::Terminals, "Tab reached the terminal");
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            2,
+            "voluntary Tab into the terminal keeps the selection",
+        );
+    }
+
     /// `m` mark-read fans out one `MarkRead` per selected workspace.
     #[test]
     fn bulk_mark_read_fans_out() {
@@ -26300,6 +26405,56 @@ mod remote_spawn_tests {
             );
         }
         assert_eq!(m.remote_marks.len(), 2);
+    }
+
+    /// Regression for #1482: a *remote* bulk spawn must not arm the local
+    /// focus-follow pin. A `SpawnRemote` runs on the box and never
+    /// produces a local `TerminalSpawned`, so an armed `spawn_follow_to`
+    /// would linger with nothing to consume it — and `flash_bulk_outcome`
+    /// reads that pin to decide whether to name the still-live selection.
+    /// Pre-fix the pin was armed for the remote follow, so the summary
+    /// silently dropped its "N still selected" suffix even though focus
+    /// never left the sidebar and the marks stayed fully reachable (and
+    /// the stale pin then stripped the suffix off the next bulk summary
+    /// too). Post-fix only a local spawn arms the pin.
+    #[test]
+    fn remote_bulk_spawn_keeps_the_selection_named_and_arms_no_follow() {
+        let (mut m, _conn, mut box_rx) = build_model_with_box();
+        seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
+        m.sidebar.toggle_broadcast_select();
+        seed_focused(&mut m, "owner/repo#2", Duration::hours(2));
+        m.sidebar.toggle_broadcast_select();
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+
+        let _ = m.dispatch_action(&Action::SpawnAgentRemote("claude".into()));
+        assert_eq!(m.modal_stack.last(), Some(&Id::BulkSpawnConfirm));
+        let _ = m.handle_confirmed(true);
+
+        let mut spawned = 0;
+        while box_rx.try_recv().is_ok() {
+            spawned += 1;
+        }
+        assert_eq!(spawned, 2, "both remote spawns went to the box");
+
+        assert!(
+            m.spawn_follow_to.is_none(),
+            "a remote-only fan-out arms no local focus-follow pin",
+        );
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            2,
+            "focus never left the sidebar, so the selection survives",
+        );
+        let msg = m
+            .status
+            .notice
+            .as_ref()
+            .map(|n| n.message.clone())
+            .unwrap_or_default();
+        assert!(
+            msg.contains("2 still selected"),
+            "the summary must still name the live selection, got {msg:?}",
+        );
     }
 
     /// `WorkspaceRemoved` releases the remote latch, exactly like

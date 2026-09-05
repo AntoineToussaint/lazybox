@@ -1385,7 +1385,7 @@ impl Sidebar {
                 say("you're ready:"),
                 hint(",", "setup"),
                 hint("?", "Ask Lazybox"),
-                hint("⇧T", "tour"),
+                hint("⇧T", "coach"),
             ],
             // Credentials failed — the empty inbox is a sign-in problem.
             InboxDiagnosis::CredentialFailure { provider } => {

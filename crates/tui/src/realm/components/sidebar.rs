@@ -364,6 +364,16 @@ impl Sidebar {
         self.inner.note_provider_quota(agent_id, session_key, quota);
     }
 
+    /// The live spend/headroom badge for an agent terminal (#1490): plan-quota
+    /// headroom when known, else the session's metered cost.
+    pub fn terminal_usage_badge(
+        &self,
+        session_key: &str,
+        agent_id: &str,
+    ) -> Option<crate::components::terminal_stack::UsageBadge> {
+        self.inner.terminal_usage_badge(session_key, agent_id)
+    }
+
     /// Attribute a usage-limit reset hint to a terminal's agent
     /// (`AgentUsageLimit`).
     pub fn note_usage_limit_reset(&mut self, terminal_id: lazybox_ipc::TerminalId, hint: String) {

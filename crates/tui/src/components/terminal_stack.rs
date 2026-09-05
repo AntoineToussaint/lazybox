@@ -946,6 +946,16 @@ impl TerminalStreamSync {
     }
 }
 
+/// The live spend/headroom figure for an agent terminal's tab (#1490),
+/// recomputed each frame from the usage tracker. `headroom` is the plan-quota
+/// "can I keep working?" figure (accented like the sidebar's quota); otherwise
+/// `text` is the metered dollar cost, the real signal for API-key users.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageBadge {
+    pub text: String,
+    pub headroom: bool,
+}
+
 struct TerminalSlot {
     session_key: SessionKey,
     kind: TerminalKind,
@@ -1031,6 +1041,11 @@ struct TerminalSlot {
     /// the user picked a tier via a `w S` / `a S` chord. Drives the
     /// tier badge in the tab strip. `None` for a default-model spawn.
     model_label: Option<String>,
+    /// Live spend/headroom figure for this agent tab (#1490), recomputed each
+    /// frame by [`TerminalStack::refresh_usage_badges`] from the usage tracker.
+    /// `None` for shells and for agents with no metered cost or known plan
+    /// quota yet, so the badge is omitted rather than showing `$0.00`.
+    usage_badge: Option<UsageBadge>,
     /// Whether this terminal was drawn in the last frame. Set by
     /// `render_one_terminal`, reset for every slot at the top of
     /// `render`. Output for a displayed terminal is fed to the VT
@@ -3385,6 +3400,7 @@ impl TerminalStack {
             no_permission,
             on_main,
             model_label,
+            usage_badge: None,
             displayed: false,
             pending_feed: Vec::new(),
             exited: None,
@@ -3393,6 +3409,24 @@ impl TerminalStack {
             spawned_at: std::time::Instant::now(),
             did_work: false,
             deep_scrollback_requested: false,
+        }
+    }
+
+    /// Recompute every agent tab's live spend/headroom badge (#1490) from a
+    /// lookup over the usage tracker, keyed by the slot's own `(session_key,
+    /// agent_id)`. Called once per frame before render so the figure tracks
+    /// live usage and drops a plan window the moment its reset passes; shells
+    /// carry no badge.
+    pub fn refresh_usage_badges(
+        &mut self,
+        lookup: impl Fn(&SessionKey, &str) -> Option<UsageBadge>,
+    ) {
+        for slot in self.terminals.values_mut() {
+            let TerminalKind::Agent(agent_id) = &slot.kind else {
+                continue;
+            };
+            let agent_id = agent_id.clone();
+            slot.usage_badge = lookup(&slot.session_key, &agent_id);
         }
     }
 
@@ -4363,6 +4397,7 @@ impl TerminalStack {
             // a stale "working" on a crashed tab would be actively
             // misleading.
             let exited = self.terminals.get(id).is_some_and(|s| s.exited.is_some());
+            let usage_badge = self.terminals.get(id).and_then(|s| s.usage_badge.clone());
             if let Some((label, hint_style)) = Self::agent_state_badge(
                 agent_state.unwrap_or(lazybox_ipc::AgentState::Idle),
                 exited,
@@ -4409,6 +4444,27 @@ impl TerminalStack {
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
                 ));
+                cursor = cursor.saturating_add(width);
+            }
+            // Live spend / plan headroom (#1490): the "can I keep going?"
+            // figure on the agent's own tab, answerable without visiting the
+            // sidebar. Headroom (accent) when a plan window is known; the
+            // metered dollar cost (dim) otherwise, since dollars are the real
+            // signal only for API-key users.
+            if let Some(badge) = &usage_badge {
+                let (glyph, style) = if badge.headroom {
+                    (
+                        "◔ ",
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    ("", Style::default().fg(theme.text_dim))
+                };
+                let badge_text = format!(" {glyph}{}", badge.text);
+                let width = badge_text.chars().count() as u16;
+                title_spans.push(Span::styled(badge_text, style));
                 cursor = cursor.saturating_add(width);
             }
         }
@@ -5417,6 +5473,22 @@ impl TerminalStack {
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             ));
+        }
+
+        // Live spend / plan headroom (#1490) — see the tab-strip surface.
+        if let Some(usage) = &slot.usage_badge {
+            let (badge, style) = if usage.headroom {
+                (
+                    format!("◔ {} ", usage.text),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                (format!("{} ", usage.text), Style::default().fg(theme.text_dim))
+            };
+            used += badge.chars().count();
+            spans.push(Span::styled(badge, style));
         }
 
         if slot.on_main {
@@ -7221,6 +7293,29 @@ mod selection_offset_tests {
             text.contains("agent exited"),
             "the restart banner overlays the frozen screen: {text}"
         );
+    }
+
+    /// The live spend/headroom badge (#1490) paints on the agent's own tab
+    /// strip, so "can I keep going?" is answerable without visiting the
+    /// sidebar.
+    #[test]
+    fn tab_strip_shows_the_live_usage_badge() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        const W: u16 = 60;
+        const H: u16 = 6;
+        let area = Rect::new(0, 0, W, H);
+        let mut stack = stack_with(TerminalKind::Agent("claude".into()), None, &[]);
+        stack.terminals.get_mut(&TerminalId(1)).unwrap().usage_badge = Some(UsageBadge {
+            text: "wk 38% left".into(),
+            headroom: true,
+        });
+        let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
+        term.draw(|f| stack.render(area, f, true)).unwrap();
+        let buf = term.backend().buffer();
+        let top: String = (0..W).map(|x| buf[(x, 0)].symbol()).collect();
+        assert!(top.contains("◔ wk 38% left"), "{top:?}");
     }
 
     /// Every on-screen grid row — top and bottom boundary included —

@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use lazybox_ipc::{AgentRunId, AgentUsage, ProviderQuota};
+use lazybox_ipc::{AgentRunId, AgentUsage, ProviderQuota, QuotaWindow};
 
 /// Cells in the `▓▓▓░░` progress bar.
 const BAR_WIDTH: usize = 5;
@@ -36,6 +36,39 @@ pub fn format_cost_micros(micros: u64) -> String {
         format!("${dollars:.2}")
     } else {
         format!("${dollars:.4}")
+    }
+}
+
+/// One plan-quota window as remaining headroom — the percent left before the
+/// limit — or `None` when the window is absent or its reset has already passed.
+/// A passed reset means the provider rolled the window over, so the last
+/// utilization describes the *previous* window; headroom then reads as
+/// restored rather than pinned at the pre-reset ceiling. `utilization_bp` is in
+/// basis points (0..=10000) and rounds to a whole percent, matching the
+/// sidebar's utilization figure so the two surfaces never disagree.
+fn window_headroom(window: Option<QuotaWindow>, now_unix: i64) -> Option<u8> {
+    let window = window?;
+    if let Some(reset_at) = window.reset_at
+        && reset_at <= now_unix
+    {
+        return None;
+    }
+    let used = ((window.utilization_bp + 50) / 100).min(100);
+    Some((100 - used) as u8)
+}
+
+/// The binding plan-quota window as remaining headroom: the tighter of the 5h
+/// and weekly windows — the one that runs out first — as `(label, percent
+/// left)`. This is the "can I keep working?" number that changes behaviour
+/// mid-task. `None` when neither window is live, so the caller falls back to
+/// the dollar figure (the real signal for API-key users, who have no plan
+/// window).
+pub fn quota_headroom(quota: &ProviderQuota, now_unix: i64) -> Option<(&'static str, u8)> {
+    let five = window_headroom(quota.five_hour, now_unix).map(|left| ("5h", left));
+    let weekly = window_headroom(quota.weekly, now_unix).map(|left| ("wk", left));
+    match (five, weekly) {
+        (Some(a), Some(b)) => Some(if a.1 <= b.1 { a } else { b }),
+        (only, None) | (None, only) => only,
     }
 }
 
@@ -609,6 +642,71 @@ mod tests {
         // A zero baseline mints nothing.
         tracker.hydrate_session_cost("ws-b", 0);
         assert_eq!(tracker.cost_micros_for_session("ws-b"), 0);
+    }
+
+    fn window(utilization_bp: u32, reset_at: Option<i64>) -> QuotaWindow {
+        QuotaWindow {
+            utilization_bp,
+            reset_at,
+        }
+    }
+
+    #[test]
+    fn headroom_reports_the_percent_left_and_rounds_like_the_sidebar() {
+        // 6200 bp used → 62% used → 38% headroom (matches the issue's example).
+        let quota = ProviderQuota {
+            five_hour: None,
+            weekly: Some(window(6_200, Some(1_000))),
+        };
+        assert_eq!(quota_headroom(&quota, 0), Some(("wk", 38)));
+    }
+
+    #[test]
+    fn headroom_picks_the_tighter_window() {
+        // Weekly is more consumed (less headroom) than the 5h window, so it is
+        // the binding constraint the badge must surface.
+        let quota = ProviderQuota {
+            five_hour: Some(window(2_000, Some(1_000))), // 80% left
+            weekly: Some(window(7_500, Some(1_000))),    // 25% left
+        };
+        assert_eq!(quota_headroom(&quota, 0), Some(("wk", 25)));
+        // …and the other way round.
+        let quota = ProviderQuota {
+            five_hour: Some(window(9_000, Some(1_000))), // 10% left
+            weekly: Some(window(3_000, Some(1_000))),    // 70% left
+        };
+        assert_eq!(quota_headroom(&quota, 0), Some(("5h", 10)));
+    }
+
+    #[test]
+    fn a_passed_reset_drops_the_window_so_headroom_reads_as_restored() {
+        // The window rolled over: its stale utilization no longer describes the
+        // current window, so it is ignored and the live window wins.
+        let quota = ProviderQuota {
+            five_hour: Some(window(9_500, Some(500))), // reset already passed
+            weekly: Some(window(4_000, Some(2_000))),  // 60% left, still live
+        };
+        assert_eq!(quota_headroom(&quota, 1_000), Some(("wk", 60)));
+        // Both stale → no headroom known, caller falls back to cost.
+        let quota = ProviderQuota {
+            five_hour: Some(window(9_500, Some(500))),
+            weekly: Some(window(4_000, Some(500))),
+        };
+        assert_eq!(quota_headroom(&quota, 1_000), None);
+    }
+
+    #[test]
+    fn a_window_with_no_reset_is_still_shown() {
+        let quota = ProviderQuota {
+            five_hour: Some(window(1_000, None)),
+            weekly: None,
+        };
+        assert_eq!(quota_headroom(&quota, 999_999), Some(("5h", 90)));
+    }
+
+    #[test]
+    fn headroom_is_none_without_any_window() {
+        assert_eq!(quota_headroom(&ProviderQuota::default(), 0), None);
     }
 
     #[test]

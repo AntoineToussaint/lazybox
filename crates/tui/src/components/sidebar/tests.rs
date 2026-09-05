@@ -2532,6 +2532,89 @@ mod search_tests {
         assert!(!row.contains("used"), "{row:?}");
     }
 
+    /// The terminal tab badge (#1490) prefers plan-quota headroom — the
+    /// binding window's remaining percent — over dollars while a window is
+    /// live, since headroom is the number that changes behaviour mid-task on a
+    /// subscription.
+    #[test]
+    fn terminal_usage_badge_prefers_plan_headroom() {
+        let session_key = SessionKey::from("gh:owner/repo#1");
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.set_now_override(chrono::DateTime::from_timestamp(1_000, 0).unwrap());
+        // 62% used → 38% headroom on the only live window.
+        sb.note_provider_quota(
+            "claude",
+            None,
+            lazybox_ipc::ProviderQuota {
+                five_hour: None,
+                weekly: Some(lazybox_ipc::QuotaWindow {
+                    utilization_bp: 6200,
+                    reset_at: Some(9_999_999_999),
+                }),
+            },
+        );
+        // A metered cost is present too, but headroom wins while a window is up.
+        sb.hydrate_session_costs(&[(session_key.as_str().to_string(), 420_000)]);
+
+        let badge = sb
+            .terminal_usage_badge(session_key.as_str(), "claude")
+            .expect("badge");
+        assert!(badge.headroom, "{badge:?}");
+        assert_eq!(badge.text, "wk 38% left");
+    }
+
+    /// Absent any live plan window, the badge falls back to the session's
+    /// metered dollar cost — the real signal for API-key users.
+    #[test]
+    fn terminal_usage_badge_falls_back_to_cost_without_a_quota() {
+        let session_key = SessionKey::from("gh:owner/repo#1");
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.hydrate_session_costs(&[(session_key.as_str().to_string(), 420_000)]);
+
+        let badge = sb
+            .terminal_usage_badge(session_key.as_str(), "claude")
+            .expect("badge");
+        assert!(!badge.headroom, "{badge:?}");
+        assert_eq!(badge.text, "$0.42");
+    }
+
+    /// A stale plan window (its reset already passed) is ignored, so the badge
+    /// falls through to cost rather than reporting pre-reset headroom.
+    #[test]
+    fn terminal_usage_badge_ignores_a_reset_window() {
+        let session_key = SessionKey::from("gh:owner/repo#1");
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.set_now_override(chrono::DateTime::from_timestamp(1_000, 0).unwrap());
+        sb.note_provider_quota(
+            "claude",
+            None,
+            lazybox_ipc::ProviderQuota {
+                five_hour: Some(lazybox_ipc::QuotaWindow {
+                    utilization_bp: 9000,
+                    reset_at: Some(500),
+                }),
+                weekly: None,
+            },
+        );
+        sb.hydrate_session_costs(&[(session_key.as_str().to_string(), 250_000)]);
+
+        let badge = sb
+            .terminal_usage_badge(session_key.as_str(), "claude")
+            .expect("badge");
+        assert!(!badge.headroom, "{badge:?}");
+        assert_eq!(badge.text, "$0.25");
+    }
+
+    /// No quota and no metered cost → no badge, never a misleading `$0.00`.
+    #[test]
+    fn terminal_usage_badge_is_absent_without_data() {
+        let sb = sidebar_with_issues(&[("1", "Alpha")]);
+        assert!(
+            sb.terminal_usage_badge("gh:owner/repo#1", "claude")
+                .is_none()
+        );
+    }
+
     /// Without a budget the widget degrades to a bare token total ("show
     /// what's known"), and the reset hint is folded in only while the
     /// agent is actually limited.

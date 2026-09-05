@@ -214,6 +214,15 @@ impl Terminals {
         self.inner.mark_visible_desynced();
     }
 
+    /// Recompute each agent tab's live spend/headroom badge (#1490) from a
+    /// lookup over the usage tracker. Called once per frame before render.
+    pub fn refresh_usage_badges(
+        &mut self,
+        lookup: impl Fn(&SessionKey, &str) -> Option<crate::components::terminal_stack::UsageBadge>,
+    ) {
+        self.inner.refresh_usage_badges(lookup);
+    }
+
     /// Direct render entry point.
     pub fn view_in(&mut self, area: Rect, frame: &mut Frame) {
         self.inner.render(area, frame, self.focused);

@@ -12005,6 +12005,84 @@ mod merge_focus_follow_tests {
         );
     }
 
+    /// Reproduction for the stranded-selection bug: a bulk spawn pulls
+    /// focus into the freshly-spawned terminal, and from there `Esc`
+    /// belongs to the PTY (`resolve_focus_for_keys` is `None`), so the
+    /// selection #1467 now keeps alive can no longer be cleared. The
+    /// marks sit in the sidebar and Esc types an escape at the agent.
+    #[test]
+    fn esc_clears_a_selection_stranded_by_a_bulk_spawn() {
+        use lazybox_ipc::{TerminalId, TerminalKind};
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+        let mut m = build_model();
+        let keys = seed_and_select(
+            &mut m,
+            vec![
+                workspace("owner/repo#1", true, Duration::hours(1)),
+                workspace("owner/repo#2", true, Duration::hours(2)),
+            ],
+        );
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+
+        // The bulk spawn lands: the daemon reports the first terminal,
+        // and the client pulls focus to it so the user can type.
+        m.spawn_follow_to = Some(keys[0].clone());
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: keys[0].clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        assert_eq!(m.focus, PaneFocus::Terminals, "spawn pulls focus");
+
+        m.dispatch_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "a selection the user can see must always be clearable",
+        );
+    }
+
+    /// The other half of the rule: a *voluntary* move into the terminal
+    /// (Tab) leaves the marks alone — the user chose to go there and can
+    /// Tab back to clear. Only the involuntary spawn jump takes them.
+    #[test]
+    fn tabbing_into_a_terminal_keeps_the_selection() {
+        use lazybox_ipc::{TerminalId, TerminalKind};
+        let mut m = build_model();
+        let keys = seed_and_select(
+            &mut m,
+            vec![
+                workspace("owner/repo#1", true, Duration::hours(1)),
+                workspace("owner/repo#2", true, Duration::hours(2)),
+            ],
+        );
+        // A terminal exists, but this client didn't request it (no
+        // `spawn_follow_to`), so focus stays put and the marks survive.
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: keys[0].clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2, "not our spawn");
+
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        m.set_focus(PaneFocus::Terminals);
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            2,
+            "a deliberate Tab into the terminal keeps the selection",
+        );
+    }
+
     /// `m` mark-read fans out one `MarkRead` per selected workspace.
     #[test]
     fn bulk_mark_read_fans_out() {

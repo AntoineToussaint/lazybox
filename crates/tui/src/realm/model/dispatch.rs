@@ -1168,7 +1168,16 @@ impl<T: TerminalAdapter> Model<T> {
     /// (`bulk_dispatch` / `dispatch_action_confirmed_bulk`) and the
     /// agent-spawn / broadcast paths so all bulk notices read the same.
     pub(super) fn flash_bulk_outcome(&mut self, mut summary: String) {
-        let still = self.sidebar.visible_broadcast_selected_count();
+        // A pending spawn-follow means the first `TerminalSpawned` is
+        // about to pull focus into the new terminal and take the
+        // selection with it (see the `TerminalSpawned` handler), so
+        // claiming rows are "still selected" would be a promise the next
+        // event breaks.
+        let still = if self.spawn_follow_to.is_some() {
+            0
+        } else {
+            self.sidebar.visible_broadcast_selected_count()
+        };
         if still > 0 {
             summary.push_str(&format!(" · {still} still selected"));
         }

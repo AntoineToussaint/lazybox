@@ -261,10 +261,16 @@ impl Sidebar {
         self.focused = focused;
     }
 
-    /// Record whether `ui.keep_awake` is on so the header can badge
-    /// active sleep inhibition.
-    pub fn set_keep_awake(&mut self, keep_awake: bool) {
+    /// Record the `ui.keep_awake` mode so the header can badge active
+    /// sleep inhibition.
+    pub fn set_keep_awake(&mut self, keep_awake: lazybox_config::KeepAwake) {
         self.inner.set_keep_awake(keep_awake);
+    }
+
+    /// Record whether the daemon owning the inhibitor is on battery, so
+    /// the badge tells the truth about what it protects (#1485).
+    pub fn set_keep_awake_on_battery(&mut self, on_battery: bool) {
+        self.inner.set_keep_awake_on_battery(on_battery);
     }
 
     /// Record whether `ui.auto_wait_on_limit` is on so the rising-edge

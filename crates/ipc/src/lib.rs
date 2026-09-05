@@ -2835,6 +2835,18 @@ pub enum Event {
         required_points: u32,
         allowance: u32,
     },
+    /// The daemon's power source, for the `☼ awake` sidebar badge (#1485).
+    /// The daemon owns the sleep inhibitor, so on a laptop it is the
+    /// authority on whether that assertion actually protects a run: macOS
+    /// honours system sleep only on AC power and never over a closed lid.
+    /// `on_battery: true` tells the client to paint the badge as
+    /// `☼ awake (AC only)` so it can't claim protection the OS isn't
+    /// giving. Primed once per subscribe and re-emitted by the keep-awake
+    /// watcher when the power source changes; a non-macOS daemon always
+    /// reports `false`. Appended last (bincode is ordinal-sensitive).
+    KeepAwakeStatus {
+        on_battery: bool,
+    },
 }
 
 /// Daemon resource posture for the Shift-D sync-status screen.

@@ -1655,11 +1655,24 @@ pub async fn dispatch_command(
                     config.auto_fix.to_settings(),
                     spawnable_agents(&config),
                     config.setup.default_agent.clone(),
+                    // The daemon owns the sleep inhibitor, so it's the
+                    // authority on its own power source; prime the client
+                    // so the `☼ awake` badge is honest from the first
+                    // frame instead of waiting on the watcher's next
+                    // poll (#1485). Blocking (`pmset`), hence in here.
+                    crate::keep_awake::on_battery(),
                 )
             })
             .await;
             let auto_fix = match daemon_settings {
-                Ok((shell_command, shell_configured, auto_fix, agents, default_agent)) => {
+                Ok((
+                    shell_command,
+                    shell_configured,
+                    auto_fix,
+                    agents,
+                    default_agent,
+                    on_battery,
+                )) => {
                     let _ = tx.send(Event::ShellCommandConfig {
                         command: shell_command,
                         configured: shell_configured,
@@ -1668,6 +1681,7 @@ pub async fn dispatch_command(
                         agents,
                         default_agent,
                     });
+                    let _ = tx.send(Event::KeepAwakeStatus { on_battery });
                     auto_fix
                 }
                 Err(e) => {

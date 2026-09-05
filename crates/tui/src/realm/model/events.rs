@@ -1296,6 +1296,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::GithubDiscoveryBehind { .. }
                 | IpcEvent::SessionCosts { .. }
                 | IpcEvent::RepoMergeHistory { .. }
+                | IpcEvent::KeepAwakeStatus { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -1386,6 +1387,16 @@ impl<T: TerminalAdapter> Model<T> {
                 command: command.clone(),
                 configured: *configured,
             });
+            self.redraw = true;
+            return;
+        }
+        // The daemon's authoritative keep-awake status (#1485): it owns the
+        // sleep inhibitor and reads the governing config, so it — not the
+        // client's own (possibly different, over `--connect`) config —
+        // decides whether the badge shows and whether it must admit the
+        // macOS on-battery / closed-lid limit as `☼ awake (AC only)`.
+        if let IpcEvent::KeepAwakeStatus { active, on_battery } = &event {
+            self.sidebar.set_keep_awake_status(*active, *on_battery);
             self.redraw = true;
             return;
         }
@@ -2311,6 +2322,7 @@ impl<T: TerminalAdapter> Model<T> {
             // deferred sweep, handled (set/clear) in the main event match.
             | IpcEvent::GithubDiscoveryBehind { .. }
             | IpcEvent::RepoMergeHistory { .. }
+            | IpcEvent::KeepAwakeStatus { .. }
             | IpcEvent::ResourcePosture(..) => {}
         }
         // Keep the empty-inbox doctor's sync facts (polled-ok /
@@ -2644,6 +2656,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::SnippetKeepMine { .. }
                 | IpcEvent::SessionCosts { .. }
                 | IpcEvent::RepoMergeHistory { .. }
+                | IpcEvent::KeepAwakeStatus { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }

@@ -348,19 +348,30 @@ impl Sidebar {
                 Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
             ));
         }
-        // Sleep-inhibition badge: painted exactly while the daemon's
-        // keep-awake watcher holds its assertion (`ui.keep_awake` on
-        // and ≥1 agent working), so the user can tell at a glance why
-        // the machine isn't sleeping.
+        // Sleep-inhibition badge: painted exactly while the daemon reports
+        // it holds its assertion (`Event::KeepAwakeStatus.active`) — the
+        // daemon's own truth, so the badge can't disagree with what it's
+        // actually doing (matters over `--connect`, where the client's
+        // config differs).
         // `☼` (U+263C) rather than an emoji: like the header's `●`
         // it's an ambiguous-width BMP symbol every terminal font
         // renders one cell wide, so the right-aligned summary can't
         // drift on fonts that draw emoji narrow.
-        if self.keep_awake && self.any_agent_working() {
+        if self.keep_awake_active {
             if !signal_spans.is_empty() {
                 signal_spans.push(Span::raw("  "));
             }
-            signal_spans.push(Span::styled("☼ awake", Style::default().fg(theme.text_dim)));
+            // On battery the OS honours neither system sleep nor a closed
+            // lid, so the held assertion is not a guarantee — say so
+            // rather than implying protection the OS isn't giving (#1485).
+            if self.keep_awake_on_battery {
+                signal_spans.push(Span::styled(
+                    "☼ awake (AC only)",
+                    Style::default().fg(theme.warn),
+                ));
+            } else {
+                signal_spans.push(Span::styled("☼ awake", Style::default().fg(theme.text_dim)));
+            }
         }
         // Usage-limit indicator (#1012): the count of workspaces whose
         // agent is blocked on its provider usage limit, so the proactive

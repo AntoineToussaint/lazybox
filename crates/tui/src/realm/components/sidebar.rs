@@ -261,10 +261,11 @@ impl Sidebar {
         self.focused = focused;
     }
 
-    /// Record whether `ui.keep_awake` is on so the header can badge
-    /// active sleep inhibition.
-    pub fn set_keep_awake(&mut self, keep_awake: bool) {
-        self.inner.set_keep_awake(keep_awake);
+    /// Record the daemon's authoritative keep-awake status (holding +
+    /// power source) so the header badges active sleep inhibition and
+    /// tells the truth about what it protects (#1485).
+    pub fn set_keep_awake_status(&mut self, active: bool, on_battery: bool) {
+        self.inner.set_keep_awake_status(active, on_battery);
     }
 
     /// Record whether `ui.auto_wait_on_limit` is on so the rising-edge

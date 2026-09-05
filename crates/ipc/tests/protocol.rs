@@ -412,6 +412,9 @@ fn all_commands() -> Vec<Command> {
         Command::FetchRequestableReviewers {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
         },
+        Command::FetchAssignableUsers {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+        },
         Command::FetchRepoMergeHistory {
             repo: "o/r".to_string(),
         },
@@ -681,6 +684,10 @@ fn all_events() -> Vec<Event> {
             labels: vec![lazybox_core::Label::with_color("bug", "d73a4a")],
         },
         Event::RequestableReviewers {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            logins: vec!["octocat".into()],
+        },
+        Event::AssignableUsers {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
             logins: vec!["octocat".into()],
         },
@@ -1256,6 +1263,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::SetLabels { .. } => "SetLabels",
         Command::FetchRepoLabels { .. } => "FetchRepoLabels",
         Command::FetchRequestableReviewers { .. } => "FetchRequestableReviewers",
+        Command::FetchAssignableUsers { .. } => "FetchAssignableUsers",
         Command::FetchRepoMergeHistory { .. } => "FetchRepoMergeHistory",
         Command::CleanWorktrees => "CleanWorktrees",
         Command::InspectWorktrees => "InspectWorktrees",
@@ -1333,6 +1341,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::RemovalCancelled { .. } => "RemovalCancelled",
         Event::RepoLabels { .. } => "RepoLabels",
         Event::RequestableReviewers { .. } => "RequestableReviewers",
+        Event::AssignableUsers { .. } => "AssignableUsers",
         Event::RepoMergeHistory { .. } => "RepoMergeHistory",
         Event::SessionCreated(_) => "SessionCreated",
         Event::WorktreeProgress { .. } => "WorktreeProgress",
@@ -1416,12 +1425,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        90,
+        91,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        98,
+        99,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

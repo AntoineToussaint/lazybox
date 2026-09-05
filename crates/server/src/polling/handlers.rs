@@ -218,6 +218,15 @@ impl ProviderHandle {
             Self::Linear(c) => lazybox_core::TaskProvider::list_requestable_reviewers(c, ws).await,
         }
     }
+    pub async fn list_assignable_users(
+        &self,
+        ws: &lazybox_core::Workspace,
+    ) -> Result<Vec<String>, lazybox_core::ProviderError> {
+        match self {
+            Self::Github(c) => lazybox_core::TaskProvider::list_assignable_users(c, ws).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::list_assignable_users(c, ws).await,
+        }
+    }
     pub async fn set_labels(
         &self,
         ws: &lazybox_core::Workspace,
@@ -1592,6 +1601,54 @@ pub async fn handle_fetch_requestable_reviewers(
         Err(e) => {
             tracing::warn!("fetch_requestable_reviewers {workspace_key}: {e:?}");
             emit_err(&format!("requestable reviewers fetch failed: {e}"));
+        }
+    }
+}
+
+/// Handle `Command::FetchAssignableUsers`: pull the accounts assignable
+/// on the workspace's PR / issue and broadcast `Event::AssignableUsers`
+/// so the TUI can populate the assignees picker. A repository-level
+/// query, so it works for issue-only workspaces (no PR needed). On
+/// failure, broadcast a `ProviderError` with source `"assignable-users"`
+/// — the client is waiting on this reply to mount the picker, and staying
+/// silent would leave its pending request armed forever. On that failure
+/// event the client falls back to a picker built from interaction-derived
+/// candidates.
+pub async fn handle_fetch_assignable_users(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let emit_err = |msg: &str| {
+        let _ = config
+            .bus
+            .send(Event::provider_error_retryable("assignable-users", msg));
+    };
+    let Some(ws) = load_workspace(config, &workspace_key) else {
+        tracing::debug!("fetch_assignable_users: workspace {workspace_key} not found");
+        emit_err(&format!(
+            "fetch assignable users: workspace {workspace_key} not found"
+        ));
+        return;
+    };
+    let provider = match build_provider_for_workspace(config, &workspace_key).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("fetch_assignable_users: {e}");
+            emit_err(&e);
+            return;
+        }
+    };
+    match provider.list_assignable_users(&ws).await {
+        Ok(logins) => {
+            tracing::info!(
+                "fetch_assignable_users {workspace_key}: {} candidates",
+                logins.len()
+            );
+            let _ = config.bus.send(Event::AssignableUsers {
+                workspace_key,
+                logins,
+            });
+        }
+        Err(e) => {
+            tracing::warn!("fetch_assignable_users {workspace_key}: {e:?}");
+            emit_err(&format!("assignable users fetch failed: {e}"));
         }
     }
 }

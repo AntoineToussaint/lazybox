@@ -1225,6 +1225,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::RemovalCancelled { .. }
                 | IpcEvent::RepoLabels { .. }
                 | IpcEvent::RequestableReviewers { .. }
+                | IpcEvent::AssignableUsers { .. }
                 | IpcEvent::SessionCreated(_)
                 | IpcEvent::WorktreeProgress { .. }
                 | IpcEvent::SessionEnded { .. }
@@ -1969,6 +1970,22 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
+        // Response to a `FetchAssignableUsers` command — mount the
+        // assignees picker once the daemon has the repo's assignable
+        // set. Same out-of-band tolerance as `RequestableReviewers`:
+        // only mount when the workspace key still matches the pending
+        // request.
+        if let IpcEvent::AssignableUsers {
+            workspace_key,
+            logins,
+        } = &event
+        {
+            if self.awaiting_assignable_users.as_ref() == Some(workspace_key) {
+                self.mount_add_assignees(workspace_key.clone(), logins.clone());
+                self.redraw = true;
+            }
+            return;
+        }
         // Resource-posture reply (2026-08-19 audit) — repaint the open
         // Shift-D window. Dropped by `update_sync_status_posture` when
         // the window is already closed.
@@ -2225,6 +2242,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::RemovalCancelled { .. }
             | IpcEvent::RepoLabels { .. }
             | IpcEvent::RequestableReviewers { .. }
+            | IpcEvent::AssignableUsers { .. }
             | IpcEvent::SessionCreated(_)
             | IpcEvent::WorktreeProgress { .. }
             | IpcEvent::SessionEnded { .. }
@@ -2402,6 +2420,8 @@ impl<T: TerminalAdapter> Model<T> {
                         self.handle_repo_labels_failed(message);
                     } else if source == "requestable-reviewers" {
                         self.handle_requestable_reviewers_failed(message);
+                    } else if source == "assignable-users" {
+                        self.handle_assignable_users_failed(message);
                     } else if let Some(action) = mutation_failure_label(source) {
                         // A user-initiated GitHub mutation was rejected
                         // (or never reached the provider). Pre-fix the
@@ -2547,6 +2567,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::RemovalCancelled { .. }
                 | IpcEvent::RepoLabels { .. }
                 | IpcEvent::RequestableReviewers { .. }
+                | IpcEvent::AssignableUsers { .. }
                 | IpcEvent::SessionCreated(_)
                 | IpcEvent::WorktreeProgress { .. }
                 | IpcEvent::SessionEnded { .. }
@@ -3023,6 +3044,39 @@ impl<T: TerminalAdapter> Model<T> {
             // participants to fall back to, so surface the error rather
             // than claim we're "showing participants".
             self.flash_error(format!("✗ couldn't load requestable reviewers — {message}"));
+        }
+        self.redraw = true;
+    }
+
+    /// The daemon couldn't fetch the assignable-user set for a pending
+    /// `g a` request (`ProviderError { source: "assignable-users" }`).
+    /// Consume the stash and fall back to the interaction-derived picker
+    /// (people already on the task) so the action never dead-ends on a
+    /// fetch error. `mount_add_assignees` with an empty `fetched`
+    /// degrades to that candidate list — and to the framed empty-state
+    /// modal — on its own.
+    fn handle_assignable_users_failed(&mut self, message: &str) {
+        let Some(workspace_key) = self.awaiting_assignable_users.take() else {
+            return;
+        };
+        // Whether the picker will have anything to show without the
+        // fetched pool: existing assignees (seeded unconditionally by
+        // `mount_add_assignees`) or interaction-derived participants.
+        let has_fallback = self
+            .sidebar
+            .workspace_iter()
+            .find(|(k, _)| k.as_str() == workspace_key.as_str())
+            .and_then(|(_, w)| w.primary_task())
+            .is_some_and(|t| !t.assignees.is_empty())
+            || !self
+                .gather_candidate_logins_inclusive(&workspace_key)
+                .is_empty();
+        self.mount_add_assignees(workspace_key, Vec::new());
+        let mounted = matches!(self.modal_stack.last(), Some(Id::AddAssignees));
+        if mounted && has_fallback {
+            self.flash_hint("assignable users unavailable — showing task participants only");
+        } else {
+            self.flash_error(format!("✗ couldn't load assignable users — {message}"));
         }
         self.redraw = true;
     }

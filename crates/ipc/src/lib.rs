@@ -1290,6 +1290,15 @@ pub enum Command {
     FetchRequestableReviewers {
         workspace_key: lazybox_core::WorkspaceKey,
     },
+    /// Ask the daemon for the accounts assignable on the workspace's
+    /// PR / issue — the repo's `assignableUsers` pool — and broadcast
+    /// them back via `Event::AssignableUsers`. Used by the assignees
+    /// picker on mount so the user can assign anyone assignable, not
+    /// only people who already touched the task. A repository-level
+    /// query, so it works for issue-only workspaces (no PR required).
+    FetchAssignableUsers {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
     /// Ask the daemon for a repository's recently-merged PRs — the
     /// "what's been landing here" ledger (#1432) — and broadcast the
     /// result via `Event::RepoMergeHistory`. `repo` is `owner/name`,
@@ -2136,6 +2145,15 @@ pub enum Event {
     /// `workspace_key` so the reviewer picker knows which mount to
     /// fill — same request/response-by-key shape as `RepoLabels`.
     RequestableReviewers {
+        workspace_key: lazybox_core::WorkspaceKey,
+        logins: Vec<String>,
+    },
+    /// Response to `Command::FetchAssignableUsers`. Carries the GitHub
+    /// logins assignable on the workspace's PR / issue (the repo's
+    /// assignable-user pool). Keyed by `workspace_key` so the assignees
+    /// picker knows which mount to fill — same request/response-by-key
+    /// shape as `RequestableReviewers`.
+    AssignableUsers {
         workspace_key: lazybox_core::WorkspaceKey,
         logins: Vec<String>,
     },

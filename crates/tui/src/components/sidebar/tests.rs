@@ -5761,6 +5761,7 @@ mod inbox_diagnosis_tests {
     /// the doctor's whole point is that the copy differs per cause.
     #[test]
     fn each_diagnosis_renders_its_own_heading() {
+        use lazybox_tui_core::action::{ActionDef, ActionKind};
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
@@ -5782,7 +5783,22 @@ mod inbox_diagnosis_tests {
         };
 
         let mut first = Sidebar::new(PaneId::new(1));
-        assert!(screen(&mut first).contains("Nothing configured yet"));
+        let first_screen = screen(&mut first);
+        assert!(first_screen.contains("Nothing configured yet"));
+        // The first-run doctor advertises the onboarding entry point, which is
+        // the coach rail (#1460 retired the 14-card tour). The panel renders a
+        // literal, so this pins that literal to the catalog's OpenTour label —
+        // the name every other surface shows — to catch it drifting back to the
+        // dead "tour" wording.
+        let coach_label = ActionDef::for_kind(ActionKind::OpenTour).label;
+        assert!(
+            first_screen.contains(coach_label),
+            "first-run doctor must advertise the coach as {coach_label:?}: {first_screen:?}"
+        );
+        assert!(
+            !first_screen.contains("tour"),
+            "first-run doctor must not use the retired 'tour' name: {first_screen:?}"
+        );
 
         let mut syncing = Sidebar::new(PaneId::new(1));
         syncing.set_inbox_health(health(true, false, None));

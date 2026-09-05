@@ -119,6 +119,11 @@ fn section_intro(section: Section) -> &'static str {
             "A focused terminal forwards every key to the PTY; only the chords below are \
              intercepted. `]]` (the escape char, doubled) opens the terminal command menu."
         }
+        Section::Hopper => {
+            "Active only while the personal Hopper editor (`Shift-H`) is open. Text editing \
+             (arrows, Backspace, plain characters) stays local; these lifecycle chords are \
+             remappable and collision-checked like every other binding."
+        }
     }
 }
 
@@ -166,6 +171,7 @@ fn generate(frontmatter: &str) -> String {
         Section::Sidebar,
         Section::Activity,
         Section::Terminal,
+        Section::Hopper,
     ] {
         out.push_str(&format!("\n## {}\n\n", section.title()));
         out.push_str(section_intro(section));

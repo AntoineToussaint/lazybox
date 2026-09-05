@@ -444,7 +444,7 @@ const SECONDARY_INTERACTIVE_GAP: Duration = Duration::from_secs(20);
 /// retry hint (up to 15 minutes), so a merge during any cooldown either
 /// queued for minutes or gave up. A small burst lets one action through
 /// whole; the gap still spaces successive actions.
-const SECONDARY_INTERACTIVE_BURST: u32 = 4;
+pub(crate) const SECONDARY_INTERACTIVE_BURST: u32 = 4;
 
 #[derive(Debug, Clone)]
 struct CircuitState {

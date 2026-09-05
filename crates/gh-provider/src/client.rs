@@ -7700,13 +7700,19 @@ mod tests {
             Err(crate::rate_budget::AcquireError::CircuitOpen { .. }) => {}
             other => panic!("scheduled work must be refused after a 429, got {other:?}"),
         }
-        assert!(
-            client.budget.lock().try_acquire().is_ok(),
-            "one paced interactive request passes the cooldown",
-        );
+        // A burst of SECONDARY_INTERACTIVE_BURST interactive requests
+        // passes the cooldown per window — one user action (e.g. `g m`) is
+        // several requests fired back to back — after which they are paced
+        // out until the window rolls over.
+        for n in 0..crate::rate_budget::SECONDARY_INTERACTIVE_BURST {
+            assert!(
+                client.budget.lock().try_acquire().is_ok(),
+                "interactive request {n} of the burst passes the cooldown",
+            );
+        }
         match client.budget.lock().try_acquire() {
             Err(crate::rate_budget::AcquireError::CircuitOpen { .. }) => {}
-            other => panic!("a second interactive inside the gap is paced, got {other:?}"),
+            other => panic!("an interactive request past the burst is paced, got {other:?}"),
         }
     }
 

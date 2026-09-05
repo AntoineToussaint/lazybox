@@ -5746,6 +5746,41 @@ mod inbox_diagnosis_tests {
     }
 
     #[test]
+    fn filter_over_only_inactive_workspaces_is_not_blamed() {
+        // The sole workspace merged long ago (past the Inbox grace
+        // window → Inactive), so an empty Inbox isn't the filter's doing
+        // — clearing it would reveal nothing. Diagnose the genuine
+        // "nothing open" state instead of falsely pointing at the filter.
+        let now = chrono::Utc::now();
+        let long_ago = now - chrono::Duration::days(30);
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.set_now_override(now);
+        let mut t = base_task();
+        t.id.key = "1".into();
+        t.url = "https://github.com/o/r/pull/1".into();
+        t.state = lazybox_core::TaskState::Merged;
+        t.closed_at = Some(long_ago);
+        t.updated_at = long_ago;
+        let w = Workspace::from_task(t, long_ago);
+        sb.workspaces.insert(SessionKey::from(&w.key), w);
+        sb.set_filters([Filter::Unread]);
+        sb.set_inbox_health(health(true, true, None));
+        assert_eq!(sb.workspace_count(), 0);
+        assert_eq!(sb.inbox_diagnosis(), Some(InboxDiagnosis::NothingOpen));
+    }
+
+    #[test]
+    fn successful_poll_outranks_empty_local_providers() {
+        // Remote-daemon shape: this client has no local provider config
+        // but the daemon polled successfully. A completed poll proves a
+        // provider exists — show NothingOpen, not the "nothing configured"
+        // first-run panel.
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.set_inbox_health(health(false, true, None));
+        assert_eq!(sb.inbox_diagnosis(), Some(InboxDiagnosis::NothingOpen));
+    }
+
+    #[test]
     fn filter_with_no_workspaces_falls_through_to_config() {
         // A filter on but nothing anywhere isn't a filter problem —
         // diagnose the config state instead.
@@ -5816,7 +5851,7 @@ mod inbox_diagnosis_tests {
 
         let mut cred = Sidebar::new(PaneId::new(1));
         cred.set_inbox_health(health(true, false, Some("github")));
-        assert!(screen(&mut cred).contains("github sign-in failed"));
+        assert!(screen(&mut cred).contains("Github sign-in failed"));
 
         let mut filtered = ws_sidebar();
         filtered.set_filters([Filter::Conflict]);

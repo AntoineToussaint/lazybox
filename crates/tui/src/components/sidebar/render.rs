@@ -164,6 +164,17 @@ fn hash_one<H: std::hash::Hash>(v: &H) -> u64 {
     h.finish()
 }
 
+/// Capitalize the first character so a lowercase provider id
+/// (`github`, `linear`) reads as a heading. Single-word ids only —
+/// no attempt at intercaps like "GitHub".
+fn title_case(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 /// Collapse an `AgentState` to a stable code for the signature. `AgentState`
 /// isn't `Hash` (and lives in `ipc`, where adding a derive would churn the
 /// wire fixture), so we fold it here — every variant that changes a row's
@@ -1377,18 +1388,21 @@ impl Sidebar {
                 hint("⇧T", "tour"),
             ],
             // Credentials failed — the empty inbox is a sign-in problem.
-            InboxDiagnosis::CredentialFailure { provider } => vec![
+            InboxDiagnosis::CredentialFailure { provider } => {
+                let named = title_case(provider);
+                vec![
+                    Line::raw(""),
+                    head(warn, &format!("{named} sign-in failed")),
+                    Line::raw(""),
+                    say("lazybox can't reach your"),
+                    say(&format!("{named} tasks — the token")),
+                    say("was rejected. Re-connect it:"),
                 Line::raw(""),
-                head(warn, &format!("{provider} sign-in failed")),
-                Line::raw(""),
-                say("lazybox can't reach your"),
-                say(&format!("{provider} tasks — the token")),
-                say("was rejected. Re-connect it:"),
-                Line::raw(""),
-                hint(",", "setup / re-auth"),
-                hint("⇧D", "sync details"),
-                hint("⇧R", "retry sync"),
-            ],
+                    hint(",", "setup / re-auth"),
+                    hint("⇧D", "sync details"),
+                    hint("⇧R", "retry sync"),
+                ]
+            }
             // A user-applied view filter is hiding rows we hold.
             InboxDiagnosis::FiltersExcludeAll { count } => {
                 let noun = if *count == 1 { "filter" } else { "filters" };

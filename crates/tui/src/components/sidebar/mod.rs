@@ -2596,21 +2596,42 @@ impl Sidebar {
                 provider: provider.clone(),
             });
         }
-        // A user-applied view filter that's hiding rows we actually hold.
-        // With no workspaces at all a filter isn't the cause, so fall
-        // through to the config diagnosis.
-        if !self.filters.is_empty() && !self.workspaces.is_empty() {
+        // A user-applied view filter that's actually hiding rows. The
+        // test is Inbox-*eligible* workspaces (`mailbox_membership`
+        // ignoring the filters), not the raw workspace set — otherwise a
+        // quiet Inbox whose only workspaces are snoozed or merged would be
+        // wrongly blamed on the filter, and clearing it would reveal
+        // nothing.
+        if !self.filters.is_empty() && self.inbox_eligible_count() > 0 {
             return Some(InboxDiagnosis::FiltersExcludeAll {
                 count: self.filters.len(),
             });
         }
-        if !self.inbox_health.providers_enabled {
-            return Some(InboxDiagnosis::FirstRun);
+        // A completed successful poll proves a provider exists, so it
+        // outranks the local `providers_enabled` flag — which, against a
+        // remote daemon, describes *this* machine's config, not the one
+        // doing the polling. FirstRun only when nothing has polled yet.
+        if self.inbox_health.polled_ok {
+            return Some(InboxDiagnosis::NothingOpen);
         }
-        if !self.inbox_health.polled_ok {
+        if self.inbox_health.providers_enabled {
             return Some(InboxDiagnosis::Syncing);
         }
-        Some(InboxDiagnosis::NothingOpen)
+        Some(InboxDiagnosis::FirstRun)
+    }
+
+    /// Workspaces that belong to the Inbox mailbox ignoring the active
+    /// view filters — i.e. how many rows a filter *could* be hiding.
+    /// Zero means an empty Inbox is genuinely empty (everything snoozed,
+    /// merged, or nothing at all), not filtered.
+    fn inbox_eligible_count(&self) -> usize {
+        let now = self.now();
+        self.workspaces
+            .values()
+            .filter(|w| {
+                mailbox_membership(w, Mailbox::Inbox, now, self.show_inactive_in_inbox)
+            })
+            .count()
     }
 
     /// How many *workspace* rows are visible (excluding repo headers).

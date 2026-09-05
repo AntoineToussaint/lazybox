@@ -36,10 +36,10 @@ use tokio::sync::broadcast;
 
 use crate::{ServerConfig, TerminalRegistry};
 
-/// How often the watcher re-checks the power source, so a plug/unplug
-/// mid-run refreshes the badge even without an agent transition to wake
-/// the loop. Cheap: an in-memory state check every tick, and a `pmset`
-/// probe only while the feature is enabled.
+/// How often the watcher re-checks the power source while holding, so a
+/// plug/unplug mid-run refreshes the badge even without an agent
+/// transition to wake the loop. When not holding the timer does no work
+/// at all (no config read, no probe).
 const BATTERY_POLL: Duration = Duration::from_secs(20);
 
 /// Spawn the keep-awake watcher. `None` only on platforms with no
@@ -97,17 +97,24 @@ pub(crate) fn on_battery() -> bool {
 }
 
 /// Watch the event bus and mirror the mode's `should_hold` predicate
-/// into the inhibitor. Every `AgentState` transition passes over the
-/// bus, so recomputing from the authoritative states map on each one
-/// (plus `TerminalExited` for teardown sweeps, plus lag recovery, plus a
-/// periodic tick for battery changes) converges even if individual
-/// events are missed.
+/// into the inhibitor, broadcasting the resulting status so a client can
+/// paint the `☼ awake` badge from the daemon's truth rather than its own
+/// config. Every `AgentState` transition passes over the bus, so
+/// recomputing from the authoritative states map on each one (plus
+/// `TerminalExited` for teardown sweeps, plus lag recovery) converges
+/// even if individual events are missed.
+///
+/// While holding, a periodic tick also re-checks the power source, so a
+/// plug/unplug mid-run refreshes the badge even without an agent
+/// transition to wake the loop. When *not* holding there is nothing to
+/// refresh, so the timer does no work — an off/idle daemon stays fully
+/// event-driven and never reads config or probes power on a timer.
 ///
 /// Throttles `set_active()` calls to a minimum interval (10s) to avoid
 /// redundant config reads and state checks when events arrive frequently
-/// (e.g., every keystroke or CLI output line). The power-source signal
-/// is *not* throttled that way — a plug/unplug emits promptly so the
-/// badge never lies for long.
+/// (e.g., every keystroke or CLI output line). The status broadcast is
+/// *not* throttled that way — a state or plug/unplug change emits promptly
+/// so the badge never lies for long.
 ///
 /// Returns the inhibitor (for tests) when the bus closes. In
 /// production the bus never closes — the daemon exits by dropping the
@@ -120,10 +127,10 @@ async fn run(
     terminals: TerminalRegistry,
     argv: Vec<String>,
     mode: impl Fn() -> KeepAwake,
-    on_battery: impl Fn() -> bool,
+    on_battery: impl Fn() -> bool + Clone + Send + 'static,
 ) -> Inhibitor {
     let mut inhibitor = Inhibitor::new(argv);
-    let mut last_battery: Option<bool> = None;
+    let mut last_status: Option<(bool, bool)> = None;
     let mut poll = tokio::time::interval(BATTERY_POLL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Prime before the first event: a session recovered mid-`Working`
@@ -132,7 +139,7 @@ async fn run(
     // for the rest of that run.
     tick(
         &mut inhibitor,
-        &mut last_battery,
+        &mut last_status,
         &terminals,
         &bus,
         &mode,
@@ -140,54 +147,67 @@ async fn run(
     )
     .await;
     loop {
-        tokio::select! {
+        let run_tick = tokio::select! {
             recv = rx.recv() => match recv {
                 Ok(Event::AgentState { .. } | Event::TerminalExited { .. })
-                | Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Ok(_) => continue,
+                | Err(broadcast::error::RecvError::Lagged(_)) => true,
+                Ok(_) => false,
                 Err(broadcast::error::RecvError::Closed) => break,
             },
-            _ = poll.tick() => {}
+            // The only thing that can change without an agent event is the
+            // power source, and it only matters while inhibiting; skip the
+            // config read + probe otherwise.
+            _ = poll.tick() => inhibitor.holding(),
+        };
+        if run_tick {
+            tick(
+                &mut inhibitor,
+                &mut last_status,
+                &terminals,
+                &bus,
+                &mode,
+                &on_battery,
+            )
+            .await;
         }
-        tick(
-            &mut inhibitor,
-            &mut last_battery,
-            &terminals,
-            &bus,
-            &mode,
-            &on_battery,
-        )
-        .await;
     }
     inhibitor
 }
 
 /// One recompute: acquire/release the inhibitor per the mode's
-/// `should_hold`, then emit the power source over the bus when it
-/// changed so a connected client can keep the badge honest.
+/// `should_hold`, then broadcast the (active, on_battery) status when it
+/// changed so a connected client keeps the badge honest.
 async fn tick(
     inhibitor: &mut Inhibitor,
-    last_battery: &mut Option<bool>,
+    last_status: &mut Option<(bool, bool)>,
     terminals: &TerminalRegistry,
     bus: &broadcast::Sender<Event>,
     mode: &impl Fn() -> KeepAwake,
-    on_battery: &impl Fn() -> bool,
+    on_battery: &(impl Fn() -> bool + Clone + Send + 'static),
 ) {
     let mode = mode();
     let working = terminals.any_agent_working().await;
     // Only `asking` mode cares about the parked-on-input set, so skip the
     // extra scan otherwise.
     let asking = matches!(mode, KeepAwake::Asking) && terminals.any_agent_asking().await;
-    inhibitor.recompute(mode.should_hold(working, asking));
-    // The badge only shows while inhibiting, so the power source only
-    // matters — and only warrants a `pmset` probe — when the feature is
-    // on. When it's off, leave the last reported value be.
-    if mode != KeepAwake::Off {
-        let batt = on_battery();
-        if *last_battery != Some(batt) {
-            *last_battery = Some(batt);
-            let _ = bus.send(Event::KeepAwakeStatus { on_battery: batt });
-        }
+    let active = mode.should_hold(working, asking);
+    inhibitor.recompute(active);
+    // The badge — and thus the power source — only matter while holding,
+    // so the (blocking) `pmset` probe is short-circuited unless active and
+    // run off the async worker via `spawn_blocking`.
+    let on_batt = if active {
+        let probe = on_battery.clone();
+        tokio::task::spawn_blocking(probe).await.unwrap_or(false)
+    } else {
+        false
+    };
+    let status = (active, on_batt);
+    if *last_status != Some(status) {
+        *last_status = Some(status);
+        let _ = bus.send(Event::KeepAwakeStatus {
+            active,
+            on_battery: on_batt,
+        });
     }
 }
 
@@ -265,7 +285,9 @@ impl Inhibitor {
         }
     }
 
-    #[cfg(test)]
+    /// Whether the inhibitor child is currently spawned. Drives the
+    /// watcher's decision to skip the periodic power-source poll when
+    /// nothing is being held.
     fn holding(&self) -> bool {
         self.child.is_some()
     }
@@ -491,12 +513,13 @@ mod tests {
         assert!(inhibitor.holding(), "always mode must hold unconditionally");
     }
 
-    /// The power-source branch: while the feature is on, the priming pass
-    /// reports the (faked) source over the bus so a client can keep the
-    /// `☼ awake (AC only)` badge honest. Faking the source fits the same
-    /// shape as faking the inhibitor argv.
+    /// The power-source branch: while holding, the priming pass reports
+    /// the (faked) source over the bus as the authoritative status
+    /// (`active` + `on_battery`) so a client can keep the `☼ awake (AC
+    /// only)` badge honest. Faking the source fits the same shape as
+    /// faking the inhibitor argv.
     #[tokio::test]
-    async fn reports_power_source_when_enabled() {
+    async fn reports_power_source_when_holding() {
         for on_batt in [true, false] {
             let (tx, rx) = broadcast::channel(8);
             drop(tx);
@@ -513,17 +536,18 @@ mod tests {
             assert!(
                 matches!(
                     bus_rx.try_recv(),
-                    Ok(Event::KeepAwakeStatus { on_battery }) if on_battery == on_batt
+                    Ok(Event::KeepAwakeStatus { active: true, on_battery }) if on_battery == on_batt
                 ),
-                "priming must report on_battery={on_batt}"
+                "priming must report active with on_battery={on_batt}"
             );
         }
     }
 
-    /// With the feature off nothing is inhibited and no power-source probe
-    /// runs — so no status is emitted.
+    /// When not holding, the power-source probe is short-circuited — the
+    /// faked probe here would panic if run — and the status reports
+    /// `active: false, on_battery: false`.
     #[tokio::test]
-    async fn off_mode_emits_no_power_source() {
+    async fn inactive_status_never_probes_power() {
         let (tx, rx) = broadcast::channel(8);
         drop(tx);
         let (bus, mut bus_rx) = inspect_bus();
@@ -533,12 +557,18 @@ mod tests {
             working_terminals().await,
             sleep_argv(),
             || KeepAwake::Off,
-            || true,
+            || panic!("power source must not be probed while inactive"),
         )
         .await;
         assert!(
-            bus_rx.try_recv().is_err(),
-            "off mode must not emit a power-source status"
+            matches!(
+                bus_rx.try_recv(),
+                Ok(Event::KeepAwakeStatus {
+                    active: false,
+                    on_battery: false
+                })
+            ),
+            "off mode must report inactive without probing power"
         );
     }
 

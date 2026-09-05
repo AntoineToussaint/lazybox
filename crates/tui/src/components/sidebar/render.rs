@@ -348,19 +348,16 @@ impl Sidebar {
                 Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
             ));
         }
-        // Sleep-inhibition badge: painted exactly while the daemon's
-        // keep-awake watcher holds its assertion — the `ui.keep_awake`
-        // mode's `should_hold` over the current working / asking agents,
-        // the same predicate the daemon spawns on — so the user can tell
-        // at a glance why the machine isn't sleeping.
+        // Sleep-inhibition badge: painted exactly while the daemon reports
+        // it holds its assertion (`Event::KeepAwakeStatus.active`) — the
+        // daemon's own truth, so the badge can't disagree with what it's
+        // actually doing (matters over `--connect`, where the client's
+        // config differs).
         // `☼` (U+263C) rather than an emoji: like the header's `●`
         // it's an ambiguous-width BMP symbol every terminal font
         // renders one cell wide, so the right-aligned summary can't
         // drift on fonts that draw emoji narrow.
-        if self
-            .keep_awake
-            .should_hold(self.any_agent_working(), self.any_agent_asking())
-        {
+        if self.keep_awake_active {
             if !signal_spans.is_empty() {
                 signal_spans.push(Span::raw("  "));
             }

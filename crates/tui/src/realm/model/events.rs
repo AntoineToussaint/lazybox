@@ -1390,12 +1390,13 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
-        // The daemon's power source (#1485): it owns the sleep inhibitor,
-        // so it's the authority on whether a held assertion actually
-        // protects a run — on a macOS laptop it doesn't on battery or over
-        // a closed lid. Drives the `☼ awake (AC only)` badge honesty.
-        if let IpcEvent::KeepAwakeStatus { on_battery } = &event {
-            self.sidebar.set_keep_awake_on_battery(*on_battery);
+        // The daemon's authoritative keep-awake status (#1485): it owns the
+        // sleep inhibitor and reads the governing config, so it — not the
+        // client's own (possibly different, over `--connect`) config —
+        // decides whether the badge shows and whether it must admit the
+        // macOS on-battery / closed-lid limit as `☼ awake (AC only)`.
+        if let IpcEvent::KeepAwakeStatus { active, on_battery } = &event {
+            self.sidebar.set_keep_awake_status(*active, *on_battery);
             self.redraw = true;
             return;
         }

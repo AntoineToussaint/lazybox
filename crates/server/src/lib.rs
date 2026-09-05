@@ -1655,12 +1655,7 @@ pub async fn dispatch_command(
                     config.auto_fix.to_settings(),
                     spawnable_agents(&config),
                     config.setup.default_agent.clone(),
-                    // The daemon owns the sleep inhibitor, so it's the
-                    // authority on its own power source; prime the client
-                    // so the `☼ awake` badge is honest from the first
-                    // frame instead of waiting on the watcher's next
-                    // poll (#1485). Blocking (`pmset`), hence in here.
-                    crate::keep_awake::on_battery(),
+                    config.ui.keep_awake,
                 )
             })
             .await;
@@ -1671,7 +1666,7 @@ pub async fn dispatch_command(
                     auto_fix,
                     agents,
                     default_agent,
-                    on_battery,
+                    keep_awake_mode,
                 )) => {
                     let _ = tx.send(Event::ShellCommandConfig {
                         command: shell_command,
@@ -1681,7 +1676,23 @@ pub async fn dispatch_command(
                         agents,
                         default_agent,
                     });
-                    let _ = tx.send(Event::KeepAwakeStatus { on_battery });
+                    // The daemon owns the sleep inhibitor and reads the config
+                    // governing it, so it's the authority on the badge — not
+                    // the client's own (possibly different, over `--connect`)
+                    // config. Prime `active` from the daemon's mode over the
+                    // live agents, and probe the power source (blocking
+                    // `pmset`) only when actually holding (#1485).
+                    let active = {
+                        let working = config.terminal.any_agent_working().await;
+                        let asking = matches!(keep_awake_mode, lazybox_config::KeepAwake::Asking)
+                            && config.terminal.any_agent_asking().await;
+                        keep_awake_mode.should_hold(working, asking)
+                    };
+                    let on_battery = active
+                        && tokio::task::spawn_blocking(crate::keep_awake::on_battery)
+                            .await
+                            .unwrap_or(false);
+                    let _ = tx.send(Event::KeepAwakeStatus { active, on_battery });
                     auto_fix
                 }
                 Err(e) => {

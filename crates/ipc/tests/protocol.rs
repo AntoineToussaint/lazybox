@@ -1206,7 +1206,10 @@ fn all_events() -> Vec<Event> {
             required_points: 900,
             allowance: 120,
         },
-        Event::KeepAwakeStatus { on_battery: true },
+        Event::KeepAwakeStatus {
+            active: true,
+            on_battery: true,
+        },
     ]
 }
 

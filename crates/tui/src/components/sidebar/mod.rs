@@ -469,18 +469,17 @@ pub struct Sidebar {
     /// uninterrupted run of Shift-arrows — any other cursor move restarts
     /// the sweep. `None` between sweeps and after `v` / Esc (#1243).
     sweep: Option<(SessionKey, Option<SessionKey>)>,
-    /// Mirror of the `ui.keep_awake` mode as loaded at startup. The header
-    /// paints a small "awake" badge while the mode says the daemon would
-    /// hold its OS sleep inhibitor ([`KeepAwake::should_hold`] over the
-    /// current working / asking agents) — so the user can see the machine
-    /// is being kept awake and why. The daemon re-reads the mode live;
-    /// this client-side mirror refreshes on restart.
-    keep_awake: lazybox_config::KeepAwake,
-    /// Whether the daemon (which owns the inhibitor) is on battery power.
-    /// Fed by [`lazybox_ipc::Event::KeepAwakeStatus`]. On a macOS laptop a
-    /// held assertion covers neither system sleep on battery nor a closed
-    /// lid, so the badge reads `☼ awake (AC only)` here rather than
-    /// implying a protection the OS isn't giving (#1485).
+    /// Whether the daemon is currently holding its OS sleep inhibitor, as
+    /// reported over `Event::KeepAwakeStatus`. The header paints a small
+    /// "awake" badge from this daemon truth — not the client's own config,
+    /// which differs over `--connect` — so the badge can never disagree
+    /// with what the daemon is actually doing (#1485).
+    keep_awake_active: bool,
+    /// Whether the daemon (which owns the inhibitor) is on battery power,
+    /// reported alongside `keep_awake_active`. On a macOS laptop a held
+    /// assertion covers neither system sleep on battery nor a closed lid,
+    /// so the badge reads `☼ awake (AC only)` here rather than implying a
+    /// protection the OS isn't giving (#1485).
     keep_awake_on_battery: bool,
     /// Mirror of `ui.auto_wait_on_limit` as loaded at startup. When set, the
     /// daemon auto-presses "Wait" on a usage-limit block and immediately
@@ -655,7 +654,7 @@ impl Sidebar {
             searched_keys: std::collections::HashSet::new(),
             broadcast_selected: std::collections::HashSet::new(),
             sweep: None,
-            keep_awake: lazybox_config::KeepAwake::default(),
+            keep_awake_active: false,
             keep_awake_on_battery: false,
             auto_wait_on_limit: false,
             show_agent_model: true,
@@ -688,17 +687,13 @@ impl Sidebar {
         self.now_override = Some(now);
     }
 
-    /// Record the `ui.keep_awake` mode, so the header can badge active
-    /// sleep inhibition. Display-only — the daemon holds the actual
-    /// inhibitor.
-    pub fn set_keep_awake(&mut self, keep_awake: lazybox_config::KeepAwake) {
-        self.keep_awake = keep_awake;
-    }
-
-    /// Record whether the daemon that owns the inhibitor is on battery,
-    /// so the badge can tell the truth about what the assertion protects
-    /// on a macOS laptop (#1485). Fed by `Event::KeepAwakeStatus`.
-    pub fn set_keep_awake_on_battery(&mut self, on_battery: bool) {
+    /// Record the daemon's authoritative keep-awake status (whether it's
+    /// holding the inhibitor, and whether it's on battery), so the header
+    /// can badge active sleep inhibition and tell the truth about what the
+    /// assertion protects on a macOS laptop (#1485). Fed by
+    /// `Event::KeepAwakeStatus`.
+    pub fn set_keep_awake_status(&mut self, active: bool, on_battery: bool) {
+        self.keep_awake_active = active;
         self.keep_awake_on_battery = on_battery;
     }
 
@@ -915,21 +910,12 @@ impl Sidebar {
             .collect()
     }
 
-    /// True while ≥1 agent in the sidebar is `Working` — the same
-    /// predicate the daemon's keep-awake watcher inhibits sleep on.
+    /// True while ≥1 agent in the sidebar is `Working` — drives the
+    /// working spinner cadence.
     fn any_agent_working(&self) -> bool {
         self.agents
             .values()
             .any(|s| matches!(s, lazybox_ipc::AgentState::Working))
-    }
-
-    /// True while ≥1 agent is parked on input (`InputNeeded`). Reads the
-    /// same state map as [`any_agent_working`], so the `keep_awake: asking`
-    /// badge mirrors the daemon's own `any_agent_asking` predicate.
-    fn any_agent_asking(&self) -> bool {
-        self.agents
-            .values()
-            .any(|s| matches!(s, lazybox_ipc::AgentState::InputNeeded))
     }
     /// True while `session_key`'s workspace is provisioning its first
     /// spawn and no terminal has reported an `AgentState` yet — drives

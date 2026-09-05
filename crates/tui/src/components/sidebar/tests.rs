@@ -3818,7 +3818,7 @@ mod broadcast_select_tests {
     fn selection_count_outranks_passive_badges_when_space_is_tight() {
         let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
         sb.toggle_broadcast_select();
-        sb.set_keep_awake(lazybox_config::KeepAwake::Working);
+        sb.set_keep_awake_status(true, false);
         let key = sb.selected_session_key().expect("cursor row").clone();
         sb.agents.insert(key, lazybox_ipc::AgentState::Working);
 
@@ -5934,57 +5934,19 @@ mod keep_awake_badge_tests {
         (0..80).map(|x| buf[(x, 0)].symbol()).collect::<String>()
     }
 
-    fn working_agent(sb: &mut Sidebar) {
-        let ws: SessionKey = (&lazybox_core::WorkspaceKey::new("github:o/r#1")).into();
-        sb.agents.insert(ws, lazybox_ipc::AgentState::Working);
-    }
-
-    fn asking_agent(sb: &mut Sidebar) {
-        let ws: SessionKey = (&lazybox_core::WorkspaceKey::new("github:o/r#1")).into();
-        sb.agents.insert(ws, lazybox_ipc::AgentState::InputNeeded);
-    }
-
-    /// The badge paints exactly while the daemon's inhibitor holds:
-    /// `ui.keep_awake` on AND ≥1 agent working. Either side alone
-    /// paints nothing.
+    /// The badge is daemon-driven: it paints exactly when the daemon
+    /// reports it's holding (`Event::KeepAwakeStatus.active`), independent
+    /// of the client's own config or agent map (#1485).
     #[test]
-    fn awake_badge_requires_option_and_a_working_agent() {
+    fn awake_badge_follows_daemon_active_flag() {
         let mut sb = Sidebar::new(PaneId::new(1));
-        working_agent(&mut sb);
         assert!(!header_row(&mut sb).contains("awake"));
 
-        sb.set_keep_awake(lazybox_config::KeepAwake::Working);
-        assert!(header_row(&mut sb).contains("awake"));
-    }
-
-    #[test]
-    fn awake_badge_clears_when_agents_go_idle() {
-        let mut sb = Sidebar::new(PaneId::new(1));
-        sb.set_keep_awake(lazybox_config::KeepAwake::Working);
-        assert!(!header_row(&mut sb).contains("awake"));
-
-        working_agent(&mut sb);
+        sb.set_keep_awake_status(true, false);
         assert!(header_row(&mut sb).contains("awake"));
 
-        for state in sb.agents.values_mut() {
-            *state = lazybox_ipc::AgentState::Done;
-        }
+        sb.set_keep_awake_status(false, false);
         assert!(!header_row(&mut sb).contains("awake"));
-    }
-
-    /// `working` mode ignores an agent that's merely asking, but `asking`
-    /// mode holds for it — the run parked on a question is one keystroke
-    /// from resuming (#1485).
-    #[test]
-    fn asking_mode_badge_covers_input_pending() {
-        let mut sb = Sidebar::new(PaneId::new(1));
-        asking_agent(&mut sb);
-
-        sb.set_keep_awake(lazybox_config::KeepAwake::Working);
-        assert!(!header_row(&mut sb).contains("awake"));
-
-        sb.set_keep_awake(lazybox_config::KeepAwake::Asking);
-        assert!(header_row(&mut sb).contains("awake"));
     }
 
     /// On battery the badge says so, rather than implying a protection the
@@ -5992,15 +5954,14 @@ mod keep_awake_badge_tests {
     #[test]
     fn awake_badge_admits_ac_only_on_battery() {
         let mut sb = Sidebar::new(PaneId::new(1));
-        working_agent(&mut sb);
-        sb.set_keep_awake(lazybox_config::KeepAwake::Working);
+        sb.set_keep_awake_status(true, false);
         assert!(header_row(&mut sb).contains("awake"));
         assert!(!header_row(&mut sb).contains("AC only"));
 
-        sb.set_keep_awake_on_battery(true);
+        sb.set_keep_awake_status(true, true);
         assert!(header_row(&mut sb).contains("AC only"));
 
-        sb.set_keep_awake_on_battery(false);
+        sb.set_keep_awake_status(true, false);
         assert!(header_row(&mut sb).contains("awake"));
         assert!(!header_row(&mut sb).contains("AC only"));
     }

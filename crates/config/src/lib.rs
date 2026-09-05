@@ -809,8 +809,7 @@ where
 /// and never a closed lid, so a held assertion is not a guarantee on
 /// battery — the sidebar badge says as much (it reads the power source),
 /// but no mode changes that OS limit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KeepAwake {
     #[default]
     Off,
@@ -834,10 +833,34 @@ impl KeepAwake {
     }
 }
 
+/// Serialize `Off`/`Working` back as the historical bool (`false`/`true`)
+/// so a config written by this build still loads on an *older* lazybox,
+/// whose `keep_awake` is a plain `bool` — a write-back (theme toggle,
+/// sidebar collapse, splitter resize) stamps this key into everyone's
+/// config, so emitting a string for the common cases would make a
+/// downgrade fail the entire config load and drop the user's repos and
+/// tokens to defaults. The two genuinely-new modes have no bool form and
+/// an old build couldn't honour them anyway, so those serialize as
+/// strings.
+impl Serialize for KeepAwake {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            KeepAwake::Off => s.serialize_bool(false),
+            KeepAwake::Working => s.serialize_bool(true),
+            KeepAwake::Asking => s.serialize_str("asking"),
+            KeepAwake::Always => s.serialize_str("always"),
+        }
+    }
+}
+
 /// Accept both the historical bool (`keep_awake: true|false`) and the
 /// named modes (`working|asking|always`), so upgrading never breaks a
-/// config. An unrecognized string warns and disables rather than sinking
-/// the whole config load — same policy as [`de_lenient_focus_layout`].
+/// config. Any unrecognized *or wrong-typed* value warns and disables
+/// rather than sinking the whole config load (which would take the user's
+/// repos and tokens down with it) — same policy as the `de_lenient_*`
+/// field deserializers, extended to the scalar type mismatches
+/// (`keep_awake:` with no value, an integer, a float) that a hand-edited
+/// config can produce.
 impl<'de> Deserialize<'de> for KeepAwake {
     fn deserialize<D>(de: D) -> Result<Self, D::Error>
     where
@@ -869,6 +892,24 @@ impl<'de> Deserialize<'de> for KeepAwake {
                         KeepAwake::Off
                     }
                 })
+            }
+            fn visit_unit<E>(self) -> Result<KeepAwake, E> {
+                tracing::warn!(
+                    "ui.keep_awake has no value; expected a bool or `off`/`working`/`asking`/`always`, using `off`"
+                );
+                Ok(KeepAwake::Off)
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<KeepAwake, E> {
+                tracing::warn!("ui.keep_awake is {v}, not a bool or mode name, using `off`");
+                Ok(KeepAwake::Off)
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<KeepAwake, E> {
+                tracing::warn!("ui.keep_awake is {v}, not a bool or mode name, using `off`");
+                Ok(KeepAwake::Off)
+            }
+            fn visit_f64<E>(self, v: f64) -> Result<KeepAwake, E> {
+                tracing::warn!("ui.keep_awake is {v}, not a bool or mode name, using `off`");
+                Ok(KeepAwake::Off)
             }
         }
         de.deserialize_any(V)
@@ -3990,6 +4031,49 @@ mod tests {
         // Unknown strings degrade to off rather than sinking the load.
         let cfg: Config = serde_yaml::from_str("ui:\n  keep_awake: bogus\n").expect("parse");
         assert_eq!(cfg.ui.keep_awake, KeepAwake::Off);
+
+        // Wrong-typed scalars (null / int / float from a hand edit) also
+        // degrade to off instead of failing the entire config load and
+        // taking the user's repos and tokens down with it.
+        for raw in [
+            "ui:\n  keep_awake:\n",
+            "ui:\n  keep_awake: 3\n",
+            "ui:\n  keep_awake: 1.5\n",
+        ] {
+            let cfg: Config = serde_yaml::from_str(raw).expect("must not sink the load");
+            assert_eq!(cfg.ui.keep_awake, KeepAwake::Off, "{raw:?}");
+        }
+    }
+
+    /// `Off`/`Working` serialize back as the historical bool so a config
+    /// written by this build still loads on an older lazybox (whose
+    /// `keep_awake` is a plain `bool`); the two new modes have no bool
+    /// form and round-trip as strings.
+    #[test]
+    fn keep_awake_serializes_bool_compatibly() {
+        let ser = |m: KeepAwake| {
+            let ui = UiSection {
+                keep_awake: m,
+                ..UiSection::default()
+            };
+            serde_yaml::to_string(&ui).expect("serialize")
+        };
+        assert!(ser(KeepAwake::Off).contains("keep_awake: false"));
+        assert!(ser(KeepAwake::Working).contains("keep_awake: true"));
+        assert!(ser(KeepAwake::Asking).contains("keep_awake: asking"));
+        assert!(ser(KeepAwake::Always).contains("keep_awake: always"));
+
+        // Every mode round-trips through our own deserializer too.
+        for m in [
+            KeepAwake::Off,
+            KeepAwake::Working,
+            KeepAwake::Asking,
+            KeepAwake::Always,
+        ] {
+            let yaml = serde_yaml::to_string(&m).expect("serialize scalar");
+            let back: KeepAwake = serde_yaml::from_str(&yaml).expect("deserialize scalar");
+            assert_eq!(back, m);
+        }
     }
 
     /// The single hold predicate the daemon and client share.

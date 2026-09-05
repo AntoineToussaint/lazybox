@@ -2915,6 +2915,71 @@ mod effects_tests {
         m
     }
 
+    /// Wiring guard (#1490): `view()` must refresh the agent tabs' usage
+    /// badges from the tracker *before* drawing. Feed a live plan quota, render
+    /// the whole model, and assert the headroom badge reached the tab strip —
+    /// its `◔` glyph is unique to the terminal surface (the sidebar renders
+    /// utilization, never `◔`), so a hit isolates the terminal-stack path from
+    /// the sidebar's own `$ METER` pill. Deleting the refresh call from
+    /// `view()` — the one thing a unit test on the render alone can't catch —
+    /// fails this.
+    #[test]
+    fn view_paints_the_agent_tab_usage_badge() {
+        use lazybox_ipc::{
+            Event as IpcEvent, ProviderQuota, QuotaWindow, TerminalId, TerminalKind,
+        };
+        let mut m = build_model();
+        let ws_key = WorkspaceKey::new("github:o/r#1");
+        let session_key: SessionKey = (&ws_key).into();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![lazybox_core::Workspace::empty(
+                ws_key,
+                "main",
+                chrono::Utc::now(),
+            )],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: session_key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        // Weekly window at 62% used → 38% headroom, reset far in the future so
+        // it is unambiguously live for the wall clock.
+        m.handle_daemon_event(IpcEvent::AgentProviderQuota {
+            agent_id: "claude".into(),
+            session_key: Some(session_key.clone()),
+            quota: ProviderQuota {
+                five_hour: None,
+                weekly: Some(QuotaWindow {
+                    utilization_bp: 6200,
+                    reset_at: Some(9_999_999_999),
+                }),
+            },
+        });
+
+        m.view();
+        let buffer = m.terminal.raw().backend().buffer();
+        let mut text = String::new();
+        for row in 0..buffer.area.height {
+            for col in 0..buffer.area.width {
+                text.push_str(buffer[(col, row)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(
+            text.contains('◔') && text.contains("38% left"),
+            "the headroom badge must reach the tab strip via view(): {text:?}",
+        );
+    }
+
     /// Returning to the terminal pane with a single click restores the
     /// ability to interact in one click (#103). Before the fix, the
     /// first click after leaving the terminal only refocused it —

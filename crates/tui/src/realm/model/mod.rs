@@ -3069,6 +3069,45 @@ impl<T: TerminalAdapter> Model<T> {
         // Mirror narrowed-repo scopes into the sidebar so headers
         // appear at startup, before the first poll completes.
         self.refresh_subscribed_projects();
+        // Enabled-providers is one of the empty-inbox doctor's inputs.
+        self.refresh_inbox_health();
+    }
+
+    /// Recompute the empty-inbox doctor's facts (issue #1461) from the
+    /// persisted setup and the sync log — data the sidebar can't observe
+    /// on its own — and push them into the pane. Cheap; called only when
+    /// a provider selection or a poll outcome changes.
+    pub(crate) fn refresh_inbox_health(&mut self) {
+        use crate::realm::status_ctx::SyncOutcome;
+        let providers_enabled = self
+            .setup
+            .persisted
+            .as_ref()
+            .is_some_and(|p| !p.enabled_providers.is_empty());
+        // `recent()` is newest-first, so the first entry seen for a source
+        // is that source's latest outcome — collapse to per-source latest
+        // in one borrowing pass, without cloning the whole log.
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut polled_ok = false;
+        let mut credential_failure: Option<String> = None;
+        for e in self.status.sync.recent() {
+            if !seen.insert(e.source.as_str()) {
+                continue;
+            }
+            match &e.outcome {
+                SyncOutcome::Ok { .. } => polled_ok = true,
+                SyncOutcome::Err { kind, .. } if kind == "auth" => {
+                    credential_failure.get_or_insert_with(|| e.source.clone());
+                }
+                _ => {}
+            }
+        }
+        self.sidebar
+            .set_inbox_health(crate::components::sidebar::InboxHealth {
+                providers_enabled,
+                polled_ok,
+                credential_failure,
+            });
     }
 
     /// Hand in the editors detected at startup. The `E` shortcut

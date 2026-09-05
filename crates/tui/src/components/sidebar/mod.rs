@@ -327,6 +327,12 @@ pub struct Sidebar {
     /// Loaded from `~/.lazybox/config.yaml::attention` at startup;
     /// toggle individual signals there to customize.
     attention: lazybox_config::AttentionConfig,
+    /// Provider/sync facts the sidebar can't see for itself (they live
+    /// in the Model), pushed via [`Self::set_inbox_health`]. Read only
+    /// by the empty-inbox doctor ([`Self::inbox_diagnosis`]) to name the
+    /// *specific* reason an Inbox is empty and offer the matching fix
+    /// (issue #1461).
+    inbox_health: InboxHealth,
     /// Projects mirrored from the daemon's project table. Each entry
     /// emits a sidebar header so a project with zero workspaces
     /// still appears. Populated by `apply_projects` (called from the
@@ -539,6 +545,45 @@ pub struct PendingNotification {
     pub kind: NotificationKind,
 }
 
+/// Provider/sync facts the empty-inbox doctor needs but the sidebar
+/// can't observe on its own — they live in the `Model` (`setup.persisted`,
+/// `status.sync`) and are pushed in via [`Sidebar::set_inbox_health`].
+/// Pure data so the diagnosis stays unit-testable (issue #1461).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InboxHealth {
+    /// At least one provider is enabled in the persisted setup. False on
+    /// a fresh machine (no wizard run yet) — the "point lazybox at a
+    /// folder" first-run state.
+    pub providers_enabled: bool,
+    /// At least one provider's most-recent poll completed successfully.
+    /// Distinguishes "still syncing" from "polled and genuinely empty".
+    pub polled_ok: bool,
+    /// The provider whose most-recent poll failed on credentials/auth,
+    /// if any — the empty inbox is a sign-in problem, not a quiet account.
+    pub credential_failure: Option<String>,
+}
+
+/// Why the Inbox is empty. Computed by [`Sidebar::inbox_diagnosis`] from
+/// the sidebar's own view state plus the injected [`InboxHealth`]; each
+/// variant renders a panel that names the reason and offers the fix,
+/// replacing the old one-size-fits-all "No PRs or issues yet" key list
+/// (issue #1461, acceptance criterion 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InboxDiagnosis {
+    /// No provider enabled yet — teach the worktree flow that needs no
+    /// GitHub at all, and offer the setup wizard as the way to add one.
+    FirstRun,
+    /// A provider's credentials/token failed; name it and point at the fix.
+    CredentialFailure { provider: String },
+    /// Active view filters hid every row; name the count and offer to widen.
+    FiltersExcludeAll { count: usize },
+    /// Providers enabled but no poll has succeeded yet — still loading.
+    Syncing,
+    /// Everything is configured and polling succeeded; nothing is open.
+    /// Say so and pivot to starting a worktree session.
+    NothingOpen,
+}
+
 impl Sidebar {
     pub fn new(id: PaneId) -> Self {
         Self {
@@ -582,6 +627,7 @@ impl Sidebar {
             model_shorts: HashMap::new(),
             agent_registry: lazybox_tui_core::agents::registry(),
             attention: lazybox_config::AttentionConfig::default(),
+            inbox_health: InboxHealth::default(),
             projects: BTreeMap::new(),
             default_agent: "claude".to_string(),
             conventions: lazybox_core::Conventions::default(),
@@ -2505,18 +2551,75 @@ impl Sidebar {
         self.visible.len()
     }
 
-    /// True when the inbox is genuinely empty — no rows at all on the
-    /// default, unfiltered Inbox view, with no search narrowing it.
-    /// A first-run user with little/no GitHub data lands here, so the
-    /// renderer swaps the blank list for a getting-started panel that
-    /// teaches the next actions (issue #100). A list emptied by an
-    /// active filter, a non-Inbox mailbox, or a search query is NOT
-    /// this case — those are user-driven narrowings, not first-run.
-    pub fn is_getting_started(&self) -> bool {
-        self.visible.is_empty()
-            && self.mailbox == Mailbox::Inbox
-            && self.filters.is_empty()
-            && self.search.as_ref().is_none_or(|s| s.query.is_empty())
+    /// Feed the provider/sync facts the empty-inbox doctor needs but the
+    /// sidebar can't see for itself. The Model computes these from
+    /// `setup.persisted` and `status.sync` and pushes them on provider /
+    /// poll changes (issue #1461).
+    pub fn set_inbox_health(&mut self, health: InboxHealth) {
+        self.inbox_health = health;
+    }
+
+    /// Diagnose *why* the Inbox is empty, or `None` when no empty-inbox
+    /// panel should show (there are rows, it's not the Inbox mailbox, or a
+    /// live search owns the pane with its own no-matches panel). This is
+    /// the empty-inbox doctor: each `Some` variant renders a panel that
+    /// names the specific cause and its fix, so an empty pane is a
+    /// diagnosis rather than a dead end (issue #1461).
+    pub fn inbox_diagnosis(&self) -> Option<InboxDiagnosis> {
+        if self.mailbox != Mailbox::Inbox || !self.visible.is_empty() {
+            return None;
+        }
+        // A live search filtered everything away — `render_no_matches`
+        // owns that state; don't shadow it with a config diagnosis.
+        if self
+            .search
+            .as_ref()
+            .is_some_and(|s| !s.query.trim().is_empty())
+        {
+            return None;
+        }
+        // Credentials are the root cause even if a filter is also on:
+        // "widen your filter" is the wrong advice when no fresh data
+        // could arrive.
+        if let Some(provider) = &self.inbox_health.credential_failure {
+            return Some(InboxDiagnosis::CredentialFailure {
+                provider: provider.clone(),
+            });
+        }
+        // A user-applied view filter that's actually hiding rows. The
+        // test is Inbox-*eligible* workspaces (`mailbox_membership`
+        // ignoring the filters), not the raw workspace set — otherwise a
+        // quiet Inbox whose only workspaces are snoozed or merged would be
+        // wrongly blamed on the filter, and clearing it would reveal
+        // nothing.
+        if !self.filters.is_empty() && self.inbox_eligible_count() > 0 {
+            return Some(InboxDiagnosis::FiltersExcludeAll {
+                count: self.filters.len(),
+            });
+        }
+        // A completed successful poll proves a provider exists, so it
+        // outranks the local `providers_enabled` flag — which, against a
+        // remote daemon, describes *this* machine's config, not the one
+        // doing the polling. FirstRun only when nothing has polled yet.
+        if self.inbox_health.polled_ok {
+            return Some(InboxDiagnosis::NothingOpen);
+        }
+        if self.inbox_health.providers_enabled {
+            return Some(InboxDiagnosis::Syncing);
+        }
+        Some(InboxDiagnosis::FirstRun)
+    }
+
+    /// Workspaces that belong to the Inbox mailbox ignoring the active
+    /// view filters — i.e. how many rows a filter *could* be hiding.
+    /// Zero means an empty Inbox is genuinely empty (everything snoozed,
+    /// merged, or nothing at all), not filtered.
+    fn inbox_eligible_count(&self) -> usize {
+        let now = self.now();
+        self.workspaces
+            .values()
+            .filter(|w| mailbox_membership(w, Mailbox::Inbox, now, self.show_inactive_in_inbox))
+            .count()
     }
 
     /// How many *workspace* rows are visible (excluding repo headers).

@@ -430,6 +430,17 @@ impl Sidebar {
         self.inner.set_conventions(conventions);
     }
 
+    /// Push the provider/sync facts the empty-inbox doctor reads.
+    /// Delegates to the inner pane (issue #1461).
+    pub fn set_inbox_health(&mut self, health: crate::components::sidebar::InboxHealth) {
+        self.inner.set_inbox_health(health);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inbox_diagnosis(&self) -> Option<crate::components::sidebar::InboxDiagnosis> {
+        self.inner.inbox_diagnosis()
+    }
+
     /// Conversation `w` should target on `workspace_key`: one running
     /// conversation wins over `default_agent`; several ask the user
     /// which exact terminal should receive the prompt (#418).

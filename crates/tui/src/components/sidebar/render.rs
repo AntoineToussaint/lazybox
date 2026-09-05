@@ -164,6 +164,17 @@ fn hash_one<H: std::hash::Hash>(v: &H) -> u64 {
     h.finish()
 }
 
+/// Capitalize the first character so a lowercase provider id
+/// (`github`, `linear`) reads as a heading. Single-word ids only —
+/// no attempt at intercaps like "GitHub".
+fn title_case(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 /// Collapse an `AgentState` to a stable code for the signature. `AgentState`
 /// isn't `Hash` (and lives in `ipc`, where adding a derive would churn the
 /// wire fixture), so we fold it here — every variant that changes a row's
@@ -1211,13 +1222,13 @@ impl Sidebar {
         let para = Paragraph::new(lines);
         frame.render_widget(para, inner);
 
-        // First-run / empty-inbox guidance. When the list is genuinely
-        // empty (default Inbox, no filter, no search) the blank pane is
-        // a dead end — replace it with a panel that names the next
-        // actions, foregrounding the worktree-session flow that works
-        // with zero GitHub data (issue #100).
-        if self.is_getting_started() {
-            self.render_getting_started(inner, frame, theme);
+        // Empty-inbox doctor. A blank pane is a dead end — instead
+        // diagnose *why* the Inbox is empty (no provider, credentials
+        // failed, filters hiding everything, still syncing, or genuinely
+        // nothing open) and render a panel that names the cause and its
+        // fix (issue #1461; the worktree-first first-run panel is #100).
+        if let Some(diag) = self.inbox_diagnosis() {
+            self.render_diagnosis(inner, frame, theme, &diag);
         } else if let Some(query) = self.search.as_ref().and_then(|s| {
             let q = s.query.trim();
             (!q.is_empty() && self.workspace_count() == 0).then(|| q.to_string())
@@ -1317,17 +1328,23 @@ impl Sidebar {
         }
     }
 
-    /// Paint the empty-inbox getting-started panel into the content
-    /// area. Leads with the worktree-session flow (which needs no
-    /// GitHub data) and closes with the orientation shortcuts, so a
-    /// new user with an empty inbox has somewhere to go (issue #100).
-    fn render_getting_started(&self, inner: Rect, frame: &mut Frame, theme: &crate::theme::Theme) {
+    /// Paint the empty-inbox doctor's panel for `diag` — the diagnosis of
+    /// *why* the Inbox is empty and the fix that matches it, so a blank
+    /// pane teaches instead of dead-ending (issue #1461).
+    fn render_diagnosis(
+        &self,
+        inner: Rect,
+        frame: &mut Frame,
+        theme: &crate::theme::Theme,
+        diag: &InboxDiagnosis,
+    ) {
         if inner.height < 4 {
             return;
         }
         let heading = Style::default()
             .fg(theme.text_strong)
             .add_modifier(Modifier::BOLD);
+        let warn = Style::default().fg(theme.warn).add_modifier(Modifier::BOLD);
         let prose = Style::default().fg(theme.text_dim);
         let key = Style::default()
             .fg(theme.accent)
@@ -1340,29 +1357,98 @@ impl Sidebar {
                 Span::styled(text.to_string(), label),
             ])
         };
+        let head = |style: Style, text: &str| Line::from(Span::styled(format!(" {text}"), style));
+        let say = |text: &str| Line::from(Span::styled(format!(" {text}"), prose));
 
-        let lines: Vec<Line<'static>> = vec![
-            Line::raw(""),
-            Line::from(Span::styled(" No PRs or issues yet", heading)),
-            Line::raw(""),
-            Line::from(Span::styled(" lazybox also manages your", prose)),
-            Line::from(Span::styled(" git worktrees — spin up an", prose)),
-            Line::from(Span::styled(" agent session per task:", prose)),
-            Line::raw(""),
-            hint("⇧W", "start work"),
-            hint("x p", "new project"),
-            hint("x n", "new workspace"),
-            Line::raw(""),
-            Line::from(Span::styled(" or open a tool yourself:", prose)),
-            hint("a c", "claude"),
-            hint("s", "shell"),
-            hint("e", "editor"),
-            Line::raw(""),
-            Line::from(Span::styled(" new here?", prose)),
-            hint("?", "Ask Lazybox"),
-            hint("⇧T", "tour"),
-            hint("⇧R", "refresh inbox"),
-        ];
+        let lines: Vec<Line<'static>> = match diag {
+            // First run / no provider: the worktree flow needs no GitHub,
+            // so lead with it (issue #100) and offer the wizard as the way
+            // to wire up a provider once they've felt a session.
+            InboxDiagnosis::FirstRun => vec![
+                Line::raw(""),
+                head(heading, "Nothing configured yet"),
+                Line::raw(""),
+                say("lazybox manages your git"),
+                say("worktrees — point it at a"),
+                say("folder and start an agent:"),
+                Line::raw(""),
+                hint("⇧W", "start work"),
+                hint("x p", "new project"),
+                hint("x n", "new workspace"),
+                Line::raw(""),
+                say("or open a tool yourself:"),
+                hint("a c", "claude"),
+                hint("s", "shell"),
+                hint("e", "editor"),
+                Line::raw(""),
+                say("connect GitHub / Linear when"),
+                say("you're ready:"),
+                hint(",", "setup"),
+                hint("?", "Ask Lazybox"),
+                hint("⇧T", "tour"),
+            ],
+            // Credentials failed — the empty inbox is a sign-in problem.
+            InboxDiagnosis::CredentialFailure { provider } => {
+                let named = title_case(provider);
+                vec![
+                    Line::raw(""),
+                    head(warn, &format!("{named} sign-in failed")),
+                    Line::raw(""),
+                    say("lazybox can't reach your"),
+                    say(&format!("{named} tasks — the token")),
+                    say("was rejected. Re-connect it:"),
+                    Line::raw(""),
+                    hint(",", "setup / re-auth"),
+                    hint("⇧D", "sync details"),
+                    hint("⇧R", "retry sync"),
+                ]
+            }
+            // A user-applied view filter is hiding rows we hold.
+            InboxDiagnosis::FiltersExcludeAll { count } => {
+                let noun = if *count == 1 { "filter" } else { "filters" };
+                vec![
+                    Line::raw(""),
+                    head(warn, &format!("{count} {noun} hiding your inbox")),
+                    Line::raw(""),
+                    say("every workspace is filtered"),
+                    say("out of this view. Widen or"),
+                    say("clear the filter to see them:"),
+                    Line::raw(""),
+                    hint("f", "edit filters"),
+                    hint("esc", "clear filters"),
+                    hint("⇧S", "switch mailbox"),
+                ]
+            }
+            // Providers enabled but no successful poll yet.
+            InboxDiagnosis::Syncing => vec![
+                Line::raw(""),
+                head(heading, "Checking for PRs & issues…"),
+                Line::raw(""),
+                say("lazybox is polling your"),
+                say("providers for the first time."),
+                Line::raw(""),
+                hint("⇧D", "sync status"),
+                hint("⇧R", "refresh now"),
+            ],
+            // Everything is configured and polling succeeded — genuinely
+            // nothing open. Say so and pivot to the worktree path.
+            InboxDiagnosis::NothingOpen => vec![
+                Line::raw(""),
+                head(heading, "Nothing's waiting on you"),
+                Line::raw(""),
+                say("no open PRs or issues need"),
+                say("attention right now. Want to"),
+                say("start something?"),
+                Line::raw(""),
+                hint("⇧W", "start work"),
+                hint("a c", "claude"),
+                hint("s", "shell"),
+                Line::raw(""),
+                say("or check back later:"),
+                hint("⇧R", "refresh inbox"),
+                hint("⇧D", "sync status"),
+            ],
+        };
         frame.render_widget(Paragraph::new(lines), inner);
     }
 

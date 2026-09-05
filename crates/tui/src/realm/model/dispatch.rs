@@ -2968,9 +2968,20 @@ impl<T: TerminalAdapter> Model<T> {
         for key in targets {
             match self.apply_one(op, key, model_alias.as_deref()) {
                 ApplyOutcome::Spawn { step, follow } => {
+                    // Only a *local* spawn pins the focus-follow. A
+                    // `SpawnRemote` runs on another box and never produces
+                    // a local `TerminalSpawned`, so arming `spawn_follow_to`
+                    // for it would leave a pin nothing ever consumes: it
+                    // would suppress this bulk's "N still selected" suffix
+                    // (the selection actually survives, focus never left the
+                    // sidebar) and — because it lingers — silently strip the
+                    // suffix off the *next* unrelated bulk summary too
+                    // (#1482; `flash_bulk_outcome` reads `spawn_follow_to`).
+                    if matches!(step, super::BulkAgentStep::Spawn(_)) {
+                        plan.follow.get_or_insert(follow);
+                    }
                     plan.steps.push(step);
                     plan.spawned += 1;
-                    plan.follow.get_or_insert(follow);
                 }
                 ApplyOutcome::Live(step) => {
                     plan.steps.push(step);

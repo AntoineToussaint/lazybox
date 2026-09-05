@@ -369,7 +369,7 @@ pub struct SelectedFetchOutcome {
     pub coverage: FetchCoverage,
     pub pr_coverage: FetchCoverage,
     /// The main PR discovery branch succeeded (see
-    /// [`PrFetchOutcome::main_complete`]); the PR `updated:>=` floor may
+    /// `PrFetchOutcome::main_complete`); the PR `updated:>=` floor may
     /// advance even when a companion branch failed.
     pub pr_discovery_complete: bool,
     /// Both discovery sides (main PR branch + issue search) succeeded;

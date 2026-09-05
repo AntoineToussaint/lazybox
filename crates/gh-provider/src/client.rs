@@ -4546,6 +4546,15 @@ impl GhClient {
         self.notifications_state.lock().repo_window(member)
     }
 
+    /// Drop per-member sweep floors for members no longer on the roster,
+    /// so the persisted cursor set can't grow without bound over scope
+    /// churn and a re-added member starts from a clean unwindowed pass
+    /// instead of a stale floor. Call once per tick with the current
+    /// roster.
+    pub fn retain_repo_windows(&self, roster: &[String]) {
+        self.notifications_state.lock().retain_repo_windows(roster);
+    }
+
     /// A repository's most-recently-merged PRs, for the merge-history
     /// modal (#1432) — the "what's been landing here" ledger. A single
     /// search page, `sort:updated-desc`, so it stays cheap and bounded no
@@ -7732,6 +7741,32 @@ mod tests {
         assert!(
             p95 < gap_ms,
             "recorded p95 latency {p95}ms must exclude the {gap_ms}ms pacing wait"
+        );
+    }
+
+    /// A repo-first sweep where EVERY member's query fails must surface as
+    /// `Err` (not a degraded `Ok`). This is the precondition the server's
+    /// reconcile re-arm depends on: a total-failure reconcile erred out via
+    /// this `Err`, so `fetch_repo_first` must re-arm the sweep timer on the
+    /// error path too — otherwise `force_full_sweep` stays set and the
+    /// full-roster reconcile re-runs every tick for the whole outage.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_repo_sweep_errors_when_every_member_fails() {
+        // A 200 carrying a GraphQL `errors` array fails the member's PR
+        // query deterministically (no retry ladder, no rate-limit sleep).
+        const BODY: &str = r#"{"data":null,"errors":[{"message":"boom"}]}"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        let specs = vec![RepoSweepSpec {
+            member: "acme/widgets".to_string(),
+            since: Some(chrono::Utc::now()),
+        }];
+        let result = client
+            .fetch_repo_sweep(&specs, true, false, &std::collections::BTreeSet::new())
+            .await;
+        assert!(
+            result.is_err(),
+            "every member failing must surface as Err, not a degraded Ok"
         );
     }
 

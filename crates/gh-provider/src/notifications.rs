@@ -274,6 +274,18 @@ impl NotificationsState {
         self.repo_windows.insert(member.to_string(), started);
     }
 
+    /// Drop floors for members no longer on the roster. Without this the
+    /// map grows without bound as the user churns scopes, and a repo
+    /// re-added months later would resume from its stale floor —
+    /// `updated:>=<months ago>` — which overflows the page cap and leaves
+    /// that member perpetually failing. Pruning on departure makes a
+    /// re-added member start unwindowed (a clean cold start) instead.
+    pub fn retain_repo_windows(&mut self, roster: &[String]) {
+        let keep: std::collections::BTreeSet<&str> = roster.iter().map(String::as_str).collect();
+        self.repo_windows
+            .retain(|member, _| keep.contains(member.as_str()));
+    }
+
     /// Is the slow-sweep cadence due?
     ///
     /// True in any of four cases:
@@ -614,6 +626,31 @@ mod tests {
         let legacy: SyncCursors =
             serde_json::from_str(r#"{"last_modified":null}"#).expect("legacy payload");
         assert!(legacy.repo_windows.is_empty());
+    }
+
+    /// A member that leaves the roster has its floor pruned, so the map
+    /// stays bounded over scope churn and a re-added member starts from a
+    /// clean unwindowed pass rather than a stale floor.
+    #[test]
+    fn retain_repo_windows_prunes_members_off_the_roster() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 5, 18, 0, 0).unwrap();
+        let mut state = NotificationsState::default();
+        state.record_repo_window("acme/widgets", now);
+        state.record_repo_window("acme/gadgets", now);
+        state.record_repo_window("zed/editor", now);
+
+        state.retain_repo_windows(&["acme/widgets".to_string(), "zed/editor".to_string()]);
+        assert_eq!(state.repo_window("acme/widgets"), Some(now));
+        assert_eq!(state.repo_window("zed/editor"), Some(now));
+        assert_eq!(
+            state.repo_window("acme/gadgets"),
+            None,
+            "a member off the roster is pruned"
+        );
+
+        // An empty roster clears every floor.
+        state.retain_repo_windows(&[]);
+        assert!(state.repo_windows.is_empty());
     }
 
     #[test]

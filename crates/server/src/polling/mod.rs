@@ -479,7 +479,8 @@ pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnaps
 
 #[cfg(test)]
 mod polled_list_tests {
-    use super::repo_in_polled_list;
+    use super::{PolledScope, repo_first_polled_scope, repo_in_polled_list};
+    use lazybox_core::FetchCoverage;
 
     #[test]
     fn repo_in_polled_list_matches_repo_and_org() {
@@ -489,6 +490,43 @@ mod polled_list_tests {
         assert!(!repo_in_polled_list("zed/other", &polled));
         assert!(!repo_in_polled_list("acmeco/x", &polled));
         assert!(!repo_in_polled_list("acme/widgets", &[]));
+    }
+
+    /// A rotation slice or any windowed pass has no deletion authority.
+    #[test]
+    fn rotation_and_windowed_passes_never_delete() {
+        let completed = vec!["acme".to_string()];
+        assert_eq!(
+            repo_first_polled_scope(false, FetchCoverage::Complete, false, &completed),
+            PolledScope::Repos(Vec::new())
+        );
+        assert_eq!(
+            repo_first_polled_scope(true, FetchCoverage::Complete, true, &completed),
+            PolledScope::Repos(Vec::new())
+        );
+    }
+
+    /// A fully-successful reconcile is authoritative over the whole inbox.
+    #[test]
+    fn complete_reconcile_is_exhaustive() {
+        assert_eq!(
+            repo_first_polled_scope(true, FetchCoverage::Complete, false, &[]),
+            PolledScope::Exhaustive
+        );
+    }
+
+    /// Regression for the review's 🔴 finding: a PARTIAL reconcile — one
+    /// member (e.g. an `org:` scope past the 100-open-PR page cap) erroring
+    /// on every pass — must NOT surrender retirement authority for the whole
+    /// inbox. The members that completed still retire their own gone rows.
+    #[test]
+    fn partial_reconcile_retires_within_completed_members() {
+        let completed = vec!["acme".to_string(), "zed/editor".to_string()];
+        assert_eq!(
+            repo_first_polled_scope(true, FetchCoverage::Partial, false, &completed),
+            PolledScope::Repos(completed),
+            "one truncating member must not veto retirement for the completed ones"
+        );
     }
 }
 
@@ -1088,6 +1126,38 @@ pub fn gh_polled_scope(
         PolledScope::Exhaustive
     } else {
         PolledScope::Repos(repos.to_vec())
+    }
+}
+
+/// Repo-first equivalent of [`gh_polled_scope`]. Deletion authority
+/// belongs only to a reconcile pass (unwindowed over the whole roster):
+///
+/// - A rotation slice — or any windowed pass — reports empty coverage.
+/// - A fully-successful reconcile reports `Exhaustive`: authoritative
+///   over the ENTIRE inbox, so it can retire rows whose repo has left
+///   the roster completely (a de-scoped repo).
+/// - A PARTIAL reconcile (one member truncated its page cap or errored)
+///   reports the members that DID complete their exhaustive open-set as
+///   an authoritative `Repos(completed_members)` set. Before this, a
+///   single high-volume member — e.g. an `org:` scope past the 100-open-PR
+///   page cap, which errors on every reconcile — kept coverage partial
+///   and so vetoed retirement for the WHOLE inbox indefinitely, leaving
+///   merged/closed/transferred rows stuck open forever. `completed_members`
+///   may hold `org` entries; [`repo_in_polled_list`] expands them so a
+///   completed org member still retires its children.
+pub fn repo_first_polled_scope(
+    reconcile: bool,
+    coverage: lazybox_core::FetchCoverage,
+    windowed: bool,
+    completed_members: &[String],
+) -> PolledScope {
+    if !reconcile || windowed {
+        return PolledScope::Repos(Vec::new());
+    }
+    if coverage.is_partial() {
+        PolledScope::Repos(completed_members.to_vec())
+    } else {
+        PolledScope::Exhaustive
     }
 }
 

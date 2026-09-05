@@ -7,7 +7,7 @@ use super::scheduler::{
 use super::upsert::load_workspace_offloaded;
 use super::{
     EngagementSnapshot, FetchMode, GithubEngagementTarget, PolledScope, TaskSource, TickState,
-    autofix, gh_polled_scope,
+    autofix, gh_polled_scope, repo_first_polled_scope,
 };
 use crate::ServerConfig;
 use chrono::Utc;
@@ -487,6 +487,12 @@ pub struct GhSource {
     /// row. Read by [`TaskSource::polled_scope`] after `fetch` resolves.
     /// Initialized `false` (a never-fetched source isn't windowed).
     last_windowed: parking_lot::Mutex<bool>,
+    /// Roster members whose queries ALL succeeded on the last repo-first
+    /// sweep. Read by [`TaskSource::polled_scope`] only on a PARTIAL
+    /// reconcile: those members completed their exhaustive open-set and
+    /// stay authoritative for retiring their own gone rows, so one
+    /// truncating/erroring member can't veto retirement inbox-wide.
+    last_reconcile_completed: parking_lot::Mutex<Vec<String>>,
     /// Bounded focus/live/own-PR targets that are refreshed on every
     /// tick independently of notifications and search windows.
     hot_targets: Vec<GithubEngagementTarget>,
@@ -532,7 +538,24 @@ pub fn repo_roster(
         .map(str::to_string)
         .collect();
     members.extend(watch_repos.iter().cloned());
-    members.into_iter().collect()
+    // Drop children already covered by a bare `org:owner` member: the org
+    // member's search returns every `owner/name` under it, and the scope
+    // filter accepts org-covered children (`filter_github_tasks_with_watches`),
+    // so keeping the child too would sweep it twice per pass (two wasted
+    // paginated queries; the results dedup by task key) for no extra reach.
+    let org_owners: std::collections::BTreeSet<&str> = members
+        .iter()
+        .filter(|member| !member.contains('/'))
+        .map(String::as_str)
+        .collect();
+    members
+        .iter()
+        .filter(|member| match member.split_once('/') {
+            Some((owner, _)) => !org_owners.contains(owner),
+            None => true,
+        })
+        .cloned()
+        .collect()
 }
 
 /// Out-of-band action a `TaskSource` may surface alongside the
@@ -1432,6 +1455,18 @@ impl GhSource {
             return Ok(Vec::new());
         };
         if plan.members.is_empty() {
+            // Only rotation / hot-only ticks reach here empty — a reconcile
+            // is always seeded with the (non-empty) roster. Guard that
+            // invariant: if a future change ever lets a reconcile arrive
+            // empty, still re-arm the timer here so it can't silently skip
+            // the re-arm below and reinstate the every-tick death loop.
+            debug_assert!(
+                !plan.reconcile,
+                "a reconcile must carry a non-empty member set"
+            );
+            if plan.reconcile {
+                self.client.mark_full_sweep_done();
+            }
             return Ok(Vec::new());
         }
         let want_prs = self.filter.pr_enabled();
@@ -1472,11 +1507,30 @@ impl GhSource {
                 lazybox_gh::repo_sweep_pr_query(&spec.member, spec.since)
             ));
         }
-        let outcome = self
+        let outcome = match self
             .client
             .fetch_repo_sweep(&specs, want_prs, scan_issues, &self.mention_allowed_logins)
             .await
-            .map_err(lazybox_core::ProviderError::from)?;
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // Total failure — EVERY member's query errored (e.g. a
+                // revoked token 401ing the whole roster). A reconcile that
+                // erred out entirely must still re-arm the timer, exactly
+                // like a partial one does below: otherwise `force_full_sweep`
+                // / the due-timer stay set and the full-roster reconcile
+                // re-runs on EVERY poll tick for the whole outage — the same
+                // "a failure pins the forced sweep" death loop this PR fixed
+                // for partial results, which the `?` reintroduced for the
+                // all-failed case. Backoff is still honored: the propagated
+                // `ProviderError` carries the retry-after hint and the tick
+                // loop parks the source on it.
+                if plan.reconcile {
+                    self.client.mark_full_sweep_done();
+                }
+                return Err(lazybox_core::ProviderError::from(error));
+            }
+        };
         self.set_retry_after_secs(outcome.retry_after_secs);
         self.set_coverage(if outcome.is_complete() {
             FetchCoverage::Complete
@@ -1484,6 +1538,11 @@ impl GhSource {
             FetchCoverage::Partial
         });
         self.set_windowed(windowed);
+        // Record which members completed their full query set this pass so
+        // `polled_scope` can retire within them even on a PARTIAL reconcile
+        // (a single truncating/erroring member no longer vetoes retirement
+        // for the whole inbox).
+        *self.last_reconcile_completed.lock() = outcome.completed.clone();
         if !outcome.failed.is_empty() {
             let failed = outcome
                 .failed
@@ -1956,14 +2015,13 @@ impl TaskSource for GhSource {
         let coverage = *self.last_coverage.lock();
         let windowed = *self.last_windowed.lock();
         if let Some(plan) = &self.repo_sweep {
-            // Only a COMPLETE reconcile (every member, unwindowed, no
-            // failures) may retire rows; a rotation slice or a partial
-            // reconcile has no deletion authority.
-            return if plan.reconcile && !coverage.is_partial() && !windowed {
-                PolledScope::Exhaustive
-            } else {
-                PolledScope::Repos(Vec::new())
-            };
+            // A COMPLETE reconcile is authoritative over the whole inbox
+            // (`Exhaustive`); a PARTIAL one still retires within the members
+            // that completed (`Repos(completed)`), so one truncating member
+            // can't veto retirement inbox-wide; a rotation slice / windowed
+            // pass has no deletion authority.
+            let completed = self.last_reconcile_completed.lock();
+            return repo_first_polled_scope(plan.reconcile, coverage, windowed, &completed);
         }
         gh_polled_scope(
             self.scheduling.run_global,
@@ -4056,6 +4114,14 @@ async fn push_github_source(
     // user-centric global sweep + round robin over discovered repos.
     let roster = repo_roster(&scopes, &watch_repos);
     let repo_first = !roster.is_empty();
+    // Prune sweep floors for members that have left the roster: keep the
+    // persisted cursor set bounded over scope churn, and make a re-added
+    // repo start from a clean unwindowed pass rather than a stale floor
+    // whose oversized window would overflow the page cap. Only when a
+    // roster exists — with no scopes these floors are dormant, not churning.
+    if repo_first {
+        client.retain_repo_windows(&roster);
+    }
     // A manual Shift-R runs as ONE unwindowed reconcile: repo-first, every
     // roster member; legacy, the global `involves:` sweep (its
     // `force_full_sweep` flag makes `next_pr_sweep_window` return `None`).
@@ -4213,6 +4279,7 @@ async fn push_github_source(
         retry_after_secs: parking_lot::Mutex::new(None),
         last_coverage: parking_lot::Mutex::new(FetchCoverage::Complete),
         last_windowed: parking_lot::Mutex::new(false),
+        last_reconcile_completed: parking_lot::Mutex::new(Vec::new()),
         hot_targets: engagement.hot_targets().to_vec(),
         cold_targets: engagement.cold_targets().clone(),
         poll_notifications,
@@ -4248,11 +4315,33 @@ mod repo_first_tests {
             ["zed/editor".to_string(), "acme/widgets".to_string()]
                 .into_iter()
                 .collect();
+        // `acme/widgets` (scoped AND watched) is covered by the `acme` org
+        // member, so it is dropped rather than swept twice per pass.
         assert_eq!(
             repo_roster(&scopes, &watches),
-            roster(&["acme", "acme/widgets", "zed/editor"])
+            roster(&["acme", "zed/editor"])
         );
         assert!(repo_roster(&Default::default(), &Default::default()).is_empty());
+    }
+
+    /// A child repo is dropped only when its OWNER is present as a bare
+    /// org member; a same-prefix owner that isn't a member keeps its
+    /// child (`acmeco/x` is not covered by `acme`).
+    #[test]
+    fn repo_roster_drops_only_org_covered_children() {
+        let scopes: std::collections::BTreeSet<String> = [
+            "github:acme".to_string(),
+            "github:acme/widgets".to_string(),
+            "github:acmeco/x".to_string(),
+            "github:zed/editor".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            repo_roster(&scopes, &Default::default()),
+            roster(&["acme", "acmeco/x", "zed/editor"]),
+            "acme/widgets is covered by org acme; acmeco/x and zed/editor are not"
+        );
     }
 
     #[test]

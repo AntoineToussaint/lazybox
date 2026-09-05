@@ -2571,7 +2571,11 @@ impl Sidebar {
         }
         // A live search filtered everything away — `render_no_matches`
         // owns that state; don't shadow it with a config diagnosis.
-        if self.search.as_ref().is_some_and(|s| !s.query.trim().is_empty()) {
+        if self
+            .search
+            .as_ref()
+            .is_some_and(|s| !s.query.trim().is_empty())
+        {
             return None;
         }
         // Credentials are the root cause even if a filter is also on:
@@ -2614,9 +2618,7 @@ impl Sidebar {
         let now = self.now();
         self.workspaces
             .values()
-            .filter(|w| {
-                mailbox_membership(w, Mailbox::Inbox, now, self.show_inactive_in_inbox)
-            })
+            .filter(|w| mailbox_membership(w, Mailbox::Inbox, now, self.show_inactive_in_inbox))
             .count()
     }
 

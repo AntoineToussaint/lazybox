@@ -1397,7 +1397,7 @@ impl Sidebar {
                     say("lazybox can't reach your"),
                     say(&format!("{named} tasks — the token")),
                     say("was rejected. Re-connect it:"),
-                Line::raw(""),
+                    Line::raw(""),
                     hint(",", "setup / re-auth"),
                     hint("⇧D", "sync details"),
                     hint("⇧R", "retry sync"),

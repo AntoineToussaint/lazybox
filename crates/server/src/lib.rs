@@ -2147,10 +2147,16 @@ pub async fn dispatch_command(
             polling::handle_collapse_into_pr(config, key).await;
         }
         lazybox_ipc::Command::Refresh => {
-            // Manual poll trigger. Force a full sweep so a just-created
-            // issue appears now instead of next scheduled sweep (issue
-            // #180), then wake the long-lived poll loop — the single
-            // source of truth for ticks.
+            // Manual poll trigger (`Shift-R`): "sweep every scoped repo
+            // now". Force a reconcile — repo-first, an unwindowed pass over
+            // the whole roster; without scopes, the unwindowed global
+            // `involves:` sweep — so a just-created issue appears now
+            // instead of next scheduled sweep (issue #180), then wake the
+            // long-lived poll loop — the single source of truth for ticks.
+            // The forced flag is satisfied by the sweep's DISCOVERY
+            // succeeding; a failed best-effort companion (merged sweep,
+            // watched repo) no longer pins it and re-runs the sweep every
+            // tick.
             //
             // An explicit refresh also clears the command-credential
             // cache: a user who just ran `gh auth login` and hit

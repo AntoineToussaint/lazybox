@@ -1260,7 +1260,14 @@ pub struct UiSection {
     /// transition, so editing it takes effect without a restart.
     /// Defaults to `false`: sleep behavior is unchanged unless
     /// opted in.
-    #[serde(default)]
+    ///
+    /// Parsed leniently: a newer build may write this as a mode string
+    /// (`working` / `asking` / `always` / `off`). An older daemon
+    /// sharing the same `~/.lazybox/config.yaml` must keep polling
+    /// rather than fail `Config::load()` on every tick — that exact
+    /// failure silently stopped GitHub sync for 88 minutes on
+    /// 2026-09-05. Any non-`off` mode reads as `true`.
+    #[serde(default, deserialize_with = "bool_or_keep_awake_mode")]
     pub keep_awake: bool,
     /// Auto-press "Wait" when a Claude agent hits its provider usage /
     /// monthly limit (issue #847). When `true`, the daemon accepts the
@@ -3271,12 +3278,43 @@ where
     Ok(out)
 }
 
+/// Accept `keep_awake: true|false` as well as a mode string from a
+/// newer config schema (`off` → false; `working` / `asking` / `always`
+/// or any other non-empty string → true).
+fn bool_or_keep_awake_mode<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum BoolOrMode {
+        Bool(bool),
+        Mode(String),
+    }
+    Ok(match BoolOrMode::deserialize(deserializer)? {
+        BoolOrMode::Bool(value) => value,
+        BoolOrMode::Mode(mode) => !matches!(
+            mode.trim().to_ascii_lowercase().as_str(),
+            "" | "off" | "false" | "no" | "never"
+        ),
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GithubConfig {
     /// Poll interval in seconds.
     #[serde(with = "duration_secs")]
     pub poll_interval: Duration,
+    /// How often every scoped / watched repo should be re-swept by the
+    /// repo-first discovery rotation, in seconds. The daemon spreads
+    /// the roster over `repo_refresh_interval / poll_interval` ticks
+    /// (28 repos at the 5-minute default and a 60s poll = 6 repos per
+    /// tick), each member windowed on its last successful sweep so a
+    /// steady repo costs two near-empty pages. Session-bearing and
+    /// focused repos are swept every tick regardless.
+    #[serde(with = "duration_secs")]
+    pub repo_refresh_interval: Duration,
     /// Org/repo filters. Only PRs matching these appear in the inbox.
     /// Empty = show everything.
     pub filters: Vec<Filter>,
@@ -3303,6 +3341,11 @@ pub struct GithubConfig {
     pub host: Option<String>,
 }
 
+impl GithubConfig {
+    /// Default [`repo_refresh_interval`](Self::repo_refresh_interval).
+    pub const DEFAULT_REPO_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+}
+
 impl Default for GithubConfig {
     fn default() -> Self {
         Self {
@@ -3313,6 +3356,7 @@ impl Default for GithubConfig {
             // default doubled the cost for no real-time benefit —
             // PR/issue state doesn't change that fast.
             poll_interval: Duration::from_secs(60),
+            repo_refresh_interval: Self::DEFAULT_REPO_REFRESH_INTERVAL,
             filters: vec![],
             detect_needs_reply: true,
             background_budget_share: 0.55,
@@ -3873,6 +3917,36 @@ mod tests {
         assert!(strays.is_empty(), "no stray temp files: {strays:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A newer build writes `keep_awake` as a mode string; this build
+    /// must still load the shared config (regression: 2026-09-05 sync
+    /// outage — every tick failed `Config::load()` on `working`).
+    #[test]
+    fn keep_awake_accepts_mode_strings_from_newer_builds() {
+        let cfg: Config =
+            serde_yaml::from_str("ui:\n  keep_awake: working\n").expect("mode string parses");
+        assert!(cfg.ui.keep_awake);
+        let cfg: Config = serde_yaml::from_str("ui:\n  keep_awake: off\n").expect("off parses");
+        assert!(!cfg.ui.keep_awake);
+        let cfg: Config = serde_yaml::from_str("ui:\n  keep_awake: false\n").expect("bool");
+        assert!(!cfg.ui.keep_awake);
+    }
+
+    #[test]
+    fn github_repo_refresh_interval_defaults_and_parses() {
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.providers.github.repo_refresh_interval,
+            GithubConfig::DEFAULT_REPO_REFRESH_INTERVAL
+        );
+        let cfg: Config =
+            serde_yaml::from_str("providers:\n  github:\n    repo_refresh_interval: 120s\n")
+                .expect("parses");
+        assert_eq!(
+            cfg.providers.github.repo_refresh_interval,
+            Duration::from_secs(120)
+        );
     }
 
     /// `ui.keep_awake` is opt-in: absent means off (sleep behavior

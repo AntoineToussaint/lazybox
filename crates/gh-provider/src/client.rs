@@ -101,6 +101,18 @@ impl GhError {
         }
     }
 
+    /// Whether this is lazybox's OWN governor pacing (a local budget
+    /// refusal) rather than a GitHub-imposed limit or transport failure.
+    fn is_self_throttle(&self) -> bool {
+        matches!(
+            self,
+            Self::RateLimited {
+                self_throttle: true,
+                ..
+            }
+        )
+    }
+
     fn aggregate(reason: String, errors: &[&Self]) -> Self {
         let retry_after_secs = errors
             .iter()
@@ -356,6 +368,15 @@ pub struct SelectedFetchOutcome {
     pub mentions: Vec<crate::LazyboxMention>,
     pub coverage: FetchCoverage,
     pub pr_coverage: FetchCoverage,
+    /// The main PR discovery branch succeeded (see
+    /// [`PrFetchOutcome::main_complete`]); the PR `updated:>=` floor may
+    /// advance even when a companion branch failed.
+    pub pr_discovery_complete: bool,
+    /// Both discovery sides (main PR branch + issue search) succeeded;
+    /// the sweep timer may re-arm and a forced refresh is satisfied.
+    /// Companion-branch failures leave `coverage` partial (no deletion)
+    /// but do not hold this back.
+    pub discovery_complete: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -363,9 +384,48 @@ pub struct BackgroundSweepForecast {
     pub global_points: u32,
     pub repo_base_points: u32,
     pub per_repo_points: u32,
+    /// Forecast cost of one roster member's ISSUE query in the
+    /// repo-first sweep (0 when issues aren't scanned). Paired with
+    /// `per_repo_points` for the PR query.
+    pub per_repo_issue_points: u32,
 }
 
 impl BackgroundSweepForecast {
+    /// Points one repo-first roster member costs: its PR query plus its
+    /// issue query.
+    pub fn repo_sweep_member_points(self) -> u32 {
+        self.per_repo_points
+            .saturating_add(self.per_repo_issue_points)
+    }
+
+    /// Points a windowed repo-first rotation over `members` costs.
+    pub fn repo_sweep_points(self, members: usize) -> u32 {
+        self.repo_sweep_member_points()
+            .saturating_mul(u32::try_from(members).unwrap_or(u32::MAX))
+    }
+
+    /// Points an UNWINDOWED reconcile over `members` costs: each member
+    /// pays its open-set PR query, its recent-activity PR query, and its
+    /// issue query.
+    pub fn repo_sweep_reconcile_points(self, members: usize) -> u32 {
+        self.per_repo_points
+            .saturating_mul(2)
+            .saturating_add(self.per_repo_issue_points)
+            .saturating_mul(u32::try_from(members).unwrap_or(u32::MAX))
+    }
+
+    /// How many roster members `allowance` admits this tick, capped at
+    /// `limit`.
+    pub fn repo_sweep_capacity(self, allowance: u32, limit: usize) -> usize {
+        let per_member = self.repo_sweep_member_points();
+        if per_member == 0 {
+            return limit;
+        }
+        usize::try_from(allowance / per_member)
+            .unwrap_or(usize::MAX)
+            .min(limit)
+    }
+
     pub fn required_points(self, run_global: bool, want_prs: bool) -> u32 {
         if run_global {
             self.global_points
@@ -387,11 +447,66 @@ impl BackgroundSweepForecast {
     }
 }
 
+/// Page cap for the best-effort 7-day merged sweep. Under a busy fleet
+/// the unwindowed merged set ran past 10 pages and tripped GitHub's
+/// secondary limit; the windowed steady state is a page or less, and a
+/// cold start that overflows this cap simply reconciles on later windowed
+/// passes (a merge bumps `updatedAt`, so nothing is lost for good).
+const MERGED_SWEEP_MAX_PAGES: usize = 4;
+
+/// Page cap per roster member per query in the repo-first sweep: 100
+/// open PRs (4 × 25) / 400 open issues (4 × 100) per member on an
+/// unwindowed pass. A member that overflows reports incomplete coverage —
+/// preserved, never deleted — and its windowed passes stay small.
+const REPO_SWEEP_MAX_PAGES: usize = 4;
+
+/// One roster member of the repo-first sweep and the `updated:>=` floor
+/// to fetch it with (`None` = unwindowed, exhaustive for its open set).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoSweepSpec {
+    /// `owner/name` for a repository, bare `owner` for an org scope.
+    pub member: String,
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Result of [`GhClient::fetch_repo_sweep`].
+#[derive(Debug)]
+pub struct RepoSweepOutcome {
+    pub tasks: Vec<Task>,
+    pub mentions: Vec<crate::LazyboxMention>,
+    /// Members whose every query succeeded — the authoritative coverage
+    /// of this pass. Their `updated:>=` floors have been advanced.
+    pub completed: Vec<String>,
+    /// Members with at least one failed query, with the failure text.
+    pub failed: Vec<(String, String)>,
+    /// Longest retry hint among the failures.
+    pub retry_after_secs: Option<u64>,
+    /// Members that were fetched unwindowed this pass.
+    pub unwindowed: Vec<String>,
+}
+
+impl RepoSweepOutcome {
+    pub fn is_complete(&self) -> bool {
+        self.failed.is_empty()
+    }
+}
+
 #[derive(Debug)]
 pub struct PrFetchOutcome {
     pub tasks: Vec<Task>,
     pub partial_failure: Option<String>,
     pub retry_after_secs: Option<u64>,
+    /// Whether the LOAD-BEARING discovery branch (the `involves:` search
+    /// on a global sweep, the per-repo queries on a round-robin one)
+    /// succeeded. Distinct from [`is_complete`](Self::is_complete): a
+    /// best-effort companion (merged sweep, watched repo, reviewer pass)
+    /// failing makes the outcome partial — it must not drive deletion —
+    /// but the discovery it rode alongside is still trustworthy, so the
+    /// sweep timer and the `updated:>=` floor may advance. Before this
+    /// distinction, one 403 on page 11 of the merged sweep pinned
+    /// `force_full_sweep` forever and re-ran the unwindowed global sweep
+    /// every tick (2026-09-05 log).
+    pub main_complete: bool,
 }
 
 impl PrFetchOutcome {
@@ -400,14 +515,32 @@ impl PrFetchOutcome {
             tasks,
             partial_failure: None,
             retry_after_secs: None,
+            main_complete: true,
         }
     }
 
+    /// A companion branch failed; the main discovery branch succeeded.
     fn partial(tasks: Vec<Task>, partial_failure: String, retry_after_secs: Option<u64>) -> Self {
         Self {
             tasks,
             partial_failure: Some(partial_failure),
             retry_after_secs,
+            main_complete: true,
+        }
+    }
+
+    /// Part of the main discovery branch itself failed (some per-repo
+    /// queries of a round-robin tick).
+    fn partial_main_failed(
+        tasks: Vec<Task>,
+        partial_failure: String,
+        retry_after_secs: Option<u64>,
+    ) -> Self {
+        Self {
+            tasks,
+            partial_failure: Some(partial_failure),
+            retry_after_secs,
+            main_complete: false,
         }
     }
 
@@ -427,6 +560,7 @@ fn combine_selected_fetches(
     match (prs, issues) {
         (Ok(mut prs), Ok((issues, mentions))) => {
             let pr_complete = !pr_side_requested || prs.is_complete();
+            let pr_discovery_complete = !pr_side_requested || prs.main_complete;
             prs.tasks.extend(issues);
             Ok(SelectedFetchOutcome {
                 tasks: prs.tasks,
@@ -443,6 +577,8 @@ fn combine_selected_fetches(
                 } else {
                     FetchCoverage::Partial
                 },
+                pr_discovery_complete,
+                discovery_complete: pr_discovery_complete,
             })
         }
         (Ok(prs), Err(error)) => {
@@ -468,6 +604,10 @@ fn combine_selected_fetches(
                 } else {
                     FetchCoverage::Partial
                 },
+                pr_discovery_complete: prs.main_complete,
+                // The issue side is half of discovery: a forced refresh
+                // is not satisfied until it succeeds too.
+                discovery_complete: false,
             })
         }
         (Err(error), Ok((issues, mentions))) => {
@@ -483,6 +623,8 @@ fn combine_selected_fetches(
                 mentions,
                 coverage: FetchCoverage::Partial,
                 pr_coverage: FetchCoverage::Partial,
+                pr_discovery_complete: false,
+                discovery_complete: false,
             })
         }
         (Err(pr_error), Err(issue_error)) => {
@@ -925,6 +1067,8 @@ fn request_profile(
         | "merged-sweep"
         | "watched-repo"
         | "watched-repo issues"
+        | "repo-sweep"
+        | "repo-sweep issues"
         | "round-robin-repo" => (ApiResource::Graphql, RequestPriority::Recent),
         // Working-claim label sync (#1218 storm fix). These are REST label
         // reads/writes (`fbca04` "Claimed by a lazybox agent" markers), fired
@@ -1358,6 +1502,8 @@ impl GhClient {
                 global_points: issue_points,
                 repo_base_points: issue_points,
                 per_repo_points: 0,
+                per_repo_issue_points: budget.unit_forecast("repo-sweep issues", 1)
+                    * u32::from(scan_issues),
             };
         }
 
@@ -1377,6 +1523,11 @@ impl GhClient {
                 .saturating_add(merged_points)
                 .saturating_add(issue_points),
             per_repo_points: budget.unit_forecast("round-robin-repo", 1),
+            per_repo_issue_points: if scan_issues {
+                budget.unit_forecast("repo-sweep issues", 1)
+            } else {
+                0
+            },
         }
     }
 
@@ -3480,18 +3631,26 @@ impl GhClient {
         // floor (issue #530) so a steady sweep skips re-downloading the
         // whole 7-day merged set — but NOT the main branch's floor,
         // which advances even when this best-effort branch fails.
-        // `since.and(..)` keeps it unwindowed on a reconcile (`since`
-        // None) so an unwindowed pass reconciles any merge a prior
-        // windowed pass missed, and on cold start (no floor yet).
+        //
+        // The window applies on a reconcile / forced sweep too. The
+        // floor only ever advances on a SUCCESSFUL merged sweep, so a
+        // windowed pass is complete for everything after it — nothing a
+        // prior windowed pass could have missed lies above the floor.
+        // Dropping the window on every reconcile re-downloaded the whole
+        // 7-day merged set (10+ pages under a busy fleet), tripped
+        // GitHub's secondary limit on page 11, and — because the failure
+        // pinned `force_full_sweep` — repeated every minute. Only a cold
+        // start (no floor yet) runs unwindowed, and it is page-capped.
         let merged_started = chrono::Utc::now();
-        let merged_since = since.and(self.merged_sweep_window());
+        let merged_since = self.merged_sweep_window();
         let week_ago = (chrono::Utc::now() - chrono::Duration::days(7))
             .format("%Y-%m-%d")
             .to_string();
         let merged_query =
             graphql::merged_sweep_query(&self.user, &self.pr_filters, &week_ago, merged_since);
         tracing::debug!("Recently-merged sweep: {merged_query}");
-        let merged_fut = self.fetch_pr_single_query("merged-sweep", merged_query);
+        let merged_fut =
+            self.fetch_pr_single_query_capped("merged-sweep", merged_query, MERGED_SWEEP_MAX_PAGES);
 
         // Branch 3: bounded-concurrent watched-repo fan-out. 5 in
         // flight is a healthy compromise — small enough that the
@@ -3710,15 +3869,21 @@ impl GhClient {
 
         // Merged sweep — global, cheap, identical to `fetch_all_prs`.
         // Skipping this would mean PRs that merged between our last
-        // sync of their repo and now stay stuck on `OPEN`. The
-        // round-robin path never advances a sweep window, so it stays
-        // unwindowed (`None`) — same as its per-repo branch.
+        // sync of their repo and now stay stuck on `OPEN`. Windowed on
+        // the merged sweep's own success floor and page-capped, for the
+        // same reason as in `fetch_all_prs`.
+        let merged_started = chrono::Utc::now();
         let week_ago = (chrono::Utc::now() - chrono::Duration::days(7))
             .format("%Y-%m-%d")
             .to_string();
-        let merged_query =
-            graphql::merged_sweep_query(&self.user, &self.pr_filters, &week_ago, None);
-        let merged_fut = self.fetch_pr_single_query("merged-sweep", merged_query);
+        let merged_query = graphql::merged_sweep_query(
+            &self.user,
+            &self.pr_filters,
+            &week_ago,
+            self.merged_sweep_window(),
+        );
+        let merged_fut =
+            self.fetch_pr_single_query_capped("merged-sweep", merged_query, MERGED_SWEEP_MAX_PAGES);
 
         let (per_repo_results, reviewer_res, merged_res) =
             tokio::join!(per_repo_fut, reviewer_fut, merged_fut);
@@ -3758,6 +3923,7 @@ impl GhClient {
         }
         match merged_res {
             Ok(merged_tasks) => {
+                self.record_merged_sweep_window(merged_started);
                 for t in merged_tasks {
                     if existing.insert(t.id.key.clone()) {
                         tasks.push(t);
@@ -3818,7 +3984,7 @@ impl GhClient {
                 .map(|(repo, error)| format!("{repo}: {error}"))
                 .collect::<Vec<_>>()
                 .join("; ");
-            Ok(PrFetchOutcome::partial(
+            Ok(PrFetchOutcome::partial_main_failed(
                 tasks,
                 format!(
                     "PR repo sync incomplete: {} of {} repo queries failed ({failed})",
@@ -3966,6 +4132,19 @@ impl GhClient {
         op: &'static str,
         query: String,
     ) -> Result<Vec<Task>, GhError> {
+        self.fetch_pr_single_query_capped(op, query, DEFAULT_MAX_PAGES)
+            .await
+    }
+
+    /// [`fetch_pr_single_query`](Self::fetch_pr_single_query) with an
+    /// explicit page cap, for branches whose result set can grow without
+    /// bound under a busy fleet (the merged sweep) or per roster member.
+    async fn fetch_pr_single_query_capped(
+        &self,
+        op: &'static str,
+        query: String,
+        max_pages: usize,
+    ) -> Result<Vec<Task>, GhError> {
         let started = std::time::Instant::now();
         let metrics = parking_lot::Mutex::new(BranchMetrics::new(op));
         let outcome = paginate(
@@ -4028,7 +4207,7 @@ impl GhClient {
                     })
                 }
             },
-            DEFAULT_MAX_PAGES,
+            max_pages,
         )
         .await?;
         let (tasks, incomplete) = match outcome {
@@ -4099,6 +4278,258 @@ impl GhClient {
             }
         }
         Ok(tasks)
+    }
+
+    /// Repo-first discovery sweep: one PR query and one issue query per
+    /// roster member, windowed per member on its persisted `updated:>=`
+    /// floor. This replaces the user-centric `involves:USER` global
+    /// search whenever the user has scoped repos: with scopes, everything
+    /// that global search returned outside the scope set was dropped by
+    /// the post-fetch filter anyway, so it discovered nothing the roster
+    /// can't — while costing two slow paginated pages per tick and
+    /// growing with the fleet's activity rather than the repo count.
+    ///
+    /// Per member the two queries run concurrently; members fan out four
+    /// at a time behind the shared pacer. A member fails as a unit (either
+    /// query erring) so its floor never advances past data it didn't
+    /// fetch, and a failed member is excluded from `completed` so rescope
+    /// preserves its rows. Only when EVERY member fails does the call
+    /// error, carrying the longest retry hint.
+    pub async fn fetch_repo_sweep(
+        &self,
+        specs: &[RepoSweepSpec],
+        want_prs: bool,
+        want_issues: bool,
+        allowed_logins: &std::collections::BTreeSet<String>,
+    ) -> Result<RepoSweepOutcome, GhError> {
+        use futures::stream::{self, StreamExt};
+        let started_wall = std::time::Instant::now();
+        let started = chrono::Utc::now();
+        const MEMBER_CONCURRENCY: usize = 4;
+
+        let results = stream::iter(specs.iter().cloned())
+            .map(|spec| async move {
+                let pr_fut = async {
+                    if !want_prs {
+                        return Ok(Vec::new());
+                    }
+                    let open_fut = self.fetch_pr_single_query_capped(
+                        "repo-sweep",
+                        graphql::repo_sweep_pr_query(&spec.member, spec.since),
+                        REPO_SWEEP_MAX_PAGES,
+                    );
+                    if spec.since.is_some() {
+                        return open_fut.await;
+                    }
+                    // An unwindowed pass asks for the OPEN set, which is
+                    // blind to a PR that merged or closed since the member
+                    // was last seen — its row would sit "open" until the
+                    // reconcile retired it as out of scope instead of
+                    // transitioning to merged (and running the merged-PR
+                    // cleanup / issue collapse). Pair it with the member's
+                    // recent activity so those land with their final state,
+                    // the way the legacy 7-day merged sweep did.
+                    let recent_since = chrono::Utc::now() - chrono::Duration::days(7);
+                    let recent_fut = self.fetch_pr_single_query_capped(
+                        "repo-sweep",
+                        graphql::repo_sweep_pr_query(&spec.member, Some(recent_since)),
+                        REPO_SWEEP_MAX_PAGES,
+                    );
+                    let (open, recent) = tokio::join!(open_fut, recent_fut);
+                    let mut tasks = open?;
+                    let mut seen: std::collections::HashSet<String> =
+                        tasks.iter().map(|t| t.id.key.clone()).collect();
+                    for task in recent? {
+                        if seen.insert(task.id.key.clone()) {
+                            tasks.push(task);
+                        }
+                    }
+                    Ok(tasks)
+                };
+                let issue_fut = async {
+                    if want_issues {
+                        self.fetch_issues_single_query(
+                            "repo-sweep issues",
+                            graphql::repo_sweep_issue_query(&spec.member, spec.since),
+                            allowed_logins,
+                            REPO_SWEEP_MAX_PAGES,
+                        )
+                        .await
+                    } else {
+                        Ok((Vec::new(), Vec::new()))
+                    }
+                };
+                let (prs, issues) = tokio::join!(pr_fut, issue_fut);
+                (spec, prs, issues)
+            })
+            .buffer_unordered(MEMBER_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+
+        let mut outcome = RepoSweepOutcome {
+            tasks: Vec::new(),
+            mentions: Vec::new(),
+            completed: Vec::new(),
+            failed: Vec::new(),
+            retry_after_secs: None,
+            unwindowed: Vec::new(),
+        };
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut errors: Vec<GhError> = Vec::new();
+        for (spec, prs, issues) in results {
+            match (prs, issues) {
+                (Ok(prs), Ok((issues, mut mentions))) => {
+                    for task in prs.into_iter().chain(issues) {
+                        if seen.insert(task.id.key.clone()) {
+                            outcome.tasks.push(task);
+                        }
+                    }
+                    outcome.mentions.append(&mut mentions);
+                    self.notifications_state
+                        .lock()
+                        .record_repo_window(&spec.member, started);
+                    if spec.since.is_none() {
+                        outcome.unwindowed.push(spec.member.clone());
+                    }
+                    outcome.completed.push(spec.member);
+                }
+                (prs, issues) => {
+                    let mut parts = Vec::new();
+                    if let Err(e) = prs {
+                        tracing::warn!("repo-sweep PRs `{}` failed: {e}", spec.member);
+                        parts.push(format!("PRs: {e}"));
+                        errors.push(e);
+                    }
+                    if let Err(e) = issues {
+                        tracing::warn!("repo-sweep issues `{}` failed: {e}", spec.member);
+                        parts.push(format!("issues: {e}"));
+                        errors.push(e);
+                    }
+                    outcome.failed.push((spec.member, parts.join("; ")));
+                }
+            }
+        }
+        outcome.retry_after_secs = errors.iter().filter_map(GhError::retry_after_secs).max();
+        tracing::info!(
+            "fetch_repo_sweep: completed in {}ms — {} items across {} members ({} failed, {} unwindowed)",
+            started_wall.elapsed().as_millis(),
+            outcome.tasks.len(),
+            specs.len(),
+            outcome.failed.len(),
+            outcome.unwindowed.len(),
+        );
+        if !specs.is_empty() && outcome.completed.is_empty() {
+            let details = outcome
+                .failed
+                .iter()
+                .map(|(member, error)| format!("{member}: {error}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let reason = format!("all {} repo-sweep members failed: {details}", specs.len());
+            let self_throttle = errors.iter().all(GhError::is_self_throttle);
+            return Err(match outcome.retry_after_secs {
+                Some(retry_after_secs) => GhError::RateLimited {
+                    retry_after_secs,
+                    reason,
+                    self_throttle,
+                },
+                None => GhError::Graphql(reason),
+            });
+        }
+        Ok(outcome)
+    }
+
+    /// Paginated issue search for one query string, scanning each issue
+    /// for `@lazybox` mentions from `allowed_logins` on the way. The
+    /// repo-first sibling of the `involves:` issue search.
+    async fn fetch_issues_single_query(
+        &self,
+        op: &'static str,
+        query: String,
+        allowed_logins: &std::collections::BTreeSet<String>,
+        max_pages: usize,
+    ) -> Result<(Vec<Task>, Vec<crate::LazyboxMention>), GhError> {
+        let pages_fetched = parking_lot::Mutex::new(0usize);
+        let outcome = paginate(
+            |cursor, page| {
+                let pages_fetched = &pages_fetched;
+                let query = &query;
+                async move {
+                    self.acquire_paced(op).await.map_err(|error| {
+                        tracing::error!("{op} budget error (page {page}): {error}");
+                        error
+                    })?;
+                    let body = graphql::issues_query_body(query, cursor.as_deref());
+                    let response: graphql::GqlIssueResponse =
+                        self.post_graphql_with_retry(op, &body).await.map_err(|e| {
+                            tracing::error!("{op} HTTP error (page {page}): {e}");
+                            e
+                        })?;
+                    *pages_fetched.lock() += 1;
+                    if let Some(errors) = &response.errors {
+                        let joined = errors
+                            .iter()
+                            .map(|e| e.full())
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        tracing::error!("{op} GraphQL errors (page {page}): {joined}");
+                        return Err(GhError::Graphql(format!("{op}: {joined}")));
+                    }
+                    let data = response
+                        .data
+                        .ok_or_else(|| GhError::Graphql("No data in response".into()))?;
+                    self.budget.lock().note_expected_pages(
+                        op,
+                        graphql::issue_page_count(data.search.issue_count),
+                    );
+                    Ok(FetchPage {
+                        items: data
+                            .search
+                            .nodes
+                            .iter()
+                            .map(|issue| {
+                                let mentions = if allowed_logins.is_empty() {
+                                    Vec::new()
+                                } else {
+                                    crate::mentions::scan_issue(issue, allowed_logins)
+                                };
+                                (graphql::issue_to_task(issue, &self.user), mentions)
+                            })
+                            .collect(),
+                        page_info: data.search.page_info.map(|page_info| FetchPageInfo {
+                            has_next_page: page_info.has_next_page,
+                            end_cursor: page_info.end_cursor,
+                        }),
+                    })
+                }
+            },
+            max_pages,
+        )
+        .await?;
+        let (items, incomplete) = match outcome {
+            PaginationOutcome::Complete(items) => (items, None),
+            PaginationOutcome::Partial { items, reason } => (items, Some(reason)),
+        };
+        let mut tasks = Vec::with_capacity(items.len());
+        let mut mentions = Vec::new();
+        for (task, mut issue_mentions) in items {
+            tasks.push(task);
+            mentions.append(&mut issue_mentions);
+        }
+        if let Some(reason) = incomplete {
+            tracing::error!(
+                "{op} pagination stopped after {} pages; tail is non-authoritative",
+                pages_fetched.into_inner()
+            );
+            return Err(incomplete_pagination_error(op, tasks.len(), reason));
+        }
+        Ok((tasks, mentions))
+    }
+
+    /// The persisted `updated:>=` floor for one repo-first roster member
+    /// (`None` = fetch it unwindowed).
+    pub fn repo_sweep_window(&self, member: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.notifications_state.lock().repo_window(member)
     }
 
     /// A repository's most-recently-merged PRs, for the merge-history
@@ -4493,6 +4924,8 @@ impl GhClient {
                 mentions: Vec::new(),
                 coverage: FetchCoverage::Complete,
                 pr_coverage: FetchCoverage::Complete,
+                pr_discovery_complete: true,
+                discovery_complete: true,
             });
         }
         let do_pr_side = want_prs && (run_global || !repos.is_empty());
@@ -8271,6 +8704,51 @@ mod tests {
         assert_eq!(client.next_pr_sweep_window(), Some(t2));
     }
 
+    /// Regression for the 2026-09-05 stuck-`Shift-R` loop: a failed
+    /// best-effort companion (merged sweep / watched repo) keeps
+    /// COVERAGE partial — rescope must not delete — but discovery is
+    /// complete, so the sweep timer re-arms and the forced flag clears.
+    #[test]
+    fn companion_failure_leaves_discovery_complete_but_coverage_partial() {
+        let prs = PrFetchOutcome::partial(Vec::new(), "recently-merged sweep: 403".into(), None);
+        let outcome = combine_selected_fetches(true, true, Ok(prs), Ok((Vec::new(), Vec::new())))
+            .expect("degraded success");
+        assert!(outcome.pr_discovery_complete);
+        assert!(outcome.discovery_complete);
+        assert_eq!(outcome.coverage, FetchCoverage::Partial);
+        assert_eq!(outcome.pr_coverage, FetchCoverage::Partial);
+        assert!(outcome.partial_failure.is_some());
+    }
+
+    /// The main discovery branch failing (some round-robin repo queries)
+    /// must NOT re-arm the timer or advance the floor.
+    #[test]
+    fn main_branch_failure_blocks_discovery_completion() {
+        let prs =
+            PrFetchOutcome::partial_main_failed(Vec::new(), "2 of 3 repos failed".into(), None);
+        let outcome = combine_selected_fetches(true, true, Ok(prs), Ok((Vec::new(), Vec::new())))
+            .expect("degraded success");
+        assert!(!outcome.pr_discovery_complete);
+        assert!(!outcome.discovery_complete);
+    }
+
+    /// The issue side failing keeps the PR floor advancing (the PR
+    /// search was complete) but leaves the sweep as a whole unsatisfied.
+    #[test]
+    fn issue_failure_advances_pr_floor_but_not_the_sweep() {
+        let prs = PrFetchOutcome::complete(Vec::new());
+        let outcome = combine_selected_fetches(
+            true,
+            true,
+            Ok(prs),
+            Err(GhError::Graphql("issues down".into())),
+        )
+        .expect("PRs OK");
+        assert!(outcome.pr_discovery_complete);
+        assert!(!outcome.discovery_complete);
+        assert_eq!(outcome.coverage, FetchCoverage::Partial);
+    }
+
     /// Issue #530: the merged sweep tracks its OWN success floor,
     /// independent of the main `involves:` floor, so a main-branch
     /// success can't window the merged sweep past a merge that the
@@ -8490,6 +8968,7 @@ mod tests {
                 global_points: 8,
                 repo_base_points: 3,
                 per_repo_points: 1,
+                per_repo_issue_points: 1,
             }
         );
         assert_eq!(
@@ -8498,6 +8977,7 @@ mod tests {
                 global_points: 1,
                 repo_base_points: 1,
                 per_repo_points: 0,
+                per_repo_issue_points: 1,
             }
         );
 
@@ -8509,12 +8989,20 @@ mod tests {
                 global_points: 15,
                 repo_base_points: 2,
                 per_repo_points: 1,
+                per_repo_issue_points: 0,
             }
         );
         assert_eq!(forecast.required_points(true, true), 15);
         assert_eq!(forecast.required_points(false, true), 3);
         assert_eq!(forecast.repo_capacity(5, false, 3), 3);
         assert_eq!(forecast.repo_capacity(5, true, 3), 0);
+        // Repo-first: a member costs its PR query plus its issue query.
+        let both = client.background_sweep_forecast(true, true);
+        assert_eq!(both.repo_sweep_member_points(), 2);
+        assert_eq!(both.repo_sweep_points(28), 56);
+        assert_eq!(both.repo_sweep_reconcile_points(28), 84);
+        assert_eq!(both.repo_sweep_capacity(7, 28), 3);
+        assert_eq!(both.repo_sweep_capacity(1000, 28), 28);
     }
 
     /// Issue #305: the real `mergePullRequest` success reply has no

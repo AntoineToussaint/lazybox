@@ -97,6 +97,22 @@ impl RoundRobinState {
         self.cursor.insert(repo.to_string(), at);
     }
 
+    /// Seed the cursor with the repo-first roster so every member is in
+    /// the rotation: unseen members get a "long ago" stamp and lead the
+    /// stalest-first order, and a member parked by cold suspension is
+    /// restored. Roster members never leave the rotation for being cold
+    /// — "all scoped repos synced all the time" is the contract; only
+    /// discovered (non-roster) repos are cold-suspended.
+    pub fn seed_roster(&mut self, roster: &[String], now: Instant) {
+        let never = now.checked_sub(CURSOR_TTL / 2).unwrap_or(now);
+        for member in roster {
+            if let Some(last) = self.suspended_cold.remove(member) {
+                self.cursor.entry(member.clone()).or_insert(last);
+            }
+            self.cursor.entry(member.clone()).or_insert(never);
+        }
+    }
+
     pub fn update_engagement_repos(
         &mut self,
         cold_repos: &std::collections::HashSet<String>,
@@ -135,6 +151,54 @@ pub struct RoundRobinPick {
     /// so a long-lived process eventually discovers repos the user
     /// just got pulled into.
     pub run_global: bool,
+}
+
+/// Repo-first rotation fan-out: how many roster members to sweep per
+/// warm tick so that every member refreshes within `target_ticks`
+/// ticks. Session-bearing and focused repos ride on top of this.
+pub fn rotation_fanout(roster_len: usize, target_ticks: u64) -> usize {
+    if roster_len == 0 {
+        return 0;
+    }
+    let ticks = usize::try_from(target_ticks.max(1)).unwrap_or(usize::MAX);
+    roster_len.div_ceil(ticks).max(1)
+}
+
+/// Plan one repo-first rotation tick: seed the roster, pick focus +
+/// `forced` (session-bearing) + the `fanout` stalest members, capped at
+/// `max_members` by the governor, stamp the picked ones and advance the
+/// tick counter. Only roster members and forced repos are eligible —
+/// repos merely *observed* in results (an org member's children) are
+/// covered by their roster entry and must not be queried twice.
+pub fn plan_repo_rotation(
+    state: &mut RoundRobinState,
+    roster: &[String],
+    forced: &HashSet<String>,
+    fanout: usize,
+    max_members: usize,
+    now: Instant,
+) -> Vec<String> {
+    state.seed_roster(roster, now);
+    state.prune(now);
+    let eligible: HashMap<String, Instant> = state
+        .cursor
+        .iter()
+        .filter(|(repo, _)| roster.contains(repo) || forced.contains(*repo))
+        .map(|(repo, at)| (repo.clone(), *at))
+        .collect();
+    let pick = pick_repos_for_tick_budgeted(
+        &eligible,
+        state.focused_repo.as_deref(),
+        forced,
+        state.tick,
+        fanout,
+        max_members,
+    );
+    for repo in &pick.repos {
+        state.record_sync(repo, now);
+    }
+    state.tick = state.tick.wrapping_add(1);
+    pick.repos
 }
 
 /// Per-tick scheduling entry point used by `sources_for`. Wraps
@@ -353,6 +417,83 @@ mod tests {
             .iter()
             .map(|(repo, secs)| ((*repo).to_string(), base + Duration::from_secs(*secs)))
             .collect()
+    }
+
+    #[test]
+    fn rotation_fanout_covers_the_roster_within_the_target() {
+        assert_eq!(rotation_fanout(0, 5), 0);
+        assert_eq!(rotation_fanout(28, 5), 6);
+        assert_eq!(rotation_fanout(3, 5), 1);
+        assert_eq!(rotation_fanout(10, 0), 10);
+    }
+
+    /// Every roster member is swept within `ceil(len / fanout)` ticks,
+    /// unseen members lead, and a member that was cold-suspended is
+    /// restored rather than skipped.
+    #[test]
+    fn repo_rotation_sweeps_every_roster_member() {
+        let roster: Vec<String> = (1..=7).map(|n| format!("o/r{n}")).collect();
+        let mut state = RoundRobinState::default();
+        state
+            .suspended_cold
+            .insert("o/r3".into(), Instant::now() - Duration::from_secs(10));
+        let now = Instant::now();
+        let mut seen: Vec<String> = Vec::new();
+        for _ in 0..3 {
+            let picked = plan_repo_rotation(&mut state, &roster, &no_forced(), 3, usize::MAX, now);
+            assert!(picked.len() <= 3);
+            seen.extend(picked);
+        }
+        let mut seen_sorted = seen.clone();
+        seen_sorted.sort();
+        seen_sorted.dedup();
+        assert_eq!(
+            seen_sorted, roster,
+            "three ticks of fan-out 3 cover 7 members"
+        );
+        assert!(
+            state.suspended_cold.is_empty(),
+            "roster members are never cold-parked"
+        );
+    }
+
+    /// Repos merely observed in results (not on the roster, not
+    /// session-bearing) are not rotated — their roster entry (the org)
+    /// already covers them.
+    #[test]
+    fn repo_rotation_ignores_non_roster_cursor_entries() {
+        let roster = vec!["acme".to_string()];
+        let mut state = RoundRobinState {
+            cursor: cursor(&[("acme/child", 1)]),
+            ..RoundRobinState::default()
+        };
+        let picked = plan_repo_rotation(
+            &mut state,
+            &roster,
+            &no_forced(),
+            3,
+            usize::MAX,
+            Instant::now(),
+        );
+        assert_eq!(picked, vec!["acme".to_string()]);
+    }
+
+    /// Session-bearing repos ride above the fan-out; the governor cap
+    /// still bounds the whole pick.
+    #[test]
+    fn repo_rotation_forces_sessioned_and_honours_capacity() {
+        let roster: Vec<String> = (1..=5).map(|n| format!("o/r{n}")).collect();
+        let mut state = RoundRobinState::default();
+        let picked = plan_repo_rotation(
+            &mut state,
+            &roster,
+            &forced(&["o/r5"]),
+            2,
+            2,
+            Instant::now(),
+        );
+        assert_eq!(picked.len(), 2);
+        assert_eq!(picked[0], "o/r5", "session-bearing repo leads");
     }
 
     /// No cursor entries (fresh daemon) → run global, no per-repo

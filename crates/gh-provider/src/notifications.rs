@@ -252,9 +252,28 @@ pub(crate) struct NotificationsState {
     /// update (silently closed, un-involved, transferred), so one
     /// sweep per `FULL_RECONCILE_INTERVAL` drops the window.
     pub(crate) last_full_reconcile_at: Option<DateTime<Utc>>,
+    /// Per-roster-member `updated:>=` floors for the repo-first sweep:
+    /// the start time of the last SUCCESSFUL sweep of that member. A
+    /// member without a floor (never swept, or its last sweep failed) is
+    /// fetched unwindowed. Persisted with the other cursors so a restart
+    /// resumes windowed — and therefore observes merges/closes that
+    /// happened while the daemon was down instead of missing them.
+    pub(crate) repo_windows: std::collections::BTreeMap<String, DateTime<Utc>>,
 }
 
 impl NotificationsState {
+    /// The `updated:>=` floor for one roster member, or `None` for an
+    /// unwindowed fetch.
+    pub fn repo_window(&self, member: &str) -> Option<DateTime<Utc>> {
+        self.repo_windows.get(member).copied()
+    }
+
+    /// Record a member's sweep that SUCCEEDED. `started` was captured
+    /// before the fetch so an item touched mid-sweep is caught next time.
+    pub fn record_repo_window(&mut self, member: &str, started: DateTime<Utc>) {
+        self.repo_windows.insert(member.to_string(), started);
+    }
+
     /// Is the slow-sweep cadence due?
     ///
     /// True in any of four cases:
@@ -427,6 +446,11 @@ pub struct SyncCursors {
     pub last_pr_sweep_at: Option<DateTime<Utc>>,
     pub last_merged_sweep_at: Option<DateTime<Utc>>,
     pub last_full_reconcile_at: Option<DateTime<Utc>>,
+    /// Per-member repo-first sweep floors (see
+    /// `NotificationsState::repo_windows`). Defaulted so cursors written
+    /// by an older daemon still load.
+    #[serde(default)]
+    pub repo_windows: std::collections::BTreeMap<String, DateTime<Utc>>,
 }
 
 impl NotificationsState {
@@ -437,6 +461,7 @@ impl NotificationsState {
             last_pr_sweep_at: self.last_pr_sweep_at_utc,
             last_merged_sweep_at: self.last_merged_sweep_at_utc,
             last_full_reconcile_at: self.last_full_reconcile_at,
+            repo_windows: self.repo_windows.clone(),
         }
     }
 
@@ -447,6 +472,11 @@ impl NotificationsState {
         self.last_pr_sweep_at_utc = valid(cursors.last_pr_sweep_at);
         self.last_merged_sweep_at_utc = valid(cursors.last_merged_sweep_at);
         self.last_full_reconcile_at = valid(cursors.last_full_reconcile_at);
+        self.repo_windows = cursors
+            .repo_windows
+            .into_iter()
+            .filter(|(_, at)| *at <= now)
+            .collect();
     }
 }
 
@@ -555,6 +585,35 @@ mod tests {
         );
         assert!(restored.last_full_sweep_at.is_some());
         assert!(restored.last_full_reconcile_at.is_some());
+    }
+
+    /// Repo-first per-member floors round-trip through `SyncCursors`
+    /// and a future-dated floor (clock skew) is dropped so that member
+    /// re-fetches unwindowed instead of windowing past real updates.
+    #[test]
+    fn repo_windows_round_trip_and_reject_future_floors() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 5, 18, 0, 0).unwrap();
+        let mut state = NotificationsState::default();
+        state.record_repo_window("acme/widgets", now - chrono::Duration::minutes(5));
+        state.record_repo_window("acme", now + chrono::Duration::minutes(5));
+        let cursors = state.cursors();
+        assert_eq!(cursors.repo_windows.len(), 2);
+        let json = serde_json::to_string(&cursors).expect("serialize");
+        let parsed: SyncCursors = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, cursors);
+
+        let mut restored = NotificationsState::default();
+        restored.restore_cursors(parsed, now);
+        assert_eq!(
+            restored.repo_window("acme/widgets"),
+            Some(now - chrono::Duration::minutes(5))
+        );
+        assert_eq!(restored.repo_window("acme"), None, "future floor dropped");
+
+        // Cursors written before this field existed still load.
+        let legacy: SyncCursors =
+            serde_json::from_str(r#"{"last_modified":null}"#).expect("legacy payload");
+        assert!(legacy.repo_windows.is_empty());
     }
 
     #[test]

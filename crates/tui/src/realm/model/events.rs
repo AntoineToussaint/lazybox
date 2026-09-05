@@ -2295,6 +2295,16 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::RepoMergeHistory { .. }
             | IpcEvent::ResourcePosture(..) => {}
         }
+        // Keep the empty-inbox doctor's sync facts (polled-ok /
+        // credential-failure) current after any poll outcome (#1461).
+        // Gated so the per-event hot path (terminal output, agent
+        // deltas) doesn't re-scan the sync log needlessly.
+        if matches!(
+            &event,
+            IpcEvent::PollCompleted { .. } | IpcEvent::ProviderError { .. }
+        ) {
+            self.refresh_inbox_health();
+        }
         // Background-poll indicator. Lights up whenever the daemon
         // emits PollProgress (any cycle, initial or not); clears on
         // PollCompleted. Visible only after the initial Polling modal

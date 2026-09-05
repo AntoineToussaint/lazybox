@@ -5662,6 +5662,168 @@ mod getting_started_tests {
     }
 }
 
+/// The empty-inbox doctor (#1461): every empty Inbox names its specific
+/// cause and fix instead of the old one-size-fits-all key list.
+mod inbox_diagnosis_tests {
+    use super::super::*;
+    use super::status_pill_tests::base_task;
+
+    fn ws_sidebar() -> Sidebar {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let mut t = base_task();
+        t.id.key = "1".into();
+        t.url = "https://github.com/o/r/pull/1".into();
+        let w = Workspace::from_task(t, chrono::Utc::now());
+        sb.workspaces.insert(SessionKey::from(&w.key), w);
+        sb.recompute_visible();
+        sb
+    }
+
+    fn health(providers: bool, polled: bool, cred: Option<&str>) -> InboxHealth {
+        InboxHealth {
+            providers_enabled: providers,
+            polled_ok: polled,
+            credential_failure: cred.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn fresh_run_no_provider_is_first_run() {
+        let sb = Sidebar::new(PaneId::new(1));
+        assert_eq!(sb.inbox_diagnosis(), Some(InboxDiagnosis::FirstRun));
+    }
+
+    #[test]
+    fn providers_enabled_not_polled_is_syncing() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.set_inbox_health(health(true, false, None));
+        assert_eq!(sb.inbox_diagnosis(), Some(InboxDiagnosis::Syncing));
+    }
+
+    #[test]
+    fn polled_and_empty_is_nothing_open() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.set_inbox_health(health(true, true, None));
+        assert_eq!(sb.inbox_diagnosis(), Some(InboxDiagnosis::NothingOpen));
+    }
+
+    #[test]
+    fn auth_failure_is_credential_diagnosis() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.set_inbox_health(health(true, false, Some("github")));
+        assert_eq!(
+            sb.inbox_diagnosis(),
+            Some(InboxDiagnosis::CredentialFailure {
+                provider: "github".into()
+            })
+        );
+    }
+
+    #[test]
+    fn credential_failure_outranks_active_filter() {
+        // A sign-in problem is the root cause; "widen your filter" would
+        // be wrong advice when no fresh data can arrive.
+        let mut sb = ws_sidebar();
+        sb.set_filters([Filter::Conflict]);
+        sb.set_inbox_health(health(true, false, Some("github")));
+        assert!(matches!(
+            sb.inbox_diagnosis(),
+            Some(InboxDiagnosis::CredentialFailure { .. })
+        ));
+    }
+
+    #[test]
+    fn active_filter_hiding_rows_is_filters_exclude_all() {
+        // One open non-conflicting PR + a Conflict filter → visible empty
+        // but workspaces present: the filter is the cause.
+        let mut sb = ws_sidebar();
+        sb.set_filters([Filter::Conflict]);
+        assert_eq!(sb.workspace_count(), 0);
+        assert_eq!(
+            sb.inbox_diagnosis(),
+            Some(InboxDiagnosis::FiltersExcludeAll { count: 1 })
+        );
+    }
+
+    #[test]
+    fn filter_with_no_workspaces_falls_through_to_config() {
+        // A filter on but nothing anywhere isn't a filter problem —
+        // diagnose the config state instead.
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.set_filters([Filter::Conflict]);
+        assert_eq!(sb.inbox_diagnosis(), Some(InboxDiagnosis::FirstRun));
+    }
+
+    #[test]
+    fn populated_inbox_has_no_diagnosis() {
+        let sb = ws_sidebar();
+        assert_eq!(sb.workspace_count(), 1);
+        assert_eq!(sb.inbox_diagnosis(), None);
+    }
+
+    #[test]
+    fn non_inbox_mailbox_has_no_diagnosis() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.mailbox = Mailbox::Snoozed;
+        assert_eq!(sb.inbox_diagnosis(), None);
+    }
+
+    #[test]
+    fn active_search_defers_to_no_matches_panel() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.search = Some(SearchState {
+            scope: None,
+            query: "foo".into(),
+            editing: true,
+        });
+        assert_eq!(sb.inbox_diagnosis(), None);
+    }
+
+    /// Render each panel and assert its distinguishing heading paints —
+    /// the doctor's whole point is that the copy differs per cause.
+    #[test]
+    fn each_diagnosis_renders_its_own_heading() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let screen = |sb: &mut Sidebar| -> String {
+            let backend = TestBackend::new(30, 40);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| sb.render(frame.area(), frame, true))
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            let mut out = String::new();
+            for y in 0..buffer.area.height {
+                for x in 0..buffer.area.width {
+                    out.push_str(buffer[(x, y)].symbol());
+                }
+                out.push('\n');
+            }
+            out
+        };
+
+        let mut first = Sidebar::new(PaneId::new(1));
+        assert!(screen(&mut first).contains("Nothing configured yet"));
+
+        let mut syncing = Sidebar::new(PaneId::new(1));
+        syncing.set_inbox_health(health(true, false, None));
+        assert!(screen(&mut syncing).contains("Checking for PRs"));
+
+        let mut nothing = Sidebar::new(PaneId::new(1));
+        nothing.set_inbox_health(health(true, true, None));
+        assert!(screen(&mut nothing).contains("Nothing's waiting on you"));
+
+        let mut cred = Sidebar::new(PaneId::new(1));
+        cred.set_inbox_health(health(true, false, Some("github")));
+        assert!(screen(&mut cred).contains("github sign-in failed"));
+
+        let mut filtered = ws_sidebar();
+        filtered.set_filters([Filter::Conflict]);
+        assert!(screen(&mut filtered).contains("hiding your inbox"));
+    }
+}
+
 mod work_target_tests {
     use super::super::*;
 

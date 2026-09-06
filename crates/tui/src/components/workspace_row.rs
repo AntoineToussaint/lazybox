@@ -136,6 +136,19 @@ pub struct WorkspaceRowCtx<'a> {
     /// `⤓` glyph to its warn color so a stuck (dirty/diverged) worktree
     /// reads at a glance. Only meaningful when `track_main`.
     pub track_main_behind: bool,
+    /// This workspace has the per-workspace meter *armed* (`Workspace::metered`,
+    /// toggled with `x $`): while set, its agent spawns route through lazybox's
+    /// local metering proxy — effective only when `agent.metering_proxy` is on
+    /// and the proxy is running, otherwise inert (#1488). Renders a `$` in the
+    /// passive badge cluster — the *durable* cue that the canary is armed,
+    /// matching (and gated on the same field as) the sidebar header's
+    /// ` $ METER ` pill. Before this, that per-workspace signal lived only in
+    /// the header, drawn from the focused row alone, so you couldn't see which
+    /// rows were armed without visiting each one. Reflects the per-workspace
+    /// opt-in only: Space-tier (`agent.metered_spaces`) and blanket
+    /// (`meter_all`) metering don't light it — exactly as they don't light the
+    /// header pill, so the two surfaces can't drift.
+    pub metered: bool,
     /// This workspace carries a non-empty local note
     /// (`Workspace::has_notes` — issue #458). Renders a small ` ✎ ` pill
     /// so the user can see, at a glance, which rows have a scratchpad.
@@ -173,6 +186,13 @@ pub struct WorkspaceRowCtx<'a> {
     /// so the user can see *what* matched — the vim `/pattern` cue (#1099).
     /// Already `#`-stripped and trimmed by the caller.
     pub highlight_query: Option<&'a str>,
+    /// Source group label to render as a dim `repo · ` prefix ahead of the
+    /// title (#1450). `Some` only for rows in the synthetic `★ Focused`
+    /// section, which are lifted out of their repo group and so carry no
+    /// repo header to say where they came from; the label is the same one
+    /// [`group_label`](lazybox_tui_core::inbox::group_label) gives the row's
+    /// repo header elsewhere. `None` for rows shown under their own header.
+    pub repo_prefix: Option<String>,
 }
 
 impl<'a> WorkspaceRowCtx<'a> {
@@ -625,7 +645,25 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // when the row is too narrow (see `Cell::atomic_tail`).
     let labels = label_spans(ctx);
     let tail = labels.len();
-    let mut spans = ticket_tree_prefix(ctx);
+    // A `★ Focused` row is lifted out of its repo group, so it has no repo
+    // header to say where it came from — name the source inline (#1450).
+    // Dim so it reads as a cue rather than competing with the title, but
+    // legible (no forced dim) on the cursor row, mirroring the title and
+    // the tree prefix. It leads the cell as an atomic head so a narrow
+    // pane sheds it whole rather than truncating the title behind it.
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let head = if let Some(repo) = &ctx.repo_prefix {
+        let prefix_style = if ctx.is_cursor {
+            ctx.row_style()
+        } else {
+            ctx.row_style().fg(ctx.theme.text_dim)
+        };
+        spans.push(Span::styled(format!("{repo} · "), prefix_style));
+        1
+    } else {
+        0
+    };
+    spans.extend(ticket_tree_prefix(ctx));
     spans.extend(title_spans(
         ctx.raw_title(),
         ctx.highlight_query,
@@ -633,7 +671,7 @@ fn cell_title(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         ctx.theme,
     ));
     spans.extend(labels);
-    Cell::new(spans).atomic_tail(tail)
+    Cell::new(spans).atomic_tail(tail).atomic_head(head)
 }
 
 /// Split a title into styled spans, underlining the first case-insensitive
@@ -1070,7 +1108,7 @@ fn pack_badges(cells: impl IntoIterator<Item = Cell>) -> Cell {
 /// The passive-info badge cluster (#813): the low-signal badges the row
 /// carries, packed into one right-aligned cell instead of five anchored
 /// columns (#524). Left → right, least → most consequential: `⎇ local` →
-/// `✎` → `]N` → `⤓main`/`behind` → `FIX`. The two merge-when-green arms
+/// `✎` → `]N` → `⤓main`/`behind` → `$` → `FIX`. The two merge-when-green arms
 /// live in [`cell_merge_arms`] instead, at a higher drop priority, so this
 /// decoration sheds first under width pressure while the arms survive —
 /// the graduated shedding the per-badge priorities gave before the pack.
@@ -1086,6 +1124,7 @@ fn cell_badges(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         cell_notes(ctx),
         cell_snippet(ctx),
         cell_track_main(ctx),
+        cell_metered(ctx),
         cell_fix(ctx),
     ])
 }
@@ -1257,6 +1296,30 @@ fn cell_arm(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         format!(" {} ", crate::components::sidebar::ARM_GLYPH),
         style,
     ))
+}
+
+/// The ` $ ` metering badge (#1488): this workspace has the per-workspace
+/// meter *armed* (`Workspace::metered`, `x $`), so its spawns route through
+/// the metering proxy while it's set — effective only when the proxy is
+/// running, otherwise inert. Like the header's `$ METER` pill, this reflects
+/// the armed opt-in, not confirmed billing: it shows even with the proxy off.
+///
+/// Accent, not warn — metering is *observation*, not an automation that will
+/// act on the PR (`FIX` / `ARM` earn warn). One glyph, packed into the shared
+/// passive cluster like `✎` / `]N` / `⤓main`, so an armed canary is legible
+/// across the whole sidebar rather than only on the focused row.
+fn cell_metered(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    if !ctx.metered {
+        return Cell::empty();
+    }
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default()
+            .fg(ctx.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    };
+    Cell::from_span(Span::styled(" $ ".to_string(), style))
 }
 
 /// The compact `🔧` auto-fix glyph (iconized #1046). Packs into the shared
@@ -1536,12 +1599,14 @@ mod tests {
             auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
+            metered: false,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
             stack: None,
             model_shorts: empty_shorts(),
             highlight_query: None,
+            repo_prefix: None,
         }
     }
 
@@ -1966,12 +2031,14 @@ mod tests {
             auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
+            metered: false,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
             stack: None,
             model_shorts: empty_shorts(),
             highlight_query: None,
+            repo_prefix: None,
         };
         assert_eq!(cell_type(&ctx).width(), 0);
     }
@@ -1986,6 +2053,77 @@ mod tests {
         let ctx = ctx_for(&ws, &task, &theme);
         let cell = cell_title(&ctx);
         assert_eq!(cell.spans[0].content.as_ref(), "[CI] cache post-job upload");
+    }
+
+    #[test]
+    fn cell_title_prepends_dim_repo_prefix_when_set() {
+        let task = make_task("owner/repo#1", "Fix the thing");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.repo_prefix = Some("owner/repo".into());
+        let cell = cell_title(&ctx);
+        assert_eq!(cell.spans[0].content.as_ref(), "owner/repo · ");
+        assert_eq!(cell.spans[0].style.fg, Some(theme.text_dim));
+        // The title itself still follows, unchanged.
+        assert_eq!(cell.spans[1].content.as_ref(), "Fix the thing");
+    }
+
+    #[test]
+    fn cell_title_has_no_repo_prefix_by_default() {
+        let task = make_task("owner/repo#1", "Fix the thing");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        let cell = cell_title(&ctx);
+        assert_eq!(cell.spans[0].content.as_ref(), "Fix the thing");
+    }
+
+    /// #1450 regression: the original fix put the `repo · ` prefix ahead
+    /// of the title in the same cell, and right-edge truncation then ate
+    /// the title and left only the prefix on a narrow pane. The prefix is
+    /// now a droppable atomic head, so it sheds whole and the title stays.
+    #[test]
+    fn focused_prefix_never_evicts_the_title_on_a_narrow_pane() {
+        let task = make_task("owner/repo#1", "Fix the thing");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        // A long owner/repo that, ahead of the title, would have shoved it
+        // off the row entirely.
+        ctx.repo_prefix = Some("AntoineToussaint/lazybox".into());
+        let columns = build_columns(4);
+        let lines = crate::components::table::render_table(&[build_row(&ctx)], &columns, 30);
+        let text = line_text(&lines[0]);
+        assert!(
+            text.contains("Fix the thing"),
+            "the title must stay whole, not be crowded out by the prefix: {text:?}",
+        );
+        assert!(
+            !text.contains("AntoineToussaint"),
+            "the long repo prefix must shed, not swallow the title: {text:?}",
+        );
+    }
+
+    /// #1450: on the cursor row the prefix must stay legible — no forced
+    /// dim fg, which reads as low-contrast grey over the highlight fill.
+    /// Mirrors how `cell_title`/`ticket_tree_prefix` suppress dimming on
+    /// the cursor row.
+    #[test]
+    fn focused_prefix_is_legible_not_dimmed_on_the_cursor_row() {
+        let task = make_task("owner/repo#1", "Fix the thing");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.repo_prefix = Some("owner/repo".into());
+        ctx.is_cursor = true;
+        let cell = cell_title(&ctx);
+        assert_eq!(cell.spans[0].content.as_ref(), "owner/repo · ");
+        assert_ne!(
+            cell.spans[0].style.fg,
+            Some(theme.text_dim),
+            "cursor-row prefix must not be forced to the dim fg",
+        );
     }
 
     #[test]
@@ -2461,12 +2599,14 @@ mod tests {
             auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
+            metered: false,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
             stack: None,
             model_shorts: empty_shorts(),
             highlight_query: None,
+            repo_prefix: None,
         };
         assert_eq!(cell_title(&ctx).spans[0].content.as_ref(), "lonely");
     }
@@ -2762,6 +2902,65 @@ mod tests {
     }
 
     /// The shared auto-fix column stays compact even on the cursor row.
+    /// #1488: a metered workspace carries a durable `$` on its row. Before
+    /// this the only per-workspace cue was a header pill drawn from the
+    /// focused row, so you couldn't tell which workspaces were metered
+    /// without visiting each one.
+    #[test]
+    fn cell_metered_marks_a_metered_workspace() {
+        let task = make_task("owner/repo#1", "x");
+        let mut ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+
+        // Not metered → nothing, so the column collapses for a sidebar
+        // where no row is metered.
+        let ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(cell_metered(&ctx).width(), 0);
+
+        ws.metered = true;
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.metered = true;
+        let cell = cell_metered(&ctx);
+        assert_eq!(cell_text(&cell), " $ ");
+        assert_eq!(
+            cell.spans[0].style.fg,
+            Some(theme.accent),
+            "metering observes; it doesn't act on the PR the way FIX/ARM do",
+        );
+
+        // On the cursor row the badge inherits the row highlight so the
+        // fill stays legible — same rule every other badge follows.
+        ctx.is_cursor = true;
+        assert_eq!(cell_metered(&ctx).spans[0].style, ctx.row_style());
+    }
+
+    /// The badge rides the shared passive cluster, so it packs with the
+    /// other decorations instead of reserving its own column.
+    #[test]
+    fn metered_badge_packs_into_the_passive_cluster() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.metered = true;
+        ctx.has_notes = true;
+        ctx.auto_fix_ci_armed = true;
+
+        let text = cell_text(&cell_badges(&ctx));
+        assert!(text.contains('$'), "metered badge missing: {text:?}");
+        assert!(text.contains('✎'), "notes badge missing: {text:?}");
+
+        // Ordering (#813 doctrine, least → most consequential): metering is
+        // passive observation, so `$` packs *before* the `FIX` automation
+        // glyph — not after it as the most-consequential badge.
+        let dollar = text.find('$').expect("metered badge present");
+        let fix = text.find('🔧').expect("fix badge present");
+        assert!(
+            dollar < fix,
+            "metered `$` must render before the FIX glyph: {text:?}",
+        );
+    }
+
     #[test]
     fn cell_fix_stays_compact_on_the_cursor_row() {
         let mut task = make_task("owner/repo#1", "x");
@@ -3827,12 +4026,14 @@ mod tests {
             auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
+            metered: false,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
             stack: None,
             model_shorts: empty_shorts(),
             highlight_query: None,
+            repo_prefix: None,
         };
         let columns = build_columns(4);
         let rows = vec![build_row(&ctx_task), build_row(&ctx_scratch)];

@@ -2532,6 +2532,89 @@ mod search_tests {
         assert!(!row.contains("used"), "{row:?}");
     }
 
+    /// The terminal tab badge (#1490) prefers plan-quota headroom — the
+    /// binding window's remaining percent — over dollars while a window is
+    /// live, since headroom is the number that changes behaviour mid-task on a
+    /// subscription.
+    #[test]
+    fn terminal_usage_badge_prefers_plan_headroom() {
+        let session_key = SessionKey::from("gh:owner/repo#1");
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.set_now_override(chrono::DateTime::from_timestamp(1_000, 0).unwrap());
+        // 62% used → 38% headroom on the only live window.
+        sb.note_provider_quota(
+            "claude",
+            None,
+            lazybox_ipc::ProviderQuota {
+                five_hour: None,
+                weekly: Some(lazybox_ipc::QuotaWindow {
+                    utilization_bp: 6200,
+                    reset_at: Some(9_999_999_999),
+                }),
+            },
+        );
+        // A metered cost is present too, but headroom wins while a window is up.
+        sb.hydrate_session_costs(&[(session_key.as_str().to_string(), 420_000)]);
+
+        let badge = sb
+            .terminal_usage_badge(session_key.as_str(), "claude")
+            .expect("badge");
+        assert!(badge.headroom, "{badge:?}");
+        assert_eq!(badge.text, "wk 38% left");
+    }
+
+    /// Absent any live plan window, the badge falls back to the session's
+    /// metered dollar cost — the real signal for API-key users.
+    #[test]
+    fn terminal_usage_badge_falls_back_to_cost_without_a_quota() {
+        let session_key = SessionKey::from("gh:owner/repo#1");
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.hydrate_session_costs(&[(session_key.as_str().to_string(), 420_000)]);
+
+        let badge = sb
+            .terminal_usage_badge(session_key.as_str(), "claude")
+            .expect("badge");
+        assert!(!badge.headroom, "{badge:?}");
+        assert_eq!(badge.text, "$0.42");
+    }
+
+    /// A stale plan window (its reset already passed) is ignored, so the badge
+    /// falls through to cost rather than reporting pre-reset headroom.
+    #[test]
+    fn terminal_usage_badge_ignores_a_reset_window() {
+        let session_key = SessionKey::from("gh:owner/repo#1");
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.set_now_override(chrono::DateTime::from_timestamp(1_000, 0).unwrap());
+        sb.note_provider_quota(
+            "claude",
+            None,
+            lazybox_ipc::ProviderQuota {
+                five_hour: Some(lazybox_ipc::QuotaWindow {
+                    utilization_bp: 9000,
+                    reset_at: Some(500),
+                }),
+                weekly: None,
+            },
+        );
+        sb.hydrate_session_costs(&[(session_key.as_str().to_string(), 250_000)]);
+
+        let badge = sb
+            .terminal_usage_badge(session_key.as_str(), "claude")
+            .expect("badge");
+        assert!(!badge.headroom, "{badge:?}");
+        assert_eq!(badge.text, "$0.25");
+    }
+
+    /// No quota and no metered cost → no badge, never a misleading `$0.00`.
+    #[test]
+    fn terminal_usage_badge_is_absent_without_data() {
+        let sb = sidebar_with_issues(&[("1", "Alpha")]);
+        assert!(
+            sb.terminal_usage_badge("gh:owner/repo#1", "claude")
+                .is_none()
+        );
+    }
+
     /// Without a budget the widget degrades to a bare token total ("show
     /// what's known"), and the reset hint is folded in only while the
     /// agent is actually limited.
@@ -3818,7 +3901,7 @@ mod broadcast_select_tests {
     fn selection_count_outranks_passive_badges_when_space_is_tight() {
         let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
         sb.toggle_broadcast_select();
-        sb.set_keep_awake(true);
+        sb.set_keep_awake_status(true, false);
         let key = sb.selected_session_key().expect("cursor row").clone();
         sb.agents.insert(key, lazybox_ipc::AgentState::Working);
 
@@ -3961,6 +4044,42 @@ mod broadcast_select_tests {
             sb.selected_broadcast_keys(),
             order,
             "the whole cursor→click range is marked",
+        );
+    }
+
+    /// Visual select (#1448): arming marks the cursor row and anchors
+    /// the sweep here, so a following `extend_selection` grows from it
+    /// and reversing back toward it shrinks — the same anchor semantics
+    /// Shift-↑/↓ uses, driven from a plain key.
+    #[test]
+    fn begin_visual_select_anchors_then_grows_and_shrinks() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha"), ("2", "Beta"), ("3", "Gamma")]);
+        let order: Vec<SessionKey> = sb
+            .visible_rows()
+            .iter()
+            .filter_map(|r| match r {
+                VisibleRow::Workspace(k) => Some(k.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(sb.focus_workspace_key(&order[0]));
+
+        // Arm on the first row: it's marked, nothing else is.
+        assert_eq!(sb.begin_visual_select(), Some(1));
+        assert!(sb.is_broadcast_selected(&order[0]));
+        assert_eq!(sb.selected_broadcast_keys(), vec![order[0].clone()]);
+
+        // j/k now grow the range from the anchor.
+        sb.extend_selection(1);
+        sb.extend_selection(1);
+        assert_eq!(sb.selected_broadcast_keys(), order);
+
+        // Reversing back toward the anchor shrinks it (the anchor stays).
+        sb.extend_selection(-1);
+        assert_eq!(
+            sb.selected_broadcast_keys(),
+            order[..2].to_vec(),
+            "over-sweep reverses off the last row",
         );
     }
 
@@ -5569,11 +5688,13 @@ mod agent_model_badge_tests {
     }
 }
 
-mod getting_started_tests {
+/// The empty-inbox doctor (#1461): every empty Inbox names its specific
+/// cause and fix instead of the old one-size-fits-all key list.
+mod inbox_diagnosis_tests {
     use super::super::*;
     use super::status_pill_tests::base_task;
 
-    fn one_workspace_sidebar() -> Sidebar {
+    fn ws_sidebar() -> Sidebar {
         let mut sb = Sidebar::new(PaneId::new(1));
         let mut t = base_task();
         t.id.key = "1".into();
@@ -5584,45 +5705,199 @@ mod getting_started_tests {
         sb
     }
 
+    fn health(providers: bool, polled: bool, cred: Option<&str>) -> InboxHealth {
+        InboxHealth {
+            providers_enabled: providers,
+            polled_ok: polled,
+            credential_failure: cred.map(str::to_string),
+        }
+    }
+
     #[test]
-    fn fresh_empty_inbox_is_getting_started() {
-        // Default construction: Inbox mailbox, All filter, no rows.
+    fn fresh_run_no_provider_is_first_run() {
         let sb = Sidebar::new(PaneId::new(1));
-        assert!(sb.is_getting_started());
+        assert_eq!(sb.inbox_diagnosis(), Some(InboxDiagnosis::FirstRun));
     }
 
     #[test]
-    fn populated_inbox_is_not_getting_started() {
-        let sb = one_workspace_sidebar();
-        assert_eq!(sb.workspace_count(), 1);
-        assert!(!sb.is_getting_started());
-    }
-
-    #[test]
-    fn filtered_empty_view_is_not_getting_started() {
-        // An empty list because an active filter hid everything is a
-        // user-driven narrowing, not first-run — no panel.
+    fn providers_enabled_not_polled_is_syncing() {
         let mut sb = Sidebar::new(PaneId::new(1));
-        sb.set_filters([Filter::Author]);
-        assert!(!sb.is_getting_started());
+        sb.set_inbox_health(health(true, false, None));
+        assert_eq!(sb.inbox_diagnosis(), Some(InboxDiagnosis::Syncing));
     }
 
     #[test]
-    fn non_inbox_mailbox_is_not_getting_started() {
+    fn polled_and_empty_is_nothing_open() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.set_inbox_health(health(true, true, None));
+        assert_eq!(sb.inbox_diagnosis(), Some(InboxDiagnosis::NothingOpen));
+    }
+
+    #[test]
+    fn auth_failure_is_credential_diagnosis() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.set_inbox_health(health(true, false, Some("github")));
+        assert_eq!(
+            sb.inbox_diagnosis(),
+            Some(InboxDiagnosis::CredentialFailure {
+                provider: "github".into()
+            })
+        );
+    }
+
+    #[test]
+    fn credential_failure_outranks_active_filter() {
+        // A sign-in problem is the root cause; "widen your filter" would
+        // be wrong advice when no fresh data can arrive.
+        let mut sb = ws_sidebar();
+        sb.set_filters([Filter::Conflict]);
+        sb.set_inbox_health(health(true, false, Some("github")));
+        assert!(matches!(
+            sb.inbox_diagnosis(),
+            Some(InboxDiagnosis::CredentialFailure { .. })
+        ));
+    }
+
+    #[test]
+    fn active_filter_hiding_rows_is_filters_exclude_all() {
+        // One open non-conflicting PR + a Conflict filter → visible empty
+        // but workspaces present: the filter is the cause.
+        let mut sb = ws_sidebar();
+        sb.set_filters([Filter::Conflict]);
+        assert_eq!(sb.workspace_count(), 0);
+        assert_eq!(
+            sb.inbox_diagnosis(),
+            Some(InboxDiagnosis::FiltersExcludeAll { count: 1 })
+        );
+    }
+
+    #[test]
+    fn filter_over_only_inactive_workspaces_is_not_blamed() {
+        // The sole workspace merged long ago (past the Inbox grace
+        // window → Inactive), so an empty Inbox isn't the filter's doing
+        // — clearing it would reveal nothing. Diagnose the genuine
+        // "nothing open" state instead of falsely pointing at the filter.
+        let now = chrono::Utc::now();
+        let long_ago = now - chrono::Duration::days(30);
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.set_now_override(now);
+        let mut t = base_task();
+        t.id.key = "1".into();
+        t.url = "https://github.com/o/r/pull/1".into();
+        t.state = lazybox_core::TaskState::Merged;
+        t.closed_at = Some(long_ago);
+        t.updated_at = long_ago;
+        let w = Workspace::from_task(t, long_ago);
+        sb.workspaces.insert(SessionKey::from(&w.key), w);
+        sb.set_filters([Filter::Unread]);
+        sb.set_inbox_health(health(true, true, None));
+        assert_eq!(sb.workspace_count(), 0);
+        assert_eq!(sb.inbox_diagnosis(), Some(InboxDiagnosis::NothingOpen));
+    }
+
+    #[test]
+    fn successful_poll_outranks_empty_local_providers() {
+        // Remote-daemon shape: this client has no local provider config
+        // but the daemon polled successfully. A completed poll proves a
+        // provider exists — show NothingOpen, not the "nothing configured"
+        // first-run panel.
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.set_inbox_health(health(false, true, None));
+        assert_eq!(sb.inbox_diagnosis(), Some(InboxDiagnosis::NothingOpen));
+    }
+
+    #[test]
+    fn filter_with_no_workspaces_falls_through_to_config() {
+        // A filter on but nothing anywhere isn't a filter problem —
+        // diagnose the config state instead.
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.set_filters([Filter::Conflict]);
+        assert_eq!(sb.inbox_diagnosis(), Some(InboxDiagnosis::FirstRun));
+    }
+
+    #[test]
+    fn populated_inbox_has_no_diagnosis() {
+        let sb = ws_sidebar();
+        assert_eq!(sb.workspace_count(), 1);
+        assert_eq!(sb.inbox_diagnosis(), None);
+    }
+
+    #[test]
+    fn non_inbox_mailbox_has_no_diagnosis() {
         let mut sb = Sidebar::new(PaneId::new(1));
         sb.mailbox = Mailbox::Snoozed;
-        assert!(!sb.is_getting_started());
+        assert_eq!(sb.inbox_diagnosis(), None);
     }
 
     #[test]
-    fn active_search_query_suppresses_getting_started() {
+    fn active_search_defers_to_no_matches_panel() {
         let mut sb = Sidebar::new(PaneId::new(1));
         sb.search = Some(SearchState {
             scope: None,
             query: "foo".into(),
             editing: true,
         });
-        assert!(!sb.is_getting_started());
+        assert_eq!(sb.inbox_diagnosis(), None);
+    }
+
+    /// Render each panel and assert its distinguishing heading paints —
+    /// the doctor's whole point is that the copy differs per cause.
+    #[test]
+    fn each_diagnosis_renders_its_own_heading() {
+        use lazybox_tui_core::action::{ActionDef, ActionKind};
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let screen = |sb: &mut Sidebar| -> String {
+            let backend = TestBackend::new(30, 40);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| sb.render(frame.area(), frame, true))
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            let mut out = String::new();
+            for y in 0..buffer.area.height {
+                for x in 0..buffer.area.width {
+                    out.push_str(buffer[(x, y)].symbol());
+                }
+                out.push('\n');
+            }
+            out
+        };
+
+        let mut first = Sidebar::new(PaneId::new(1));
+        let first_screen = screen(&mut first);
+        assert!(first_screen.contains("Nothing configured yet"));
+        // The first-run doctor advertises the onboarding entry point, which is
+        // the coach rail (#1460 retired the 14-card tour). The panel renders a
+        // literal, so this pins that literal to the catalog's OpenTour label —
+        // the name every other surface shows — to catch it drifting back to the
+        // dead "tour" wording.
+        let coach_label = ActionDef::for_kind(ActionKind::OpenTour).label;
+        assert!(
+            first_screen.contains(coach_label),
+            "first-run doctor must advertise the coach as {coach_label:?}: {first_screen:?}"
+        );
+        assert!(
+            !first_screen.contains("tour"),
+            "first-run doctor must not use the retired 'tour' name: {first_screen:?}"
+        );
+
+        let mut syncing = Sidebar::new(PaneId::new(1));
+        syncing.set_inbox_health(health(true, false, None));
+        assert!(screen(&mut syncing).contains("Checking for PRs"));
+
+        let mut nothing = Sidebar::new(PaneId::new(1));
+        nothing.set_inbox_health(health(true, true, None));
+        assert!(screen(&mut nothing).contains("Nothing's waiting on you"));
+
+        let mut cred = Sidebar::new(PaneId::new(1));
+        cred.set_inbox_health(health(true, false, Some("github")));
+        assert!(screen(&mut cred).contains("Github sign-in failed"));
+
+        let mut filtered = ws_sidebar();
+        filtered.set_filters([Filter::Conflict]);
+        assert!(screen(&mut filtered).contains("hiding your inbox"));
     }
 }
 
@@ -5758,37 +6033,36 @@ mod keep_awake_badge_tests {
         (0..80).map(|x| buf[(x, 0)].symbol()).collect::<String>()
     }
 
-    fn working_agent(sb: &mut Sidebar) {
-        let ws: SessionKey = (&lazybox_core::WorkspaceKey::new("github:o/r#1")).into();
-        sb.agents.insert(ws, lazybox_ipc::AgentState::Working);
-    }
-
-    /// The badge paints exactly while the daemon's inhibitor holds:
-    /// `ui.keep_awake` on AND ≥1 agent working. Either side alone
-    /// paints nothing.
+    /// The badge is daemon-driven: it paints exactly when the daemon
+    /// reports it's holding (`Event::KeepAwakeStatus.active`), independent
+    /// of the client's own config or agent map (#1485).
     #[test]
-    fn awake_badge_requires_option_and_a_working_agent() {
+    fn awake_badge_follows_daemon_active_flag() {
         let mut sb = Sidebar::new(PaneId::new(1));
-        working_agent(&mut sb);
         assert!(!header_row(&mut sb).contains("awake"));
 
-        sb.set_keep_awake(true);
-        assert!(header_row(&mut sb).contains("awake"));
-    }
-
-    #[test]
-    fn awake_badge_clears_when_agents_go_idle() {
-        let mut sb = Sidebar::new(PaneId::new(1));
-        sb.set_keep_awake(true);
-        assert!(!header_row(&mut sb).contains("awake"));
-
-        working_agent(&mut sb);
+        sb.set_keep_awake_status(true, false);
         assert!(header_row(&mut sb).contains("awake"));
 
-        for state in sb.agents.values_mut() {
-            *state = lazybox_ipc::AgentState::Done;
-        }
+        sb.set_keep_awake_status(false, false);
         assert!(!header_row(&mut sb).contains("awake"));
+    }
+
+    /// On battery the badge says so, rather than implying a protection the
+    /// macOS lid/battery rules don't give (#1485).
+    #[test]
+    fn awake_badge_admits_ac_only_on_battery() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.set_keep_awake_status(true, false);
+        assert!(header_row(&mut sb).contains("awake"));
+        assert!(!header_row(&mut sb).contains("AC only"));
+
+        sb.set_keep_awake_status(true, true);
+        assert!(header_row(&mut sb).contains("AC only"));
+
+        sb.set_keep_awake_status(true, false);
+        assert!(header_row(&mut sb).contains("awake"));
+        assert!(!header_row(&mut sb).contains("AC only"));
     }
 }
 

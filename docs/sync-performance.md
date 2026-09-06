@@ -112,14 +112,90 @@ involved in, which `involves-main` returned moments earlier. The busy
 watched repo alone re-downloaded 89.6 KB of mostly-duplicate PRs. At
 10+ watched repos this branch count and its overlap dominate.
 
+## Repo-first discovery
+
+Discovery used to be user-centric: one `involves:USER` global search
+(plus `review-requested:`, a 7-day merged sweep and per-watched-repo
+queries), with the user's scoped repos applied only as a post-fetch
+filter, and a 3-repo round robin that rarely ran. Two failure modes
+fell out of that shape on 2026-09-05:
+
+- **Stuck manual sweep.** `Shift-R` set `force_full_sweep`, which only
+  cleared when the sweep's *coverage* was complete. The unwindowed
+  merged sweep paginated 10+ pages under a busy fleet, tripped GitHub's
+  secondary limit (HTTP 403), marked coverage partial, and the forced,
+  governor-bypassing unwindowed global sweep re-ran every minute for
+  hours (~30–45 s, ~2 MB, ~40 GraphQL points per tick, then a 60 s
+  pause). The `updated:>=` floor never advanced either.
+- **Silent config-parse dead loop.** A newer build wrote a field this
+  daemon could not parse; every tick returned early on
+  `Config::load()` with no user-visible error for 88 minutes.
+
+The daemon now discovers **per repo** whenever the user has scoped or
+watched repos (the *roster*):
+
+- **Rotation (every warm tick).** Focus + session-bearing repos, then
+  the `ceil(roster / target_ticks)` stalest members, where
+  `target_ticks = repo_refresh_interval / poll_interval` (defaults:
+  5 min / 60 s → every member within 5 ticks). Each member costs one PR
+  query and one issue query, windowed on its own persisted
+  `updated:>=` floor (`SyncCursors::repo_windows`). Windowed queries
+  drop `is:open` so a merge or close comes back with its new state —
+  no separate merged sweep. The governor caps the slice by allowance;
+  members that don't fit keep their cursor age and lead the next tick.
+- **Reconcile (every `FULL_SWEEP_INTERVAL`, or `Shift-R`).** Every
+  member unwindowed (`is:open`), uncapped, paced by the request gap.
+  Only a complete reconcile reports `Exhaustive` coverage and may
+  retire rows; a failed member is preserved and retried on the
+  rotation. The reconcile timer re-arms after any reconcile that ran,
+  so a member that overflows its page cap cannot make the whole roster
+  re-run every tick.
+- **`g s`** stays the interactive "sync this repo now": the focused
+  row's PR/issue plus the repo's open PRs and issues, at interactive
+  priority, outside the poll loop.
+- **Org scopes** are one roster member each (`org:name`), covered by a
+  single query pair rather than one per repo.
+- Without a roster (no scopes), the legacy `involves:USER` global sweep
+  and discovered-repo round robin still run. Both paths now advance
+  their floors and clear a forced refresh on *discovery* success
+  (`SelectedFetchOutcome::discovery_complete`), independent of
+  best-effort companions; the merged sweep is always windowed on its
+  own floor and capped at 4 pages.
+
+Hot rows are the focused row, every row with a live agent, and up to
+three recent own PRs; a merely session-bearing worktree is no longer
+hot (20–40 idle worktrees used to pin the 15 s cadence permanently) —
+its repo is force-included in every rotation tick instead.
+
+A config file that fails to parse now surfaces as a permanent GitHub
+provider error naming the file, and `ui.keep_awake` accepts the newer
+mode strings so a newer client cannot brick an older daemon.
+
+### Merging during a rate-limit pause
+
+A secondary-limit cooldown used to make `g m` fail or queue for
+minutes: the governor admitted one interactive request per 20 s
+window, but a merge is three back to back (fresh pre-merge fetch,
+merge-method lookup, mutation), so the mutation itself was refused with
+the whole remaining pause as its retry hint. Now:
+
+- interactive requests get a burst of four per window
+  (`SECONDARY_INTERACTIVE_BURST`), enough for one user action;
+- the repo's merge method is cached per `owner/name` after the first
+  merge, so later merges are a single mutation (a rejected cached
+  method is refetched and retried once when it changed);
+- while the circuit is open, the merge path skips the optional fresh
+  pre-check and merges from the last synced row, spending the ration
+  on the mutation — GitHub still rejects a moved head or a conflict.
+
 ## Engagement tiers
 
 The daemon overlays three engagement tiers on the discovery and
 notifications paths:
 
-- **Hot**: a focused workspace, a workspace with a live agent, or an
-  open authored PR updated in the last 24 hours. The set is capped at
-  three. While non-empty, the poll loop runs every 15 seconds, targets
+- **Hot**: the focused workspace and every workspace with a live agent
+  (uncapped — one batched `nodes(ids:)` query), plus open authored PRs
+  updated in the last 24 hours, capped at three. While non-empty, the poll loop runs every 15 seconds, targets
   these rows before notification targets, and refreshes the whole set
   with one full-detail `nodes(ids:)` GraphQL request per pass.
 - **Warm**: the remaining active inbox. These rows keep the configured

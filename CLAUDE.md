@@ -140,6 +140,14 @@ crates/
     `SetupRunner` state machine driving Choice/Loading/Error modals.
 - **Event bus**: `tokio::sync::broadcast` inside the daemon. Providers
   produce; subscribers (TUI clients, JSON API gateway) consume.
+- **GitHub discovery is repo-first** (see
+  [`docs/sync-performance.md`](docs/sync-performance.md#repo-first-discovery)):
+  with scoped/watched repos, the daemon sweeps every roster member with
+  one windowed PR query + one issue query on a rotation sized by
+  `providers.github.repo_refresh_interval` (default 5 min); a 30-min /
+  `Shift-R` reconcile sweeps the whole roster unwindowed and is the only
+  pass allowed to retire rows. The user-centric `involves:USER` global
+  sweep only runs when no scopes are configured.
 - **Credential chain**: `EnvProvider("GH_TOKEN") → EnvProvider("GITHUB_TOKEN") → CommandProvider("gh auth token")`. Trait-based, extensible (Vault, Keychain, OAuth).
 - **Store**: `Store` trait with `SqliteStore` backend at `~/.lazybox/v2/state.db`.
   Read/unread, snooze, and session metadata persist across launches.
@@ -222,9 +230,12 @@ which-key popup and `?` help reuse the same group labels.
 `ui.theme`), `Shift-W` start agent from anywhere (pick a project,
 name a workspace, spawn the default agent — one flow, any pane),
 `]` browse snippets (read-only catalog; `e` there opens the YAML),
-`Shift-R` refresh, `Ctrl-L` force a full repaint (recovery for a
+`Shift-R` refresh (sweep every scoped repo now — an unwindowed
+repo-first reconcile), `Ctrl-L` force a full repaint (recovery for a
 stale/garbled screen; resize and focus-regain also repaint
-automatically), `Shift-T` tour, `Shift-D` sync status, `Shift-M`
+automatically), `Shift-T` coach (the onboarding coach rail — one
+objective at a time, gated on you doing it; press again to end it,
+`Ctrl-n` skips a step), `Shift-D` sync status, `Shift-M`
 messages log (a scrollable, `c`-clearable history of recent footer
 notices; #309), `Esc` dismiss the current footer notice regardless of
 severity — severity only drives auto-fade, never dismissability, and
@@ -330,7 +341,13 @@ same-key double-tap `r r` (the leader stashes the shadowed direct
 action). `v` multi-selects the cursor
 workspace; `Shift-↑`/`Shift-↓` extend the selection from the cursor
 (spreadsheet-style contiguous sweep, #932) and `Shift-click` extends
-it to the clicked row (marks survive j/k; `Esc` clears). A live
+it to the clicked row (marks survive j/k; `Esc` clears). `V` arms a
+vim-style **visual-select** sweep (#1448) — an encoding-independent
+alternative to `Shift-↑/↓` for terminals that don't report Shift on
+arrows: while armed, plain `j`/`k` (and arrows) grow / shrink the
+marked range from the anchor, `Esc` cancels (dropping the selection),
+a second `V` disarms (keeping it), and any action key fires on the
+marked set (it also drives the activity pane's row multi-select). A live
 multi-select makes **every bulk-appropriate workspace action** target
 the whole set instead of just the cursor row — selection is the
 primary path, not a special broadcast mode (#932, mechanism from
@@ -342,10 +359,16 @@ running an agent; `g m` merge, `g u` update-branch, `z` snooze,
 `x x` archive, `m` mark-read, `g s` sync, `g g` arm-auto-merge,
 `g d` delete-or-close, and `x c` close-issue apply per target,
 running the eligible ones and summarizing what was
-skipped and why. Destructive bulk actions confirm with the count + an
-affected list + the eligible/skipped split (e.g. "Merge 3 of 5
-selected PRs?", "Close 3 PRs without merging and delete 1 issue?"),
-snapshotting the selection at mount so a poll under
+skipped and why. A bulk action **consumes its selection** (#1498,
+reverting #1449): once anything actually ran, the marks are dropped, so
+acting on the same set twice means re-marking it. A run where every
+target was ineligible ("nothing to merge") keeps the marks so it can be
+retried. `Esc` still clears a selection you built but haven't acted on,
+and a row leaving the projection prunes its own mark
+(`recompute_visible`, so an archived row's mark goes with it). Destructive bulk actions confirm
+with the count + an affected list + the eligible/skipped split (e.g.
+"Merge 3 of 5 selected PRs?", "Close 3 PRs without merging and delete 1
+issue?"), snapshotting the selection at mount so a poll under
 the modal can't redirect them. Inherently single-target actions stay
 focused-only: open editor (`e`), rename (`x R`), view diff,
 open-in-browser (`g o`),
@@ -408,9 +431,9 @@ own PR, no conflicts, no changes requested; only while lazybox runs),
 listing merge-on-green, per-session auto-fix arm/disarm, and
 GitHub-native auto-merge status for the focused PR/issue, each toggled
 in place; #363), `g r` reviewers, `g a` assignees, `g l` labels,
-`g s` sync (a targeted re-poll of just the focused workspace's own
-PR/issue instead of the global `Shift-R` sweep — cheap when you're
-waiting on one PR's CI; #456), `g o` open in browser, `g d` delete issue / close PR (confirmed
+`g s` sync (re-poll the focused workspace's own PR/issue AND its
+repo's open PRs + issues, interactive priority — "sync this repo now",
+versus the roster-wide `Shift-R` sweep; #456, #1390), `g o` open in browser, `g d` delete issue / close PR (confirmed
 first, naming the target; an issue is hard-deleted when the token
 has admin rights, else closed as not-planned with a notice; a PR is
 closed without merging; #408) — leader chords only, the legacy
@@ -427,7 +450,9 @@ scope.
 
 **RightPane (Activity)**: `j/k` or arrows move the row cursor,
 `g/G` top/bottom, `→/l` expand row, `←/h` collapse row, `Enter`
-toggle the section, `Space`/`v` multi-select rows, `w w` work on
+toggle the section, `Space`/`v` multi-select rows (`V` arms the same
+vim-style visual sweep as the sidebar — `j`/`k` grow / shrink the row
+range from the anchor, `Esc` cancels; #1448), `w w` work on
 selection, `d` toggle the PR/issue description teaser (Collapsed ⇄
 Preview); a second `d` on a long — or richly-formatted (tables, fenced
 code, images) — preview, or clicking `+N more lines`, opens the full

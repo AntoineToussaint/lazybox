@@ -33,16 +33,16 @@ mod upsert;
 pub use auto_merge::AutoMergeMemory;
 pub use scheduler::{
     CURSOR_TTL, DEFAULT_ROUND_ROBIN_N, RoundRobinPick, RoundRobinState, pick_repos_for_tick,
-    pick_repos_for_tick_budgeted, plan_round_robin_tick, plan_round_robin_tick_budgeted,
-    will_run_global,
+    pick_repos_for_tick_budgeted, plan_repo_rotation, plan_round_robin_tick,
+    plan_round_robin_tick_budgeted, rotation_fanout, will_run_global,
 };
 
 pub(crate) use handlers::resolve_gh_client_result;
 pub use handlers::{
     ProviderHandle, apply_pr_details, handle_add_assignees, handle_clean_worktrees,
     handle_close_issue, handle_close_pr, handle_convert_to_draft, handle_delete_or_close,
-    handle_delete_orphaned_worktree, handle_fetch_pr_details, handle_fetch_repo_labels,
-    handle_fetch_repo_merge_history, handle_fetch_requestable_reviewers,
+    handle_delete_orphaned_worktree, handle_fetch_assignable_users, handle_fetch_pr_details,
+    handle_fetch_repo_labels, handle_fetch_repo_merge_history, handle_fetch_requestable_reviewers,
     handle_inspect_workspace_diff, handle_inspect_worktrees, handle_mark_ready, handle_merge_pr,
     handle_request_reviewers, handle_scan_checkouts, handle_set_assignees, handle_set_labels,
     handle_sync_workspace, handle_update_branch, post_reply, prefetch_top_pr_details,
@@ -56,7 +56,7 @@ pub use sources::{
     build_pr_search_qualifiers, default_sources, filter_github_tasks,
     filter_github_tasks_with_watches, filter_linear_tasks, gh_client_reusable,
     github_scopes_from_filters, github_watch_repos_from_filters, label_spawn_actions,
-    readmit_mentioned_tasks, sources_for,
+    readmit_mentioned_tasks, repo_roster, sources_for,
 };
 use sources::{dispatch_action, sources_for_with_engagement};
 pub use upsert::upsert;
@@ -132,9 +132,18 @@ pub struct EngagementSnapshot {
     cold_only_repos: std::collections::HashSet<String>,
     active_repos: std::collections::HashSet<String>,
     sessioned_repos: std::collections::HashSet<String>,
+    live_agent_repos: std::collections::HashSet<String>,
 }
 
 impl EngagementSnapshot {
+    /// Repos backing a workspace with a LIVE agent terminal right now.
+    /// Force-included in every repo-first rotation tick so the repo an
+    /// agent is pushing to refreshes at the base cadence; merely
+    /// session-bearing repos rotate stalest-first like the rest.
+    pub fn live_agent_repos(&self) -> &std::collections::HashSet<String> {
+        &self.live_agent_repos
+    }
+
     pub fn tier_for(&self, key: &WorkspaceKey) -> EngagementTier {
         self.entries
             .get(key.as_str())
@@ -236,8 +245,7 @@ fn select_engagement_snapshot(
     let mut eligible: Vec<&EngagementCandidate> = candidates
         .iter()
         .filter(|candidate| {
-            candidate.sessioned
-                || candidate.live_agent
+            candidate.live_agent
                 || focused_workspace == Some(candidate.workspace_key.as_str())
                 || (!candidate.cold
                     && candidate.own_open_pr
@@ -260,14 +268,20 @@ fn select_engagement_snapshot(
             })
     });
 
-    // Sessioned workspaces (Tier 0) are ALWAYS hot — uncapped, bounded
-    // only by how many worktrees the user has open. `HOT_SET_MAX` caps
-    // only the remaining engagement signals (focus / live agent / recent
-    // own PR) so those can't drown out a repo the user is working in.
+    // Hot = the rows whose freshness the user is waiting on RIGHT NOW:
+    // the focused row and every row with a live agent (uncapped — they
+    // ride one batched `nodes(ids:)` query), plus recent own PRs capped
+    // at `HOT_SET_MAX`. A merely session-bearing workspace (an idle
+    // worktree / shell) is NOT hot on its own any more: with 20-40 open
+    // worktrees that pinned the whole loop on the 15s hot cadence around
+    // the clock. Its repo is still force-included in every repo-first
+    // rotation tick (`sessioned_repos`), so it refreshes at the base
+    // cadence rather than every 15 seconds.
     let mut hot_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut capped_used = 0usize;
     for candidate in eligible {
-        if candidate.sessioned {
+        let focused = focused_workspace == Some(candidate.workspace_key.as_str());
+        if focused || candidate.live_agent {
             hot_keys.insert(candidate.workspace_key.as_str().to_string());
         } else if capped_used < HOT_SET_MAX {
             hot_keys.insert(candidate.workspace_key.as_str().to_string());
@@ -281,9 +295,13 @@ fn select_engagement_snapshot(
     let mut repos = std::collections::HashSet::new();
     let mut non_cold_repos = std::collections::HashSet::new();
     let mut sessioned_repos = std::collections::HashSet::new();
+    let mut live_agent_repos = std::collections::HashSet::new();
     for candidate in candidates {
         if candidate.sessioned {
             sessioned_repos.insert(candidate.repo.clone());
+        }
+        if candidate.live_agent {
+            live_agent_repos.insert(candidate.repo.clone());
         }
         let focused = focused_workspace == Some(candidate.workspace_key.as_str());
         let tier = if hot_keys.contains(candidate.workspace_key.as_str()) {
@@ -349,6 +367,7 @@ fn select_engagement_snapshot(
         cold_only_repos,
         active_repos: non_cold_repos,
         sessioned_repos,
+        live_agent_repos,
     }
 }
 
@@ -459,6 +478,59 @@ pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnaps
 }
 
 #[cfg(test)]
+mod polled_list_tests {
+    use super::{PolledScope, repo_first_polled_scope, repo_in_polled_list};
+    use lazybox_core::FetchCoverage;
+
+    #[test]
+    fn repo_in_polled_list_matches_repo_and_org() {
+        let polled = vec!["acme".to_string(), "zed/editor".to_string()];
+        assert!(repo_in_polled_list("acme/widgets", &polled));
+        assert!(repo_in_polled_list("zed/editor", &polled));
+        assert!(!repo_in_polled_list("zed/other", &polled));
+        assert!(!repo_in_polled_list("acmeco/x", &polled));
+        assert!(!repo_in_polled_list("acme/widgets", &[]));
+    }
+
+    /// A rotation slice or any windowed pass has no deletion authority.
+    #[test]
+    fn rotation_and_windowed_passes_never_delete() {
+        let completed = vec!["acme".to_string()];
+        assert_eq!(
+            repo_first_polled_scope(false, FetchCoverage::Complete, false, &completed),
+            PolledScope::Repos(Vec::new())
+        );
+        assert_eq!(
+            repo_first_polled_scope(true, FetchCoverage::Complete, true, &completed),
+            PolledScope::Repos(Vec::new())
+        );
+    }
+
+    /// A fully-successful reconcile is authoritative over the whole inbox.
+    #[test]
+    fn complete_reconcile_is_exhaustive() {
+        assert_eq!(
+            repo_first_polled_scope(true, FetchCoverage::Complete, false, &[]),
+            PolledScope::Exhaustive
+        );
+    }
+
+    /// Regression for the review's 🔴 finding: a PARTIAL reconcile — one
+    /// member (e.g. an `org:` scope past the 100-open-PR page cap) erroring
+    /// on every pass — must NOT surrender retirement authority for the whole
+    /// inbox. The members that completed still retire their own gone rows.
+    #[test]
+    fn partial_reconcile_retires_within_completed_members() {
+        let completed = vec!["acme".to_string(), "zed/editor".to_string()];
+        assert_eq!(
+            repo_first_polled_scope(true, FetchCoverage::Partial, false, &completed),
+            PolledScope::Repos(completed),
+            "one truncating member must not veto retirement for the completed ones"
+        );
+    }
+}
+
+#[cfg(test)]
 mod engagement_tier_tests {
     use super::*;
     use lazybox_core::{
@@ -541,7 +613,8 @@ mod engagement_tier_tests {
         let candidates: Vec<_> = (1..=8).map(candidate).collect();
         let focused = WorkspaceKey::new("github:o/r#8");
         let snapshot = select_engagement_snapshot(candidates, Some(focused.as_str()), Utc::now());
-        assert_eq!(snapshot.hot_count(), HOT_SET_MAX);
+        // Focus rides above the cap; the recent own PRs share `HOT_SET_MAX`.
+        assert_eq!(snapshot.hot_count(), HOT_SET_MAX + 1);
         assert_eq!(snapshot.tier_for(&focused), EngagementTier::Hot);
         assert!(
             snapshot
@@ -572,11 +645,12 @@ mod engagement_tier_tests {
         assert!(!snapshot.cold_only_repos().contains("o/warm"));
     }
 
-    /// Every sessioned workspace stays hot even when there are more of
-    /// them than `HOT_SET_MAX` — the Tier 0 cap-bypass. Pre-fix the
-    /// `.take(HOT_SET_MAX)` dropped session-bearing repos past the top 3.
+    /// Session-bearing workspaces are NOT hot on their own any more:
+    /// 20+ idle worktrees used to pin the loop on the 15s hot cadence.
+    /// Their repos still register as `sessioned_repos` (forced into
+    /// every repo-first rotation tick) and never park as cold.
     #[test]
-    fn all_sessioned_repos_stay_hot_beyond_the_cap() {
+    fn sessioned_repos_are_forced_into_rotation_but_not_hot() {
         let candidates: Vec<_> = (1..=6)
             .map(|n| {
                 let mut c = candidate(n);
@@ -589,22 +663,18 @@ mod engagement_tier_tests {
         let keys: Vec<_> = candidates.iter().map(|c| c.workspace_key.clone()).collect();
 
         let snapshot = select_engagement_snapshot(candidates, None, Utc::now());
-        assert!(
-            snapshot.hot_count() >= 6,
-            "all 6 sessioned repos must be hot"
-        );
+        assert_eq!(snapshot.hot_count(), 0, "idle sessions must not be hot");
         for key in &keys {
-            assert_eq!(snapshot.tier_for(key), EngagementTier::Hot);
+            assert_eq!(snapshot.tier_for(key), EngagementTier::Warm);
         }
         assert_eq!(snapshot.sessioned_repos().len(), 6);
         assert!(snapshot.cold_only_repos().is_empty());
     }
 
-    /// A persisted-but-idle session (no live agent PTY, no own PR) is
-    /// engaged, not cold — the signal is `workspace.sessions`, not a
-    /// live Agent terminal. A shell session behaves identically.
+    /// A snoozed / terminal row with a persisted-but-idle session stays
+    /// cold for freshness purposes, but its repo is still session-bearing.
     #[test]
-    fn persisted_session_without_live_agent_is_engaged() {
+    fn persisted_session_without_live_agent_is_cold_but_sessioned() {
         let mut idle = candidate(1);
         idle.cold = true;
         idle.own_open_pr = false;
@@ -613,27 +683,24 @@ mod engagement_tier_tests {
         let key = idle.workspace_key.clone();
 
         let snapshot = select_engagement_snapshot(vec![idle], None, Utc::now());
-        assert_eq!(snapshot.tier_for(&key), EngagementTier::Hot);
+        assert_eq!(snapshot.tier_for(&key), EngagementTier::Cold);
         assert!(snapshot.sessioned_repos().contains("o/r"));
-        assert!(snapshot.cold_only_repos().is_empty());
     }
 
-    /// Non-sessioned engagement signals (focus / live agent / recent own
-    /// PR) still share the `HOT_SET_MAX` cap so they can't drown out the
-    /// round-robin, while sessioned repos ride above it.
+    /// Live agents and focus are uncapped hot; recent own PRs share the
+    /// `HOT_SET_MAX` cap.
     #[test]
-    fn non_sessioned_hot_stays_capped_alongside_uncapped_sessioned() {
-        let mut sessioned: Vec<_> = (1..=4)
+    fn live_agents_uncapped_own_prs_capped() {
+        let mut live: Vec<_> = (1..=4)
             .map(|n| {
                 let mut c = candidate(n);
                 c.own_open_pr = false;
-                c.sessioned = true;
+                c.live_agent = true;
                 c.repo = format!("o/s{n}");
                 c
             })
             .collect();
-        // Five recent own-PR (non-sessioned) candidates competing for the
-        // 3 capped slots.
+        // Five recent own-PR candidates competing for the 3 capped slots.
         let recent: Vec<_> = (10..=14)
             .map(|n| {
                 let mut c = candidate(n);
@@ -641,10 +708,10 @@ mod engagement_tier_tests {
                 c
             })
             .collect();
-        sessioned.extend(recent);
+        live.extend(recent);
 
-        let snapshot = select_engagement_snapshot(sessioned, None, Utc::now());
-        // 4 sessioned (uncapped) + 3 capped own-PR = 7 hot.
+        let snapshot = select_engagement_snapshot(live, None, Utc::now());
+        // 4 live agents (uncapped) + 3 capped own-PR = 7 hot.
         assert_eq!(snapshot.hot_count(), 7);
     }
 
@@ -660,6 +727,7 @@ mod engagement_tier_tests {
         assert_eq!(snapshot.tier_for(&key), EngagementTier::Hot);
         assert!(snapshot.signals_for(&key).live_agent);
         assert!(snapshot.cold_only_repos().is_empty());
+        assert!(snapshot.live_agent_repos().contains("o/r"));
     }
 
     #[test]
@@ -829,7 +897,9 @@ mod engagement_tier_tests {
         assert!(config.terminal.metadata_map().await.is_empty());
 
         let snapshot = refresh_github_engagement(&config).await;
-        assert_eq!(snapshot.tier_for(&key), EngagementTier::Hot);
+        // An idle shell session is session-bearing (its repo is forced
+        // into every rotation tick) but not hot on its own.
+        assert_eq!(snapshot.tier_for(&key), EngagementTier::Warm);
         assert!(!snapshot.signals_for(&key).live_agent);
         assert!(snapshot.sessioned_repos().contains("o/r"));
     }
@@ -1009,6 +1079,20 @@ pub enum PolledScope {
     Repos(Vec<String>),
 }
 
+/// Whether `repo` (`owner/name`) is covered by a [`PolledScope::Repos`]
+/// list. A list entry is either a repo (`owner/name`, exact match) or a
+/// bare org scope (`owner`) that covers every repo under it.
+pub fn repo_in_polled_list(repo: &str, polled: &[String]) -> bool {
+    polled.iter().any(|entry| {
+        if entry.contains('/') {
+            entry == repo
+        } else {
+            repo.split_once('/')
+                .is_some_and(|(owner, _)| owner == entry)
+        }
+    })
+}
+
 /// Decide what coverage the GitHub source reports to `rescope` for a
 /// tick, given the round-robin scheduling decision and whether the
 /// sweep was a PARTIAL success (one of PRs/Issues errored).
@@ -1042,6 +1126,38 @@ pub fn gh_polled_scope(
         PolledScope::Exhaustive
     } else {
         PolledScope::Repos(repos.to_vec())
+    }
+}
+
+/// Repo-first equivalent of [`gh_polled_scope`]. Deletion authority
+/// belongs only to a reconcile pass (unwindowed over the whole roster):
+///
+/// - A rotation slice — or any windowed pass — reports empty coverage.
+/// - A fully-successful reconcile reports `Exhaustive`: authoritative
+///   over the ENTIRE inbox, so it can retire rows whose repo has left
+///   the roster completely (a de-scoped repo).
+/// - A PARTIAL reconcile (one member truncated its page cap or errored)
+///   reports the members that DID complete their exhaustive open-set as
+///   an authoritative `Repos(completed_members)` set. Before this, a
+///   single high-volume member — e.g. an `org:` scope past the 100-open-PR
+///   page cap, which errors on every reconcile — kept coverage partial
+///   and so vetoed retirement for the WHOLE inbox indefinitely, leaving
+///   merged/closed/transferred rows stuck open forever. `completed_members`
+///   may hold `org` entries; [`repo_in_polled_list`] expands them so a
+///   completed org member still retires its children.
+pub fn repo_first_polled_scope(
+    reconcile: bool,
+    coverage: lazybox_core::FetchCoverage,
+    windowed: bool,
+    completed_members: &[String],
+) -> PolledScope {
+    if !reconcile || windowed {
+        return PolledScope::Repos(Vec::new());
+    }
+    if coverage.is_partial() {
+        PolledScope::Repos(completed_members.to_vec())
+    } else {
+        PolledScope::Exhaustive
     }
 }
 
@@ -2397,7 +2513,7 @@ pub async fn rescope_with_state(
                 Some(PolledScope::Repos(repos)) => task
                     .repo
                     .as_deref()
-                    .is_some_and(|r| repos.iter().any(|x| x == r)),
+                    .is_some_and(|r| repo_in_polled_list(r, repos)),
             };
             if !in_authoritative_scope {
                 tracing::debug!(
@@ -2974,7 +3090,28 @@ async fn run_one_tick_with_notifications(
     let setup = match lazybox_config::Config::load() {
         Ok(c) => crate::persisted_from_config(&c),
         Err(e) => {
+            // An unparseable config used to be a WARN line and nothing
+            // else: every tick returned early, no provider error was
+            // broadcast, and the inbox simply froze with a healthy-looking
+            // sync status (2026-09-05: a newer build wrote a field this
+            // daemon couldn't parse, and sync was dead for 88 minutes).
+            // Surface it as a permanent, debounced GitHub error so the
+            // TUI names the file and the fix; it clears on the next
+            // successful tick.
             tracing::warn!("polling: config.yaml load failed: {e}");
+            let mut state = checkout_poll_state(&config.poll).await;
+            state.broadcast_error_debounced(
+                &config.bus,
+                lazybox_gh::SOURCE,
+                &lazybox_core::ProviderError::permanent(
+                    lazybox_gh::SOURCE,
+                    format!(
+                        "sync paused: ~/.lazybox/config.yaml failed to parse ({e}) — fix the file; \
+                         polling resumes on the next tick"
+                    ),
+                ),
+            );
+            restore_poll_state(&config.poll, state).await;
             return TickSummary::default();
         }
     };

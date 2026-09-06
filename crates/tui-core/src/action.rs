@@ -329,6 +329,13 @@ pub enum Action {
     /// inject; a plain shell gets a direct write; workspaces with no
     /// session are skipped and reported.
     BroadcastToSelected,
+    /// Arm "visual select": an encoding-independent alternative to the
+    /// Shift-↑/↓ sweep (#1448). Once armed, plain `j`/`k` (and arrows)
+    /// drive the same anchor/grow/shrink [`Action::SelectWorkspace`] extend, so
+    /// a contiguous range is reachable on terminals that don't report
+    /// Shift on arrows. `Esc` cancels; any action key fires on the set.
+    /// Works from the sidebar and the activity pane alike.
+    VisualSelect,
 
     // ── Activity pane (right) ──────────────────────────────────────
     /// Toggle the activity-section collapse on the focused workspace.
@@ -373,7 +380,7 @@ pub enum Action {
     ForceRedraw,
     /// Open Ask Lazybox (`?`): live keymap search plus conversational help.
     OpenHelp,
-    /// Launch the in-app feature tour / guided walkthrough.
+    /// Start (or re-run) the onboarding coach rail (#1460).
     OpenTour,
     /// Open the debug / sync-status window (Shift+D).
     OpenSyncStatus,
@@ -590,6 +597,7 @@ pub enum ActionKind {
     ToggleFocusWorkspace,
     SelectWorkspace,
     BroadcastToSelected,
+    VisualSelect,
     // Activity
     ToggleActivity,
     ToggleRow,
@@ -689,7 +697,7 @@ impl ActionKind {
         Self::SpawnAgentOnMain,
         Self::SpawnShellOnMain,
         Self::OpenEditor,
-        Self::ViewDiff,
+        Self::VisualSelect,
         Self::MarkAllRead,
         Self::ToggleSnooze,
         // Workspace-management menu: creation and movement first,
@@ -731,6 +739,7 @@ impl ActionKind {
         Self::ClosePr,
         Self::ConvertToDraft,
         Self::MarkReady,
+        Self::ViewDiff,
         Self::Reply,
         Self::EditNotes,
         // Sidebar list management
@@ -881,6 +890,7 @@ impl Action {
             Action::ToggleFocusWorkspace => ActionKind::ToggleFocusWorkspace,
             Action::SelectWorkspace => ActionKind::SelectWorkspace,
             Action::BroadcastToSelected => ActionKind::BroadcastToSelected,
+            Action::VisualSelect => ActionKind::VisualSelect,
             Action::ToggleActivity => ActionKind::ToggleActivity,
             Action::ToggleRow => ActionKind::ToggleRow,
             Action::ActivityTop => ActionKind::ActivityTop,
@@ -999,8 +1009,8 @@ impl ActionDef {
             ActionKind::OpenTour => &Self {
                 kind: ActionKind::OpenTour,
                 default_keys: "Shift-T",
-                label: "tour",
-                describe: "Launch the guided onboarding walkthrough (start from scratch, inbox, agents, snippet workflows + memory, juggling sessions, config).",
+                label: "coach",
+                describe: "Start (or re-run) the onboarding coach — a slim rail that gives you one objective at a time and confirms when you actually do it. Press again to end it.",
                 section: Section::Global,
             },
             ActionKind::OpenSyncStatus => &Self {
@@ -1269,7 +1279,7 @@ impl ActionDef {
             },
             ActionKind::ViewDiff => &Self {
                 kind: ActionKind::ViewDiff,
-                default_keys: "Shift-V",
+                default_keys: "g v",
                 label: "review diff",
                 describe: "Review the worktree's staged, unstaged, and untracked changes; search or annotate lines and send the draft to the running agent.",
                 section: Section::Workspace,
@@ -1652,6 +1662,13 @@ impl ActionDef {
                 label: "broadcast",
                 describe: "Send one free-text instruction — optionally seeded from a snippet — to every multi-selected workspace at once. The one broadcast-only flow (free-text-to-many has no single-row action key). Running agents get the prompt injected; plain shells get a direct write; workspaces with no session are skipped and reported.",
                 section: Section::Sidebar,
+            },
+            ActionKind::VisualSelect => &Self {
+                kind: ActionKind::VisualSelect,
+                default_keys: "Shift-V",
+                label: "visual select",
+                describe: "Arm a vim-style visual sweep: j/k (and arrows) grow / shrink the multi-select range from the anchor, no Shift-arrow encoding needed. Esc cancels; any action key fires on the marked set. Works in the sidebar and the activity pane.",
+                section: Section::Workspace,
             },
             // ── Activity ────────────────────────────────────────────
             ActionKind::ToggleActivity => &Self {
@@ -2287,6 +2304,7 @@ impl ActionKind {
             ActionKind::ToggleFocusWorkspace => "toggle_focus_workspace",
             ActionKind::SelectWorkspace => "select_workspace",
             ActionKind::BroadcastToSelected => "broadcast_to_selected",
+            ActionKind::VisualSelect => "visual_select",
             ActionKind::ToggleActivity => "toggle_activity",
             ActionKind::ToggleRow => "toggle_row",
             ActionKind::ActivityTop => "activity_top",
@@ -2523,7 +2541,8 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::DeleteOrClose
         | ActionKind::ClosePr
         | ActionKind::ConvertToDraft
-        | ActionKind::MarkReady => Some("github"),
+        | ActionKind::MarkReady
+        | ActionKind::ViewDiff => Some("github"),
         ActionKind::SpawnAgent | ActionKind::RecoverAllAgentCredit => Some("agent"),
         ActionKind::SpawnAgentRemote => Some("remote"),
         ActionKind::Work | ActionKind::WorkWith => Some("work"),
@@ -3301,6 +3320,9 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // can't see), so the dispatcher gates on it and surfaces a
         // footer nudge when nothing is selected.
         ActionKind::BroadcastToSelected => true,
+        // Visual-select arms the sweep on the row under the cursor, so it
+        // needs one there — same gate as the `v` select toggle.
+        ActionKind::VisualSelect => has_ws,
         // Global / no-workspace-needed actions.
         ActionKind::NewWorkspace
         | ActionKind::NewProject

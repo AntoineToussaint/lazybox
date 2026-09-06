@@ -327,6 +327,12 @@ pub struct Sidebar {
     /// Loaded from `~/.lazybox/config.yaml::attention` at startup;
     /// toggle individual signals there to customize.
     attention: lazybox_config::AttentionConfig,
+    /// Provider/sync facts the sidebar can't see for itself (they live
+    /// in the Model), pushed via [`Self::set_inbox_health`]. Read only
+    /// by the empty-inbox doctor ([`Self::inbox_diagnosis`]) to name the
+    /// *specific* reason an Inbox is empty and offer the matching fix
+    /// (issue #1461).
+    inbox_health: InboxHealth,
     /// Projects mirrored from the daemon's project table. Each entry
     /// emits a sidebar header so a project with zero workspaces
     /// still appears. Populated by `apply_projects` (called from the
@@ -463,13 +469,18 @@ pub struct Sidebar {
     /// uninterrupted run of Shift-arrows — any other cursor move restarts
     /// the sweep. `None` between sweeps and after `v` / Esc (#1243).
     sweep: Option<(SessionKey, Option<SessionKey>)>,
-    /// Mirror of `ui.keep_awake` as loaded at startup. When set, the
-    /// header paints a small "awake" badge while any agent is
-    /// `Working` — the same condition under which the daemon holds
-    /// its OS sleep inhibitor — so the user can see the machine is
-    /// being kept awake and why. The daemon re-reads the flag live;
-    /// this client-side mirror refreshes on restart.
-    keep_awake: bool,
+    /// Whether the daemon is currently holding its OS sleep inhibitor, as
+    /// reported over `Event::KeepAwakeStatus`. The header paints a small
+    /// "awake" badge from this daemon truth — not the client's own config,
+    /// which differs over `--connect` — so the badge can never disagree
+    /// with what the daemon is actually doing (#1485).
+    keep_awake_active: bool,
+    /// Whether the daemon (which owns the inhibitor) is on battery power,
+    /// reported alongside `keep_awake_active`. On a macOS laptop a held
+    /// assertion covers neither system sleep on battery nor a closed lid,
+    /// so the badge reads `☼ awake (AC only)` here rather than implying a
+    /// protection the OS isn't giving (#1485).
+    keep_awake_on_battery: bool,
     /// Mirror of `ui.auto_wait_on_limit` as loaded at startup. When set, the
     /// daemon auto-presses "Wait" on a usage-limit block and immediately
     /// relabels it to the calm `AwaitingReset`, so the transient
@@ -539,6 +550,45 @@ pub struct PendingNotification {
     pub kind: NotificationKind,
 }
 
+/// Provider/sync facts the empty-inbox doctor needs but the sidebar
+/// can't observe on its own — they live in the `Model` (`setup.persisted`,
+/// `status.sync`) and are pushed in via [`Sidebar::set_inbox_health`].
+/// Pure data so the diagnosis stays unit-testable (issue #1461).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InboxHealth {
+    /// At least one provider is enabled in the persisted setup. False on
+    /// a fresh machine (no wizard run yet) — the "point lazybox at a
+    /// folder" first-run state.
+    pub providers_enabled: bool,
+    /// At least one provider's most-recent poll completed successfully.
+    /// Distinguishes "still syncing" from "polled and genuinely empty".
+    pub polled_ok: bool,
+    /// The provider whose most-recent poll failed on credentials/auth,
+    /// if any — the empty inbox is a sign-in problem, not a quiet account.
+    pub credential_failure: Option<String>,
+}
+
+/// Why the Inbox is empty. Computed by [`Sidebar::inbox_diagnosis`] from
+/// the sidebar's own view state plus the injected [`InboxHealth`]; each
+/// variant renders a panel that names the reason and offers the fix,
+/// replacing the old one-size-fits-all "No PRs or issues yet" key list
+/// (issue #1461, acceptance criterion 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InboxDiagnosis {
+    /// No provider enabled yet — teach the worktree flow that needs no
+    /// GitHub at all, and offer the setup wizard as the way to add one.
+    FirstRun,
+    /// A provider's credentials/token failed; name it and point at the fix.
+    CredentialFailure { provider: String },
+    /// Active view filters hid every row; name the count and offer to widen.
+    FiltersExcludeAll { count: usize },
+    /// Providers enabled but no poll has succeeded yet — still loading.
+    Syncing,
+    /// Everything is configured and polling succeeded; nothing is open.
+    /// Say so and pivot to starting a worktree session.
+    NothingOpen,
+}
+
 impl Sidebar {
     pub fn new(id: PaneId) -> Self {
         Self {
@@ -582,6 +632,7 @@ impl Sidebar {
             model_shorts: HashMap::new(),
             agent_registry: lazybox_tui_core::agents::registry(),
             attention: lazybox_config::AttentionConfig::default(),
+            inbox_health: InboxHealth::default(),
             projects: BTreeMap::new(),
             default_agent: "claude".to_string(),
             conventions: lazybox_core::Conventions::default(),
@@ -603,7 +654,8 @@ impl Sidebar {
             searched_keys: std::collections::HashSet::new(),
             broadcast_selected: std::collections::HashSet::new(),
             sweep: None,
-            keep_awake: false,
+            keep_awake_active: false,
+            keep_awake_on_battery: false,
             auto_wait_on_limit: false,
             show_agent_model: true,
             usage: lazybox_tui_core::usage::UsageTracker::default(),
@@ -635,11 +687,14 @@ impl Sidebar {
         self.now_override = Some(now);
     }
 
-    /// Record whether `ui.keep_awake` is on, so the header can badge
-    /// active sleep inhibition. Display-only — the daemon holds the
-    /// actual inhibitor.
-    pub fn set_keep_awake(&mut self, keep_awake: bool) {
-        self.keep_awake = keep_awake;
+    /// Record the daemon's authoritative keep-awake status (whether it's
+    /// holding the inhibitor, and whether it's on battery), so the header
+    /// can badge active sleep inhibition and tell the truth about what the
+    /// assertion protects on a macOS laptop (#1485). Fed by
+    /// `Event::KeepAwakeStatus`.
+    pub fn set_keep_awake_status(&mut self, active: bool, on_battery: bool) {
+        self.keep_awake_active = active;
+        self.keep_awake_on_battery = on_battery;
     }
 
     /// Record whether `ui.auto_wait_on_limit` is on. When set, the rising-edge
@@ -759,6 +814,34 @@ impl Sidebar {
         self.usage.note_quota(agent_id, quota);
     }
 
+    /// The live spend/headroom badge for an agent terminal (#1490): the
+    /// binding plan-quota window's remaining headroom when one is known — the
+    /// number that changes behaviour mid-task on a subscription — else the
+    /// session's metered dollar cost, the real signal for API-key users.
+    /// `None` when neither is known, so the tab shows nothing rather than a
+    /// misleading `$0.00`.
+    pub fn terminal_usage_badge(
+        &self,
+        session_key: &str,
+        agent_id: &str,
+    ) -> Option<crate::components::terminal_stack::UsageBadge> {
+        use crate::components::terminal_stack::UsageBadge;
+        let now_unix = self.now().timestamp();
+        if let Some(quota) = self.usage.quota_for(agent_id)
+            && let Some((label, left)) = lazybox_tui_core::usage::quota_headroom(&quota, now_unix)
+        {
+            return Some(UsageBadge {
+                text: format!("{label} {left}% left"),
+                headroom: true,
+            });
+        }
+        let cost = self.usage.cost_micros_for_session(session_key);
+        (cost > 0).then(|| UsageBadge {
+            text: lazybox_tui_core::usage::format_cost_micros(cost),
+            headroom: false,
+        })
+    }
+
     /// Attribute a usage-limit reset hint to the terminal's agent, so the
     /// summary can show ` · resets 3pm` while that provider is limited
     /// (`AgentUsageLimit`). A hint for a terminal we don't track is
@@ -855,8 +938,8 @@ impl Sidebar {
             .collect()
     }
 
-    /// True while ≥1 agent in the sidebar is `Working` — the same
-    /// predicate the daemon's keep-awake watcher inhibits sleep on.
+    /// True while ≥1 agent in the sidebar is `Working` — drives the
+    /// working spinner cadence.
     fn any_agent_working(&self) -> bool {
         self.agents
             .values()
@@ -1444,6 +1527,18 @@ impl Sidebar {
         // first one it reaches.
         self.sweep = anchor.or_else(|| landed.clone()).map(|a| (a, landed));
         self.visible_broadcast_selected_count()
+    }
+
+    /// Arm a visual-select sweep (#1448) on the cursor row: mark it and
+    /// anchor the sweep here, so the next [`Self::extend_selection`] grows /
+    /// shrinks from this row exactly like the Shift-↑/↓ path. Returns the
+    /// visible-and-selected count, or `None` when the cursor isn't on a
+    /// workspace / session row (nothing to sweep).
+    pub fn begin_visual_select(&mut self) -> Option<usize> {
+        let key = self.selected_session_key()?.clone();
+        self.broadcast_selected.insert(key.clone());
+        self.sweep = Some((key.clone(), Some(key)));
+        Some(self.visible_broadcast_selected_count())
     }
 
     /// Visible index of a workspace's row (its `Workspace` row, or the
@@ -2493,18 +2588,75 @@ impl Sidebar {
         self.visible.len()
     }
 
-    /// True when the inbox is genuinely empty — no rows at all on the
-    /// default, unfiltered Inbox view, with no search narrowing it.
-    /// A first-run user with little/no GitHub data lands here, so the
-    /// renderer swaps the blank list for a getting-started panel that
-    /// teaches the next actions (issue #100). A list emptied by an
-    /// active filter, a non-Inbox mailbox, or a search query is NOT
-    /// this case — those are user-driven narrowings, not first-run.
-    pub fn is_getting_started(&self) -> bool {
-        self.visible.is_empty()
-            && self.mailbox == Mailbox::Inbox
-            && self.filters.is_empty()
-            && self.search.as_ref().is_none_or(|s| s.query.is_empty())
+    /// Feed the provider/sync facts the empty-inbox doctor needs but the
+    /// sidebar can't see for itself. The Model computes these from
+    /// `setup.persisted` and `status.sync` and pushes them on provider /
+    /// poll changes (issue #1461).
+    pub fn set_inbox_health(&mut self, health: InboxHealth) {
+        self.inbox_health = health;
+    }
+
+    /// Diagnose *why* the Inbox is empty, or `None` when no empty-inbox
+    /// panel should show (there are rows, it's not the Inbox mailbox, or a
+    /// live search owns the pane with its own no-matches panel). This is
+    /// the empty-inbox doctor: each `Some` variant renders a panel that
+    /// names the specific cause and its fix, so an empty pane is a
+    /// diagnosis rather than a dead end (issue #1461).
+    pub fn inbox_diagnosis(&self) -> Option<InboxDiagnosis> {
+        if self.mailbox != Mailbox::Inbox || !self.visible.is_empty() {
+            return None;
+        }
+        // A live search filtered everything away — `render_no_matches`
+        // owns that state; don't shadow it with a config diagnosis.
+        if self
+            .search
+            .as_ref()
+            .is_some_and(|s| !s.query.trim().is_empty())
+        {
+            return None;
+        }
+        // Credentials are the root cause even if a filter is also on:
+        // "widen your filter" is the wrong advice when no fresh data
+        // could arrive.
+        if let Some(provider) = &self.inbox_health.credential_failure {
+            return Some(InboxDiagnosis::CredentialFailure {
+                provider: provider.clone(),
+            });
+        }
+        // A user-applied view filter that's actually hiding rows. The
+        // test is Inbox-*eligible* workspaces (`mailbox_membership`
+        // ignoring the filters), not the raw workspace set — otherwise a
+        // quiet Inbox whose only workspaces are snoozed or merged would be
+        // wrongly blamed on the filter, and clearing it would reveal
+        // nothing.
+        if !self.filters.is_empty() && self.inbox_eligible_count() > 0 {
+            return Some(InboxDiagnosis::FiltersExcludeAll {
+                count: self.filters.len(),
+            });
+        }
+        // A completed successful poll proves a provider exists, so it
+        // outranks the local `providers_enabled` flag — which, against a
+        // remote daemon, describes *this* machine's config, not the one
+        // doing the polling. FirstRun only when nothing has polled yet.
+        if self.inbox_health.polled_ok {
+            return Some(InboxDiagnosis::NothingOpen);
+        }
+        if self.inbox_health.providers_enabled {
+            return Some(InboxDiagnosis::Syncing);
+        }
+        Some(InboxDiagnosis::FirstRun)
+    }
+
+    /// Workspaces that belong to the Inbox mailbox ignoring the active
+    /// view filters — i.e. how many rows a filter *could* be hiding.
+    /// Zero means an empty Inbox is genuinely empty (everything snoozed,
+    /// merged, or nothing at all), not filtered.
+    fn inbox_eligible_count(&self) -> usize {
+        let now = self.now();
+        self.workspaces
+            .values()
+            .filter(|w| mailbox_membership(w, Mailbox::Inbox, now, self.show_inactive_in_inbox))
+            .count()
     }
 
     /// How many *workspace* rows are visible (excluding repo headers).
@@ -3749,8 +3901,8 @@ impl Sidebar {
         self.pane_state_rev
     }
 
-    /// Test-only: number of workspace rows in the current visible list.
-    #[cfg(test)]
+    /// Number of workspace rows in the current visible list (after the
+    /// active filter / search / mailbox lens).
     pub fn visible_workspace_count(&self) -> usize {
         self.visible
             .iter()

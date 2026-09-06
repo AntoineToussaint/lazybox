@@ -218,6 +218,15 @@ impl ProviderHandle {
             Self::Linear(c) => lazybox_core::TaskProvider::list_requestable_reviewers(c, ws).await,
         }
     }
+    pub async fn list_assignable_users(
+        &self,
+        ws: &lazybox_core::Workspace,
+    ) -> Result<Vec<String>, lazybox_core::ProviderError> {
+        match self {
+            Self::Github(c) => lazybox_core::TaskProvider::list_assignable_users(c, ws).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::list_assignable_users(c, ws).await,
+        }
+    }
     pub async fn set_labels(
         &self,
         ws: &lazybox_core::Workspace,
@@ -719,36 +728,59 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
     if let Some((owner, repo, number)) = ws.pr.as_ref().and_then(github_target)
         && let Some(client) = resolve_gh_client(config).await
     {
-        match client
-            .fetch_single_pr_with_head_interactive(&owner, &repo, number)
-            .await
-        {
-            Ok(Some((fresh, head))) => {
-                // Reflect GitHub truth in the store so the CONFLICT / READY
-                // pills and any next action read fresh state.
-                super::upsert(config, fresh.clone()).await;
-                match classify_fresh_pr(&fresh, head) {
-                    FreshMergeCheck::Conflict => {
-                        let _ = config.bus.send(Event::PrMergeFailed {
-                            workspace_key: workspace_key.clone(),
-                            pr_label: fresh.id.key.clone(),
-                            reason: "the branch has merge conflicts".to_string(),
-                            conflict: true,
-                        });
-                        return;
-                    }
-                    FreshMergeCheck::Proceed { head } => {
-                        merge_ws.pr = Some(fresh);
-                        expected_head = head;
+        // While GitHub has us on a secondary cooldown, interactive
+        // requests are rationed and each one GitHub still refuses
+        // lengthens the pause. The fresh pre-check is optional; the
+        // mutation is what the user asked for. Spend the ration on the
+        // merge itself and merge from the cached row — GitHub remains
+        // the authority at merge time, so a stale head or conflict still
+        // gets its own rejection.
+        let paused_until = client
+            .rate_snapshot()
+            .retry_at
+            .filter(|at| *at > chrono::Utc::now());
+        if let Some(paused_until) = paused_until {
+            tracing::info!(
+                "merge {workspace_key}: GitHub rate-limited until {paused_until} — \
+                 skipping the fresh pre-merge check, merging from cached state"
+            );
+            let _ = config.bus.send(Event::provider_error_retryable(
+                "merge",
+                "GitHub is rate-limited — merging from the last synced state without a fresh pre-check",
+            ));
+        }
+        if paused_until.is_none() {
+            match client
+                .fetch_single_pr_with_head_interactive(&owner, &repo, number)
+                .await
+            {
+                Ok(Some((fresh, head))) => {
+                    // Reflect GitHub truth in the store so the CONFLICT / READY
+                    // pills and any next action read fresh state.
+                    super::upsert(config, fresh.clone()).await;
+                    match classify_fresh_pr(&fresh, head) {
+                        FreshMergeCheck::Conflict => {
+                            let _ = config.bus.send(Event::PrMergeFailed {
+                                workspace_key: workspace_key.clone(),
+                                pr_label: fresh.id.key.clone(),
+                                reason: "the branch has merge conflicts".to_string(),
+                                conflict: true,
+                            });
+                            return;
+                        }
+                        FreshMergeCheck::Proceed { head } => {
+                            merge_ws.pr = Some(fresh);
+                            expected_head = head;
+                        }
                     }
                 }
-            }
-            // PR no longer visible (merged out-of-band / transferred /
-            // scope revoked): fall through and let the mutation surface
-            // GitHub's own verdict.
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!("merge {workspace_key}: pre-merge status fetch failed: {e}");
+                // PR no longer visible (merged out-of-band / transferred /
+                // scope revoked): fall through and let the mutation surface
+                // GitHub's own verdict.
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("merge {workspace_key}: pre-merge status fetch failed: {e}");
+                }
             }
         }
     }
@@ -1592,6 +1624,54 @@ pub async fn handle_fetch_requestable_reviewers(
         Err(e) => {
             tracing::warn!("fetch_requestable_reviewers {workspace_key}: {e:?}");
             emit_err(&format!("requestable reviewers fetch failed: {e}"));
+        }
+    }
+}
+
+/// Handle `Command::FetchAssignableUsers`: pull the accounts assignable
+/// on the workspace's PR / issue and broadcast `Event::AssignableUsers`
+/// so the TUI can populate the assignees picker. A repository-level
+/// query, so it works for issue-only workspaces (no PR needed). On
+/// failure, broadcast a `ProviderError` with source `"assignable-users"`
+/// — the client is waiting on this reply to mount the picker, and staying
+/// silent would leave its pending request armed forever. On that failure
+/// event the client falls back to a picker built from interaction-derived
+/// candidates.
+pub async fn handle_fetch_assignable_users(config: &ServerConfig, workspace_key: WorkspaceKey) {
+    let emit_err = |msg: &str| {
+        let _ = config
+            .bus
+            .send(Event::provider_error_retryable("assignable-users", msg));
+    };
+    let Some(ws) = load_workspace(config, &workspace_key) else {
+        tracing::debug!("fetch_assignable_users: workspace {workspace_key} not found");
+        emit_err(&format!(
+            "fetch assignable users: workspace {workspace_key} not found"
+        ));
+        return;
+    };
+    let provider = match build_provider_for_workspace(config, &workspace_key).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("fetch_assignable_users: {e}");
+            emit_err(&e);
+            return;
+        }
+    };
+    match provider.list_assignable_users(&ws).await {
+        Ok(logins) => {
+            tracing::info!(
+                "fetch_assignable_users {workspace_key}: {} candidates",
+                logins.len()
+            );
+            let _ = config.bus.send(Event::AssignableUsers {
+                workspace_key,
+                logins,
+            });
+        }
+        Err(e) => {
+            tracing::warn!("fetch_assignable_users {workspace_key}: {e:?}");
+            emit_err(&format!("assignable users fetch failed: {e}"));
         }
     }
 }

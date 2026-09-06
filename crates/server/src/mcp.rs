@@ -24,6 +24,12 @@
 //! distinct scopes ever written (one per session that posts), which is not
 //! reclaimed here since notes deliberately outlive their author.
 //!
+//! Phase 2 (#1420) adds the **push** side, closing the two-way bus:
+//!
+//! - `notify_session` — actively poke another session, delivering text through
+//!   the same settle-gated inject the TUI's send-to-session and `/v1/agents/inject`
+//!   use, so a pasted instruction never lands in a permission prompt.
+//!
 //! Identity is **implicit from the connection**: each spawned agent carries a
 //! per-session bearer token (minted at spawn, see the spawn wiring in a later
 //! phase) that the daemon maps back to its [`SessionKey`] via
@@ -223,6 +229,22 @@ struct ReadNotesArgs {
     /// Keep only notes posted at or after this unix-millisecond timestamp.
     #[serde(default)]
     since: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct NotifySessionArgs {
+    /// Workspace key of the target session (from `list_sessions`).
+    workspace: String,
+    /// The instruction to deliver into that agent's composer.
+    text: String,
+    /// Submit after pasting (`true`, the default: paste + run) or leave it in
+    /// the target's composer for its operator to review and send (`false`).
+    #[serde(default = "default_notify_submit")]
+    submit: bool,
+}
+
+fn default_notify_submit() -> bool {
+    true
 }
 
 /// One blackboard note, stored as a JSON string in the kv under
@@ -578,6 +600,102 @@ impl LazyboxMcp {
                 .await?,
         ))
     }
+
+    /// Push `text` into `workspace`'s running agent over the same settle-gated
+    /// inject the JSON gateway's `/v1/agents/inject` uses. Rejects an empty
+    /// body and a self-notify (which would inject into the caller's own
+    /// composer and could loop); returns an error result — not an `Err` — when
+    /// the target has no live agent, so the caller can see the miss.
+    async fn notify_session_payload(
+        &self,
+        caller: &SessionKey,
+        workspace: &str,
+        text: &str,
+        submit: bool,
+    ) -> Result<CallToolResult, McpError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(McpError::invalid_request(
+                "notification text is empty",
+                None,
+            ));
+        }
+        if text.len() > MAX_NOTIFY_BYTES {
+            return Err(McpError::invalid_request(
+                format!(
+                    "notification text exceeds {MAX_NOTIFY_BYTES} bytes (send a distilled instruction, not raw output)"
+                ),
+                None,
+            ));
+        }
+        let target = SessionKey::from(workspace);
+        if &target == caller {
+            return Err(McpError::invalid_request(
+                "cannot notify your own session — pass a sibling workspace from list_sessions",
+                None,
+            ));
+        }
+        let Some(terminal_id) = self.config.terminal.running_agent_terminal(&target).await else {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
+                "no running agent in workspace {workspace}"
+            ))]));
+        };
+        // Audit trail: who poked whom. The body is not logged — only its size —
+        // so an injected instruction never leaks into daemon logs.
+        tracing::info!(
+            from = %caller.as_str(),
+            to = %workspace,
+            chars = text.chars().count(),
+            submit,
+            "mcp notify_session: delivering prompt to a sibling agent"
+        );
+        // Bound the settle-gated inject the way the gateway does: it returns
+        // once the injection is *registered*, but registration waits on the
+        // per-terminal interaction lock a concurrent write can hold. A wedged
+        // lock must not pin the tool call open forever.
+        let injected = crate::spawn_handler::handle_inject_prompt(
+            &self.config,
+            terminal_id,
+            text,
+            None,
+            submit,
+        );
+        match tokio::time::timeout(NOTIFY_TIMEOUT, injected).await {
+            Ok(()) => Ok(json_result(notify_handoff_payload(workspace, submit))),
+            Err(_) => Ok(CallToolResult::error(vec![ContentBlock::text(
+                "notify timed out acquiring the target agent terminal".to_string(),
+            )])),
+        }
+    }
+
+    #[tool(
+        description = "Actively push an instruction into another agent's session by its workspace key (from list_sessions) — a direct poke, not the pull-based blackboard. Delivers through the same settle-gated inject the TUI uses, so it never lands in a permission/chooser prompt. submit=true (default) pastes and runs it; submit=false leaves it in the target's composer for its operator to review first. Returns once the message is handed off, which is NOT a confirmation the target read or ran it — a target parked at a permission prompt drops it silently. Verify with read_session when delivery matters."
+    )]
+    async fn notify_session(
+        &self,
+        Parameters(args): Parameters<NotifySessionArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        self.notify_session_payload(&caller, &args.workspace, &args.text, args.submit)
+            .await
+    }
+}
+
+/// The `notify_session` success payload. `handle_inject_prompt` returns once
+/// the injection is *registered*, not delivered: a target parked at a
+/// permission/credit prompt drops it, and that outcome surfaces only on the
+/// daemon's `/v1/events` stream, which an MCP caller does not consume. So this
+/// reports hand-off — never confirmed delivery — and points the caller at the
+/// one channel it *can* use to verify: reading the target back.
+fn notify_handoff_payload(workspace: &str, submit: bool) -> serde_json::Value {
+    serde_json::json!({
+        "handed_off": true,
+        "workspace": workspace,
+        "submit_requested": submit,
+        "delivery_confirmed": false,
+        "note": "Handed to the target's settle-gated inject; not a confirmation it was read or run. If the target was at a permission prompt the message is dropped silently. Verify with read_session when delivery matters.",
+    })
 }
 
 /// Wrap a JSON value as a successful single-text tool result.
@@ -599,7 +717,9 @@ impl ServerHandler for LazyboxMcp {
                  list_sessions, learn your own identity with whoami, and read \
                  another session's recent output with read_session. Publish \
                  distilled context to the shared blackboard with post_note and \
-                 pull it — across repos, persistently — with read_notes."
+                 pull it — across repos, persistently — with read_notes. To \
+                 actively poke another session, push an instruction into it with \
+                 notify_session."
                     .to_string(),
             )
     }
@@ -920,6 +1040,22 @@ fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<(
     Ok(())
 }
 
+/// Upper bound on how long `notify_session` waits for the settle-gated inject
+/// to register, so a wedged per-terminal lock can't pin the tool call open
+/// forever. Set to the JSON gateway's *default* inject timeout
+/// (`GatewayOptions::command_timeout`) for parity with the sibling caller.
+/// Must stay comfortably above `handle_inject_prompt`'s own 120s
+/// `INJECT_INPUT_DEADLINE`, or a legitimately slow composer would be cut off
+/// here before the inject path gets its full window — do not shorten below it.
+const NOTIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// Largest accepted `notify_session` body, in bytes. A notify is a distilled
+/// instruction to a sibling agent — the same kind of content as a blackboard
+/// note — so it shares [`MAX_NOTE_BYTES`]; the cap keeps a runaway agent from
+/// pasting megabytes into another session's PTY. The gateway's `/v1/agents/inject`
+/// is bounded too, by its command-frame size (`MAX_COMMAND_FRAME_BYTES`).
+const MAX_NOTIFY_BYTES: usize = MAX_NOTE_BYTES;
+
 /// kv prefix under which every blackboard note lives.
 const NOTE_KV_PREFIX: &str = "lazybox:note:";
 /// The scope every session can read from and post to, for broadcast.
@@ -1111,6 +1247,84 @@ mod tests {
                 .read_session_text("test:absent", None)
                 .await
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_session_reports_an_error_result_when_the_target_has_no_agent() {
+        // Distinct from an `Err`: a missing target is a normal miss the caller
+        // should see, so it comes back as an error tool result, not a protocol
+        // error.
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let caller = SessionKey::from("github:acme/widget#1");
+        let result = handler
+            .notify_session_payload(&caller, "test:absent", "ship it", true)
+            .await
+            .expect("payload");
+        assert_eq!(result.is_error, Some(true));
+        let text = result.content[0].as_text().expect("text").text.clone();
+        assert!(text.contains("no running agent"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn notify_session_rejects_empty_text() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let caller = SessionKey::from("a");
+        assert!(
+            handler
+                .notify_session_payload(&caller, "b", "   ", true)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_session_rejects_notifying_your_own_session() {
+        // A self-notify would inject into the caller's own composer and could
+        // loop; it's rejected before any terminal lookup.
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let me = SessionKey::from("github:acme/widget#1");
+        assert!(
+            handler
+                .notify_session_payload(&me, me.as_str(), "hello", true)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_session_rejects_oversized_text() {
+        // A notify is a distilled instruction, not raw output: a body past the
+        // cap is rejected rather than pasted megabytes into another PTY.
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let caller = SessionKey::from("a");
+        let huge = "x".repeat(MAX_NOTIFY_BYTES + 1);
+        assert!(
+            handler
+                .notify_session_payload(&caller, "b", &huge, true)
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn notify_handoff_payload_never_claims_confirmed_delivery() {
+        // The registered-not-delivered contract: the success payload must not
+        // read as "the target got it", since a target at a permission prompt
+        // silently drops the inject and no async channel tells the MCP caller.
+        let payload = notify_handoff_payload("github:acme/widget#1", true);
+        assert_eq!(payload["handed_off"], true);
+        assert_eq!(payload["delivery_confirmed"], false);
+        assert_eq!(payload["submit_requested"], true);
+        // The prior wording ("accepted") invited exactly the misread this fix
+        // removes — it must be gone.
+        assert!(payload.get("accepted").is_none(), "{payload}");
+        assert!(
+            payload["note"]
+                .as_str()
+                .expect("note")
+                .contains("read_session"),
+            "the caller must be pointed at the one channel that can verify"
         );
     }
 
@@ -1459,6 +1673,22 @@ mod tests {
             .expect("read_notes");
         let read_text = read.content[0].as_text().expect("text").text.clone();
         assert!(read_text.contains("chose approach X"), "{read_text}");
+
+        // notify_session is registered and reachable over the transport; with
+        // no live agent in the target it comes back as an error tool result.
+        let mut notify_args = serde_json::Map::new();
+        notify_args.insert("workspace".into(), "github:other/thing#7".into());
+        notify_args.insert("text".into(), "please rebase".into());
+        let notified = client
+            .call_tool(CallToolRequestParams::new("notify_session").with_arguments(notify_args))
+            .await
+            .expect("notify_session");
+        assert_eq!(notified.is_error, Some(true));
+        let notified_text = notified.content[0].as_text().expect("text").text.clone();
+        assert!(
+            notified_text.contains("no running agent"),
+            "{notified_text}"
+        );
 
         client.cancel().await.ok();
     }

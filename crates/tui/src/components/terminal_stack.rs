@@ -559,6 +559,11 @@ fn at_live_bottom(outcome: ScrollOutcome) -> bool {
     }
 }
 
+/// A resolved terminal selection from a word / line gesture (#1451):
+/// the extracted text plus its screen-absolute grid span `(anchor,
+/// focus)` for the highlight overlay.
+pub type SelectionSpan = (String, (u16, u32), (u16, u32));
+
 /// What the user right-clicked on inside the terminal grid. Returned
 /// by [`TerminalStack::target_at`] so the model can route each kind
 /// to the right opener: URLs and issue references go to the browser,
@@ -941,6 +946,16 @@ impl TerminalStreamSync {
     }
 }
 
+/// The live spend/headroom figure for an agent terminal's tab (#1490),
+/// recomputed each frame from the usage tracker. `headroom` is the plan-quota
+/// "can I keep working?" figure (accented like the sidebar's quota); otherwise
+/// `text` is the metered dollar cost, the real signal for API-key users.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageBadge {
+    pub text: String,
+    pub headroom: bool,
+}
+
 struct TerminalSlot {
     session_key: SessionKey,
     kind: TerminalKind,
@@ -1026,6 +1041,11 @@ struct TerminalSlot {
     /// the user picked a tier via a `w S` / `a S` chord. Drives the
     /// tier badge in the tab strip. `None` for a default-model spawn.
     model_label: Option<String>,
+    /// Live spend/headroom figure for this agent tab (#1490), recomputed each
+    /// frame by [`TerminalStack::refresh_usage_badges`] from the usage tracker.
+    /// `None` for shells and for agents with no metered cost or known plan
+    /// quota yet, so the badge is omitted rather than showing `$0.00`.
+    usage_badge: Option<UsageBadge>,
     /// Whether this terminal was drawn in the last frame. Set by
     /// `render_one_terminal`, reset for every slot at the top of
     /// `render`. Output for a displayed terminal is fed to the VT
@@ -1860,6 +1880,14 @@ impl TerminalStack {
             .is_some_and(|slot| matches!(slot.kind, TerminalKind::Agent(_)))
     }
 
+    /// Whether any tracked terminal — in any workspace — runs an agent.
+    /// The coach's "an agent came up" goal (#1460) reads this.
+    pub fn has_agent_terminal(&self) -> bool {
+        self.terminals
+            .values()
+            .any(|slot| matches!(slot.kind, TerminalKind::Agent(_)))
+    }
+
     pub(crate) fn terminal_agent_id(&self, id: TerminalId) -> Option<&str> {
         match &self.terminals.get(&id)?.kind {
             TerminalKind::Agent(agent_id) => Some(agent_id.as_str()),
@@ -2436,6 +2464,161 @@ impl TerminalStack {
             )
         };
         Some((project(a), project(b)))
+    }
+
+    /// Read the visible rows of terminal `id` — each `(text, column→byte
+    /// map, is_wrapped)` the same way [`Self::target_in_body`] does —
+    /// together with the viewport cell `(vx, vy)` the crossterm `(col,
+    /// row)` maps into and the frame offset to compose screen-absolute
+    /// points against. Backs the double/triple-click word / line selection
+    /// gestures (#1451). The pointer is clamped into `id`'s grid, mirroring
+    /// [`Self::selection_point`]. `None` when the grid or scrollbar is
+    /// unavailable or the pointer lands past the last row.
+    #[allow(clippy::type_complexity)]
+    fn selection_cells(
+        &mut self,
+        id: TerminalId,
+        rect: tuirealm::ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+    ) -> Option<(Vec<(String, Vec<usize>, bool)>, usize, usize, u64)> {
+        let (inner_x, inner_y, last_col, last_row) = self.grid_bounds(id, rect)?;
+        let offset = self.frame_offset_for(id)?;
+        let vx = (col.clamp(inner_x, last_col) - inner_x) as usize;
+        let vy = (row.clamp(inner_y, last_row) - inner_y) as usize;
+        let slot = self.terminals.get_mut(&id)?;
+        // The grid must reflect every byte received, not just those that
+        // arrived while on screen — mirrors `target_in_body`.
+        slot.flush_pending();
+        let snapshot = slot.vt.render_state.update(&slot.vt.terminal).ok()?;
+        let mut row_iter = slot.vt.row_iter.update(&snapshot).ok()?;
+        let mut rows: Vec<(String, Vec<usize>, bool)> = Vec::new();
+        while let Some(r) = row_iter.next() {
+            let wrapped = r
+                .raw_row()
+                .ok()
+                .and_then(|raw| raw.is_wrapped().ok())
+                .unwrap_or(false);
+            let (text, starts) = row_text_and_starts(&mut slot.vt.cell_iter, r);
+            rows.push((text, starts, wrapped));
+        }
+        if vy >= rows.len() {
+            return None;
+        }
+        Some((rows, vy, vx, offset))
+    }
+
+    /// The WORD under the crossterm `(col, row)` in terminal `id` — the
+    /// double-click gesture (#1451). Returns the word's text plus its
+    /// screen-absolute grid span `(anchor, focus)` for the highlight.
+    /// Boundaries hold alphanumerics plus the connectors in
+    /// `is_word_char` together, so a path (`src/a.rs`) or URL selects
+    /// whole; the run is widened across a soft-wrap group so a token that
+    /// spilled onto the next row still selects entire (mirrors
+    /// `target_in_body`'s stitching). The text is read straight
+    /// from the row bytes — soft wraps join with no break, which the
+    /// selection formatter won't do. `None` when the pointer sits on
+    /// whitespace or the grid can't be read.
+    pub fn word_span_at(
+        &mut self,
+        id: TerminalId,
+        rect: tuirealm::ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+    ) -> Option<SelectionSpan> {
+        let (rows, vy, vx, offset) = self.selection_cells(id, rect, col, row)?;
+        let (start, end) = wrap_group(&rows, vy);
+        // Flatten the soft-wrap group into per-cell `(viewport_row, col,
+        // byte_start, byte_end)` so word expansion crosses row boundaries
+        // with no gap — exactly how a wrapped token reads as one string.
+        let mut cells: Vec<(usize, u16, usize, usize)> = Vec::new();
+        let mut clicked: Option<usize> = None;
+        for (ri, (text, starts, _)) in rows.iter().enumerate().take(end + 1).skip(start) {
+            for c in 0..starts.len() {
+                let b = starts[c];
+                // The next *distinct* byte start bounds this cell's
+                // grapheme; a wide glyph's spacer-tail shares the head's
+                // start, so both columns resolve to the head grapheme.
+                let next = starts[c + 1..]
+                    .iter()
+                    .copied()
+                    .find(|&s| s > b)
+                    .unwrap_or(text.len());
+                if ri == vy && c == vx {
+                    clicked = Some(cells.len());
+                }
+                cells.push((ri, c as u16, b, next));
+            }
+        }
+        let idx = clicked?;
+        let char_of = |cell: &(usize, u16, usize, usize)| {
+            rows[cell.0]
+                .0
+                .get(cell.2..cell.3)
+                .and_then(|s| s.chars().next())
+                .unwrap_or(' ')
+        };
+        let ch = char_of(&cells[idx]);
+        if ch.is_whitespace() {
+            return None;
+        }
+        let (lo, hi) = if is_word_char(ch) {
+            let mut lo = idx;
+            while lo > 0 && is_word_char(char_of(&cells[lo - 1])) {
+                lo -= 1;
+            }
+            let mut hi = idx;
+            while hi + 1 < cells.len() && is_word_char(char_of(&cells[hi + 1])) {
+                hi += 1;
+            }
+            (lo, hi)
+        } else {
+            // A lone non-word, non-space glyph selects just itself.
+            (idx, idx)
+        };
+        // Slice the word out of the row bytes, skipping a wide glyph's
+        // spacer-tail (which shares the head's byte range).
+        let mut text = String::new();
+        let mut last: Option<(usize, usize)> = None;
+        for cell in &cells[lo..=hi] {
+            let key = (cell.0, cell.2);
+            if last == Some(key) {
+                continue;
+            }
+            last = Some(key);
+            if let Some(s) = rows[cell.0].0.get(cell.2..cell.3) {
+                text.push_str(s);
+            }
+        }
+        let point = |c: &(usize, u16, usize, usize)| (c.1, (offset + c.0 as u64) as u32);
+        Some((text, point(&cells[lo]), point(&cells[hi])))
+    }
+
+    /// The whole soft-wrap-joined LINE under the crossterm `(col, row)` in
+    /// terminal `id` — the triple-click gesture (#1451). Returns the joined
+    /// line text (trailing blanks trimmed) plus its screen-absolute grid
+    /// span, from column 0 of the group's first row to the last column of
+    /// its last row. `None` when the grid can't be read.
+    pub fn line_span_at(
+        &mut self,
+        id: TerminalId,
+        rect: tuirealm::ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+    ) -> Option<SelectionSpan> {
+        let (rows, vy, _vx, offset) = self.selection_cells(id, rect, col, row)?;
+        let (start, end) = wrap_group(&rows, vy);
+        let mut text = String::new();
+        for (t, _, _) in &rows[start..=end] {
+            text.push_str(t);
+        }
+        let text = text.trim_end().to_string();
+        let last_col = rows[end].1.len().saturating_sub(1) as u16;
+        Some((
+            text,
+            (0, (offset + start as u64) as u32),
+            (last_col, (offset + end as u64) as u32),
+        ))
     }
 
     /// Plain-text dump of a terminal's whole visible grid — every row
@@ -3217,6 +3400,7 @@ impl TerminalStack {
             no_permission,
             on_main,
             model_label,
+            usage_badge: None,
             displayed: false,
             pending_feed: Vec::new(),
             exited: None,
@@ -3225,6 +3409,24 @@ impl TerminalStack {
             spawned_at: std::time::Instant::now(),
             did_work: false,
             deep_scrollback_requested: false,
+        }
+    }
+
+    /// Recompute every agent tab's live spend/headroom badge (#1490) from a
+    /// lookup over the usage tracker, keyed by the slot's own `(session_key,
+    /// agent_id)`. Called once per frame before render so the figure tracks
+    /// live usage and drops a plan window the moment its reset passes; shells
+    /// carry no badge.
+    pub fn refresh_usage_badges(
+        &mut self,
+        lookup: impl Fn(&SessionKey, &str) -> Option<UsageBadge>,
+    ) {
+        for slot in self.terminals.values_mut() {
+            let TerminalKind::Agent(agent_id) = &slot.kind else {
+                continue;
+            };
+            let agent_id = agent_id.clone();
+            slot.usage_badge = lookup(&slot.session_key, &agent_id);
         }
     }
 
@@ -4195,6 +4397,7 @@ impl TerminalStack {
             // a stale "working" on a crashed tab would be actively
             // misleading.
             let exited = self.terminals.get(id).is_some_and(|s| s.exited.is_some());
+            let usage_badge = self.terminals.get(id).and_then(|s| s.usage_badge.clone());
             if let Some((label, hint_style)) = Self::agent_state_badge(
                 agent_state.unwrap_or(lazybox_ipc::AgentState::Idle),
                 exited,
@@ -4241,6 +4444,27 @@ impl TerminalStack {
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
                 ));
+                cursor = cursor.saturating_add(width);
+            }
+            // Live spend / plan headroom (#1490): the "can I keep going?"
+            // figure on the agent's own tab, answerable without visiting the
+            // sidebar. Headroom (accent) when a plan window is known; the
+            // metered dollar cost (dim) otherwise, since dollars are the real
+            // signal only for API-key users.
+            if let Some(badge) = &usage_badge {
+                let (glyph, style) = if badge.headroom {
+                    (
+                        "◔ ",
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    ("", Style::default().fg(theme.text_dim))
+                };
+                let badge_text = format!(" {glyph}{}", badge.text);
+                let width = badge_text.chars().count() as u16;
+                title_spans.push(Span::styled(badge_text, style));
                 cursor = cursor.saturating_add(width);
             }
         }
@@ -5251,6 +5475,25 @@ impl TerminalStack {
             ));
         }
 
+        // Live spend / plan headroom (#1490) — see the tab-strip surface.
+        if let Some(usage) = &slot.usage_badge {
+            let (badge, style) = if usage.headroom {
+                (
+                    format!("◔ {} ", usage.text),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                (
+                    format!("{} ", usage.text),
+                    Style::default().fg(theme.text_dim),
+                )
+            };
+            used += badge.chars().count();
+            spans.push(Span::styled(badge, style));
+        }
+
         if slot.on_main {
             let main = "⎇ main ".to_string();
             used += main.chars().count();
@@ -5680,6 +5923,35 @@ fn is_border_row(row: &str) -> bool {
 /// occupies a column, so it maps back to the wide base (the last
 /// recorded start). Covers the post-glyph `SpacerTail` and the soft-wrap
 /// `SpacerHead`.
+/// Whether `c` holds a word together for double-click selection — the
+/// usual emulator rule: alphanumerics plus the path / URL connectors,
+/// so `src/main.rs` or `https://x.com/a?b=c#d` selects whole rather
+/// than fragmenting at each separator (#1451).
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric()
+        || matches!(
+            c,
+            '_' | '-' | '.' | '/' | ':' | '@' | '~' | '+' | '=' | '#' | '%' | '?' | '&'
+        )
+}
+
+/// The inclusive `(first, last)` viewport-row range of the soft-wrap
+/// group containing row `vy`: walk back over predecessors that wrap into
+/// us, forward over rows we (or our successors) wrap into. Mirrors the
+/// stitching in [`TerminalStack::target_in_body`]. `rows[i].2` is row
+/// `i`'s soft-wrap flag.
+fn wrap_group(rows: &[(String, Vec<usize>, bool)], vy: usize) -> (usize, usize) {
+    let mut start = vy;
+    while start > 0 && rows[start - 1].2 {
+        start -= 1;
+    }
+    let mut end = vy;
+    while rows[end].2 && end + 1 < rows.len() {
+        end += 1;
+    }
+    (start, end)
+}
+
 fn row_text_and_starts(
     cell_iter: &mut vt::render::CellIterator<'static>,
     row: &vt::render::RowIteration<'static, '_>,
@@ -6813,6 +7085,105 @@ mod selection_offset_tests {
         assert_eq!(text, "line0");
     }
 
+    /// Select the word under a crossterm point via `word_span_at` — the
+    /// double-click text (#1451). A shell grid has no recap, so screen row
+    /// 3 is grid row 0 and screen col 1 is grid col 0.
+    fn select_word(stack: &mut TerminalStack, rect: Rect, col: u16, row: u16) -> Option<String> {
+        let id = stack.focused_terminal_id().expect("focused");
+        stack
+            .word_span_at(id, rect, col, row)
+            .map(|(text, _, _)| text)
+    }
+
+    #[test]
+    fn word_span_at_selects_a_whole_path() {
+        let mut stack = stack_with(TerminalKind::Shell, None, &["run src/main.rs now"]);
+        // "run " is grid cols 0-3, "src/main.rs" is cols 4-14. Grid row 0
+        // is screen row 3; grid col 8 (the 'a' in "main") is screen col 9.
+        let text = select_word(&mut stack, Rect::new(0, 0, 80, 30), 9, 3);
+        assert_eq!(
+            text.as_deref(),
+            Some("src/main.rs"),
+            "the path selects whole across its separators",
+        );
+    }
+
+    #[test]
+    fn word_span_at_stops_at_word_boundaries() {
+        let mut stack = stack_with(TerminalKind::Shell, None, &["run src/main.rs now"]);
+        // Grid col 0 ('r' of "run") is screen col 1.
+        let text = select_word(&mut stack, Rect::new(0, 0, 80, 30), 1, 3);
+        assert_eq!(
+            text.as_deref(),
+            Some("run"),
+            "a bare word stops at the space"
+        );
+    }
+
+    #[test]
+    fn word_span_at_returns_none_on_whitespace() {
+        let mut stack = stack_with(TerminalKind::Shell, None, &["run src/main.rs now"]);
+        // Grid col 3 is the space after "run" (screen col 4).
+        let id = stack.focused_terminal_id().unwrap();
+        assert!(
+            stack
+                .word_span_at(id, Rect::new(0, 0, 80, 30), 4, 3)
+                .is_none(),
+            "double-clicking whitespace selects nothing",
+        );
+    }
+
+    #[test]
+    fn line_span_at_selects_the_whole_line() {
+        let mut stack = stack_with(
+            TerminalKind::Shell,
+            None,
+            &["first line here", "second line", "third"],
+        );
+        let id = stack.focused_terminal_id().unwrap();
+        // Grid row 1 ("second line") is screen row 4; any column picks the
+        // whole line.
+        let (text, _, _) = stack
+            .line_span_at(id, Rect::new(0, 0, 80, 30), 6, 4)
+            .expect("a line span");
+        assert_eq!(text, "second line");
+    }
+
+    #[test]
+    fn is_word_char_holds_paths_and_urls_together() {
+        for c in [
+            'a', 'Z', '9', '_', '-', '.', '/', ':', '@', '~', '?', '=', '&', '#', '%', '+',
+        ] {
+            assert!(is_word_char(c), "{c:?} should be a word char");
+        }
+        for c in [' ', '\t', '(', ')', '"', '\'', ',', ';', '|'] {
+            assert!(!is_word_char(c), "{c:?} should break a word");
+        }
+    }
+
+    #[test]
+    fn wrap_group_spans_soft_wrapped_rows() {
+        // rows[i].2 is the soft-wrap flag: row 0 wraps into 1, 1 into 2,
+        // 2 ends; row 3 stands alone.
+        let rows = vec![
+            (String::new(), Vec::new(), true),
+            (String::new(), Vec::new(), true),
+            (String::new(), Vec::new(), false),
+            (String::new(), Vec::new(), false),
+        ];
+        assert_eq!(
+            wrap_group(&rows, 1),
+            (0, 2),
+            "middle of a group spans it all"
+        );
+        assert_eq!(wrap_group(&rows, 0), (0, 2), "the head still spans forward");
+        assert_eq!(
+            wrap_group(&rows, 3),
+            (3, 3),
+            "an unwrapped row is its own group"
+        );
+    }
+
     /// U1 regression (2026-08-19 audit): with no VT mutation between
     /// frames, the render path must repaint from the cached composed
     /// frame — pixel-identical to a fresh walk — and a subsequent feed
@@ -6925,6 +7296,29 @@ mod selection_offset_tests {
             text.contains("agent exited"),
             "the restart banner overlays the frozen screen: {text}"
         );
+    }
+
+    /// The live spend/headroom badge (#1490) paints on the agent's own tab
+    /// strip, so "can I keep going?" is answerable without visiting the
+    /// sidebar.
+    #[test]
+    fn tab_strip_shows_the_live_usage_badge() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        const W: u16 = 60;
+        const H: u16 = 6;
+        let area = Rect::new(0, 0, W, H);
+        let mut stack = stack_with(TerminalKind::Agent("claude".into()), None, &[]);
+        stack.terminals.get_mut(&TerminalId(1)).unwrap().usage_badge = Some(UsageBadge {
+            text: "wk 38% left".into(),
+            headroom: true,
+        });
+        let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
+        term.draw(|f| stack.render(area, f, true)).unwrap();
+        let buf = term.backend().buffer();
+        let top: String = (0..W).map(|x| buf[(x, 0)].symbol()).collect();
+        assert!(top.contains("◔ wk 38% left"), "{top:?}");
     }
 
     /// Every on-screen grid row — top and bottom boundary included —

@@ -55,7 +55,7 @@ pub fn terminal_leader_reference_rows() -> Vec<(String, String)> {
 pub(crate) use helpers::{
     emit_clipboard_copy, find_action_for_seq, find_action_for_stroke, key_event_to_stroke,
     paint_selection, rect_contains, section_rank, seq_continuations, seq_continuations_available,
-    split_for_footer,
+    split_coach, split_for_footer,
 };
 
 use crate::PaneId;
@@ -349,11 +349,6 @@ pub enum Id {
     /// injects an explicit "Use the `<skill>` skill." instruction through
     /// the same settle-gated path snippets use. See `mount_skill_picker`.
     SkillPicker,
-    /// In-app feature tour (issue #146). Stepped walkthrough card,
-    /// launched on first run (gated by `ui.tour_seen`) and on demand
-    /// via the tour shortcut. `Msg::TourFinished` marks it seen +
-    /// pops. See `realm::components::tour`.
-    Tour,
     /// Debug / sync-status window (default `Shift-D`). Read-only,
     /// scrollable view of recent provider-sync outcomes built from
     /// `self.status.sync`. No pending state — dismiss just pops it.
@@ -1043,14 +1038,6 @@ pub(crate) enum ModalFlow {
     EditorForm { stage: EditorFormStage },
     /// Editors-panel remove confirm (#1102): the id awaiting a yes/no.
     EditorRemoveConfirm { id: String },
-    /// The tour handed control to the real snippet picker. A confirmed
-    /// delivery resumes at `success_step`; cancelling or rejecting the
-    /// delivery returns to `return_step`.
-    TourSnippet {
-        terminal: lazybox_ipc::TerminalId,
-        return_step: usize,
-        success_step: usize,
-    },
     /// Remote-sandbox onboarding (#1112). Carries the accumulating
     /// [`crate::sandbox_flow::SandboxDraft`]; each answer advances its
     /// stage and re-mounts the next `Sandbox*` modal until the final
@@ -1123,11 +1110,6 @@ impl HelpQuestionKind {
 #[derive(Debug, PartialEq, Clone)]
 pub enum Msg {
     SplashConfirmed,
-    /// The feature tour was dismissed or finished — mark it seen so
-    /// it doesn't re-launch, and pop the modal.
-    TourFinished,
-    TourTrySnippet,
-    TourRepeatSnippet,
     AppClose,
     Confirmed(bool),
     InputSubmitted(String),
@@ -1501,6 +1483,18 @@ struct TerminalDrag {
     dragged: bool,
 }
 
+/// A finished terminal selection with no live gesture behind it — the
+/// double / triple-click word / line copy (#1451). Endpoints are
+/// screen-absolute grid points (see [`TerminalStack::selection_point`]),
+/// pinned to the tile the click landed in, so the reverse-video
+/// highlight tracks the text as the viewport scrolls.
+#[derive(Debug, Clone, Copy)]
+struct TerminalSelection {
+    terminal: lazybox_ipc::TerminalId,
+    anchor: (u16, u32),
+    focus: (u16, u32),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ShellCommandConfig {
     command: String,
@@ -1537,6 +1531,13 @@ pub struct Model<T: TerminalAdapter> {
     /// clears it. Toggled by `.` (sidebar) or `]]f` (terminal);
     /// `]]<digit>` jumps straight to a specific agent.
     focus_mode: bool,
+    /// Visual-select mode (#1448): while `true`, plain `j`/`k` (and
+    /// arrows) drive the multi-select `extend_selection` sweep in the
+    /// focused pane (sidebar or activity) instead of moving the cursor —
+    /// an encoding-independent alternative to Shift-↑/↓. Armed by the
+    /// `VisualSelect` action (`V`); cleared by `Esc`, a second `V`, an
+    /// action key, or a pane-focus change.
+    visual_select: bool,
     /// Focus-mode multi-workspace layout (#1258). Active only while
     /// `focus_mode` is on; `Single` renders exactly the historical
     /// one-fullscreen-terminal focus mode. Cycled by `]]v`, persisted
@@ -1639,6 +1640,12 @@ pub struct Model<T: TerminalAdapter> {
     /// server-side actions (shell PTY, agents) and machine-local ones
     /// (browser open, notifications) stay available. See #742.
     remote: bool,
+    /// True when this client drives a *practice* daemon (`lazybox
+    /// practice`, #1459) — a sandboxed, simulated inbox. Draws the
+    /// permanent practice banner so the session can never be mistaken for
+    /// the real inbox. Purely cosmetic on the client; isolation is enforced
+    /// at boot by the sandboxed `LAZYBOX_HOME`.
+    practice: bool,
     /// Watches the inbound daemon-event channel depth after each
     /// drain. A backlog that climbs tick-over-tick means the TUI is
     /// consuming slower than the daemon produces — the signature of a
@@ -1807,6 +1814,18 @@ pub struct Model<T: TerminalAdapter> {
     /// scrollback (#432). On Up the whole span is extracted from
     /// libghostty's grid and copied to the host clipboard via OSC 52.
     terminal_drag: Option<TerminalDrag>,
+    /// Persistent terminal selection from a double / triple-click (#1451).
+    /// Unlike a drag it has no live gesture keeping it alive, so it's kept
+    /// here and painted every frame (screen-absolute, so it stays glued to
+    /// its text as output scrolls) until the next terminal click or
+    /// keystroke clears it.
+    terminal_selection: Option<TerminalSelection>,
+    /// Click bookkeeping for terminal double / triple-click detection:
+    /// `(col, row, when, count)`. A press at the same cell within
+    /// `DOUBLE_CLICK_WINDOW` increments `count` (1 = single, 2 = word,
+    /// ≥3 = line). Separate from `last_click` (the sidebar / activity
+    /// double-click), which only needs a 2-state pair.
+    terminal_click: Option<(u16, u16, std::time::Instant, u8)>,
     /// `]]` escape latch: first press of the escape char arms; a second
     /// within the window arms the `]]` *leader* (see `terminal_leader_armed`)
     /// instead of forwarding to the PTY. Armed from the terminal pane and,
@@ -1898,6 +1917,12 @@ pub struct Model<T: TerminalAdapter> {
     /// picker. Same async-mount contract as [`Self::awaiting_repo_labels`]:
     /// armed before any modal, disarmed by the reply / fetch-failure.
     awaiting_requestable_reviewers: Option<lazybox_core::WorkspaceKey>,
+    /// Workspace whose assignable-user set we've asked the daemon for
+    /// (`g a` → `Command::FetchAssignableUsers`), waiting on the async
+    /// `Event::AssignableUsers` reply to mount the picker. Same
+    /// async-mount contract as [`Self::awaiting_requestable_reviewers`]:
+    /// armed before any modal, disarmed by the reply / fetch-failure.
+    awaiting_assignable_users: Option<lazybox_core::WorkspaceKey>,
     /// Exact checkout whose diff response this client is waiting for.
     pending_diff_session: Option<(lazybox_core::WorkspaceKey, lazybox_ipc::WorkspaceDiffTarget)>,
     /// Optimistic mutations applied locally and awaiting the daemon's
@@ -2238,11 +2263,22 @@ pub struct Model<T: TerminalAdapter> {
     /// stashed at mount so a pick can't land on a drifted default.
     pub(crate) default_model_agent: Option<String>,
     /// Set at startup from `ui.tour_seen` (inverted): `true` means
-    /// the feature tour should auto-launch once the panes are
-    /// visible. Cleared the moment the tour mounts so it never
-    /// double-fires; manual `Shift-T` invocation ignores it. See
-    /// `maybe_mount_tour` / `mount_tour`.
+    /// the onboarding coach should auto-launch once the panes are
+    /// visible. Cleared the moment the coach starts so it never
+    /// double-fires; manual coach-key invocation ignores it. See
+    /// `maybe_start_coach` / `start_coach`.
     auto_tour_pending: bool,
+    /// The active onboarding coach rail (#1460), or `None` when it's
+    /// not running. A docked strip, not a modal: it's carved out of the
+    /// pane area in `view()` and never occludes a pane. See `coach`.
+    coach: Option<crate::realm::coach::Coach>,
+    /// `display.ascii_glyphs`, cached so the coach rail can pick ASCII
+    /// fallbacks without re-reading config.
+    coach_ascii: bool,
+    /// The coach step a returning user resumes at, from `ui.coach_step`
+    /// (clamped). `start_coach`'s auto-launch path reads it; an explicit
+    /// re-run restarts from the top instead.
+    coach_resume_step: usize,
     /// Progressive feature-discovery tips (#115). `tips_enabled`
     /// mirrors `ui.show_tips` (opt-out); `tips_seen` mirrors
     /// `ui.tour_seen` but per-tip (ids already surfaced, persisted so
@@ -2322,7 +2358,9 @@ pub struct Preselect {
     pub session_id_raw: Option<String>,
 }
 
-use crate::realm::layout::{LayoutCtx, apply_activity_mode, focus_mode_areas, pane_areas};
+use crate::realm::layout::{
+    LayoutCtx, apply_activity_mode, fit_activity_height, focus_mode_areas, pane_areas,
+};
 use crate::realm::setup_ctx::{SettingsAction, SetupCtx};
 use crate::realm::status_ctx::StatusCtx;
 use lazybox_config::ActivityPaneMode;
@@ -2466,6 +2504,7 @@ impl<T: TerminalAdapter> Model<T> {
             viewer_logins: std::collections::HashMap::new(),
             focus: PaneFocus::Sidebar,
             focus_mode: false,
+            visual_select: false,
             focus_layout: lazybox_config::FocusLayout::Single,
             focus_pane: 0,
             focus_pane_slots: [None, None, None, None],
@@ -2485,6 +2524,7 @@ impl<T: TerminalAdapter> Model<T> {
             remote_require_connect: false,
             event_backlog: helpers::BacklogMonitor::default(),
             remote: false,
+            practice: false,
             redraw: true,
             quit: false,
             setup: SetupCtx::new(),
@@ -2523,6 +2563,8 @@ impl<T: TerminalAdapter> Model<T> {
             mouse_capture_requester,
             url_opener: Box::new(crate::editors::open_url),
             terminal_drag: None,
+            terminal_selection: None,
+            terminal_click: None,
             preselect: None,
             layout: LayoutCtx::new(),
             modal_flow: None,
@@ -2533,6 +2575,7 @@ impl<T: TerminalAdapter> Model<T> {
             awaiting_repo_labels: None,
             merge_history_repo: None,
             awaiting_requestable_reviewers: None,
+            awaiting_assignable_users: None,
             pending_diff_session: None,
             pending_mutations: Vec::new(),
             removal_prompt_queue: std::collections::VecDeque::new(),
@@ -2606,6 +2649,9 @@ impl<T: TerminalAdapter> Model<T> {
             pr_chat_held_question: None,
             default_model_agent: None,
             auto_tour_pending: false,
+            coach: None,
+            coach_ascii: false,
+            coach_resume_step: 0,
             tips_enabled: false,
             tips_seen: Vec::new(),
             tip_shown_this_session: false,
@@ -2720,6 +2766,14 @@ impl<T: TerminalAdapter> Model<T> {
     /// the first daemon Snapshot lands.
     pub fn with_preselect(mut self, p: Preselect) -> Self {
         self.preselect = Some(p);
+        self
+    }
+
+    /// Mark this client as driving a *practice* daemon (`lazybox practice`,
+    /// #1459). Draws the permanent practice banner so the simulated inbox can
+    /// never be mistaken for the real one.
+    pub fn with_practice(mut self) -> Self {
+        self.practice = true;
         self
     }
 
@@ -3015,6 +3069,45 @@ impl<T: TerminalAdapter> Model<T> {
         // Mirror narrowed-repo scopes into the sidebar so headers
         // appear at startup, before the first poll completes.
         self.refresh_subscribed_projects();
+        // Enabled-providers is one of the empty-inbox doctor's inputs.
+        self.refresh_inbox_health();
+    }
+
+    /// Recompute the empty-inbox doctor's facts (issue #1461) from the
+    /// persisted setup and the sync log — data the sidebar can't observe
+    /// on its own — and push them into the pane. Cheap; called only when
+    /// a provider selection or a poll outcome changes.
+    pub(crate) fn refresh_inbox_health(&mut self) {
+        use crate::realm::status_ctx::SyncOutcome;
+        let providers_enabled = self
+            .setup
+            .persisted
+            .as_ref()
+            .is_some_and(|p| !p.enabled_providers.is_empty());
+        // `recent()` is newest-first, so the first entry seen for a source
+        // is that source's latest outcome — collapse to per-source latest
+        // in one borrowing pass, without cloning the whole log.
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut polled_ok = false;
+        let mut credential_failure: Option<String> = None;
+        for e in self.status.sync.recent() {
+            if !seen.insert(e.source.as_str()) {
+                continue;
+            }
+            match &e.outcome {
+                SyncOutcome::Ok { .. } => polled_ok = true,
+                SyncOutcome::Err { kind, .. } if kind == "auth" => {
+                    credential_failure.get_or_insert_with(|| e.source.clone());
+                }
+                _ => {}
+            }
+        }
+        self.sidebar
+            .set_inbox_health(crate::components::sidebar::InboxHealth {
+                providers_enabled,
+                polled_ok,
+                credential_failure,
+            });
     }
 
     /// Hand in the editors detected at startup. The `E` shortcut
@@ -3161,13 +3254,23 @@ impl<T: TerminalAdapter> Model<T> {
         // and override-induced chord collisions surface as a footer
         // warning + messages-log details instead of failing silently.
         self.surface_keymap_warnings(keymap_warnings);
-        // Arm the feature tour for anyone who hasn't seen it; the boot
-        // path decides when (if ever) to mount it.
+        // Arm the onboarding coach for anyone who hasn't seen it; the
+        // boot path decides when (if ever) to start it. The resume
+        // position + ascii glyphs feed the rail when it launches.
+        self.coach_ascii = user_config.display.ascii_glyphs;
+        self.coach_resume_step = user_config
+            .ui
+            .coach_step
+            .min(crate::realm::coach::STEP_COUNT - 1);
         self.set_auto_tour(!user_config.ui.tour_seen);
         // Seed progressive feature tips (#115): the opt-out flag plus
         // the ids already shown so they never repeat.
         self.set_tips(user_config.ui.show_tips, user_config.ui.tips_seen.clone());
-        self.set_splits(user_config.ui.sidebar_pct, user_config.ui.right_top_pct);
+        self.set_splits(
+            user_config.ui.sidebar_pct,
+            user_config.ui.right_top_pct,
+            user_config.ui.activity_user_resized,
+        );
     }
 
     /// Test-only: read access to the sidebar pane, so the boot-path
@@ -3233,7 +3336,9 @@ impl<T: TerminalAdapter> Model<T> {
             default_agent,
             display,
         );
-        self.sidebar.set_keep_awake(ui.keep_awake);
+        // Note: the `☼ awake` badge is driven by the daemon's
+        // authoritative `Event::KeepAwakeStatus`, not this client's config
+        // — so nothing to apply here for keep_awake (#1485).
         self.sidebar.set_auto_wait_on_limit(ui.auto_wait_on_limit);
         self.sidebar.set_show_agent_model(ui.show_agent_model);
         self.sidebar.set_usage_summary(ui.usage_summary);
@@ -3263,65 +3368,157 @@ impl<T: TerminalAdapter> Model<T> {
         self.auto_fix_opt_out_labels = opt_out_labels;
     }
 
-    /// Arm the auto-launch of the feature tour. `main.rs` passes
+    /// Arm the auto-launch of the onboarding coach. `main.rs` passes
     /// `!ui.tour_seen` so a brand-new install (or one upgraded into
-    /// the feature) gets the walkthrough once. `maybe_mount_tour`
+    /// the feature) gets the walkthrough once. `maybe_start_coach`
     /// consumes the flag at the right moment (after setup, or at
     /// startup for returning users).
     pub fn set_auto_tour(&mut self, pending: bool) {
         self.auto_tour_pending = pending;
     }
 
-    /// Launch the tour now if it's armed. Idempotent — mounting
-    /// clears the flag, so this is safe to call from multiple boot
-    /// paths (returning-user startup and first-run wizard finish).
-    pub fn maybe_mount_tour(&mut self) {
-        if self.auto_tour_pending {
-            self.mount_tour();
-        }
-    }
-
-    /// Mount the feature-tour overlay. Used by the `Shift-T` shortcut
-    /// (always) and by `maybe_mount_tour` (when armed). Clears the
-    /// auto-launch flag so it can't re-fire.
-    pub(crate) fn mount_tour(&mut self) {
-        self.mount_tour_at(0);
-    }
-
-    pub(crate) fn mount_tour_at(&mut self, step: usize) {
-        use crate::realm::components::tour::Tour;
-        self.auto_tour_pending = false;
-        if matches!(self.modal_stack.last(), Some(Id::Tour)) {
+    /// Try to auto-start the armed coach. Deliberately *not* fired
+    /// unconditionally: the whole curriculum (look at a task → work on
+    /// it → step out → come back → jump) is unsatisfiable with an empty
+    /// inbox, so launching then would strand a first-run user (no repos,
+    /// or a poll that hasn't landed yet) on step 1 forever. The arm is
+    /// kept until there's a workspace to act on and no modal is up, so
+    /// the coach appears the moment the inbox has something in it — and
+    /// never over a blank sidebar. Called at boot and each tick.
+    pub fn maybe_start_coach(&mut self) {
+        if !self.auto_tour_pending || self.coach.is_some() {
             return;
         }
-        self.mount_modal(Id::Tour, Tour::at_step(step, self.catalog.clone()));
+        if !self.modal_stack.is_empty() || self.sidebar.visible_workspace_count() == 0 {
+            return;
+        }
+        self.auto_tour_pending = false;
+        let at = self.coach_resume_step;
+        self.start_coach(at);
     }
 
-    fn start_tour_snippet_exercise(&mut self, return_step: usize, success_step: usize) {
-        let Some(terminal) = self.terminals.active_terminal_id() else {
-            self.flash_info("open an agent terminal to try this — or press → to skip");
+    /// Toggle the coach from the coach shortcut / `?`: end it if it's
+    /// up, else re-run it from the top. An explicit re-run always
+    /// restarts at step 1, unlike the auto-launch which resumes. With an
+    /// empty inbox there's nothing the curriculum can act on, so say so
+    /// rather than opening an unsatisfiable rail.
+    pub(crate) fn toggle_coach(&mut self) {
+        self.auto_tour_pending = false;
+        if self.coach.is_some() {
+            self.end_coach();
+        } else if self.sidebar.visible_workspace_count() == 0 {
+            self.flash_info("track a repo or start a workspace first, then re-run the coach");
+        } else {
+            self.start_coach(0);
+        }
+    }
+
+    /// Start the coach rail at `step`, seeding its per-step baseline
+    /// from the current sidebar cursor.
+    pub(crate) fn start_coach(&mut self, step: usize) {
+        self.auto_tour_pending = false;
+        let cursor = self.sidebar.cursor();
+        self.coach = Some(crate::realm::coach::Coach::new(
+            self.catalog.clone(),
+            step,
+            self.coach_ascii,
+            self.ui_defaults.terminal_escape_char,
+            cursor,
+        ));
+        self.redraw = true;
+    }
+
+    /// Advance the coach past the current step (the keyboard / click
+    /// skip). Ending the coach when there's no next step.
+    pub(crate) fn coach_skip_step(&mut self) {
+        let cursor = self.sidebar.cursor();
+        let Some(coach) = self.coach.as_mut() else {
             return;
         };
-        if !self.terminals.terminal_is_agent(terminal) {
-            self.flash_info("the tour exercise needs an agent terminal — or press → to skip");
-            return;
+        let finished = coach.advance(cursor);
+        let step = coach.step_index();
+        self.persist_coach_step(step);
+        if finished {
+            self.end_coach();
         }
-        if return_step == crate::realm::components::tour::REPEAT_SNIPPET_STEP
-            && self.recent_snippets.is_empty()
-        {
-            self.flash_info("send a snippet first — or press → to skip this exercise");
-            return;
-        }
-        self.pop_modal();
-        self.set_modal_flow(ModalFlow::TourSnippet {
-            terminal,
-            return_step,
-            success_step,
-        });
-        self.mount_snippet_picker(String::new());
+        self.redraw = true;
     }
 
-    /// Persist `ui.tour_seen = true` so the tour stops auto-launching.
+    /// End the coach (skip-all / completion): persist `ui.tour_seen` so
+    /// it won't auto-launch again, and drop the rail.
+    pub(crate) fn end_coach(&mut self) {
+        if self.coach.take().is_some() {
+            self.mark_tour_seen();
+            self.redraw = true;
+        }
+    }
+
+    /// Note a real dispatched action the coach's goals care about (a
+    /// jump-to-signal). Called from `dispatch_action`.
+    pub(crate) fn note_coach_action(&mut self, action: &lazybox_tui_core::action::Action) {
+        use lazybox_tui_core::action::Action;
+        let Some(coach) = self.coach.as_mut() else {
+            return;
+        };
+        if matches!(
+            action,
+            Action::JumpToAsking | Action::JumpToFailingCi | Action::JumpToWorkspace
+        ) {
+            coach.note_jump();
+        }
+    }
+
+    /// Fold real model state into the coach each tick: advance a
+    /// satisfied step once its success line has lingered, ending the
+    /// coach when the last step completes. See `tick_tips` for the
+    /// surrounding tick discipline.
+    pub fn tick_coach(&mut self) {
+        // A boot-time arm may have been withheld because the inbox was
+        // still empty (see `maybe_start_coach`); retry each tick so the
+        // coach appears once the first poll lands a workspace.
+        self.maybe_start_coach();
+        if self.coach.is_none() {
+            return;
+        }
+        let snap = self.coach_snapshot();
+        let cursor = self.sidebar.cursor();
+        let coach = self.coach.as_mut().expect("coach present");
+        let just = coach.observe(&snap);
+        let advanced = (!just && coach.ready_to_advance()).then(|| coach.advance(cursor));
+        let step = coach.step_index();
+        if just || advanced.is_some() {
+            self.redraw = true;
+        }
+        if let Some(finished) = advanced {
+            self.persist_coach_step(step);
+            if finished {
+                self.end_coach();
+            }
+        }
+    }
+
+    /// Build the real-state snapshot the coach's goals read.
+    fn coach_snapshot(&self) -> crate::realm::coach::CoachSnapshot {
+        use crate::realm::coach::CoachFocus;
+        let focus = match self.focus {
+            PaneFocus::Sidebar => CoachFocus::Sidebar,
+            PaneFocus::Right => CoachFocus::Activity,
+            PaneFocus::Terminals => CoachFocus::Terminal,
+        };
+        crate::realm::coach::CoachSnapshot {
+            focus,
+            cursor: self.sidebar.cursor(),
+            agent_running: self.terminals.has_agent_terminal(),
+        }
+    }
+
+    /// Persist the coach's resume position so quitting mid-walkthrough
+    /// resumes where the user left off. Best-effort like `mark_tour_seen`.
+    fn persist_coach_step(&self, step: usize) {
+        lazybox_config::Config::save_with_async(move |c| c.ui.coach_step = step);
+    }
+
+    /// Persist `ui.tour_seen = true` so the coach stops auto-launching.
     /// Best-effort: a write failure just means it may re-prompt next
     /// boot, which is harmless.
     fn mark_tour_seen(&mut self) {
@@ -5095,6 +5292,10 @@ impl<T: TerminalAdapter> Model<T> {
             component,
             vec![Sub::new(EventClause::Any, SubClause::Always)],
         );
+        // A modal captures the keyboard, so an armed visual-select sweep
+        // must not survive it (see `push_modal`) — the mode would come
+        // back live after the modal closes and eat the next j/k (#1448).
+        self.visual_select = false;
         self.modal_stack.push(id.clone());
         let _ = self.app.active(&id);
         self.redraw = true;
@@ -5180,15 +5381,26 @@ impl<T: TerminalAdapter> Model<T> {
     /// Override the initial sidebar / right-top split percentages
     /// from `~/.lazybox/config.yaml::ui`. Each value is clamped to
     /// `[SPLIT_MIN, SPLIT_MAX]`. `None` keeps the default.
-    pub fn with_splits(mut self, sidebar_pct: Option<u16>, right_top_pct: Option<u16>) -> Self {
-        self.set_splits(sidebar_pct, right_top_pct);
+    pub fn with_splits(
+        mut self,
+        sidebar_pct: Option<u16>,
+        right_top_pct: Option<u16>,
+        activity_user_resized: Option<bool>,
+    ) -> Self {
+        self.set_splits(sidebar_pct, right_top_pct, activity_user_resized);
         self
     }
 
     /// In-place form of [`Self::with_splits`], used by the shared
     /// `apply_client_config` boot wiring (#1244).
-    pub fn set_splits(&mut self, sidebar_pct: Option<u16>, right_top_pct: Option<u16>) {
-        self.layout.apply_persisted(sidebar_pct, right_top_pct);
+    pub fn set_splits(
+        &mut self,
+        sidebar_pct: Option<u16>,
+        right_top_pct: Option<u16>,
+        activity_user_resized: Option<bool>,
+    ) {
+        self.layout
+            .apply_persisted(sidebar_pct, right_top_pct, activity_user_resized);
     }
 
     /// True when an editor launch must be declined because this client
@@ -6071,7 +6283,12 @@ impl<T: TerminalAdapter> Model<T> {
             self.layout.right_top_pct,
             self.layout.sidebar_user_resized,
         );
-        apply_activity_mode(rects, self.activity_pane_mode())
+        let fitted = fit_activity_height(
+            rects,
+            self.right.natural_height(),
+            self.layout.activity_user_resized,
+        );
+        apply_activity_mode(fitted, self.activity_pane_mode())
     }
 
     /// Keep focus off the Activity pane while it's hidden — Tab,
@@ -6086,13 +6303,35 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Render the current frame.
+    /// Recompute every agent tab's live spend/headroom badge (#1490) from the
+    /// sidebar's usage tracker. The tracker (cost per session, quota per agent)
+    /// lives on the sidebar; the terminal stack owns the tabs — so the badge is
+    /// resolved here, joining the two disjoint field borrows.
+    fn refresh_terminal_usage_badges(&mut self) {
+        let sidebar = &self.sidebar;
+        self.terminals
+            .refresh_usage_badges(|session_key, agent_id| {
+                sidebar.terminal_usage_badge(session_key.as_str(), agent_id)
+            });
+    }
+
     pub fn view(&mut self) {
+        // Refresh the agent tabs' live spend/headroom badges (#1490) from the
+        // usage tracker before drawing, so the figure tracks live usage and a
+        // plan window drops the instant its reset passes. Done here (not in the
+        // draw closure) because the closure holds `&mut self.terminals`.
+        self.refresh_terminal_usage_badges();
         // Pull state out before the closure so the borrow checker is
         // happy — `terminal.draw` takes `&mut self.terminal` while we
         // also need `&mut self.app` etc. inside.
         let sidebar_pct = self.layout.sidebar_pct;
         let right_top_pct = self.layout.right_top_pct;
         let sidebar_user_resized = self.layout.sidebar_user_resized;
+        let activity_user_resized = self.layout.activity_user_resized;
+        // Fit the Activity row to its content (#1469) before the draw
+        // closure — computing it there would borrow all of `self` and
+        // clash with the disjoint `&mut self.{sidebar,right}` borrows.
+        let activity_natural = self.right.natural_height();
         // Computed outside the draw closure: calling a `&self` method
         // inside it would capture all of `self` and clash with the
         // disjoint `&mut self.sidebar` / `self.right` borrows below.
@@ -6391,6 +6630,14 @@ impl<T: TerminalAdapter> Model<T> {
             };
         let mut captured_area = Rect::default();
         let mut footer_overflow: Option<Rect> = None;
+        // The coach rail (#1460) is carved out of the pane area inside
+        // the draw closure so it never occludes a pane. Resolve its
+        // active/spotlight state out here (immutable borrow) so the
+        // closure's disjoint `&mut self.coach` render borrow is free.
+        let coach_active = self.coach.is_some();
+        let coach_spot = self.coach.as_ref().map(|c| c.current_spot());
+        let coach_ascii = self.coach_ascii;
+        let practice = self.practice;
         // Split the `terminal.draw` cost into *build* (walking the widget
         // tree into the back buffer — CPU) vs *flush* (diffing + writing
         // the frame to stdout — I/O that blocks on the host terminal).
@@ -6402,9 +6649,21 @@ impl<T: TerminalAdapter> Model<T> {
         let draw_start = std::time::Instant::now();
         let build_end: std::cell::Cell<Option<std::time::Instant>> = std::cell::Cell::new(None);
         let _ = self.terminal.draw(|f| {
-            let area = f.area();
+            // Practice mode (#1459): carve the top row for the permanent
+            // banner before anything else lays out, so every screen — panes,
+            // focus mode, modals behind it — sits below it and it can never be
+            // mistaken for the real inbox.
+            let area = if practice {
+                let (banner, rest) =
+                    crate::realm::components::practice_banner::split_for_banner(f.area());
+                crate::realm::components::practice_banner::render(f, banner);
+                rest
+            } else {
+                f.area()
+            };
             captured_area = area;
             let (pane_area, footer_area) = split_for_footer(area);
+            let (pane_area, coach_area) = split_coach(pane_area, coach_active);
             let right_bottom = if focus_mode {
                 let (header, body) = focus_mode_areas(pane_area);
                 crate::realm::components::focus_header::render(
@@ -6448,11 +6707,15 @@ impl<T: TerminalAdapter> Model<T> {
                 body
             } else {
                 let (left, right_top, right_bottom) = apply_activity_mode(
-                    pane_areas(pane_area, sidebar_pct, right_top_pct, sidebar_user_resized),
+                    fit_activity_height(
+                        pane_areas(pane_area, sidebar_pct, right_top_pct, sidebar_user_resized),
+                        activity_natural,
+                        activity_user_resized,
+                    ),
                     activity_mode,
                 );
                 self.sidebar.view_in(left, f);
-                if self.right.showing_overview() {
+                let terminal_rect = if self.right.showing_overview() {
                     // Group-header overview (#1442): no terminal to share
                     // with, so the overview takes the whole right column.
                     let full = right_top.union(right_bottom);
@@ -6471,7 +6734,21 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                     self.terminals.view_in(right_bottom, f);
                     right_bottom
+                };
+                // Coach spotlight (#1460): accent-frame the pane the
+                // current step is pointing at, over the just-rendered
+                // pane border.
+                if let Some(spot) = coach_spot {
+                    let target = match spot {
+                        crate::realm::coach::Spot::Sidebar => Some(left),
+                        crate::realm::coach::Spot::Terminal => Some(terminal_rect),
+                        crate::realm::coach::Spot::None => None,
+                    };
+                    if let Some(rect) = target {
+                        crate::realm::coach::spotlight(f, rect, coach_ascii);
+                    }
                 }
+                terminal_rect
             };
 
             // Selection highlight overlay. Painted AFTER the terminal
@@ -6485,15 +6762,33 @@ impl<T: TerminalAdapter> Model<T> {
             // panes from leaking across lazybox's chrome; the pane rect
             // is only the fallback for a terminal with no recorded hit
             // geometry this frame.
-            if let Some(drag) = self.terminal_drag.as_ref() {
-                let (terminal, anchor, focus) = (drag.terminal, drag.anchor, drag.focus);
-                let clip = self
-                    .terminals
-                    .tile_grid_rect(terminal)
-                    .unwrap_or(right_bottom);
-                if let Some((start, end)) = self
-                    .terminals
-                    .selection_screen_span(terminal, clip, anchor, focus)
+            // A live drag takes precedence over a resting double/triple-click
+            // selection — they are never both meaningful, and a fresh drag
+            // clears the resting one at mouse-down anyway (#1451). A drag may
+            // fall back to the pane rect before its tile's geometry is
+            // recorded (first frame); a resting selection paints ONLY when
+            // its own tile is on screen this frame, so switching to another
+            // workspace can't bleed a stale highlight onto the new
+            // terminal.
+            let painted = self
+                .terminal_drag
+                .as_ref()
+                .map(|d| (d.terminal, d.anchor, d.focus, true))
+                .or_else(|| {
+                    self.terminal_selection
+                        .as_ref()
+                        .map(|s| (s.terminal, s.anchor, s.focus, false))
+                });
+            if let Some((terminal, anchor, focus, is_drag)) = painted {
+                let clip = match self.terminals.tile_grid_rect(terminal) {
+                    Some(grid) => Some(grid),
+                    None if is_drag => Some(right_bottom),
+                    None => None,
+                };
+                if let Some(clip) = clip
+                    && let Some((start, end)) = self
+                        .terminals
+                        .selection_screen_span(terminal, clip, anchor, focus)
                 {
                     paint_selection(f.buffer_mut(), clip, start, end);
                 }
@@ -6555,6 +6850,16 @@ impl<T: TerminalAdapter> Model<T> {
                 crate::realm::components::which_key::render_quit_hint(f, area, &keys);
             }
 
+            // Coach rail (#1460): drawn into its carved-out band below
+            // the panes and above the footer, so it never occludes a
+            // pane. Below the modal stack — a modal is a deliberate,
+            // temporary takeover the coach shouldn't fight.
+            if let Some(rail) = coach_area
+                && let Some(coach) = self.coach.as_mut()
+            {
+                coach.render(f, rail);
+            }
+
             // Modal stack last (highest z-order).
             if let Some(top) = self.modal_stack.last() {
                 self.app.view(top, f, area);
@@ -6603,22 +6908,6 @@ impl<T: TerminalAdapter> Model<T> {
                     // without a runner, just pop it.
                     self.pop_modal();
                 }
-            }
-            Msg::TourFinished => {
-                self.mark_tour_seen();
-                self.pop_modal();
-            }
-            Msg::TourTrySnippet => {
-                self.start_tour_snippet_exercise(
-                    crate::realm::components::tour::SEND_SNIPPET_STEP,
-                    crate::realm::components::tour::REPEAT_SNIPPET_STEP,
-                );
-            }
-            Msg::TourRepeatSnippet => {
-                self.start_tour_snippet_exercise(
-                    crate::realm::components::tour::REPEAT_SNIPPET_STEP,
-                    crate::realm::components::tour::REPEAT_SNIPPET_STEP + 1,
-                );
             }
             Msg::AppClose => {
                 self.quit = true;

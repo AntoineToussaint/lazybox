@@ -558,6 +558,23 @@ pub trait TaskProvider: Send + Sync {
         ))
     }
 
+    /// List the accounts assignable on the workspace's PR or issue —
+    /// the repo's assignable-user pool. A repository-level query, so it
+    /// serves issue-only workspaces (no PR required). Used to populate
+    /// the assignees picker with the full assignable set rather than
+    /// only people who already touched the task. Returns provider-native
+    /// logins; the caller merges them with interaction-derived candidates.
+    async fn list_assignable_users(
+        &self,
+        workspace: &Workspace,
+    ) -> Result<Vec<String>, ProviderError> {
+        let _ = workspace;
+        Err(ProviderError::unsupported(
+            self.name(),
+            "list_assignable_users",
+        ))
+    }
+
     /// Request reviewer(s) on the workspace's task. `logins` are
     /// provider-native account identifiers (github logins, linear
     /// user ids, …).

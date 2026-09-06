@@ -238,6 +238,9 @@ impl<T: TerminalAdapter> Model<T> {
             // doesn't leave a stale burst that suppresses the next
             // genuine shortcut.
             self.sidebar_burst.reset();
+            // Visual-select is per-pane (its anchor lives in the pane it
+            // was armed in), so leaving that pane ends the sweep (#1448).
+            self.visual_select = false;
         }
         self.focus = focus;
         self.set_focus_attr();
@@ -383,7 +386,25 @@ impl<T: TerminalAdapter> Model<T> {
     /// the run loop's drain can coalesce a whole batch into one
     /// projection — see `dispatch_daemon_event`.
     pub fn handle_daemon_event(&mut self, event: IpcEvent) {
+        // A visual-select sweep is anchored on the focused pane's current
+        // workspace (#1448). A daemon event that moves focus OFF that
+        // workspace — a removal, a filter-out, a re-sort that relocates the
+        // cursor — invalidates the anchor; keep the mode armed and the next
+        // j/k would silently re-anchor on an unrelated workspace. So if the
+        // focused workspace changes as a result of this event, end the
+        // sweep. Key-driven sweeps never pass through here (they run in
+        // `handle_pane_key`), so this can't cut a live sweep short; a
+        // routine poll that re-upserts the same focused workspace leaves the
+        // key unchanged and the mode intact.
+        let focused_before = self
+            .visual_select
+            .then(|| self.sidebar.selected_workspace_key().cloned());
         self.dispatch_daemon_event(event);
+        if let Some(before) = focused_before
+            && before != self.sidebar.selected_workspace_key().cloned()
+        {
+            self.visual_select = false;
+        }
         self.flush_pane_sync();
     }
 
@@ -1204,6 +1225,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::RemovalCancelled { .. }
                 | IpcEvent::RepoLabels { .. }
                 | IpcEvent::RequestableReviewers { .. }
+                | IpcEvent::AssignableUsers { .. }
                 | IpcEvent::SessionCreated(_)
                 | IpcEvent::WorktreeProgress { .. }
                 | IpcEvent::SessionEnded { .. }
@@ -1274,6 +1296,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::GithubDiscoveryBehind { .. }
                 | IpcEvent::SessionCosts { .. }
                 | IpcEvent::RepoMergeHistory { .. }
+                | IpcEvent::KeepAwakeStatus { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -1364,6 +1387,16 @@ impl<T: TerminalAdapter> Model<T> {
                 command: command.clone(),
                 configured: *configured,
             });
+            self.redraw = true;
+            return;
+        }
+        // The daemon's authoritative keep-awake status (#1485): it owns the
+        // sleep inhibitor and reads the governing config, so it — not the
+        // client's own (possibly different, over `--connect`) config —
+        // decides whether the badge shows and whether it must admit the
+        // macOS on-battery / closed-lid limit as `☼ awake (AC only)`.
+        if let IpcEvent::KeepAwakeStatus { active, on_battery } = &event {
+            self.sidebar.set_keep_awake_status(*active, *on_battery);
             self.redraw = true;
             return;
         }
@@ -1948,6 +1981,22 @@ impl<T: TerminalAdapter> Model<T> {
             }
             return;
         }
+        // Response to a `FetchAssignableUsers` command — mount the
+        // assignees picker once the daemon has the repo's assignable
+        // set. Same out-of-band tolerance as `RequestableReviewers`:
+        // only mount when the workspace key still matches the pending
+        // request.
+        if let IpcEvent::AssignableUsers {
+            workspace_key,
+            logins,
+        } = &event
+        {
+            if self.awaiting_assignable_users.as_ref() == Some(workspace_key) {
+                self.mount_add_assignees(workspace_key.clone(), logins.clone());
+                self.redraw = true;
+            }
+            return;
+        }
         // Resource-posture reply (2026-08-19 audit) — repaint the open
         // Shift-D window. Dropped by `update_sync_status_posture` when
         // the window is already closed.
@@ -2204,6 +2253,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::RemovalCancelled { .. }
             | IpcEvent::RepoLabels { .. }
             | IpcEvent::RequestableReviewers { .. }
+            | IpcEvent::AssignableUsers { .. }
             | IpcEvent::SessionCreated(_)
             | IpcEvent::WorktreeProgress { .. }
             | IpcEvent::SessionEnded { .. }
@@ -2272,7 +2322,18 @@ impl<T: TerminalAdapter> Model<T> {
             // deferred sweep, handled (set/clear) in the main event match.
             | IpcEvent::GithubDiscoveryBehind { .. }
             | IpcEvent::RepoMergeHistory { .. }
+            | IpcEvent::KeepAwakeStatus { .. }
             | IpcEvent::ResourcePosture(..) => {}
+        }
+        // Keep the empty-inbox doctor's sync facts (polled-ok /
+        // credential-failure) current after any poll outcome (#1461).
+        // Gated so the per-event hot path (terminal output, agent
+        // deltas) doesn't re-scan the sync log needlessly.
+        if matches!(
+            &event,
+            IpcEvent::PollCompleted { .. } | IpcEvent::ProviderError { .. }
+        ) {
+            self.refresh_inbox_health();
         }
         // Background-poll indicator. Lights up whenever the daemon
         // emits PollProgress (any cycle, initial or not); clears on
@@ -2381,6 +2442,8 @@ impl<T: TerminalAdapter> Model<T> {
                         self.handle_repo_labels_failed(message);
                     } else if source == "requestable-reviewers" {
                         self.handle_requestable_reviewers_failed(message);
+                    } else if source == "assignable-users" {
+                        self.handle_assignable_users_failed(message);
                     } else if let Some(action) = mutation_failure_label(source) {
                         // A user-initiated GitHub mutation was rejected
                         // (or never reached the provider). Pre-fix the
@@ -2526,6 +2589,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::RemovalCancelled { .. }
                 | IpcEvent::RepoLabels { .. }
                 | IpcEvent::RequestableReviewers { .. }
+                | IpcEvent::AssignableUsers { .. }
                 | IpcEvent::SessionCreated(_)
                 | IpcEvent::WorktreeProgress { .. }
                 | IpcEvent::SessionEnded { .. }
@@ -2592,6 +2656,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::SnippetKeepMine { .. }
                 | IpcEvent::SessionCosts { .. }
                 | IpcEvent::RepoMergeHistory { .. }
+                | IpcEvent::KeepAwakeStatus { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -2623,41 +2688,13 @@ impl<T: TerminalAdapter> Model<T> {
                 self.terminals
                     .apply_delivered_prompt(*terminal_id, prompt.clone());
             }
-            let tour_step = match &self.modal_flow {
-                Some(ModalFlow::TourSnippet {
-                    terminal,
-                    success_step,
-                    ..
-                }) if terminal == terminal_id => Some(*success_step),
-                _ => None,
-            };
-            if let Some(step) = tour_step {
-                self.modal_flow = None;
-                self.mount_tour_at(step);
-            }
             self.flash_info(format!("sent snippet ]{snippet_key}"));
             self.redraw = true;
         }
         // Terminal delivery failures are retryable user-input errors, not
         // provider polling failures. Keep them out of the sync log/modal and
         // surface the exact recovery action in the footer/messages history.
-        if let IpcEvent::TerminalInputRejected {
-            terminal_id,
-            message,
-        } = &event
-        {
-            let tour_step = match &self.modal_flow {
-                Some(ModalFlow::TourSnippet {
-                    terminal,
-                    return_step,
-                    ..
-                }) if terminal == terminal_id => Some(*return_step),
-                _ => None,
-            };
-            if let Some(step) = tour_step {
-                self.modal_flow = None;
-                self.mount_tour_at(step);
-            }
+        if let IpcEvent::TerminalInputRejected { message, .. } = &event {
             self.flash(
                 format!("⚠ terminal input not delivered — {message}"),
                 crate::realm::components::footer::NoticeSeverity::Retryable,
@@ -2850,6 +2887,16 @@ impl<T: TerminalAdapter> Model<T> {
                 .iter()
                 .any(|id| *id != Id::WorktreeProgress);
             if requested_here && !interactive_modal_up && !self.sidebar.search_editing() {
+                // The jump is involuntary, and `Esc` belongs to the PTY
+                // once we land — so a live multi-select would be stranded:
+                // its `✓` marks stay visible in the sidebar with no way to
+                // clear them from where the user now is (#1482). A bulk
+                // action now consumes its own selection (#1498), so this is
+                // normally a no-op; it stays as the backstop for any spawn
+                // that pulls focus while marks are live. An involuntary move
+                // takes the selection with it; a voluntary `Tab` into the
+                // terminal does not, because the user can Tab back.
+                self.sidebar.clear_broadcast_selection();
                 self.set_focus(PaneFocus::Terminals);
             }
             // Clear any legacy "Spawning…" footer notice that was set
@@ -3030,6 +3077,39 @@ impl<T: TerminalAdapter> Model<T> {
             // participants to fall back to, so surface the error rather
             // than claim we're "showing participants".
             self.flash_error(format!("✗ couldn't load requestable reviewers — {message}"));
+        }
+        self.redraw = true;
+    }
+
+    /// The daemon couldn't fetch the assignable-user set for a pending
+    /// `g a` request (`ProviderError { source: "assignable-users" }`).
+    /// Consume the stash and fall back to the interaction-derived picker
+    /// (people already on the task) so the action never dead-ends on a
+    /// fetch error. `mount_add_assignees` with an empty `fetched`
+    /// degrades to that candidate list — and to the framed empty-state
+    /// modal — on its own.
+    fn handle_assignable_users_failed(&mut self, message: &str) {
+        let Some(workspace_key) = self.awaiting_assignable_users.take() else {
+            return;
+        };
+        // Whether the picker will have anything to show without the
+        // fetched pool: existing assignees (seeded unconditionally by
+        // `mount_add_assignees`) or interaction-derived participants.
+        let has_fallback = self
+            .sidebar
+            .workspace_iter()
+            .find(|(k, _)| k.as_str() == workspace_key.as_str())
+            .and_then(|(_, w)| w.primary_task())
+            .is_some_and(|t| !t.assignees.is_empty())
+            || !self
+                .gather_candidate_logins_inclusive(&workspace_key)
+                .is_empty();
+        self.mount_add_assignees(workspace_key, Vec::new());
+        let mounted = matches!(self.modal_stack.last(), Some(Id::AddAssignees));
+        if mounted && has_fallback {
+            self.flash_hint("assignable users unavailable — showing task participants only");
+        } else {
+            self.flash_error(format!("✗ couldn't load assignable users — {message}"));
         }
         self.redraw = true;
     }

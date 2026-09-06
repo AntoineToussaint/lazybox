@@ -398,6 +398,7 @@ impl<T: TerminalAdapter> Model<T> {
         action: &lazybox_tui_core::action::Action,
     ) -> Vec<IpcCommand> {
         use lazybox_tui_core::action::ActionDef;
+        self.note_coach_action(action);
         if Self::hopper_action_requires_project(action) {
             let repo_less_hopper = self.sidebar.selected_workspace().and_then(|workspace| {
                 (workspace.hopper.is_some() && workspace.project_key.is_none())
@@ -1072,9 +1073,10 @@ impl<T: TerminalAdapter> Model<T> {
     /// `dispatch_action_confirmed`, so its eligibility re-check and
     /// optimistic UI are unchanged; a target that yields no command
     /// (gone, or no longer eligible — merged, conflicted) is counted as
-    /// skipped. The multi-select is cleared and a single aggregate
-    /// summary replaces the per-target chatter. Iterates the *snapshot*
-    /// captured at mount, never the live selection.
+    /// skipped. The multi-select is consumed by the action (#1498), so
+    /// acting on the same set again means re-marking it; a single
+    /// aggregate summary replaces the per-target chatter.
+    /// Iterates the *snapshot* captured at mount, never the live selection.
     pub(crate) fn dispatch_action_confirmed_bulk(
         &mut self,
         action: &lazybox_tui_core::action::Action,
@@ -1095,12 +1097,8 @@ impl<T: TerminalAdapter> Model<T> {
                 cmds.extend(produced);
             }
         }
-        // Preserve the marks when nothing acted (every target had
-        // regressed / gone ineligible under the modal) so the user can
-        // retry — the same no-op-survives rule `bulk_dispatch` follows.
-        if acted > 0 {
-            self.sidebar.clear_broadcast_selection();
-        }
+        // The selection is consumed by the action (#1498): `flash_bulk_summary`
+        // → `flash_bulk_outcome` drops it whenever anything actually ran.
         self.flash_bulk_summary(bulk_confirmed_verb(action), "ineligible", acted, &skipped);
         self.redraw = true;
         cmds
@@ -1108,9 +1106,9 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Fan a per-workspace IPC command over the active `v` multi-select
     /// (#899). `build` yields the command for an eligible workspace or
-    /// `None` to skip it; the shared loop collects commands, clears the
-    /// selection when anything acted, and flashes a
-    /// "<done> N · M skipped (<why>)" summary. Only called when
+    /// `None` to skip it; the shared loop collects commands, keeps the
+    /// selection (#1498 — one action, one selection), and
+    /// flashes a "<done> N · M skipped (<why>)" summary. Only called when
     /// [`bulk_active`](Self::bulk_active) — the single-row path stays in
     /// each action's own arm so its bespoke UX (pickers, optimistic
     /// redraws) is unchanged.
@@ -1132,9 +1130,6 @@ impl<T: TerminalAdapter> Model<T> {
             }
         }
         let acted = cmds.len();
-        if acted > 0 {
-            self.sidebar.clear_broadcast_selection();
-        }
         self.flash_bulk_summary(done, why_skip, acted, &skipped);
         self.redraw = true;
         cmds
@@ -1160,6 +1155,31 @@ impl<T: TerminalAdapter> Model<T> {
         } else {
             parts.join(" · ")
         };
+        self.flash_bulk_outcome(summary, acted);
+    }
+
+    /// Flash a bulk-outcome summary and drop the multi-select.
+    ///
+    /// **A bulk action consumes its selection** (#1498, reverting #1449).
+    /// Keeping the marks live so a set could be acted on twice sounded
+    /// useful and wasn't: a surviving selection is invisible state the
+    /// *next* keypress silently acts on, and the marks routinely ended up
+    /// somewhere they couldn't be cleared from — the spawn-focus
+    /// stranding #1482 had to patch. One action, one selection, gone; the
+    /// user re-marks when they mean to act again.
+    ///
+    /// `acted` is how many targets actually ran. A run where every target
+    /// was ineligible ("nothing to merge") leaves the marks alone, so a
+    /// no-op can be retried after fixing whatever blocked it.
+    ///
+    /// The single choke point for every bulk path — the fan-out
+    /// (`bulk_dispatch` / `dispatch_action_confirmed_bulk`) and the
+    /// agent-spawn / broadcast paths all land here, so none of them can
+    /// drift on this rule.
+    pub(super) fn flash_bulk_outcome(&mut self, summary: String, acted: usize) {
+        if acted > 0 {
+            self.sidebar.clear_broadcast_selection();
+        }
         self.flash_info(summary);
     }
 
@@ -2192,7 +2212,7 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_help_ask();
             }
             Action::OpenTour => {
-                self.mount_tour();
+                self.toggle_coach();
             }
             Action::OpenSyncStatus => {
                 self.mount_sync_status();
@@ -2351,7 +2371,17 @@ impl<T: TerminalAdapter> Model<T> {
                             .unwrap_or(false);
                     if has_target {
                         let ws_key = ws.key.clone();
-                        self.mount_add_assignees(ws_key);
+                        // Two-step like the reviewer picker (`g r`): ask
+                        // the daemon for the repo's assignable-user pool,
+                        // then mount the picker when `Event::AssignableUsers`
+                        // arrives. Stash the workspace key so the event
+                        // handler knows whether the response is still
+                        // relevant.
+                        self.awaiting_assignable_users = Some(ws_key.clone());
+                        cmds.push(IpcCommand::FetchAssignableUsers {
+                            workspace_key: ws_key,
+                        });
+                        self.flash_hint("loading assignees…");
                     }
                 }
             }
@@ -2631,6 +2661,31 @@ impl<T: TerminalAdapter> Model<T> {
             Action::BroadcastToSelected => {
                 self.mount_broadcast_picker();
             }
+            Action::VisualSelect => {
+                // Arm the encoding-independent sweep (#1448): mark the
+                // cursor row and switch j/k over to extend_selection in
+                // the focused pane. `Esc` / a second `V` / any action key
+                // / a pane change ends it (see handle_pane_key + set_focus).
+                let armed = match self.focus {
+                    PaneFocus::Sidebar => self.sidebar.begin_visual_select(),
+                    PaneFocus::Right => self.right.begin_activity_visual_select(),
+                    PaneFocus::Terminals => None,
+                };
+                if let Some(n) = armed {
+                    self.visual_select = true;
+                    self.flash_info(format!(
+                        "visual select — {n} marked · j/k extend · Esc cancels"
+                    ));
+                    self.sync_panes();
+                    self.redraw = true;
+                } else {
+                    // Nothing sweepable under the cursor — a repo/Space
+                    // header row, or a collapsed / empty activity pane.
+                    // Nudge instead of silently swallowing the key (#1448).
+                    self.flash_hint("visual select — nothing here to sweep");
+                    self.redraw = true;
+                }
+            }
             Action::SendToSession => {
                 let workspace = self.sidebar.selected_workspace().cloned();
                 let captured = workspace.as_ref().and_then(|workspace| {
@@ -2717,13 +2772,12 @@ impl<T: TerminalAdapter> Model<T> {
         let summary = bulk_agent_summary(&plan);
         if plan.spawned == 0 {
             // No heavy spawns — run the plan (injects, or nothing) now.
-            if plan.injected > 0 {
-                self.sidebar.clear_broadcast_selection();
-            }
+            // The selection is consumed by the action (#1498).
+            let acted = plan.spawned + plan.injected;
             if let Some(follow) = plan.follow {
                 self.spawn_follow_to = Some(follow);
             }
-            self.flash_info(summary);
+            self.flash_bulk_outcome(summary, acted);
             self.redraw = true;
             return self.run_bulk_agent_steps(plan.steps);
         }
@@ -2821,18 +2875,15 @@ impl<T: TerminalAdapter> Model<T> {
         self.run_broadcast_plan(plan)
     }
 
-    /// Materialize a broadcast plan: clear the multi-select when anything
-    /// was delivered or started (but not when every target was skipped, so
-    /// a retry keeps the marks), flash the outcome summary, and run the
+    /// Materialize a broadcast plan: flash the outcome summary (which drops
+    /// the multi-select the broadcast just consumed, #1498) and run the
     /// steps. Broadcast never follows focus (fire-and-stay), so
     /// `spawn_follow_to` is left untouched. Shared by the immediate and
     /// post-confirm paths so both materialize identically.
     fn run_broadcast_plan(&mut self, plan: BulkAgentPlan) -> Vec<IpcCommand> {
         let summary = broadcast_summary(&plan);
-        if plan.injected > 0 || plan.spawned > 0 {
-            self.sidebar.clear_broadcast_selection();
-        }
-        self.flash_info(summary);
+        let acted = plan.spawned + plan.injected;
+        self.flash_bulk_outcome(summary, acted);
         self.redraw = true;
         self.run_bulk_agent_steps(plan.steps)
     }
@@ -2917,9 +2968,17 @@ impl<T: TerminalAdapter> Model<T> {
         for key in targets {
             match self.apply_one(op, key, model_alias.as_deref()) {
                 ApplyOutcome::Spawn { step, follow } => {
+                    // Only a *local* spawn pins the focus-follow. A
+                    // `SpawnRemote` runs on another box and never produces
+                    // a local `TerminalSpawned`, so arming `spawn_follow_to`
+                    // for it would leave a pin nothing ever consumes — it
+                    // would linger and pull the focus of the *next*
+                    // unrelated local spawn instead (#1482).
+                    if matches!(step, super::BulkAgentStep::Spawn(_)) {
+                        plan.follow.get_or_insert(follow);
+                    }
                     plan.steps.push(step);
                     plan.spawned += 1;
-                    plan.follow.get_or_insert(follow);
                 }
                 ApplyOutcome::Live(step) => {
                     plan.steps.push(step);

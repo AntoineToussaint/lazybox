@@ -1070,6 +1070,9 @@ impl Server {
                         lazybox_ipc::Command::FetchRequestableReviewers { .. } => {
                             "FetchRequestableReviewers"
                         }
+                        lazybox_ipc::Command::FetchAssignableUsers { .. } => {
+                            "FetchAssignableUsers"
+                        }
                         lazybox_ipc::Command::FetchRepoMergeHistory { .. } => {
                             "FetchRepoMergeHistory"
                         }
@@ -1652,11 +1655,19 @@ pub async fn dispatch_command(
                     config.auto_fix.to_settings(),
                     spawnable_agents(&config),
                     config.setup.default_agent.clone(),
+                    config.ui.keep_awake,
                 )
             })
             .await;
             let auto_fix = match daemon_settings {
-                Ok((shell_command, shell_configured, auto_fix, agents, default_agent)) => {
+                Ok((
+                    shell_command,
+                    shell_configured,
+                    auto_fix,
+                    agents,
+                    default_agent,
+                    keep_awake_mode,
+                )) => {
                     let _ = tx.send(Event::ShellCommandConfig {
                         command: shell_command,
                         configured: shell_configured,
@@ -1665,6 +1676,23 @@ pub async fn dispatch_command(
                         agents,
                         default_agent,
                     });
+                    // The daemon owns the sleep inhibitor and reads the config
+                    // governing it, so it's the authority on the badge — not
+                    // the client's own (possibly different, over `--connect`)
+                    // config. Prime `active` from the daemon's mode over the
+                    // live agents, and probe the power source (blocking
+                    // `pmset`) only when actually holding (#1485).
+                    let active = {
+                        let working = config.terminal.any_agent_working().await;
+                        let asking = matches!(keep_awake_mode, lazybox_config::KeepAwake::Asking)
+                            && config.terminal.any_agent_asking().await;
+                        keep_awake_mode.should_hold(working, asking)
+                    };
+                    let on_battery = active
+                        && tokio::task::spawn_blocking(crate::keep_awake::on_battery)
+                            .await
+                            .unwrap_or(false);
+                    let _ = tx.send(Event::KeepAwakeStatus { active, on_battery });
                     auto_fix
                 }
                 Err(e) => {
@@ -2144,10 +2172,16 @@ pub async fn dispatch_command(
             polling::handle_collapse_into_pr(config, key).await;
         }
         lazybox_ipc::Command::Refresh => {
-            // Manual poll trigger. Force a full sweep so a just-created
-            // issue appears now instead of next scheduled sweep (issue
-            // #180), then wake the long-lived poll loop — the single
-            // source of truth for ticks.
+            // Manual poll trigger (`Shift-R`): "sweep every scoped repo
+            // now". Force a reconcile — repo-first, an unwindowed pass over
+            // the whole roster; without scopes, the unwindowed global
+            // `involves:` sweep — so a just-created issue appears now
+            // instead of next scheduled sweep (issue #180), then wake the
+            // long-lived poll loop — the single source of truth for ticks.
+            // The forced flag is satisfied by the sweep's DISCOVERY
+            // succeeding; a failed best-effort companion (merged sweep,
+            // watched repo) no longer pins it and re-runs the sweep every
+            // tick.
             //
             // An explicit refresh also clears the command-credential
             // cache: a user who just ran `gh auth login` and hit
@@ -2254,6 +2288,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::FetchRequestableReviewers { workspace_key } => {
             polling::handle_fetch_requestable_reviewers(config, workspace_key).await;
+        }
+        lazybox_ipc::Command::FetchAssignableUsers { workspace_key } => {
+            polling::handle_fetch_assignable_users(config, workspace_key).await;
         }
         lazybox_ipc::Command::FetchRepoMergeHistory { repo } => {
             polling::handle_fetch_repo_merge_history(config, repo).await;

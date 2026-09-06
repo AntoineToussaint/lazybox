@@ -107,6 +107,12 @@ impl Terminals {
         self.inner.terminal_is_agent(id)
     }
 
+    /// Whether any tracked terminal runs an agent (#1460, the coach's
+    /// "an agent came up" goal).
+    pub fn has_agent_terminal(&self) -> bool {
+        self.inner.has_agent_terminal()
+    }
+
     pub fn terminal_agent_state(&self, id: TerminalId) -> Option<lazybox_ipc::AgentState> {
         self.inner.terminal_agent_state(id)
     }
@@ -206,6 +212,15 @@ impl Terminals {
     /// the daemon's authoritative replay replaces the client grid.
     pub fn mark_visible_desynced(&mut self) {
         self.inner.mark_visible_desynced();
+    }
+
+    /// Recompute each agent tab's live spend/headroom badge (#1490) from a
+    /// lookup over the usage tracker. Called once per frame before render.
+    pub fn refresh_usage_badges(
+        &mut self,
+        lookup: impl Fn(&SessionKey, &str) -> Option<crate::components::terminal_stack::UsageBadge>,
+    ) {
+        self.inner.refresh_usage_badges(lookup);
     }
 
     /// Direct render entry point.
@@ -390,6 +405,32 @@ impl Terminals {
         focus: (u16, u32),
     ) -> String {
         self.inner.extract_selection(id, anchor, focus)
+    }
+
+    /// Forward `word_span_at` — the screen-absolute grid span of the word
+    /// under a crossterm `(col, row)`, for the double-click select+copy
+    /// gesture (#1451).
+    pub fn word_span_at(
+        &mut self,
+        id: TerminalId,
+        rect: tuirealm::ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+    ) -> Option<crate::components::terminal_stack::SelectionSpan> {
+        self.inner.word_span_at(id, rect, col, row)
+    }
+
+    /// Forward `line_span_at` — the screen-absolute grid span of the whole
+    /// soft-wrap-joined line under a crossterm `(col, row)`, for the
+    /// triple-click select+copy gesture (#1451).
+    pub fn line_span_at(
+        &mut self,
+        id: TerminalId,
+        rect: tuirealm::ratatui::layout::Rect,
+        col: u16,
+        row: u16,
+    ) -> Option<crate::components::terminal_stack::SelectionSpan> {
+        self.inner.line_span_at(id, rect, col, row)
     }
 
     /// Project a screen-absolute selection span back to terminal `id`'s

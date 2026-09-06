@@ -1290,6 +1290,15 @@ pub enum Command {
     FetchRequestableReviewers {
         workspace_key: lazybox_core::WorkspaceKey,
     },
+    /// Ask the daemon for the accounts assignable on the workspace's
+    /// PR / issue — the repo's `assignableUsers` pool — and broadcast
+    /// them back via `Event::AssignableUsers`. Used by the assignees
+    /// picker on mount so the user can assign anyone assignable, not
+    /// only people who already touched the task. A repository-level
+    /// query, so it works for issue-only workspaces (no PR required).
+    FetchAssignableUsers {
+        workspace_key: lazybox_core::WorkspaceKey,
+    },
     /// Ask the daemon for a repository's recently-merged PRs — the
     /// "what's been landing here" ledger (#1432) — and broadcast the
     /// result via `Event::RepoMergeHistory`. `repo` is `owner/name`,
@@ -2139,6 +2148,15 @@ pub enum Event {
         workspace_key: lazybox_core::WorkspaceKey,
         logins: Vec<String>,
     },
+    /// Response to `Command::FetchAssignableUsers`. Carries the GitHub
+    /// logins assignable on the workspace's PR / issue (the repo's
+    /// assignable-user pool). Keyed by `workspace_key` so the assignees
+    /// picker knows which mount to fill — same request/response-by-key
+    /// shape as `RequestableReviewers`.
+    AssignableUsers {
+        workspace_key: lazybox_core::WorkspaceKey,
+        logins: Vec<String>,
+    },
     /// Response to `Command::FetchRepoMergeHistory` (#1432): the repo's
     /// recently-merged PRs, newest first, as full `Task`s (title, body,
     /// author, url, merge time) so the modal can preview the body and
@@ -2816,6 +2834,24 @@ pub enum Event {
         watched_repos: u32,
         required_points: u32,
         allowance: u32,
+    },
+    /// The daemon's authoritative keep-awake status, for the `☼ awake`
+    /// sidebar badge (#1485). The daemon owns the sleep inhibitor and
+    /// reads the config that governs it, so — like [`Event::AutoFixPolicyConfig`]
+    /// — it is the authority, not the client's own local config (which
+    /// differs in `--connect` remote mode). `active` is whether the
+    /// inhibitor is currently held (the mode's `should_hold` over the live
+    /// agents); the client paints the badge from it directly rather than
+    /// recomputing from its own config. `on_battery` is `true` only while
+    /// `active` and the machine is on battery, where macOS honours system
+    /// sleep only on AC power and never over a closed lid — so the badge
+    /// reads `☼ awake (AC only)` and can't claim protection the OS isn't
+    /// giving; a non-macOS daemon always reports `false`. Primed once per
+    /// subscribe and re-emitted by the keep-awake watcher when either flag
+    /// changes. Appended last (bincode is ordinal-sensitive).
+    KeepAwakeStatus {
+        active: bool,
+        on_battery: bool,
     },
 }
 

@@ -116,6 +116,13 @@ pub(crate) async fn run_io_router(
             continue;
         }
 
+        // A Close must never queue behind a spawn-injection input hold: release
+        // that hold here on the router (not the possibly-parked lane worker) so
+        // `]]x` reaches `handle_close` promptly (#1444).
+        if matches!(command, Command::Close { .. }) {
+            config.spawn.note_close_requested(terminal_id);
+        }
+
         let send_error = {
             let sender = lanes.entry(terminal_id).or_insert_with(|| {
                 let (tx, lane_rx) = mpsc::channel(LANE_CAPACITY);

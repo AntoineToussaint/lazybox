@@ -414,6 +414,30 @@ mod scroll_does_not_rebuild_tests {
             .unwrap();
     }
 
+    /// #1448: arming visual-select declines (returns `None`) when there's
+    /// nothing to sweep — no workspace, or a collapsed section — so the
+    /// caller can nudge instead of silently swallowing the key. It arms
+    /// (marks the cursor row) only when the section has visible rows.
+    #[test]
+    fn begin_activity_visual_select_declines_when_nothing_to_sweep() {
+        let mut pane = RightPane::new(PaneId::new(0));
+        assert_eq!(pane.begin_activity_visual_select(), None, "no workspace");
+
+        pane.set_workspace(Some(ws_with_n_activities(3)));
+        assert_eq!(
+            pane.begin_activity_visual_select(),
+            Some(1),
+            "expanded rows → arms on the cursor row",
+        );
+
+        pane.set_activity_collapsed(true);
+        assert_eq!(
+            pane.begin_activity_visual_select(),
+            None,
+            "collapsed section → nothing to sweep",
+        );
+    }
+
     #[test]
     fn scrolling_reuses_the_cached_buffer() {
         let mut pane = RightPane::new(PaneId::new(0));
@@ -2498,5 +2522,71 @@ mod overview_tests {
         // A click on the roster row queues that workspace's selection.
         assert!(pane.handle_mouse_click(4, roster_line as u16));
         assert_eq!(pane.take_select_workspace(), Some(key));
+    }
+}
+
+#[cfg(test)]
+mod natural_height_tests {
+    //! `natural_height` is what `layout::fit_activity_height` shrinks the
+    //! reserved Activity row down to (#1469): header + separator +
+    //! description body + activity feed, floored at the renderer's
+    //! `Constraint::Min(3)` activity guarantee.
+    use super::super::{PaneId, RightPane};
+    use chrono::Utc;
+    use lazybox_core::{Activity, ActivityKind, Workspace, WorkspaceKey};
+
+    fn empty_ws() -> Workspace {
+        Workspace::empty(WorkspaceKey::new("github:o/r#1"), "main", Utc::now())
+    }
+
+    fn ws_with_n_comments(n: usize) -> Workspace {
+        let mut w = empty_ws();
+        for i in 0..n {
+            w.activity.push(Activity {
+                author: format!("u{i}"),
+                body: "x".into(),
+                created_at: Utc::now(),
+                kind: ActivityKind::Comment,
+                node_id: None,
+                path: None,
+                line: None,
+                diff_hunk: None,
+                thread_id: None,
+            });
+        }
+        w
+    }
+
+    fn pane_with(ws: Option<Workspace>) -> RightPane {
+        let mut pane = RightPane::new(PaneId::new(0));
+        pane.set_workspace(ws);
+        pane
+    }
+
+    #[test]
+    fn empty_workspace_is_header_plus_collapsed_activity() {
+        // 4 header + 1 separator + 0 body + 1 collapsed-activity row.
+        assert_eq!(pane_with(Some(empty_ws())).natural_height(), 6);
+    }
+
+    #[test]
+    fn no_workspace_collapses_to_the_same_min_shape() {
+        assert_eq!(pane_with(None).natural_height(), 6);
+    }
+
+    #[test]
+    fn activity_count_drives_height_before_first_paint() {
+        // No frame rendered yet, so the ActivityBuffer is empty and the
+        // measurement falls back to the raw activity count: 4 header + 1
+        // separator + 0 body + (comments + 3 activity chrome rows).
+        assert_eq!(
+            pane_with(Some(ws_with_n_comments(2))).natural_height(),
+            4 + 1 + (2 + 3)
+        );
+        // Each extra comment adds exactly one row.
+        assert_eq!(
+            pane_with(Some(ws_with_n_comments(10))).natural_height(),
+            4 + 1 + (10 + 3)
+        );
     }
 }

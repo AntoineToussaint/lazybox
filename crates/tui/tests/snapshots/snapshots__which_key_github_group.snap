@@ -1,6 +1,5 @@
 ---
 source: crates/tui/tests/snapshots.rs
-assertion_line: 352
 expression: rendered
 ---
 

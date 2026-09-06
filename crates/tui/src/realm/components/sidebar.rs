@@ -124,8 +124,9 @@ impl Sidebar {
         self.inner.recompute_count()
     }
 
-    /// Test-only: number of workspace rows currently in the visible list.
-    #[cfg(test)]
+    /// Number of workspace rows currently in the visible list — the
+    /// coach uses it to avoid launching over an inbox with nothing to
+    /// act on (#1460).
     pub fn visible_workspace_count(&self) -> usize {
         self.inner.visible_workspace_count()
     }
@@ -260,10 +261,11 @@ impl Sidebar {
         self.focused = focused;
     }
 
-    /// Record whether `ui.keep_awake` is on so the header can badge
-    /// active sleep inhibition.
-    pub fn set_keep_awake(&mut self, keep_awake: bool) {
-        self.inner.set_keep_awake(keep_awake);
+    /// Record the daemon's authoritative keep-awake status (holding +
+    /// power source) so the header badges active sleep inhibition and
+    /// tells the truth about what it protects (#1485).
+    pub fn set_keep_awake_status(&mut self, active: bool, on_battery: bool) {
+        self.inner.set_keep_awake_status(active, on_battery);
     }
 
     /// Record whether `ui.auto_wait_on_limit` is on so the rising-edge
@@ -363,6 +365,16 @@ impl Sidebar {
         self.inner.note_provider_quota(agent_id, session_key, quota);
     }
 
+    /// The live spend/headroom badge for an agent terminal (#1490): plan-quota
+    /// headroom when known, else the session's metered cost.
+    pub fn terminal_usage_badge(
+        &self,
+        session_key: &str,
+        agent_id: &str,
+    ) -> Option<crate::components::terminal_stack::UsageBadge> {
+        self.inner.terminal_usage_badge(session_key, agent_id)
+    }
+
     /// Attribute a usage-limit reset hint to a terminal's agent
     /// (`AgentUsageLimit`).
     pub fn note_usage_limit_reset(&mut self, terminal_id: lazybox_ipc::TerminalId, hint: String) {
@@ -427,6 +439,17 @@ impl Sidebar {
     /// Delegates to the inner pane.
     pub fn set_conventions(&mut self, conventions: lazybox_core::Conventions) {
         self.inner.set_conventions(conventions);
+    }
+
+    /// Push the provider/sync facts the empty-inbox doctor reads.
+    /// Delegates to the inner pane (issue #1461).
+    pub fn set_inbox_health(&mut self, health: crate::components::sidebar::InboxHealth) {
+        self.inner.set_inbox_health(health);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inbox_diagnosis(&self) -> Option<crate::components::sidebar::InboxDiagnosis> {
+        self.inner.inbox_diagnosis()
     }
 
     /// Conversation `w` should target on `workspace_key`: one running
@@ -494,6 +517,11 @@ impl Sidebar {
     /// See `Sidebar::extend_selection`.
     pub fn extend_selection(&mut self, dir: isize) -> usize {
         self.inner.extend_selection(dir)
+    }
+
+    /// See `Sidebar::begin_visual_select`.
+    pub fn begin_visual_select(&mut self) -> Option<usize> {
+        self.inner.begin_visual_select()
     }
 
     /// See `Sidebar::extend_selection_to`.

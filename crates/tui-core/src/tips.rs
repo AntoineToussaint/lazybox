@@ -1,8 +1,8 @@
 //! Tips — progressive feature-discovery hints (#115).
 //!
-//! A complement to the one-shot tour: where the tour runs once at
-//! first launch and walks the onboarding user-story (inbox → work →
-//! snippets → navigation → config), tips keep teaching the *long
+//! A complement to the onboarding coach (#1460): where the coach runs
+//! once at first launch and walks the core user-story (look → work →
+//! step out → return → jump → quit), tips keep teaching the *long
 //! tail* afterwards, surfaced just-in-time off the current UI state.
 //!
 //! A tip is deliberately quiet: it renders as a dim,
@@ -71,7 +71,7 @@ impl Tip {
 /// state signal and points at the catalog action that addresses it,
 /// so the hint is relevant rather than random. These cover the long
 /// tail (cross-workspace jumps, terminal escape) deliberately left
-/// out of the tour's onboarding story.
+/// out of the coach's onboarding story.
 const TIPS: &[Tip] = &[
     Tip {
         id: "jump_to_asking",

@@ -34,7 +34,7 @@ Work from any non-terminal pane. A focused terminal forwards keys to the PTY; pr
 | `t` | theme | Open the theme picker — arrow through the built-in palettes with a live preview, Enter to keep one. |
 | `]` | snippets | Browse the snippet workflow library — every `]]s<key>` shortcut with its description and body, so you can see what's available without already knowing the key. |
 | `?` | ask lazybox | Search the live keymap or ask how to use lazybox in plain language. |
-| `Shift-T` | tour | Launch the guided onboarding walkthrough (start from scratch, inbox, agents, snippet workflows + memory, juggling sessions, config). |
+| `Shift-T` | coach | Start (or re-run) the onboarding coach — a slim rail that gives you one objective at a time and confirms when you actually do it. |
 | `Shift-D` | sync diagnostics | Show recent provider-sync outcomes, last poll times, and errors. |
 | `Shift-M` | messages | Open the messages log — a scrollable, clearable history of recent footer notices, so an error that flashed and faded is still readable. |
 | `Shift-E` | errors | Open the Error Inbox — the daemon's durable, deduplicated error store (survives restart), grouped by class with counts. |
@@ -65,7 +65,7 @@ Act on the focused workspace. Available from the sidebar **and** the activity pa
 | `Enter` | open | Focus the workspace's activity / terminal. |
 | `s` | shell | Open a shell in the workspace's worktree. |
 | `e` | editor | Open the worktree in the configured editor. |
-| `Shift-V` | review diff | Review the worktree's staged, unstaged, and untracked changes; search or annotate lines and send the draft to the running agent. |
+| `Shift-V` | visual select | Arm a vim-style visual sweep: j/k (and arrows) grow / shrink the multi-select range from the anchor, no Shift-arrow encoding needed. |
 | `m` | mark read | Mark every activity row on the focused workspace read. |
 | `z` | snooze | Snooze the workspace for ~4h (toggle). |
 | `Shift-A` | toggle auto-fix | Arm or disarm auto-fix for the focused PR. |
@@ -209,6 +209,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | `g c` | close PR *(confirmed first)* |
 | `g f` | convert to draft |
 | `g y` | mark ready |
+| `g v` | review diff |
 
 ### `x` — workspace
 

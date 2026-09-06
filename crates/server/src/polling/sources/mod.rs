@@ -1,12 +1,13 @@
 //! Provider adapters and source construction for polling.
 
 use super::scheduler::{
-    DEFAULT_ROUND_ROBIN_N, RoundRobinPick, plan_round_robin_tick_budgeted, will_run_global,
+    DEFAULT_ROUND_ROBIN_N, RoundRobinPick, plan_repo_rotation, plan_round_robin_tick_budgeted,
+    rotation_fanout, will_run_global,
 };
 use super::upsert::load_workspace_offloaded;
 use super::{
     EngagementSnapshot, FetchMode, GithubEngagementTarget, PolledScope, TaskSource, TickState,
-    autofix, gh_polled_scope,
+    autofix, gh_polled_scope, repo_first_polled_scope,
 };
 use crate::ServerConfig;
 use chrono::Utc;
@@ -486,6 +487,12 @@ pub struct GhSource {
     /// row. Read by [`TaskSource::polled_scope`] after `fetch` resolves.
     /// Initialized `false` (a never-fetched source isn't windowed).
     last_windowed: parking_lot::Mutex<bool>,
+    /// Roster members whose queries ALL succeeded on the last repo-first
+    /// sweep. Read by [`TaskSource::polled_scope`] only on a PARTIAL
+    /// reconcile: those members completed their exhaustive open-set and
+    /// stay authoritative for retiring their own gone rows, so one
+    /// truncating/erroring member can't veto retirement inbox-wide.
+    last_reconcile_completed: parking_lot::Mutex<Vec<String>>,
     /// Bounded focus/live/own-PR targets that are refreshed on every
     /// tick independently of notifications and search windows.
     hot_targets: Vec<GithubEngagementTarget>,
@@ -495,6 +502,60 @@ pub struct GhSource {
     /// Whether this tick also carries the base-cadence notifications
     /// heartbeat. False on the intervening hot-only ticks.
     poll_notifications: bool,
+    /// Repo-first discovery plan (`Some` whenever the user has scoped or
+    /// watched repos). Replaces the `involves:USER` global sweep and the
+    /// per-repo round robin: every roster member is swept on a rotation
+    /// sized so each refreshes within `repo_refresh_interval`, windowed
+    /// per member; a periodic / manual reconcile sweeps every member
+    /// unwindowed and is the only pass that may drive deletion.
+    repo_sweep: Option<RepoSweepPlan>,
+}
+
+/// One tick's repo-first sweep plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RepoSweepPlan {
+    /// Roster members (`owner/name` repos, bare `owner` orgs) to sweep
+    /// this tick. Empty on a hot-only tick.
+    pub members: Vec<String>,
+    /// Unwindowed pass over the whole roster (periodic cadence or a
+    /// manual `Shift-R`): exhaustive for every member's open set, so it
+    /// reports `Exhaustive` coverage on success.
+    pub reconcile: bool,
+    /// Roster size, for status text.
+    pub roster_len: usize,
+}
+
+/// The repo-first roster: every scoped repo / org plus every watched
+/// repo, as bare `owner/name` / `owner` members, sorted and deduped.
+pub fn repo_roster(
+    scopes: &std::collections::BTreeSet<String>,
+    watch_repos: &std::collections::BTreeSet<String>,
+) -> Vec<String> {
+    let mut members: std::collections::BTreeSet<String> = scopes
+        .iter()
+        .filter_map(|scope| scope.strip_prefix("github:"))
+        .filter(|member| !member.is_empty())
+        .map(str::to_string)
+        .collect();
+    members.extend(watch_repos.iter().cloned());
+    // Drop children already covered by a bare `org:owner` member: the org
+    // member's search returns every `owner/name` under it, and the scope
+    // filter accepts org-covered children (`filter_github_tasks_with_watches`),
+    // so keeping the child too would sweep it twice per pass (two wasted
+    // paginated queries; the results dedup by task key) for no extra reach.
+    let org_owners: std::collections::BTreeSet<&str> = members
+        .iter()
+        .filter(|member| !member.contains('/'))
+        .map(String::as_str)
+        .collect();
+    members
+        .iter()
+        .filter(|member| match member.split_once('/') {
+            Some((owner, _)) => !org_owners.contains(owner),
+            None => true,
+        })
+        .cloned()
+        .collect()
 }
 
 /// Out-of-band action a `TaskSource` may surface alongside the
@@ -725,6 +786,22 @@ impl GhSource {
     fn governor_status(&self) -> String {
         let next = if let Some(at) = self.governor_plan.next_eligible_at {
             at.to_rfc3339()
+        } else if let Some(plan) = &self.repo_sweep {
+            if plan.reconcile {
+                format!("repo-first reconcile ({} members)", plan.members.len())
+            } else if plan.members.is_empty() {
+                format!(
+                    "notification heartbeat / hot targets (roster {} members)",
+                    plan.roster_len
+                )
+            } else {
+                format!(
+                    "repo-first rotation {} of {}: {}",
+                    plan.members.len(),
+                    plan.roster_len,
+                    plan.members.join(",")
+                )
+            }
         } else if !self.client.should_full_sweep() {
             "notification heartbeat / hot targets".to_string()
         } else if !self.full_sweep_admitted {
@@ -971,8 +1048,14 @@ impl GhSource {
             .await
             .map_err(lazybox_core::ProviderError::from)?;
         let coverage = outcome.coverage;
-        let pr_complete = outcome.pr_coverage == FetchCoverage::Complete;
-        let sweep_complete = coverage == FetchCoverage::Complete;
+        // Floors and the sweep timer follow DISCOVERY success, not
+        // coverage: a failed best-effort companion (merged sweep, watched
+        // repo, reviewer pass) keeps coverage partial — rescope must not
+        // delete — but the main search it rode alongside is complete, so
+        // holding the timer/flag hostage to it only re-ran the heaviest
+        // possible sweep every tick (the 2026-09-05 stuck-`Shift-R` loop).
+        let pr_complete = outcome.pr_discovery_complete;
+        let sweep_complete = outcome.discovery_complete;
         let raw = outcome.tasks;
         let partial_warning = outcome.partial_failure;
         self.set_retry_after_secs(outcome.retry_after_secs);
@@ -1005,6 +1088,35 @@ impl GhSource {
             });
         }
 
+        let kept = self.finish_sweep(raw, mentions).await;
+
+        // Advance the `updated:>=` floor (issue #14) only when this
+        // tick completed the global `involves:` search. A failed PR side
+        // may still return issue rows as a degraded success, but moving
+        // the floor then would skip the PR interval it never fetched.
+        // `pr_since.is_none()` means a reconcile sweep, which re-arms the
+        // reconcile timer.
+        let commit = full_sweep_commit(global_pr_sweep, pr_complete, sweep_complete);
+        if commit.pr_window {
+            self.client
+                .record_pr_sweep_window(sweep_started, pr_since.is_none());
+        }
+        // A degraded result stays due so the next tick retries the
+        // incomplete side instead of waiting for the normal cadence.
+        if commit.sweep_timer {
+            self.client.mark_full_sweep_done();
+        }
+        Ok(kept)
+    }
+
+    /// Shared tail of every discovery sweep (global, round-robin, and
+    /// repo-first): queue `@lazybox` mention / `lazybox:` label
+    /// auto-spawns, react 👀, then apply the role / scope / watch filter.
+    async fn finish_sweep(
+        &self,
+        raw: Vec<Task>,
+        mentions: Vec<lazybox_gh::LazyboxMention>,
+    ) -> Vec<Task> {
         // Process `@lazybox` mention triggers BEFORE returning the task
         // list. Two passes:
         //
@@ -1192,24 +1304,7 @@ impl GhSource {
             self.detect_needs_reply,
         );
         self.emit_progress(format!("{} tasks kept after filter", kept.len()));
-
-        // Advance the `updated:>=` floor (issue #14) only when this
-        // tick completed the global `involves:` search. A failed PR side
-        // may still return issue rows as a degraded success, but moving
-        // the floor then would skip the PR interval it never fetched.
-        // `pr_since.is_none()` means a reconcile sweep, which re-arms the
-        // reconcile timer.
-        let commit = full_sweep_commit(global_pr_sweep, pr_complete, sweep_complete);
-        if commit.pr_window {
-            self.client
-                .record_pr_sweep_window(sweep_started, pr_since.is_none());
-        }
-        // A degraded result stays due so the next tick retries the
-        // incomplete side instead of waiting for the normal cadence.
-        if commit.sweep_timer {
-            self.client.mark_full_sweep_done();
-        }
-        Ok(kept)
+        kept
     }
 
     async fn fetch_targeted(
@@ -1348,6 +1443,141 @@ impl GhSource {
             ),
             self.detect_needs_reply,
         ))
+    }
+
+    /// Repo-first sweep for this tick's [`RepoSweepPlan`]: every planned
+    /// member gets one PR query and one issue query, windowed on its
+    /// persisted `updated:>=` floor on a rotation tick and unwindowed on a
+    /// reconcile. Failed members are reported, preserved by rescope, and
+    /// lead the next rotation (their floor didn't move).
+    async fn fetch_repo_first(&self) -> Result<Vec<Task>, lazybox_core::ProviderError> {
+        let Some(plan) = &self.repo_sweep else {
+            return Ok(Vec::new());
+        };
+        if plan.members.is_empty() {
+            // Only rotation / hot-only ticks reach here empty — a reconcile
+            // is always seeded with the (non-empty) roster. Guard that
+            // invariant: if a future change ever lets a reconcile arrive
+            // empty, still re-arm the timer here so it can't silently skip
+            // the re-arm below and reinstate the every-tick death loop.
+            debug_assert!(
+                !plan.reconcile,
+                "a reconcile must carry a non-empty member set"
+            );
+            if plan.reconcile {
+                self.client.mark_full_sweep_done();
+            }
+            return Ok(Vec::new());
+        }
+        let want_prs = self.filter.pr_enabled();
+        // Issues are queried for `@lazybox` mentions even when issue
+        // display is off — same rule as the global sweep (issue #50).
+        let scan_issues = self.filter.issue_enabled() || !self.mention_allowed_logins.is_empty();
+        if !want_prs && !scan_issues {
+            self.emit_progress("nothing to fetch (no PR or Issue keys enabled)");
+            return Ok(Vec::new());
+        }
+        let specs: Vec<lazybox_gh::RepoSweepSpec> = plan
+            .members
+            .iter()
+            .map(|member| lazybox_gh::RepoSweepSpec {
+                member: member.clone(),
+                since: if plan.reconcile {
+                    None
+                } else {
+                    self.client.repo_sweep_window(member)
+                },
+            })
+            .collect();
+        let windowed = specs.iter().any(|spec| spec.since.is_some());
+        self.emit_progress(format!(
+            "Querying GitHub repo-first ({}: {} of {} repos{})…",
+            if plan.reconcile {
+                "reconcile"
+            } else {
+                "rotation"
+            },
+            specs.len(),
+            plan.roster_len,
+            if windowed { ", windowed" } else { "" },
+        ));
+        for spec in &specs {
+            self.emit_progress(format!(
+                "repo query: {}",
+                lazybox_gh::repo_sweep_pr_query(&spec.member, spec.since)
+            ));
+        }
+        let outcome = match self
+            .client
+            .fetch_repo_sweep(&specs, want_prs, scan_issues, &self.mention_allowed_logins)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // Total failure — EVERY member's query errored (e.g. a
+                // revoked token 401ing the whole roster). A reconcile that
+                // erred out entirely must still re-arm the timer, exactly
+                // like a partial one does below: otherwise `force_full_sweep`
+                // / the due-timer stay set and the full-roster reconcile
+                // re-runs on EVERY poll tick for the whole outage — the same
+                // "a failure pins the forced sweep" death loop this PR fixed
+                // for partial results, which the `?` reintroduced for the
+                // all-failed case. Backoff is still honored: the propagated
+                // `ProviderError` carries the retry-after hint and the tick
+                // loop parks the source on it.
+                if plan.reconcile {
+                    self.client.mark_full_sweep_done();
+                }
+                return Err(lazybox_core::ProviderError::from(error));
+            }
+        };
+        self.set_retry_after_secs(outcome.retry_after_secs);
+        self.set_coverage(if outcome.is_complete() {
+            FetchCoverage::Complete
+        } else {
+            FetchCoverage::Partial
+        });
+        self.set_windowed(windowed);
+        // Record which members completed their full query set this pass so
+        // `polled_scope` can retire within them even on a PARTIAL reconcile
+        // (a single truncating/erroring member no longer vetoes retirement
+        // for the whole inbox).
+        *self.last_reconcile_completed.lock() = outcome.completed.clone();
+        if !outcome.failed.is_empty() {
+            let failed = outcome
+                .failed
+                .iter()
+                .map(|(member, error)| format!("{member} ({error})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let _ = self.bus.send(Event::ProviderError {
+                source: "github".into(),
+                message: format!(
+                    "partial sync — {} of {} repos failed: {failed}",
+                    outcome.failed.len(),
+                    specs.len()
+                ),
+                detail: "see /tmp/lazybox.log for the full error".into(),
+                kind: ProviderErrorKind::Retryable.as_str().to_string(),
+            });
+        }
+        // Re-arm the reconcile timer after ANY reconcile that ran, even
+        // a partial one. A member that permanently overflows its page
+        // cap must not keep the reconcile "due" — that would re-run the
+        // whole roster every tick, the same death loop the stuck
+        // `force_full_sweep` produced. Coverage stays partial (no
+        // deletion), and the failed member retries on the rotation.
+        if plan.reconcile {
+            self.client.mark_full_sweep_done();
+        }
+        self.emit_progress(format!(
+            "Got {} raw items from {} repos, applying filters…",
+            outcome.tasks.len(),
+            outcome.completed.len()
+        ));
+        let kept = self.finish_sweep(outcome.tasks, outcome.mentions).await;
+        self.emit_progress(format!("{} tasks kept after filter", kept.len()));
+        Ok(kept)
     }
 
     /// Notifications-driven incremental fetch. Hot targets are added
@@ -1784,6 +2014,15 @@ impl TaskSource for GhSource {
     fn polled_scope(&self) -> PolledScope {
         let coverage = *self.last_coverage.lock();
         let windowed = *self.last_windowed.lock();
+        if let Some(plan) = &self.repo_sweep {
+            // A COMPLETE reconcile is authoritative over the whole inbox
+            // (`Exhaustive`); a PARTIAL one still retires within the members
+            // that completed (`Repos(completed)`), so one truncating member
+            // can't veto retirement inbox-wide; a rotation slice / windowed
+            // pass has no deletion authority.
+            let completed = self.last_reconcile_completed.lock();
+            return repo_first_polled_scope(plan.reconcile, coverage, windowed, &completed);
+        }
         gh_polled_scope(
             self.scheduling.run_global,
             &self.scheduling.repos,
@@ -1845,9 +2084,46 @@ impl TaskSource for GhSource {
                     &self.governor_plan,
                     required_sweep_points,
                 );
-                let plan = gh_fetch_plan(full_sweep_admitted, self.poll_notifications);
+                let plan = match &self.repo_sweep {
+                    Some(repo_sweep) if repo_sweep.reconcile => GhFetchPlan::Full,
+                    Some(_) => gh_fetch_plan(false, self.poll_notifications),
+                    None => gh_fetch_plan(full_sweep_admitted, self.poll_notifications),
+                };
                 let is_full_plan = matches!(plan, GhFetchPlan::Full);
                 let (mut tasks, kind) = match plan {
+                    GhFetchPlan::Full if self.repo_sweep.is_some() => {
+                        // Repo-first reconcile: focused hot rows first (so the
+                        // row under the cursor lands before the paced fan-out),
+                        // then every roster member unwindowed.
+                        let mut focused = Vec::new();
+                        if !self.hot_targets.is_empty() {
+                            let hot_targets = self.hot_notification_targets();
+                            let requests =
+                                rank_targeted_requests(&hot_targets, &[], &self.cold_targets);
+                            let targeted = self.fetch_targeted(requests).await?;
+                            focused = apply_needs_reply_toggle(
+                                filter_github_tasks_with_watches(
+                                    targeted.tasks,
+                                    &self.filter,
+                                    &self.scopes,
+                                    &self.watch_repos,
+                                ),
+                                self.detect_needs_reply,
+                            );
+                        }
+                        let mut tasks = self.fetch_repo_first().await?;
+                        merge_targeted_tasks(&mut tasks, focused);
+                        (tasks, FetchMode::Full)
+                    }
+                    GhFetchPlan::Warm if self.repo_sweep.is_some() => {
+                        // Heartbeat + hot targets as usual, then this tick's
+                        // rotation slice; targeted rows (deep single-node
+                        // fetches) win over the lean search payload.
+                        let targeted = self.fetch_incremental().await?.unwrap_or_default();
+                        let mut tasks = self.fetch_repo_first().await?;
+                        merge_targeted_tasks(&mut tasks, targeted);
+                        (tasks, FetchMode::Incremental)
+                    }
                     GhFetchPlan::Full => {
                         let mut focused = Vec::new();
                         let mut broad = None;
@@ -3649,6 +3925,9 @@ async fn push_github_source(
     let poll_interval = github_cfg
         .map(|g| g.poll_interval)
         .unwrap_or(Duration::from_secs(60));
+    let repo_refresh_interval = github_cfg
+        .map(|g| g.repo_refresh_interval)
+        .unwrap_or(lazybox_config::GithubConfig::DEFAULT_REPO_REFRESH_INTERVAL);
     let background_budget_share = github_cfg
         .map(|g| g.background_budget_share)
         .unwrap_or(lazybox_gh::rate_budget::DEFAULT_BACKGROUND_SHARE);
@@ -3827,17 +4106,37 @@ async fn push_github_source(
     let forecast = client.background_sweep_forecast(want_prs, scan_issues);
     state.round_robin.prune(now);
     let manual_refresh = client.manual_refresh_pending();
-    // A manual Shift-R runs as ONE unwindowed global reconcile (its
-    // `force_full_sweep` flag makes `next_pr_sweep_window` return
-    // `None`), which covers every involved PR, review-requested,
-    // merged, watched repos, and issues in a single fixed-size sweep.
-    let global_due = manual_refresh
-        || will_run_global(
-            state.round_robin.cursor.len(),
-            state.round_robin.tick,
-            DEFAULT_ROUND_ROBIN_N,
-        );
-    let required_sweep_points = forecast.required_points(global_due, want_prs);
+    // Repo-first discovery whenever the user has scoped or watched
+    // repos: the roster IS the inbox's universe, so the `involves:USER`
+    // global search (whose out-of-scope hits the filter dropped anyway)
+    // is retired in favour of one windowed query pair per roster member
+    // on a rotation. With no roster (no scopes), discovery stays the
+    // user-centric global sweep + round robin over discovered repos.
+    let roster = repo_roster(&scopes, &watch_repos);
+    let repo_first = !roster.is_empty();
+    // Prune sweep floors for members that have left the roster: keep the
+    // persisted cursor set bounded over scope churn, and make a re-added
+    // repo start from a clean unwindowed pass rather than a stale floor
+    // whose oversized window would overflow the page cap. Only when a
+    // roster exists — with no scopes these floors are dormant, not churning.
+    if repo_first {
+        client.retain_repo_windows(&roster);
+    }
+    // A manual Shift-R runs as ONE unwindowed reconcile: repo-first, every
+    // roster member; legacy, the global `involves:` sweep (its
+    // `force_full_sweep` flag makes `next_pr_sweep_window` return `None`).
+    let global_due = !repo_first
+        && (manual_refresh
+            || will_run_global(
+                state.round_robin.cursor.len(),
+                state.round_robin.tick,
+                DEFAULT_ROUND_ROBIN_N,
+            ));
+    let required_sweep_points = if repo_first {
+        forecast.repo_sweep_reconcile_points(roster.len() + sessioned_repos.len())
+    } else {
+        forecast.required_points(global_due, want_prs)
+    };
     let max_repos = forecast.repo_capacity(
         governor_plan.graphql_points,
         global_due,
@@ -3894,15 +4193,54 @@ async fn push_github_source(
         }
         DeferralSignal::None => {}
     }
-    let scheduling = schedule_github_tick(
-        &mut state.round_robin,
-        sessioned_repos,
-        manual_refresh,
-        full_sweep_admitted,
-        max_repos,
-        now,
-    );
-    if will_full_sweep {
+    let scheduling = if repo_first {
+        RoundRobinPick {
+            repos: Vec::new(),
+            run_global: false,
+        }
+    } else {
+        schedule_github_tick(
+            &mut state.round_robin,
+            sessioned_repos,
+            manual_refresh,
+            full_sweep_admitted,
+            max_repos,
+            now,
+        )
+    };
+    let repo_sweep = repo_first.then(|| {
+        let plan = plan_repo_first_tick(
+            &mut state.round_robin,
+            &roster,
+            sessioned_repos,
+            engagement.live_agent_repos(),
+            full_sweep_admitted,
+            poll_notifications,
+            rotation_fanout(
+                roster.len(),
+                rotation_target_ticks(repo_refresh_interval, poll_interval),
+            ),
+            |limit| forecast.repo_sweep_capacity(governor_plan.graphql_points, limit),
+            now,
+        );
+        tracing::info!(
+            source = lazybox_gh::SOURCE,
+            tick = state.round_robin.tick,
+            reconcile = plan.reconcile,
+            members = ?plan.members,
+            roster = roster.len(),
+            sessioned = sessioned_repos.len(),
+            live_agents = engagement.live_agent_repos().len(),
+            focused = state.round_robin.focused_repo.as_deref().unwrap_or(""),
+            allowance = governor_plan.graphql_points,
+            required = required_sweep_points,
+            admitted = full_sweep_admitted,
+            manual = manual_refresh,
+            "repo-first scheduling decision"
+        );
+        plan
+    });
+    if will_full_sweep && !repo_first {
         tracing::info!(
             source = lazybox_gh::SOURCE,
             tick = state.round_robin.tick,
@@ -3941,10 +4279,279 @@ async fn push_github_source(
         retry_after_secs: parking_lot::Mutex::new(None),
         last_coverage: parking_lot::Mutex::new(FetchCoverage::Complete),
         last_windowed: parking_lot::Mutex::new(false),
+        last_reconcile_completed: parking_lot::Mutex::new(Vec::new()),
         hot_targets: engagement.hot_targets().to_vec(),
         cold_targets: engagement.cold_targets().clone(),
         poll_notifications,
+        repo_sweep,
     }));
+}
+
+#[cfg(test)]
+mod repo_first_tests {
+    use super::*;
+    use crate::polling::scheduler::RoundRobinState;
+    use std::collections::HashSet;
+    use std::time::Instant;
+
+    fn roster(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| (*n).to_string()).collect()
+    }
+
+    fn set(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|n| (*n).to_string()).collect()
+    }
+
+    #[test]
+    fn repo_roster_strips_prefix_and_merges_watches() {
+        let scopes: std::collections::BTreeSet<String> = [
+            "github:acme/widgets".to_string(),
+            "github:acme".to_string(),
+            "github:".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let watches: std::collections::BTreeSet<String> =
+            ["zed/editor".to_string(), "acme/widgets".to_string()]
+                .into_iter()
+                .collect();
+        // `acme/widgets` (scoped AND watched) is covered by the `acme` org
+        // member, so it is dropped rather than swept twice per pass.
+        assert_eq!(
+            repo_roster(&scopes, &watches),
+            roster(&["acme", "zed/editor"])
+        );
+        assert!(repo_roster(&Default::default(), &Default::default()).is_empty());
+    }
+
+    /// A child repo is dropped only when its OWNER is present as a bare
+    /// org member; a same-prefix owner that isn't a member keeps its
+    /// child (`acmeco/x` is not covered by `acme`).
+    #[test]
+    fn repo_roster_drops_only_org_covered_children() {
+        let scopes: std::collections::BTreeSet<String> = [
+            "github:acme".to_string(),
+            "github:acme/widgets".to_string(),
+            "github:acmeco/x".to_string(),
+            "github:zed/editor".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            repo_roster(&scopes, &Default::default()),
+            roster(&["acme", "acmeco/x", "zed/editor"]),
+            "acme/widgets is covered by org acme; acmeco/x and zed/editor are not"
+        );
+    }
+
+    #[test]
+    fn rotation_target_ticks_rounds_up_and_floors_at_one() {
+        assert_eq!(
+            rotation_target_ticks(Duration::from_secs(300), Duration::from_secs(60)),
+            5
+        );
+        assert_eq!(
+            rotation_target_ticks(Duration::from_secs(90), Duration::from_secs(60)),
+            2
+        );
+        assert_eq!(
+            rotation_target_ticks(Duration::from_secs(10), Duration::from_secs(60)),
+            1
+        );
+    }
+
+    /// A reconcile (periodic or `Shift-R`) sweeps EVERY roster member
+    /// plus session-bearing and focused repos that aren't on it, all
+    /// unwindowed, ignoring the rotation capacity.
+    #[test]
+    fn reconcile_sweeps_the_whole_roster_plus_sessioned_and_focus() {
+        let mut state = RoundRobinState::default();
+        state.focused_repo = Some("other/focused".into());
+        let plan = plan_repo_first_tick(
+            &mut state,
+            &roster(&["acme", "acme/widgets"]),
+            &set(&["acme/child"]),
+            &set(&[]),
+            true,
+            false,
+            1,
+            |_| 0,
+            Instant::now(),
+        );
+        assert!(plan.reconcile);
+        assert_eq!(
+            plan.members,
+            roster(&["acme", "acme/widgets", "acme/child", "other/focused"])
+        );
+        assert_eq!(plan.roster_len, 2);
+        assert_eq!(state.tick, 1);
+    }
+
+    #[test]
+    fn hot_only_tick_plans_nothing() {
+        let mut state = RoundRobinState::default();
+        let plan = plan_repo_first_tick(
+            &mut state,
+            &roster(&["acme/widgets"]),
+            &set(&[]),
+            &set(&[]),
+            false,
+            false,
+            3,
+            |limit| limit,
+            Instant::now(),
+        );
+        assert!(!plan.reconcile);
+        assert!(plan.members.is_empty());
+        assert_eq!(state.tick, 0, "an empty tick must not advance the rotation");
+    }
+
+    /// A warm tick sweeps a fan-out slice, live-agent repos first,
+    /// bounded by the governor's capacity. An idle session-bearing repo
+    /// outside the roster joins the rotation but is not forced.
+    #[test]
+    fn rotation_slice_is_capped_by_capacity_with_live_agents_first() {
+        let mut state = RoundRobinState::default();
+        let plan = plan_repo_first_tick(
+            &mut state,
+            &roster(&["a/1", "a/2", "a/3", "a/4", "a/5"]),
+            &set(&["a/5", "org/idle"]),
+            &set(&["a/5"]),
+            false,
+            true,
+            2,
+            |limit| {
+                assert_eq!(limit, 2 + 1 + 1);
+                2
+            },
+            Instant::now(),
+        );
+        assert!(!plan.reconcile);
+        assert_eq!(plan.members.len(), 2);
+        assert_eq!(plan.members[0], "a/5", "live-agent repo leads");
+        assert_eq!(state.tick, 1);
+        assert!(
+            state.cursor.contains_key("org/idle"),
+            "idle sessioned repo joins the rotation"
+        );
+    }
+
+    /// Successive warm ticks cover the whole roster within the target.
+    #[test]
+    fn successive_rotation_ticks_cover_every_member() {
+        let members = roster(&["a/1", "a/2", "a/3", "a/4", "a/5"]);
+        let mut state = RoundRobinState::default();
+        let mut seen = HashSet::new();
+        for _ in 0..3 {
+            let plan = plan_repo_first_tick(
+                &mut state,
+                &members,
+                &set(&[]),
+                &set(&[]),
+                false,
+                true,
+                rotation_fanout(members.len(), 3),
+                |limit| limit,
+                Instant::now(),
+            );
+            seen.extend(plan.members);
+        }
+        assert_eq!(seen, members.into_iter().collect::<HashSet<_>>());
+    }
+}
+
+/// Ticks between refreshes of one roster member: the configured
+/// `repo_refresh_interval` in units of the poll interval, at least 1.
+pub(super) fn rotation_target_ticks(
+    repo_refresh_interval: Duration,
+    poll_interval: Duration,
+) -> u64 {
+    let poll = poll_interval.as_secs().max(1);
+    repo_refresh_interval.as_secs().div_ceil(poll).max(1)
+}
+
+/// Decide this tick's repo-first plan.
+///
+/// - Reconcile admitted (periodic cadence or a manual `Shift-R`, budget
+///   permitting): every roster member plus every session-bearing and the
+///   focused repo, unwindowed. Uncapped — the pacer serialises it.
+/// - Warm tick: a rotation slice — focus first, then repos with a LIVE
+///   agent (forced every tick), then the `fanout` stalest members
+///   (idle session-bearing repos rotate here like any other, so 20
+///   open worktrees don't cost 20 query pairs a minute) — capped by
+///   what the governor allowance admits (`capacity_for(limit)`).
+///   Members that don't fit keep their cursor age and lead the next tick.
+/// - Hot-only tick: nothing (hot targets are fetched by the caller).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn plan_repo_first_tick(
+    round_robin: &mut crate::polling::scheduler::RoundRobinState,
+    roster: &[String],
+    sessioned_repos: &std::collections::HashSet<String>,
+    live_agent_repos: &std::collections::HashSet<String>,
+    reconcile_admitted: bool,
+    poll_notifications: bool,
+    fanout: usize,
+    capacity_for: impl Fn(usize) -> usize,
+    now: std::time::Instant,
+) -> RepoSweepPlan {
+    let roster_len = roster.len();
+    if reconcile_admitted {
+        let mut members: Vec<String> = roster.to_vec();
+        let mut extra: Vec<&String> = sessioned_repos
+            .iter()
+            .filter(|repo| !members.contains(repo))
+            .collect();
+        extra.sort();
+        members.extend(extra.into_iter().cloned());
+        if let Some(focus) = round_robin.focused_repo.as_deref()
+            && !members.iter().any(|member| member == focus)
+        {
+            members.push(focus.to_string());
+        }
+        round_robin.seed_roster(roster, now);
+        for member in &members {
+            round_robin.record_sync(member, now);
+        }
+        round_robin.tick = round_robin.tick.wrapping_add(1);
+        return RepoSweepPlan {
+            members,
+            reconcile: true,
+            roster_len,
+        };
+    }
+    if !poll_notifications {
+        return RepoSweepPlan {
+            members: Vec::new(),
+            reconcile: false,
+            roster_len,
+        };
+    }
+    // Session-bearing repos join the eligible set (they may sit outside
+    // the roster under an org scope) but only live-agent repos are
+    // forced; the rest rotate stalest-first.
+    let mut eligible: Vec<String> = roster.to_vec();
+    let mut extra: Vec<&String> = sessioned_repos
+        .iter()
+        .filter(|repo| !eligible.contains(repo))
+        .collect();
+    extra.sort();
+    eligible.extend(extra.into_iter().cloned());
+    let limit = fanout
+        .saturating_add(live_agent_repos.len())
+        .saturating_add(1);
+    let members = plan_repo_rotation(
+        round_robin,
+        &eligible,
+        live_agent_repos,
+        fanout,
+        capacity_for(limit),
+        now,
+    );
+    RepoSweepPlan {
+        members,
+        reconcile: false,
+        roster_len,
+    }
 }
 
 /// Convenience: build the default source set assuming both providers

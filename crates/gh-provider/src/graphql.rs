@@ -787,6 +787,56 @@ pub fn merged_sweep_query(
     build_query(&quals)
 }
 
+/// Search qualifier addressing one repo-first roster member. A member
+/// with a `/` is a repository (`repo:owner/name`); a bare owner is an
+/// organization scope (`org:name`). GitHub's search accepts either as a
+/// single qualifier, so an org scope costs one query, not one per repo.
+pub fn roster_member_qualifier(member: &str) -> String {
+    if member.contains('/') {
+        format!("repo:{member}")
+    } else {
+        format!("org:{member}")
+    }
+}
+
+/// PR search for one roster member of the repo-first sweep.
+///
+/// Unwindowed (`since == None`) → every OPEN PR in the member: the
+/// exhaustive set a reconcile needs so rescope can retire rows that left
+/// the repo. Windowed → every PR *touched* since `since`, open or not.
+/// A merge or close bumps `updatedAt`, so dropping `is:open` is what lets
+/// a steady rotation observe state transitions without a separate global
+/// merged sweep, and the window keeps the steady-state page near-empty.
+pub fn repo_sweep_pr_query(member: &str, since: Option<DateTime<Utc>>) -> String {
+    let mut quals = Vec::with_capacity(5);
+    if since.is_none() {
+        quals.push("is:open".to_string());
+    }
+    quals.push("is:pr".to_string());
+    quals.push("archived:false".to_string());
+    quals.push(roster_member_qualifier(member));
+    if let Some(since) = since {
+        quals.push(updated_since_qualifier(since));
+    }
+    build_query(&quals)
+}
+
+/// Issue counterpart of [`repo_sweep_pr_query`]: same window semantics,
+/// `is:issue` instead of `is:pr`.
+pub fn repo_sweep_issue_query(member: &str, since: Option<DateTime<Utc>>) -> String {
+    let mut quals = Vec::with_capacity(5);
+    if since.is_none() {
+        quals.push("is:open".to_string());
+    }
+    quals.push("is:issue".to_string());
+    quals.push("archived:false".to_string());
+    quals.push(roster_member_qualifier(member));
+    if let Some(since) = since {
+        quals.push(updated_since_qualifier(since));
+    }
+    build_issues_query(&quals)
+}
+
 /// Per-page size for the PR search. Was 100 (GraphQL's maximum)
 /// but with the heavy SEARCH_QUERY payload, GitHub's GraphQL
 /// gateway timed out (HTTP 502 / 504 "We couldn't respond to your
@@ -1380,6 +1430,76 @@ pub struct GqlAssignableUsersConn {
     // Reuses the crate-wide `GqlPageInfo` (hasNextPage / endCursor).
     #[serde(default, rename = "pageInfo")]
     pub page_info: GqlPageInfo,
+}
+
+/// Fetch the accounts assignable on any of a repository's issues or PRs.
+/// `assignableUsers` is a **repository-level** field, so this serves
+/// issue-only workspaces (no PR number required) as well as PRs — it's
+/// the same pool GitHub's own "Assignees" dropdown draws from. Feeds the
+/// assignees picker so an owner can be assigned to a brand-new issue that
+/// has no assignees or activity yet.
+///
+/// Paginates 100/page via `$after`/`pageInfo`, mirroring the reviewer
+/// query, so a repo with more than 100 collaborators doesn't silently
+/// drop the overflow.
+const ASSIGNABLE_USERS_QUERY: &str = r#"
+query($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    assignableUsers(first: 100, after: $after) {
+      nodes { login }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+  rateLimit {
+    cost
+    limit
+    remaining
+    resetAt
+    used
+  }
+}
+"#;
+
+pub fn assignable_users_body(owner: &str, name: &str, after: Option<&str>) -> serde_json::Value {
+    serde_json::json!({
+        "query": ASSIGNABLE_USERS_QUERY,
+        "variables": {
+            "owner": owner,
+            "name": name,
+            "after": after,
+        },
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlAssignableUsersResponse {
+    pub data: Option<GqlAssignableUsersData>,
+    #[serde(default)]
+    pub errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlAssignableUsersData {
+    pub repository: Option<GqlAssignableUsersRepo>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlAssignableUsersRepo {
+    #[serde(default, rename = "assignableUsers")]
+    pub assignable_users: GqlAssignableUsersConn,
+}
+
+impl GqlAssignableUsersRepo {
+    /// Flatten to the assignable logins, deduped and order-preserving.
+    pub fn logins(self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for u in self.assignable_users.nodes {
+            if !u.login.is_empty() && !out.contains(&u.login) {
+                out.push(u.login);
+            }
+        }
+        out
+    }
 }
 
 /// Per-PR "give me everything heavy" query. Pulls every field the
@@ -3917,6 +4037,38 @@ mod tests {
     }
 
     #[test]
+    fn roster_member_qualifier_distinguishes_repo_from_org() {
+        assert_eq!(roster_member_qualifier("acme/widgets"), "repo:acme/widgets");
+        assert_eq!(roster_member_qualifier("acme"), "org:acme");
+    }
+
+    /// Repo-first sweep queries: an unwindowed pass is the exhaustive
+    /// OPEN set; a windowed pass drops `is:open` so merges/closes since
+    /// the floor come back with their new state.
+    #[test]
+    fn repo_sweep_queries_window_without_is_open() {
+        let since = DateTime::parse_from_rfc3339("2026-09-05T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            repo_sweep_pr_query("acme/widgets", None),
+            "is:open is:pr archived:false repo:acme/widgets"
+        );
+        assert_eq!(
+            repo_sweep_pr_query("acme/widgets", Some(since)),
+            "is:pr archived:false repo:acme/widgets updated:>=2026-09-05T12:00:00+00:00"
+        );
+        assert_eq!(
+            repo_sweep_issue_query("acme", None),
+            "is:open is:issue archived:false org:acme"
+        );
+        assert_eq!(
+            repo_sweep_issue_query("acme", Some(since)),
+            "is:issue archived:false org:acme updated:>=2026-09-05T12:00:00+00:00"
+        );
+    }
+
+    #[test]
     fn merged_sweep_query_windows_on_since() {
         let since = DateTime::parse_from_rfc3339("2026-06-05T13:30:00Z")
             .unwrap()
@@ -6012,5 +6164,43 @@ mod tests {
         let resp: GqlRequestableReviewersResponse = serde_json::from_str(json).unwrap();
         let repo = resp.data.unwrap().repository.unwrap();
         assert_eq!(repo.logins(), vec!["solo".to_string()]);
+    }
+
+    #[test]
+    fn assignable_users_body_carries_owner_name_and_cursor() {
+        let body = assignable_users_body("acme", "widget", None);
+        let query = body["query"].as_str().unwrap();
+        assert!(query.contains("assignableUsers"));
+        assert_eq!(body["variables"]["owner"], "acme");
+        assert_eq!(body["variables"]["name"], "widget");
+        assert!(body["variables"]["after"].is_null());
+
+        let paged = assignable_users_body("acme", "widget", Some("CUR2"));
+        assert_eq!(paged["variables"]["after"], "CUR2");
+    }
+
+    #[test]
+    fn assignable_users_response_flattens_and_dedupes() {
+        let json = r#"{
+          "data": {
+            "repository": {
+              "assignableUsers": {
+                "nodes": [ { "login": "octocat" }, { "login": "hubot" }, { "login": "octocat" } ],
+                "pageInfo": { "hasNextPage": true, "endCursor": "CUR2" }
+              }
+            }
+          }
+        }"#;
+        let resp: GqlAssignableUsersResponse = serde_json::from_str(json).unwrap();
+        let repo = resp.data.unwrap().repository.unwrap();
+        assert!(repo.assignable_users.page_info.has_next_page);
+        assert_eq!(
+            repo.assignable_users.page_info.end_cursor.as_deref(),
+            Some("CUR2")
+        );
+        assert_eq!(
+            repo.logins(),
+            vec!["octocat".to_string(), "hubot".to_string()]
+        );
     }
 }

@@ -436,6 +436,16 @@ struct OperationState {
 /// PRIMARY exhaustion (the quota is actually gone) still blocks everyone.
 const SECONDARY_INTERACTIVE_GAP: Duration = Duration::from_secs(20);
 
+/// Interactive requests admitted per [`SECONDARY_INTERACTIVE_GAP`] window
+/// while a secondary cooldown is open. One user action is several
+/// requests fired back to back — a `g m` is the fresh pre-merge fetch,
+/// the merge-method lookup and the mutation itself — and admitting only
+/// the first refused the mutation with the whole remaining pause as its
+/// retry hint (up to 15 minutes), so a merge during any cooldown either
+/// queued for minutes or gave up. A small burst lets one action through
+/// whole; the gap still spaces successive actions.
+pub(crate) const SECONDARY_INTERACTIVE_BURST: u32 = 4;
+
 #[derive(Debug, Clone)]
 struct CircuitState {
     reason: String,
@@ -470,6 +480,10 @@ pub struct RateBudget {
     /// Earliest instant the next Interactive request may pass through an
     /// open secondary cooldown ([`SECONDARY_INTERACTIVE_GAP`] pacing).
     secondary_interactive_next: Option<Instant>,
+    /// Interactive requests admitted in the current
+    /// [`SECONDARY_INTERACTIVE_GAP`] window (see
+    /// [`SECONDARY_INTERACTIVE_BURST`]).
+    secondary_interactive_used: u32,
     primary_circuits: HashMap<String, CircuitState>,
     secondary_failures: u32,
     min_request_gap: Duration,
@@ -500,6 +514,7 @@ impl RateBudget {
             request_latencies_ms: VecDeque::new(),
             secondary_circuit: None,
             secondary_interactive_next: None,
+            secondary_interactive_used: 0,
             primary_circuits: HashMap::new(),
             secondary_failures: 0,
             min_request_gap: DEFAULT_MIN_REQUEST_GAP,
@@ -760,16 +775,26 @@ impl RateBudget {
         self.expire_circuits(wall_now);
         if let Some(circuit) = &self.secondary_circuit {
             // #1218 item 5: user-initiated requests pass through a
-            // secondary cooldown, spaced SECONDARY_INTERACTIVE_GAP apart;
+            // secondary cooldown — a burst of SECONDARY_INTERACTIVE_BURST
+            // per SECONDARY_INTERACTIVE_GAP window, so one user action
+            // (fetch + merge-method + mutation) goes through whole;
             // everything scheduled waits out the window. Primary
             // exhaustion below still blocks unconditionally.
-            let interactive_may_pass = priority == RequestPriority::Interactive
-                && self
+            let mut interactive_may_pass = false;
+            if priority == RequestPriority::Interactive {
+                if self
                     .secondary_interactive_next
-                    .is_none_or(|next| mono_now >= next);
-            if interactive_may_pass {
-                self.secondary_interactive_next = Some(mono_now + SECONDARY_INTERACTIVE_GAP);
-            } else {
+                    .is_none_or(|next| mono_now >= next)
+                {
+                    self.secondary_interactive_next = Some(mono_now + SECONDARY_INTERACTIVE_GAP);
+                    self.secondary_interactive_used = 0;
+                }
+                if self.secondary_interactive_used < SECONDARY_INTERACTIVE_BURST {
+                    self.secondary_interactive_used += 1;
+                    interactive_may_pass = true;
+                }
+            }
+            if !interactive_may_pass {
                 return Err(AcquireError::CircuitOpen {
                     reason: circuit.reason.clone(),
                     retry_at: circuit.retry_at,
@@ -1472,6 +1497,7 @@ impl RateBudget {
             request_latencies_ms: self.request_latencies_ms.clone(),
             secondary_circuit: self.secondary_circuit.clone(),
             secondary_interactive_next: self.secondary_interactive_next,
+            secondary_interactive_used: self.secondary_interactive_used,
             primary_circuits: self.primary_circuits.clone(),
             secondary_failures: self.secondary_failures,
             min_request_gap: self.min_request_gap,
@@ -2266,8 +2292,9 @@ mod tests {
 
     /// #1218 item 5: a secondary cooldown (usually opened by background
     /// churn) must not refuse the user's own actions — Interactive
-    /// requests pass, paced one per SECONDARY_INTERACTIVE_GAP, while
-    /// scheduled priorities keep waiting out the window.
+    /// requests pass, a burst of SECONDARY_INTERACTIVE_BURST per
+    /// SECONDARY_INTERACTIVE_GAP window (one `g m` is three requests back
+    /// to back), while scheduled priorities keep waiting out the window.
     #[test]
     fn secondary_cooldown_lets_spaced_interactive_requests_through() {
         let wall_now = Utc::now();
@@ -2275,19 +2302,21 @@ mod tests {
         let mut budget = RateBudget::new(100, 6000.0);
         budget.observe_secondary_limit(None, wall_now);
 
-        assert!(
-            budget
-                .admit_at(
-                    ApiResource::Graphql,
-                    "g-sync",
-                    RequestPriority::Interactive,
-                    1,
-                    wall_now,
-                    mono_now
-                )
-                .is_ok(),
-            "the first interactive request passes the open cooldown",
-        );
+        for n in 0..SECONDARY_INTERACTIVE_BURST {
+            assert!(
+                budget
+                    .admit_at(
+                        ApiResource::Graphql,
+                        "g-sync",
+                        RequestPriority::Interactive,
+                        1,
+                        wall_now,
+                        mono_now + Duration::from_secs(u64::from(n))
+                    )
+                    .is_ok(),
+                "interactive request {n} of the burst passes the open cooldown",
+            );
+        }
         assert!(
             matches!(
                 budget.admit_at(
@@ -2296,11 +2325,11 @@ mod tests {
                     RequestPriority::Interactive,
                     1,
                     wall_now,
-                    mono_now + Duration::from_secs(1)
+                    mono_now + Duration::from_secs(5)
                 ),
                 Err(AcquireError::CircuitOpen { .. })
             ),
-            "a second interactive request inside the gap is paced",
+            "a request past the burst inside the gap is paced",
         );
         assert!(
             budget

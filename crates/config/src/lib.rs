@@ -790,6 +790,132 @@ where
     })
 }
 
+/// When the daemon holds an OS sleep inhibitor for agent activity
+/// (`ui.keep_awake`, issue #1485). The historical bool maps onto this:
+/// `false` → [`KeepAwake::Off`], `true` → [`KeepAwake::Working`], so an
+/// existing config keeps its meaning. The wider modes were added because
+/// an agent that stops to ask a question leaves `Working` — exactly when
+/// you most want the machine up, since the run is one keystroke from
+/// resuming.
+///
+/// - `off` — never inhibit.
+/// - `working` — inhibit while ≥1 agent is actively computing (today's
+///   behaviour, and what `true` decodes to).
+/// - `asking` — also inhibit while an agent is parked waiting on you
+///   (`InputNeeded`).
+/// - `always` — inhibit for as long as the daemon runs, agents or not.
+///
+/// On a macOS laptop the inhibitor only covers system sleep on AC power
+/// and never a closed lid, so a held assertion is not a guarantee on
+/// battery — the sidebar badge says as much (it reads the power source),
+/// but no mode changes that OS limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KeepAwake {
+    #[default]
+    Off,
+    Working,
+    Asking,
+    Always,
+}
+
+impl KeepAwake {
+    /// Whether the inhibitor should be held right now, given whether any
+    /// agent is `Working` and whether any is parked on input. The single
+    /// predicate the daemon spawns the inhibitor on and the client paints
+    /// the `☼ awake` badge from, so the two never disagree.
+    pub fn should_hold(self, any_working: bool, any_asking: bool) -> bool {
+        match self {
+            KeepAwake::Off => false,
+            KeepAwake::Working => any_working,
+            KeepAwake::Asking => any_working || any_asking,
+            KeepAwake::Always => true,
+        }
+    }
+}
+
+/// Serialize `Off`/`Working` back as the historical bool (`false`/`true`)
+/// so a config written by this build still loads on an *older* lazybox,
+/// whose `keep_awake` is a plain `bool` — a write-back (theme toggle,
+/// sidebar collapse, splitter resize) stamps this key into everyone's
+/// config, so emitting a string for the common cases would make a
+/// downgrade fail the entire config load and drop the user's repos and
+/// tokens to defaults. The two genuinely-new modes have no bool form and
+/// an old build couldn't honour them anyway, so those serialize as
+/// strings.
+impl Serialize for KeepAwake {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            KeepAwake::Off => s.serialize_bool(false),
+            KeepAwake::Working => s.serialize_bool(true),
+            KeepAwake::Asking => s.serialize_str("asking"),
+            KeepAwake::Always => s.serialize_str("always"),
+        }
+    }
+}
+
+/// Accept both the historical bool (`keep_awake: true|false`) and the
+/// named modes (`working|asking|always`), so upgrading never breaks a
+/// config. Any unrecognized *or wrong-typed* value warns and disables
+/// rather than sinking the whole config load (which would take the user's
+/// repos and tokens down with it) — same policy as the `de_lenient_*`
+/// field deserializers, extended to the scalar type mismatches
+/// (`keep_awake:` with no value, an integer, a float) that a hand-edited
+/// config can produce.
+impl<'de> Deserialize<'de> for KeepAwake {
+    fn deserialize<D>(de: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = KeepAwake;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a bool or one of `off`, `working`, `asking`, `always`")
+            }
+            fn visit_bool<E>(self, v: bool) -> Result<KeepAwake, E> {
+                Ok(if v {
+                    KeepAwake::Working
+                } else {
+                    KeepAwake::Off
+                })
+            }
+            fn visit_str<E>(self, v: &str) -> Result<KeepAwake, E> {
+                Ok(match v.trim().to_ascii_lowercase().as_str() {
+                    "off" | "false" | "none" => KeepAwake::Off,
+                    "working" | "true" | "on" => KeepAwake::Working,
+                    "asking" => KeepAwake::Asking,
+                    "always" => KeepAwake::Always,
+                    other => {
+                        tracing::warn!(
+                            "unknown ui.keep_awake {other:?}; expected a bool or `off`/`working`/`asking`/`always`, using `off`"
+                        );
+                        KeepAwake::Off
+                    }
+                })
+            }
+            fn visit_unit<E>(self) -> Result<KeepAwake, E> {
+                tracing::warn!(
+                    "ui.keep_awake has no value; expected a bool or `off`/`working`/`asking`/`always`, using `off`"
+                );
+                Ok(KeepAwake::Off)
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<KeepAwake, E> {
+                tracing::warn!("ui.keep_awake is {v}, not a bool or mode name, using `off`");
+                Ok(KeepAwake::Off)
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<KeepAwake, E> {
+                tracing::warn!("ui.keep_awake is {v}, not a bool or mode name, using `off`");
+                Ok(KeepAwake::Off)
+            }
+            fn visit_f64<E>(self, v: f64) -> Result<KeepAwake, E> {
+                tracing::warn!("ui.keep_awake is {v}, not a bool or mode name, using `off`");
+                Ok(KeepAwake::Off)
+            }
+        }
+        de.deserialize_any(V)
+    }
+}
+
 /// Which button a Confirm modal highlights for `Enter` — resolved from
 /// *how the modal was invoked*, not from its prompt text (issue #525).
 /// `Yes` fires the action on a bare `Enter`; `No` backs out.
@@ -1123,6 +1249,12 @@ pub struct UiSection {
     /// Right-top (activity) row height as a percentage of the
     /// right column. None = use the default (25%).
     pub right_top_pct: Option<u16>,
+    /// True once the user has deliberately chosen the activity row's
+    /// height (a splitter drag or Shift-↑/↓). When set, `right_top_pct`
+    /// is honored verbatim instead of being shrunk to fit content. None
+    /// = never resized, so the content-fit still applies.
+    #[serde(default)]
+    pub activity_user_resized: Option<bool>,
     /// How long the cursor must sit on an unread activity row
     /// before the daemon auto-marks it read. None = 1 second (the
     /// historical default). Yazi-ish: long enough to scan past,
@@ -1185,13 +1317,20 @@ pub struct UiSection {
     /// its argument. None = the OS default browser.
     pub browser: Option<String>,
     /// Whether the user has already seen the in-app feature tour.
-    /// Set `true` the first time the tour is dismissed or finished
+    /// Set `true` the first time the coach is ended or completed
     /// so it doesn't re-launch on every boot; re-invocable on demand
-    /// via the tour shortcut regardless. Defaults to `false` so a
-    /// brand-new install (or one upgraded into the tour feature)
+    /// via the coach shortcut regardless. Defaults to `false` so a
+    /// brand-new install (or one upgraded into the coach feature)
     /// gets the walkthrough once.
     #[serde(default)]
     pub tour_seen: bool,
+    /// The coach step a returning user should resume at (#1460). The
+    /// coach persists its position as the user advances so quitting
+    /// mid-walkthrough resumes where they left off rather than
+    /// restarting; a skipped step advances this past it so it never
+    /// returns uninvited. Clamped to the curriculum length on load.
+    #[serde(default)]
+    pub coach_step: usize,
     /// Whether the progressive feature-discovery tips are enabled.
     /// Tips surface occasionally as a dim, auto-fading footer hint
     /// keyed off current state (agent waiting, failing CI, in a
@@ -1234,21 +1373,26 @@ pub struct UiSection {
     /// removal) defaults to `no`. See [`ConfirmDefaults`].
     #[serde(default)]
     pub confirm_default: ConfirmDefaults,
-    /// Keep the machine awake while any agent is actively working.
-    /// When `true`, the daemon holds an OS sleep inhibitor
-    /// (`caffeinate` on macOS, `systemd-inhibit` on Linux — a
-    /// non-systemd Linux gets a logged warning and no inhibition)
-    /// for exactly as long as ≥1 agent terminal is `Working`, and
-    /// releases it the moment everything goes idle — the box never
-    /// stays pinned awake just because lazybox is open. "Working"
-    /// means actively computing: an agent parked at a permission
-    /// prompt or resting after its turn lets the machine sleep
-    /// normally. The daemon re-reads this flag on every agent
-    /// transition, so editing it takes effect without a restart.
-    /// Defaults to `false`: sleep behavior is unchanged unless
-    /// opted in.
+    /// Keep the machine awake while agents are active. The daemon holds
+    /// an OS sleep inhibitor (`caffeinate` on macOS, `systemd-inhibit` on
+    /// Linux — a non-systemd Linux gets a logged warning and no
+    /// inhibition) while the [`KeepAwake`] mode says to, and releases it
+    /// the moment nothing qualifies — the box never stays pinned awake
+    /// just because lazybox is open. `working` (the historical `true`)
+    /// holds only while ≥1 agent is actively computing; `asking` also
+    /// holds while an agent is parked on input; `always` holds for as
+    /// long as the daemon runs. The daemon re-reads this on every agent
+    /// transition, so editing it takes effect without a restart. Defaults
+    /// to `off`: sleep behavior is unchanged unless opted in. See
+    /// [`KeepAwake`] for the macOS-laptop caveat (AC-only, lid).
+    ///
+    /// `KeepAwake`'s deserializer accepts a bool or a mode string and
+    /// degrades an unknown value to `off` with a warning, so a newer
+    /// build writing a mode this one doesn't know can never fail
+    /// `Config::load()` — the 2026-09-05 sync outage this PR also fixed
+    /// with a bool-tolerant shim, now subsumed by the real enum from #1485.
     #[serde(default)]
-    pub keep_awake: bool,
+    pub keep_awake: KeepAwake,
     /// Auto-press "Wait" when a Claude agent hits its provider usage /
     /// monthly limit (issue #847). When `true`, the daemon accepts the
     /// limit prompt's default (Wait) option the moment an agent enters
@@ -1329,6 +1473,7 @@ impl Default for UiSection {
             theme: None,
             sidebar_pct: None,
             right_top_pct: None,
+            activity_user_resized: None,
             auto_mark_delay: None,
             quit_double_tap_window: None,
             terminal_escape_char: None,
@@ -1340,13 +1485,14 @@ impl Default for UiSection {
             action_keys: std::collections::BTreeMap::new(),
             browser: None,
             tour_seen: false,
+            coach_step: 0,
             show_tips: true,
             tips_seen: Vec::new(),
             terminal_new_layout: NewTerminalLayout::default(),
             activity_pane_default: ActivityPaneMode::default(),
             focus_layout: FocusLayout::default(),
             confirm_default: ConfirmDefaults::default(),
-            keep_awake: false,
+            keep_awake: KeepAwake::default(),
             auto_wait_on_limit: false,
             credit_recovery_prompt: default_credit_recovery_prompt(),
             show_agent_model: true,
@@ -1394,9 +1540,9 @@ pub struct UiDefaults {
     /// Per-source Confirm-modal defaults. See
     /// [`UiSection::confirm_default`].
     pub confirm_default: ConfirmDefaults,
-    /// Hold an OS sleep inhibitor while agents work. See
-    /// [`UiSection::keep_awake`].
-    pub keep_awake: bool,
+    /// Hold an OS sleep inhibitor while agents are active. See
+    /// [`UiSection::keep_awake`] and [`KeepAwake`].
+    pub keep_awake: KeepAwake,
     /// Show each agent's model + effort by its badge. See
     /// [`UiSection::show_agent_model`].
     pub show_agent_model: bool,
@@ -1445,7 +1591,7 @@ impl Default for UiDefaults {
             activity_pane_default: ActivityPaneMode::default(),
             focus_layout: FocusLayout::default(),
             confirm_default: ConfirmDefaults::default(),
-            keep_awake: false,
+            keep_awake: KeepAwake::default(),
             show_agent_model: true,
             usage_limit_alerts: true,
             auto_wait_on_limit: false,
@@ -3262,6 +3408,15 @@ pub struct GithubConfig {
     /// Poll interval in seconds.
     #[serde(with = "duration_secs")]
     pub poll_interval: Duration,
+    /// How often every scoped / watched repo should be re-swept by the
+    /// repo-first discovery rotation, in seconds. The daemon spreads
+    /// the roster over `repo_refresh_interval / poll_interval` ticks
+    /// (28 repos at the 5-minute default and a 60s poll = 6 repos per
+    /// tick), each member windowed on its last successful sweep so a
+    /// steady repo costs two near-empty pages. Session-bearing and
+    /// focused repos are swept every tick regardless.
+    #[serde(with = "duration_secs")]
+    pub repo_refresh_interval: Duration,
     /// Org/repo filters. Only PRs matching these appear in the inbox.
     /// Empty = show everything.
     pub filters: Vec<Filter>,
@@ -3288,6 +3443,11 @@ pub struct GithubConfig {
     pub host: Option<String>,
 }
 
+impl GithubConfig {
+    /// Default [`repo_refresh_interval`](Self::repo_refresh_interval).
+    pub const DEFAULT_REPO_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+}
+
 impl Default for GithubConfig {
     fn default() -> Self {
         Self {
@@ -3298,6 +3458,7 @@ impl Default for GithubConfig {
             // default doubled the cost for no real-time benefit —
             // PR/issue state doesn't change that fast.
             poll_interval: Duration::from_secs(60),
+            repo_refresh_interval: Self::DEFAULT_REPO_REFRESH_INTERVAL,
             filters: vec![],
             detect_needs_reply: true,
             background_budget_share: 0.55,
@@ -3860,18 +4021,109 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn github_repo_refresh_interval_defaults_and_parses() {
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.providers.github.repo_refresh_interval,
+            GithubConfig::DEFAULT_REPO_REFRESH_INTERVAL
+        );
+        let cfg: Config =
+            serde_yaml::from_str("providers:\n  github:\n    repo_refresh_interval: 120s\n")
+                .expect("parses");
+        assert_eq!(
+            cfg.providers.github.repo_refresh_interval,
+            Duration::from_secs(120)
+        );
+    }
+
     /// `ui.keep_awake` is opt-in: absent means off (sleep behavior
-    /// unchanged), and both the raw section and the resolved defaults
-    /// carry an explicit `true`.
+    /// unchanged). The historical bool still parses — `true` decodes to
+    /// `Working` so an existing config keeps its meaning — alongside the
+    /// named modes.
     #[test]
     fn keep_awake_defaults_off_and_parses() {
         let cfg: Config = serde_yaml::from_str("{}").expect("parse");
-        assert!(!cfg.ui.keep_awake);
-        assert!(!cfg.ui.resolved().keep_awake);
+        assert_eq!(cfg.ui.keep_awake, KeepAwake::Off);
+        assert_eq!(cfg.ui.resolved().keep_awake, KeepAwake::Off);
 
         let cfg: Config = serde_yaml::from_str("ui:\n  keep_awake: true\n").expect("parse");
-        assert!(cfg.ui.keep_awake);
-        assert!(cfg.ui.resolved().keep_awake);
+        assert_eq!(cfg.ui.keep_awake, KeepAwake::Working);
+        assert_eq!(cfg.ui.resolved().keep_awake, KeepAwake::Working);
+
+        let cfg: Config = serde_yaml::from_str("ui:\n  keep_awake: false\n").expect("parse");
+        assert_eq!(cfg.ui.keep_awake, KeepAwake::Off);
+
+        for (raw, want) in [
+            ("working", KeepAwake::Working),
+            ("asking", KeepAwake::Asking),
+            ("always", KeepAwake::Always),
+            ("off", KeepAwake::Off),
+        ] {
+            let cfg: Config =
+                serde_yaml::from_str(&format!("ui:\n  keep_awake: {raw}\n")).expect("parse");
+            assert_eq!(cfg.ui.keep_awake, want, "keep_awake: {raw}");
+        }
+
+        // Unknown strings degrade to off rather than sinking the load.
+        let cfg: Config = serde_yaml::from_str("ui:\n  keep_awake: bogus\n").expect("parse");
+        assert_eq!(cfg.ui.keep_awake, KeepAwake::Off);
+
+        // Wrong-typed scalars (null / int / float from a hand edit) also
+        // degrade to off instead of failing the entire config load and
+        // taking the user's repos and tokens down with it.
+        for raw in [
+            "ui:\n  keep_awake:\n",
+            "ui:\n  keep_awake: 3\n",
+            "ui:\n  keep_awake: 1.5\n",
+        ] {
+            let cfg: Config = serde_yaml::from_str(raw).expect("must not sink the load");
+            assert_eq!(cfg.ui.keep_awake, KeepAwake::Off, "{raw:?}");
+        }
+    }
+
+    /// `Off`/`Working` serialize back as the historical bool so a config
+    /// written by this build still loads on an older lazybox (whose
+    /// `keep_awake` is a plain `bool`); the two new modes have no bool
+    /// form and round-trip as strings.
+    #[test]
+    fn keep_awake_serializes_bool_compatibly() {
+        let ser = |m: KeepAwake| {
+            let ui = UiSection {
+                keep_awake: m,
+                ..UiSection::default()
+            };
+            serde_yaml::to_string(&ui).expect("serialize")
+        };
+        assert!(ser(KeepAwake::Off).contains("keep_awake: false"));
+        assert!(ser(KeepAwake::Working).contains("keep_awake: true"));
+        assert!(ser(KeepAwake::Asking).contains("keep_awake: asking"));
+        assert!(ser(KeepAwake::Always).contains("keep_awake: always"));
+
+        // Every mode round-trips through our own deserializer too.
+        for m in [
+            KeepAwake::Off,
+            KeepAwake::Working,
+            KeepAwake::Asking,
+            KeepAwake::Always,
+        ] {
+            let yaml = serde_yaml::to_string(&m).expect("serialize scalar");
+            let back: KeepAwake = serde_yaml::from_str(&yaml).expect("deserialize scalar");
+            assert_eq!(back, m);
+        }
+    }
+
+    /// The single hold predicate the daemon and client share.
+    #[test]
+    fn keep_awake_should_hold_per_mode() {
+        use KeepAwake::*;
+        assert!(!Off.should_hold(true, true));
+        assert!(Working.should_hold(true, false));
+        assert!(!Working.should_hold(false, true));
+        assert!(Asking.should_hold(false, true));
+        assert!(Asking.should_hold(true, false));
+        assert!(!Asking.should_hold(false, false));
+        assert!(Always.should_hold(false, false));
     }
 
     #[test]

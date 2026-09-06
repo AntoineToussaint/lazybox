@@ -27,6 +27,71 @@ fn seed_ws(m: &mut crate::realm::model::Model<tuirealm::terminal::TestTerminalAd
 }
 
 #[cfg(test)]
+mod scope_removal_prompt_tests {
+    //! The safe-unsubscribe confirm names its targets (#1474).
+    use super::super::inputs::format_scope_removal_prompt;
+
+    #[test]
+    fn names_each_repo_with_its_workspace_count() {
+        let repos = vec![
+            ("obin-ai/lazybox".to_string(), 12),
+            ("acme/api".to_string(), 4),
+        ];
+        let prompt = format_scope_removal_prompt(&repos, 16);
+        assert!(prompt.contains("Removing 2 repo(s) DELETES their 16 workspace(s)"));
+        assert!(prompt.contains("  obin-ai/lazybox — 12 workspace(s)"));
+        assert!(prompt.contains("  acme/api — 4 workspace(s)"));
+        assert!(prompt.contains("press z on its"));
+        assert!(!prompt.contains("more"));
+    }
+
+    /// `Confirm` truncates the question from the BOTTOM (buttons are
+    /// pinned to the modal's last row). So on a short terminal the repo
+    /// list must be the thing that falls off — never the DELETES
+    /// warning, the mute escape hatch, or the question. Freeze that
+    /// ordering: every decision-critical phrase precedes the first repo
+    /// row in the string.
+    #[test]
+    fn decision_critical_text_precedes_the_truncatable_list() {
+        let repos = vec![
+            ("obin-ai/lazybox".to_string(), 12),
+            ("acme/api".to_string(), 4),
+        ];
+        let prompt = format_scope_removal_prompt(&repos, 16);
+        let first_repo = prompt.find("  obin-ai/lazybox").expect("repo list present");
+        for phrase in [
+            "DELETES their 16 workspace(s)",
+            "press z on its",
+            "Remove and delete?",
+        ] {
+            let at = prompt
+                .find(phrase)
+                .unwrap_or_else(|| panic!("missing {phrase:?}"));
+            assert!(
+                at < first_repo,
+                "{phrase:?} must come before the repo list so it survives \
+                 bottom-up truncation: {prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn caps_the_list_and_trails_with_a_more_count() {
+        let repos: Vec<(String, usize)> = (0..9).map(|i| (format!("org/repo{i}"), 1)).collect();
+        let prompt = format_scope_removal_prompt(&repos, 9);
+        assert_eq!(
+            prompt.matches("workspace(s)\n").count(),
+            6,
+            "only the first 6 repos should be listed: {prompt}"
+        );
+        assert!(
+            prompt.contains("  +3 more\n"),
+            "missing overflow trailer: {prompt}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod prompt_history_format_tests {
     //! Formatting helpers for the `]]h` prompt-history rows (#523).
     use super::super::{relative_age, summarize_prompt};
@@ -291,6 +356,45 @@ mod effects_tests {
             m.handle_confirmed(true).as_slice(),
             [Command::ClearErrors]
         ));
+    }
+
+    /// The empty-inbox doctor's sync facts must track real poll events end
+    /// to end (#1461): an auth error makes the empty inbox a sign-in
+    /// problem, and a *later* successful poll for the same provider must
+    /// clear it — the diagnosis reads each source's LATEST outcome, not a
+    /// stale one. Would have caught a per-source-latest mapping regression.
+    #[test]
+    fn empty_inbox_doctor_tracks_sync_health_across_events() {
+        use crate::components::sidebar::InboxDiagnosis;
+        use lazybox_ipc::{Event, ProviderErrorKind};
+
+        let mut m = build_model();
+        // Fresh model: no providers enabled, nothing polled → first run.
+        assert_eq!(m.sidebar.inbox_diagnosis(), Some(InboxDiagnosis::FirstRun));
+
+        // A GitHub credential failure surfaces as the sign-in diagnosis.
+        m.handle_daemon_event(Event::provider_error(
+            "github",
+            "bad credentials",
+            ProviderErrorKind::Auth,
+        ));
+        assert_eq!(
+            m.sidebar.inbox_diagnosis(),
+            Some(InboxDiagnosis::CredentialFailure {
+                provider: "github".into()
+            }),
+        );
+
+        // A later successful poll for the SAME provider is now its latest
+        // outcome — the stale auth failure must not linger.
+        m.handle_daemon_event(Event::PollCompleted {
+            source: "github".into(),
+            count: 0,
+        });
+        assert_eq!(
+            m.sidebar.inbox_diagnosis(),
+            Some(InboxDiagnosis::NothingOpen),
+        );
     }
 
     #[test]
@@ -2811,6 +2915,71 @@ mod effects_tests {
         m
     }
 
+    /// Wiring guard (#1490): `view()` must refresh the agent tabs' usage
+    /// badges from the tracker *before* drawing. Feed a live plan quota, render
+    /// the whole model, and assert the headroom badge reached the tab strip —
+    /// its `◔` glyph is unique to the terminal surface (the sidebar renders
+    /// utilization, never `◔`), so a hit isolates the terminal-stack path from
+    /// the sidebar's own `$ METER` pill. Deleting the refresh call from
+    /// `view()` — the one thing a unit test on the render alone can't catch —
+    /// fails this.
+    #[test]
+    fn view_paints_the_agent_tab_usage_badge() {
+        use lazybox_ipc::{
+            Event as IpcEvent, ProviderQuota, QuotaWindow, TerminalId, TerminalKind,
+        };
+        let mut m = build_model();
+        let ws_key = WorkspaceKey::new("github:o/r#1");
+        let session_key: SessionKey = (&ws_key).into();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![lazybox_core::Workspace::empty(
+                ws_key,
+                "main",
+                chrono::Utc::now(),
+            )],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: session_key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        // Weekly window at 62% used → 38% headroom, reset far in the future so
+        // it is unambiguously live for the wall clock.
+        m.handle_daemon_event(IpcEvent::AgentProviderQuota {
+            agent_id: "claude".into(),
+            session_key: Some(session_key.clone()),
+            quota: ProviderQuota {
+                five_hour: None,
+                weekly: Some(QuotaWindow {
+                    utilization_bp: 6200,
+                    reset_at: Some(9_999_999_999),
+                }),
+            },
+        });
+
+        m.view();
+        let buffer = m.terminal.raw().backend().buffer();
+        let mut text = String::new();
+        for row in 0..buffer.area.height {
+            for col in 0..buffer.area.width {
+                text.push_str(buffer[(col, row)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(
+            text.contains('◔') && text.contains("38% left"),
+            "the headroom badge must reach the tab strip via view(): {text:?}",
+        );
+    }
+
     /// Returning to the terminal pane with a single click restores the
     /// ability to interact in one click (#103). Before the fix, the
     /// first click after leaving the terminal only refocused it —
@@ -3297,60 +3466,54 @@ snippets:
         assert_eq!(m.recent_snippets, vec!["ls"]);
     }
 
+    /// The coach shortcut starts the rail as a non-modal (it never
+    /// enters the modal stack), and a dispatched jump action satisfies
+    /// the "notice work / jump to it" step — the coach reads real
+    /// dispatched actions, not keypresses (#1460).
     #[test]
-    fn tour_sends_and_repeats_through_the_real_picker() {
-        use crate::realm::components::tour::SEND_SNIPPET_STEP;
+    fn coach_starts_non_modal_and_notes_jump_actions() {
+        use lazybox_tui_core::action::Action;
 
-        let mut m = model_with_active_terminal_and_snippet(
-            "tour",
-            "\nsnippets:\n  rev:\n    description: Review\n    body: review the diff\n",
-            lazybox_ipc::TerminalKind::Agent("claude".into()),
+        let mut m = model_with_terminal();
+        assert!(m.coach.is_none());
+        m.toggle_coach();
+        assert!(m.coach.is_some(), "coach shortcut starts the rail");
+        assert!(
+            m.modal_stack.is_empty(),
+            "the coach is a docked rail, never a modal"
         );
-        m.modal_stack.clear();
-        m.mount_tour_at(SEND_SNIPPET_STEP);
-        m.update(Msg::TourTrySnippet);
-        assert_eq!(m.top_modal(), Some(&Id::SnippetPicker));
 
-        let first = m.handle_choice_picked(vec![ChoicePayload::Text("rev".into())]);
-        assert!(matches!(
-            first.as_slice(),
-            [IpcCommand::DeliverSnippet { .. }]
-        ));
-        assert!(m.recent_snippets.is_empty());
-        m.handle_daemon_event(lazybox_ipc::Event::SnippetDelivered {
-            terminal_id: lazybox_ipc::TerminalId(1),
-            session_key: "github:o/r#1".into(),
-            snippet_key: "rev".into(),
-            prompt: Some(lazybox_ipc::UserPrompt {
-                text: "review the diff".into(),
-                timestamp_ms: 611,
-                source: lazybox_ipc::PromptSource::Snippet {
-                    key: "rev".into(),
-                    category: String::new(),
-                },
-            }),
-        });
-        assert_eq!(m.top_modal(), Some(&Id::Tour));
-        assert_eq!(m.recent_snippets, vec!["rev"]);
+        // Re-seat at the jump step and dispatch a jump: its goal fires.
+        m.start_coach(4);
+        m.note_coach_action(&Action::JumpToAsking);
+        let snap = m.coach_snapshot();
+        assert!(
+            m.coach.as_mut().expect("coach present").observe(&snap),
+            "a dispatched jump action completes the jump step"
+        );
+    }
 
-        m.update(Msg::TourRepeatSnippet);
-        assert_eq!(m.top_modal(), Some(&Id::SnippetPicker));
-        let repeat = m.handle_choice_picked(vec![ChoicePayload::Text("rev".into())]);
-        assert!(matches!(
-            repeat.as_slice(),
-            [IpcCommand::DeliverSnippet {
-                snippet_key,
-                ..
-            }] if snippet_key == "rev"
-        ));
-        m.handle_daemon_event(lazybox_ipc::Event::SnippetDelivered {
-            terminal_id: lazybox_ipc::TerminalId(1),
-            session_key: "github:o/r#1".into(),
-            snippet_key: "rev".into(),
-            prompt: None,
-        });
-        assert_eq!(m.top_modal(), Some(&Id::Tour));
-        assert!(m.modal_flow.is_none());
+    /// The whole curriculum is unsatisfiable with an empty inbox, so the
+    /// armed coach must wait for a workspace to act on rather than
+    /// stranding a first-run user (no repos) on step 1 (#1460 F4).
+    #[test]
+    fn coach_waits_for_a_workspace_before_launching() {
+        // Empty inbox: armed, but no workspace → no launch.
+        let mut m = build_model();
+        assert_eq!(m.sidebar.visible_workspace_count(), 0);
+        m.set_auto_tour(true);
+        m.maybe_start_coach();
+        assert!(m.coach.is_none(), "must not launch over an empty inbox");
+        // Manual invoke over an empty inbox is a no-op too, not a stall.
+        m.toggle_coach();
+        assert!(m.coach.is_none(), "manual invoke over empty inbox is inert");
+
+        // Once a workspace exists, the still-armed coach launches.
+        let mut m2 = model_with_terminal();
+        assert!(m2.sidebar.visible_workspace_count() > 0);
+        m2.set_auto_tour(true);
+        m2.maybe_start_coach();
+        assert!(m2.coach.is_some(), "coach launches once there's a task");
     }
 
     /// Workspace attribution is not part of the client command: the daemon
@@ -4072,7 +4235,7 @@ snippets:
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
             1,
-            "the multi-select survives a cancel",
+            "nothing ran, so the marks stay — only a real action consumes them",
         );
     }
 
@@ -4531,12 +4694,12 @@ snippets:
     }
 
     /// `Shift-B` resolves its targets from the sidebar multi-select at
-    /// mount time, and a delivered broadcast clears the selection —
-    /// the same contract as the activity pane's `w`. A broadcast that
-    /// reached nobody keeps the marks so the user can retry after
-    /// spawning an agent.
+    /// mount time, and a delivered broadcast now KEEPS the selection
+    /// (#1449) so the same set can be acted on again — the same contract
+    /// as every other bulk action. A broadcast that reached nobody also
+    /// keeps the marks so the user can retry after spawning an agent.
     #[test]
-    fn broadcast_clears_selection_after_delivery_but_not_after_all_skipped() {
+    fn broadcast_consumes_selection_on_delivery_but_keeps_it_when_all_skipped() {
         let (mut m, keys) = model_with_broadcast_targets(&[
             Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
             None,
@@ -4564,7 +4727,7 @@ snippets:
             "all-skipped send must not clear the marks",
         );
 
-        // Delivered broadcast: selection clears.
+        // Delivered broadcast: the action consumes the selection (#1498).
         let expected_targets = m.sidebar.selected_broadcast_keys();
         m.mount_broadcast_picker();
         assert_eq!(
@@ -4589,7 +4752,7 @@ snippets:
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
             0,
-            "successful send consumes the selection",
+            "a bulk action consumes its selection (#1498)",
         );
     }
 
@@ -4616,7 +4779,7 @@ snippets:
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
             1,
-            "the marks survive a cancelled compose",
+            "nothing ran, so the marks stay — only a real action consumes them",
         );
     }
 
@@ -7833,7 +7996,6 @@ mod stale_input_tests {
                 | Id::Error
                 | Id::Update
                 | Id::Polling
-                | Id::Tour
                 | Id::SyncStatus
                 | Id::Messages
                 | Id::ErrorInbox
@@ -7897,7 +8059,6 @@ mod stale_input_tests {
             Id::ConflictResolve,
             Id::SnippetPicker,
             Id::SkillPicker,
-            Id::Tour,
             Id::SyncStatus,
             Id::Messages,
             Id::ErrorInbox,
@@ -9785,7 +9946,7 @@ mod merge_focus_follow_tests {
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
             0,
-            "selection clears after the bulk fire",
+            "a bulk action consumes its selection (#1498)",
         );
     }
 
@@ -9807,7 +9968,7 @@ mod merge_focus_follow_tests {
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
             1,
-            "selection survives a no-op bulk update",
+            "a fully-ineligible run leaves the marks so it can be retried",
         );
     }
 
@@ -9853,6 +10014,191 @@ mod merge_focus_follow_tests {
         // selection — no Shift-U detour (#932).
         let cmds = m.dispatch_action(&Action::UpdateBranch);
         assert_eq!(cmds.len(), 3, "one UpdateBranch per selected PR");
+    }
+
+    /// End-to-end #1448: `V` arms visual-select and plain `j` (no Shift
+    /// on the arrow) sweeps a contiguous range, driving the same
+    /// `extend_selection` as Shift-↑/↓ — the encoding-independent path.
+    /// A normal action then fans out across the marked set.
+    #[test]
+    fn visual_select_key_then_j_sweeps_range_and_action_fans_out() {
+        use lazybox_tui_core::action::Action;
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        let mut a = workspace("owner/repo#1", true, Duration::hours(1));
+        a.pr.as_mut().unwrap().is_behind_base = true;
+        let mut b = workspace("owner/repo#2", true, Duration::hours(2));
+        b.pr.as_mut().unwrap().is_behind_base = true;
+        let mut c = workspace("owner/repo#3", true, Duration::hours(3));
+        c.pr.as_mut().unwrap().is_behind_base = true;
+        let top_key = a.key.clone();
+        for ws in [a, b, c] {
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        }
+
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        // Anchor on the top (newest) row, then arm and sweep downward.
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&top_key)));
+        m.dispatch_key(KeyEvent::new(Key::Char('V'), KeyModifiers::SHIFT));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            1,
+            "arming marks the cursor row",
+        );
+        for _ in 0..8 {
+            m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        }
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            3,
+            "V + plain j sweeps every contiguous row",
+        );
+
+        let cmds = m.dispatch_action(&Action::UpdateBranch);
+        assert_eq!(cmds.len(), 3, "one UpdateBranch per selected PR");
+    }
+
+    /// `Esc` while visual-select is armed cancels the mode AND drops the
+    /// selection (#1448); a second `V` disarms but keeps the marks.
+    #[test]
+    fn visual_select_esc_cancels_and_second_v_disarms() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        let a = workspace("owner/repo#1", true, Duration::hours(1));
+        let b = workspace("owner/repo#2", true, Duration::hours(2));
+        let top_key = a.key.clone();
+        for ws in [a, b] {
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        }
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&top_key)));
+
+        // Arm + grow, then Esc: mode off and selection cleared.
+        m.dispatch_key(KeyEvent::new(Key::Char('V'), KeyModifiers::SHIFT));
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+        m.dispatch_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "Esc drops the swept selection",
+        );
+        // Esc also disarmed the mode: a plain `j` now navigates (no extend).
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "j no longer extends once the mode is off",
+        );
+
+        // Re-arm, grow, then a second `V` disarms but keeps the marks.
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&top_key)));
+        m.dispatch_key(KeyEvent::new(Key::Char('V'), KeyModifiers::SHIFT));
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        let marked = m.sidebar.broadcast_selected_count();
+        assert_eq!(marked, 2);
+        m.dispatch_key(KeyEvent::new(Key::Char('V'), KeyModifiers::SHIFT));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            marked,
+            "a second V keeps the marks",
+        );
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            marked,
+            "with the mode off, j stops extending",
+        );
+    }
+
+    /// #1448 regression: a visual-select sweep must not survive a modal.
+    /// A modal steals the keyboard (keys route to it, not
+    /// `handle_pane_key`), so if the mode stayed armed it would resurface
+    /// live when the modal closed and turn the next `j` into a stray
+    /// extend. Mounting any modal ends the sweep.
+    #[test]
+    fn visual_select_disarms_when_a_modal_mounts() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        let a = workspace("owner/repo#1", true, Duration::hours(1));
+        let b = workspace("owner/repo#2", true, Duration::hours(2));
+        let top_key = a.key.clone();
+        for ws in [a, b] {
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        }
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&top_key)));
+
+        m.dispatch_key(KeyEvent::new(Key::Char('V'), KeyModifiers::SHIFT));
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+        assert!(m.visual_select, "armed before the modal");
+
+        // An (unsolicited) modal mounts and is dismissed.
+        m.push_modal(Id::Help);
+        assert!(!m.visual_select, "mounting a modal ends the sweep");
+        m.pop_modal();
+
+        // The next `j` navigates — it does not extend the selection.
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            2,
+            "j no longer extends after the modal closed",
+        );
+    }
+
+    /// #1448 regression: a daemon event that moves focus off the anchored
+    /// workspace (here a removal of the focused row) ends the sweep, so
+    /// the next j/k doesn't silently re-anchor on an unrelated workspace.
+    /// A routine same-workspace poll must NOT disarm — covered by the
+    /// other sweep tests, which upsert repeatedly while armed.
+    #[test]
+    fn visual_select_disarms_when_a_poll_moves_focus_off_the_anchor() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+
+        let mut m = build_model();
+        let a = workspace("owner/repo#1", true, Duration::hours(1));
+        let b = workspace("owner/repo#2", true, Duration::hours(2));
+        let a_key = a.key.clone();
+        let top_key = a.key.clone();
+        for ws in [a, b] {
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        }
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&top_key)));
+
+        // Arm on the focused row without moving the cursor.
+        m.dispatch_key(KeyEvent::new(Key::Char('V'), KeyModifiers::SHIFT));
+        assert_eq!(m.sidebar.broadcast_selected_count(), 1);
+        assert!(m.visual_select);
+
+        // A poll removes the focused workspace → focus relocates → disarm.
+        m.handle_daemon_event(IpcEvent::WorkspaceRemoved(a_key));
+        assert!(
+            !m.visual_select,
+            "focus moved off the anchor, so the sweep ended",
+        );
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "the removed anchor is pruned from the selection",
+        );
+
+        // The next `j` navigates rather than starting a fresh sweep.
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "j no longer extends once the sweep ended",
+        );
     }
 
     #[test]
@@ -11624,7 +11970,7 @@ mod merge_focus_follow_tests {
     }
 
     /// `g s` sync fans out one `SyncWorkspace` per selected row and
-    /// clears the selection (acceptance #6).
+    /// keeps the selection live for a follow-up action (#1449).
     #[test]
     fn bulk_sync_fans_out_over_selection() {
         use lazybox_tui_core::action::Action;
@@ -11643,8 +11989,192 @@ mod merge_focus_follow_tests {
             cmds.iter()
                 .all(|c| matches!(c, IpcCommand::SyncWorkspace { .. }))
         );
-        assert_eq!(m.sidebar.broadcast_selected_count(), 0, "selection clears");
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "a bulk action consumes its selection (#1498)",
+        );
+        let msg = &m.status.notice.as_ref().expect("summary flashed").message;
+        assert!(
+            !msg.contains("still selected"),
+            "the summary no longer promises a surviving selection: {msg}",
+        );
         let _ = keys;
+    }
+
+    /// #1449 end-to-end: a selection survives a bulk action so the same set
+    /// can be acted on twice — `g d` (close upstream) then `x x` (archive),
+    /// the common finishing chain — without re-marking between them.
+    /// #1498 (reverting #1449): a bulk action consumes its selection. The
+    /// `g d` → `x x` chain that motivated keeping it alive now needs an
+    /// explicit re-mark, which is the point — a surviving selection is
+    /// invisible state the next keypress acts on unseen.
+    #[test]
+    fn a_bulk_action_consumes_the_selection_so_the_next_one_re_marks() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        let keys = seed_and_select(
+            &mut m,
+            vec![
+                workspace("owner/repo#1", true, Duration::hours(1)),
+                workspace("owner/repo#2", true, Duration::hours(2)),
+            ],
+        );
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+
+        // `g d` closes both PRs upstream and takes the marks with it.
+        assert!(m.dispatch_action(&Action::DeleteOrClose).is_empty());
+        let close = m.handle_confirmed(true);
+        assert_eq!(close.len(), 2, "both PRs close");
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "the action consumed the selection",
+        );
+
+        // A second action with no selection falls back to the cursor row
+        // only — it does NOT silently re-run over the old set, which is
+        // exactly the invisible-state hazard this revert removes.
+        assert!(m.dispatch_action(&Action::Archive).is_empty());
+        let cursor_only = m.handle_confirmed(true);
+        assert_eq!(cursor_only.len(), 1, "focused row only: {cursor_only:?}");
+        assert!(
+            cursor_only
+                .iter()
+                .all(|c| matches!(c, IpcCommand::Kill { .. }))
+        );
+        let _ = keys;
+    }
+
+    /// `Esc` still clears a selection the user built but hasn't acted on —
+    /// the abandon path. (Clearing *after* an action is now the action's own
+    /// job, #1498.)
+    #[test]
+    fn esc_clears_an_unused_selection() {
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+        let mut m = build_model();
+        seed_and_select(
+            &mut m,
+            vec![
+                workspace("owner/repo#1", true, Duration::hours(1)),
+                workspace("owner/repo#2", true, Duration::hours(2)),
+            ],
+        );
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+
+        m.dispatch_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "Esc abandons a selection that was never acted on",
+        );
+    }
+
+    /// The stranded-selection fix (#1482): a bulk spawn pulls focus into
+    /// the freshly-spawned terminal, and from there `Esc` belongs to the
+    /// PTY — so the selection #1449 keeps alive would sit in the sidebar
+    /// with no way to clear it. The fix clears the marks *eagerly*, on the
+    /// same involuntary jump that steals focus, so they are never stranded
+    /// (rather than leaving it to an Esc that now types an escape at the
+    /// agent). The load-bearing assertion is therefore the count right
+    /// after the spawn — pre-fix the marks survived it.
+    #[test]
+    fn a_bulk_spawn_that_steals_focus_clears_the_selection() {
+        use lazybox_ipc::{TerminalId, TerminalKind};
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+        let mut m = build_model();
+        let keys = seed_and_select(
+            &mut m,
+            vec![
+                workspace("owner/repo#1", true, Duration::hours(1)),
+                workspace("owner/repo#2", true, Duration::hours(2)),
+            ],
+        );
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+
+        // The bulk spawn lands: the daemon reports the first terminal,
+        // and the client pulls focus to it so the user can type.
+        m.spawn_follow_to = Some(keys[0].clone());
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: keys[0].clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        assert_eq!(m.focus, PaneFocus::Terminals, "spawn pulls focus");
+        // The fix, isolated: the involuntary jump took the selection with
+        // it *at spawn time*, so nothing is stranded behind the PTY. This
+        // is the assertion that fails pre-fix (the marks survived).
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "the spawn that stole focus cleared the selection eagerly",
+        );
+
+        // And because there is nothing left to clear, `Esc` is free to
+        // belong to the PTY: it does not resurrect the marks or bounce
+        // focus back out of the terminal.
+        m.dispatch_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+        assert_eq!(m.focus, PaneFocus::Terminals, "Esc yields to the PTY");
+    }
+
+    /// The other half of the rule: a *voluntary* move into the terminal
+    /// (Tab) leaves the marks alone — the user chose to go there and can
+    /// Tab back to clear. Only the involuntary spawn jump takes them.
+    #[test]
+    fn tabbing_into_a_terminal_keeps_the_selection() {
+        use lazybox_ipc::{TerminalId, TerminalKind};
+        use tuirealm::event::{Key, KeyEvent, KeyModifiers};
+        let mut m = build_model();
+        let keys = seed_and_select(
+            &mut m,
+            vec![
+                workspace("owner/repo#1", true, Duration::hours(1)),
+                workspace("owner/repo#2", true, Duration::hours(2)),
+            ],
+        );
+        // A terminal exists, but this client didn't request it (no
+        // `spawn_follow_to`), so focus stays put and the marks survive.
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: keys[0].clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2, "not our spawn");
+
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        // Walk into the terminal the way a user does — real `Tab` presses
+        // through the pane-cycle path, not a raw `set_focus`. The clear
+        // lives only in the spawn handler, so a voluntary move here must
+        // never touch the marks at any hop.
+        for _ in 0..4 {
+            if m.focus == PaneFocus::Terminals {
+                break;
+            }
+            m.dispatch_key(KeyEvent::new(Key::Tab, KeyModifiers::NONE));
+            assert_eq!(
+                m.sidebar.broadcast_selected_count(),
+                2,
+                "a deliberate Tab into the terminal keeps the selection",
+            );
+        }
+        assert_eq!(m.focus, PaneFocus::Terminals, "Tab reached the terminal");
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            2,
+            "a deliberate Tab into the terminal keeps the selection",
+        );
     }
 
     /// `m` mark-read fans out one `MarkRead` per selected workspace.
@@ -11800,7 +12330,11 @@ mod merge_focus_follow_tests {
             merged_keys, expected,
             "ready AND soft-blocked fire (GitHub decides); only the merged PR is skipped"
         );
-        assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "a bulk action consumes its selection (#1498)",
+        );
     }
 
     /// `x x` archive over a selection confirms with the count, then kills
@@ -11925,6 +12459,54 @@ mod merge_focus_follow_tests {
         );
     }
 
+    /// #1449: an inject-only bulk `w w` (every target already runs an
+    /// agent, so it never gates on a spawn confirm) keeps the selection
+    /// live and names it in the notice — the immediate `dispatch_bulk_agent`
+    /// path used to consume it on `injected > 0`.
+    #[test]
+    fn bulk_inject_only_work_consumes_the_selection() {
+        use lazybox_ipc::{TerminalId, TerminalKind};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        for (i, tid) in [(1u64, 21u64), (2, 22)] {
+            let ws = workspace(&format!("owner/repo#{i}"), true, Duration::hours(i as i64));
+            let key: SessionKey = (&ws.key).into();
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+            m.handle_daemon_event(IpcEvent::TerminalSpawned {
+                model_label: None,
+                terminal_id: TerminalId(tid),
+                session_key: key.clone(),
+                kind: TerminalKind::Agent("claude".into()),
+                no_permission: false,
+                on_main: false,
+            });
+            assert!(m.sidebar.focus_workspace_key(&key));
+            m.sidebar.toggle_broadcast_select();
+        }
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+
+        // All targets live → no spawn confirm, injects run immediately.
+        let cmds = m.dispatch_action(&Action::Work);
+        assert_eq!(
+            cmds.iter()
+                .filter(|c| matches!(c, IpcCommand::InjectPrompt { .. }))
+                .count(),
+            2,
+            "one inject per live selected agent: {cmds:?}",
+        );
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "a bulk action consumes its selection (#1498)",
+        );
+        let msg = &m.status.notice.as_ref().expect("summary flashed").message;
+        assert!(
+            !msg.contains("still selected"),
+            "the summary no longer promises a surviving selection: {msg}",
+        );
+    }
+
     /// A bulk `a c` spawn gates behind a "start N agents?" confirm (#836);
     /// confirming emits the snapshotted spawns (acceptance #4).
     #[test]
@@ -11952,7 +12534,11 @@ mod merge_focus_follow_tests {
                 ..
             }
         )));
-        assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "a bulk action consumes its selection (#1498)",
+        );
     }
 
     /// A bulk `w w` with no live agents plans a contextual spawn per row
@@ -12062,7 +12648,11 @@ mod merge_focus_follow_tests {
             "a live agent is injected tier-less — its model can't be changed: {cmds:?}",
         );
 
-        assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "a bulk action consumes its selection (#1498)",
+        );
     }
 
     /// #1077 headline acceptance: for N selected workspaces, a snippet
@@ -12144,11 +12734,18 @@ mod merge_focus_follow_tests {
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
             0,
-            "selection clears after delivery"
+            "a bulk action consumes its selection (#1498)",
         );
 
-        // --- `w w` fan-out over the same selection ---
-        select_all(&mut m);
+        // --- `w w` fan-out over the same set, re-marked ---
+        // The snippet delivery consumed the selection (#1498), so the set is
+        // re-marked before the second action. The point of the test is that
+        // both paths fan out *identically* over a selection, not that a
+        // selection outlives an action.
+        for key in &keys {
+            assert!(m.sidebar.focus_workspace_key(key));
+            m.sidebar.toggle_broadcast_select();
+        }
         let work_cmds = m.dispatch_action(&Action::Work);
         let mut work_targets: Vec<u64> = work_cmds
             .iter()
@@ -12246,7 +12843,11 @@ mod merge_focus_follow_tests {
         let mut expected = vec![a_key.as_str().to_string(), b_key.as_str().to_string()];
         expected.sort();
         assert_eq!(closed, expected, "every marked open issue is closed");
-        assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "a bulk action consumes its selection (#1498)",
+        );
     }
 
     /// #1243 journey, end-to-end through the KEYBOARD: three rows marked
@@ -12315,7 +12916,11 @@ mod merge_focus_follow_tests {
         closed.sort();
         expected.sort();
         assert_eq!(closed, expected, "all three marked PRs are closed");
-        assert_eq!(m.sidebar.broadcast_selected_count(), 0);
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "a bulk action consumes its selection (#1498)",
+        );
     }
 
     /// `g s` on a taskless, repo-scoped workspace (no PR/issue of its own —
@@ -15098,6 +15703,359 @@ mod terminal_url_mouse_tests {
         );
     }
 
+    fn left(model: &mut TestModel, kind: MouseEventKind, col: u16, row: u16) {
+        model.handle_mouse(MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: KeyModifiers::empty(),
+        });
+    }
+
+    /// Count the reverse-video cells the selection overlay paints inside
+    /// `pane`, isolating the selection's contribution from chrome/cursor by
+    /// comparing against a run with the selection lifted.
+    fn reversed_in_pane(model: &mut TestModel, pane: Rect) -> usize {
+        use tuirealm::ratatui::style::Modifier;
+        model.view();
+        let buffer = model.terminal.raw().backend().buffer();
+        let mut n = 0;
+        for row in pane.y..pane.y.saturating_add(pane.height) {
+            for col in pane.x..pane.x.saturating_add(pane.width) {
+                if buffer[(col, row)]
+                    .style()
+                    .add_modifier
+                    .contains(Modifier::REVERSED)
+                {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    /// Double-click in the terminal selects the word under the pointer,
+    /// leaves a resting reverse-video highlight (not a drag), and a
+    /// keystroke dismisses it (#1451). The copied text is what
+    /// `word_span_at` returns for the clicked cell.
+    #[test]
+    fn double_click_selects_word_and_highlights_until_a_keystroke() {
+        let (mut model, _server, _opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, b"run src/main.rs now\r\n".to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+        let id = model.terminals.focused_terminal_id().expect("focused");
+
+        // The word the gesture will copy, mapped through the rendered frame.
+        let (word, _, _) = model
+            .terminals
+            .word_span_at(id, pane, x + 8, y)
+            .expect("a word under the pointer");
+        assert_eq!(
+            word, "src/main.rs",
+            "grid col 8 sits inside the path, which selects whole",
+        );
+
+        // A real double-click: down, up, down at the same cell.
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 8,
+            y,
+        );
+        left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 8, y);
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 8,
+            y,
+        );
+
+        assert!(
+            model.terminal_drag.is_none(),
+            "a double-click installs a resting selection, not a drag",
+        );
+        assert!(
+            model.terminal_selection.is_some(),
+            "the double-click leaves a resting word selection",
+        );
+
+        // The word's cells render reverse-video: lifting the selection
+        // drops exactly the path's 11 cells (single row).
+        let with_sel = reversed_in_pane(&mut model, pane);
+        let saved = model.terminal_selection.take();
+        let baseline = reversed_in_pane(&mut model, pane);
+        model.terminal_selection = saved;
+        assert_eq!(
+            with_sel - baseline,
+            "src/main.rs".len(),
+            "the highlight reverse-videos exactly the selected word",
+        );
+
+        // A keystroke to the PTY dismisses the resting highlight.
+        model.dispatch_key(RealmKey::new(Key::Char('x'), RealmMods::NONE));
+        assert!(
+            model.terminal_selection.is_none(),
+            "typing dismisses the word highlight",
+        );
+    }
+
+    /// Triple-click selects the whole line and installs a resting
+    /// highlight (#1451). The copied text is the joined line.
+    #[test]
+    fn triple_click_selects_the_whole_line() {
+        let (mut model, _server, _opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, b"the whole line here\r\nnext\r\n".to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+        let id = model.terminals.focused_terminal_id().expect("focused");
+
+        // Any column on the row yields the whole line.
+        let (line, _, _) = model
+            .terminals
+            .line_span_at(id, pane, x + 5, y)
+            .expect("a line under the pointer");
+        assert_eq!(line, "the whole line here");
+
+        // Down, up, down, up, down — three presses at the same cell.
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Left),
+        ] {
+            left(&mut model, kind, x + 5, y);
+        }
+
+        assert!(
+            model.terminal_drag.is_none(),
+            "a triple-click installs a resting selection, not a drag",
+        );
+        assert!(
+            model.terminal_selection.is_some(),
+            "the triple-click leaves a resting line selection",
+        );
+    }
+
+    /// A click that leaves the terminal resets its multi-click counter, so
+    /// bouncing out to the sidebar and straight back to the same cell reads
+    /// as a fresh single click (a drag anchor), not a continued
+    /// triple-click that would select and copy the whole line (#1451).
+    #[test]
+    fn leaving_the_terminal_resets_the_multi_click_counter() {
+        let (mut model, _server, _opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, b"the whole line here\r\n".to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+        let area = model.layout.last_area;
+        let (sidebar, _rt, _rb) = model.effective_pane_rects(area);
+
+        // A double-click in the terminal.
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 5,
+            y,
+        );
+        left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 5, y);
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 5,
+            y,
+        );
+        left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 5, y);
+        assert!(model.terminal_selection.is_some(), "double-click selected");
+
+        // Bounce out to the sidebar, then back to the SAME terminal cell.
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            sidebar.x + 1,
+            sidebar.y + 1,
+        );
+        left(
+            &mut model,
+            MouseEventKind::Up(MouseButton::Left),
+            sidebar.x + 1,
+            sidebar.y + 1,
+        );
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 5,
+            y,
+        );
+
+        // The return click is a fresh single click: it starts a drag anchor
+        // and installs no resting line selection.
+        assert!(
+            model.terminal_drag.is_some(),
+            "the return click starts a fresh drag, not a continued multi-click",
+        );
+        assert!(
+            model.terminal_selection.is_none(),
+            "the return single click cleared the old selection and made no new one",
+        );
+    }
+
+    /// A resting selection is pinned to a specific terminal; once that
+    /// terminal is no longer displayed (switched tab / workspace), the
+    /// highlight paints nothing rather than bleeding a stale reverse-video
+    /// band onto whatever terminal now fills the pane (#1451).
+    #[test]
+    fn resting_selection_does_not_bleed_onto_another_terminal() {
+        let (mut model, _server, _opened) = build_model(2);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, b"alpha bravo charlie\r\n".to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+
+        // Double-click a word in the active tab (terminal 1).
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 2,
+            y,
+        );
+        left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 2, y);
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 2,
+            y,
+        );
+        let sel = model.terminal_selection.expect("a word selection");
+        assert_eq!(sel.terminal, TerminalId(1));
+
+        // Switch to the other tab: terminal 1 is no longer rendered.
+        model.terminals.set_active_tab(1);
+        feed(&mut model, 2, b"unrelated output\r\n".to_vec());
+        model.view();
+        assert_eq!(
+            model.terminals.tile_grid_rect(TerminalId(1)),
+            None,
+            "terminal 1 must be off-screen for this test to mean anything",
+        );
+
+        // With the stale selection present vs lifted, the pane paints the
+        // same reverse-video cells — the off-screen selection adds none.
+        let with_sel = reversed_in_pane(&mut model, pane);
+        let saved = model.terminal_selection.take();
+        let baseline = reversed_in_pane(&mut model, pane);
+        model.terminal_selection = saved;
+        assert_eq!(
+            with_sel, baseline,
+            "a selection for an off-screen terminal must not paint (with={with_sel}, baseline={baseline})",
+        );
+    }
+
+    /// A wheel scroll over the terminal dismisses a resting highlight so it
+    /// can't clamp to a stray edge band once its rows leave the viewport
+    /// (#1451).
+    #[test]
+    fn wheel_scroll_dismisses_a_resting_selection() {
+        let (mut model, _server, _opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        feed(&mut model, 1, b"alpha bravo charlie\r\n".to_vec());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 2,
+            y,
+        );
+        left(&mut model, MouseEventKind::Up(MouseButton::Left), x + 2, y);
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 2,
+            y,
+        );
+        assert!(model.terminal_selection.is_some(), "double-click selected");
+
+        model.handle_mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: x + 2,
+            row: y,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(
+            model.terminal_selection.is_none(),
+            "a wheel scroll clears the resting selection",
+        );
+    }
+
+    /// A double-click on a soft-wrapped token selects it whole — the URL
+    /// that spilled onto a second row copies as one contiguous string,
+    /// reusing the soft-wrap stitching (#1451). The display formatter
+    /// would break it at the wrap, so `word_span_at` reads the joined
+    /// bytes directly.
+    #[test]
+    fn double_click_selects_a_soft_wrapped_url_whole() {
+        let (mut model, _server, _opened) = build_model(1);
+        model
+            .terminals
+            .set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        render(&mut model);
+        let url = format!("https://wrapped.example.com/{}", "a".repeat(160));
+        feed(&mut model, 1, format!("{url}\r\n").into_bytes());
+        let pane = render(&mut model);
+        let (x, y) = body_origin(&model, pane, 1);
+        let id = model.terminals.focused_terminal_id().expect("focused");
+
+        // Click on the continuation row (y+1), well inside the wrapped run.
+        let (word, _, _) = model
+            .terminals
+            .word_span_at(id, pane, x + 2, y + 1)
+            .expect("a word under the pointer");
+        assert_eq!(word, url, "the wrapped URL selects as one contiguous token");
+
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 2,
+            y + 1,
+        );
+        left(
+            &mut model,
+            MouseEventKind::Up(MouseButton::Left),
+            x + 2,
+            y + 1,
+        );
+        left(
+            &mut model,
+            MouseEventKind::Down(MouseButton::Left),
+            x + 2,
+            y + 1,
+        );
+        assert!(
+            model.terminal_selection.is_some(),
+            "the double-click leaves a resting selection spanning both rows",
+        );
+    }
+
     #[test]
     fn right_click_opens_plain_url_through_model_launcher() {
         let (mut model, _server, opened) = build_model(1);
@@ -16482,6 +17440,75 @@ mod activity_pane_visibility_tests {
         let mut m = build_model();
         seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
         assert!(m.activity_pane_visible());
+    }
+
+    /// #1448: visual-select works in the activity pane too — `V` arms
+    /// the sweep and plain `j` grows the row multi-select from the
+    /// anchor, and `Esc` cancels + clears it.
+    #[test]
+    fn visual_select_sweeps_the_activity_pane_rows() {
+        let mut m = build_model();
+        let mut w = empty_ws("github:o/r#1");
+        for body in ["one", "two", "three"] {
+            w.activity.push(lazybox_core::Activity {
+                author: "alice".into(),
+                body: body.into(),
+                created_at: Utc::now(),
+                kind: lazybox_core::ActivityKind::Comment,
+                node_id: None,
+                path: None,
+                line: None,
+                diff_hunk: None,
+                thread_id: None,
+            });
+        }
+        seed(&mut m, vec![w]);
+        m.focus = PaneFocus::Right;
+        m.set_focus_attr();
+
+        // Arm on the top row, then sweep down with plain j (no Shift).
+        m.dispatch_key(KeyEvent::new(Key::Char('V'), KeyModifiers::SHIFT));
+        assert_eq!(
+            m.right.selected_activity_indices(),
+            vec![0],
+            "arming marks the cursor row",
+        );
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        m.dispatch_key(KeyEvent::new(Key::Char('j'), KeyModifiers::NONE));
+        assert_eq!(
+            m.right.selected_activity_indices(),
+            vec![0, 1, 2],
+            "V + plain j sweeps the activity rows without Shift-arrow",
+        );
+
+        // Esc cancels the mode and drops the selection.
+        m.dispatch_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
+        assert!(
+            m.right.selected_activity_indices().is_empty(),
+            "Esc clears the swept activity selection",
+        );
+    }
+
+    /// #1448: `V` with nothing to sweep (a collapsed activity section)
+    /// does not arm the mode — the dispatch nudges instead of silently
+    /// swallowing the key, and no stray sweep is left armed.
+    #[test]
+    fn visual_select_does_not_arm_with_nothing_to_sweep() {
+        let mut m = build_model();
+        seed(&mut m, vec![ws_with_activity("github:o/r#1")]);
+        m.focus = PaneFocus::Right;
+        m.set_focus_attr();
+        // Collapse the section so there are no rows to sweep.
+        m.dispatch_key(KeyEvent::new(Key::Enter, KeyModifiers::NONE));
+        m.dispatch_key(KeyEvent::new(Key::Char('V'), KeyModifiers::SHIFT));
+        assert!(
+            !m.visual_select,
+            "V must not arm when the activity section is collapsed",
+        );
+        assert!(
+            m.right.selected_activity_indices().is_empty(),
+            "and it marks nothing",
+        );
     }
 
     #[test]
@@ -25451,6 +26478,51 @@ mod remote_spawn_tests {
             );
         }
         assert_eq!(m.remote_marks.len(), 2);
+    }
+
+    /// Regression for #1482: a *remote* bulk spawn must not arm the local
+    /// focus-follow pin. A `SpawnRemote` runs on the box and never
+    /// produces a local `TerminalSpawned`, so an armed `spawn_follow_to`
+    /// would linger with nothing to consume it — and `flash_bulk_outcome`
+    /// reads that pin to decide whether to name the still-live selection.
+    /// Pre-fix the pin was armed for the remote follow, so the summary
+    /// silently dropped its "N still selected" suffix even though focus
+    /// never left the sidebar and the marks stayed fully reachable (and
+    /// the stale pin then stripped the suffix off the next bulk summary
+    /// too). Post-fix only a local spawn arms the pin.
+    #[test]
+    fn remote_bulk_spawn_consumes_the_selection_and_arms_no_follow() {
+        let (mut m, _conn, mut box_rx) = build_model_with_box();
+        seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
+        m.sidebar.toggle_broadcast_select();
+        seed_focused(&mut m, "owner/repo#2", Duration::hours(2));
+        m.sidebar.toggle_broadcast_select();
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+
+        let _ = m.dispatch_action(&Action::SpawnAgentRemote("claude".into()));
+        assert_eq!(m.modal_stack.last(), Some(&Id::BulkSpawnConfirm));
+        let _ = m.handle_confirmed(true);
+
+        let mut spawned = 0;
+        while box_rx.try_recv().is_ok() {
+            spawned += 1;
+        }
+        assert_eq!(spawned, 2, "both remote spawns went to the box");
+
+        assert!(
+            m.spawn_follow_to.is_none(),
+            "a remote-only fan-out arms no local focus-follow pin",
+        );
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "a bulk action consumes its selection (#1498)",
+        );
+        let msg = &m.status.notice.as_ref().expect("summary flashed").message;
+        assert!(
+            !msg.contains("still selected"),
+            "the summary no longer promises a surviving selection: {msg}",
+        );
     }
 
     /// `WorkspaceRemoved` releases the remote latch, exactly like

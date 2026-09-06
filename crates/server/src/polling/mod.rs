@@ -5599,13 +5599,17 @@ mod rescope_collapse_tests {
         let config = ServerConfig::with_store(store.clone());
 
         // Swept this batch, still open upstream → in the poll → survives.
-        let widgets_open = Workspace::from_task(gh_task_in("acme/widgets", 1, TaskState::Open), Utc::now());
+        let widgets_open =
+            Workspace::from_task(gh_task_in("acme/widgets", 1, TaskState::Open), Utc::now());
         // Swept this batch, gone upstream (closed/merged) → not polled.
-        let widgets_gone = Workspace::from_task(gh_task_in("acme/widgets", 2, TaskState::Open), Utc::now());
+        let widgets_gone =
+            Workspace::from_task(gh_task_in("acme/widgets", 2, TaskState::Open), Utc::now());
         // Roster member swept by ANOTHER batch → not polled THIS tick.
-        let api_other_batch = Workspace::from_task(gh_task_in("acme/api", 9, TaskState::Open), Utc::now());
+        let api_other_batch =
+            Workspace::from_task(gh_task_in("acme/api", 9, TaskState::Open), Utc::now());
         // Repo removed from the roster entirely (de-scoped) → not polled.
-        let de_scoped = Workspace::from_task(gh_task_in("old/removed", 3, TaskState::Open), Utc::now());
+        let de_scoped =
+            Workspace::from_task(gh_task_in("old/removed", 3, TaskState::Open), Utc::now());
         for ws in [&widgets_open, &widgets_gone, &api_other_batch, &de_scoped] {
             assert!(!ws.local, "provider PR workspaces are local=false");
             seed(&store, ws);

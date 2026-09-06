@@ -2045,12 +2045,7 @@ impl TaskSource for GhSource {
             // preserved. A rotation slice / windowed pass has no deletion
             // authority. See `PolledScope::Reconcile`.
             let completed = self.last_reconcile_completed.lock();
-            return repo_first_polled_scope(
-                plan.reconcile,
-                windowed,
-                &completed,
-                &plan.in_scope,
-            );
+            return repo_first_polled_scope(plan.reconcile, windowed, &completed, &plan.in_scope);
         }
         gh_polled_scope(
             self.scheduling.run_global,
@@ -4433,7 +4428,10 @@ mod repo_first_tests {
         // session-bearing repos) so rescope can retire de-scoped rows on
         // it — note `other/focused` (a transient focus, not in scope) is
         // NOT part of the universe.
-        assert_eq!(plan.in_scope, roster(&["acme", "acme/widgets", "acme/child"]));
+        assert_eq!(
+            plan.in_scope,
+            roster(&["acme", "acme/widgets", "acme/child"])
+        );
         // Tick 2: the governor no longer "admits" (the timer is still due
         // but the allowance is spent) — the queue still drains.
         let plan = plan_repo_first_tick(
@@ -4457,7 +4455,10 @@ mod repo_first_tests {
         // batch is still authoritative to retire de-scoped rows — the
         // capability the old `reconcile_whole`/`Exhaustive` path lost once
         // the reconcile was split across ticks (#1501 review 🔴).
-        assert_eq!(plan.in_scope, roster(&["acme", "acme/widgets", "acme/child"]));
+        assert_eq!(
+            plan.in_scope,
+            roster(&["acme", "acme/widgets", "acme/child"])
+        );
         assert_eq!(state.tick, 2);
     }
 

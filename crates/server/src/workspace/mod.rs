@@ -1079,30 +1079,56 @@ mod rename_workspace_tests {
 /// hides the tabs in lazybox but leaves ghost tmux sessions visible
 /// in `tmux ls`, which then re-surface on the next lazybox launch
 /// via `recover_sessions`.
+/// Compose the per-key kv row name for an archived workspace key.
+fn archived_row_key(key: &str) -> String {
+    format!("{}{}", lazybox_core::KV_PREFIX_ARCHIVED, key)
+}
+
+/// Parse the legacy single-blob archived set (`KV_KEY_ARCHIVED`).
+/// `Ok(None)` = no blob stored; `Ok(Some(set))` = a blob was present
+/// and parsed; `Err` = the row exists but could not be read/parsed.
+fn read_legacy_archived_blob(
+    config: &ServerConfig,
+) -> Result<Option<std::collections::HashSet<String>>, String> {
+    let Some(json) = config
+        .store
+        .get_kv(lazybox_core::KV_KEY_ARCHIVED)
+        .map_err(|e| format!("read failed: {e}"))?
+    else {
+        return Ok(None);
+    };
+    if json.trim().is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_str::<Vec<String>>(&json)
+        .map(|v| Some(v.into_iter().collect()))
+        .map_err(|e| format!("parse failed: {e}"))
+}
+
 /// Strict read of the persisted archived set, distinguishing "no set
 /// stored yet" (`Ok(empty)`) from "the set exists but could not be
-/// read" (`Err`). The distinction matters for the read-modify-WRITE
-/// callers ([`archive_workspace_key`] / [`unarchive_workspace_key`]):
-/// treating one SQLITE_BUSY (or a corrupt payload) as an empty set and
-/// then rewriting the row would replace the user's entire archive
-/// history with a single element.
+/// read" (`Err`). The set is the union of the per-key rows under
+/// [`lazybox_core::KV_PREFIX_ARCHIVED`] (the current form — one atomic
+/// row per key, #1496) and any surviving legacy [`KV_KEY_ARCHIVED`]
+/// blob (migrated away lazily by [`unarchive_workspace_key`]).
 pub(crate) fn load_archived_set_strict(
     config: &ServerConfig,
 ) -> Result<std::collections::HashSet<String>, String> {
-    let raw = config
+    let mut set: std::collections::HashSet<String> = config
         .store
-        .get_kv(lazybox_core::KV_KEY_ARCHIVED)
-        .map_err(|e| format!("read failed: {e}"))?;
-    let Some(json) = raw else {
-        return Ok(Default::default());
-    };
-    if json.trim().is_empty() {
-        // Legacy empty payload — nothing stored, nothing to lose.
-        return Ok(Default::default());
+        .list_kv_prefix(lazybox_core::KV_PREFIX_ARCHIVED)
+        .map_err(|e| format!("read failed: {e}"))?
+        .into_iter()
+        .map(|(k, _)| {
+            k.strip_prefix(lazybox_core::KV_PREFIX_ARCHIVED)
+                .unwrap_or(&k)
+                .to_string()
+        })
+        .collect();
+    if let Some(legacy) = read_legacy_archived_blob(config)? {
+        set.extend(legacy);
     }
-    serde_json::from_str::<Vec<String>>(&json)
-        .map(|v| v.into_iter().collect())
-        .map_err(|e| format!("parse failed: {e}"))
+    Ok(set)
 }
 
 /// Read the persisted set of archived workspace keys. Used by the
@@ -1123,33 +1149,46 @@ pub fn load_archived_set(config: &ServerConfig) -> std::collections::HashSet<Str
 /// persistence fails so a destructive caller can keep the workspace instead
 /// of deleting it now and letting the next restart resurrect it.
 ///
-/// A failed or unparseable READ of the existing set also returns false:
-/// rewriting the row from a degraded read would wipe every previously
-/// archived key. The caller's abort/rollback path already handles a
-/// `false` archive.
+/// The tombstone is a single atomic per-key row write (#1496): unlike the
+/// former whole-set read-modify-write, it cannot lose a concurrent
+/// neighbour's tombstone when an overlapping daemon (e.g. during a
+/// restart) writes a different key between our load and our store.
 #[must_use]
 pub fn archive_workspace_key(config: &ServerConfig, key: &str) -> bool {
-    let _update_guard = config.archive_updates.lock();
-    let mut set = match load_archived_set_strict(config) {
-        Ok(set) => set,
+    if let Err(e) = config.store.set_kv(&archived_row_key(key), "1") {
+        tracing::warn!("archive_workspace_key: set_kv failed: {e}");
+        return false;
+    }
+    tracing::info!(workspace_key = %key, "archived workspace key (tombstone written)");
+    true
+}
+
+/// Migrate the legacy single-blob archived set into per-key rows and
+/// drop the blob, so subsequent removals operate purely on per-key
+/// rows. Idempotent and safe to call repeatedly; returns false only
+/// when a read/write step fails (leaving the blob in place so the keys
+/// are not lost). Runs under the process-local archive lock.
+#[must_use]
+fn migrate_legacy_archived_blob(config: &ServerConfig) -> bool {
+    let legacy = match read_legacy_archived_blob(config) {
+        Ok(Some(set)) => set,
+        Ok(None) => return true,
         Err(e) => {
             tracing::error!(
-                "archive_workspace_key: existing archived set unreadable ({e}) — \
-                 refusing to rewrite it; archive of {key} aborted"
+                "migrate_legacy_archived_blob: legacy blob unreadable ({e}) — \
+                 refusing to drop it"
             );
             return false;
         }
     };
-    if !set.insert(key.to_string()) {
-        return true;
+    for k in &legacy {
+        if let Err(e) = config.store.set_kv(&archived_row_key(k), "1") {
+            tracing::warn!("migrate_legacy_archived_blob: set_kv failed: {e}");
+            return false;
+        }
     }
-    let vec: Vec<&String> = set.iter().collect();
-    let Ok(json) = serde_json::to_string(&vec) else {
-        tracing::error!("archive_workspace_key: serialize failed");
-        return false;
-    };
-    if let Err(e) = config.store.set_kv(lazybox_core::KV_KEY_ARCHIVED, &json) {
-        tracing::warn!("archive_workspace_key: set_kv failed: {e}");
+    if let Err(e) = config.store.delete_kv(lazybox_core::KV_KEY_ARCHIVED) {
+        tracing::warn!("migrate_legacy_archived_blob: delete_kv failed: {e}");
         return false;
     }
     true
@@ -1160,33 +1199,18 @@ pub fn archive_workspace_key(config: &ServerConfig, key: &str) -> bool {
 /// only after persistence succeeds; otherwise an unarchived-but-still-deleted
 /// workspace could race back into existence during this daemon run.
 ///
-/// Same degraded-read contract as [`archive_workspace_key`]: an
-/// unreadable existing set fails the operation instead of rewriting
-/// (and thereby truncating) the stored history.
+/// Migrates any surviving legacy blob into per-key rows first, so a key
+/// recorded only under the old form is genuinely removed rather than
+/// masked by a per-key delete that misses the blob. Returns false when a
+/// step fails, leaving the stored state intact.
 #[must_use]
 pub fn unarchive_workspace_key(config: &ServerConfig, key: &str) -> bool {
     let _update_guard = config.archive_updates.lock();
-    let mut set = match load_archived_set_strict(config) {
-        Ok(set) => set,
-        Err(e) => {
-            tracing::error!(
-                "unarchive_workspace_key: existing archived set unreadable ({e}) — \
-                 refusing to rewrite it; unarchive of {key} aborted"
-            );
-            return false;
-        }
-    };
-    if !set.remove(key) {
-        config.deleted_workspaces.lock().remove(key);
-        return true;
-    }
-    let vec: Vec<&String> = set.iter().collect();
-    let Ok(json) = serde_json::to_string(&vec) else {
-        tracing::error!("unarchive_workspace_key: serialize failed");
+    if !migrate_legacy_archived_blob(config) {
         return false;
-    };
-    if let Err(e) = config.store.set_kv(lazybox_core::KV_KEY_ARCHIVED, &json) {
-        tracing::warn!("unarchive_workspace_key: set_kv failed: {e}");
+    }
+    if let Err(e) = config.store.delete_kv(&archived_row_key(key)) {
+        tracing::warn!("unarchive_workspace_key: delete_kv failed: {e}");
         return false;
     }
     config.deleted_workspaces.lock().remove(key);
@@ -3099,21 +3123,23 @@ pub async fn mark_workspace_read(config: &ServerConfig, key: &WorkspaceKey) {
 }
 
 #[cfg(test)]
-mod archived_set_degraded_read_tests {
-    //! Fix for the archived-set wipe: `archive_workspace_key` /
-    //! `unarchive_workspace_key` are read-modify-writes of the whole
-    //! `archived_workspaces_v1` row. One failing or unparseable READ
-    //! used to be treated as "empty set", so the follow-up write
-    //! replaced the user's entire archive history with a single
-    //! element. Degraded reads must fail the operation instead.
+mod archived_set_tests {
+    //! #1496: the archived-workspace set is stored as one atomic row
+    //! per key (`KV_PREFIX_ARCHIVED`), not a single JSON blob. An
+    //! archive is a lone `set_kv`, so a concurrent writer archiving a
+    //! neighbouring key between another archive's steps can no longer
+    //! silently drop a tombstone (the resurrection-after-restart bug).
+    //! Any surviving legacy blob is still read and migrated away.
     use super::*;
     use lazybox_store::{MemoryStore, Store, StoreError, StoreMutation};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    /// Store that fails reads of the legacy blob on demand, to prove a
+    /// degraded legacy read never destroys the stored history.
     struct FlakyArchiveStore {
         inner: MemoryStore,
-        fail_archived_reads: AtomicBool,
+        fail_legacy_reads: AtomicBool,
     }
 
     impl Store for FlakyArchiveStore {
@@ -3122,7 +3148,7 @@ mod archived_set_degraded_read_tests {
         }
         fn get_kv(&self, key: &str) -> Result<Option<String>, StoreError> {
             if key == lazybox_core::KV_KEY_ARCHIVED
-                && self.fail_archived_reads.load(Ordering::SeqCst)
+                && self.fail_legacy_reads.load(Ordering::SeqCst)
             {
                 return Err(StoreError::Backend("database is locked".into()));
             }
@@ -3133,6 +3159,50 @@ mod archived_set_degraded_read_tests {
         }
         fn delete_kv(&self, key: &str) -> Result<(), StoreError> {
             self.inner.delete_kv(key)
+        }
+        fn list_kv_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>, StoreError> {
+            self.inner.list_kv_prefix(prefix)
+        }
+        fn list_workspaces(&self) -> Result<Vec<lazybox_store::WorkspaceRecord>, StoreError> {
+            self.inner.list_workspaces()
+        }
+        fn list_projects(&self) -> Result<Vec<lazybox_store::ProjectRecord>, StoreError> {
+            self.inner.list_projects()
+        }
+    }
+
+    /// Store that, while writing the per-key row for `trigger_key`, runs
+    /// a callback that archives a *different* key against the same
+    /// backend — modelling a concurrent writer landing between one
+    /// archive's load and its store.
+    struct InterleavingStore {
+        inner: Arc<MemoryStore>,
+        trigger_key: String,
+        neighbour: parking_lot::Mutex<Option<String>>,
+    }
+
+    impl Store for InterleavingStore {
+        fn apply_batch(&self, mutations: &[StoreMutation]) -> Result<(), StoreError> {
+            self.inner.apply_batch(mutations)
+        }
+        fn get_kv(&self, key: &str) -> Result<Option<String>, StoreError> {
+            self.inner.get_kv(key)
+        }
+        fn set_kv(&self, key: &str, value: &str) -> Result<(), StoreError> {
+            if key == self.trigger_key {
+                if let Some(neighbour) = self.neighbour.lock().take() {
+                    // The concurrent writer commits its own tombstone
+                    // before ours lands.
+                    self.inner.set_kv(&neighbour, "1").unwrap();
+                }
+            }
+            self.inner.set_kv(key, value)
+        }
+        fn delete_kv(&self, key: &str) -> Result<(), StoreError> {
+            self.inner.delete_kv(key)
+        }
+        fn list_kv_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>, StoreError> {
+            self.inner.list_kv_prefix(prefix)
         }
         fn list_workspaces(&self) -> Result<Vec<lazybox_store::WorkspaceRecord>, StoreError> {
             self.inner.list_workspaces()
@@ -3145,7 +3215,7 @@ mod archived_set_degraded_read_tests {
     fn seeded_config() -> (Arc<FlakyArchiveStore>, ServerConfig) {
         let store = Arc::new(FlakyArchiveStore {
             inner: MemoryStore::new(),
-            fail_archived_reads: AtomicBool::new(false),
+            fail_legacy_reads: AtomicBool::new(false),
         });
         store
             .inner
@@ -3158,50 +3228,79 @@ mod archived_set_degraded_read_tests {
         (store, config)
     }
 
-    fn persisted_set(store: &FlakyArchiveStore) -> std::collections::HashSet<String> {
-        serde_json::from_str::<Vec<String>>(
-            &store
-                .inner
-                .get_kv(lazybox_core::KV_KEY_ARCHIVED)
-                .unwrap()
-                .unwrap(),
-        )
-        .unwrap()
-        .into_iter()
-        .collect()
+    #[test]
+    fn concurrent_neighbour_archive_survives() {
+        // Regression for #1496: archiving key A must not lose a
+        // neighbour B that a concurrent writer commits mid-operation.
+        let inner = Arc::new(MemoryStore::new());
+        let store = Arc::new(InterleavingStore {
+            inner: inner.clone(),
+            trigger_key: archived_row_key("A"),
+            neighbour: parking_lot::Mutex::new(Some(archived_row_key("B"))),
+        });
+        let config = ServerConfig::with_store(store.clone());
+
+        assert!(crate::workspace::archive_workspace_key(&config, "A"));
+
+        let set = crate::workspace::load_archived_set_strict(&config).unwrap();
+        assert!(set.contains("A"), "our own tombstone must persist");
+        assert!(
+            set.contains("B"),
+            "a concurrently-archived neighbour must not be dropped"
+        );
     }
 
     #[test]
-    fn failing_read_during_archive_must_not_shrink_the_persisted_set() {
+    fn archive_reads_and_migrates_the_legacy_blob() {
         let (store, config) = seeded_config();
-        store.fail_archived_reads.store(true, Ordering::SeqCst);
 
-        assert!(
-            !crate::workspace::archive_workspace_key(&config, "new-key"),
-            "archive must fail loudly on a degraded read"
-        );
-
-        store.fail_archived_reads.store(false, Ordering::SeqCst);
-        let set = persisted_set(&store);
+        // New archives write per-key rows; the legacy blob's keys are
+        // still visible through the union read.
+        assert!(crate::workspace::archive_workspace_key(&config, "new-key"));
+        let set = crate::workspace::load_archived_set_strict(&config).unwrap();
         assert_eq!(
             set,
-            ["old-1", "old-2", "old-3"]
+            ["old-1", "old-2", "old-3", "new-key"]
+                .into_iter()
+                .map(String::from)
+                .collect()
+        );
+
+        // Unarchiving migrates the blob into per-key rows and drops it,
+        // so the removal is complete (no masked legacy entry).
+        assert!(crate::workspace::unarchive_workspace_key(&config, "old-2"));
+        assert_eq!(
+            store
+                .inner
+                .get_kv(lazybox_core::KV_KEY_ARCHIVED)
+                .unwrap(),
+            None,
+            "the legacy blob is migrated away on unarchive"
+        );
+        let set = crate::workspace::load_archived_set_strict(&config).unwrap();
+        assert_eq!(
+            set,
+            ["old-1", "old-3", "new-key"]
                 .into_iter()
                 .map(String::from)
                 .collect(),
-            "the historical archived set must survive the failed attempt"
+            "old-2 is genuinely removed, the rest survive"
         );
     }
 
     #[test]
-    fn corrupt_archived_payload_fails_archive_without_rewriting() {
+    fn corrupt_legacy_blob_is_preserved_not_destroyed() {
         let (store, config) = seeded_config();
         store
             .inner
             .set_kv(lazybox_core::KV_KEY_ARCHIVED, "{definitely not json")
             .unwrap();
 
-        assert!(!crate::workspace::archive_workspace_key(&config, "new-key"));
+        // A new archive touches only its own row and succeeds.
+        assert!(crate::workspace::archive_workspace_key(&config, "new-key"));
+        // Unarchive must not migrate (and thereby destroy) an
+        // unparseable blob; it aborts, leaving the blob for recovery.
+        assert!(!crate::workspace::unarchive_workspace_key(&config, "new-key"));
         assert_eq!(
             store
                 .inner
@@ -3209,30 +3308,42 @@ mod archived_set_degraded_read_tests {
                 .unwrap()
                 .as_deref(),
             Some("{definitely not json"),
-            "an unparseable set is preserved for recovery, never replaced"
+            "an unparseable legacy blob is preserved, never replaced"
         );
     }
 
     #[test]
-    fn failing_read_during_unarchive_must_not_wipe_the_set() {
+    fn failing_legacy_read_during_unarchive_does_not_wipe_the_set() {
         let (store, config) = seeded_config();
-        store.fail_archived_reads.store(true, Ordering::SeqCst);
+        store.fail_legacy_reads.store(true, Ordering::SeqCst);
         assert!(!crate::workspace::unarchive_workspace_key(&config, "old-2"));
-        store.fail_archived_reads.store(false, Ordering::SeqCst);
-        assert_eq!(persisted_set(&store).len(), 3);
+        store.fail_legacy_reads.store(false, Ordering::SeqCst);
+        assert_eq!(
+            crate::workspace::load_archived_set_strict(&config)
+                .unwrap()
+                .len(),
+            3,
+            "the legacy set survives a degraded read"
+        );
     }
 
     #[test]
-    fn archive_still_works_on_a_healthy_store() {
-        let (store, config) = seeded_config();
-        assert!(crate::workspace::archive_workspace_key(&config, "new-key"));
-        let set = persisted_set(&store);
-        assert_eq!(set.len(), 4);
-        assert!(set.contains("new-key"));
-        assert!(crate::workspace::unarchive_workspace_key(
-            &config, "new-key"
-        ));
-        assert_eq!(persisted_set(&store).len(), 3);
+    fn archive_and_unarchive_roundtrip_on_a_healthy_store() {
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+        assert!(crate::workspace::archive_workspace_key(&config, "k1"));
+        assert!(crate::workspace::archive_workspace_key(&config, "k2"));
+        assert!(crate::workspace::archive_workspace_key(&config, "k1")); // idempotent
+        assert_eq!(
+            crate::workspace::load_archived_set_strict(&config)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(crate::workspace::unarchive_workspace_key(&config, "k1"));
+        let set = crate::workspace::load_archived_set_strict(&config).unwrap();
+        assert_eq!(set.len(), 1);
+        assert!(set.contains("k2"));
     }
 }
 

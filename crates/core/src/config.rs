@@ -303,12 +303,20 @@ pub const KV_KEY_THEME: &str = "theme_v1";
 /// old saves are ignored, new writes go to the new key.
 pub const KV_KEY_LAYOUT: &str = "layout_v2";
 
-/// Set of workspace keys the user has explicitly archived
-/// (`x x`). Stored as a JSON-encoded `Vec<String>` so re-poll
-/// upserts know to skip them — without this the next poll's
-/// `WorkspaceUpserted` would just re-create the row the user
-/// just dismissed. Persistence is per-machine, not synced.
+/// Legacy single-blob storage for the archived-workspace set: a
+/// JSON-encoded `Vec<String>` under one kv row. Superseded by the
+/// per-key rows under [`KV_PREFIX_ARCHIVED`] because a single blob's
+/// read-modify-write can silently drop a concurrent neighbour's
+/// tombstone across a daemon restart (#1496). Still read (and migrated
+/// away) for backward compatibility.
 pub const KV_KEY_ARCHIVED: &str = "archived_workspaces_v1";
+
+/// Per-key storage for the archived-workspace set: each archived
+/// workspace key gets its own kv row `{prefix}{workspace_key}`, so an
+/// archive is a single atomic write that can't lose a concurrent
+/// neighbour (#1496). The chosen prefix does not collide with the
+/// legacy [`KV_KEY_ARCHIVED`] blob (`archived_workspaces_v1`, no colon).
+pub const KV_PREFIX_ARCHIVED: &str = "archived_workspace:";
 
 /// Set of workspace keys whose backing session must be killed —
 /// never reattached — on the next recovery pass. Written on *every*

@@ -135,8 +135,9 @@ land with the #403/#405 fixes, against the e2e success contract above.
 | `crates/core/tests/persisted_compat.rs::current_serialization_matches_checked_in_fixture` | any persisted `Workspace` field rename/retype/removal fails the build against the golden fixture |
 | `crates/core/tests/persisted_compat.rs::v0_legacy_minimal_blob_deserializes` | pre-schema-field records keep deserializing forever |
 | `crates/core/src/workspace.rs::decode_persisted_refuses_rows_from_a_newer_build` | the strict decoder's newer-schema refusal |
-| `crates/server/src/workspace/mod.rs::failing_read_during_archive_must_not_shrink_the_persisted_set` | one SQLITE_BUSY during `x x` cannot replace the whole archived set with a single element |
-| `crates/server/src/workspace/mod.rs::corrupt_archived_payload_fails_archive_without_rewriting` | an unparseable archived set is preserved for recovery, never rewritten |
+| `crates/server/src/workspace/mod.rs::concurrent_neighbour_archive_survives` | archiving one key (`x x`) is a single atomic per-key write that can't drop a neighbour a concurrent writer archives mid-operation — the deleted-workspace-resurrects-after-restart bug (#1496) |
+| `crates/server/src/workspace/mod.rs::corrupt_legacy_blob_is_preserved_not_destroyed` | an unparseable legacy archived-set blob is preserved for recovery, never migrated away or rewritten |
+| `crates/server/src/workspace/mod.rs::failing_legacy_read_during_unarchive_does_not_wipe_the_set` | a SQLITE_BUSY reading the legacy blob during unarchive aborts instead of truncating the stored history |
 | `crates/gh-provider/src/graphql.rs::pending_review_activity_identity_is_stable_across_polls` | a pending review (null `submittedAt`) keeps one stable identity across polls instead of duplicating as unread forever |
 | `crates/gh-provider/src/graphql.rs::pending_review_fallback_timestamp_never_uses_wall_clock` | review-activity timestamps are never stamped with `Utc::now()` |
 | `crates/core/src/workspace.rs::merge_activity_same_node_id_review_edit_replaces_in_place` | an edited review (same node id, new body) replaces its stored activity instead of appending |

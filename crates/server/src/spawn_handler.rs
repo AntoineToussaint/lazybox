@@ -3362,8 +3362,15 @@ async fn reclaim_non_live_managed_holder_locked(
     // filesystem I/O and git operations).
     {
         let _ownership_guard = config.worktree_ownership_lock.lock().await;
+        // A provisioning claim on the *intended* path is this very spawn's
+        // own — a holder at that path is a stale registration lazybox left
+        // behind (an interrupted `worktree add`), not another spawn's
+        // checkout. Treating our own claim as a live owner reported the
+        // target as "another live worktree" and dead-ended the spawn.
+        let claimed_by_another =
+            !paths_match(holder, intended_path) && provisioning_worktree_is_claimed(config, holder);
         if managed_worktree_has_live_session_owner(config, holder)
-            || provisioning_worktree_is_claimed(config, holder)
+            || claimed_by_another
             || managed_worktree_has_live_main_owner(config, holder).await
         {
             return BranchHolderReclaim::Preserved;
@@ -18391,6 +18398,108 @@ mod tests {
             BranchHolderReclaim::Reclaimed
         );
         assert!(!holder.exists());
+    }
+
+    /// The spawn's *own* provisioning claim must not count as a live
+    /// owner of the holder when the holder IS the intended path: that
+    /// shape is lazybox's own stale registration (an interrupted
+    /// `worktree add`), and treating it as "another live worktree"
+    /// dead-ended every re-spawn of the workspace in the recovery modal.
+    #[tokio::test]
+    async fn own_claim_on_the_intended_path_does_not_preserve_the_holder() {
+        fn git(cwd: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let upstream = tempfile::tempdir().unwrap();
+        git(upstream.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
+        git(upstream.path(), &["add", "."]);
+        git(upstream.path(), &["commit", "-q", "-m", "base"]);
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let manager = config.worktree_manager();
+        let bare = manager.bare_path("acme", "core");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(
+            root.path(),
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &upstream.path().to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+        git(&bare, &["branch", "feature", "main"]);
+        let holder = root.path().join("worktrees").join("self");
+        std::fs::create_dir_all(holder.parent().unwrap()).unwrap();
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                "feature",
+                &holder.to_string_lossy(),
+                "refs/heads/feature",
+            ],
+        );
+
+        // This spawn claims the path it is provisioning — the holder.
+        let own_claim = ProvisioningWorktreeClaim::new(&config, holder.clone());
+        assert_eq!(
+            reclaim_non_live_managed_holder(
+                &config, &manager, "acme", "core", "feature", &holder, &holder,
+            )
+            .await,
+            BranchHolderReclaim::Reclaimed,
+            "our own claim on the target is not another spawn's live checkout"
+        );
+        drop(own_claim);
+
+        // A claim by a spawn targeting a *different* path still preserves.
+        let other = root.path().join("worktrees").join("other");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                "feature",
+                &holder.to_string_lossy(),
+                "refs/heads/feature",
+            ],
+        );
+        let _other_claim = ProvisioningWorktreeClaim::new(&config, holder.clone());
+        assert_eq!(
+            reclaim_non_live_managed_holder(
+                &config, &manager, "acme", "core", "feature", &holder, &other,
+            )
+            .await,
+            BranchHolderReclaim::Preserved,
+        );
     }
 
     /// A linked (no-worktree) workspace resolves every spawn straight to

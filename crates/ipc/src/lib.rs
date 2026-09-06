@@ -3373,7 +3373,7 @@ impl WorktreeRecovery {
         match self {
             Self::Transient => "Looks transient — press r to retry.",
             Self::BranchHeldLive => {
-                "Lazybox holder: select it, press Shift-A, and choose this PR. External \
+                "Lazybox holder: press g to jump to the session that owns it. External \
                  holder: inspect it, then detach it from the branch."
             }
             Self::BranchHeldManaged => {
@@ -3442,7 +3442,7 @@ impl WorktreeRecovery {
             Self::BranchHeldLive => branch_holder_commands(
                 message,
                 "already checked out at ",
-                "Lazybox: select its workspace, Shift-A, choose this PR.",
+                "Lazybox holder: press g to jump to its session. External:",
                 self.hint(),
             ),
             Self::BranchHeldManaged => branch_holder_commands(
@@ -3465,8 +3465,11 @@ fn branch_holder_commands(message: &str, marker: &str, prefix: &str, fallback: &
     else {
         return fallback.to_string();
     };
+    // Name the path once: the error line above already spells it out,
+    // and a long managed path repeated three times wraps into a wall
+    // that pushes the modal's key hints off-screen.
     let quoted = shell_quote(path);
-    format!("{prefix} External: git -C {quoted} status; then git -C {quoted} switch --detach.")
+    format!("{prefix} (cd {quoted} && git status && git switch --detach)")
 }
 
 fn shell_quote(value: &str) -> String {
@@ -4259,7 +4262,12 @@ mod worktree_recovery_tests {
         ] {
             assert!(c.retryable(), "{c:?} is retryable on its own");
         }
-        assert!(WorktreeRecovery::BranchHeldLive.hint().contains("Shift-A"));
+        // The hint names the modal's actual affordance (`g` jumps to the
+        // holder's session). `Shift-A` used to be quoted here but now
+        // toggles auto-fix, and `x a` (adopt sessions) cannot release a
+        // branch checkout — neither may be advertised.
+        assert!(WorktreeRecovery::BranchHeldLive.hint().contains("press g"));
+        assert!(!WorktreeRecovery::BranchHeldLive.hint().contains("Shift-A"));
         assert!(
             !WorktreeRecovery::BranchHeldLive.hint().contains("x a"),
             "session adoption cannot release a branch checkout"
@@ -4267,11 +4275,17 @@ mod worktree_recovery_tests {
         let remediation = WorktreeRecovery::BranchHeldLive.remediation(
             "branch 'feat' is already checked out at /tmp/path with spaces — refusing to take it",
         );
+        assert!(remediation.contains("press g"), "{remediation}");
         assert!(
-            remediation.contains("git -C '/tmp/path with spaces' status"),
+            remediation.contains("cd '/tmp/path with spaces' && git status"),
             "{remediation}"
         );
         assert!(remediation.contains("switch --detach"), "{remediation}");
+        assert_eq!(
+            remediation.matches("/tmp/path with spaces").count(),
+            1,
+            "the path is spelled once — it already heads the error line: {remediation}"
+        );
     }
 
     /// Issue #787: the non-retryable classes split into ones lazybox can

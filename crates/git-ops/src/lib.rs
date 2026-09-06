@@ -2230,7 +2230,23 @@ async fn validate_worktree_dir(
                             "worktree checkout incomplete (no index — interrupted \
                              `git worktree add`?); repairing with reset --hard"
                         );
+                        // A killed `worktree add` leaves two corpses in the
+                        // admin dir that block the repair outright: its
+                        // `index.lock` (`reset --hard` fails with "Unable to
+                        // create index.lock: File exists") and the
+                        // `locked: initializing` marker git only clears when
+                        // the add completes. Both belong to a process that is
+                        // gone — the marker proves it — so clear them rather
+                        // than dead-end on our own debris.
+                        let interrupted =
+                            interrupted_add_registration(git, bare_path, wt_path).await;
+                        if interrupted {
+                            let _ = tokio::fs::remove_file(gitdir.join("index.lock")).await;
+                        }
                         if run_git_in(git, wt_path, &["reset", "--hard"]).await.is_ok() {
+                            if interrupted {
+                                unlock_worktree(git, bare_path, wt_path).await;
+                            }
                             return Ok(WorktreeDirState::Valid);
                         }
                     }
@@ -2283,7 +2299,12 @@ async fn validate_worktree_dir(
     // before the checkout finishes; with the directory now gone that
     // entry is prunable, and clearing it keeps the re-provision's
     // `worktree add -B <branch>` from failing with "'<branch>' is
-    // already used by worktree".
+    // already used by worktree". `prune` skips a *locked* entry,
+    // though, and an interrupted add is always locked (`initializing`
+    // — git clears it only on completion), so unlock first: the path
+    // is lazybox's own and its directory is gone, so no lock on it is
+    // protecting anything.
+    unlock_worktree(git, bare_path, wt_path).await;
     let _ = run_git_in(git, bare_path, &["worktree", "prune"]).await;
     Ok(WorktreeDirState::Reprovision)
 }
@@ -2339,6 +2360,28 @@ async fn worktree_has_tracked_edits(git: &dyn GitRunner, gitdir: &Path, wt: &Pat
         let _ = tokio::fs::remove_file(&index).await;
         return true;
     }
+    // `read-tree` writes entries with no stat data, and `diff-files` is
+    // stat-driven: without a refresh every file the interrupted checkout
+    // DID write shows up as `M` even when its bytes match `HEAD`, and an
+    // intact tree would be "refused reset --hard" and reclaimed wholesale.
+    // `--refresh` rehashes stat-dirty entries so only real content
+    // changes survive into the diff (`-q` keeps genuinely modified files
+    // from failing the refresh itself).
+    let _ = run_git_in_env(
+        git,
+        wt,
+        &[
+            "--git-dir",
+            &gitdir_arg,
+            "--work-tree",
+            &wt_arg,
+            "update-index",
+            "-q",
+            "--refresh",
+        ],
+        &index_env,
+    )
+    .await;
     let diff = run_git_in_env(
         git,
         wt,
@@ -3009,6 +3052,39 @@ async fn add_worktree_resilient(
         return Ok(());
     }
 
+    // The holder may be the corpse of an *interrupted* `worktree add`
+    // (Esc-cancel, timeout): git registers the worktree and locks it
+    // (`initializing`) before checking files out, and only unlocks on
+    // completion — so a killed add leaves a locked registration that
+    // `prune` above refuses to touch, yet still "holds" the branch.
+    // With its directory gone there is nothing live behind it; that is
+    // also true of any locked registration at the very path we are
+    // provisioning (lazybox's own), whatever its lock reason. Unlock,
+    // prune, retry — otherwise every re-provision of this branch
+    // dead-ends on "already checked out at <the target itself>".
+    if !holder.exists()
+        && (paths_equal(&holder, wt_path)
+            || interrupted_add_registration(git, bare_path, &holder).await)
+    {
+        tracing::warn!(
+            holder = %holder.display(),
+            target = %wt_path.display(),
+            branch,
+            "branch held by a locked registration whose directory is gone \
+             (interrupted `worktree add`) — unlocking and pruning it before retrying"
+        );
+        unlock_worktree(git, bare_path, &holder).await;
+        let _ = run_git_in(git, bare_path, &["worktree", "prune"]).await;
+        match git.run_transfer(bare_path, &plain, auth, None).await {
+            Ok(()) => return Ok(()),
+            Err(e) => tracing::warn!(
+                holder = %holder.display(),
+                error = %e,
+                "retry after unlocking the stale registration still failed"
+            ),
+        }
+    }
+
     // Only force-share the branch when the holder is a genuine Claude
     // Code agent worktree — those live under `<bare>/.claude/worktrees/`
     // (see the doc comment). A bare-path `starts_with` was too loose:
@@ -3097,6 +3173,71 @@ fn worktree_missing_but_registered(err: &GitError) -> bool {
         return false;
     };
     msg.contains("missing but already registered worktree")
+}
+
+/// Whether `<bare>`'s registration for `path` is the corpse of an
+/// *interrupted* `git worktree add`. git writes `locked` = `initializing`
+/// into the admin dir the moment an add starts and removes it only when
+/// the checkout completes, so that reason surviving means the add was
+/// killed (Esc-cancel, timeout, crash) — nothing is behind the lock. It
+/// matters because `worktree prune` skips locked entries: without
+/// recognising the corpse, every re-provision of its branch fails with
+/// "already used by worktree at <path>" forever.
+///
+/// Reads `worktree list --porcelain` rather than guessing the admin dir
+/// from the path's basename (git suffixes colliding basenames).
+async fn interrupted_add_registration(git: &dyn GitRunner, bare_path: &Path, path: &Path) -> bool {
+    let Ok(listing) = run_git_in(git, bare_path, &["worktree", "list", "--porcelain"]).await else {
+        return false;
+    };
+    listing.split("\n\n").any(|block| {
+        let registered = block
+            .lines()
+            .find_map(|l| l.strip_prefix("worktree "))
+            .map(Path::new);
+        registered.is_some_and(|p| paths_equal(p, path))
+            && block.lines().any(|l| l.trim() == "locked initializing")
+    })
+}
+
+/// `git worktree unlock <path>`, tolerating "not locked" / "not a
+/// working tree": callers only ever unlock a registration they are about
+/// to prune or repair, so a no-op is the desired outcome, not an error.
+async fn unlock_worktree(git: &dyn GitRunner, bare_path: &Path, path: &Path) {
+    let p = path.to_string_lossy();
+    if let Err(e) = run_git_in(git, bare_path, &["worktree", "unlock", &p]).await {
+        tracing::debug!(path = %path.display(), error = %e, "worktree unlock was a no-op");
+    }
+}
+
+/// Path equality that survives a path whose directory is gone: git
+/// reports registered paths realpath'd (`/private/var/…` on macOS for a
+/// `/var/…` tempdir), and a plain `canonicalize` fails on a missing
+/// leaf, so the nearest existing ancestor is canonicalized instead and
+/// the missing tail re-appended.
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    a == b || canonical_lenient(a) == canonical_lenient(b)
+}
+
+fn canonical_lenient(p: &Path) -> PathBuf {
+    if let Ok(c) = std::fs::canonicalize(p) {
+        return c;
+    }
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = p;
+    while let Some(parent) = cur.parent() {
+        if let Some(name) = cur.file_name() {
+            tail.push(name.to_owned());
+        }
+        if let Ok(mut out) = std::fs::canonicalize(parent) {
+            for name in tail.iter().rev() {
+                out.push(name);
+            }
+            return out;
+        }
+        cur = parent;
+    }
+    p.to_path_buf()
 }
 
 /// Parse the *existing* conflicting ref out of git's directory/file
@@ -5579,6 +5720,185 @@ mod resilient_add_tests {
                 .unwrap(),
             WorktreeDirState::Valid
         );
+    }
+
+    /// Stage the corpse an Esc-cancelled `git worktree add` leaves
+    /// behind: the registration exists, is locked `initializing` (git
+    /// clears that only on completion), its admin dir still holds the
+    /// killed add's `index.lock`, and — when `keep_dir` is false — the
+    /// half-built directory has been reclaimed. Returns the admin dir.
+    fn stage_interrupted_add(bare: &Path, wt: &Path, branch: &str, keep_dir: bool) -> PathBuf {
+        git(
+            bare,
+            &[
+                "worktree",
+                "add",
+                wt.to_str().unwrap(),
+                "-B",
+                branch,
+                "HEAD",
+            ],
+        );
+        let admin = std::process::Command::new("git")
+            .current_dir(wt)
+            .args(["rev-parse", "--git-dir"])
+            .output()
+            .expect("rev-parse");
+        let admin = PathBuf::from(String::from_utf8_lossy(&admin.stdout).trim());
+        git(
+            bare,
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                "initializing",
+                wt.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(admin.join("index.lock"), "").expect("stale index.lock");
+        if keep_dir {
+            // The add died before the index landed.
+            let _ = std::fs::remove_file(admin.join("index"));
+        } else {
+            std::fs::remove_dir_all(wt).expect("reclaim the half-built dir");
+        }
+        admin
+    }
+
+    fn is_locked(bare: &Path, wt: &Path) -> bool {
+        let out = std::process::Command::new("git")
+            .current_dir(bare)
+            .args(["worktree", "list", "--porcelain"])
+            .output()
+            .expect("worktree list");
+        // git prints registered paths realpath'd (`/private/var` on
+        // macOS); compare leniently since the directory may be gone.
+        String::from_utf8_lossy(&out.stdout).split("\n\n").any(|b| {
+            b.lines()
+                .find_map(|l| l.strip_prefix("worktree "))
+                .is_some_and(|p| paths_equal(Path::new(p), wt))
+                && b.lines().any(|l| l.starts_with("locked"))
+        })
+    }
+
+    /// The real-world dead end: Esc during "Creating worktree" kills
+    /// `git worktree add`, leaving a *locked* registration at the target
+    /// path that `prune` refuses to clear. The next spawn then fails with
+    /// "already checked out at <the target itself>" — a collision with
+    /// lazybox's own corpse. The ladder must unlock + prune it and land
+    /// the retry.
+    #[tokio::test]
+    async fn interrupted_add_at_the_target_path_is_unlocked_pruned_and_retried() {
+        let (tmp, bare) = local_bare_clone();
+        let target = tmp.path().join("target");
+        stage_interrupted_add(&bare, &target, "feat", false);
+        assert!(is_locked(&bare, &target), "sanity: the corpse is locked");
+        assert!(
+            run_git_transfer(&bare, &["worktree", "prune"], &[], None,)
+                .await
+                .is_ok()
+                && is_locked(&bare, &target),
+            "sanity: prune alone leaves the locked corpse in place"
+        );
+
+        add_worktree_resilient(default_git_runner(), &bare, &target, "feat", "HEAD", &[])
+            .await
+            .expect("the locked corpse must be cleared, not reported as a live holder");
+        assert_eq!(
+            validate_worktree_dir(default_git_runner(), &target, &bare)
+                .await
+                .unwrap(),
+            WorktreeDirState::Valid
+        );
+        assert!(
+            !is_locked(&bare, &target),
+            "the fresh worktree is not locked"
+        );
+        assert!(target.join("f.txt").exists(), "the checkout completed");
+    }
+
+    /// The same corpse at a *different* path (another workspace's
+    /// cancelled add on the same branch) is equally dead — `initializing`
+    /// with no directory can hold no work — and is cleared too.
+    #[tokio::test]
+    async fn interrupted_add_elsewhere_is_cleared_when_its_directory_is_gone() {
+        let (tmp, bare) = local_bare_clone();
+        let ghost = tmp.path().join("ghost");
+        stage_interrupted_add(&bare, &ghost, "feat", false);
+        let target = tmp.path().join("target");
+        add_worktree_resilient(default_git_runner(), &bare, &target, "feat", "HEAD", &[])
+            .await
+            .expect("an initializing corpse elsewhere is not a live holder");
+        assert!(target.join("f.txt").exists());
+        assert!(!is_locked(&bare, &ghost));
+    }
+
+    /// A *deliberately* locked registration elsewhere (a checkout on a
+    /// removable drive — the very case `git worktree lock` exists for)
+    /// is NOT stolen even though its directory is absent: only the
+    /// `initializing` corpse and lazybox's own target path qualify.
+    #[tokio::test]
+    async fn deliberately_locked_holder_elsewhere_is_still_refused() {
+        let (tmp, bare) = local_bare_clone();
+        let usb = tmp.path().join("usb");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                usb.to_str().unwrap(),
+                "-B",
+                "feat",
+                "HEAD",
+            ],
+        );
+        git(
+            &bare,
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                "removable drive",
+                usb.to_str().unwrap(),
+            ],
+        );
+        std::fs::remove_dir_all(&usb).expect("unmount");
+        let target = tmp.path().join("target");
+        let err = add_worktree_resilient(default_git_runner(), &bare, &target, "feat", "HEAD", &[])
+            .await
+            .expect_err("a deliberate lock is honoured");
+        assert!(matches!(err, GitError::BranchHeldLive { .. }), "{err}");
+        assert!(is_locked(&bare, &usb), "the deliberate lock survives");
+    }
+
+    /// The directory-still-present variant: the add died before its
+    /// index landed and left `index.lock` behind, so the in-place
+    /// `reset --hard` repair used to fail on "index.lock: File exists"
+    /// and the tree was reclaimed wholesale. The corpse's lock files are
+    /// cleared, the repair completes, and the registration is unlocked.
+    #[tokio::test]
+    async fn interrupted_add_with_directory_present_is_repaired_in_place() {
+        let (tmp, bare) = local_bare_clone();
+        let wt = tmp.path().join("wt");
+        let admin = stage_interrupted_add(&bare, &wt, "feat", true);
+        assert!(!admin.join("index").exists(), "sanity: no index");
+        assert_eq!(
+            validate_worktree_dir(default_git_runner(), &wt, &bare)
+                .await
+                .unwrap(),
+            WorktreeDirState::Valid,
+            "repaired in place rather than reclaimed"
+        );
+        assert!(
+            admin.join("index").exists(),
+            "reset --hard rebuilt the index"
+        );
+        assert!(!admin.join("index.lock").exists());
+        assert!(
+            !is_locked(&bare, &wt),
+            "the interrupted-add lock is released"
+        );
+        assert!(wt.join("f.txt").exists());
     }
 
     /// A *live* worktree that is NOT nested inside the bare clone (e.g.

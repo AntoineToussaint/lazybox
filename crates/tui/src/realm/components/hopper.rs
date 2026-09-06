@@ -1079,7 +1079,10 @@ mod tests {
         assert!(navigate.contains("done"), "{navigate}");
         assert!(navigate.contains("cancel"), "{navigate}");
         assert!(navigate.contains("delete"), "{navigate}");
-        assert!(!navigate.contains("Ctrl"), "no Ctrl in navigate: {navigate}");
+        assert!(
+            !navigate.contains("Ctrl"),
+            "no Ctrl in navigate: {navigate}"
+        );
     }
 
     #[test]

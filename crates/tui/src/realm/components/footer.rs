@@ -17,10 +17,11 @@
 //!   against the zone's width and elided by whole cells — the
 //!   escape-hatch tail (`?`/`q q`) surviving longest, then contextual
 //!   hints in order, then evergreen hints first — with a dim
-//!   `… +N ? all` overflow cell instead of mid-label clipping. That
-//!   cell names `?` and is returned to the caller as a hit-rect so a
-//!   click on it opens the `?` catalog listing the hidden hints — the
-//!   `… +N` count is no longer a dead end (#805, was #303).
+//!   `… +N more` overflow cell instead of mid-label clipping. That
+//!   cell is returned to the caller as a hit-rect *plus the hidden
+//!   hints themselves*, so a click on it pops exactly those hints in a
+//!   which-key popup (and `?` lists them too) — the `… +N` count is no
+//!   longer a dead end (#805, #1502; was #303).
 //! - **Right**: background polling status — spinner + "Pulling
 //!   tasks from github · PR query: …" — OR the most recent notice /
 //!   error if one is set. Retryable hiccups auto-fade; permanent +
@@ -207,15 +208,24 @@ fn focus_chip_line(
     (line, width)
 }
 
+/// What the footer could not fit (#805, #1502): the screen rect of the
+/// `… +N more` overflow cell so the caller can make it clickable, and
+/// the elided hints themselves in display order, so the click (or the
+/// `?` empty prompt) can list exactly what was hidden instead of
+/// bouncing the user to a generic help screen.
+#[derive(Debug, Clone)]
+pub struct FooterOverflow {
+    pub rect: Rect,
+    pub dropped: Vec<Binding>,
+}
+
 /// Pure render. The orchestrator passes in everything Footer needs:
 /// the `focus_chip` mode indicator, the focused pane's keymap, the
 /// escape-hatch `globals` tail, the low-value `evergreen` hints
-/// (dropped first), the effective help key (`help_key` — what the
-/// overflow cell tells the user to press, so a remap of `OpenHelp` is
-/// honored), the optional polling status, and the optional notice.
-/// Paints directly and returns the screen rect of the `… +N` overflow
-/// cell when one was drawn, so the caller can make it clickable
-/// (opening help); `None` when everything fit (#805).
+/// (dropped first), the optional polling status, and the optional
+/// notice. Paints directly and returns the `… +N more` overflow cell
+/// (rect + the hidden hints) when one was drawn; `None` when
+/// everything fit (#805).
 #[allow(clippy::too_many_arguments)]
 pub fn render(
     f: &mut Frame,
@@ -224,10 +234,9 @@ pub fn render(
     keymap: &[Binding],
     globals: &[Binding],
     evergreen: &[Binding],
-    help_key: &str,
     polling_status: Option<(&str, &str)>, // (spinner, label)
     notice: Option<&Notice>,
-) -> Option<Rect> {
+) -> Option<FooterOverflow> {
     let theme = crate::theme::current();
 
     // Background fill so the line stands out.
@@ -383,20 +392,16 @@ pub fn render(
     // end), then contextual hints in catalog order, then the globals
     // escape hatches from the front (so `q q` quit — rightmost —
     // survives above all, keeping #100's guarantee). When anything
-    // drops, a dim `… +N ? all` cell ends the bar: it both names the
-    // count and points at `?`, and its rect is returned so a click on
-    // it opens the catalog listing the hidden hints (#805).
+    // drops, a dim `… +N more` cell ends the bar: its rect and the
+    // hidden hints are returned so a click on it pops exactly those
+    // hints, and `?` lists them too (#805, #1502).
     let budget = left_rect.width as usize;
     let cell_width = |b: &Binding| {
         crate::util::visual_width(&compact_key(&b.keys)) + 1 + crate::util::visual_width(&b.label)
     };
     // "  ·  " between cells; also the contextual → tail gap width.
     const SEP_W: usize = 5;
-    // The overflow cell tells the user which key reveals the hidden
-    // hints; use the *effective* help key (compact form) so a remap of
-    // `OpenHelp` is honored rather than a hardcoded `?` (#805).
-    let help_disp = compact_key(help_key);
-    let overflow_label = |n: usize| format!("… +{n} {help_disp} all");
+    let overflow_label = |n: usize| format!("… +{n} more");
     let total = keymap.len() + evergreen.len() + globals.len();
     // Width of the non-overflow content for a given set of kept cells.
     // `kg` keeps the globals *suffix* (drop from front); `ke` keeps the
@@ -446,6 +451,15 @@ pub fn render(
         }
     }
     let dropped = total - kept_ctx - kept_ever - kept_glob;
+    // The hidden hints, in the order the bar would have shown them:
+    // contextual tail, then the evergreen tail, then any globals cut
+    // from the front.
+    let dropped_cells: Vec<Binding> = keymap[kept_ctx..]
+        .iter()
+        .chain(evergreen[kept_ever..].iter())
+        .chain(globals[..globals.len() - kept_glob].iter())
+        .cloned()
+        .collect();
     let keymap = &keymap[..kept_ctx];
     let evergreen = &evergreen[..kept_ever];
     let globals = &globals[globals.len() - kept_glob..];
@@ -480,20 +494,17 @@ pub fn render(
         spans.push(Span::styled(" ", bg));
         spans.push(Span::styled(b.label.clone(), label_style));
     }
-    // Overflow cell. `… +N` is dim (a count), the help key is drawn
-    // like a key (accent) so it reads as "press <key> for all", and the
-    // whole cell is returned as a hit-rect for the click affordance
-    // (#805).
-    let overflow_rect = if dropped > 0 {
+    // Overflow cell. `… +N more` is dim (a count); the whole cell is
+    // returned as a hit-rect for the click affordance together with
+    // the hidden hints (#805, #1502).
+    let overflow = if dropped > 0 {
         let leading_sep = if !keymap.is_empty() || !evergreen.is_empty() || !globals.is_empty() {
             spans.push(Span::styled("  ·  ", sep_style));
             SEP_W
         } else {
             0
         };
-        spans.push(Span::styled(format!("… +{dropped} "), label_style));
-        spans.push(Span::styled(help_disp.to_string(), key_style));
-        spans.push(Span::styled(" all", label_style));
+        spans.push(Span::styled(overflow_label(dropped), label_style));
         // Offset of the cell within `left_rect` — the width consumed by
         // everything rendered before it. The elision loop guarantees the
         // cell fits, so `offset + width <= left_rect.width`; the `.min`
@@ -501,11 +512,14 @@ pub fn render(
         let offset =
             (content_width(keymap.len(), evergreen.len(), globals.len()) + leading_sep) as u16;
         let width = crate::util::visual_width(&overflow_label(dropped)) as u16;
-        Some(Rect {
-            x: left_rect.x.saturating_add(offset),
-            y: left_rect.y,
-            width: width.min(left_rect.width.saturating_sub(offset)),
-            height: 1,
+        Some(FooterOverflow {
+            rect: Rect {
+                x: left_rect.x.saturating_add(offset),
+                y: left_rect.y,
+                width: width.min(left_rect.width.saturating_sub(offset)),
+                height: 1,
+            },
+            dropped: dropped_cells,
         })
     } else {
         None
@@ -516,7 +530,7 @@ pub fn render(
         f.render_widget(Paragraph::new(line).style(bg), right_rect);
     }
 
-    overflow_rect
+    overflow
 }
 
 /// Compact display for footer hints — `Shift-X` → `X`, `Ctrl-Q` →
@@ -528,7 +542,7 @@ pub fn render(
 /// Returns `Cow` so the pass-through case (most rows) doesn't
 /// allocate — the footer redraws on every state change and this is a
 /// hot path.
-fn compact_key(keys: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn compact_key(keys: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
     if let Some(rest) = keys.strip_prefix("Shift-") {
         // `Shift-X` where X is one ASCII letter → uppercase letter
@@ -581,21 +595,19 @@ mod tests {
         polling_status: Option<(&str, &str)>,
         notice: Option<&Notice>,
     ) -> String {
-        render_row_at_evergreen(w, keymap, globals, &[], "?", polling_status, notice).0
+        render_row_at_evergreen(w, keymap, globals, &[], polling_status, notice).0
     }
 
-    /// Render at width `w` with an explicit `evergreen` group and help
-    /// key, returning both the flat row and the overflow cell's rect (if
-    /// drawn).
+    /// Render at width `w` with an explicit `evergreen` group,
+    /// returning both the flat row and the overflow cell (if drawn).
     fn render_row_at_evergreen(
         w: u16,
         keymap: &[Binding],
         globals: &[Binding],
         evergreen: &[Binding],
-        help_key: &str,
         polling_status: Option<(&str, &str)>,
         notice: Option<&Notice>,
-    ) -> (String, Option<Rect>) {
+    ) -> (String, Option<FooterOverflow>) {
         let backend = TestBackend::new(w, 1);
         let mut term = Terminal::new(backend).unwrap();
         let mut overflow = None;
@@ -607,7 +619,6 @@ mod tests {
                 keymap,
                 globals,
                 evergreen,
-                help_key,
                 polling_status,
                 notice,
             );
@@ -846,62 +857,79 @@ mod tests {
         assert!(!row.contains("… +"), "spurious overflow indicator: {row:?}");
     }
 
-    /// The overflow cell is not a dead `… +N`: it names `?` (the escape
-    /// hatch that reveals the hidden hints) and reports a screen rect so
-    /// the caller can make it clickable (#805).
+    /// The overflow cell is not a dead `… +N`: it reads `… +N more`,
+    /// reports a screen rect so the caller can make it clickable, and
+    /// carries the hidden hints themselves (#805, #1502).
     #[test]
     fn overflow_cell_is_labeled_and_returns_a_hit_rect() {
         let keymap = rich_keymap();
         let globals = globals_survivors();
         let evergreen = evergreen_tail();
         let (row, overflow) =
-            render_row_at_evergreen(70, &keymap, &globals, &evergreen, "?", None, None);
+            render_row_at_evergreen(70, &keymap, &globals, &evergreen, None, None);
         assert!(row.contains("… +"), "overflow indicator missing: {row:?}");
         assert!(
-            row.contains("all"),
-            "overflow cell must point at `?`/all, not a dead `… +N`: {row:?}",
+            row.contains("more"),
+            "overflow cell must read `+N more`, not a dead `… +N`: {row:?}",
         );
-        let rect = overflow.expect("overflow cell must report a hit-rect");
+        assert!(!row.contains(" all"), "stale `? all` label: {row:?}");
+        let overflow = overflow.expect("overflow cell must report a hit-rect");
+        let rect = overflow.rect;
         assert!(rect.width > 0, "overflow rect has no width: {rect:?}");
-        // The reported rect must actually cover the `?` glyph so a click
-        // there is a click on the escape hatch.
         let cell: String = row
             .chars()
             .skip(rect.x as usize)
             .take(rect.width as usize)
             .collect();
-        assert!(cell.contains('?'), "overflow rect must cover `?`: {cell:?}");
         assert!(
-            cell.contains("all"),
-            "overflow rect must cover label: {cell:?}"
+            cell.contains("more"),
+            "overflow rect must cover the label: {cell:?}"
+        );
+        assert!(
+            cell.contains(&format!("+{}", overflow.dropped.len())),
+            "the count must match the dropped list: {cell:?} vs {:?}",
+            overflow.dropped
         );
     }
 
-    /// The overflow cell names the EFFECTIVE help key, not a hardcoded
-    /// `?`: a user who remapped `OpenHelp` sees the key they actually
-    /// press (#805). The rect still covers the labeled key.
+    /// The returned `dropped` list is exactly the cells missing from
+    /// the rendered row, in display order, so a popup built from it
+    /// shows what the bar could not (#1502).
     #[test]
-    fn overflow_cell_uses_the_effective_help_key() {
+    fn overflow_reports_the_dropped_cells_in_order() {
         let keymap = rich_keymap();
-        let globals = vec![binding("F1", "ask lazybox"), binding("q q", "quit")];
+        let globals = globals_survivors();
         let evergreen = evergreen_tail();
-        let (row, overflow) =
-            render_row_at_evergreen(70, &keymap, &globals, &evergreen, "F1", None, None);
-        assert!(
-            row.contains("F1 all"),
-            "overflow must advertise the remapped help key: {row:?}",
-        );
-        assert!(!row.contains("? all"), "stale hardcoded `?`: {row:?}");
-        let rect = overflow.expect("overflow cell must report a hit-rect");
-        let cell: String = row
-            .chars()
-            .skip(rect.x as usize)
-            .take(rect.width as usize)
-            .collect();
-        assert!(
-            cell.contains("F1"),
-            "rect must cover the help key: {cell:?}"
-        );
+        for w in [50u16, 70, 90] {
+            let (row, overflow) =
+                render_row_at_evergreen(w, &keymap, &globals, &evergreen, None, None);
+            let Some(overflow) = overflow else {
+                panic!("expected overflow at {w} cols: {row:?}");
+            };
+            let all: Vec<&Binding> = keymap
+                .iter()
+                .chain(evergreen.iter())
+                .chain(globals.iter())
+                .collect();
+            let expected: Vec<String> = all
+                .iter()
+                .filter(|b| !row.contains(b.label.as_ref()))
+                .map(|b| b.label.to_string())
+                .collect();
+            let got: Vec<String> = overflow
+                .dropped
+                .iter()
+                .map(|b| b.label.to_string())
+                .collect();
+            assert_eq!(got, expected, "dropped list mismatch at {w} cols: {row:?}");
+            for b in &overflow.dropped {
+                assert!(
+                    !row.contains(b.label.as_ref()),
+                    "{:?} is listed as dropped but rendered at {w} cols",
+                    b.label
+                );
+            }
+        }
     }
 
     /// A wide row that fits everything reports no overflow rect — there
@@ -911,9 +939,8 @@ mod tests {
         let keymap = rich_keymap();
         let globals = globals_survivors();
         let evergreen = evergreen_tail();
-        let (_, overflow) =
-            render_row_at_evergreen(200, &keymap, &globals, &evergreen, "?", None, None);
-        assert!(overflow.is_none(), "no overflow rect expected at 200 cols");
+        let (_, overflow) = render_row_at_evergreen(200, &keymap, &globals, &evergreen, None, None);
+        assert!(overflow.is_none(), "no overflow expected at 200 cols");
     }
 
     /// Ranking (#805): the low-value evergreen hint (tour) is the FIRST
@@ -926,8 +953,7 @@ mod tests {
         let globals = globals_survivors();
         let evergreen = evergreen_tail();
         // Wide enough for everything: tour shows.
-        let (wide, _) =
-            render_row_at_evergreen(200, &keymap, &globals, &evergreen, "?", None, None);
+        let (wide, _) = render_row_at_evergreen(200, &keymap, &globals, &evergreen, None, None);
         assert!(
             wide.contains("tour"),
             "tour should show when it fits: {wide:?}"
@@ -935,8 +961,7 @@ mod tests {
         // As the row narrows, tour is the first cell to fall off while
         // the top contextual hint and quit stay.
         for w in [70u16, 80, 90] {
-            let (row, _) =
-                render_row_at_evergreen(w, &keymap, &globals, &evergreen, "?", None, None);
+            let (row, _) = render_row_at_evergreen(w, &keymap, &globals, &evergreen, None, None);
             assert!(
                 !row.contains("tour"),
                 "tour must drop first at {w} cols: {row:?}"
@@ -977,7 +1002,7 @@ mod tests {
         let mut exercised = false;
         for w in 60u16..=140 {
             let (as_global, _) =
-                render_row_at_evergreen(w, &keymap, &globals_with_hopper, &[], "?", None, None);
+                render_row_at_evergreen(w, &keymap, &globals_with_hopper, &[], None, None);
             // The problematic band: hopper (a global) survives AND the top
             // contextual hint survives, yet a lower-priority contextual
             // hint has already been elided — i.e. hopper is holding a slot
@@ -991,7 +1016,7 @@ mod tests {
             }
             exercised = true;
             let (as_evergreen, _) =
-                render_row_at_evergreen(w, &keymap, &globals, &evergreen, "?", None, None);
+                render_row_at_evergreen(w, &keymap, &globals, &evergreen, None, None);
             assert!(
                 !as_evergreen.contains("hopper"),
                 "hopper in evergreen must yield to contextual at {w} cols: {as_evergreen:?}",

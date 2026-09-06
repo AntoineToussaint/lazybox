@@ -46,6 +46,7 @@ Work from any non-terminal pane. A focused terminal forwards keys to the PTY; pr
 | `!` | next asking | Jump the cursor to the next workspace whose agent is waiting on input (a quick jump; the workspace picker `` ` `` reaches any workspace). |
 | `Shift-F` | next failing | Jump the cursor to the next PR whose CI is failing (a quick jump; the workspace picker `` ` `` reaches any workspace). |
 | `Shift-L` | next rate-limited | Jump the cursor to the next workspace whose agent hit its provider usage / rate limit (#847). |
+| `Shift-N` | next unread | Jump the cursor to the next workspace with unread activity, wrapping around (#1502). |
 | `.` | focus mode | Maximize the focused workspace's terminal to near-fullscreen behind a slim event header, hiding the sidebar and activity pane. |
 | `Shift-W` | start work | Pick a project, name a workspace, and start the default agent in it — all in one step, from any pane. |
 | `Shift-C` | connect box | Connect to (or disconnect from) the remote box on demand. |
@@ -78,6 +79,8 @@ Manage the sidebar list itself — only while the sidebar has focus.
 
 | Key | Action | What it does |
 | --- | --- | --- |
+| `{` | prev group | Move the cursor to the previous group header (Space / repo / Focused / Hopper) so a long inbox can be crossed a group at a time (#1502). |
+| `}` | next group | Move the cursor to the next group header (Space / repo / Focused / Hopper) so a long inbox can be crossed a group at a time (#1502). |
 | `f` | filter | Open the filter menu — toggle state (with-agent, CI-failing, conflict, unread, asking, …), role, and kind predicates. |
 | `o` | order | Cycle the sort order (recency → by-role → by-role with section headers). |
 | `Shift-S` | switch mailbox | Cycle the mailbox view (Inbox → Inactive → Snoozed). |

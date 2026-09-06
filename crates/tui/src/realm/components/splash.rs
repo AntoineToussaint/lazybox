@@ -20,13 +20,24 @@ use tuirealm::state::State;
 /// Welcome card shown on first run. Press Enter to advance, Esc to
 /// quit.
 pub struct Splash {
-    _private: (),
+    /// `ui.action_keys` overrides, so the "keys to know" list shows the
+    /// user's EFFECTIVE bindings — a remapped user must not see wrong
+    /// keys on the very first screen (#1502).
+    overrides: std::collections::BTreeMap<String, String>,
 }
 
 impl Splash {
     /// Construct a fresh splash.
     pub fn new() -> Self {
-        Self { _private: () }
+        Self {
+            overrides: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Attach the user's key overrides (#1502).
+    pub fn with_overrides(mut self, overrides: std::collections::BTreeMap<String, String>) -> Self {
+        self.overrides = overrides;
+        self
     }
 }
 
@@ -90,7 +101,7 @@ impl Component for Splash {
             )),
             Line::raw(""),
             Line::from(Span::styled(
-                "    Tour of commands:",
+                "    Keys to know:",
                 Style::default()
                     .fg(theme.text_strong)
                     .add_modifier(Modifier::BOLD),
@@ -100,7 +111,7 @@ impl Component for Splash {
             lines.push(Line::from(vec![
                 Span::styled("      ", Style::default()),
                 Span::styled(
-                    format!("{:<14}", def.default_keys),
+                    format!("{:<14}", def.effective_keys_display(&self.overrides)),
                     Style::default()
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
@@ -164,5 +175,45 @@ impl AppComponent<Msg, UserEvent> for Splash {
             }) if modifiers.contains(KeyModifiers::CONTROL) => Some(Msg::AppClose),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tuirealm::ratatui::Terminal;
+    use tuirealm::ratatui::backend::TestBackend;
+
+    fn render(splash: &mut Splash) -> String {
+        let (w, h) = (80u16, 32u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| splash.view(f, Rect::new(0, 0, w, h)))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The first screen a user ever sees lists their EFFECTIVE keys: a
+    /// `ui.action_keys` remap shows the remapped chord, not the default
+    /// (#1502).
+    #[test]
+    fn keys_to_know_honor_overrides() {
+        let out = render(&mut Splash::new());
+        assert!(out.contains("Keys to know"), "{out}");
+        assert!(out.contains("ask lazybox"), "{out}");
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("open_help".to_string(), "F1".to_string());
+        let remapped = render(&mut Splash::new().with_overrides(overrides));
+        let help_line = remapped
+            .lines()
+            .find(|l| l.contains("ask lazybox"))
+            .expect("help row");
+        assert!(
+            help_line.contains("F1"),
+            "remapped key missing: {help_line}"
+        );
     }
 }

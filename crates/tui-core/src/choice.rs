@@ -41,6 +41,11 @@ pub const SOURCE_LEVELS: [lazybox_config::SourceAttentionLevel; 4] = [
 
 /// Payload access needed by [`resolve_pick`]. The renderer owns its picker
 /// payload enum; this trait keeps the pure resolver independent of it.
+/// Text payloads of the `Shift-W` Start sheet rows (#1502).
+pub const START_SHEET_CHAT: &str = "start:chat";
+pub const START_SHEET_REPO: &str = "start:repo";
+pub const START_SHEET_PROJECT: &str = "start:project";
+
 pub trait PickPayload {
     type Filter: Clone;
 
@@ -132,6 +137,11 @@ pub enum PickFlow {
     },
     StartAgentProject,
     NewWorkspaceRepo,
+    /// The `Shift-W` Start sheet (#1502): one modal that works on an
+    /// empty install. Rows are text-shaped (`chat` / `repo` /
+    /// `project`) or carry the cursor project's key for "workspace
+    /// here".
+    StartSheet,
     /// One-time project assignment for a repo-less Hopper workspace. The
     /// action is carried through the picker so the TUI can resume it only
     /// after the daemon echoes the persisted assignment.
@@ -256,6 +266,13 @@ pub enum SpacePickEntry {
 pub enum PickOutcome<F> {
     NoOp,
     Pop,
+    /// Start sheet → Chat: a scratch workspace with the default agent,
+    /// no repo, no project picked (#1502).
+    StartChat,
+    /// Start sheet → Repository…: the `x p` repo picker.
+    MountNewWorkspaceRepoPicker,
+    /// Start sheet → Project…: the project picker.
+    MountStartAgentPicker,
     MountBroadcastComposer {
         snippet_key: Option<String>,
         body: Option<String>,
@@ -568,6 +585,20 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
             .and_then(P::project)
             .map(PickOutcome::MountNewWorkspace)
             .unwrap_or(PickOutcome::NoOp),
+        PickFlow::StartSheet => match picks.first() {
+            Some(payload) if payload.as_text() == Some(START_SHEET_CHAT) => PickOutcome::StartChat,
+            Some(payload) if payload.as_text() == Some(START_SHEET_REPO) => {
+                PickOutcome::MountNewWorkspaceRepoPicker
+            }
+            Some(payload) if payload.as_text() == Some(START_SHEET_PROJECT) => {
+                PickOutcome::MountStartAgentPicker
+            }
+            Some(payload) => payload
+                .project()
+                .map(PickOutcome::MountNewWorkspace)
+                .unwrap_or(PickOutcome::NoOp),
+            None => PickOutcome::NoOp,
+        },
         PickFlow::NewWorkspaceRepo => match picks.first() {
             Some(payload) if payload.is_new_local_project() => PickOutcome::MountNewProject,
             Some(payload) => payload
@@ -1100,6 +1131,43 @@ mod tests {
             has_unpushed_commits: false,
             is_safe_to_delete: safe,
         }
+    }
+
+    /// The Start sheet's rows resolve to their typed outcomes: the three
+    /// text rows and the cursor-project row (#1502).
+    #[test]
+    fn start_sheet_rows_resolve_to_typed_outcomes() {
+        assert!(matches!(
+            resolve_pick(
+                &[Payload::Text(START_SHEET_CHAT.into())],
+                PickFlow::StartSheet
+            ),
+            PickOutcome::StartChat
+        ));
+        assert!(matches!(
+            resolve_pick(
+                &[Payload::Text(START_SHEET_REPO.into())],
+                PickFlow::StartSheet
+            ),
+            PickOutcome::MountNewWorkspaceRepoPicker
+        ));
+        assert!(matches!(
+            resolve_pick(
+                &[Payload::Text(START_SHEET_PROJECT.into())],
+                PickFlow::StartSheet
+            ),
+            PickOutcome::MountStartAgentPicker
+        ));
+        let pk = ProjectKey::local("proj");
+        assert!(matches!(
+            resolve_pick(&[Payload::Project(pk.clone())], PickFlow::StartSheet),
+            PickOutcome::MountNewWorkspace(key) if key == pk
+        ));
+        let none: [Payload; 0] = [];
+        assert!(matches!(
+            resolve_pick(&none, PickFlow::StartSheet),
+            PickOutcome::NoOp
+        ));
     }
 
     #[test]

@@ -11,7 +11,7 @@
 //! `handle_choice_picked` / `handle_confirmed` arms (in mod.rs or
 //! events.rs) read the stashed state and execute on submit.
 
-use super::{ChoicePayload, ConversionDraft, HandoffDraft, Id, ModalFlow, Model};
+use super::{ChoicePayload, ConversionDraft, HandoffDraft, Id, ModalFlow, Model, PaneFocus};
 use tuirealm::terminal::TerminalAdapter;
 
 /// Fallback display name for an editor entry with no explicit `display:`
@@ -465,7 +465,9 @@ impl<T: TerminalAdapter> Model<T> {
 
         let projects = self.sidebar.projects_for_picker();
         if projects.is_empty() {
-            self.flash_info("no projects yet — create one with x p");
+            // No container yet: the Start sheet is the one entry point
+            // that works here (#1502).
+            self.start_agent_flow();
             return;
         }
         type ProjectRow = (lazybox_core::ProjectKey, String);
@@ -1755,22 +1757,56 @@ impl<T: TerminalAdapter> Model<T> {
         );
     }
 
+    /// The focused pane's contextual footer bindings — the state-aware
+    /// short list ("g m merge" when the row is READY, "w fix CI" when
+    /// CI is failing, …) so the user always sees what's actionable
+    /// right now, not a generic alphabet. Feeds both the footer hint
+    /// bar and the `?` empty prompt, so the two never disagree (#1502).
+    pub(super) fn focused_pane_bindings(&self) -> Vec<crate::pane::Binding> {
+        match self.focus {
+            PaneFocus::Sidebar => {
+                let mut bindings = self.sidebar.contextual_bindings(&self.catalog, self.remote);
+                // The `]]` leader also arms from the sidebar (#871),
+                // addressing the cursor workspace's agent. It's not a
+                // catalog action, so append its gateway hint here — the
+                // popup carries the individual `]]s`/`]]l`/… commands.
+                if self.sidebar.selected_workspace().is_some() {
+                    let esc = self.ui_defaults.terminal_escape_char;
+                    bindings.push(crate::pane::Binding {
+                        keys: std::borrow::Cow::Owned(format!("{esc}{esc}")),
+                        label: std::borrow::Cow::Borrowed("send"),
+                    });
+                }
+                bindings
+            }
+            PaneFocus::Right => self.right.contextual_bindings(&self.action_key_overrides),
+            PaneFocus::Terminals => self
+                .terminals
+                .contextual_bindings(self.ui_defaults.terminal_escape_char),
+        }
+    }
+
     /// Build + mount the "Ask Lazybox" modal (#302): fuzzy search over
     /// a snapshot of the runtime catalog, plus the shared help
-    /// conversation for agent answers. Idempotent like `mount_help`.
+    /// conversation for agent answers. The empty prompt lists the
+    /// focused pane's keys — every footer hint, including the ones the
+    /// bar could not fit — so `?` is the keyboard path to the hidden
+    /// hints (#1502). Idempotent like `mount_help`.
     pub(super) fn mount_help_ask(&mut self) {
         use crate::realm::components::help_ask::HelpAsk;
 
         if self.modal_stack.last() == Some(&Id::HelpAsk) {
             return;
         }
+        let pane_keys = (self.focus.title(), self.focused_pane_bindings());
         self.mount_modal(
             Id::HelpAsk,
             HelpAsk::new(
                 self.catalog.clone(),
                 self.help_convo.clone(),
                 self.ui_defaults.terminal_escape_char,
-            ),
+            )
+            .with_pane_keys(pane_keys.0, pane_keys.1),
         );
     }
 
@@ -3160,37 +3196,130 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::ConvertSessionRole, modal);
     }
 
-    /// Drive the global "start agent" (`Shift-W`) flow. Resolve the
-    /// project set up front:
+    /// The name of the scratch project the Start sheet's Chat row
+    /// creates on demand (#1502). Its key is `local-scratch`.
+    pub(crate) const SCRATCH_PROJECT: &'static str = "scratch";
+
+    /// Drive the global "start" (`Shift-W`) flow (#1502): ALWAYS one
+    /// sheet, whatever the state of the inbox, so the advertised
+    /// zero-friction key never bounces the user to another key:
     ///
-    /// - **No projects** → footer nudge pointing at `x p`; there's
-    ///   nothing to create a workspace under yet.
-    /// - **One project** → skip the picker and go straight to the
-    ///   name input (the project is unambiguous).
-    /// - **Several** → mount the project picker; the pick funnels into
-    ///   the same name input.
+    /// - **Chat** — a scratch workspace with the default agent, no
+    ///   repo, no name to type. Works with zero providers and zero
+    ///   projects.
+    /// - **Repository…** — the `x p` repo picker (or, with no tracked
+    ///   repos, the new-project input).
+    /// - **Workspace** — the `x n` name input under the project at the
+    ///   cursor; listed only when there is one.
+    /// - **Project…** — the project picker; listed when ≥ 1 project.
     ///
-    /// The name input's submit auto-spawns the configured default
-    /// agent (see `handle_input_submitted`), so this whole flow is
-    /// "create workspace + start agent" in one keystroke chain.
+    /// Each row funnels into `handle_choice_picked` →
+    /// `PickFlow::StartSheet`.
     pub(crate) fn start_agent_flow(&mut self) {
-        let projects = self.sidebar.projects_for_picker();
-        match projects.len() {
-            0 => {
-                self.flash_info("no projects yet — create one with x p");
-            }
-            1 => {
-                let (key, _) = projects.into_iter().next().expect("len checked == 1");
-                self.mount_new_workspace_input(key);
-            }
-            _ => self.mount_start_agent_picker(projects),
+        use crate::realm::components::choice::Choice;
+        use lazybox_tui_core::choice::{START_SHEET_CHAT, START_SHEET_PROJECT, START_SHEET_REPO};
+
+        if matches!(self.modal_stack.last(), Some(Id::StartSheet)) {
+            return;
         }
+        let projects = self.sidebar.projects_for_picker();
+        let cursor_project = self.sidebar.focused_project_key().and_then(|key| {
+            projects
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(k, name)| (k.clone(), name.clone()))
+        });
+        type StartRow = (String, ChoicePayload);
+        let mut items: Vec<StartRow> = vec![
+            (
+                "Chat — a scratch workspace, no repo".to_string(),
+                ChoicePayload::Text(START_SHEET_CHAT.to_string()),
+            ),
+            (
+                "Repository… — pick a tracked repo".to_string(),
+                ChoicePayload::Text(START_SHEET_REPO.to_string()),
+            ),
+        ];
+        if let Some((key, name)) = cursor_project {
+            items.push((
+                format!("Workspace — in {name}"),
+                ChoicePayload::Project(key),
+            ));
+        }
+        if !projects.is_empty() {
+            items.push((
+                "Project… — pick a project".to_string(),
+                ChoicePayload::Text(START_SHEET_PROJECT.to_string()),
+            ));
+        }
+        let modal = Choice::single("Where do you want to start?", items)
+            .title("Start")
+            .label(|(label, _): &StartRow| label.clone())
+            .payload_for(|(_, payload): &StartRow| payload.clone());
+        self.mount_modal(Id::StartSheet, modal);
+    }
+
+    /// Start sheet → Chat (#1502): ensure the `scratch` local project
+    /// exists, then create a dated chat workspace under it with the
+    /// default agent spawned in. When the project is already known the
+    /// workspace is created at once; otherwise `CreateProject` goes out
+    /// and the `ProjectUpserted` hand-off (`deferred_chat`) finishes
+    /// the job.
+    pub(crate) fn start_chat_cmds(&mut self) -> Vec<lazybox_ipc::Command> {
+        let scratch = lazybox_core::ProjectKey::local(Self::SCRATCH_PROJECT);
+        self.flash_info("starting a chat…");
+        if self.projects.contains_key(&scratch) {
+            let name = self.next_chat_name(&scratch);
+            self.create_workspace_cmds(scratch, name)
+        } else {
+            self.deferred_chat = true;
+            self.deferred_focus_project = Some(Self::SCRATCH_PROJECT.to_string());
+            vec![lazybox_ipc::Command::CreateProject {
+                name: Self::SCRATCH_PROJECT.to_string(),
+            }]
+        }
+    }
+
+    /// `chat-<mmdd>`, suffixed `-2`, `-3`, … when a workspace of that
+    /// name already exists under `project` (#1502). Also counts
+    /// workspace creates still in flight (`pending_workspace_creates`):
+    /// creation is async, so two rapid `Shift-W → Chat` presses would
+    /// otherwise both compute the same base name — the first hasn't
+    /// landed in the sidebar when the second runs — and produce two
+    /// rows sharing one label (the daemon keeps the KEYS unique, but
+    /// copies the requested name verbatim).
+    pub(crate) fn next_chat_name(&self, project: &lazybox_core::ProjectKey) -> String {
+        let base = format!("chat-{}", chrono::Local::now().format("%m%d"));
+        let mut taken: std::collections::HashSet<String> = self
+            .sidebar
+            .workspace_iter()
+            .filter(|(_, w)| w.project_key.as_ref() == Some(project))
+            .map(|(_, w)| w.name.clone())
+            .collect();
+        // Pending creates carry no project key, so union all of them —
+        // a stray same-named create under another project only bumps
+        // the suffix, which is harmless.
+        taken.extend(
+            self.pending_workspace_creates
+                .values()
+                .map(|p| p.name.clone()),
+        );
+        if !taken.contains(&base) {
+            return base;
+        }
+        (2..)
+            .map(|n| format!("{base}-{n}"))
+            .find(|candidate| !taken.contains(candidate))
+            .unwrap_or(base)
     }
 
     /// Mount the project picker for the `Shift-W` start-agent flow.
     /// Mirrors `mount_adopt_picker`: stash the keys in row order so
     /// `Msg::ChoicePicked` can recover the chosen `ProjectKey`.
-    fn mount_start_agent_picker(&mut self, projects: Vec<(lazybox_core::ProjectKey, String)>) {
+    pub(super) fn mount_start_agent_picker(
+        &mut self,
+        projects: Vec<(lazybox_core::ProjectKey, String)>,
+    ) {
         use crate::realm::components::choice::Choice;
 
         // Each row carries its project key (#512).

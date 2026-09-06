@@ -1796,15 +1796,220 @@ mod effects_tests {
         assert!(cmds.is_empty(), "blank rename must not emit a command");
     }
 
-    /// `Shift-W` with no projects yet can't resolve a container, so
-    /// it surfaces a nudge instead of mounting a picker.
+    /// `Shift-W` on an empty install mounts the Start sheet instead of
+    /// bouncing to `x p` (#1502): Chat and Repository are always
+    /// offered; Workspace/Project rows need a project.
     #[test]
-    fn start_agent_flow_without_projects_mounts_no_modal() {
+    fn start_agent_flow_without_projects_mounts_the_start_sheet() {
         let mut m = build_model();
         m.start_agent_flow();
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::StartSheet),
+            "no project → the Start sheet, never a dead-end nudge"
+        );
+    }
+
+    /// Start sheet → Chat with no scratch project yet: one
+    /// `CreateProject { scratch }` goes out and the `ProjectUpserted`
+    /// hand-off then creates a dated chat workspace (default agent
+    /// spawned) without a name prompt (#1502).
+    #[test]
+    fn start_sheet_chat_creates_scratch_project_then_workspace() {
+        use lazybox_tui_core::choice::START_SHEET_CHAT;
+        // Keep the daemon end alive so the hand-off's send succeeds and
+        // can be observed.
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(100, 30)).expect("model init");
+        while server.rx.try_recv().is_ok() {}
+        m.start_agent_flow();
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text(START_SHEET_CHAT.into())]);
+        assert!(
+            matches!(&cmds[..], [IpcCommand::CreateProject { name }] if name == "scratch"),
+            "chat first creates the scratch project: {cmds:?}"
+        );
+        assert!(m.modal_stack.is_empty(), "no name prompt for a chat");
+        // The daemon echoes the project.
+        let project = lazybox_core::Project::new(
+            lazybox_core::ProjectKey::local("scratch"),
+            "scratch".to_string(),
+            chrono::Utc::now(),
+        );
+        m.handle_daemon_event(lazybox_ipc::Event::ProjectUpserted(Box::new(project)));
+        let sent: Vec<IpcCommand> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+        match &sent[..] {
+            [
+                IpcCommand::CreateWorkspace {
+                    name,
+                    project_key,
+                    spawn_agent,
+                    ..
+                },
+            ] => {
+                assert!(
+                    name.starts_with("chat-"),
+                    "chat workspaces are dated: {name}"
+                );
+                assert_eq!(*project_key, lazybox_core::ProjectKey::local("scratch"));
+                assert!(spawn_agent.is_some(), "the default agent is spawned in");
+            }
+            other => panic!("expected one CreateWorkspace after the hand-off, got {other:?}"),
+        }
+        assert_eq!(
+            m.pending_workspace_creates.len(),
+            1,
+            "one chat workspace create in flight"
+        );
         assert!(
             m.modal_stack.is_empty(),
-            "no project → footer nudge, no modal"
+            "the hand-off must not mount the name input for a chat"
+        );
+    }
+
+    /// With the scratch project already known, Chat creates the
+    /// workspace at once and picks a fresh suffix when today's name is
+    /// taken (#1502).
+    #[test]
+    fn start_sheet_chat_reuses_scratch_project_and_suffixes_names() {
+        use lazybox_tui_core::choice::START_SHEET_CHAT;
+        let mut m = build_model();
+        let scratch = lazybox_core::ProjectKey::local("scratch");
+        m.handle_daemon_event(lazybox_ipc::Event::ProjectUpserted(Box::new(
+            lazybox_core::Project::new(scratch.clone(), "scratch".to_string(), chrono::Utc::now()),
+        )));
+        let today = format!("chat-{}", chrono::Local::now().format("%m%d"));
+        let mut existing = lazybox_core::Workspace::empty(
+            WorkspaceKey::new("local:scratch/chat"),
+            "main",
+            chrono::Utc::now(),
+        );
+        existing.name = today.clone();
+        existing.project_key = Some(scratch.clone());
+        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            existing,
+        )));
+        m.start_agent_flow();
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text(START_SHEET_CHAT.into())]);
+        match &cmds[..] {
+            [
+                IpcCommand::CreateWorkspace {
+                    name,
+                    project_key,
+                    spawn_agent,
+                    ..
+                },
+            ] => {
+                assert_eq!(*project_key, scratch);
+                assert_eq!(*name, format!("{today}-2"), "second chat today gets -2");
+                assert!(spawn_agent.is_some(), "default agent rides along");
+            }
+            other => panic!("expected one CreateWorkspace, got {other:?}"),
+        }
+    }
+
+    /// Two rapid `Shift-W → Chat` presses (scratch already known) must
+    /// not both mint the same `chat-MMDD` name: the first create is
+    /// still in flight (no `WorkspaceUpserted` yet) when the second
+    /// runs, so the second reads it from `pending_workspace_creates`
+    /// and suffixes `-2`. Without that, two sidebar rows share one
+    /// label (#1502).
+    #[test]
+    fn back_to_back_chats_suffix_from_pending_creates() {
+        use lazybox_tui_core::choice::START_SHEET_CHAT;
+        let mut m = build_model();
+        let scratch = lazybox_core::ProjectKey::local("scratch");
+        m.handle_daemon_event(lazybox_ipc::Event::ProjectUpserted(Box::new(
+            lazybox_core::Project::new(scratch.clone(), "scratch".to_string(), chrono::Utc::now()),
+        )));
+        let today = format!("chat-{}", chrono::Local::now().format("%m%d"));
+
+        m.start_agent_flow();
+        let first = m.handle_choice_picked(vec![ChoicePayload::Text(START_SHEET_CHAT.into())]);
+        match &first[..] {
+            [IpcCommand::CreateWorkspace { name, .. }] => assert_eq!(*name, today),
+            other => panic!("expected one CreateWorkspace, got {other:?}"),
+        }
+        // The first create is unacknowledged — it lives only in
+        // pending_workspace_creates, not yet in the sidebar.
+        m.start_agent_flow();
+        let second = m.handle_choice_picked(vec![ChoicePayload::Text(START_SHEET_CHAT.into())]);
+        match &second[..] {
+            [IpcCommand::CreateWorkspace { name, .. }] => assert_eq!(
+                *name,
+                format!("{today}-2"),
+                "second chat suffixes off the in-flight first"
+            ),
+            other => panic!("expected one CreateWorkspace, got {other:?}"),
+        }
+    }
+
+    /// Regression (#1502): a `deferred_chat` flag left stuck `true` by a
+    /// scratch-project create whose store write failed (no
+    /// `ProjectUpserted` ever emitted) must NOT ride the NEXT `x p`
+    /// upsert. `deferred_chat` is process-lifetime state, so without the
+    /// scratch-key gate the stale flag would make the user's next real
+    /// project spawn a phantom chat workspace instead of opening the
+    /// name input. The gate means only a scratch upsert can consume it.
+    #[test]
+    fn stuck_deferred_chat_does_not_hijack_a_later_project() {
+        use lazybox_tui_core::choice::START_SHEET_CHAT;
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(100, 30)).expect("model init");
+        while server.rx.try_recv().is_ok() {}
+        // Chat with no scratch yet → CreateProject{scratch} + the flag.
+        m.start_agent_flow();
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text(START_SHEET_CHAT.into())]);
+        assert!(
+            matches!(&cmds[..], [IpcCommand::CreateProject { name }] if name == "scratch"),
+            "chat first creates the scratch project: {cmds:?}"
+        );
+        assert!(m.deferred_chat, "chat is deferred until scratch lands");
+        // The scratch store write fails on the daemon: its
+        // ProjectUpserted never arrives. The user instead creates a
+        // real project via `x p`, which re-aims the deferred focus.
+        m.deferred_focus_project = Some("myproj".to_string());
+        let pk = lazybox_core::ProjectKey::local("myproj");
+        m.handle_daemon_event(lazybox_ipc::Event::ProjectUpserted(Box::new(
+            lazybox_core::Project::new(pk.clone(), "myproj".to_string(), chrono::Utc::now()),
+        )));
+        // The real project opens the name input — NOT a chat workspace.
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::NewWorkspace),
+            "the unrelated project opens the name input, not a chat"
+        );
+        assert!(matches!(
+            &m.modal_flow,
+            Some(super::super::ModalFlow::NewWorkspaceProject { project }) if *project == pk
+        ));
+        let sent: Vec<IpcCommand> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+        assert!(
+            !sent
+                .iter()
+                .any(|c| matches!(c, IpcCommand::CreateWorkspace { .. })),
+            "no phantom chat workspace spawned into the unrelated project: {sent:?}"
+        );
+        // The leaked flag survives harmlessly — only a scratch upsert
+        // consumes it, so a later real Chat still works.
+        assert!(
+            m.deferred_chat,
+            "a non-scratch upsert must leave the flag for the scratch that owns it"
+        );
+    }
+
+    /// The Workspace row appears only when a project sits under the
+    /// cursor; Repository always does (#1502).
+    #[test]
+    fn start_sheet_offers_workspace_row_only_with_a_cursor_project() {
+        use lazybox_tui_core::choice::START_SHEET_REPO;
+        let mut m = build_model();
+        m.start_agent_flow();
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text(START_SHEET_REPO.into())]);
+        assert!(cmds.is_empty());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::NewProject),
+            "Repository with no tracked repos falls through to the new-project input"
         );
     }
 
@@ -7979,6 +8184,7 @@ mod stale_input_tests {
                 | Id::Setup
                 | Id::AdoptTarget
                 | Id::StartAgentProject
+                | Id::StartSheet
                 | Id::LlmGatewayUrl
                 | Id::AddScanRoot
                 | Id::SaveViewName
@@ -8040,6 +8246,7 @@ mod stale_input_tests {
             Id::MergeConfirm,
             Id::AdoptTarget,
             Id::StartAgentProject,
+            Id::StartSheet,
             Id::RequestReviewers,
             Id::AddAssignees,
             Id::ManageLabels,
@@ -20594,12 +20801,13 @@ mod click_outside_modal_dismiss_tests {
         );
     }
 
-    /// A left-click on the footer's `… +N ? all` overflow cell opens the
-    /// `?` catalog so the elided hints are reachable — the count is no
-    /// longer a dead end (#805). The footer sits outside every pane, so
+    /// A left-click on the footer's `… +N more` overflow cell pops
+    /// exactly the hints the bar could not fit — the count is not a
+    /// dead end (#805, #1502). The footer sits outside every pane, so
     /// this handler is the only thing that claims the click.
     #[test]
-    fn footer_overflow_click_opens_help() {
+    fn footer_overflow_click_pops_the_dropped_hints() {
+        use crate::realm::components::footer::FooterOverflow;
         let mut m = build_model();
         m.handle_daemon_event(IpcEvent::Snapshot {
             workspaces: vec![empty_ws("github:o/r#1")],
@@ -20610,22 +20818,62 @@ mod click_outside_modal_dismiss_tests {
         });
         let area = Rect::new(0, 0, 120, 40);
         // Simulate the last render having placed the overflow cell at the
-        // right end of the footer row.
+        // right end of the footer row, hiding two hints.
         let cell = Rect::new(100, 39, 10, 1);
-        m.footer_overflow_rect = Some(cell);
-        assert!(m.modal_stack.is_empty(), "no modal before the click");
+        let dropped = vec![
+            crate::pane::Binding {
+                keys: std::borrow::Cow::Borrowed("x n"),
+                label: std::borrow::Cow::Borrowed("new workspace"),
+            },
+            crate::pane::Binding {
+                keys: std::borrow::Cow::Borrowed("Shift-T"),
+                label: std::borrow::Cow::Borrowed("coach"),
+            },
+        ];
+        m.footer_overflow = Some(FooterOverflow {
+            rect: cell,
+            dropped: dropped.clone(),
+        });
+        assert!(m.footer_more_popup.is_none(), "no popup before the click");
         m.dispatch_mouse_in(left_down(cell.x + 2, cell.y), area);
-        assert_eq!(
-            m.modal_stack.last(),
-            Some(&Id::HelpAsk),
-            "clicking the overflow cell must open the `?` catalog",
+        let rows = m
+            .footer_more_popup
+            .clone()
+            .expect("clicking the overflow cell must pop the hidden hints");
+        let expected: Vec<(String, String)> = dropped
+            .iter()
+            .map(|b| (b.keys.to_string(), b.label.to_string()))
+            .collect();
+        assert_eq!(rows, expected, "popup must list exactly the dropped cells");
+        assert!(
+            !m.modal_stack.contains(&Id::HelpAsk),
+            "the popup replaces the old bounce into Ask Lazybox",
+        );
+        // The popup is informational: the next key closes it and is
+        // still handled (here `j` moves the sidebar cursor).
+        m.dispatch_key(tuirealm::event::KeyEvent::new(
+            tuirealm::event::Key::Char('j'),
+            tuirealm::event::KeyModifiers::NONE,
+        ));
+        assert!(
+            m.footer_more_popup.is_none(),
+            "any key must close the popup"
+        );
+        // A second click on the cell toggles it closed.
+        m.dispatch_mouse_in(left_down(cell.x + 2, cell.y), area);
+        assert!(m.footer_more_popup.is_some());
+        m.dispatch_mouse_in(left_down(cell.x + 2, cell.y), area);
+        assert!(
+            m.footer_more_popup.is_none(),
+            "clicking the cell again closes the popup"
         );
     }
 
-    /// A click that misses the overflow cell must not open help — only
-    /// the cell itself is the escape hatch (#805).
+    /// A click that misses the overflow cell must not pop anything —
+    /// only the cell itself is the affordance (#805).
     #[test]
-    fn click_off_footer_overflow_leaves_help_closed() {
+    fn click_off_footer_overflow_pops_nothing() {
+        use crate::realm::components::footer::FooterOverflow;
         let mut m = build_model();
         m.handle_daemon_event(IpcEvent::Snapshot {
             workspaces: vec![empty_ws("github:o/r#1")],
@@ -20635,11 +20883,14 @@ mod click_outside_modal_dismiss_tests {
             dismissed_updates: Vec::new(),
         });
         let area = Rect::new(0, 0, 120, 40);
-        m.footer_overflow_rect = Some(Rect::new(100, 39, 10, 1));
+        m.footer_overflow = Some(FooterOverflow {
+            rect: Rect::new(100, 39, 10, 1),
+            dropped: Vec::new(),
+        });
         m.dispatch_mouse_in(left_down(1, 1), area);
         assert!(
-            !m.modal_stack.contains(&Id::HelpAsk),
-            "a click away from the overflow cell must not open help",
+            m.footer_more_popup.is_none() && !m.modal_stack.contains(&Id::HelpAsk),
+            "a click away from the overflow cell must not pop anything",
         );
     }
 }
@@ -24270,6 +24521,38 @@ mod spawn_focus_steal_tests {
             m.sidebar.search().is_none(),
             "a bare Esc clears the committed search"
         );
+    }
+
+    /// `/foo⏎` opens the top match: Enter on a live query commits the
+    /// filter AND moves focus off the sidebar, the same way a plain
+    /// Enter on the row would (#1502). An empty query only closes the
+    /// bar and stays put.
+    #[test]
+    fn search_enter_opens_the_top_match() {
+        use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+        let mut m = build_model();
+        let ws = pr_workspace("owner/repo#1");
+        let k: SessionKey = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&k));
+        assert_eq!(m.focus, PaneFocus::Sidebar);
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenSearch);
+        m.dispatch_key(RealmKey::new(Key::Char('o'), RealmMods::NONE));
+        m.dispatch_key(RealmKey::new(Key::Enter, RealmMods::NONE));
+        assert!(!m.sidebar.search_editing(), "Enter commits the search");
+        assert_ne!(
+            m.focus,
+            PaneFocus::Sidebar,
+            "Enter on a live query opens the top match"
+        );
+
+        let mut m = build_model();
+        let ws = pr_workspace("owner/repo#1");
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenSearch);
+        m.dispatch_key(RealmKey::new(Key::Enter, RealmMods::NONE));
+        assert!(m.sidebar.search().is_none(), "empty query closes the bar");
+        assert_eq!(m.focus, PaneFocus::Sidebar, "and focus stays put");
     }
 
     #[test]

@@ -1,0 +1,10 @@
+---
+source: crates/tui/tests/snapshots.rs
+expression: "body.join(\"\\n\")"
+---
+
+ ▾  owner/repo
+  I Issues
+ ▎○ 12 A   task: owner/repo#12           3m
+  ○ 7  A   task: owner/repo#7            1h
+  ○ 3  A   task: owner/repo#3           10h

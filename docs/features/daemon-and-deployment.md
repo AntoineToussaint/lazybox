@@ -264,7 +264,7 @@ session with no polling/disk writes. `LAZYBOX_HOME` is resolved by
 worktrees, daemon socket, config) derives from it.
 
 ### Test checklist
-- [ ] `--fresh` clears `state.db` and re-runs the setup wizard.
+- [ ] `--fresh` clears `state.db`, forgets the `setup:` block + onboarding markers in `config.yaml`, and re-runs the setup wizard and the coach.
 - [ ] `--test` opens a seeded session without touching real state or GitHub.
 - [ ] `LAZYBOX_HOME=~/.lazybox-dev` uses a fully separate profile (no shared state, separate socket).
 - [ ] `--workspace`/`--session` preselect the UI on startup.

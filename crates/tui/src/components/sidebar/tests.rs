@@ -2599,7 +2599,8 @@ mod search_tests {
         sb.hydrate_session_costs(&[("gh:owner/repo#2".to_string(), 999_000)]);
 
         assert!(
-            sb.terminal_usage_badge("gh:owner/repo#1", "claude").is_none(),
+            sb.terminal_usage_badge("gh:owner/repo#1", "claude")
+                .is_none(),
             "no quota and no cost for #1 → no badge"
         );
         let badge = sb

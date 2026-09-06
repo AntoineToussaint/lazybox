@@ -351,8 +351,16 @@ mod tests {
         assert_eq!(costs, vec![("github:o/r#42".to_string(), 1_500_000)]);
 
         // No source row → nothing changes; self-move → nothing changes.
-        assert!(!move_session_cost(&*store, "github:o/r#999", "github:o/r#42"));
-        assert!(!move_session_cost(&*store, "github:o/r#42", "github:o/r#42"));
+        assert!(!move_session_cost(
+            &*store,
+            "github:o/r#999",
+            "github:o/r#42"
+        ));
+        assert!(!move_session_cost(
+            &*store,
+            "github:o/r#42",
+            "github:o/r#42"
+        ));
         assert_eq!(
             session_costs(&*store),
             vec![("github:o/r#42".to_string(), 1_500_000)]

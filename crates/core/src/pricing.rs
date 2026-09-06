@@ -447,27 +447,42 @@ mod tests {
         let no = no_overrides();
 
         assert_eq!(cost_micros("claude-fable-5", &input, &no), Some(10_000_000));
-        assert_eq!(cost_micros("claude-fable-5", &output, &no), Some(50_000_000));
-        assert_eq!(cost_micros("claude-fable-5", &cache_read, &no), Some(1_000_000));
+        assert_eq!(
+            cost_micros("claude-fable-5", &output, &no),
+            Some(50_000_000)
+        );
+        assert_eq!(
+            cost_micros("claude-fable-5", &cache_read, &no),
+            Some(1_000_000)
+        );
         assert_eq!(
             cost_micros("claude-fable-5-1", &cache_read, &no),
             Some(250_000),
             "Fable 5.1 reads cache at $0.25"
         );
-        assert_eq!(cost_micros("claude-mythos-5-1", &input, &no), Some(10_000_000));
+        assert_eq!(
+            cost_micros("claude-mythos-5-1", &input, &no),
+            Some(10_000_000)
+        );
 
         assert_eq!(
             cost_micros("claude-sonnet-5", &input, &no),
             Some(2_000_000),
             "Sonnet 5 is $2 in, not the $3 family rate"
         );
-        assert_eq!(cost_micros("claude-sonnet-5", &output, &no), Some(10_000_000));
+        assert_eq!(
+            cost_micros("claude-sonnet-5", &output, &no),
+            Some(10_000_000)
+        );
         assert_eq!(
             cost_micros("claude-sonnet-4-6", &input, &no),
             Some(3_000_000),
             "Sonnet 4.6 keeps $3"
         );
-        assert_eq!(cost_micros("claude-haiku-4-5", &input, &no), Some(1_000_000));
+        assert_eq!(
+            cost_micros("claude-haiku-4-5", &input, &no),
+            Some(1_000_000)
+        );
     }
 
     /// The models the Codex CLI actually runs (GPT-5 family) are priced; the

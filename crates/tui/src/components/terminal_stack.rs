@@ -7361,7 +7361,10 @@ mod selection_offset_tests {
         let buf = term.backend().buffer();
         let top: String = (0..W).map(|x| buf[(x, 0)].symbol()).collect();
         assert!(top.contains("$1.30"), "{top:?}");
-        assert!(!top.contains('◔'), "no headroom glyph on a cost-only badge: {top:?}");
+        assert!(
+            !top.contains('◔'),
+            "no headroom glyph on a cost-only badge: {top:?}"
+        );
     }
 
     /// Every on-screen grid row — top and bottom boundary included —

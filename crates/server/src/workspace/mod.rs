@@ -1815,10 +1815,11 @@ async fn reclaim_workspace_worktrees(
     }
 
     tombstone_legacy_remote_host(config, workspace);
-    // Drop the durable meter total so an archived metered workspace doesn't
-    // leave a `meter-cost:` row in the store forever (#1389). The proxy keys
-    // cost by the session key, which is the workspace key string.
-    crate::client_kv::clear_session_cost(&*config.store, workspace.key.as_str());
+    // The durable `meter-cost:` row is deliberately KEPT on teardown: it is
+    // the "what did this PR cost" record, and archiving a merged PR is
+    // exactly when that figure is finished and worth having. One `u64` per
+    // metered workspace ever — bounded by PR count, never destructive. (#1389
+    // evicted it here; that lost the price the moment the work was done.)
 
     let cleanup =
         (!paths.is_empty()).then(|| spawn_worktree_removal(config, workspace.key.clone(), paths));
@@ -2201,26 +2202,23 @@ mod reclaim_worktree_tests {
         assert!(cleanup.is_none(), "nothing on disk → no cleanup task");
     }
 
-    /// #1389: archiving a metered workspace must drop its durable
-    /// `meter-cost:` row, or the total lingers in the store forever and
-    /// re-ships in every future `Event::SessionCosts`.
+    /// Archiving a metered workspace keeps its durable `meter-cost:` row —
+    /// that total is the record of what the PR cost, and archive-after-merge
+    /// is exactly when it's final. (Reverses #1389's eviction, which erased
+    /// the price the moment the work was done.)
     #[tokio::test]
-    async fn reclaim_evicts_the_persisted_meter_cost_row() {
+    async fn reclaim_keeps_the_persisted_meter_cost_row() {
         let config = ServerConfig::in_memory();
         let key = WorkspaceKey::new("github:o/r#1");
         let workspace = Workspace::empty(key.clone(), "gone", Utc::now());
         crate::client_kv::add_session_cost(&config, key.as_str().to_string(), 1_500_000).await;
-        assert_eq!(
-            crate::client_kv::session_costs(&*config.store).len(),
-            1,
-            "precondition: the cost row exists"
-        );
 
         let _ = reclaim_workspace_worktrees(&config, &workspace).await;
 
-        assert!(
-            crate::client_kv::session_costs(&*config.store).is_empty(),
-            "archiving the workspace evicts its meter-cost row",
+        assert_eq!(
+            crate::client_kv::session_costs(&*config.store),
+            vec![(key.as_str().to_string(), 1_500_000)],
+            "the PR's price survives archiving",
         );
     }
 

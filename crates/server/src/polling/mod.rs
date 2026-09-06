@@ -4203,18 +4203,50 @@ async fn commit_merge(
     match commit_workspace_move(
         config,
         vec![(pr_key.clone(), pr_ws)],
-        deletes,
+        deletes.clone(),
         terminal_moves,
         post_commit_events,
         workspace_guards,
     )
     .await
     {
-        Ok(outcome) => outcome,
+        Ok(outcome) => {
+            fold_issue_costs_into_pr(config, &deletes, &pr_key).await;
+            outcome
+        }
         Err(error) => {
             report_commit_error(config, "merge issue workspace into PR", &error);
             CommitOutcome::Unchanged
         }
+    }
+}
+
+/// The cost half of the issue→PR collapse: fold each absorbed issue's
+/// durable metered total into the PR's row so the PR's price covers the
+/// whole line of work (issue-phase spend included), then re-ship the
+/// per-session costs so every connected client's tracker picks up the PR's
+/// new total (its hydrate is max-not-add, so a replay can't double it).
+/// Runs after the workspace commit so a failed merge leaves the rows put.
+async fn fold_issue_costs_into_pr(
+    config: &ServerConfig,
+    issue_keys: &[WorkspaceKey],
+    pr_key: &WorkspaceKey,
+) {
+    let store = config.store.clone();
+    let issue_keys: Vec<String> = issue_keys.iter().map(|k| k.as_str().to_string()).collect();
+    let pr_key = pr_key.as_str().to_string();
+    let costs = tokio::task::spawn_blocking(move || {
+        let mut moved_any = false;
+        for issue_key in &issue_keys {
+            moved_any |= crate::client_kv::move_session_cost(&*store, issue_key, &pr_key);
+        }
+        moved_any.then(|| crate::client_kv::session_costs(&*store))
+    })
+    .await
+    .ok()
+    .flatten();
+    if let Some(costs) = costs {
+        let _ = config.bus.send(lazybox_ipc::Event::SessionCosts { costs });
     }
 }
 

@@ -2532,12 +2532,12 @@ mod search_tests {
         assert!(!row.contains("used"), "{row:?}");
     }
 
-    /// The terminal tab badge (#1490) prefers plan-quota headroom — the
-    /// binding window's remaining percent — over dollars while a window is
-    /// live, since headroom is the number that changes behaviour mid-task on a
-    /// subscription.
+    /// The terminal tab badge (#1490) shows plan-quota headroom — the binding
+    /// window's remaining percent — AND this session's metered cost when both
+    /// are known: a subscription user still wants what the workspace cost, so
+    /// headroom no longer preempts dollars.
     #[test]
-    fn terminal_usage_badge_prefers_plan_headroom() {
+    fn terminal_usage_badge_shows_headroom_and_session_cost_together() {
         let session_key = SessionKey::from("gh:owner/repo#1");
         let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
         sb.set_now_override(chrono::DateTime::from_timestamp(1_000, 0).unwrap());
@@ -2553,14 +2553,59 @@ mod search_tests {
                 }),
             },
         );
-        // A metered cost is present too, but headroom wins while a window is up.
+        // A metered cost is present too: both halves render.
         sb.hydrate_session_costs(&[(session_key.as_str().to_string(), 420_000)]);
 
         let badge = sb
             .terminal_usage_badge(session_key.as_str(), "claude")
             .expect("badge");
-        assert!(badge.headroom, "{badge:?}");
-        assert_eq!(badge.text, "wk 38% left");
+        assert_eq!(badge.headroom.as_deref(), Some("wk 38% left"));
+        assert_eq!(badge.cost.as_deref(), Some("$0.42"));
+        assert_eq!(badge.text(), "wk 38% left · $0.42");
+    }
+
+    /// Headroom alone (no metered cost yet) renders just the plan window —
+    /// never a trailing `· $0.00`.
+    #[test]
+    fn terminal_usage_badge_headroom_alone_without_cost() {
+        let session_key = SessionKey::from("gh:owner/repo#1");
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        sb.set_now_override(chrono::DateTime::from_timestamp(1_000, 0).unwrap());
+        sb.note_provider_quota(
+            "claude",
+            None,
+            lazybox_ipc::ProviderQuota {
+                five_hour: Some(lazybox_ipc::QuotaWindow {
+                    utilization_bp: 8200,
+                    reset_at: Some(9_999_999_999),
+                }),
+                weekly: None,
+            },
+        );
+
+        let badge = sb
+            .terminal_usage_badge(session_key.as_str(), "claude")
+            .expect("badge");
+        assert_eq!(badge.headroom.as_deref(), Some("5h 18% left"));
+        assert_eq!(badge.cost, None);
+        assert_eq!(badge.text(), "5h 18% left");
+    }
+
+    /// Cost is attributed per session key: a metered sibling workspace's
+    /// spend never leaks into this terminal's badge.
+    #[test]
+    fn terminal_usage_badge_cost_is_per_session() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha"), ("2", "Beta")]);
+        sb.hydrate_session_costs(&[("gh:owner/repo#2".to_string(), 999_000)]);
+
+        assert!(
+            sb.terminal_usage_badge("gh:owner/repo#1", "claude").is_none(),
+            "no quota and no cost for #1 → no badge"
+        );
+        let badge = sb
+            .terminal_usage_badge("gh:owner/repo#2", "claude")
+            .expect("badge");
+        assert_eq!(badge.cost.as_deref(), Some("$1.00"));
     }
 
     /// Absent any live plan window, the badge falls back to the session's
@@ -2574,8 +2619,9 @@ mod search_tests {
         let badge = sb
             .terminal_usage_badge(session_key.as_str(), "claude")
             .expect("badge");
-        assert!(!badge.headroom, "{badge:?}");
-        assert_eq!(badge.text, "$0.42");
+        assert_eq!(badge.headroom, None, "{badge:?}");
+        assert_eq!(badge.cost.as_deref(), Some("$0.42"));
+        assert_eq!(badge.text(), "$0.42");
     }
 
     /// A stale plan window (its reset already passed) is ignored, so the badge
@@ -2601,8 +2647,8 @@ mod search_tests {
         let badge = sb
             .terminal_usage_badge(session_key.as_str(), "claude")
             .expect("badge");
-        assert!(!badge.headroom, "{badge:?}");
-        assert_eq!(badge.text, "$0.25");
+        assert_eq!(badge.headroom, None, "{badge:?}");
+        assert_eq!(badge.text(), "$0.25");
     }
 
     /// No quota and no metered cost → no badge, never a misleading `$0.00`.

@@ -947,13 +947,31 @@ impl TerminalStreamSync {
 }
 
 /// The live spend/headroom figure for an agent terminal's tab (#1490),
-/// recomputed each frame from the usage tracker. `headroom` is the plan-quota
-/// "can I keep working?" figure (accented like the sidebar's quota); otherwise
-/// `text` is the metered dollar cost, the real signal for API-key users.
+/// recomputed each frame from the usage tracker. Both halves render when
+/// both are known — `◔ 5h 18% left · $0.42` — rather than one preempting the
+/// other: `headroom` is the plan-quota "can I keep working?" figure (accented
+/// like the sidebar's quota) and `cost` is *this session's* metered dollar
+/// spend, so a subscription user still sees what the workspace cost while an
+/// API-key user (no plan window) sees dollars alone. At least one is `Some`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageBadge {
-    pub text: String,
-    pub headroom: bool,
+    /// `"5h 18% left"` — the binding plan window's remaining percent.
+    pub headroom: Option<String>,
+    /// `"$0.42"` — this session's accrued metered cost (only when > 0).
+    pub cost: Option<String>,
+}
+
+impl UsageBadge {
+    /// The badge text without its glyph: headroom, cost, or both joined by
+    /// ` · `.
+    pub fn text(&self) -> String {
+        match (&self.headroom, &self.cost) {
+            (Some(h), Some(c)) => format!("{h} · {c}"),
+            (Some(h), None) => h.clone(),
+            (None, Some(c)) => c.clone(),
+            (None, None) => String::new(),
+        }
+    }
 }
 
 struct TerminalSlot {
@@ -4448,11 +4466,12 @@ impl TerminalStack {
             }
             // Live spend / plan headroom (#1490): the "can I keep going?"
             // figure on the agent's own tab, answerable without visiting the
-            // sidebar. Headroom (accent) when a plan window is known; the
-            // metered dollar cost (dim) otherwise, since dollars are the real
-            // signal only for API-key users.
+            // sidebar. Headroom (accent, `◔`) when a plan window is known,
+            // followed by this session's metered dollar cost when it has any;
+            // a session with cost but no plan window shows dollars alone
+            // (dim) — the real signal for API-key users.
             if let Some(badge) = &usage_badge {
-                let (glyph, style) = if badge.headroom {
+                let (glyph, style) = if badge.headroom.is_some() {
                     (
                         "◔ ",
                         Style::default()
@@ -4462,7 +4481,7 @@ impl TerminalStack {
                 } else {
                     ("", Style::default().fg(theme.text_dim))
                 };
-                let badge_text = format!(" {glyph}{}", badge.text);
+                let badge_text = format!(" {glyph}{}", badge.text());
                 let width = badge_text.chars().count() as u16;
                 title_spans.push(Span::styled(badge_text, style));
                 cursor = cursor.saturating_add(width);
@@ -5477,16 +5496,16 @@ impl TerminalStack {
 
         // Live spend / plan headroom (#1490) — see the tab-strip surface.
         if let Some(usage) = &slot.usage_badge {
-            let (badge, style) = if usage.headroom {
+            let (badge, style) = if usage.headroom.is_some() {
                 (
-                    format!("◔ {} ", usage.text),
+                    format!("◔ {} ", usage.text()),
                     Style::default()
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
                 (
-                    format!("{} ", usage.text),
+                    format!("{} ", usage.text()),
                     Style::default().fg(theme.text_dim),
                 )
             };
@@ -7311,14 +7330,38 @@ mod selection_offset_tests {
         let area = Rect::new(0, 0, W, H);
         let mut stack = stack_with(TerminalKind::Agent("claude".into()), None, &[]);
         stack.terminals.get_mut(&TerminalId(1)).unwrap().usage_badge = Some(UsageBadge {
-            text: "wk 38% left".into(),
-            headroom: true,
+            headroom: Some("wk 38% left".into()),
+            cost: Some("$0.42".into()),
         });
         let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
         term.draw(|f| stack.render(area, f, true)).unwrap();
         let buf = term.backend().buffer();
         let top: String = (0..W).map(|x| buf[(x, 0)].symbol()).collect();
-        assert!(top.contains("◔ wk 38% left"), "{top:?}");
+        // Headroom and this session's cost paint together, not either/or.
+        assert!(top.contains("◔ wk 38% left · $0.42"), "{top:?}");
+    }
+
+    /// A cost-only badge (API-key user, no plan window) paints the dollars
+    /// without the headroom glyph.
+    #[test]
+    fn tab_strip_shows_a_cost_only_usage_badge() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        const W: u16 = 60;
+        const H: u16 = 6;
+        let area = Rect::new(0, 0, W, H);
+        let mut stack = stack_with(TerminalKind::Agent("claude".into()), None, &[]);
+        stack.terminals.get_mut(&TerminalId(1)).unwrap().usage_badge = Some(UsageBadge {
+            headroom: None,
+            cost: Some("$1.30".into()),
+        });
+        let mut term = Terminal::new(TestBackend::new(W, H)).unwrap();
+        term.draw(|f| stack.render(area, f, true)).unwrap();
+        let buf = term.backend().buffer();
+        let top: String = (0..W).map(|x| buf[(x, 0)].symbol()).collect();
+        assert!(top.contains("$1.30"), "{top:?}");
+        assert!(!top.contains('◔'), "no headroom glyph on a cost-only badge: {top:?}");
     }
 
     /// Every on-screen grid row — top and bottom boundary included —

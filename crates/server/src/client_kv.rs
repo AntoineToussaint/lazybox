@@ -153,11 +153,45 @@ pub async fn add_session_cost(config: &ServerConfig, session_key: String, delta_
     }
 }
 
-/// Drop the persisted cost row for `session_key` — called when its
-/// workspace is archived/deleted so the total doesn't linger in the store
-/// (and re-ship in every future `Event::SessionCosts`) forever (#1389).
-/// Best-effort: a failed delete just leaves a dead row that renders under no
-/// workspace, never destructible history.
+/// Fold the persisted cost of `from` into `to` and drop the `from` row —
+/// the aggregation step when one line of work collapses into another (an
+/// issue workspace absorbed by the PR it produced). Without it the issue's
+/// spend stays orphaned under a key no workspace renders and the PR's
+/// "price" starts from zero. Synchronous read-modify-write, for callers
+/// already on the blocking pool. Returns whether anything moved — `false`
+/// for a `from` with no row, a self-move, or a failed write — so a caller
+/// knows whether the per-session costs need re-shipping.
+pub fn move_session_cost(store: &dyn lazybox_store::Store, from: &str, to: &str) -> bool {
+    if from == to {
+        return false;
+    }
+    let read = |key: &str| -> u64 {
+        store
+            .get_kv(&format!("{SESSION_COST_KV_PREFIX}{key}"))
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let moving = read(from);
+    if moving == 0 {
+        return false;
+    }
+    let total = read(to).saturating_add(moving);
+    if let Err(e) = store.set_kv(&format!("{SESSION_COST_KV_PREFIX}{to}"), &total.to_string()) {
+        tracing::warn!("move session cost `{from}` → `{to}` failed: {e}");
+        return false;
+    }
+    clear_session_cost(store, from);
+    true
+}
+
+/// Drop the persisted cost row for `session_key`. Called when a workspace
+/// is *deleted* outright, and when its cost has been folded into another
+/// key ([`move_session_cost`]). Deliberately NOT called on archive: an
+/// archived merged PR's total is the durable "what did this PR cost"
+/// record, so it stays. Best-effort: a failed delete just leaves a dead row
+/// that renders under no workspace, never destructible history.
 pub fn clear_session_cost(store: &dyn lazybox_store::Store, session_key: &str) {
     let kv_key = format!("{SESSION_COST_KV_PREFIX}{session_key}");
     if let Err(e) = store.delete_kv(&kv_key) {
@@ -285,6 +319,48 @@ mod tests {
         // The snapshot bundle carries the same figures for hydration.
         let snap = snapshot(&*store);
         assert_eq!(snap.session_costs.len(), 2);
+    }
+
+    /// The issue→PR fold: the issue's total lands on the PR's row (added to
+    /// anything the PR already accrued) and the issue row is gone, so the
+    /// PR's price spans the whole line of work. A key with no row, or a
+    /// self-move, is a no-op.
+    #[tokio::test]
+    async fn move_session_cost_folds_issue_total_into_pr() {
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        add_session_cost(&config, "github:o/r#7".into(), 1_200_000).await; // issue
+        add_session_cost(&config, "github:o/r#42".into(), 300_000).await; // PR
+
+        assert!(move_session_cost(&*store, "github:o/r#7", "github:o/r#42"));
+
+        let mut costs = session_costs(&*store);
+        costs.sort();
+        assert_eq!(costs, vec![("github:o/r#42".to_string(), 1_500_000)]);
+
+        // No source row → nothing changes; self-move → nothing changes.
+        assert!(!move_session_cost(&*store, "github:o/r#999", "github:o/r#42"));
+        assert!(!move_session_cost(&*store, "github:o/r#42", "github:o/r#42"));
+        assert_eq!(
+            session_costs(&*store),
+            vec![("github:o/r#42".to_string(), 1_500_000)]
+        );
+
+        // A PR with no row yet still receives the fold (the row-count stays
+        // flat here — one leaves, one appears — which is exactly the case a
+        // count-based "did anything move" check would miss).
+        add_session_cost(&config, "github:o/r#8".into(), 700_000).await;
+        assert!(move_session_cost(&*store, "github:o/r#8", "github:o/r#43"));
+        let mut costs = session_costs(&*store);
+        costs.sort();
+        assert_eq!(
+            costs,
+            vec![
+                ("github:o/r#42".to_string(), 1_500_000),
+                ("github:o/r#43".to_string(), 700_000),
+            ]
+        );
     }
 
     #[tokio::test]

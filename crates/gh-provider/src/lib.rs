@@ -11,9 +11,12 @@ pub mod oauth;
 pub mod rate_budget;
 
 pub use client::{
-    BackgroundSweepForecast, GhClient, HotFetch, SelectedFetchOutcome, credential_fingerprint,
+    BackgroundSweepForecast, GhClient, HotFetch, RepoSweepOutcome, RepoSweepSpec,
+    SelectedFetchOutcome, credential_fingerprint,
 };
-pub use graphql::PrDetails;
+pub use graphql::{
+    PrDetails, repo_sweep_issue_query, repo_sweep_pr_query, roster_member_qualifier,
+};
 pub use mentions::{LazyboxMention, MentionSource, parse_label_directive, scan_issue};
 pub use notifications::{
     NotificationEntry, NotificationTarget, NotificationTargetKind, NotificationsPoll,

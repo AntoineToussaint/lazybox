@@ -140,6 +140,14 @@ crates/
     `SetupRunner` state machine driving Choice/Loading/Error modals.
 - **Event bus**: `tokio::sync::broadcast` inside the daemon. Providers
   produce; subscribers (TUI clients, JSON API gateway) consume.
+- **GitHub discovery is repo-first** (see
+  [`docs/sync-performance.md`](docs/sync-performance.md#repo-first-discovery)):
+  with scoped/watched repos, the daemon sweeps every roster member with
+  one windowed PR query + one issue query on a rotation sized by
+  `providers.github.repo_refresh_interval` (default 5 min); a 30-min /
+  `Shift-R` reconcile sweeps the whole roster unwindowed and is the only
+  pass allowed to retire rows. The user-centric `involves:USER` global
+  sweep only runs when no scopes are configured.
 - **Credential chain**: `EnvProvider("GH_TOKEN") → EnvProvider("GITHUB_TOKEN") → CommandProvider("gh auth token")`. Trait-based, extensible (Vault, Keychain, OAuth).
 - **Store**: `Store` trait with `SqliteStore` backend at `~/.lazybox/v2/state.db`.
   Read/unread, snooze, and session metadata persist across launches.
@@ -222,7 +230,8 @@ which-key popup and `?` help reuse the same group labels.
 `ui.theme`), `Shift-W` start agent from anywhere (pick a project,
 name a workspace, spawn the default agent — one flow, any pane),
 `]` browse snippets (read-only catalog; `e` there opens the YAML),
-`Shift-R` refresh, `Ctrl-L` force a full repaint (recovery for a
+`Shift-R` refresh (sweep every scoped repo now — an unwindowed
+repo-first reconcile), `Ctrl-L` force a full repaint (recovery for a
 stale/garbled screen; resize and focus-regain also repaint
 automatically), `Shift-T` coach (the onboarding coach rail — one
 objective at a time, gated on you doing it; press again to end it,
@@ -421,9 +430,9 @@ own PR, no conflicts, no changes requested; only while lazybox runs),
 listing merge-on-green, per-session auto-fix arm/disarm, and
 GitHub-native auto-merge status for the focused PR/issue, each toggled
 in place; #363), `g r` reviewers, `g a` assignees, `g l` labels,
-`g s` sync (a targeted re-poll of just the focused workspace's own
-PR/issue instead of the global `Shift-R` sweep — cheap when you're
-waiting on one PR's CI; #456), `g o` open in browser, `g d` delete issue / close PR (confirmed
+`g s` sync (re-poll the focused workspace's own PR/issue AND its
+repo's open PRs + issues, interactive priority — "sync this repo now",
+versus the roster-wide `Shift-R` sweep; #456, #1390), `g o` open in browser, `g d` delete issue / close PR (confirmed
 first, naming the target; an issue is hard-deleted when the token
 has admin rights, else closed as not-planned with a notice; a PR is
 closed without merging; #408) — leader chords only, the legacy

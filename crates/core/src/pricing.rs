@@ -68,11 +68,41 @@ impl ModelPrice {
 fn builtin_prices() -> &'static [(&'static str, ModelPrice)] {
     &[
         // ── Anthropic (Claude) ─────────────────────────────────────────
-        // Current-generation list prices (Opus 4.5/4.6/4.7/4.8/5 all share the
-        // Opus-tier rate; Sonnet 4.6/5; Haiku 4.5). Cache-write is Anthropic's
-        // 1.25× input premium, cache-read the 0.1× discount. The retired
-        // dotted models (Opus 3, Haiku 3.5) keep their historical rates below,
-        // reachable via their longer `claude-3-*` prefixes.
+        // Current-generation list prices (Fable 5/5.1 and Mythos 5/5.1 share
+        // the Fable tier; Opus 4.5/4.6/4.7/4.8/5 the Opus tier; Sonnet 5 is
+        // cheaper than Sonnet 4.6 and gets its own longer key; Haiku 4.5).
+        // Cache-write is Anthropic's 1.25× input premium, cache-read the 0.1×
+        // discount (Fable 5.1 reads at $0.25, a deeper discount, so it too
+        // gets a longer key). The retired dotted models (Opus 3, Haiku 3.5)
+        // keep their historical rates below, reachable via their longer
+        // `claude-3-*` prefixes.
+        (
+            "claude-fable",
+            ModelPrice {
+                input: 10.0,
+                output: 50.0,
+                cache_write: 12.5,
+                cache_read: 1.0,
+            },
+        ),
+        (
+            "claude-fable-5-1",
+            ModelPrice {
+                input: 10.0,
+                output: 50.0,
+                cache_write: 12.5,
+                cache_read: 0.25,
+            },
+        ),
+        (
+            "claude-mythos",
+            ModelPrice {
+                input: 10.0,
+                output: 50.0,
+                cache_write: 12.5,
+                cache_read: 1.0,
+            },
+        ),
         (
             "claude-opus",
             ModelPrice {
@@ -89,6 +119,16 @@ fn builtin_prices() -> &'static [(&'static str, ModelPrice)] {
                 output: 15.0,
                 cache_write: 3.75,
                 cache_read: 0.30,
+            },
+        ),
+        // Sonnet 5 dropped to $2/$10; the longer key beats the family rate.
+        (
+            "claude-sonnet-5",
+            ModelPrice {
+                input: 2.0,
+                output: 10.0,
+                cache_write: 2.5,
+                cache_read: 0.20,
             },
         ),
         (
@@ -123,6 +163,138 @@ fn builtin_prices() -> &'static [(&'static str, ModelPrice)] {
         ),
         // ── OpenAI (Codex / GPT) ───────────────────────────────────────
         // OpenAI has no separate cache-write charge; cache_write == input.
+        // The Codex CLI runs the GPT-5 family (`gpt-5.5` is its current
+        // default; `gpt-5.3-codex` the coding-tuned variant) — the models the
+        // proxy actually sees on `response.model`. GPT-5 cached input is a
+        // 0.1× discount; the 4.1 / o-series 0.25×; 4o 0.5×.
+        (
+            "gpt-5",
+            ModelPrice {
+                input: 1.25,
+                output: 10.0,
+                cache_write: 1.25,
+                cache_read: 0.125,
+            },
+        ),
+        (
+            "gpt-5-mini",
+            ModelPrice {
+                input: 0.25,
+                output: 2.0,
+                cache_write: 0.25,
+                cache_read: 0.025,
+            },
+        ),
+        (
+            "gpt-5-nano",
+            ModelPrice {
+                input: 0.05,
+                output: 0.40,
+                cache_write: 0.05,
+                cache_read: 0.005,
+            },
+        ),
+        (
+            "gpt-5.1",
+            ModelPrice {
+                input: 1.25,
+                output: 10.0,
+                cache_write: 1.25,
+                cache_read: 0.125,
+            },
+        ),
+        (
+            "gpt-5.2",
+            ModelPrice {
+                input: 1.75,
+                output: 14.0,
+                cache_write: 1.75,
+                cache_read: 0.175,
+            },
+        ),
+        (
+            "gpt-5.3-codex",
+            ModelPrice {
+                input: 1.75,
+                output: 14.0,
+                cache_write: 1.75,
+                cache_read: 0.175,
+            },
+        ),
+        (
+            "gpt-5.5",
+            ModelPrice {
+                input: 5.0,
+                output: 30.0,
+                cache_write: 5.0,
+                cache_read: 0.50,
+            },
+        ),
+        (
+            "gpt-4.1",
+            ModelPrice {
+                input: 2.0,
+                output: 8.0,
+                cache_write: 2.0,
+                cache_read: 0.50,
+            },
+        ),
+        (
+            "gpt-4.1-mini",
+            ModelPrice {
+                input: 0.40,
+                output: 1.60,
+                cache_write: 0.40,
+                cache_read: 0.10,
+            },
+        ),
+        (
+            "gpt-4.1-nano",
+            ModelPrice {
+                input: 0.10,
+                output: 0.40,
+                cache_write: 0.10,
+                cache_read: 0.025,
+            },
+        ),
+        (
+            "o3",
+            ModelPrice {
+                input: 2.0,
+                output: 8.0,
+                cache_write: 2.0,
+                cache_read: 0.50,
+            },
+        ),
+        (
+            "o4-mini",
+            ModelPrice {
+                input: 1.10,
+                output: 4.40,
+                cache_write: 1.10,
+                cache_read: 0.275,
+            },
+        ),
+        // The `-mini` reasoning tiers must out-prefix their bare parents
+        // (`o3`, `o1`) or they'd bill at the full-size rate.
+        (
+            "o3-mini",
+            ModelPrice {
+                input: 1.10,
+                output: 4.40,
+                cache_write: 1.10,
+                cache_read: 0.55,
+            },
+        ),
+        (
+            "o1-mini",
+            ModelPrice {
+                input: 1.10,
+                output: 4.40,
+                cache_write: 1.10,
+                cache_read: 0.55,
+            },
+        ),
         (
             "gpt-4o-mini",
             ModelPrice {
@@ -252,6 +424,109 @@ mod tests {
             cost_micros("claude-opus-5", &input, &no_overrides()),
             Some(5_000_000)
         );
+    }
+
+    /// Current Anthropic list rates by family: Fable / Mythos ($10/$50) are
+    /// priced at all (they were absent → cost silently missing), Sonnet 5
+    /// dropped to $2/$10 and must beat the $3/$15 `claude-sonnet` family key,
+    /// Fable 5.1's deeper $0.25 cache-read discount beats the Fable family.
+    #[test]
+    fn current_anthropic_families_price_at_list_rate() {
+        let input = TokenCounts {
+            input: 1_000_000,
+            ..Default::default()
+        };
+        let output = TokenCounts {
+            output: 1_000_000,
+            ..Default::default()
+        };
+        let cache_read = TokenCounts {
+            cache_read: 1_000_000,
+            ..Default::default()
+        };
+        let no = no_overrides();
+
+        assert_eq!(cost_micros("claude-fable-5", &input, &no), Some(10_000_000));
+        assert_eq!(
+            cost_micros("claude-fable-5", &output, &no),
+            Some(50_000_000)
+        );
+        assert_eq!(
+            cost_micros("claude-fable-5", &cache_read, &no),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            cost_micros("claude-fable-5-1", &cache_read, &no),
+            Some(250_000),
+            "Fable 5.1 reads cache at $0.25"
+        );
+        assert_eq!(
+            cost_micros("claude-mythos-5-1", &input, &no),
+            Some(10_000_000)
+        );
+
+        assert_eq!(
+            cost_micros("claude-sonnet-5", &input, &no),
+            Some(2_000_000),
+            "Sonnet 5 is $2 in, not the $3 family rate"
+        );
+        assert_eq!(
+            cost_micros("claude-sonnet-5", &output, &no),
+            Some(10_000_000)
+        );
+        assert_eq!(
+            cost_micros("claude-sonnet-4-6", &input, &no),
+            Some(3_000_000),
+            "Sonnet 4.6 keeps $3"
+        );
+        assert_eq!(
+            cost_micros("claude-haiku-4-5", &input, &no),
+            Some(1_000_000)
+        );
+    }
+
+    /// The models the Codex CLI actually runs (GPT-5 family) are priced; the
+    /// dotted point-releases and the coding variant each beat the bare
+    /// `gpt-5` key, and the `-mini` / `-nano` tiers beat their parent.
+    #[test]
+    fn codex_gpt5_family_prices_at_list_rate() {
+        let input = TokenCounts {
+            input: 1_000_000,
+            ..Default::default()
+        };
+        let output = TokenCounts {
+            output: 1_000_000,
+            ..Default::default()
+        };
+        let cache_read = TokenCounts {
+            cache_read: 1_000_000,
+            ..Default::default()
+        };
+        let no = no_overrides();
+
+        assert_eq!(cost_micros("gpt-5", &input, &no), Some(1_250_000));
+        assert_eq!(cost_micros("gpt-5", &output, &no), Some(10_000_000));
+        assert_eq!(cost_micros("gpt-5", &cache_read, &no), Some(125_000));
+        assert_eq!(cost_micros("gpt-5-mini", &input, &no), Some(250_000));
+        assert_eq!(cost_micros("gpt-5-nano", &input, &no), Some(50_000));
+        assert_eq!(cost_micros("gpt-5.2", &input, &no), Some(1_750_000));
+        assert_eq!(cost_micros("gpt-5.3-codex", &input, &no), Some(1_750_000));
+        assert_eq!(cost_micros("gpt-5.3-codex", &output, &no), Some(14_000_000));
+        assert_eq!(
+            cost_micros("gpt-5.5", &input, &no),
+            Some(5_000_000),
+            "Codex's current default model"
+        );
+        assert_eq!(cost_micros("gpt-5.5", &output, &no), Some(30_000_000));
+        assert_eq!(cost_micros("o3", &input, &no), Some(2_000_000));
+        assert_eq!(cost_micros("o4-mini", &input, &no), Some(1_100_000));
+        assert_eq!(
+            cost_micros("o3-mini", &input, &no),
+            Some(1_100_000),
+            "o3-mini must not be shadowed by the bare `o3` key"
+        );
+        assert_eq!(cost_micros("o1-mini", &input, &no), Some(1_100_000));
+        assert_eq!(cost_micros("gpt-4.1-mini", &input, &no), Some(400_000));
     }
 
     #[test]

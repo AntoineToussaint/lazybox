@@ -827,19 +827,19 @@ impl Sidebar {
     ) -> Option<crate::components::terminal_stack::UsageBadge> {
         use crate::components::terminal_stack::UsageBadge;
         let now_unix = self.now().timestamp();
-        if let Some(quota) = self.usage.quota_for(agent_id)
-            && let Some((label, left)) = lazybox_tui_core::usage::quota_headroom(&quota, now_unix)
-        {
-            return Some(UsageBadge {
-                text: format!("{label} {left}% left"),
-                headroom: true,
-            });
-        }
-        let cost = self.usage.cost_micros_for_session(session_key);
-        (cost > 0).then(|| UsageBadge {
-            text: lazybox_tui_core::usage::format_cost_micros(cost),
-            headroom: false,
-        })
+        // Plan headroom and this session's metered cost are independent
+        // signals — a subscription user still wants to know what the
+        // workspace cost — so both render when both are known rather than
+        // headroom preempting dollars.
+        let headroom = self
+            .usage
+            .quota_for(agent_id)
+            .and_then(|quota| lazybox_tui_core::usage::quota_headroom(&quota, now_unix))
+            .map(|(label, left)| format!("{label} {left}% left"));
+        let cost_micros = self.usage.cost_micros_for_session(session_key);
+        let cost =
+            (cost_micros > 0).then(|| lazybox_tui_core::usage::format_cost_micros(cost_micros));
+        (headroom.is_some() || cost.is_some()).then_some(UsageBadge { headroom, cost })
     }
 
     /// Attribute a usage-limit reset hint to the terminal's agent, so the

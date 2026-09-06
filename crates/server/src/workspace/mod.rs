@@ -1795,6 +1795,7 @@ pub(crate) fn notify_reclaimed(config: &ServerConfig, title: &str, reclaimed: Re
 async fn reclaim_workspace_worktrees(
     config: &ServerConfig,
     workspace: &Workspace,
+    keep_cost: bool,
 ) -> (Reclaimed, Option<tokio::task::JoinHandle<()>>) {
     // Measure the reclaim synchronously (a stat-only walk) so the
     // returned total — and the "reclaimed N GB" notice — is accurate
@@ -1815,10 +1816,17 @@ async fn reclaim_workspace_worktrees(
     }
 
     tombstone_legacy_remote_host(config, workspace);
-    // Drop the durable meter total so an archived metered workspace doesn't
-    // leave a `meter-cost:` row in the store forever (#1389). The proxy keys
-    // cost by the session key, which is the workspace key string.
-    crate::client_kv::clear_session_cost(&*config.store, workspace.key.as_str());
+    // The durable `meter-cost:` row is KEPT on an *archive* (`keep_cost`) —
+    // an archived merged PR's total is the "what did this PR cost" record, and
+    // archive-after-merge is exactly when that figure is finished and worth
+    // having. But a genuine delete/retire/rescope (`keep_cost == false`)
+    // removes the workspace for good: its key can never render again, so the
+    // row would linger dead forever and re-ship in every future
+    // `Event::SessionCosts`. Drop it then — this is the eviction #1389 added,
+    // now scoped to real deletion so it no longer erases an archive's price.
+    if !keep_cost {
+        crate::client_kv::clear_session_cost(&*config.store, workspace.key.as_str());
+    }
 
     let cleanup =
         (!paths.is_empty()).then(|| spawn_worktree_removal(config, workspace.key.clone(), paths));
@@ -2162,7 +2170,7 @@ mod reclaim_worktree_tests {
             Utc::now(),
         ));
 
-        let (reclaimed, cleanup) = reclaim_workspace_worktrees(&config, &workspace).await;
+        let (reclaimed, cleanup) = reclaim_workspace_worktrees(&config, &workspace, true).await;
 
         // Byte accounting is synchronous, so the notice is accurate the
         // instant the poll path returns — before the slow `rm` runs.
@@ -2194,33 +2202,51 @@ mod reclaim_worktree_tests {
             Utc::now(),
         ));
 
-        let (reclaimed, cleanup) = reclaim_workspace_worktrees(&config, &workspace).await;
+        let (reclaimed, cleanup) = reclaim_workspace_worktrees(&config, &workspace, true).await;
 
         assert_eq!(reclaimed.worktrees, 0);
         assert_eq!(reclaimed.bytes, 0);
         assert!(cleanup.is_none(), "nothing on disk → no cleanup task");
     }
 
-    /// #1389: archiving a metered workspace must drop its durable
-    /// `meter-cost:` row, or the total lingers in the store forever and
-    /// re-ships in every future `Event::SessionCosts`.
+    /// Archiving a metered workspace (`keep_cost = true`) keeps its durable
+    /// `meter-cost:` row — that total is the record of what the PR cost, and
+    /// archive-after-merge is exactly when it's final. (Reverses #1389's
+    /// unconditional eviction, which erased the price the moment the work was
+    /// done.)
     #[tokio::test]
-    async fn reclaim_evicts_the_persisted_meter_cost_row() {
+    async fn reclaim_keeps_the_persisted_meter_cost_row_on_archive() {
         let config = ServerConfig::in_memory();
         let key = WorkspaceKey::new("github:o/r#1");
         let workspace = Workspace::empty(key.clone(), "gone", Utc::now());
         crate::client_kv::add_session_cost(&config, key.as_str().to_string(), 1_500_000).await;
-        assert_eq!(
-            crate::client_kv::session_costs(&*config.store).len(),
-            1,
-            "precondition: the cost row exists"
-        );
 
-        let _ = reclaim_workspace_worktrees(&config, &workspace).await;
+        let _ = reclaim_workspace_worktrees(&config, &workspace, true).await;
+
+        assert_eq!(
+            crate::client_kv::session_costs(&*config.store),
+            vec![(key.as_str().to_string(), 1_500_000)],
+            "the PR's price survives archiving",
+        );
+    }
+
+    /// A genuine delete/retire/rescope (`keep_cost = false`) drops the durable
+    /// `meter-cost:` row. The workspace key is gone for good, so a kept row
+    /// would linger dead forever and re-ship in every `Event::SessionCosts` —
+    /// exactly the leak #1389 fixed, which this PR must not reintroduce for the
+    /// non-archive teardown paths.
+    #[tokio::test]
+    async fn reclaim_clears_the_persisted_meter_cost_row_on_delete() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("github:o/r#1");
+        let workspace = Workspace::empty(key.clone(), "gone", Utc::now());
+        crate::client_kv::add_session_cost(&config, key.as_str().to_string(), 1_500_000).await;
+
+        let _ = reclaim_workspace_worktrees(&config, &workspace, false).await;
 
         assert!(
             crate::client_kv::session_costs(&*config.store).is_empty(),
-            "archiving the workspace evicts its meter-cost row",
+            "a real delete evicts the dead meter-cost row",
         );
     }
 
@@ -2813,7 +2839,10 @@ impl<'a> WorkspaceLifecycle<'a> {
         // reclaimed worktree directory are deterministic rather than racing
         // the background `rm` (the deferral itself is covered directly by
         // `reclaim_measures_bytes_but_defers_the_removal`).
-        let (reclaimed, cleanup) = reclaim_workspace_worktrees(config, &workspace).await;
+        // `keep_cost = archive`: an archive keeps the durable meter-cost row
+        // (the finished PR's price), a genuine delete drops it so no dead row
+        // lingers under a key that can never render again.
+        let (reclaimed, cleanup) = reclaim_workspace_worktrees(config, &workspace, archive).await;
         #[cfg(test)]
         if let Some(handle) = cleanup {
             let _ = handle.await;

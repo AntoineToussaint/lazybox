@@ -2149,6 +2149,191 @@ fn bang_jumps_to_next_asking_workspace() {
     assert_eq!(s.selected_session_key(), Some(&k2));
 }
 
+/// A sidebar of `n` workspaces in one repo, cursor on the first, with
+/// the viewport height recorded by a render at `height` rows (#1502).
+fn long_sidebar(n: usize, height: u16) -> Sidebar {
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let workspaces: Vec<_> = (1..=n)
+        .map(|i| {
+            make_workspace(
+                "owner/repo",
+                &format!("o/r#{i}"),
+                now - Duration::seconds(i as i64),
+            )
+        })
+        .collect();
+    s.on_event(&Event::Snapshot {
+        workspaces,
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    let _ = render_to_string(&mut s, 60, height, true);
+    s
+}
+
+/// PgDn / PgUp move a viewport of rows, Ctrl-d / Ctrl-u half of one,
+/// both clamped at the ends; Home / End hit the edges (#1502).
+#[test]
+fn paging_and_edge_keys_move_the_cursor_by_the_viewport() {
+    let mut s = long_sidebar(40, 20);
+    let mut cmds = Vec::new();
+    let start = s.cursor();
+    s.handle_key(key_code(KeyCode::PageDown), &mut cmds);
+    let after_page = s.cursor();
+    assert!(
+        after_page > start + 5,
+        "PgDn moves a page: {start} → {after_page}"
+    );
+    s.handle_key(key_code(KeyCode::PageUp), &mut cmds);
+    assert_eq!(s.cursor(), start, "PgUp returns");
+    s.handle_key(
+        KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        &mut cmds,
+    );
+    let half = s.cursor() - start;
+    assert!(
+        half > 0 && half < after_page - start,
+        "Ctrl-d is half a page: {half}"
+    );
+    s.handle_key(
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        &mut cmds,
+    );
+    assert_eq!(s.cursor(), start, "Ctrl-u returns");
+    s.handle_key(key_code(KeyCode::End), &mut cmds);
+    let last = s.cursor();
+    assert!(last > after_page, "End jumps to the last row");
+    s.handle_key(key_code(KeyCode::PageDown), &mut cmds);
+    assert_eq!(s.cursor(), last, "PgDn clamps at the end");
+    s.handle_key(key_code(KeyCode::Home), &mut cmds);
+    assert_eq!(s.cursor(), 0, "Home is the first row");
+    s.handle_key(key_code(KeyCode::PageUp), &mut cmds);
+    assert_eq!(s.cursor(), 0, "PgUp clamps at the top");
+}
+
+/// `}` / `{` hop between group headers and clamp at the ends (#1502).
+#[test]
+fn group_hop_lands_on_headers_and_clamps() {
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![
+            make_workspace("owner/alpha", "o/a#1", now),
+            make_workspace("owner/alpha", "o/a#2", now - Duration::seconds(1)),
+            make_workspace("owner/beta", "o/b#1", now - Duration::seconds(2)),
+            make_workspace("owner/gamma", "o/g#1", now - Duration::seconds(3)),
+        ],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    let is_header = |s: &Sidebar| {
+        matches!(
+            s.visible_rows().get(s.cursor()),
+            Some(VisibleRow::RepoHeader(_) | VisibleRow::SpaceHeader(_))
+        )
+    };
+    assert!(!is_header(&s), "cursor starts on a workspace row");
+    assert!(
+        s.move_cursor_to_group(true),
+        "next-group finds the next header"
+    );
+    assert!(is_header(&s));
+    let first_hop = s.cursor();
+    assert!(s.move_cursor_to_group(true));
+    assert!(
+        is_header(&s) && s.cursor() > first_hop,
+        "next-group keeps advancing"
+    );
+    while s.move_cursor_to_group(true) {}
+    let last = s.cursor();
+    assert!(
+        !s.move_cursor_to_group(true),
+        "next-group clamps at the last header"
+    );
+    assert_eq!(s.cursor(), last);
+    assert!(s.move_cursor_to_group(false), "prev-group goes back");
+    assert!(is_header(&s) && s.cursor() < last);
+    while s.move_cursor_to_group(false) {}
+    assert!(
+        !s.move_cursor_to_group(false),
+        "prev-group clamps at the first header"
+    );
+}
+
+/// `Shift-N` cycles through workspaces with unread activity, wrapping,
+/// and reports nothing to jump to when the inbox is all read (#1502).
+#[test]
+fn next_unread_cycles_with_wrap_and_reports_none() {
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let unread = |key: &str, secs: i64| {
+        let mut t = make_task("owner/repo", key, now - Duration::seconds(secs));
+        t.recent_activity.push(lazybox_core::Activity {
+            author: "reviewer".into(),
+            body: "ping".into(),
+            created_at: now,
+            kind: lazybox_core::ActivityKind::Comment,
+            node_id: None,
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        });
+        Workspace::from_task(t, now)
+    };
+    let w1 = make_workspace("owner/repo", "o/r#1", now);
+    let w2 = unread("o/r#2", 1);
+    let w3 = make_workspace("owner/repo", "o/r#3", now - Duration::seconds(2));
+    let w4 = unread("o/r#4", 3);
+    let (k2, k4) = (ws_key(&w2), ws_key(&w4));
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![w1, w2, w3, w4],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    assert!(s.focus_next_unread_workspace());
+    assert_eq!(s.selected_session_key(), Some(&k2));
+    assert!(s.focus_next_unread_workspace());
+    assert_eq!(s.selected_session_key(), Some(&k4));
+    assert!(s.focus_next_unread_workspace(), "wraps around");
+    assert_eq!(s.selected_session_key(), Some(&k2));
+
+    let mut quiet = populated_sidebar();
+    assert!(
+        !quiet.focus_next_unread_workspace(),
+        "nothing unread → no move"
+    );
+}
+
+/// `Enter` on a live search query commits the filter AND asks the host
+/// to open the top match; an empty query just closes the bar (#1502).
+#[test]
+fn search_enter_commits_and_opens_the_top_match() {
+    let mut s = populated_sidebar();
+    s.open_search();
+    for c in "r#2".chars() {
+        s.handle_search_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert!(
+        s.handle_search_key(key_code(KeyCode::Enter)),
+        "Enter on a query opens the match"
+    );
+    assert!(!s.search_editing(), "and commits the filter");
+    let mut empty = populated_sidebar();
+    empty.open_search();
+    assert!(
+        !empty.handle_search_key(key_code(KeyCode::Enter)),
+        "Enter on an empty query only closes the bar"
+    );
+}
+
 #[test]
 fn shift_f_jumps_to_next_failing_ci_workspace() {
     // Three PRs, only #2 has failing CI. Cursor starts on #1.

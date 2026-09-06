@@ -2263,6 +2263,22 @@ impl<T: TerminalAdapter> Model<T> {
                     self.flash_hint("no rate-limited agents");
                 }
             }
+            Action::JumpToUnread => {
+                if self.sidebar.focus_next_unread_workspace() {
+                    self.set_focus(PaneFocus::Sidebar);
+                    self.redraw = true;
+                } else {
+                    self.flash_hint("nothing unread");
+                }
+            }
+            Action::JumpPrevGroup | Action::JumpNextGroup => {
+                if self
+                    .sidebar
+                    .move_cursor_to_group(matches!(action, Action::JumpNextGroup))
+                {
+                    self.redraw = true;
+                }
+            }
             Action::ResumeRateLimited => {
                 cmds.extend(self.resume_rate_limited_agents());
             }

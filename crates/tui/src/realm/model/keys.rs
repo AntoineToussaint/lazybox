@@ -96,10 +96,22 @@ impl<T: TerminalAdapter> Model<T> {
         // chord below). `Esc` / `Enter` close it from inside the same
         // handler.
         if self.focus == PaneFocus::Sidebar && self.sidebar.search_editing() {
-            self.sidebar.handle_search_key(realm_key_to_crossterm(&key));
+            let open_match = self.sidebar.handle_search_key(realm_key_to_crossterm(&key));
             // Filtering may have moved the selection; keep the right
             // pane / terminals in step.
             self.sync_panes();
+            // `Enter` on a live query commits the filter AND opens the
+            // top match (#1502) — the same focus move as the sidebar's
+            // plain Enter, so `/foo⏎` lands in the workspace instead of
+            // needing a second Enter nobody documented.
+            if open_match && self.sidebar.selected_workspace().is_some() {
+                self.q_latch.disarm();
+                self.set_focus(if self.activity_pane_visible() {
+                    PaneFocus::Right
+                } else {
+                    PaneFocus::Terminals
+                });
+            }
             self.redraw = true;
             return;
         }
@@ -2962,6 +2974,9 @@ pub(super) fn action_from_kind(
         ActionKind::JumpToAsking => Action::JumpToAsking,
         ActionKind::JumpToFailingCi => Action::JumpToFailingCi,
         ActionKind::JumpToLimited => Action::JumpToLimited,
+        ActionKind::JumpToUnread => Action::JumpToUnread,
+        ActionKind::JumpPrevGroup => Action::JumpPrevGroup,
+        ActionKind::JumpNextGroup => Action::JumpNextGroup,
         ActionKind::ResumeRateLimited => Action::ResumeRateLimited,
         ActionKind::RecoverAgentCredit => Action::RecoverAgentCredit,
         ActionKind::RecoverAllAgentCredit => Action::RecoverAllAgentCredit,

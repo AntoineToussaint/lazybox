@@ -432,6 +432,15 @@ pub enum Action {
     /// blocked on a provider usage / rate limit (`Shift-L`, #847). Wraps
     /// around. The rate-limited analog of [`Action::JumpToAsking`].
     JumpToLimited,
+    /// Jump the sidebar cursor to the next workspace with unread
+    /// activity (`Shift-N`, #1502). Wraps around.
+    JumpToUnread,
+    /// Move the sidebar cursor to the previous group header (`{`,
+    /// #1502). Clamps at the first.
+    JumpPrevGroup,
+    /// Move the sidebar cursor to the next group header (`}`, #1502).
+    /// Clamps at the last.
+    JumpNextGroup,
     /// Resume every workspace currently blocked on a usage / rate limit
     /// (`Shift-K`, #847): a one-shot settle-gated inject fan-out of a
     /// "continue" prompt across exactly the limit-blocked set, reusing the
@@ -630,6 +639,9 @@ pub enum ActionKind {
     JumpToAsking,
     JumpToFailingCi,
     JumpToLimited,
+    JumpToUnread,
+    JumpPrevGroup,
+    JumpNextGroup,
     ResumeRateLimited,
     RecoverAgentCredit,
     RecoverAllAgentCredit,
@@ -677,6 +689,7 @@ impl ActionKind {
         Self::JumpToAsking,
         Self::JumpToFailingCi,
         Self::JumpToLimited,
+        Self::JumpToUnread,
         Self::ToggleFocusMode,
         Self::StartAgent,
         Self::ConnectBox,
@@ -743,6 +756,8 @@ impl ActionKind {
         Self::Reply,
         Self::EditNotes,
         // Sidebar list management
+        Self::JumpPrevGroup,
+        Self::JumpNextGroup,
         Self::OpenFilterMenu,
         Self::CycleSort,
         Self::CycleMailbox,
@@ -921,6 +936,9 @@ impl Action {
             Action::JumpToAsking => ActionKind::JumpToAsking,
             Action::JumpToFailingCi => ActionKind::JumpToFailingCi,
             Action::JumpToLimited => ActionKind::JumpToLimited,
+            Action::JumpToUnread => ActionKind::JumpToUnread,
+            Action::JumpPrevGroup => ActionKind::JumpPrevGroup,
+            Action::JumpNextGroup => ActionKind::JumpNextGroup,
             Action::ResumeRateLimited => ActionKind::ResumeRateLimited,
             Action::RecoverAgentCredit => ActionKind::RecoverAgentCredit,
             Action::RecoverAllAgentCredit => ActionKind::RecoverAllAgentCredit,
@@ -1110,6 +1128,27 @@ impl ActionDef {
                 label: "next rate-limited",
                 describe: "Jump the cursor to the next workspace whose agent hit its provider usage / rate limit (#847). Pair with Shift-K to resume them all after re-authing.",
                 section: Section::Global,
+            },
+            ActionKind::JumpToUnread => &Self {
+                kind: ActionKind::JumpToUnread,
+                default_keys: "Shift-N",
+                label: "next unread",
+                describe: "Jump the cursor to the next workspace with unread activity, wrapping around (#1502). The keyboard answer to the `●N` badge — no filter mode needed.",
+                section: Section::Global,
+            },
+            ActionKind::JumpPrevGroup => &Self {
+                kind: ActionKind::JumpPrevGroup,
+                default_keys: "{",
+                label: "prev group",
+                describe: "Move the cursor to the previous group header (Space / repo / Focused / Hopper) so a long inbox can be crossed a group at a time (#1502).",
+                section: Section::Sidebar,
+            },
+            ActionKind::JumpNextGroup => &Self {
+                kind: ActionKind::JumpNextGroup,
+                default_keys: "}",
+                label: "next group",
+                describe: "Move the cursor to the next group header (Space / repo / Focused / Hopper) so a long inbox can be crossed a group at a time (#1502).",
+                section: Section::Sidebar,
             },
             ActionKind::ResumeRateLimited => &Self {
                 kind: ActionKind::ResumeRateLimited,
@@ -2336,6 +2375,9 @@ impl ActionKind {
             ActionKind::JumpToAsking => "jump_to_asking",
             ActionKind::JumpToFailingCi => "jump_to_failing_ci",
             ActionKind::JumpToLimited => "jump_to_limited",
+            ActionKind::JumpToUnread => "jump_to_unread",
+            ActionKind::JumpPrevGroup => "jump_prev_group",
+            ActionKind::JumpNextGroup => "jump_next_group",
             ActionKind::ResumeRateLimited => "resume_rate_limited",
             ActionKind::RecoverAgentCredit => "recover_agent_credit",
             ActionKind::RecoverAllAgentCredit => "recover_all_agent_credit",
@@ -3354,6 +3396,9 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::JumpToAsking
         | ActionKind::JumpToFailingCi
         | ActionKind::JumpToLimited
+        | ActionKind::JumpToUnread
+        | ActionKind::JumpPrevGroup
+        | ActionKind::JumpNextGroup
         | ActionKind::ResumeRateLimited
         | ActionKind::RecoverAgentCredit
         | ActionKind::RecoverAllAgentCredit

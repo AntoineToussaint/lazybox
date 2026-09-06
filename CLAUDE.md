@@ -291,7 +291,11 @@ resize.
 **Sidebar**: the cursor row is a full-row band (theme `fill`) with a
 `▎` accent bar in the gutter, kept — unbolded — while another pane has
 focus so the open workspace stays obvious; multi-selected rows share the
-band behind their `✓` (#1502). `j/k` or arrows navigate, `Enter` open (focus activity),
+band behind their `✓` (#1502). `j/k` or arrows navigate, `PgUp`/`PgDn` a
+viewport, `Ctrl-u`/`Ctrl-d` half of one, `Home`/`End` the edges, `{`/`}`
+hop between group headers, `Shift-N` jumps to the next unread workspace
+(wrapping, like `!` / `Shift-F`), `/` then `Enter` on a live query
+commits the filter AND opens the top match (#1502), `Enter` open (focus activity),
 `w w` work on this (contextual agent prompt), `s` shell, `e` editor,
 `m` mark read, `z` snooze, `f` open the filter
 menu (a multi-select over state / role / kind predicates — with-agent,

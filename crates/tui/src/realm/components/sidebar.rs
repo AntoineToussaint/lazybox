@@ -388,9 +388,10 @@ impl Sidebar {
     }
 
     /// Feed one keystroke into the open search bar. See
-    /// `Sidebar::handle_search_key`.
-    pub fn handle_search_key(&mut self, key: crossterm::event::KeyEvent) {
-        self.inner.handle_search_key(key);
+    /// `Sidebar::handle_search_key`; `true` when `Enter` committed a
+    /// live query and the top match should open (#1502).
+    pub fn handle_search_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        self.inner.handle_search_key(key)
     }
 
     /// True when `(col, row)` lands on the bottom `/` search input bar.
@@ -785,6 +786,18 @@ impl Sidebar {
     /// was found. Backs the `Shift-L` global key (#847).
     pub fn focus_next_limit_reached_workspace(&mut self) -> bool {
         self.inner.focus_next_limit_reached_workspace()
+    }
+
+    /// Move the cursor onto the next workspace with unread activity,
+    /// wrapping around. Backs the `Shift-N` global key (#1502).
+    pub fn focus_next_unread_workspace(&mut self) -> bool {
+        self.inner.focus_next_unread_workspace()
+    }
+
+    /// Move the cursor to the previous / next group header. Backs the
+    /// `{` / `}` sidebar keys (#1502).
+    pub fn move_cursor_to_group(&mut self, forward: bool) -> bool {
+        self.inner.move_cursor_to_group(forward)
     }
 
     /// See `Sidebar::limit_reached_terminals`.

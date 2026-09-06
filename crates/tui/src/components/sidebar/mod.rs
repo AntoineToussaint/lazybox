@@ -2023,6 +2023,90 @@ impl Sidebar {
         self.focus_workspace_key(&target)
     }
 
+    /// Move the cursor onto the next workspace with unread activity,
+    /// starting AFTER the current row and wrapping (`Shift-N`, #1502) —
+    /// the unread analog of [`Self::focus_next_asking_workspace`].
+    pub fn focus_next_unread_workspace(&mut self) -> bool {
+        let keys_order = self.visible_workspace_keys();
+        if keys_order.is_empty() {
+            return false;
+        }
+        let start = self
+            .selected_session_key()
+            .and_then(|cur| keys_order.iter().position(|k| k == cur))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let target = (0..keys_order.len())
+            .map(|i| &keys_order[(start + i) % keys_order.len()])
+            .find(|k| {
+                self.workspaces
+                    .get(*k)
+                    .is_some_and(|w| w.unread_count() > 0)
+            })
+            .cloned();
+        match target {
+            Some(key) => self.focus_workspace_key(&key),
+            None => false,
+        }
+    }
+
+    /// Move the cursor a page (`PgUp` / `PgDn`) or half a page
+    /// (`Ctrl-u` / `Ctrl-d`) of visible rows, clamped at the ends
+    /// (#1502). The page is the last rendered viewport height; before
+    /// the first frame it falls back to a single step.
+    pub fn move_cursor_page(&mut self, forward: bool, half: bool) {
+        let page = self.last_viewport.max(1);
+        let step = if half { (page / 2).max(1) } else { page } as isize;
+        self.move_cursor_by(if forward { step } else { -step });
+    }
+
+    /// `Home` / `End`: the first / last visible row (#1502).
+    pub fn move_cursor_to_edge(&mut self, end: bool) {
+        if self.visible.is_empty() {
+            return;
+        }
+        let idx = if end { self.visible.len() - 1 } else { 0 };
+        self.set_cursor(idx);
+    }
+
+    /// `{` / `}`: the previous / next group header (Space, repo,
+    /// Focused, Hopper — the tiers a long inbox is crossed by), clamped
+    /// at the ends (#1502). Returns whether the cursor moved.
+    pub fn move_cursor_to_group(&mut self, forward: bool) -> bool {
+        let is_group_header = |row: &VisibleRow| {
+            matches!(
+                row,
+                VisibleRow::RepoHeader(_)
+                    | VisibleRow::SpaceHeader(_)
+                    | VisibleRow::FocusedHeader
+                    | VisibleRow::HopperHeader
+            )
+        };
+        let target = if forward {
+            self.visible
+                .iter()
+                .enumerate()
+                .skip(self.cursor + 1)
+                .find(|(_, row)| is_group_header(row))
+                .map(|(i, _)| i)
+        } else {
+            self.visible
+                .iter()
+                .enumerate()
+                .take(self.cursor)
+                .rev()
+                .find(|(_, row)| is_group_header(row))
+                .map(|(i, _)| i)
+        };
+        match target {
+            Some(idx) => {
+                self.set_cursor(idx);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Move the cursor onto the next workspace whose agent is blocked on
     /// a usage / rate limit, starting AFTER the current row and wrapping
     /// (`Shift-L`, #847) — the rate-limited analog of
@@ -2937,8 +3021,11 @@ impl Sidebar {
     /// extend the query, `Backspace` trims it, `Enter` keeps the query
     /// applied while closing the editor, `Esc` clears + closes. Each
     /// query mutation rebuilds the visible list so filtering is live.
-    pub fn handle_search_key(&mut self, key: KeyEvent) {
+    /// Returns `true` when `Enter` committed a non-empty query — the
+    /// caller then opens the top match (#1502).
+    pub fn handle_search_key(&mut self, key: KeyEvent) -> bool {
         let mut query_changed = false;
+        let mut open_match = false;
         match key.code {
             KeyCode::Esc => {
                 if self.search.is_some() {
@@ -2955,6 +3042,7 @@ impl Sidebar {
                     query_changed = true;
                 } else if let Some(s) = self.search.as_mut() {
                     s.editing = false;
+                    open_match = true;
                 }
             }
             KeyCode::Backspace => {
@@ -2981,6 +3069,7 @@ impl Sidebar {
             self.scroll_detached = false;
             self.recompute_visible();
         }
+        open_match
     }
 
     /// Look up the display label of a project by key. Used by the

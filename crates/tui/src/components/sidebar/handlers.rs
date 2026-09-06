@@ -38,6 +38,33 @@ impl Sidebar {
                 self.move_cursor_by(-1);
                 PaneOutcome::Consumed
             }
+            // Paging + edges (#1502): the keyboard answer to a long
+            // inbox, mirroring the activity pane's PgUp/PgDn and the
+            // vim half-page pair. Pane-native like j/k.
+            (KeyCode::PageDown, KeyModifiers::NONE) => {
+                self.move_cursor_page(true, false);
+                PaneOutcome::Consumed
+            }
+            (KeyCode::PageUp, KeyModifiers::NONE) => {
+                self.move_cursor_page(false, false);
+                PaneOutcome::Consumed
+            }
+            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+                self.move_cursor_page(true, true);
+                PaneOutcome::Consumed
+            }
+            (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
+                self.move_cursor_page(false, true);
+                PaneOutcome::Consumed
+            }
+            (KeyCode::Home, KeyModifiers::NONE) => {
+                self.move_cursor_to_edge(false);
+                PaneOutcome::Consumed
+            }
+            (KeyCode::End, KeyModifiers::NONE) => {
+                self.move_cursor_to_edge(true);
+                PaneOutcome::Consumed
+            }
             // Collapse / expand the cursor's repo group (`Space`, mimics
             // file-tree TUIs — yazi, nnn, lf — folding a directory) is a
             // catalog action now (`ActionKind::ToggleRepoGroup`, #338),

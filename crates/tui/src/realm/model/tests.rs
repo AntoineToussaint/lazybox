@@ -24433,6 +24433,38 @@ mod spawn_focus_steal_tests {
         );
     }
 
+    /// `/foo⏎` opens the top match: Enter on a live query commits the
+    /// filter AND moves focus off the sidebar, the same way a plain
+    /// Enter on the row would (#1502). An empty query only closes the
+    /// bar and stays put.
+    #[test]
+    fn search_enter_opens_the_top_match() {
+        use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+        let mut m = build_model();
+        let ws = pr_workspace("owner/repo#1");
+        let k: SessionKey = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&k));
+        assert_eq!(m.focus, PaneFocus::Sidebar);
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenSearch);
+        m.dispatch_key(RealmKey::new(Key::Char('o'), RealmMods::NONE));
+        m.dispatch_key(RealmKey::new(Key::Enter, RealmMods::NONE));
+        assert!(!m.sidebar.search_editing(), "Enter commits the search");
+        assert_ne!(
+            m.focus,
+            PaneFocus::Sidebar,
+            "Enter on a live query opens the top match"
+        );
+
+        let mut m = build_model();
+        let ws = pr_workspace("owner/repo#1");
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenSearch);
+        m.dispatch_key(RealmKey::new(Key::Enter, RealmMods::NONE));
+        assert!(m.sidebar.search().is_none(), "empty query closes the bar");
+        assert_eq!(m.focus, PaneFocus::Sidebar, "and focus stays put");
+    }
+
     #[test]
     fn spawn_never_steals_focus_while_search_is_being_typed() {
         let mut m = build_model();

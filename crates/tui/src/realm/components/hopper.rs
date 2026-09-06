@@ -904,7 +904,10 @@ mod tests {
         let existing_key = existing.key.clone();
         let mut editor = HopperEditor::new(vec![existing]);
         editor.on(&key(Key::Up));
-        assert_eq!(editor.on(&modified(Key::Char('k'), KeyModifiers::CONTROL)), None);
+        assert_eq!(
+            editor.on(&modified(Key::Char('k'), KeyModifiers::CONTROL)),
+            None
+        );
         assert!(editor.history.is_empty());
         let drafts = editor.drafts().expect("valid drafts");
         assert_eq!(drafts[0].workspace_key, Some(existing_key));

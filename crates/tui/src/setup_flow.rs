@@ -223,6 +223,29 @@ pub fn save_persisted_yaml(
     Ok(backed_up)
 }
 
+/// Forget the persisted wizard answers so the setup wizard replays on
+/// the next launch (`lazybox --fresh`, #1502). Clears only the `setup:`
+/// block plus the onboarding markers (`ui.tour_seen`, `ui.coach_step`,
+/// `ui.tips_seen`); every hand-edited section survives. A missing file
+/// is `Ok(false)`; a malformed one is left untouched and reported, so
+/// a typo can't be "fixed" by silently rewriting the file.
+pub fn clear_persisted_yaml(path: &std::path::Path) -> anyhow::Result<bool> {
+    use anyhow::Context;
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(anyhow::Error::new(e).context("config.yaml read failed")),
+    };
+    let mut cfg = lazybox_config::Config::parse(&raw)
+        .context("config.yaml is malformed — fix it by hand before --fresh")?;
+    cfg.setup = Default::default();
+    cfg.ui.tour_seen = false;
+    cfg.ui.coach_step = 0;
+    cfg.ui.tips_seen.clear();
+    lazybox_config::Config::save_to(&cfg, path).context("config.yaml write failed")?;
+    Ok(true)
+}
+
 // ── Choices ─────────────────────────────────────────────────────────────
 
 /// One detected tool — payload for both the provider-picker and
@@ -1277,6 +1300,51 @@ mod tests {
         assert!(o.enabled_providers.contains("github"));
         assert!(o.enabled_agents.contains("claude"));
         assert!(o.provider_filters.contains_key("github"));
+    }
+
+    /// `--fresh` forgets the wizard answers and the onboarding markers
+    /// but keeps every other key (#1502).
+    #[test]
+    fn clear_persisted_yaml_forgets_setup_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        assert!(
+            !clear_persisted_yaml(&path).unwrap(),
+            "missing file is a no-op"
+        );
+        let setup = PersistedSetup {
+            enabled_providers: ["github"].iter().map(|s| s.to_string()).collect(),
+            enabled_agents: ["claude"].iter().map(|s| s.to_string()).collect(),
+            provider_filters: Default::default(),
+            selected_scopes: Default::default(),
+        };
+        save_persisted_yaml(&setup, &path).unwrap();
+        // A hand-edited key + onboarding markers alongside the setup.
+        let mut cfg =
+            lazybox_config::Config::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        cfg.ui.theme = Some("Gruvbox Dark".to_string());
+        cfg.ui.tour_seen = true;
+        cfg.ui.coach_step = 3;
+        lazybox_config::Config::save_to(&cfg, &path).unwrap();
+        assert!(
+            load_from_yaml(&path).is_some(),
+            "setup persisted before --fresh"
+        );
+
+        assert!(clear_persisted_yaml(&path).unwrap());
+        assert!(
+            load_from_yaml(&path).is_none(),
+            "wizard replays after --fresh"
+        );
+        let after =
+            lazybox_config::Config::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            after.ui.theme.as_deref(),
+            Some("Gruvbox Dark"),
+            "hand edits survive"
+        );
+        assert!(!after.ui.tour_seen);
+        assert_eq!(after.ui.coach_step, 0);
     }
 
     #[test]

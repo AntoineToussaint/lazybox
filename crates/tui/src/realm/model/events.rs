@@ -1445,7 +1445,14 @@ impl<T: TerminalAdapter> Model<T> {
             if self.deferred_focus_project.as_deref() == Some(project.name.as_str()) {
                 self.deferred_focus_project = None;
                 let project_key = project.key;
-                if self.sidebar.focus_project_header(&project_key) {
+                if std::mem::take(&mut self.deferred_chat) {
+                    // Start sheet → Chat (#1502): the scratch project
+                    // just landed; create the chat workspace straight
+                    // away, no name to type.
+                    let name = self.next_chat_name(&project_key);
+                    let cmds = self.create_workspace_cmds(project_key, name);
+                    self.dispatch_cmds(cmds);
+                } else if self.sidebar.focus_project_header(&project_key) {
                     self.mount_new_workspace_input(project_key);
                 }
             }

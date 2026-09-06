@@ -358,6 +358,11 @@ pub struct Sidebar {
     /// `~/.lazybox/config.yaml::display.ascii_glyphs` — the escape
     /// hatch for fonts that don't render the glyphs as a single cell.
     ascii_glyphs: bool,
+    /// `ui.action_keys` overrides, so surfaces the sidebar paints
+    /// without the runtime catalog in hand (the empty-inbox doctor)
+    /// still show the user's EFFECTIVE keys rather than defaults
+    /// (#1502).
+    action_key_overrides: std::collections::BTreeMap<String, String>,
     /// Notifications queued in response to "any agent → Asking"
     /// transitions. The library NEVER fires an OS-level
     /// `osascript` / `notify-send` itself — that would break tests
@@ -638,6 +643,7 @@ impl Sidebar {
             conventions: lazybox_core::Conventions::default(),
             show_inactive_in_inbox: false,
             ascii_glyphs: false,
+            action_key_overrides: std::collections::BTreeMap::new(),
             pending_notifications: Vec::new(),
             pending_asking_notices: Vec::new(),
             agents: std::collections::HashMap::new(),
@@ -1266,6 +1272,23 @@ impl Sidebar {
 
     /// Live-update the default agent (Settings → "Change default
     /// agent"). Mirrors `with_default_agent` for the in-session path.
+    /// Install the user's `ui.action_keys` overrides so the doctor
+    /// panel's hints render effective keys (#1502).
+    pub fn set_action_key_overrides(
+        &mut self,
+        overrides: std::collections::BTreeMap<String, String>,
+    ) {
+        self.action_key_overrides = overrides;
+    }
+
+    /// The compact effective key for `kind` (`⇧W`, `x p`, `,`), for
+    /// the doctor panel's hint rows (#1502).
+    pub(crate) fn key_hint(&self, kind: lazybox_tui_core::action::ActionKind) -> String {
+        let keys = lazybox_tui_core::action::ActionDef::for_kind(kind)
+            .effective_keys_display(&self.action_key_overrides);
+        crate::realm::components::footer::compact_key(&keys).into_owned()
+    }
+
     pub fn set_default_agent(&mut self, agent: impl Into<String>) {
         self.default_agent = agent.into();
     }

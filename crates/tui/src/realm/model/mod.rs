@@ -211,11 +211,16 @@ pub enum Id {
     /// [`ChoicePayload::Workspace`] that `Msg::ChoicePicked` resolves
     /// to the target and dispatches `Command::AdoptSessions`.
     AdoptTarget,
-    /// Project picker for the global "start agent" (`Shift-W`) flow.
-    /// Each row carries a [`ChoicePayload::Project`]; `Msg::ChoicePicked`
-    /// resolves the project, then funnels into the new-workspace name
-    /// input (which auto-spawns the default agent on submit). Skipped
-    /// when only one project exists.
+    /// The `Shift-W` Start sheet (#1502): Chat (scratch workspace, no
+    /// repo) / Repository… / Workspace here / Project…. Always mounts,
+    /// even on an empty install — the one entry point that never
+    /// bounces the user to another key.
+    StartSheet,
+    /// Project picker behind the Start sheet's Project… row (and the
+    /// old `Shift-W` picker). Each row carries a
+    /// [`ChoicePayload::Project`]; `Msg::ChoicePicked` resolves the
+    /// project, then funnels into the new-workspace name input (which
+    /// auto-spawns the default agent on submit).
     StartAgentProject,
     /// Single-line input prompt for the reviewer-login(s) to add to
     /// the focused workspace's PR. Submit →
@@ -2130,6 +2135,10 @@ pub struct Model<T: TerminalAdapter> {
     /// user has no clear next step. An event-to-event handoff, not a
     /// mounted-modal continuation, so it stays out of [`ModalFlow`].
     deferred_focus_project: Option<String>,
+    /// Start sheet → Chat while the `scratch` project does not exist
+    /// yet (#1502): the `ProjectUpserted` hand-off creates the chat
+    /// workspace directly instead of mounting the name input.
+    deferred_chat: bool,
     /// Issue workspace the user was viewing when it was removed by a
     /// merge. Set in the `WorkspaceRemoved` handler (before the sidebar
     /// moves the cursor off the gone row) and consumed by the matching
@@ -2633,6 +2642,7 @@ impl<T: TerminalAdapter> Model<T> {
                 &std::collections::BTreeMap::new(),
             ),
             deferred_focus_project: None,
+            deferred_chat: false,
             merge_follow_from: None,
             spawn_follow_to: None,
             pending_workspace_creates: std::collections::HashMap::new(),
@@ -3061,7 +3071,10 @@ impl<T: TerminalAdapter> Model<T> {
         let scope_providers = scope_provider_ids(&sources);
         self.setup.inputs = Some((report.clone(), sources));
         self.setup.runner = Some(crate::setup_flow::SetupRunner::new(report, scope_providers));
-        self.mount_modal(Id::Splash, Splash::new());
+        self.mount_modal(
+            Id::Splash,
+            Splash::new().with_overrides(self.action_key_overrides.clone()),
+        );
     }
 
     /// Pre-populate the cached setup inputs without launching the
@@ -4350,6 +4363,8 @@ impl<T: TerminalAdapter> Model<T> {
         overrides: std::collections::BTreeMap<String, String>,
     ) {
         self.action_key_overrides = overrides;
+        self.sidebar
+            .set_action_key_overrides(self.action_key_overrides.clone());
         self.rebuild_catalog();
     }
 

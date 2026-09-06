@@ -123,6 +123,7 @@ impl<T: TerminalAdapter> Model<T> {
                 active: matches!(self.modal_flow, Some(ModalFlow::ConvertSession { .. })),
             },
             Id::StartAgentProject => PickFlow::StartAgentProject,
+            Id::StartSheet => PickFlow::StartSheet,
             Id::NewWorkspaceRepo => PickFlow::NewWorkspaceRepo,
             Id::HopperProject => match &self.modal_flow {
                 Some(ModalFlow::HopperProject { workspace, action }) => PickFlow::HopperProject {
@@ -555,6 +556,12 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_new_workspace_input(project_key);
             }
             PickOutcome::MountNewProject => self.mount_new_project_input(),
+            PickOutcome::StartChat => cmds.extend(self.start_chat_cmds()),
+            PickOutcome::MountNewWorkspaceRepoPicker => self.mount_new_workspace_repo_picker(),
+            PickOutcome::MountStartAgentPicker => {
+                let projects = self.sidebar.projects_for_picker();
+                self.mount_start_agent_picker(projects);
+            }
             PickOutcome::AssignSpace { source, space } => {
                 let resolved = self
                     .sidebar

@@ -48,9 +48,23 @@ fn repo_pick_row_label(s: &Scope) -> String {
 /// [`Screen::Loading`] the second tuple element is the producer handle
 /// the executor delivers the effect's result into; every other screen
 /// returns `None` there.
+/// Test-only convenience: [`render_with`] with no key overrides.
+#[cfg(test)]
 pub fn render(screen: Screen) -> (Box<dyn AppComponent<Msg, UserEvent>>, Option<LoadingResult>) {
+    render_with(screen, &std::collections::BTreeMap::new())
+}
+
+/// `overrides` are the user's `ui.action_keys`, so the splash card's
+/// "keys to know" shows effective bindings (#1502).
+pub fn render_with(
+    screen: Screen,
+    overrides: &std::collections::BTreeMap<String, String>,
+) -> (Box<dyn AppComponent<Msg, UserEvent>>, Option<LoadingResult>) {
     match screen {
-        Screen::Splash => (Box::new(Splash::new()), None),
+        Screen::Splash => (
+            Box::new(Splash::new().with_overrides(overrides.clone())),
+            None,
+        ),
 
         Screen::Providers { items, selected } => (
             Box::new(

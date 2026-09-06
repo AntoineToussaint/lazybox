@@ -1796,15 +1796,130 @@ mod effects_tests {
         assert!(cmds.is_empty(), "blank rename must not emit a command");
     }
 
-    /// `Shift-W` with no projects yet can't resolve a container, so
-    /// it surfaces a nudge instead of mounting a picker.
+    /// `Shift-W` on an empty install mounts the Start sheet instead of
+    /// bouncing to `x p` (#1502): Chat and Repository are always
+    /// offered; Workspace/Project rows need a project.
     #[test]
-    fn start_agent_flow_without_projects_mounts_no_modal() {
+    fn start_agent_flow_without_projects_mounts_the_start_sheet() {
         let mut m = build_model();
         m.start_agent_flow();
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::StartSheet),
+            "no project → the Start sheet, never a dead-end nudge"
+        );
+    }
+
+    /// Start sheet → Chat with no scratch project yet: one
+    /// `CreateProject { scratch }` goes out and the `ProjectUpserted`
+    /// hand-off then creates a dated chat workspace (default agent
+    /// spawned) without a name prompt (#1502).
+    #[test]
+    fn start_sheet_chat_creates_scratch_project_then_workspace() {
+        use lazybox_tui_core::choice::START_SHEET_CHAT;
+        // Keep the daemon end alive so the hand-off's send succeeds and
+        // can be observed.
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(100, 30)).expect("model init");
+        while server.rx.try_recv().is_ok() {}
+        m.start_agent_flow();
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text(START_SHEET_CHAT.into())]);
+        assert!(
+            matches!(&cmds[..], [IpcCommand::CreateProject { name }] if name == "scratch"),
+            "chat first creates the scratch project: {cmds:?}"
+        );
+        assert!(m.modal_stack.is_empty(), "no name prompt for a chat");
+        // The daemon echoes the project.
+        let project = lazybox_core::Project::new(
+            lazybox_core::ProjectKey::local("scratch"),
+            "scratch".to_string(),
+            chrono::Utc::now(),
+        );
+        m.handle_daemon_event(lazybox_ipc::Event::ProjectUpserted(Box::new(project)));
+        let sent: Vec<IpcCommand> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+        match &sent[..] {
+            [
+                IpcCommand::CreateWorkspace {
+                    name,
+                    project_key,
+                    spawn_agent,
+                    ..
+                },
+            ] => {
+                assert!(
+                    name.starts_with("chat-"),
+                    "chat workspaces are dated: {name}"
+                );
+                assert_eq!(*project_key, lazybox_core::ProjectKey::local("scratch"));
+                assert!(spawn_agent.is_some(), "the default agent is spawned in");
+            }
+            other => panic!("expected one CreateWorkspace after the hand-off, got {other:?}"),
+        }
+        assert_eq!(
+            m.pending_workspace_creates.len(),
+            1,
+            "one chat workspace create in flight"
+        );
         assert!(
             m.modal_stack.is_empty(),
-            "no project → footer nudge, no modal"
+            "the hand-off must not mount the name input for a chat"
+        );
+    }
+
+    /// With the scratch project already known, Chat creates the
+    /// workspace at once and picks a fresh suffix when today's name is
+    /// taken (#1502).
+    #[test]
+    fn start_sheet_chat_reuses_scratch_project_and_suffixes_names() {
+        use lazybox_tui_core::choice::START_SHEET_CHAT;
+        let mut m = build_model();
+        let scratch = lazybox_core::ProjectKey::local("scratch");
+        m.handle_daemon_event(lazybox_ipc::Event::ProjectUpserted(Box::new(
+            lazybox_core::Project::new(scratch.clone(), "scratch".to_string(), chrono::Utc::now()),
+        )));
+        let today = format!("chat-{}", chrono::Local::now().format("%m%d"));
+        let mut existing = lazybox_core::Workspace::empty(
+            WorkspaceKey::new("local:scratch/chat"),
+            "main",
+            chrono::Utc::now(),
+        );
+        existing.name = today.clone();
+        existing.project_key = Some(scratch.clone());
+        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            existing,
+        )));
+        m.start_agent_flow();
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text(START_SHEET_CHAT.into())]);
+        match &cmds[..] {
+            [
+                IpcCommand::CreateWorkspace {
+                    name,
+                    project_key,
+                    spawn_agent,
+                    ..
+                },
+            ] => {
+                assert_eq!(*project_key, scratch);
+                assert_eq!(*name, format!("{today}-2"), "second chat today gets -2");
+                assert!(spawn_agent.is_some(), "default agent rides along");
+            }
+            other => panic!("expected one CreateWorkspace, got {other:?}"),
+        }
+    }
+
+    /// The Workspace row appears only when a project sits under the
+    /// cursor; Repository always does (#1502).
+    #[test]
+    fn start_sheet_offers_workspace_row_only_with_a_cursor_project() {
+        use lazybox_tui_core::choice::START_SHEET_REPO;
+        let mut m = build_model();
+        m.start_agent_flow();
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text(START_SHEET_REPO.into())]);
+        assert!(cmds.is_empty());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::NewProject),
+            "Repository with no tracked repos falls through to the new-project input"
         );
     }
 
@@ -7979,6 +8094,7 @@ mod stale_input_tests {
                 | Id::Setup
                 | Id::AdoptTarget
                 | Id::StartAgentProject
+                | Id::StartSheet
                 | Id::LlmGatewayUrl
                 | Id::AddScanRoot
                 | Id::SaveViewName
@@ -8040,6 +8156,7 @@ mod stale_input_tests {
             Id::MergeConfirm,
             Id::AdoptTarget,
             Id::StartAgentProject,
+            Id::StartSheet,
             Id::RequestReviewers,
             Id::AddAssignees,
             Id::ManageLabels,

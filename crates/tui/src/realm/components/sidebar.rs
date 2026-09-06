@@ -447,6 +447,15 @@ impl Sidebar {
         self.inner.set_inbox_health(health);
     }
 
+    /// Install the user's `ui.action_keys` overrides so the doctor
+    /// panel renders effective keys (#1502). Delegates to the inner pane.
+    pub fn set_action_key_overrides(
+        &mut self,
+        overrides: std::collections::BTreeMap<String, String>,
+    ) {
+        self.inner.set_action_key_overrides(overrides);
+    }
+
     #[cfg(test)]
     pub(crate) fn inbox_diagnosis(&self) -> Option<crate::components::sidebar::InboxDiagnosis> {
         self.inner.inbox_diagnosis()

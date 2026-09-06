@@ -424,6 +424,43 @@ impl<T: TerminalAdapter> Model<T> {
         self.maybe_mount_next_merge_prompt();
     }
 
+    /// Commands that create `name` under `project_key` AND land the user
+    /// in a live session immediately: creating a workspace and then
+    /// having to know to press `c` was the main first-run friction, so
+    /// the daemon spawns the configured default agent into the new
+    /// workspace (see the `CreateWorkspace` server handler). Shared by
+    /// the new-workspace name input and the Start sheet's Chat row
+    /// (#1502).
+    pub(super) fn create_workspace_cmds(
+        &mut self,
+        project_key: lazybox_core::ProjectKey,
+        name: String,
+    ) -> Vec<IpcCommand> {
+        let spawn_agent = Some(self.sidebar.default_agent().to_string());
+        let client_request_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        self.pending_workspace_creates.insert(
+            client_request_id.clone(),
+            super::PendingWorkspaceCreate {
+                name: name.clone(),
+                spawn_agent: spawn_agent.is_some(),
+                workspace_key: None,
+            },
+        );
+        tracing::info!(
+            workspace_name = %name,
+            project_key = %project_key,
+            %client_request_id,
+            ?spawn_agent,
+            "creating new pre-PR workspace under project",
+        );
+        vec![IpcCommand::CreateWorkspace {
+            name,
+            project_key,
+            spawn_agent,
+            client_request_id: Some(client_request_id),
+        }]
+    }
+
     /// Input modal submit (single-line text). Dispatch by which
     /// Input modal is currently on top. Handles `NewWorkspace`
     /// (→ `CreateWorkspace`), `RequestReviewers`, `AddAssignees`.
@@ -445,36 +482,7 @@ impl<T: TerminalAdapter> Model<T> {
                 };
                 match (name.is_empty(), project_key) {
                     (false, Some(project_key)) => {
-                        // Land the user in a live session immediately:
-                        // creating a workspace and then having to know to
-                        // press `c` was the main first-run friction. The
-                        // daemon spawns the configured default agent into
-                        // the new workspace (see `CreateWorkspace`
-                        // server handler). Same behavior for the global
-                        // "start agent" shortcut, which funnels here.
-                        let spawn_agent = Some(self.sidebar.default_agent().to_string());
-                        let client_request_id = uuid::Uuid::new_v4().hyphenated().to_string();
-                        self.pending_workspace_creates.insert(
-                            client_request_id.clone(),
-                            super::PendingWorkspaceCreate {
-                                name: name.clone(),
-                                spawn_agent: spawn_agent.is_some(),
-                                workspace_key: None,
-                            },
-                        );
-                        tracing::info!(
-                            workspace_name = %name,
-                            project_key = %project_key,
-                            %client_request_id,
-                            ?spawn_agent,
-                            "creating new pre-PR workspace under project",
-                        );
-                        cmds.push(IpcCommand::CreateWorkspace {
-                            name,
-                            project_key,
-                            spawn_agent,
-                            client_request_id: Some(client_request_id),
-                        });
+                        cmds.extend(self.create_workspace_cmds(project_key, name));
                     }
                     (false, None) => {
                         tracing::warn!(
@@ -1804,7 +1812,8 @@ showing keybinding search only",
                 self.setup.runner = Some(runner);
                 // Layer 2: turn the pure Screen into a widget. Loading
                 // screens hand back a producer the executor delivers into.
-                let (component, result) = crate::realm::setup_screen::render(screen);
+                let (component, result) =
+                    crate::realm::setup_screen::render_with(screen, &self.action_key_overrides);
                 self.mount_setup_modal(component);
                 // Layer 3: run the paired effect (if any) against the
                 // registered scope sources. Result flows back as

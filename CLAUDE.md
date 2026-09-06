@@ -232,8 +232,15 @@ the mouse (#1502).
 
 **Global**: `Tab` cycle panes, `?` help, `q q` quit, `,` settings,
 `t` theme picker (live-preview palette list; the choice persists to
-`ui.theme`), `Shift-W` start agent from anywhere (pick a project,
-name a workspace, spawn the default agent — one flow, any pane),
+`ui.theme`), `Shift-W` the **Start sheet** from anywhere (#1502) — one
+modal that works on an empty install: `Chat` (a dated workspace under a
+`scratch` local project with the default agent spawned in, no repo, no
+name to type), `Repository…` (the `x p` repo picker), `Workspace` (the
+`x n` name input under the cursor's project, when there is one), and
+`Project…` (the project picker); the empty-inbox doctor and the splash
+render their keys from the catalog, so a remap never shows a stale key,
+and `lazybox --fresh` forgets the wizard answers + onboarding markers in
+`config.yaml` (not just `state.db`) so setup and the coach replay,
 `]` browse snippets (read-only catalog; `e` there opens the YAML),
 `Shift-R` refresh (sweep every scoped repo now — an unwindowed
 repo-first reconcile), `Ctrl-L` force a full repaint (recovery for a

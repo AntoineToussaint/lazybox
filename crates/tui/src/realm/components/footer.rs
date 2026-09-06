@@ -541,7 +541,7 @@ pub fn render(
 /// Returns `Cow` so the pass-through case (most rows) doesn't
 /// allocate — the footer redraws on every state change and this is a
 /// hot path.
-fn compact_key(keys: &str) -> std::borrow::Cow<'_, str> {
+pub(crate) fn compact_key(keys: &str) -> std::borrow::Cow<'_, str> {
     use std::borrow::Cow;
     if let Some(rest) = keys.strip_prefix("Shift-") {
         // `Shift-X` where X is one ASCII letter → uppercase letter

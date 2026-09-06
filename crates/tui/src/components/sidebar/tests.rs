@@ -5930,6 +5930,30 @@ mod inbox_diagnosis_tests {
             "first-run doctor must not use the retired 'tour' name: {first_screen:?}"
         );
 
+        // Hints are the user's EFFECTIVE keys, never literals (#1502):
+        // a remap of the start action shows in the panel, and the
+        // panel no longer advertises `x n`, which cannot work with no
+        // project at the cursor.
+        assert!(
+            !first_screen.contains("x n"),
+            "first-run doctor must not advertise x n: {first_screen:?}"
+        );
+        let mut remapped = Sidebar::new(PaneId::new(1));
+        remapped.set_action_key_overrides(
+            [("start_agent".to_string(), "F5".to_string())]
+                .into_iter()
+                .collect(),
+        );
+        let remapped_screen = screen(&mut remapped);
+        assert!(
+            remapped_screen.contains("F5"),
+            "doctor must show the remapped start key: {remapped_screen:?}"
+        );
+        assert!(
+            !remapped_screen.contains("⇧W"),
+            "stale default start key after a remap: {remapped_screen:?}"
+        );
+
         let mut syncing = Sidebar::new(PaneId::new(1));
         syncing.set_inbox_health(health(true, false, None));
         assert!(screen(&mut syncing).contains("Checking for PRs"));

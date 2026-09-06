@@ -1349,32 +1349,33 @@ impl Sidebar {
         let head = |style: Style, text: &str| Line::from(Span::styled(format!(" {text}"), style));
         let say = |text: &str| Line::from(Span::styled(format!(" {text}"), prose));
 
+        // Every key below is the user's EFFECTIVE binding, resolved
+        // from the catalog — the panel must not drift from a remap or
+        // the vim preset (#1502). Only keys that actually work with an
+        // empty inbox are offered: the ones that need a row under the
+        // cursor (`w w`, `a c`, `s`, `e`) would just flash a notice.
+        use lazybox_tui_core::action::ActionKind as K;
+        let k = |kind: K| self.key_hint(kind);
         let lines: Vec<Line<'static>> = match diag {
-            // First run / no provider: the worktree flow needs no GitHub,
-            // so lead with it (issue #100) and offer the wizard as the way
-            // to wire up a provider once they've felt a session.
+            // First run / no provider: the Start sheet needs no GitHub,
+            // so lead with it (issue #100, #1502) and offer the wizard as
+            // the way to wire up a provider once they've felt a session.
             InboxDiagnosis::FirstRun => vec![
                 Line::raw(""),
                 head(heading, "Nothing configured yet"),
                 Line::raw(""),
-                say("lazybox manages your git"),
-                say("worktrees — point it at a"),
-                say("folder and start an agent:"),
+                say("start a chat, or point"),
+                say("lazybox at a repo — it"),
+                say("manages the worktrees:"),
                 Line::raw(""),
-                hint("⇧W", "start work"),
-                hint("x p", "new project"),
-                hint("x n", "new workspace"),
-                Line::raw(""),
-                say("or open a tool yourself:"),
-                hint("a c", "claude"),
-                hint("s", "shell"),
-                hint("e", "editor"),
+                hint(&k(K::StartAgent), "start · chat / repo"),
+                hint(&k(K::NewProject), "new project"),
                 Line::raw(""),
                 say("connect GitHub / Linear when"),
                 say("you're ready:"),
-                hint(",", "setup"),
-                hint("?", "Ask Lazybox"),
-                hint("⇧T", "coach"),
+                hint(&k(K::OpenSettings), "setup"),
+                hint(&k(K::OpenHelp), "Ask Lazybox"),
+                hint(&k(K::OpenTour), "coach"),
             ],
             // Credentials failed — the empty inbox is a sign-in problem.
             InboxDiagnosis::CredentialFailure { provider } => {
@@ -1387,9 +1388,9 @@ impl Sidebar {
                     say(&format!("{named} tasks — the token")),
                     say("was rejected. Re-connect it:"),
                     Line::raw(""),
-                    hint(",", "setup / re-auth"),
-                    hint("⇧D", "sync details"),
-                    hint("⇧R", "retry sync"),
+                    hint(&k(K::OpenSettings), "setup / re-auth"),
+                    hint(&k(K::OpenSyncStatus), "sync details"),
+                    hint(&k(K::Refresh), "retry sync"),
                 ]
             }
             // A user-applied view filter is hiding rows we hold.
@@ -1403,9 +1404,9 @@ impl Sidebar {
                     say("out of this view. Widen or"),
                     say("clear the filter to see them:"),
                     Line::raw(""),
-                    hint("f", "edit filters"),
+                    hint(&k(K::OpenFilterMenu), "edit filters"),
                     hint("esc", "clear filters"),
-                    hint("⇧S", "switch mailbox"),
+                    hint(&k(K::CycleMailbox), "switch mailbox"),
                 ]
             }
             // Providers enabled but no successful poll yet.
@@ -1416,11 +1417,11 @@ impl Sidebar {
                 say("lazybox is polling your"),
                 say("providers for the first time."),
                 Line::raw(""),
-                hint("⇧D", "sync status"),
-                hint("⇧R", "refresh now"),
+                hint(&k(K::OpenSyncStatus), "sync status"),
+                hint(&k(K::Refresh), "refresh now"),
             ],
             // Everything is configured and polling succeeded — genuinely
-            // nothing open. Say so and pivot to the worktree path.
+            // nothing open. Say so and pivot to the Start sheet.
             InboxDiagnosis::NothingOpen => vec![
                 Line::raw(""),
                 head(heading, "Nothing's waiting on you"),
@@ -1429,13 +1430,12 @@ impl Sidebar {
                 say("attention right now. Want to"),
                 say("start something?"),
                 Line::raw(""),
-                hint("⇧W", "start work"),
-                hint("a c", "claude"),
-                hint("s", "shell"),
+                hint(&k(K::StartAgent), "start · chat / repo"),
+                hint(&k(K::NewProject), "new project"),
                 Line::raw(""),
                 say("or check back later:"),
-                hint("⇧R", "refresh inbox"),
-                hint("⇧D", "sync status"),
+                hint(&k(K::Refresh), "refresh inbox"),
+                hint(&k(K::OpenSyncStatus), "sync status"),
             ],
         };
         frame.render_widget(Paragraph::new(lines), inner);

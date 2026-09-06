@@ -6983,7 +6983,13 @@ async fn commit_pty_reading(
     // when a hint parses — the block itself rode `Event::AgentState`
     // above; clients fold this countdown in where the banner named one,
     // and degrade to the bare block where it didn't.
-    if let lazybox_agents::Outcome::Committed(lazybox_ipc::AgentState::LimitReached) = outcome
+    // `AwaitingReset` counts too: the detector classifies Claude's
+    // auto-continue banner (`continuing automatically at 1:10pm`) straight
+    // to the calm state, and that banner's time is the reset the badge
+    // should show.
+    if let lazybox_agents::Outcome::Committed(
+        lazybox_ipc::AgentState::LimitReached | lazybox_ipc::AgentState::AwaitingReset,
+    ) = outcome
         && let Some(reset_hint) = lazybox_agents::detect::parse_usage_limit_reset(detect_window)
     {
         let session_key = terminals

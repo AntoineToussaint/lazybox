@@ -860,15 +860,19 @@ impl Sidebar {
         }
     }
 
-    /// True while any of `agent_id`'s live terminals sits in the
-    /// `LimitReached` block — the window in which its stored reset hint is
-    /// still meaningful.
+    /// True while any of `agent_id`'s live terminals sits in the usage-limit
+    /// block — the alerting `LimitReached` or its calm, parked sibling
+    /// `AwaitingReset` (auto-Wait pressed, or Claude's own auto-continue
+    /// banner) — the window in which its stored reset hint is still
+    /// meaningful.
     fn agent_is_limited(&self, agent_id: &str) -> bool {
         self.agent_terminal_states
             .iter()
             .any(|(terminal_id, (_, state))| {
-                *state == lazybox_ipc::AgentState::LimitReached
-                    && self.terminal_agent_id(*terminal_id).as_deref() == Some(agent_id)
+                matches!(
+                    state,
+                    lazybox_ipc::AgentState::LimitReached | lazybox_ipc::AgentState::AwaitingReset
+                ) && self.terminal_agent_id(*terminal_id).as_deref() == Some(agent_id)
             })
     }
 

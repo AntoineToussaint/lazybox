@@ -6303,7 +6303,24 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Render the current frame.
+    /// Recompute every agent tab's live spend/headroom badge (#1490) from the
+    /// sidebar's usage tracker. The tracker (cost per session, quota per agent)
+    /// lives on the sidebar; the terminal stack owns the tabs — so the badge is
+    /// resolved here, joining the two disjoint field borrows.
+    fn refresh_terminal_usage_badges(&mut self) {
+        let sidebar = &self.sidebar;
+        self.terminals
+            .refresh_usage_badges(|session_key, agent_id| {
+                sidebar.terminal_usage_badge(session_key.as_str(), agent_id)
+            });
+    }
+
     pub fn view(&mut self) {
+        // Refresh the agent tabs' live spend/headroom badges (#1490) from the
+        // usage tracker before drawing, so the figure tracks live usage and a
+        // plan window drops the instant its reset passes. Done here (not in the
+        // draw closure) because the closure holds `&mut self.terminals`.
+        self.refresh_terminal_usage_badges();
         // Pull state out before the closure so the borrow checker is
         // happy — `terminal.draw` takes `&mut self.terminal` while we
         // also need `&mut self.app` etc. inside.

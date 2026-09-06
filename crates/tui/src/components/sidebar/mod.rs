@@ -814,6 +814,34 @@ impl Sidebar {
         self.usage.note_quota(agent_id, quota);
     }
 
+    /// The live spend/headroom badge for an agent terminal (#1490): the
+    /// binding plan-quota window's remaining headroom when one is known — the
+    /// number that changes behaviour mid-task on a subscription — else the
+    /// session's metered dollar cost, the real signal for API-key users.
+    /// `None` when neither is known, so the tab shows nothing rather than a
+    /// misleading `$0.00`.
+    pub fn terminal_usage_badge(
+        &self,
+        session_key: &str,
+        agent_id: &str,
+    ) -> Option<crate::components::terminal_stack::UsageBadge> {
+        use crate::components::terminal_stack::UsageBadge;
+        let now_unix = self.now().timestamp();
+        if let Some(quota) = self.usage.quota_for(agent_id)
+            && let Some((label, left)) = lazybox_tui_core::usage::quota_headroom(&quota, now_unix)
+        {
+            return Some(UsageBadge {
+                text: format!("{label} {left}% left"),
+                headroom: true,
+            });
+        }
+        let cost = self.usage.cost_micros_for_session(session_key);
+        (cost > 0).then(|| UsageBadge {
+            text: lazybox_tui_core::usage::format_cost_micros(cost),
+            headroom: false,
+        })
+    }
+
     /// Attribute a usage-limit reset hint to the terminal's agent, so the
     /// summary can show ` · resets 3pm` while that provider is limited
     /// (`AgentUsageLimit`). A hint for a terminal we don't track is

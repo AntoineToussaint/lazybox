@@ -2361,6 +2361,14 @@ pub enum Event {
         remaining: u32,
         limit: u32,
         reset_at: chrono::DateTime<chrono::Utc>,
+        /// `true` when the wait is lazybox's OWN pacing (local request
+        /// bucket / background allowance spent) rather than a limit GitHub
+        /// imposed. The budget is healthy in that case — `remaining` says
+        /// so — and clients must not label it "GitHub rate-limited": a
+        /// user reading that after a `g m` rejection concluded GitHub
+        /// blocked the merge when GitHub had answered normally.
+        #[serde(default)]
+        self_throttle: bool,
     },
     /// Emitted at the end of every successful poll cycle, even when
     /// no tasks matched. The TUI uses this to distinguish "polling

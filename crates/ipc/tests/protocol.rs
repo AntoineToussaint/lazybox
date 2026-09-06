@@ -972,6 +972,7 @@ fn all_events() -> Vec<Event> {
             reset_at: chrono::DateTime::parse_from_rfc3339("2026-07-30T07:23:22Z")
                 .expect("valid fixture")
                 .with_timezone(&chrono::Utc),
+            self_throttle: false,
         },
         Event::PollCompleted {
             source: "github".into(),

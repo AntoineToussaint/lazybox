@@ -144,12 +144,17 @@ watched repos (the *roster*):
   no separate merged sweep. The governor caps the slice by allowance;
   members that don't fit keep their cursor age and lead the next tick.
 - **Reconcile (every `FULL_SWEEP_INTERVAL`, or `Shift-R`).** Every
-  member unwindowed (`is:open`), uncapped, paced by the request gap.
-  Only a complete reconcile reports `Exhaustive` coverage and may
-  retire rows; a failed member is preserved and retried on the
-  rotation. The reconcile timer re-arms after any reconcile that ran,
-  so a member that overflows its page cap cannot make the whole roster
-  re-run every tick.
+  member unwindowed (`is:open` plus a 7-day recent-activity query),
+  queued in `TickState::reconcile_pending` and drained one
+  fan-out-sized batch per warm tick (double on a manual refresh), focus
+  first. Run in a single tick, a 28-repo reconcile (~84 requests)
+  emptied the 30-request local bucket and left the heartbeat, detail
+  prefetch and the user's own `g m` pre-check refused for ~3 minutes.
+  Each batch's completed members are authoritative for rescope
+  (`PolledScope::Repos`); a failed member is preserved and retried on
+  the rotation. The reconcile timer re-arms once the last batch has
+  run, so a member that overflows its page cap cannot make the whole
+  roster re-run every tick.
 - **`g s`** stays the interactive "sync this repo now": the focused
   row's PR/issue plus the repo's open PRs and issues, at interactive
   priority, outside the poll loop.
@@ -170,6 +175,17 @@ its repo is force-included in every rotation tick instead.
 A config file that fails to parse now surfaces as a permanent GitHub
 provider error naming the file, and `ui.keep_awake` accepts the newer
 mode strings so a newer client cannot brick an older daemon.
+
+### "GitHub rate-limited" vs. lazybox pacing itself
+
+The wait event now carries `self_throttle`. When lazybox's own local
+bucket or background allowance is what's pausing *scheduled* work while
+the primary budget is healthy, the footer reads `pacing GitHub sync ·
+~2m · 4053/5000 left` rather than `GitHub rate-limited`. User actions
+(`g m`, `g s`, replies) are interactive and go through regardless — a
+merge rejected during that state was rejected by GitHub for its own
+reason (e.g. "2 of 2 required status checks are expected": CI hasn't
+reported yet), which the merge notice spells out.
 
 ### Merging during a rate-limit pause
 

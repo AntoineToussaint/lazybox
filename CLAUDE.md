@@ -281,7 +281,10 @@ they extend the multi-select instead — #932), `F8` /
 selection), mouse-click any pane to focus it, mouse-drag splitters to
 resize.
 
-**Sidebar**: `j/k` or arrows navigate, `Enter` open (focus activity),
+**Sidebar**: the cursor row is a full-row band (theme `fill`) with a
+`▎` accent bar in the gutter, kept — unbolded — while another pane has
+focus so the open workspace stays obvious; multi-selected rows share the
+band behind their `✓` (#1502). `j/k` or arrows navigate, `Enter` open (focus activity),
 `w w` work on this (contextual agent prompt), `s` shell, `e` editor,
 `m` mark read, `z` snooze, `f` open the filter
 menu (a multi-select over state / role / kind predicates — with-agent,

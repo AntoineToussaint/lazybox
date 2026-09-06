@@ -586,9 +586,53 @@ fn render_shows_cursor_marker_on_selected_workspace() {
     let rendered = render_to_string(&mut s, 80, 10, true);
     let cursor_line = rendered
         .lines()
-        .find(|l| l.contains('▶'))
+        .find(|l| l.contains('▎'))
         .unwrap_or_else(|| panic!("expected cursor marker; got:\n{rendered}"));
     assert!(cursor_line.contains("o/r#1"));
+}
+
+/// The cursor row is a full-row band in BOTH focus states (#1502): every
+/// cell of the row carries the theme `fill` background whether or not the
+/// sidebar has focus, so the open workspace stays obvious while the user
+/// types in its terminal. Only the focused pane's band is bold.
+#[test]
+fn cursor_row_is_a_full_band_in_both_focus_states() {
+    let theme = lazybox_tui::theme::current();
+    for focused in [true, false] {
+        let mut s = populated_sidebar();
+        let (width, height) = (60u16, 10u16);
+        let backend = TestBackend::new(width, height);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|frame| {
+            s.render(Rect::new(0, 0, width, height), frame, focused);
+        })
+        .unwrap();
+        let buffer = term.backend().buffer();
+        let cursor_y = (0..height)
+            .find(|&y| (0..width).any(|x| buffer[(x, y)].symbol() == "▎"))
+            .unwrap_or_else(|| panic!("no cursor bar rendered (focused={focused})"));
+        // The sidebar keeps a 1-col pad on the left and the scrollbar
+        // gutter on the right outside every row rect; the band spans
+        // everything in between.
+        let inner = 1..width - 1;
+        for x in inner.clone() {
+            let cell = &buffer[(x, cursor_y)];
+            assert_eq!(
+                cell.bg,
+                theme.fill,
+                "col {x} of the cursor row lacks the band (focused={focused}): {:?}",
+                cell.symbol()
+            );
+        }
+        // (Bold-vs-not per focus state is pinned at the row-style level in
+        // `workspace_row`; individual cells like the accent bar stay bold
+        // in both states.)
+        // No other workspace row is banded.
+        let banded_rows = (0..height)
+            .filter(|&y| inner.clone().all(|x| buffer[(x, y)].bg == theme.fill))
+            .count();
+        assert_eq!(banded_rows, 1, "exactly one banded row (focused={focused})");
+    }
 }
 
 #[test]
@@ -629,7 +673,7 @@ fn render_windows_list_to_keep_cursor_visible_with_scrollbar() {
     let bottom = render_to_string(&mut s, 40, 12, true);
     let cursor_line = bottom
         .lines()
-        .find(|l| l.contains('▶'))
+        .find(|l| l.contains('▎'))
         .unwrap_or_else(|| panic!("expected cursor marker; got:\n{bottom}"));
     assert!(
         cursor_line.contains("o/r#20"),
@@ -714,7 +758,7 @@ fn keyboard_nav_reanchors_wheel_scrolled_viewport() {
         "render re-anchored the viewport onto the cursor row"
     );
     assert!(
-        rendered.contains('▶'),
+        rendered.contains('▎'),
         "cursor marker back on screen; got:\n{rendered}"
     );
 }

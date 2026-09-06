@@ -891,13 +891,7 @@ impl Sidebar {
                 VisibleRow::FocusedHeader => {
                     use crate::components::icons;
                     let is_cursor = i == self.cursor;
-                    let row_bg = if is_cursor && focused {
-                        Some(theme.row_focused())
-                    } else if is_cursor {
-                        Some(theme.row_unfocused())
-                    } else {
-                        None
-                    };
+                    let row_bg = theme.row_band(is_cursor, focused, false);
                     // Synthetic top group. No disclosure glyph (it never
                     // collapses) — a star in the gutter, then the label,
                     // both in the accent tone so the shortlist reads as a
@@ -926,13 +920,7 @@ impl Sidebar {
                 VisibleRow::HopperHeader => {
                     use crate::components::icons;
                     let is_cursor = i == self.cursor;
-                    let row_bg = if is_cursor && focused {
-                        Some(theme.row_focused())
-                    } else if is_cursor {
-                        Some(theme.row_unfocused())
-                    } else {
-                        None
-                    };
+                    let row_bg = theme.row_band(is_cursor, focused, false);
                     let count = self
                         .workspaces
                         .values()
@@ -974,13 +962,7 @@ impl Sidebar {
                     let collapsed = self.collapsed_spaces.contains(name);
                     let glyph = if collapsed { "▸" } else { "▾" };
                     let is_cursor = i == self.cursor;
-                    let row_bg = if is_cursor && focused {
-                        Some(theme.row_focused())
-                    } else if is_cursor {
-                        Some(theme.row_unfocused())
-                    } else {
-                        None
-                    };
+                    let row_bg = theme.row_band(is_cursor, focused, false);
                     let glyph_style = match row_bg {
                         Some(bg) => bg,
                         None => Style::default().fg(theme.text_dim),
@@ -1022,13 +1004,7 @@ impl Sidebar {
                     let collapsed = self.collapsed_repos.contains(name);
                     let glyph = if collapsed { "▸" } else { "▾" };
                     let is_cursor = i == self.cursor;
-                    let row_bg = if is_cursor && focused {
-                        Some(theme.row_focused())
-                    } else if is_cursor {
-                        Some(theme.row_unfocused())
-                    } else {
-                        None
-                    };
+                    let row_bg = theme.row_band(is_cursor, focused, false);
                     // Root of the tree, so it carries no selection
                     // caret: the disclosure glyph sits in the shared
                     // left gutter and the cursor is shown by the
@@ -1151,14 +1127,14 @@ impl Sidebar {
                     // pills and sits at the same inset as the workspace
                     // type glyph so the eye lines them up.
                     let is_cursor = i == self.cursor;
-                    let row_bg = if is_cursor && focused {
-                        Some(theme.row_focused())
-                    } else if is_cursor {
-                        Some(theme.row_unfocused())
+                    let row_bg = theme.row_band(is_cursor, focused, false);
+                    let caret = if !is_cursor {
+                        " "
+                    } else if self.ascii_glyphs {
+                        ">"
                     } else {
-                        None
+                        crate::components::workspace_row::CURSOR_BAR
                     };
-                    let caret = if is_cursor { "▸" } else { " " };
                     let color = match kind {
                         WorkspaceKind::Pr => theme.success,
                         WorkspaceKind::Issue => theme.hover,
@@ -1206,14 +1182,16 @@ impl Sidebar {
                         .map(|s| s.name.as_str())
                         .unwrap_or("?");
                     let is_cursor = i == self.cursor;
-                    let style = if is_cursor && focused {
-                        theme.row_focused()
-                    } else if is_cursor {
-                        theme.row_unfocused()
+                    let style = theme
+                        .row_band(is_cursor, focused, false)
+                        .unwrap_or_else(|| Style::default().fg(theme.text_dim));
+                    let prefix = if !is_cursor {
+                        "   "
+                    } else if self.ascii_glyphs {
+                        ">  "
                     } else {
-                        Style::default().fg(theme.text_dim)
+                        "\u{258e}  "
                     };
-                    let prefix = if is_cursor { "▸  " } else { "   " };
                     let name_budget = row_budget.saturating_sub(visual_width(prefix));
                     let name_text = truncate_ellipsis(name, name_budget);
                     let mut spans =

@@ -195,18 +195,20 @@ pub struct WorkspaceRowCtx<'a> {
     pub repo_prefix: Option<String>,
 }
 
+/// Gutter glyph on the cursor row: a left-edge accent bar (U+258E). The
+/// ASCII fallback is `>`.
+pub const CURSOR_BAR: &str = "▎";
+
 impl<'a> WorkspaceRowCtx<'a> {
-    /// Cursor row background. Drives `Row::fill_style` so every
-    /// column's padding inherits the highlight bg — without this
-    /// the cursor row looked broken (highlight stopping mid-row).
+    /// Row band. Drives `Row::fill_style` so every column's padding
+    /// inherits the highlight bg — without this the cursor row looked
+    /// broken (highlight stopping mid-row). The cursor row is banded in
+    /// BOTH focus states and a multi-selected row is banded too
+    /// (`Theme::row_band`, #1502).
     pub fn row_style(&self) -> Style {
-        if self.is_cursor && self.focused {
-            self.theme.row_focused()
-        } else if self.is_cursor {
-            self.theme.row_unfocused()
-        } else {
-            Style::default()
-        }
+        self.theme
+            .row_band(self.is_cursor, self.focused, self.is_selected)
+            .unwrap_or_default()
     }
 
     fn raw_title(&self) -> &'a str {
@@ -238,7 +240,7 @@ impl<'a> WorkspaceRowCtx<'a> {
 ///
 /// Order (left → right):
 ///
-/// 0. Prefix — `▶` (cursor) / ` ` (no cursor). A single shared
+/// 0. Prefix — `▎` accent bar (cursor) / `✓` (selected) / ` `. A single shared
 ///    selection gutter: the marker occupies one column reused across
 ///    every row type, instead of a 2-col marker re-added at each depth
 ///    (issue #231). Rows sit one column in from the repo header's
@@ -398,10 +400,13 @@ fn cell_prefix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // caret win this single-cell gutter would hide the mark on the very
     // row you just pressed `v` on — the "no immediate feedback" bug
     // (issue #786). Selection wins the glyph; cursor keeps the highlight.
+    // The cursor row is a full-row band (`row_style`), so its gutter
+    // glyph is a slim accent bar rather than an arrow: it marks the
+    // band's edge instead of competing with it (#1502).
     let s = if ctx.is_selected {
         "✓"
     } else if ctx.is_cursor {
-        "▶"
+        if ctx.ascii_glyphs { ">" } else { CURSOR_BAR }
     } else {
         " "
     };
@@ -910,13 +915,12 @@ fn cell_unread(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     } else {
         " ●99+".to_string()
     };
-    let style = if ctx.is_cursor {
-        ctx.row_style()
-    } else {
-        Style::default()
-            .fg(ctx.theme.hover)
-            .add_modifier(Modifier::BOLD)
-    };
+    // Keep the unread color on the band: the dot is a signal, not
+    // decoration, so the cursor row must not flatten it (#1502).
+    let style = ctx
+        .row_style()
+        .fg(ctx.theme.hover)
+        .add_modifier(Modifier::BOLD);
     Cell::from_span(Span::styled(text, style))
 }
 
@@ -1633,7 +1637,7 @@ mod tests {
     }
 
     /// Regression for issue #231: the row prefix is a single shared
-    /// 1-cell selection gutter (`▶` / ` `), not a 2-cell marker re-added
+    /// 1-cell selection gutter (`▎` / ` `), not a 2-cell marker re-added
     /// at every depth. Reclaims one column of title room on every
     /// workspace row (and #121's earlier 4→2 cut goes the rest of the
     /// way to 1).
@@ -1652,7 +1656,9 @@ mod tests {
         ctx.is_cursor = true;
         let cell = cell_prefix(&ctx);
         assert_eq!(cell.width(), 1);
-        assert_eq!(cell_text(&cell), "▶");
+        assert_eq!(cell_text(&cell), CURSOR_BAR);
+        ctx.ascii_glyphs = true;
+        assert_eq!(cell_text(&cell_prefix(&ctx)), ">");
 
         // The fixed prefix column matches the cell width so the table
         // doesn't pad the inset back out.
@@ -1700,7 +1706,7 @@ mod tests {
             let cell = cell_prefix(&ctx);
 
             assert_eq!(cell.width(), 1, "theme: {}", theme.name);
-            assert_eq!(cell_text(&cell), "▶", "theme: {}", theme.name);
+            assert_eq!(cell_text(&cell), CURSOR_BAR, "theme: {}", theme.name);
             assert_eq!(
                 cell.spans[0].style.fg,
                 Some(theme.accent),
@@ -1713,6 +1719,85 @@ mod tests {
                 theme.name
             );
         }
+    }
+
+    /// The cursor row is a full-row band in BOTH focus states (#1502):
+    /// the `fill` bg persists while the user types in the workspace's
+    /// terminal, and only the focused pane's cursor is bold. A
+    /// multi-selected row gets the band too, unbolded.
+    #[test]
+    fn cursor_row_band_persists_when_pane_unfocused_across_themes() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        for theme in crate::theme::BUILT_IN_THEMES {
+            let mut ctx = ctx_for(&ws, &task, theme);
+            ctx.is_cursor = true;
+            ctx.focused = true;
+            let focused = ctx.row_style();
+            assert_eq!(focused.bg, Some(theme.fill), "theme: {}", theme.name);
+            assert!(
+                focused.add_modifier.contains(Modifier::BOLD),
+                "focused cursor is bold: {}",
+                theme.name
+            );
+            ctx.focused = false;
+            let unfocused = ctx.row_style();
+            assert_eq!(
+                unfocused.bg,
+                Some(theme.fill),
+                "unfocused cursor keeps the band: {}",
+                theme.name
+            );
+            assert!(
+                !unfocused.add_modifier.contains(Modifier::BOLD),
+                "unfocused cursor is not bold: {}",
+                theme.name
+            );
+            ctx.is_cursor = false;
+            ctx.is_selected = true;
+            assert_eq!(
+                ctx.row_style().bg,
+                Some(theme.fill),
+                "selected row is banded: {}",
+                theme.name
+            );
+            ctx.is_selected = false;
+            assert_eq!(
+                ctx.row_style(),
+                Style::default(),
+                "plain row: {}",
+                theme.name
+            );
+        }
+    }
+
+    /// The unread dot keeps its `hover` color on the cursor band — a
+    /// signal must not flatten into the highlight (#1502).
+    #[test]
+    fn unread_badge_keeps_its_color_on_the_cursor_row() {
+        let mut task = make_task("owner/repo#1", "x");
+        task.recent_activity = (0..3)
+            .map(|i| lazybox_core::Activity {
+                author: "reviewer".into(),
+                body: format!("comment {i}"),
+                created_at: fixed_time() - chrono::Duration::minutes(i),
+                kind: lazybox_core::ActivityKind::Comment,
+                node_id: None,
+                path: None,
+                line: None,
+                diff_hunk: None,
+                thread_id: None,
+            })
+            .collect();
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        assert_eq!(ws.unread_count(), 3, "fixture carries three unread items");
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.is_cursor = true;
+        let cell = cell_unread(&ctx);
+        assert_eq!(cell_text(&cell).trim(), "●3");
+        assert_eq!(cell.spans[0].style.fg, Some(theme.hover));
+        assert_eq!(cell.spans[0].style.bg, Some(theme.fill));
     }
 
     #[test]

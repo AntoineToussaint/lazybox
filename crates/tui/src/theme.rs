@@ -342,9 +342,27 @@ impl Theme {
             .add_modifier(Modifier::BOLD)
     }
 
-    /// Selected row when the pane lacks focus — fg-only, no bg fill.
+    /// Selected row when the pane lacks focus — keeps the `fill` band so
+    /// the open workspace stays obvious while the user types in its
+    /// terminal (#1502), but drops BOLD so the focused pane's cursor
+    /// still reads as the hot one.
     pub fn row_unfocused(&self) -> Style {
-        Style::default().fg(self.text_strong)
+        Style::default().bg(self.fill).fg(self.text_strong)
+    }
+
+    /// The full-row band every sidebar row type shares (#1502): the
+    /// cursor row is banded in both focus states (bold only while the
+    /// pane has focus), a multi-selected row is banded without bold so
+    /// a `V` sweep reads as one block, and any other row is `None` so
+    /// it keeps its own colors.
+    pub fn row_band(&self, is_cursor: bool, focused: bool, selected: bool) -> Option<Style> {
+        if is_cursor && focused {
+            Some(self.row_focused())
+        } else if is_cursor || selected {
+            Some(self.row_unfocused())
+        } else {
+            None
+        }
     }
 
     /// Unread / "new" badge inline.

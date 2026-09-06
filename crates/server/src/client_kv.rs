@@ -125,16 +125,20 @@ pub fn snippet_keepmine(store: &dyn lazybox_store::Store) -> Vec<String> {
 
 /// Add `delta_micros` to the persisted running cost for `session_key`, so
 /// the per-workspace meter figure accumulates across a restart (#1389).
-/// Read-modify-write on the blocking pool; callers invoke it one at a time
-/// (the metering subscriber awaits each), so no two writes race the same
-/// key. Best-effort — a lost write is a bounded under-count, never
-/// destructive.
+/// Read-modify-write on the blocking pool. The metering subscriber is no
+/// longer the only writer of this keyspace — the issue→PR fold
+/// ([`move_session_cost`]) read-modify-writes the same keys from a different
+/// task — so the RMW runs under `config.session_cost_lock` to keep the two
+/// from interleaving and losing an update. Best-effort — a lost write is a
+/// bounded under-count, never destructive.
 pub async fn add_session_cost(config: &ServerConfig, session_key: String, delta_micros: u64) {
     if delta_micros == 0 {
         return;
     }
     let store = config.store.clone();
+    let cost_lock = config.session_cost_lock.clone();
     let result = tokio::task::spawn_blocking(move || {
+        let _guard = cost_lock.lock();
         let kv_key = format!("{SESSION_COST_KV_PREFIX}{session_key}");
         let current = store
             .get_kv(&kv_key)
@@ -161,6 +165,11 @@ pub async fn add_session_cost(config: &ServerConfig, session_key: String, delta_
 /// already on the blocking pool. Returns whether anything moved — `false`
 /// for a `from` with no row, a self-move, or a failed write — so a caller
 /// knows whether the per-session costs need re-shipping.
+///
+/// Production callers MUST hold `ServerConfig::session_cost_lock` for the
+/// duration of this call: it read-modify-writes the same `meter-cost:` keys
+/// as [`add_session_cost`], and without the shared lock the two interleave
+/// and lose an update. (Single-threaded tests call it directly.)
 pub fn move_session_cost(store: &dyn lazybox_store::Store, from: &str, to: &str) -> bool {
     if from == to {
         return false;
@@ -186,12 +195,14 @@ pub fn move_session_cost(store: &dyn lazybox_store::Store, from: &str, to: &str)
     true
 }
 
-/// Drop the persisted cost row for `session_key`. Called when a workspace
-/// is *deleted* outright, and when its cost has been folded into another
-/// key ([`move_session_cost`]). Deliberately NOT called on archive: an
-/// archived merged PR's total is the durable "what did this PR cost"
-/// record, so it stays. Best-effort: a failed delete just leaves a dead row
-/// that renders under no workspace, never destructible history.
+/// Drop the persisted cost row for `session_key`. Called on a genuine
+/// workspace teardown — a delete/retire/rescope, the non-archiving
+/// [`WorkspaceRemovalReason`](crate::workspace)s (via
+/// `reclaim_workspace_worktrees`) — and when a row's cost has been folded
+/// into another key ([`move_session_cost`]). Deliberately NOT called on an
+/// archive: an archived merged PR's total is the durable "what did this PR
+/// cost" record, so it stays. Best-effort: a failed delete just leaves a
+/// dead row that renders under no workspace, never destructible history.
 pub fn clear_session_cost(store: &dyn lazybox_store::Store, session_key: &str) {
     let kv_key = format!("{SESSION_COST_KV_PREFIX}{session_key}");
     if let Err(e) = store.delete_kv(&kv_key) {

@@ -399,6 +399,14 @@ pub struct ServerConfig {
     /// set insert; without this lock two concurrent deletes can each load the
     /// old set and overwrite the other's tombstone.
     pub archive_updates: Arc<parking_lot::Mutex<()>>,
+    /// Serializes the per-session `meter-cost:` read-modify-write cycle. The
+    /// metering subscriber is no longer the only writer — the issue→PR cost
+    /// fold (`client_kv::move_session_cost`) also read-modify-writes the same
+    /// keys from a different task — so without this lock the two can interleave
+    /// and lose an update (the fold's folded total or a concurrent proxy
+    /// delta). Both writers take it inside their blocking section, mirroring
+    /// `archive_updates`.
+    pub(crate) session_cost_lock: Arc<parking_lot::Mutex<()>>,
     /// Serializes workspace-key allocation through the matching durable
     /// insert. Allocation is a check-then-save loop; without this boundary,
     /// concurrent creates with the same display name can both observe the
@@ -574,6 +582,7 @@ impl ServerConfig {
             working_claim_error_reports: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             deleted_workspaces: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             archive_updates: Arc::new(parking_lot::Mutex::new(())),
+            session_cost_lock: Arc::new(parking_lot::Mutex::new(())),
             workspace_creations: Arc::new(parking_lot::Mutex::new(())),
             undecodable_row_reports: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             event_metrics: Arc::new(metrics::EventMetrics::default()),

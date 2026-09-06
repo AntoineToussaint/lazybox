@@ -4233,9 +4233,15 @@ async fn fold_issue_costs_into_pr(
     pr_key: &WorkspaceKey,
 ) {
     let store = config.store.clone();
+    let cost_lock = config.session_cost_lock.clone();
     let issue_keys: Vec<String> = issue_keys.iter().map(|k| k.as_str().to_string()).collect();
     let pr_key = pr_key.as_str().to_string();
     let costs = tokio::task::spawn_blocking(move || {
+        // Hold the shared cost lock across the whole fold so each move's
+        // read-modify-write, and the final snapshot read, can't interleave
+        // with a concurrent `add_session_cost` on the same PR key and lose an
+        // update (see `ServerConfig::session_cost_lock`).
+        let _guard = cost_lock.lock();
         let mut moved_any = false;
         for issue_key in &issue_keys {
             moved_any |= crate::client_kv::move_session_cost(&*store, issue_key, &pr_key);

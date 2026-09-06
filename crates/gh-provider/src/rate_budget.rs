@@ -350,6 +350,24 @@ impl Snapshot {
             retry,
         )
     }
+
+    /// The instant GitHub traffic fully resumes when the token is on a
+    /// rate-limit pause — the latest future `retry_at` across BOTH the
+    /// secondary cooldown ([`retry_at`](Self::retry_at)) and every open
+    /// primary-window circuit ([`ResourceSnapshot::eligible_at`]); `None`
+    /// when nothing is paused. [`retry_at`](Self::retry_at) alone reflects
+    /// only the secondary cooldown, so a caller gating on a pause (e.g.
+    /// auto-merge deferring a probe) MUST use this to also see an
+    /// exhausted primary window — otherwise a primary-exhausted token
+    /// looks idle and the gate never fires.
+    pub fn paused_until(&self) -> Option<DateTime<Utc>> {
+        let now = Utc::now();
+        self.retry_at
+            .into_iter()
+            .chain(self.resources.iter().filter_map(|r| r.eligible_at))
+            .filter(|at| *at > now)
+            .max()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1872,6 +1890,38 @@ mod tests {
             mono_now + Duration::from_secs(60),
         );
         assert!(after.graphql_points < before.graphql_points);
+    }
+
+    #[test]
+    fn paused_until_reflects_an_exhausted_primary_window() {
+        let wall_now = Utc::now();
+        let mono_now = Instant::now();
+        let reset = wall_now + chrono::Duration::hours(1);
+        let mut budget = RateBudget::new(100, 6000.0);
+
+        // Healthy window: nothing paused.
+        budget.observe_primary("graphql", 5000, 5000, 0, reset, mono_now);
+        assert_eq!(
+            budget.snapshot().paused_until(),
+            None,
+            "a healthy token is not paused"
+        );
+
+        // Primary window exhausted (remaining == 0) opens a primary
+        // circuit — NOT a secondary cooldown, so `retry_at` stays None.
+        // `paused_until` must still report the pause, else auto-merge's
+        // gate would fire a doomed probe every changed poll for the hour.
+        budget.observe_primary("graphql", 5000, 0, 5000, reset, mono_now);
+        let snap = budget.snapshot();
+        assert_eq!(
+            snap.retry_at, None,
+            "a primary exhaustion is not a secondary cooldown"
+        );
+        assert_eq!(
+            snap.paused_until(),
+            Some(reset + chrono::Duration::seconds(1)),
+            "paused_until sees the exhausted primary window"
+        );
     }
 
     #[test]

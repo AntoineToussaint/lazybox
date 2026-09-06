@@ -341,9 +341,11 @@ impl MergeBackend for lazybox_gh::GhClient {
     }
 
     fn paused_until(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-        self.rate_snapshot()
-            .retry_at
-            .filter(|at| *at > chrono::Utc::now())
+        // Effective pause across BOTH the secondary cooldown and any
+        // exhausted primary window — `retry_at` alone would miss a
+        // primary-exhausted token and leave the gate inert (see
+        // `Snapshot::paused_until`).
+        self.rate_snapshot().paused_until()
     }
 }
 
@@ -363,8 +365,14 @@ pub fn transient_merge_rejection(message: &str) -> bool {
         "changes requested",
         "approving review",
         "review is required",
+        // A concurrent merge (native auto-merge, the merge queue, a manual
+        // `g m`) is still running. Kept SPECIFIC on purpose: a bare
+        // "in progress" would misclassify any permanent failure whose text
+        // happens to contain the phrase as transient, re-firing a doomed
+        // merge mutation — and a red PrMergeFailed — on every changed poll.
+        // The pending-check phrasings ("… is in progress") already match
+        // via "status check" above.
         "merge already in progress",
-        "in progress",
     ]
     .iter()
     .any(|marker| lower.contains(marker))
@@ -555,6 +563,17 @@ pub async fn run_attempt<B: MergeBackend>(
         return;
     }
 
+    // A green-but-held PR (a still-unopted author, a still-open stacked
+    // parent) re-fires `Signal::Fire` every changed poll — `signal_for`
+    // is author-agnostic and the fresh row is green — so a widened
+    // `Blocked` re-probe would re-broadcast the identical stand-down
+    // notice on every comment / CI-check flap. #845 wanted the decline
+    // audible ONCE, not re-flashed forever. `restore` carries the prior
+    // verdict; an unchanged `Blocked` head means we already announced
+    // this stand-down, so re-probe silently and let the terminal outcome
+    // (merge, or a genuinely new reason) be the next audible signal.
+    let already_announced = ticket.restore.as_ref() == Some(&Latch::Blocked(head.clone()));
+
     // Re-verify against the FRESH state — this is the whole point of
     // the re-fetch. A changes-requested/red-CI/closed/draft arriving
     // after the last poll aborts here instead of being merged over.
@@ -565,10 +584,12 @@ pub async fn run_attempt<B: MergeBackend>(
     // opted in stands down with a logged + broadcast reason (issue #845).
     if let Some(reason) = lazybox_core::auto_merge_block_reason(&probe, policy) {
         tracing::info!(workspace = %key, reason, "auto-merge: fresh re-check stood down");
-        let _ = config.bus.send(Event::provider_error_retryable(
-            "auto-merge",
-            format!("auto-merge stood down on {pr_label}: {reason}"),
-        ));
+        if !already_announced {
+            let _ = config.bus.send(Event::provider_error_retryable(
+                "auto-merge",
+                format!("auto-merge stood down on {pr_label}: {reason}"),
+            ));
+        }
         settle(Some(Latch::Blocked(head)));
         commit_fresh_task(config, key, fresh).await;
         return;
@@ -586,10 +607,12 @@ pub async fn run_attempt<B: MergeBackend>(
     // order.
     if stacked_on_open_parent(config, &fresh).await {
         tracing::info!(workspace = %key, "auto-merge: stacked on an open parent — standing down");
-        let _ = config.bus.send(Event::provider_error_retryable(
-            "auto-merge",
-            format!("auto-merge held on {pr_label}: stacked on a still-open parent PR"),
-        ));
+        if !already_announced {
+            let _ = config.bus.send(Event::provider_error_retryable(
+                "auto-merge",
+                format!("auto-merge held on {pr_label}: stacked on a still-open parent PR"),
+            ));
+        }
         settle(Some(Latch::Blocked(head)));
         commit_fresh_task(config, key, fresh).await;
         return;
@@ -637,8 +660,12 @@ pub async fn run_attempt<B: MergeBackend>(
             tracing::warn!(workspace = %key, "auto-merge failed: {}", e.diagnostic());
             // A "not yet" (checks expected / pending, base moved) keeps
             // the head re-probable so it merges once it clears; a hard
-            // rejection stands the head down until a new commit.
-            if transient_merge_rejection(&e.user_message()) {
+            // rejection stands the head down until a new commit. Classify
+            // on the FULL diagnostic, not `user_message()` — the latter is
+            // the first line only for a `Permanent` error, so a reason on a
+            // later line (or after a "; "-joined first clause) would be
+            // silently dropped and the head misclassified as a hard reject.
+            if transient_merge_rejection(&e.diagnostic()) {
                 settle(Some(Latch::Blocked(head)));
             } else {
                 settle(Some(Latch::Rejected(head)));
@@ -904,9 +931,39 @@ mod tests {
             "Pull Request has merge conflicts",
             "Repository rule violations found",
             "not authorized to merge",
+            // The over-broad "in progress" trap: a hard failure that merely
+            // mentions the phrase must NOT be treated as transient (else it
+            // re-fires a doomed mutation + red notice every changed poll).
+            "Merge blocked: a required deployment is in progress and failed",
         ] {
             assert!(!transient_merge_rejection(msg), "{msg}");
         }
+    }
+
+    /// The classifier runs on `ProviderError::diagnostic()` at the call
+    /// site, not `user_message()` — which for a `Permanent` error is the
+    /// FIRST LINE only. A reason on a later line must still classify: this
+    /// is the fidelity the direct-string test above cannot exercise.
+    #[test]
+    fn classifier_sees_a_reason_past_the_first_line_via_diagnostic() {
+        // A multi-line detail whose transient reason is NOT on line one.
+        let err = lazybox_core::ProviderError::permanent(
+            "github",
+            "GraphQL error: merge could not be completed\nBase branch was modified. Review and try the merge again.",
+        );
+        assert_eq!(
+            err.user_message(),
+            "github: GraphQL error: merge could not be completed",
+            "user_message truncates to the first line — the reason is lost"
+        );
+        assert!(
+            !transient_merge_rejection(&err.user_message()),
+            "the first line alone misclassifies the transient reason as hard"
+        );
+        assert!(
+            transient_merge_rejection(&err.diagnostic()),
+            "the full diagnostic preserves the transient reason"
+        );
     }
 
     /// Client-era `confirmed_merge_suppresses_a_redundant_auto_merge`:
@@ -1185,6 +1242,51 @@ mod tests {
                 assert!(message.contains("your own PRs"), "{message}");
             }
             other => panic!("expected a ProviderError notice, got {other:?}"),
+        }
+    }
+
+    /// #845 wanted a non-own PR's decline audible ONCE. A green-but-held
+    /// PR re-fires `Signal::Fire` every changed poll (`signal_for` is
+    /// author-agnostic and the row is green), so a widened `Blocked`
+    /// re-probe on the SAME head must stand down SILENTLY — no re-flashed
+    /// footer notice on every comment / CI-check flap.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_reprobe_on_the_same_blocked_head_stands_down_silently() {
+        let ws = armed_bot_ws("o/r#1", "dependabot[bot]");
+        let config = config_with(&ws);
+        let mut rx = config.bus.subscribe();
+        let mut fresh = green_task("o/r#1");
+        fresh.role = TaskRole::Mentioned;
+        fresh.author = "dependabot[bot]".into();
+        let backend = FakeBackend::merging(fresh, "abc123");
+
+        // The re-probe ticket `plan` issues for a `Blocked` head already
+        // stood down on "abc123" (`restore == Blocked(Some("abc123"))`).
+        run_attempt(
+            &config,
+            blocked_ticket(&ws, "abc123"),
+            &own_policy(),
+            &backend,
+        )
+        .await;
+
+        assert!(backend.merges.lock().is_empty(), "must not merge");
+        assert_eq!(
+            config.poll.auto_merge.lock().latch(&ws.key),
+            Some(&Latch::Blocked(Some("abc123".into()))),
+            "still held on the same head"
+        );
+        // No auto-merge stand-down notice on the re-probe — the first one
+        // already fired. (commit_fresh_task's own upserts may ride the bus;
+        // only an auto-merge ProviderError is forbidden here.)
+        while let Ok(evt) = rx.try_recv() {
+            if let Event::ProviderError { source, .. } = &evt {
+                assert_ne!(
+                    source.as_str(),
+                    "auto-merge",
+                    "a same-head re-probe must not re-flash the decline"
+                );
+            }
         }
     }
 

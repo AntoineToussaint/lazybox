@@ -150,11 +150,20 @@ watched repos (the *roster*):
   first. Run in a single tick, a 28-repo reconcile (~84 requests)
   emptied the 30-request local bucket and left the heartbeat, detail
   prefetch and the user's own `g m` pre-check refused for ~3 minutes.
-  Each batch's completed members are authoritative for rescope
-  (`PolledScope::Repos`); a failed member is preserved and retried on
-  the rotation. The reconcile timer re-arms once the last batch has
-  run, so a member that overflows its page cap cannot make the whole
-  roster re-run every tick.
+  Each batch reports `PolledScope::Reconcile { swept, roster }`: it
+  retires gone rows within the members it swept this tick AND rows whose
+  repo has left the roster entirely (a de-scoped repo — which can hold no
+  live in-scope row), while preserving a roster member swept by a
+  *different* batch (this tick never fetched it) and a member whose query
+  failed. De-scope retirement was previously carried by an `Exhaustive`
+  coverage report, but that only ever fired when the whole roster fit one
+  batch — essentially a single-repo roster under the default cadence — so
+  batching had silently stopped retiring de-scoped rows; expressing the
+  authority per-batch restores it without the per-tick-complete
+  assumption `Exhaustive` makes (which under batching would delete the
+  other batches' live rows). The reconcile timer re-arms once the last
+  batch has run, so a member that overflows its page cap cannot make the
+  whole roster re-run every tick.
 - **`g s`** stays the interactive "sync this repo now": the focused
   row's PR/issue plus the repo's open PRs and issues, at interactive
   priority, outside the poll loop.

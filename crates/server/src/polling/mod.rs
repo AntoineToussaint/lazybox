@@ -480,7 +480,6 @@ pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnaps
 #[cfg(test)]
 mod polled_list_tests {
     use super::{PolledScope, repo_first_polled_scope, repo_in_polled_list};
-    use lazybox_core::FetchCoverage;
 
     #[test]
     fn repo_in_polled_list_matches_repo_and_org() {
@@ -496,48 +495,80 @@ mod polled_list_tests {
     #[test]
     fn rotation_and_windowed_passes_never_delete() {
         let completed = vec!["acme".to_string()];
+        let roster = vec!["acme".to_string()];
         assert_eq!(
-            repo_first_polled_scope(false, true, FetchCoverage::Complete, false, &completed),
+            repo_first_polled_scope(false, false, &completed, &roster),
             PolledScope::Repos(Vec::new())
         );
         assert_eq!(
-            repo_first_polled_scope(true, true, FetchCoverage::Complete, true, &completed),
+            repo_first_polled_scope(true, true, &completed, &roster),
             PolledScope::Repos(Vec::new())
         );
     }
 
-    /// A fully-successful reconcile is authoritative over the whole inbox.
+    /// A reconcile batch reports the members it swept AND the current
+    /// in-scope universe, so `rescope` can both retire gone rows within
+    /// the swept members and retire rows for a de-scoped repo (one no
+    /// longer in the roster). Replaces the old whole-roster-only
+    /// `Exhaustive`, which batching had made unreachable for any 2+-repo
+    /// roster (#1501 review 🔴).
     #[test]
-    fn complete_reconcile_is_exhaustive() {
-        assert_eq!(
-            repo_first_polled_scope(true, true, FetchCoverage::Complete, false, &[]),
-            PolledScope::Exhaustive
-        );
-    }
-
-    /// One clean batch of a multi-tick reconcile covered only its own
-    /// members: authoritative for them, never for the whole inbox.
-    #[test]
-    fn batch_of_a_multi_tick_reconcile_is_authoritative_for_its_members_only() {
+    fn reconcile_batch_reports_swept_members_and_the_in_scope_universe() {
         let completed = vec!["acme".to_string()];
+        let in_scope = vec!["acme".to_string(), "zed/editor".to_string()];
         assert_eq!(
-            repo_first_polled_scope(true, false, FetchCoverage::Complete, false, &completed),
-            PolledScope::Repos(completed)
+            repo_first_polled_scope(true, false, &completed, &in_scope),
+            PolledScope::Reconcile {
+                swept: completed,
+                roster: in_scope,
+            }
         );
     }
 
-    /// Regression for the review's 🔴 finding: a PARTIAL reconcile — one
-    /// member (e.g. an `org:` scope past the 100-open-PR page cap) erroring
-    /// on every pass — must NOT surrender retirement authority for the whole
-    /// inbox. The members that completed still retire their own gone rows.
+    /// A PARTIAL reconcile — one member (e.g. an `org:` scope past the
+    /// 100-open-PR page cap) erroring on every pass — must NOT surrender
+    /// retirement authority for the members that DID complete. Those still
+    /// appear in `swept`; the erroring member (still in `roster`, absent
+    /// from `swept`) is preserved rather than deleted or de-scoped.
     #[test]
-    fn partial_reconcile_retires_within_completed_members() {
-        let completed = vec!["acme".to_string(), "zed/editor".to_string()];
+    fn partial_reconcile_sweeps_only_completed_members() {
+        let completed = vec!["acme".to_string()];
+        let in_scope = vec!["acme".to_string(), "zed/editor".to_string()];
         assert_eq!(
-            repo_first_polled_scope(true, true, FetchCoverage::Partial, false, &completed),
-            PolledScope::Repos(completed),
-            "one truncating member must not veto retirement for the completed ones"
+            repo_first_polled_scope(true, false, &completed, &in_scope),
+            PolledScope::Reconcile {
+                swept: completed,
+                roster: in_scope,
+            },
+            "a truncating member must not veto retirement for the completed ones"
         );
+    }
+
+    /// The core of the review's 🔴 finding, at the rescope decision: a
+    /// batched reconcile must retire a de-scoped repo's leftovers, retire
+    /// gone rows within its swept members, and PRESERVE a roster member
+    /// swept by a different batch of the same reconcile (this tick never
+    /// fetched it, so its absence from `polled` is not evidence it is
+    /// gone).
+    #[test]
+    fn reconcile_scope_retires_de_scoped_and_swept_but_preserves_other_batch() {
+        let scope = PolledScope::Reconcile {
+            swept: vec!["acme/widgets".to_string()],
+            roster: vec!["acme/widgets".to_string(), "acme/api".to_string()],
+        };
+        let authoritative = |repo: &str| match &scope {
+            PolledScope::Reconcile { swept, roster } => {
+                repo_in_polled_list(repo, swept)
+                    || (!roster.is_empty() && !repo_in_polled_list(repo, roster))
+            }
+            _ => unreachable!(),
+        };
+        // Swept this batch → its gone rows are retirable.
+        assert!(authoritative("acme/widgets"));
+        // De-scoped (not in the roster at all) → retirable.
+        assert!(authoritative("old/removed"));
+        // In the roster but swept by ANOTHER batch → preserved.
+        assert!(!authoritative("acme/api"));
     }
 }
 
@@ -1088,6 +1119,30 @@ pub enum PolledScope {
     /// must be preserved — we have no information about them this
     /// tick.
     Repos(Vec<String>),
+    /// One batch of a (possibly multi-tick) repo-first reconcile.
+    /// Authoritative to retire two disjoint sets, and nothing else:
+    ///
+    /// - `swept` — the members whose every query completed THIS tick.
+    ///   Their gone rows (not in `polled`) are retired, exactly like
+    ///   [`PolledScope::Repos`]. A roster member swept in a DIFFERENT
+    ///   batch of the same reconcile is in `roster` but not `swept`, so
+    ///   its live rows are preserved (this tick never fetched them).
+    /// - Rows whose repo is in NEITHER `swept` NOR `roster` — a repo the
+    ///   user de-scoped entirely. Such a repo cannot have a live in-scope
+    ///   row, so retiring its leftovers is safe on ANY batch. This is the
+    ///   authority `Exhaustive` used to carry for the whole-roster
+    ///   single-tick reconcile; expressing it per-batch is what lets a
+    ///   BATCHED reconcile still retire de-scoped rows without the
+    ///   per-tick-complete assumption `Exhaustive` makes (which, under
+    ///   batching, would delete the OTHER batches' live rows).
+    ///
+    /// `roster` is the current in-scope universe (roster ∪ session-bearing
+    /// repos). Never produced with an empty `roster` — an empty roster is
+    /// not repo-first, so it never reaches this path.
+    Reconcile {
+        swept: Vec<String>,
+        roster: Vec<String>,
+    },
 }
 
 /// Whether `repo` (`owner/name`) is covered by a [`PolledScope::Repos`]
@@ -1141,38 +1196,35 @@ pub fn gh_polled_scope(
 }
 
 /// Repo-first equivalent of [`gh_polled_scope`]. Deletion authority
-/// belongs only to a reconcile pass (unwindowed over the whole roster):
+/// belongs only to a reconcile pass (unwindowed over the roster):
 ///
 /// - A rotation slice — or any windowed pass — reports empty coverage.
-/// - A fully-successful reconcile reports `Exhaustive`: authoritative
-///   over the ENTIRE inbox, so it can retire rows whose repo has left
-///   the roster completely (a de-scoped repo).
-/// - A PARTIAL reconcile (one member truncated its page cap or errored)
-///   reports the members that DID complete their exhaustive open-set as
-///   an authoritative `Repos(completed_members)` set. Before this, a
-///   single high-volume member — e.g. an `org:` scope past the 100-open-PR
-///   page cap, which errors on every reconcile — kept coverage partial
-///   and so vetoed retirement for the WHOLE inbox indefinitely, leaving
-///   merged/closed/transferred rows stuck open forever. `completed_members`
+/// - A reconcile batch reports [`PolledScope::Reconcile`] carrying
+///   `completed_members` (the members whose exhaustive open-set queries
+///   all succeeded THIS tick — even a PARTIAL reconcile lists the ones
+///   that completed, so a single truncating/erroring member no longer
+///   vetoes retirement for the rest) and the current `in_scope`
+///   universe. That variant retires gone rows within the swept members
+///   AND rows whose repo has left the roster entirely (a de-scoped
+///   repo). It replaces the old `Exhaustive` reconcile output, which was
+///   only ever reachable when the WHOLE roster fit one batch — i.e.
+///   essentially a single-repo roster under the default cadence, so it
+///   silently stopped retiring de-scoped rows once the reconcile was
+///   split into fan-out batches (#1501 review 🔴/🟡). `completed_members`
 ///   may hold `org` entries; [`repo_in_polled_list`] expands them so a
 ///   completed org member still retires its children.
 pub fn repo_first_polled_scope(
     reconcile: bool,
-    whole_roster: bool,
-    coverage: lazybox_core::FetchCoverage,
     windowed: bool,
     completed_members: &[String],
+    in_scope: &[String],
 ) -> PolledScope {
     if !reconcile || windowed {
         return PolledScope::Repos(Vec::new());
     }
-    // Only a clean batch that covered the ENTIRE roster in one tick is
-    // exhaustive; a batch of a multi-tick reconcile — however clean — is
-    // authoritative for its own members alone.
-    if whole_roster && !coverage.is_partial() {
-        PolledScope::Exhaustive
-    } else {
-        PolledScope::Repos(completed_members.to_vec())
+    PolledScope::Reconcile {
+        swept: completed_members.to_vec(),
+        roster: in_scope.to_vec(),
     }
 }
 
@@ -2546,6 +2598,21 @@ pub async fn rescope_with_state(
                     .repo
                     .as_deref()
                     .is_some_and(|r| repo_in_polled_list(r, repos)),
+                // A reconcile batch retires within the members it swept
+                // this tick, AND retires rows for a repo that has left the
+                // roster entirely (de-scoped) — that repo has no live
+                // in-scope row, so its leftovers are safe to reap on any
+                // batch. A row whose repo is still in the roster but was
+                // swept by a DIFFERENT batch is neither `swept` nor
+                // out-of-`roster`, so it is preserved. The non-empty
+                // `roster` guard is defence-in-depth: an empty universe
+                // must never make every row read as "de-scoped".
+                Some(PolledScope::Reconcile { swept, roster }) => {
+                    task.repo.as_deref().is_some_and(|r| {
+                        repo_in_polled_list(r, swept)
+                            || (!roster.is_empty() && !repo_in_polled_list(r, roster))
+                    })
+                }
             };
             if !in_authoritative_scope {
                 tracing::debug!(
@@ -5482,6 +5549,93 @@ mod rescope_collapse_tests {
             source_scopes,
             all_full: true,
         }
+    }
+
+    fn gh_task_in(repo: &str, number: u64, state: TaskState) -> Task {
+        let key = format!("{repo}#{number}");
+        let url = format!("https://github.com/{repo}/pull/{number}");
+        let mut t = gh_task(&key, &url, state, vec![]);
+        t.repo = Some(repo.to_string());
+        t
+    }
+
+    fn reconcile_github_tick(
+        polled: Vec<WorkspaceKey>,
+        swept: &[&str],
+        roster: &[&str],
+    ) -> TickOutcome {
+        let mut source_scopes = std::collections::HashMap::new();
+        source_scopes.insert(
+            "github".to_string(),
+            PolledScope::Reconcile {
+                swept: swept.iter().map(|s| s.to_string()).collect(),
+                roster: roster.iter().map(|s| s.to_string()).collect(),
+            },
+        );
+        TickOutcome {
+            polled,
+            any_source_succeeded: true,
+            retry_after_secs: None,
+            saw_unknown_mergeable: false,
+            source_scopes,
+            all_full: true,
+        }
+    }
+
+    /// Regression for the #1501 review's 🔴 finding. A repo-first
+    /// reconcile is drained in fan-out batches, so no single tick sweeps
+    /// the whole roster — the old whole-roster `Exhaustive` scope became
+    /// unreachable and de-scoped repos' rows leaked forever. One reconcile
+    /// batch (`PolledScope::Reconcile`) must, in a single tick:
+    ///   - retire a gone row within a member it swept this tick,
+    ///   - retire a row whose repo has left the roster entirely (de-scoped),
+    ///   - PRESERVE a live row for a roster member swept by a DIFFERENT
+    ///     batch (absent from this tick's poll only because this tick
+    ///     never fetched it), and
+    ///   - preserve a still-open row it swept this tick.
+    #[tokio::test]
+    async fn reconcile_batch_retires_de_scoped_and_gone_but_keeps_other_batch() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        // Swept this batch, still open upstream → in the poll → survives.
+        let widgets_open = Workspace::from_task(gh_task_in("acme/widgets", 1, TaskState::Open), Utc::now());
+        // Swept this batch, gone upstream (closed/merged) → not polled.
+        let widgets_gone = Workspace::from_task(gh_task_in("acme/widgets", 2, TaskState::Open), Utc::now());
+        // Roster member swept by ANOTHER batch → not polled THIS tick.
+        let api_other_batch = Workspace::from_task(gh_task_in("acme/api", 9, TaskState::Open), Utc::now());
+        // Repo removed from the roster entirely (de-scoped) → not polled.
+        let de_scoped = Workspace::from_task(gh_task_in("old/removed", 3, TaskState::Open), Utc::now());
+        for ws in [&widgets_open, &widgets_gone, &api_other_batch, &de_scoped] {
+            assert!(!ws.local, "provider PR workspaces are local=false");
+            seed(&store, ws);
+        }
+
+        let outcome = reconcile_github_tick(
+            vec![widgets_open.key.clone()],
+            &["acme/widgets"],
+            &["acme/widgets", "acme/api"],
+        );
+        let mut state = TickState::default();
+        rescope_with_state(&config, &outcome, &mut state).await;
+
+        assert!(
+            load_workspace(&config, &widgets_open.key).is_some(),
+            "a still-open row the batch swept must survive"
+        );
+        assert!(
+            load_workspace(&config, &widgets_gone.key).is_none(),
+            "a gone row within a swept member must be retired"
+        );
+        assert!(
+            load_workspace(&config, &api_other_batch.key).is_some(),
+            "a member swept by another batch must be preserved, not deleted"
+        );
+        assert!(
+            load_workspace(&config, &de_scoped.key).is_none(),
+            "a de-scoped repo's leftover row must be retired (the capability \
+             the batched reconcile lost when Exhaustive became unreachable)"
+        );
     }
 
     /// Regression for #924: switching GitHub identity re-scopes the

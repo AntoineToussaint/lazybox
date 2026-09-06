@@ -4727,7 +4727,7 @@ snippets:
             "all-skipped send must not clear the marks",
         );
 
-        // Delivered broadcast: selection survives (#1449).
+        // Delivered broadcast: the action consumes the selection (#1498).
         let expected_targets = m.sidebar.selected_broadcast_keys();
         m.mount_broadcast_picker();
         assert_eq!(

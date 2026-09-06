@@ -1073,9 +1073,9 @@ impl<T: TerminalAdapter> Model<T> {
     /// `dispatch_action_confirmed`, so its eligibility re-check and
     /// optimistic UI are unchanged; a target that yields no command
     /// (gone, or no longer eligible — merged, conflicted) is counted as
-    /// skipped. The multi-select is consumed by the action (#1498) so the
-    /// acted on again (`g d` then `x x`); a single aggregate summary,
-    /// naming the still-live selection, replaces the per-target chatter.
+    /// skipped. The multi-select is consumed by the action (#1498), so
+    /// acting on the same set again means re-marking it; a single
+    /// aggregate summary replaces the per-target chatter.
     /// Iterates the *snapshot* captured at mount, never the live selection.
     pub(crate) fn dispatch_action_confirmed_bulk(
         &mut self,
@@ -2971,12 +2971,9 @@ impl<T: TerminalAdapter> Model<T> {
                     // Only a *local* spawn pins the focus-follow. A
                     // `SpawnRemote` runs on another box and never produces
                     // a local `TerminalSpawned`, so arming `spawn_follow_to`
-                    // for it would leave a pin nothing ever consumes: it
-                    // would suppress this bulk's "N still selected" suffix
-                    // (the selection actually survives, focus never left the
-                    // sidebar) and — because it lingers — silently strip the
-                    // suffix off the *next* unrelated bulk summary too
-                    // (#1482; `flash_bulk_outcome` reads `spawn_follow_to`).
+                    // for it would leave a pin nothing ever consumes — it
+                    // would linger and pull the focus of the *next*
+                    // unrelated local spawn instead (#1482).
                     if matches!(step, super::BulkAgentStep::Spawn(_)) {
                         plan.follow.get_or_insert(follow);
                     }

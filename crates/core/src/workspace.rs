@@ -2140,7 +2140,10 @@ mod tile_tree_tests {
         let TileTree::HSplit { left, right, .. } = quad else {
             panic!("outer split should be horizontal, got {quad:?}");
         };
-        assert!(matches!(*left, TileTree::VSplit { .. }), "left column stacks");
+        assert!(
+            matches!(*left, TileTree::VSplit { .. }),
+            "left column stacks"
+        );
         assert!(
             matches!(*right, TileTree::VSplit { .. }),
             "right column stacks"

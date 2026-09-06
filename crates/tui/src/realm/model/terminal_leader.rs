@@ -566,7 +566,8 @@ mod tests {
 
         let tabs = LeaderCmd::menu_rows(false, 1, NewTerminalLayout::Tabs, None);
         assert!(
-            tabs.iter().any(|(k, l)| k == "t" && l == "switch to splits"),
+            tabs.iter()
+                .any(|(k, l)| k == "t" && l == "switch to splits"),
             "on tabs the row must offer splits: {tabs:?}",
         );
 

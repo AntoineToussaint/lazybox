@@ -517,10 +517,21 @@ pub(super) struct RepoSweepPlan {
     /// Roster members (`owner/name` repos, bare `owner` orgs) to sweep
     /// this tick. Empty on a hot-only tick.
     pub members: Vec<String>,
-    /// Unwindowed pass over the whole roster (periodic cadence or a
-    /// manual `Shift-R`): exhaustive for every member's open set, so it
-    /// reports `Exhaustive` coverage on success.
+    /// Unwindowed batch of a reconcile (periodic cadence or a manual
+    /// `Shift-R`): exhaustive for each member's open set, so the members
+    /// that complete are authoritative for rescope.
     pub reconcile: bool,
+    /// This batch empties the reconcile queue; the sweep timer re-arms
+    /// once it has run.
+    pub reconcile_final: bool,
+    /// The current in-scope universe (roster ∪ session-bearing repos)
+    /// for a reconcile batch, so `polled_scope` can retire rows whose
+    /// repo has left it (de-scoped) while preserving members swept by
+    /// other batches of the same reconcile. Only populated (and only
+    /// consumed) on a reconcile batch; empty otherwise.
+    pub in_scope: Vec<String>,
+    /// Members still queued after this batch.
+    pub reconcile_remaining: usize,
     /// Roster size, for status text.
     pub roster_len: usize,
 }
@@ -788,7 +799,11 @@ impl GhSource {
             at.to_rfc3339()
         } else if let Some(plan) = &self.repo_sweep {
             if plan.reconcile {
-                format!("repo-first reconcile ({} members)", plan.members.len())
+                format!(
+                    "repo-first reconcile ({} members this tick, {} queued)",
+                    plan.members.len(),
+                    plan.reconcile_remaining
+                )
             } else if plan.members.is_empty() {
                 format!(
                     "notification heartbeat / hot targets (roster {} members)",
@@ -1491,7 +1506,7 @@ impl GhSource {
             .collect();
         let windowed = specs.iter().any(|spec| spec.since.is_some());
         self.emit_progress(format!(
-            "Querying GitHub repo-first ({}: {} of {} repos{})…",
+            "Querying GitHub repo-first ({}: {} of {} repos{}{})…",
             if plan.reconcile {
                 "reconcile"
             } else {
@@ -1500,6 +1515,11 @@ impl GhSource {
             specs.len(),
             plan.roster_len,
             if windowed { ", windowed" } else { "" },
+            if plan.reconcile && plan.reconcile_remaining > 0 {
+                format!(", {} more queued", plan.reconcile_remaining)
+            } else {
+                String::new()
+            },
         ));
         for spec in &specs {
             self.emit_progress(format!(
@@ -1524,8 +1544,11 @@ impl GhSource {
                 // for partial results, which the `?` reintroduced for the
                 // all-failed case. Backoff is still honored: the propagated
                 // `ProviderError` carries the retry-after hint and the tick
-                // loop parks the source on it.
-                if plan.reconcile {
+                // loop parks the source on it. With batching, only the LAST
+                // batch re-arms: earlier batches keep draining the queue
+                // regardless of admission, and the final one lands here or
+                // below.
+                if plan.reconcile && plan.reconcile_final {
                     self.client.mark_full_sweep_done();
                 }
                 return Err(lazybox_core::ProviderError::from(error));
@@ -1561,13 +1584,13 @@ impl GhSource {
                 kind: ProviderErrorKind::Retryable.as_str().to_string(),
             });
         }
-        // Re-arm the reconcile timer after ANY reconcile that ran, even
-        // a partial one. A member that permanently overflows its page
-        // cap must not keep the reconcile "due" — that would re-run the
+        // Re-arm the reconcile timer once the LAST batch has run, even a
+        // partial one. A member that permanently overflows its page cap
+        // must not keep the reconcile "due" — that would re-run the
         // whole roster every tick, the same death loop the stuck
-        // `force_full_sweep` produced. Coverage stays partial (no
-        // deletion), and the failed member retries on the rotation.
-        if plan.reconcile {
+        // `force_full_sweep` produced. Failed members are simply not
+        // authoritative this tick and retry on the rotation.
+        if plan.reconcile && plan.reconcile_final {
             self.client.mark_full_sweep_done();
         }
         self.emit_progress(format!(
@@ -2015,13 +2038,14 @@ impl TaskSource for GhSource {
         let coverage = *self.last_coverage.lock();
         let windowed = *self.last_windowed.lock();
         if let Some(plan) = &self.repo_sweep {
-            // A COMPLETE reconcile is authoritative over the whole inbox
-            // (`Exhaustive`); a PARTIAL one still retires within the members
-            // that completed (`Repos(completed)`), so one truncating member
-            // can't veto retirement inbox-wide; a rotation slice / windowed
-            // pass has no deletion authority.
+            // A reconcile batch is authoritative for the members whose
+            // unwindowed queries all succeeded (retire-within) AND for
+            // repos that have left the roster entirely (de-scoped); a
+            // member swept by another batch of the same reconcile is
+            // preserved. A rotation slice / windowed pass has no deletion
+            // authority. See `PolledScope::Reconcile`.
             let completed = self.last_reconcile_completed.lock();
-            return repo_first_polled_scope(plan.reconcile, coverage, windowed, &completed);
+            return repo_first_polled_scope(plan.reconcile, windowed, &completed, &plan.in_scope);
         }
         gh_polled_scope(
             self.scheduling.run_global,
@@ -4121,6 +4145,14 @@ async fn push_github_source(
     // roster exists — with no scopes these floors are dormant, not churning.
     if repo_first {
         client.retain_repo_windows(&roster);
+    } else {
+        // The roster went empty (every repo de-scoped, or scopes cleared):
+        // `plan_repo_first_tick` won't run this tick, so a half-drained
+        // reconcile queue would otherwise sit here indefinitely and, once
+        // repos are re-added, drain its STALE members instead of re-seeding
+        // from the new roster (`seeded_now` only fires on an empty queue).
+        // Drop it so the next reconcile seeds cleanly (#1501 review 🟡 #3).
+        state.reconcile_pending.clear();
     }
     // A manual Shift-R runs as ONE unwindowed reconcile: repo-first, every
     // roster member; legacy, the global `involves:` sweep (its
@@ -4211,10 +4243,12 @@ async fn push_github_source(
     let repo_sweep = repo_first.then(|| {
         let plan = plan_repo_first_tick(
             &mut state.round_robin,
+            &mut state.reconcile_pending,
             &roster,
             sessioned_repos,
             engagement.live_agent_repos(),
             full_sweep_admitted,
+            manual_refresh,
             poll_notifications,
             rotation_fanout(
                 roster.len(),
@@ -4227,6 +4261,7 @@ async fn push_github_source(
             source = lazybox_gh::SOURCE,
             tick = state.round_robin.tick,
             reconcile = plan.reconcile,
+            reconcile_remaining = plan.reconcile_remaining,
             members = ?plan.members,
             roster = roster.len(),
             sessioned = sessioned_repos.len(),
@@ -4360,41 +4395,138 @@ mod repo_first_tests {
         );
     }
 
-    /// A reconcile (periodic or `Shift-R`) sweeps EVERY roster member
-    /// plus session-bearing and focused repos that aren't on it, all
-    /// unwindowed, ignoring the rotation capacity.
+    /// A reconcile (periodic or `Shift-R`) queues EVERY roster member
+    /// plus session-bearing repos, focus first, and drains the queue one
+    /// fan-out-sized batch per warm tick; the final batch flags itself so
+    /// the sweep timer re-arms only once the whole roster has run.
     #[test]
-    fn reconcile_sweeps_the_whole_roster_plus_sessioned_and_focus() {
+    fn reconcile_is_drained_in_fanout_batches_focus_first() {
         let mut state = RoundRobinState::default();
         state.focused_repo = Some("other/focused".into());
+        let mut pending = Vec::new();
+        let members = roster(&["acme", "acme/widgets"]);
+        let sessioned = set(&["acme/child"]);
+        // Tick 1: seeds the queue and takes the first batch of 2.
         let plan = plan_repo_first_tick(
             &mut state,
-            &roster(&["acme", "acme/widgets"]),
-            &set(&["acme/child"]),
+            &mut pending,
+            &members,
+            &sessioned,
             &set(&[]),
             true,
             false,
-            1,
-            |_| 0,
+            true,
+            2,
+            |limit| limit,
             Instant::now(),
         );
-        assert!(plan.reconcile);
+        assert!(plan.reconcile && !plan.reconcile_final);
+        assert_eq!(plan.members, roster(&["other/focused", "acme"]));
+        assert_eq!(plan.reconcile_remaining, 2);
+        assert_eq!(pending, roster(&["acme/widgets", "acme/child"]));
+        // Every batch carries the current in-scope universe (roster ∪
+        // session-bearing repos) so rescope can retire de-scoped rows on
+        // it — note `other/focused` (a transient focus, not in scope) is
+        // NOT part of the universe.
         assert_eq!(
-            plan.members,
-            roster(&["acme", "acme/widgets", "acme/child", "other/focused"])
+            plan.in_scope,
+            roster(&["acme", "acme/widgets", "acme/child"])
         );
-        assert_eq!(plan.roster_len, 2);
-        assert_eq!(state.tick, 1);
+        // Tick 2: the governor no longer "admits" (the timer is still due
+        // but the allowance is spent) — the queue still drains.
+        let plan = plan_repo_first_tick(
+            &mut state,
+            &mut pending,
+            &members,
+            &sessioned,
+            &set(&[]),
+            false,
+            false,
+            true,
+            2,
+            |limit| limit,
+            Instant::now(),
+        );
+        assert!(plan.reconcile && plan.reconcile_final);
+        assert_eq!(plan.members, roster(&["acme/widgets", "acme/child"]));
+        assert_eq!(plan.reconcile_remaining, 0);
+        assert!(pending.is_empty());
+        // The in-scope universe is the same on every batch, so the final
+        // batch is still authoritative to retire de-scoped rows — the
+        // capability the old `reconcile_whole`/`Exhaustive` path lost once
+        // the reconcile was split across ticks (#1501 review 🔴).
+        assert_eq!(
+            plan.in_scope,
+            roster(&["acme", "acme/widgets", "acme/child"])
+        );
+        assert_eq!(state.tick, 2);
     }
 
+    /// A manual `Shift-R` drains twice as fast; the governor capacity
+    /// still caps the batch.
+    #[test]
+    fn manual_reconcile_takes_double_batches_within_capacity() {
+        let mut state = RoundRobinState::default();
+        let mut pending = Vec::new();
+        let members: Vec<String> = (1..=10).map(|n| format!("a/{n}")).collect();
+        let plan = plan_repo_first_tick(
+            &mut state,
+            &mut pending,
+            &members,
+            &set(&[]),
+            &set(&[]),
+            true,
+            true,
+            true,
+            3,
+            |limit| {
+                assert_eq!(limit, 6);
+                5
+            },
+            Instant::now(),
+        );
+        assert_eq!(plan.members.len(), 5);
+        assert_eq!(plan.reconcile_remaining, 5);
+    }
+
+    /// A roster that fits one batch is seeded and drained in a single
+    /// tick — one final batch whose in-scope universe is the whole roster,
+    /// so it retires both gone rows and de-scoped rows in that tick.
+    #[test]
+    fn small_roster_reconciles_whole_in_one_batch() {
+        let mut state = RoundRobinState::default();
+        let mut pending = Vec::new();
+        let plan = plan_repo_first_tick(
+            &mut state,
+            &mut pending,
+            &roster(&["a/1", "a/2"]),
+            &set(&[]),
+            &set(&[]),
+            true,
+            false,
+            true,
+            3,
+            |limit| limit,
+            Instant::now(),
+        );
+        assert!(plan.reconcile && plan.reconcile_final);
+        assert_eq!(plan.members, roster(&["a/1", "a/2"]));
+        assert_eq!(plan.in_scope, roster(&["a/1", "a/2"]));
+    }
+
+    /// A hot-only tick never runs a reconcile batch (the local bucket
+    /// refills at the warm cadence) but keeps the queue.
     #[test]
     fn hot_only_tick_plans_nothing() {
         let mut state = RoundRobinState::default();
+        let mut pending = Vec::new();
         let plan = plan_repo_first_tick(
             &mut state,
+            &mut pending,
             &roster(&["acme/widgets"]),
             &set(&[]),
             &set(&[]),
+            true,
             false,
             false,
             3,
@@ -4403,6 +4535,10 @@ mod repo_first_tests {
         );
         assert!(!plan.reconcile);
         assert!(plan.members.is_empty());
+        assert_eq!(
+            plan.reconcile_remaining, 1,
+            "the queue survives for the warm tick"
+        );
         assert_eq!(state.tick, 0, "an empty tick must not advance the rotation");
     }
 
@@ -4412,11 +4548,14 @@ mod repo_first_tests {
     #[test]
     fn rotation_slice_is_capped_by_capacity_with_live_agents_first() {
         let mut state = RoundRobinState::default();
+        let mut pending = Vec::new();
         let plan = plan_repo_first_tick(
             &mut state,
+            &mut pending,
             &roster(&["a/1", "a/2", "a/3", "a/4", "a/5"]),
             &set(&["a/5", "org/idle"]),
             &set(&["a/5"]),
+            false,
             false,
             true,
             2,
@@ -4441,13 +4580,16 @@ mod repo_first_tests {
     fn successive_rotation_ticks_cover_every_member() {
         let members = roster(&["a/1", "a/2", "a/3", "a/4", "a/5"]);
         let mut state = RoundRobinState::default();
+        let mut pending = Vec::new();
         let mut seen = HashSet::new();
         for _ in 0..3 {
             let plan = plan_repo_first_tick(
                 &mut state,
+                &mut pending,
                 &members,
                 &set(&[]),
                 &set(&[]),
+                false,
                 false,
                 true,
                 rotation_fanout(members.len(), 3),
@@ -4472,57 +4614,100 @@ pub(super) fn rotation_target_ticks(
 
 /// Decide this tick's repo-first plan.
 ///
-/// - Reconcile admitted (periodic cadence or a manual `Shift-R`, budget
+/// - Reconcile (periodic cadence or a manual `Shift-R`, budget
 ///   permitting): every roster member plus every session-bearing and the
-///   focused repo, unwindowed. Uncapped — the pacer serialises it.
-/// - Warm tick: a rotation slice — focus first, then repos with a LIVE
-///   agent (forced every tick), then the `fanout` stalest members
-///   (idle session-bearing repos rotate here like any other, so 20
-///   open worktrees don't cost 20 query pairs a minute) — capped by
-///   what the governor allowance admits (`capacity_for(limit)`).
+///   focused repo, unwindowed — queued in `reconcile_pending` and drained
+///   one fan-out-sized batch per warm tick (double on a manual refresh)
+///   so a 28-repo reconcile (~84 requests) can't empty the 30-request
+///   local bucket in one go and starve the heartbeat and the user's own
+///   actions for minutes. The focused repo leads the queue.
+/// - Warm tick with no reconcile queued: a rotation slice — focus first,
+///   then repos with a LIVE agent (forced every tick), then the `fanout`
+///   stalest members (idle session-bearing repos rotate here like any
+///   other, so 20 open worktrees don't cost 20 query pairs a minute) —
+///   capped by what the governor allowance admits (`capacity_for(limit)`).
 ///   Members that don't fit keep their cursor age and lead the next tick.
 /// - Hot-only tick: nothing (hot targets are fetched by the caller).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn plan_repo_first_tick(
     round_robin: &mut crate::polling::scheduler::RoundRobinState,
+    reconcile_pending: &mut Vec<String>,
     roster: &[String],
     sessioned_repos: &std::collections::HashSet<String>,
     live_agent_repos: &std::collections::HashSet<String>,
     reconcile_admitted: bool,
+    manual_refresh: bool,
     poll_notifications: bool,
     fanout: usize,
     capacity_for: impl Fn(usize) -> usize,
     now: std::time::Instant,
 ) -> RepoSweepPlan {
     let roster_len = roster.len();
-    if reconcile_admitted {
-        let mut members: Vec<String> = roster.to_vec();
+    let seeded_now = reconcile_pending.is_empty() && reconcile_admitted;
+    if seeded_now {
+        let mut members: Vec<String> = Vec::with_capacity(roster_len + 1);
+        if let Some(focus) = round_robin.focused_repo.as_deref() {
+            members.push(focus.to_string());
+        }
+        let focus = members.first().cloned();
+        members.extend(
+            roster
+                .iter()
+                .filter(|m| focus.as_ref() != Some(*m))
+                .cloned(),
+        );
         let mut extra: Vec<&String> = sessioned_repos
             .iter()
             .filter(|repo| !members.contains(repo))
             .collect();
         extra.sort();
         members.extend(extra.into_iter().cloned());
-        if let Some(focus) = round_robin.focused_repo.as_deref()
-            && !members.iter().any(|member| member == focus)
-        {
-            members.push(focus.to_string());
-        }
         round_robin.seed_roster(roster, now);
-        for member in &members {
-            round_robin.record_sync(member, now);
-        }
-        round_robin.tick = round_robin.tick.wrapping_add(1);
-        return RepoSweepPlan {
-            members,
-            reconcile: true,
-            roster_len,
-        };
+        *reconcile_pending = members;
     }
     if !poll_notifications {
         return RepoSweepPlan {
             members: Vec::new(),
             reconcile: false,
+            reconcile_final: false,
+            in_scope: Vec::new(),
+            reconcile_remaining: reconcile_pending.len(),
+            roster_len,
+        };
+    }
+    if !reconcile_pending.is_empty() {
+        let batch = capacity_for(
+            fanout
+                .max(1)
+                .saturating_mul(if manual_refresh { 2 } else { 1 }),
+        )
+        .max(1)
+        .min(reconcile_pending.len());
+        let members: Vec<String> = reconcile_pending.drain(..batch).collect();
+        for member in &members {
+            round_robin.record_sync(member, now);
+        }
+        round_robin.tick = round_robin.tick.wrapping_add(1);
+        let reconcile_final = reconcile_pending.is_empty();
+        // The current in-scope universe (roster ∪ session-bearing repos):
+        // a stored row whose repo is outside it has been de-scoped and is
+        // safe to retire on this batch, whereas a member swept by another
+        // batch is inside it and preserved. Computed fresh each tick, so a
+        // config edit takes effect on the next reconcile — not the snapshot
+        // seeded when the queue was first filled.
+        let mut in_scope: Vec<String> = roster.to_vec();
+        let mut extra: Vec<&String> = sessioned_repos
+            .iter()
+            .filter(|repo| !in_scope.contains(repo))
+            .collect();
+        extra.sort();
+        in_scope.extend(extra.into_iter().cloned());
+        return RepoSweepPlan {
+            members,
+            reconcile: true,
+            reconcile_final,
+            in_scope,
+            reconcile_remaining: reconcile_pending.len(),
             roster_len,
         };
     }
@@ -4550,6 +4735,9 @@ pub(super) fn plan_repo_first_tick(
     RepoSweepPlan {
         members,
         reconcile: false,
+        reconcile_final: false,
+        in_scope: Vec::new(),
+        reconcile_remaining: 0,
         roster_len,
     }
 }

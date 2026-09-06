@@ -2172,10 +2172,11 @@ impl<T: TerminalAdapter> Model<T> {
             remaining,
             limit,
             reset_at,
+            self_throttle,
         } = &event
         {
             self.status
-                .note_github_rate_limit_wait(*remaining, *limit, *reset_at);
+                .note_github_rate_limit_wait(*remaining, *limit, *reset_at, *self_throttle);
             self.pending_refresh_ack = false;
             self.redraw = true;
             false
@@ -2205,10 +2206,11 @@ impl<T: TerminalAdapter> Model<T> {
                 remaining,
                 limit,
                 reset_at,
+                self_throttle,
             } => {
                 self.status
                     .sync
-                    .note_rate_limited(*remaining, *limit, *reset_at);
+                    .note_rate_limited(*remaining, *limit, *reset_at, *self_throttle);
             }
             IpcEvent::ProviderError {
                 source,

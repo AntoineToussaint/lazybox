@@ -229,6 +229,13 @@ pub fn save_persisted_yaml(
 /// `ui.tips_seen`); every hand-edited section survives. A missing file
 /// is `Ok(false)`; a malformed one is left untouched and reported, so
 /// a typo can't be "fixed" by silently rewriting the file.
+///
+/// When there is nothing to clear — a hand-written config that never
+/// ran the wizard and carries default onboarding markers — the file is
+/// left byte-for-byte untouched (`Ok(false)`). `Config::save_to` is a
+/// full serialize that strips comments and reflows the YAML, so a
+/// `--fresh` that has no answers to forget must not rewrite the user's
+/// hand-authored file just to write back what it already says.
 pub fn clear_persisted_yaml(path: &std::path::Path) -> anyhow::Result<bool> {
     use anyhow::Context;
     let raw = match std::fs::read_to_string(path) {
@@ -238,6 +245,19 @@ pub fn clear_persisted_yaml(path: &std::path::Path) -> anyhow::Result<bool> {
     };
     let mut cfg = lazybox_config::Config::parse(&raw)
         .context("config.yaml is malformed — fix it by hand before --fresh")?;
+    let setup = &cfg.setup;
+    let nothing_to_clear = setup.providers.is_empty()
+        && setup.agents.is_empty()
+        && setup.filters.is_empty()
+        && setup.scopes.is_empty()
+        && setup.default_agent.is_none()
+        && !setup.wizard_completed
+        && !cfg.ui.tour_seen
+        && cfg.ui.coach_step == 0
+        && cfg.ui.tips_seen.is_empty();
+    if nothing_to_clear {
+        return Ok(false);
+    }
     cfg.setup = Default::default();
     cfg.ui.tour_seen = false;
     cfg.ui.coach_step = 0;
@@ -1345,6 +1365,31 @@ mod tests {
         );
         assert!(!after.ui.tour_seen);
         assert_eq!(after.ui.coach_step, 0);
+    }
+
+    /// A hand-written config that never ran the wizard is left
+    /// byte-for-byte untouched by `--fresh`: with nothing to forget,
+    /// `clear_persisted_yaml` must not reflow the file — stripping the
+    /// user's comments and layout — just to rewrite what it already
+    /// says (#1502).
+    #[test]
+    fn clear_persisted_yaml_leaves_a_pristine_config_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        // Hand-authored: comments, no `setup:` block, default
+        // onboarding markers — nothing for `--fresh` to clear.
+        let hand_written =
+            "# my lazybox config\nui:\n  theme: Gruvbox Dark # I like this one\n";
+        std::fs::write(&path, hand_written).unwrap();
+        assert!(
+            !clear_persisted_yaml(&path).unwrap(),
+            "nothing to clear → no rewrite"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            hand_written,
+            "the file — comments and all — is byte-for-byte untouched"
+        );
     }
 
     #[test]

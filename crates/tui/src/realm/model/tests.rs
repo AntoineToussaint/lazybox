@@ -1907,6 +1907,96 @@ mod effects_tests {
         }
     }
 
+    /// Two rapid `Shift-W → Chat` presses (scratch already known) must
+    /// not both mint the same `chat-MMDD` name: the first create is
+    /// still in flight (no `WorkspaceUpserted` yet) when the second
+    /// runs, so the second reads it from `pending_workspace_creates`
+    /// and suffixes `-2`. Without that, two sidebar rows share one
+    /// label (#1502).
+    #[test]
+    fn back_to_back_chats_suffix_from_pending_creates() {
+        use lazybox_tui_core::choice::START_SHEET_CHAT;
+        let mut m = build_model();
+        let scratch = lazybox_core::ProjectKey::local("scratch");
+        m.handle_daemon_event(lazybox_ipc::Event::ProjectUpserted(Box::new(
+            lazybox_core::Project::new(scratch.clone(), "scratch".to_string(), chrono::Utc::now()),
+        )));
+        let today = format!("chat-{}", chrono::Local::now().format("%m%d"));
+
+        m.start_agent_flow();
+        let first = m.handle_choice_picked(vec![ChoicePayload::Text(START_SHEET_CHAT.into())]);
+        match &first[..] {
+            [IpcCommand::CreateWorkspace { name, .. }] => assert_eq!(*name, today),
+            other => panic!("expected one CreateWorkspace, got {other:?}"),
+        }
+        // The first create is unacknowledged — it lives only in
+        // pending_workspace_creates, not yet in the sidebar.
+        m.start_agent_flow();
+        let second = m.handle_choice_picked(vec![ChoicePayload::Text(START_SHEET_CHAT.into())]);
+        match &second[..] {
+            [IpcCommand::CreateWorkspace { name, .. }] => assert_eq!(
+                *name,
+                format!("{today}-2"),
+                "second chat suffixes off the in-flight first"
+            ),
+            other => panic!("expected one CreateWorkspace, got {other:?}"),
+        }
+    }
+
+    /// Regression (#1502): a `deferred_chat` flag left stuck `true` by a
+    /// scratch-project create whose store write failed (no
+    /// `ProjectUpserted` ever emitted) must NOT ride the NEXT `x p`
+    /// upsert. `deferred_chat` is process-lifetime state, so without the
+    /// scratch-key gate the stale flag would make the user's next real
+    /// project spawn a phantom chat workspace instead of opening the
+    /// name input. The gate means only a scratch upsert can consume it.
+    #[test]
+    fn stuck_deferred_chat_does_not_hijack_a_later_project() {
+        use lazybox_tui_core::choice::START_SHEET_CHAT;
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(100, 30)).expect("model init");
+        while server.rx.try_recv().is_ok() {}
+        // Chat with no scratch yet → CreateProject{scratch} + the flag.
+        m.start_agent_flow();
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text(START_SHEET_CHAT.into())]);
+        assert!(
+            matches!(&cmds[..], [IpcCommand::CreateProject { name }] if name == "scratch"),
+            "chat first creates the scratch project: {cmds:?}"
+        );
+        assert!(m.deferred_chat, "chat is deferred until scratch lands");
+        // The scratch store write fails on the daemon: its
+        // ProjectUpserted never arrives. The user instead creates a
+        // real project via `x p`, which re-aims the deferred focus.
+        m.deferred_focus_project = Some("myproj".to_string());
+        let pk = lazybox_core::ProjectKey::local("myproj");
+        m.handle_daemon_event(lazybox_ipc::Event::ProjectUpserted(Box::new(
+            lazybox_core::Project::new(pk.clone(), "myproj".to_string(), chrono::Utc::now()),
+        )));
+        // The real project opens the name input — NOT a chat workspace.
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::NewWorkspace),
+            "the unrelated project opens the name input, not a chat"
+        );
+        assert!(matches!(
+            &m.modal_flow,
+            Some(super::super::ModalFlow::NewWorkspaceProject { project }) if *project == pk
+        ));
+        let sent: Vec<IpcCommand> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+        assert!(
+            !sent
+                .iter()
+                .any(|c| matches!(c, IpcCommand::CreateWorkspace { .. })),
+            "no phantom chat workspace spawned into the unrelated project: {sent:?}"
+        );
+        // The leaked flag survives harmlessly — only a scratch upsert
+        // consumes it, so a later real Chat still works.
+        assert!(
+            m.deferred_chat,
+            "a non-scratch upsert must leave the flag for the scratch that owns it"
+        );
+    }
+
     /// The Workspace row appears only when a project sits under the
     /// cursor; Repository always does (#1502).
     #[test]

@@ -17,10 +17,11 @@
 //!   against the zone's width and elided by whole cells — the
 //!   escape-hatch tail (`?`/`q q`) surviving longest, then contextual
 //!   hints in order, then evergreen hints first — with a dim
-//!   `… +N ? all` overflow cell instead of mid-label clipping. That
-//!   cell names `?` and is returned to the caller as a hit-rect so a
-//!   click on it opens the `?` catalog listing the hidden hints — the
-//!   `… +N` count is no longer a dead end (#805, was #303).
+//!   `… +N more` overflow cell instead of mid-label clipping. That
+//!   cell is returned to the caller as a hit-rect *plus the hidden
+//!   hints themselves*, so a click on it pops exactly those hints in a
+//!   which-key popup (and `?` lists them too) — the `… +N` count is no
+//!   longer a dead end (#805, #1502; was #303).
 //! - **Right**: background polling status — spinner + "Pulling
 //!   tasks from github · PR query: …" — OR the most recent notice /
 //!   error if one is set. Retryable hiccups auto-fade; permanent +

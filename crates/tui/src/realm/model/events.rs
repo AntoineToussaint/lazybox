@@ -1445,7 +1445,20 @@ impl<T: TerminalAdapter> Model<T> {
             if self.deferred_focus_project.as_deref() == Some(project.name.as_str()) {
                 self.deferred_focus_project = None;
                 let project_key = project.key;
-                if std::mem::take(&mut self.deferred_chat) {
+                // Only the `scratch` project's upsert may finish a
+                // deferred chat. `deferred_chat` is process-lifetime
+                // state cleared solely here, so a `CreateProject
+                // { scratch }` whose store write fails (no
+                // `ProjectUpserted` emitted — see `create_local_project`)
+                // would otherwise leave the flag stuck `true` and let it
+                // ride the NEXT `x p` upsert, silently spawning a chat
+                // workspace in the wrong project instead of the name
+                // input. Gating the take on the scratch key means a
+                // leaked flag can only ever fire for a scratch upsert,
+                // which is exactly the chat flow (#1502).
+                let is_scratch =
+                    project_key == lazybox_core::ProjectKey::local(Self::SCRATCH_PROJECT);
+                if is_scratch && std::mem::take(&mut self.deferred_chat) {
                     // Start sheet → Chat (#1502): the scratch project
                     // just landed; create the chat workspace straight
                     // away, no name to type.

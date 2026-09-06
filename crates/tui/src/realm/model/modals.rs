@@ -3281,21 +3281,35 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// `chat-<mmdd>`, suffixed `-2`, `-3`, … when a workspace of that
-    /// name already exists under `project` (#1502).
+    /// name already exists under `project` (#1502). Also counts
+    /// workspace creates still in flight (`pending_workspace_creates`):
+    /// creation is async, so two rapid `Shift-W → Chat` presses would
+    /// otherwise both compute the same base name — the first hasn't
+    /// landed in the sidebar when the second runs — and produce two
+    /// rows sharing one label (the daemon keeps the KEYS unique, but
+    /// copies the requested name verbatim).
     pub(crate) fn next_chat_name(&self, project: &lazybox_core::ProjectKey) -> String {
         let base = format!("chat-{}", chrono::Local::now().format("%m%d"));
-        let taken: std::collections::HashSet<&str> = self
+        let mut taken: std::collections::HashSet<String> = self
             .sidebar
             .workspace_iter()
             .filter(|(_, w)| w.project_key.as_ref() == Some(project))
-            .map(|(_, w)| w.name.as_str())
+            .map(|(_, w)| w.name.clone())
             .collect();
-        if !taken.contains(base.as_str()) {
+        // Pending creates carry no project key, so union all of them —
+        // a stray same-named create under another project only bumps
+        // the suffix, which is harmless.
+        taken.extend(
+            self.pending_workspace_creates
+                .values()
+                .map(|p| p.name.clone()),
+        );
+        if !taken.contains(&base) {
             return base;
         }
         (2..)
             .map(|n| format!("{base}-{n}"))
-            .find(|candidate| !taken.contains(candidate.as_str()))
+            .find(|candidate| !taken.contains(candidate))
             .unwrap_or(base)
     }
 

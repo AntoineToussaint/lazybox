@@ -56,6 +56,12 @@ impl ClientRuntime {
         }));
 
         crate::workspace::migrate_legacy_sandbox(&config);
+        // Convert the legacy single-blob archived + session-tombstone sets to
+        // per-key rows once, here at startup before any removal/unarchive can
+        // run, so a migration can never race a removal and resurrect a
+        // tombstone (#1496).
+        crate::workspace::migrate_legacy_archived_set(&config);
+        crate::workspace::migrate_legacy_session_tombstones(&config);
         tasks.push(crate::polling::spawn(config.clone(), options.poll_interval));
         tasks.push(crate::working_claims::spawn(config.clone()));
         tasks.push(crate::working_watchdog::spawn(&config));

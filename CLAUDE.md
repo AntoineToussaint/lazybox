@@ -359,12 +359,13 @@ running an agent; `g m` merge, `g u` update-branch, `z` snooze,
 `x x` archive, `m` mark-read, `g s` sync, `g g` arm-auto-merge,
 `g d` delete-or-close, and `x c` close-issue apply per target,
 running the eligible ones and summarizing what was
-skipped and why. The selection **survives a bulk action** (#1449) so a
-set can be acted on more than once — the common finishing chain is `g d`
-then `x x` over the *same* rows — and every bulk summary names the
-still-live selection (`… · N still selected`); it clears only on `Esc`
-or when a row leaves the projection (the `recompute_visible` prune, so an
-archived row's mark prunes with it). Destructive bulk actions confirm
+skipped and why. A bulk action **consumes its selection** (#1498,
+reverting #1449): once anything actually ran, the marks are dropped, so
+acting on the same set twice means re-marking it. A run where every
+target was ineligible ("nothing to merge") keeps the marks so it can be
+retried. `Esc` still clears a selection you built but haven't acted on,
+and a row leaving the projection prunes its own mark
+(`recompute_visible`, so an archived row's mark goes with it). Destructive bulk actions confirm
 with the count + an affected list + the eligible/skipped split (e.g.
 "Merge 3 of 5 selected PRs?", "Close 3 PRs without merging and delete 1
 issue?"), snapshotting the selection at mount so a poll under

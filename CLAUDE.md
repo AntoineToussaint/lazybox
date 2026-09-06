@@ -223,7 +223,12 @@ actions gets a leader group (named in `leader_group_label`); only true
 primary actions (`w`, `Enter`, navigation) earn top-level keys. The
 footer hint bar reads each pane's `contextual_bindings()`, collapsing
 a leader group into one cell (`g ▸ github`, `a ▸ agent`) — the
-which-key popup and `?` help reuse the same group labels.
+which-key popup and `?` help reuse the same group labels. When the bar
+is narrower than its cells it ends in a `… +N more` cell: clicking it
+pops exactly the hidden hints in which-key chrome (any key closes it
+and is still handled), and `?`'s empty prompt lists every key of the
+focused pane, hidden ones included, so the keyboard path never needs
+the mouse (#1502).
 
 **Global**: `Tab` cycle panes, `?` help, `q q` quit, `,` settings,
 `t` theme picker (live-preview palette list; the choice persists to

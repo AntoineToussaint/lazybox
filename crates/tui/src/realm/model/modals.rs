@@ -11,7 +11,7 @@
 //! `handle_choice_picked` / `handle_confirmed` arms (in mod.rs or
 //! events.rs) read the stashed state and execute on submit.
 
-use super::{ChoicePayload, ConversionDraft, HandoffDraft, Id, ModalFlow, Model};
+use super::{ChoicePayload, ConversionDraft, HandoffDraft, Id, ModalFlow, Model, PaneFocus};
 use tuirealm::terminal::TerminalAdapter;
 
 /// Fallback display name for an editor entry with no explicit `display:`
@@ -1755,22 +1755,56 @@ impl<T: TerminalAdapter> Model<T> {
         );
     }
 
+    /// The focused pane's contextual footer bindings — the state-aware
+    /// short list ("g m merge" when the row is READY, "w fix CI" when
+    /// CI is failing, …) so the user always sees what's actionable
+    /// right now, not a generic alphabet. Feeds both the footer hint
+    /// bar and the `?` empty prompt, so the two never disagree (#1502).
+    pub(super) fn focused_pane_bindings(&self) -> Vec<crate::pane::Binding> {
+        match self.focus {
+            PaneFocus::Sidebar => {
+                let mut bindings = self.sidebar.contextual_bindings(&self.catalog, self.remote);
+                // The `]]` leader also arms from the sidebar (#871),
+                // addressing the cursor workspace's agent. It's not a
+                // catalog action, so append its gateway hint here — the
+                // popup carries the individual `]]s`/`]]l`/… commands.
+                if self.sidebar.selected_workspace().is_some() {
+                    let esc = self.ui_defaults.terminal_escape_char;
+                    bindings.push(crate::pane::Binding {
+                        keys: std::borrow::Cow::Owned(format!("{esc}{esc}")),
+                        label: std::borrow::Cow::Borrowed("send"),
+                    });
+                }
+                bindings
+            }
+            PaneFocus::Right => self.right.contextual_bindings(&self.action_key_overrides),
+            PaneFocus::Terminals => self
+                .terminals
+                .contextual_bindings(self.ui_defaults.terminal_escape_char),
+        }
+    }
+
     /// Build + mount the "Ask Lazybox" modal (#302): fuzzy search over
     /// a snapshot of the runtime catalog, plus the shared help
-    /// conversation for agent answers. Idempotent like `mount_help`.
+    /// conversation for agent answers. The empty prompt lists the
+    /// focused pane's keys — every footer hint, including the ones the
+    /// bar could not fit — so `?` is the keyboard path to the hidden
+    /// hints (#1502). Idempotent like `mount_help`.
     pub(super) fn mount_help_ask(&mut self) {
         use crate::realm::components::help_ask::HelpAsk;
 
         if self.modal_stack.last() == Some(&Id::HelpAsk) {
             return;
         }
+        let pane_keys = (self.focus.title(), self.focused_pane_bindings());
         self.mount_modal(
             Id::HelpAsk,
             HelpAsk::new(
                 self.catalog.clone(),
                 self.help_convo.clone(),
                 self.ui_defaults.terminal_escape_char,
-            ),
+            )
+            .with_pane_keys(pane_keys.0, pane_keys.1),
         );
     }
 

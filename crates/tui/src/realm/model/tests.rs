@@ -20594,12 +20594,13 @@ mod click_outside_modal_dismiss_tests {
         );
     }
 
-    /// A left-click on the footer's `… +N ? all` overflow cell opens the
-    /// `?` catalog so the elided hints are reachable — the count is no
-    /// longer a dead end (#805). The footer sits outside every pane, so
+    /// A left-click on the footer's `… +N more` overflow cell pops
+    /// exactly the hints the bar could not fit — the count is not a
+    /// dead end (#805, #1502). The footer sits outside every pane, so
     /// this handler is the only thing that claims the click.
     #[test]
-    fn footer_overflow_click_opens_help() {
+    fn footer_overflow_click_pops_the_dropped_hints() {
+        use crate::realm::components::footer::FooterOverflow;
         let mut m = build_model();
         m.handle_daemon_event(IpcEvent::Snapshot {
             workspaces: vec![empty_ws("github:o/r#1")],
@@ -20610,22 +20611,62 @@ mod click_outside_modal_dismiss_tests {
         });
         let area = Rect::new(0, 0, 120, 40);
         // Simulate the last render having placed the overflow cell at the
-        // right end of the footer row.
+        // right end of the footer row, hiding two hints.
         let cell = Rect::new(100, 39, 10, 1);
-        m.footer_overflow_rect = Some(cell);
-        assert!(m.modal_stack.is_empty(), "no modal before the click");
+        let dropped = vec![
+            crate::pane::Binding {
+                keys: std::borrow::Cow::Borrowed("x n"),
+                label: std::borrow::Cow::Borrowed("new workspace"),
+            },
+            crate::pane::Binding {
+                keys: std::borrow::Cow::Borrowed("Shift-T"),
+                label: std::borrow::Cow::Borrowed("coach"),
+            },
+        ];
+        m.footer_overflow = Some(FooterOverflow {
+            rect: cell,
+            dropped: dropped.clone(),
+        });
+        assert!(m.footer_more_popup.is_none(), "no popup before the click");
         m.dispatch_mouse_in(left_down(cell.x + 2, cell.y), area);
-        assert_eq!(
-            m.modal_stack.last(),
-            Some(&Id::HelpAsk),
-            "clicking the overflow cell must open the `?` catalog",
+        let rows = m
+            .footer_more_popup
+            .clone()
+            .expect("clicking the overflow cell must pop the hidden hints");
+        let expected: Vec<(String, String)> = dropped
+            .iter()
+            .map(|b| (b.keys.to_string(), b.label.to_string()))
+            .collect();
+        assert_eq!(rows, expected, "popup must list exactly the dropped cells");
+        assert!(
+            !m.modal_stack.contains(&Id::HelpAsk),
+            "the popup replaces the old bounce into Ask Lazybox",
+        );
+        // The popup is informational: the next key closes it and is
+        // still handled (here `j` moves the sidebar cursor).
+        m.dispatch_key(tuirealm::event::KeyEvent::new(
+            tuirealm::event::Key::Char('j'),
+            tuirealm::event::KeyModifiers::NONE,
+        ));
+        assert!(
+            m.footer_more_popup.is_none(),
+            "any key must close the popup"
+        );
+        // A second click on the cell toggles it closed.
+        m.dispatch_mouse_in(left_down(cell.x + 2, cell.y), area);
+        assert!(m.footer_more_popup.is_some());
+        m.dispatch_mouse_in(left_down(cell.x + 2, cell.y), area);
+        assert!(
+            m.footer_more_popup.is_none(),
+            "clicking the cell again closes the popup"
         );
     }
 
-    /// A click that misses the overflow cell must not open help — only
-    /// the cell itself is the escape hatch (#805).
+    /// A click that misses the overflow cell must not pop anything —
+    /// only the cell itself is the affordance (#805).
     #[test]
-    fn click_off_footer_overflow_leaves_help_closed() {
+    fn click_off_footer_overflow_pops_nothing() {
+        use crate::realm::components::footer::FooterOverflow;
         let mut m = build_model();
         m.handle_daemon_event(IpcEvent::Snapshot {
             workspaces: vec![empty_ws("github:o/r#1")],
@@ -20635,11 +20676,14 @@ mod click_outside_modal_dismiss_tests {
             dismissed_updates: Vec::new(),
         });
         let area = Rect::new(0, 0, 120, 40);
-        m.footer_overflow_rect = Some(Rect::new(100, 39, 10, 1));
+        m.footer_overflow = Some(FooterOverflow {
+            rect: Rect::new(100, 39, 10, 1),
+            dropped: Vec::new(),
+        });
         m.dispatch_mouse_in(left_down(1, 1), area);
         assert!(
-            !m.modal_stack.contains(&Id::HelpAsk),
-            "a click away from the overflow cell must not open help",
+            m.footer_more_popup.is_none() && !m.modal_stack.contains(&Id::HelpAsk),
+            "a click away from the overflow cell must not pop anything",
         );
     }
 }

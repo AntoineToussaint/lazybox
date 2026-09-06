@@ -1437,6 +1437,15 @@ pub enum PaneFocus {
 }
 
 impl PaneFocus {
+    /// Human name used by the help surfaces ("keys in the sidebar").
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            PaneFocus::Sidebar => "sidebar",
+            PaneFocus::Right => "activity pane",
+            PaneFocus::Terminals => "terminal",
+        }
+    }
+
     fn next(self) -> Self {
         match self {
             PaneFocus::Sidebar => PaneFocus::Right,
@@ -1696,11 +1705,16 @@ pub struct Model<T: TerminalAdapter> {
     /// toggles expand/collapse on the card. Crossterm doesn't
     /// report double-clicks natively — we synthesize them here.
     last_click: Option<(u16, u16, std::time::Instant)>,
-    /// Screen rect of the footer's `… +N ? all` overflow cell, set on
-    /// every render (`None` when the hint bar fits). A left-click inside
-    /// it opens `?` so the hidden hints are reachable instead of the
-    /// count being a dead end (#805).
-    footer_overflow_rect: Option<Rect>,
+    /// The footer's `… +N more` overflow cell from the last render —
+    /// its screen rect plus the hints it hides (`None` when the hint bar
+    /// fits). A left-click inside it pops those hints so the count is
+    /// not a dead end (#805, #1502).
+    footer_overflow: Option<crate::realm::components::footer::FooterOverflow>,
+    /// The `+N more` popup's rows while it is open (#1502): the hints the
+    /// footer could not fit, drawn with the which-key chrome. Purely
+    /// informational — the next key or click closes it and is then
+    /// processed normally, so nothing is swallowed.
+    footer_more_popup: Option<Vec<(String, String)>>,
     /// Last frame's widget-build cost (walking the tree into the back
     /// buffer — CPU), split out from the flush by `view()` so the
     /// watchdog can tell an expensive render from a blocked terminal
@@ -2542,7 +2556,8 @@ impl<T: TerminalAdapter> Model<T> {
             terminal_leader_highlight: None,
             leader_target: None,
             last_click: None,
-            footer_overflow_rect: None,
+            footer_overflow: None,
+            footer_more_popup: None,
             last_render_build: std::time::Duration::ZERO,
             last_render_flush: std::time::Duration::ZERO,
             render_pending: None,
@@ -6381,27 +6396,7 @@ impl<T: TerminalAdapter> Model<T> {
         // CI is failing, etc.) so the user always sees what's
         // actionable right now, not a generic alphabet. The full
         // keymap stays in `?` help.
-        let keymap: Vec<crate::pane::Binding> = match self.focus {
-            PaneFocus::Sidebar => {
-                let mut bindings = self.sidebar.contextual_bindings(&self.catalog, self.remote);
-                // The `]]` leader also arms from the sidebar (#871),
-                // addressing the cursor workspace's agent. It's not a
-                // catalog action, so append its gateway hint here — the
-                // popup carries the individual `]]s`/`]]l`/… commands.
-                if self.sidebar.selected_workspace().is_some() {
-                    let esc = self.ui_defaults.terminal_escape_char;
-                    bindings.push(crate::pane::Binding {
-                        keys: std::borrow::Cow::Owned(format!("{esc}{esc}")),
-                        label: std::borrow::Cow::Borrowed("send"),
-                    });
-                }
-                bindings
-            }
-            PaneFocus::Right => self.right.contextual_bindings(&self.action_key_overrides),
-            PaneFocus::Terminals => self
-                .terminals
-                .contextual_bindings(self.ui_defaults.terminal_escape_char),
-        };
+        let keymap: Vec<crate::pane::Binding> = self.focused_pane_bindings();
         // Universal hints appended to panes where their shortcuts are
         // available. A live terminal owns its keys, so its command
         // leader above is the only steady-state gateway hint.
@@ -6439,13 +6434,6 @@ impl<T: TerminalAdapter> Model<T> {
                 .map(|def| make_hint(def))
                 .collect()
         };
-        // Effective help key for the overflow cell's "press <key> for
-        // all" label — resolved here so a remap of `OpenHelp` is honored
-        // (#805).
-        let help_key = lazybox_tui_core::action::ActionDef::for_kind(
-            lazybox_tui_core::action::ActionKind::OpenHelp,
-        )
-        .effective_keys_display(&self.action_key_overrides);
         // While a sticky error is pinned, advertise how to inspect its
         // full text and dismiss it right in the hint bar (#453). Inserted
         // just before `quit` so #100's quit guarantee survives narrow
@@ -6629,7 +6617,8 @@ impl<T: TerminalAdapter> Model<T> {
                 Vec::new()
             };
         let mut captured_area = Rect::default();
-        let mut footer_overflow: Option<Rect> = None;
+        let mut footer_overflow: Option<crate::realm::components::footer::FooterOverflow> = None;
+        let footer_more_rows = self.footer_more_popup.clone();
         // The coach rail (#1460) is carved out of the pane area inside
         // the draw closure so it never occludes a pane. Resolve its
         // active/spotlight state out here (immutable borrow) so the
@@ -6795,9 +6784,9 @@ impl<T: TerminalAdapter> Model<T> {
             }
 
             // Footer: keymap + globals + polling status + notice. The
-            // returned rect (if any) is the `… +N ? all` overflow cell,
-            // stashed so a click on it opens `?` — the hidden hints
-            // (#805).
+            // returned overflow (if any) is the `… +N more` cell + the
+            // hints it hides, stashed so a click on it pops exactly those
+            // (#805, #1502).
             footer_overflow = crate::realm::components::footer::render(
                 f,
                 footer_area,
@@ -6805,10 +6794,14 @@ impl<T: TerminalAdapter> Model<T> {
                 &keymap,
                 &globals,
                 &evergreen,
-                help_key.as_ref(),
                 polling_status.as_ref().map(|(s, l)| (*s, l.as_str())),
                 notice.as_ref(),
             );
+            // The `+N more` popup (#1502): the hidden footer hints, in
+            // which-key chrome, until the next key or click.
+            if let Some(rows) = footer_more_rows.as_deref() {
+                crate::realm::components::which_key::render_more(f, area, rows);
+            }
 
             // Which-key popup for an armed leader chord (#126, #102).
             // Drawn above the footer but below any modal — in practice
@@ -6881,7 +6874,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.last_render_build = render_build;
         self.last_render_flush = render_flush;
         self.layout.last_area = captured_area;
-        self.footer_overflow_rect = footer_overflow;
+        self.footer_overflow = footer_overflow;
         // Resize commands are queued by the terminal stack's render
         // path each time a slot's rect changes. Drain + ship them so
         // libghostty's PTY learns the new size — without this,

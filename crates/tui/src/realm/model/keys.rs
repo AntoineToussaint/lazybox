@@ -72,6 +72,12 @@ impl<T: TerminalAdapter> Model<T> {
     /// global escapes, and forwards everything else to the focused
     /// pane wrapper.
     pub(super) fn handle_pane_key(&mut self, key: RealmKey) {
+        // The footer's `+N more` popup is informational (#1502): any key
+        // closes it and is then handled normally, so a hint the user
+        // just read fires on the very next press.
+        if self.footer_more_popup.take().is_some() {
+            self.redraw = true;
+        }
         // Snapshot the steady focus for the selected workspace before
         // this key mutates anything, so a later re-select can restore it
         // (#182).
@@ -1862,19 +1868,34 @@ impl<T: TerminalAdapter> Model<T> {
                     self.sync_panes();
                     self.redraw = true;
                 }
-                // A left-click on the footer's `… +N ? all` overflow
-                // cell opens `?` so the elided hints are reachable — the
-                // count is no longer a dead end (#805). The footer sits
+                // Any click closes the footer's `+N more` popup (#1502)
+                // and then routes normally; a click on the overflow cell
+                // itself toggles it.
+                let more_was_open = self.footer_more_popup.take().is_some();
+                if more_was_open {
+                    self.redraw = true;
+                }
+                // A left-click on the footer's `… +N more` overflow cell
+                // pops exactly the hints the bar could not fit, so the
+                // count is not a dead end (#805, #1502). The footer sits
                 // outside every pane rect, so this is the only handler
                 // that claims the click; checked before pane routing.
                 if matches!(button, crossterm::event::MouseButton::Left)
-                    && self
-                        .footer_overflow_rect
-                        .is_some_and(|r| rect_contains(r, m.column, m.row))
+                    && let Some(overflow) = self
+                        .footer_overflow
+                        .as_ref()
+                        .filter(|o| rect_contains(o.rect, m.column, m.row))
                 {
-                    self.q_latch.disarm();
-                    self.cancel_leader_chords();
-                    self.mount_help_ask();
+                    if !more_was_open {
+                        let rows = overflow
+                            .dropped
+                            .iter()
+                            .map(|b| (b.keys.to_string(), b.label.to_string()))
+                            .collect();
+                        self.q_latch.disarm();
+                        self.cancel_leader_chords();
+                        self.footer_more_popup = Some(rows);
+                    }
                     self.redraw = true;
                     return;
                 }

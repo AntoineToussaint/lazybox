@@ -8566,6 +8566,7 @@ mod modal_input_responsiveness_tests {
             remaining: 98,
             limit: 5000,
             reset_at: chrono::Utc::now() + chrono::Duration::minutes(7),
+            self_throttle: false,
         });
 
         assert!(m.status.bg_poll.is_none());

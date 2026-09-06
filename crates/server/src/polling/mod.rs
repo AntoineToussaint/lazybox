@@ -497,11 +497,11 @@ mod polled_list_tests {
     fn rotation_and_windowed_passes_never_delete() {
         let completed = vec!["acme".to_string()];
         assert_eq!(
-            repo_first_polled_scope(false, FetchCoverage::Complete, false, &completed),
+            repo_first_polled_scope(false, true, FetchCoverage::Complete, false, &completed),
             PolledScope::Repos(Vec::new())
         );
         assert_eq!(
-            repo_first_polled_scope(true, FetchCoverage::Complete, true, &completed),
+            repo_first_polled_scope(true, true, FetchCoverage::Complete, true, &completed),
             PolledScope::Repos(Vec::new())
         );
     }
@@ -510,8 +510,19 @@ mod polled_list_tests {
     #[test]
     fn complete_reconcile_is_exhaustive() {
         assert_eq!(
-            repo_first_polled_scope(true, FetchCoverage::Complete, false, &[]),
+            repo_first_polled_scope(true, true, FetchCoverage::Complete, false, &[]),
             PolledScope::Exhaustive
+        );
+    }
+
+    /// One clean batch of a multi-tick reconcile covered only its own
+    /// members: authoritative for them, never for the whole inbox.
+    #[test]
+    fn batch_of_a_multi_tick_reconcile_is_authoritative_for_its_members_only() {
+        let completed = vec!["acme".to_string()];
+        assert_eq!(
+            repo_first_polled_scope(true, false, FetchCoverage::Complete, false, &completed),
+            PolledScope::Repos(completed)
         );
     }
 
@@ -523,7 +534,7 @@ mod polled_list_tests {
     fn partial_reconcile_retires_within_completed_members() {
         let completed = vec!["acme".to_string(), "zed/editor".to_string()];
         assert_eq!(
-            repo_first_polled_scope(true, FetchCoverage::Partial, false, &completed),
+            repo_first_polled_scope(true, true, FetchCoverage::Partial, false, &completed),
             PolledScope::Repos(completed),
             "one truncating member must not veto retirement for the completed ones"
         );
@@ -1147,6 +1158,7 @@ pub fn gh_polled_scope(
 ///   completed org member still retires its children.
 pub fn repo_first_polled_scope(
     reconcile: bool,
+    whole_roster: bool,
     coverage: lazybox_core::FetchCoverage,
     windowed: bool,
     completed_members: &[String],
@@ -1154,10 +1166,13 @@ pub fn repo_first_polled_scope(
     if !reconcile || windowed {
         return PolledScope::Repos(Vec::new());
     }
-    if coverage.is_partial() {
-        PolledScope::Repos(completed_members.to_vec())
-    } else {
+    // Only a clean batch that covered the ENTIRE roster in one tick is
+    // exhaustive; a batch of a multi-tick reconcile — however clean — is
+    // authoritative for its own members alone.
+    if whole_roster && !coverage.is_partial() {
         PolledScope::Exhaustive
+    } else {
+        PolledScope::Repos(completed_members.to_vec())
     }
 }
 
@@ -1209,6 +1224,14 @@ pub struct TickState {
     /// — adding TTL pruning or a dynamic-N knob doesn't touch this
     /// struct.
     pub round_robin: RoundRobinState,
+    /// Repo-first reconcile in progress: roster members still owed an
+    /// unwindowed sweep. A reconcile of N members is N×3 requests; run
+    /// in one tick it drained the local request bucket (30, refilling
+    /// 30/min) and left the heartbeat, detail prefetch and the user's
+    /// own `g m` pre-check refused for ~3 minutes behind a
+    /// "rate-limited" footer. It is now drained a fan-out-sized batch
+    /// per warm tick; the sweep timer re-arms when this empties.
+    pub(crate) reconcile_pending: Vec<String>,
     /// Consecutive polls in which each task (keyed by task id) has
     /// reported `Mergeable::Unknown`. Drives the fast-repoll cap:
     /// only the first [`UNKNOWN_MERGEABLE_MAX_FAST_PROBES`] Unknown
@@ -1268,6 +1291,7 @@ impl Default for TickState {
             prompted_out_of_scope: Default::default(),
             prefetched_pr_details: Default::default(),
             round_robin: Default::default(),
+            reconcile_pending: Vec::new(),
             unknown_mergeable_probes: Default::default(),
             retryable_streak: Default::default(),
             implicit_gh_scopes: None,
@@ -1505,6 +1529,8 @@ struct GithubRateLimitWait {
     remaining: u32,
     limit: u32,
     reset_at: chrono::DateTime<Utc>,
+    /// Lazybox's own pacing (see `Event::GithubRateLimitWait::self_throttle`).
+    self_throttle: bool,
 }
 
 impl GithubRateLimitWait {
@@ -1525,6 +1551,7 @@ impl GithubRateLimitWait {
             remaining: self.remaining,
             limit: self.limit,
             reset_at: self.reset_at,
+            self_throttle: self.self_throttle,
         }
     }
 }
@@ -1541,6 +1568,7 @@ fn github_rate_limit_wait(
             remaining: remote.map_or(0, |limit| limit.remaining),
             limit: remote.map_or(0, |limit| limit.limit),
             reset_at: retry_at,
+            self_throttle: false,
         });
     }
     let remote = snapshot.remote.as_ref()?;
@@ -1549,6 +1577,7 @@ fn github_rate_limit_wait(
             remaining: remote.remaining,
             limit: remote.limit,
             reset_at: remote.reset_at,
+            self_throttle: false,
         },
     )
 }
@@ -1612,6 +1641,9 @@ fn github_self_throttle_wait(
         remaining: remote.map_or(0, |limit| limit.remaining),
         limit: remote.map_or(0, |limit| limit.limit),
         reset_at,
+        // Above the low threshold this is lazybox pacing itself; at the
+        // floor the remote window is the honest wait.
+        self_throttle: !remote_exhausted,
     })
 }
 

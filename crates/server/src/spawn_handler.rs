@@ -2884,9 +2884,17 @@ async fn resolve_or_create_session(
         // directory that masqueraded as the shared main checkout —
         // the terminal opened in a non-git folder and the agent's
         // first `git` command was the only thing that noticed.
-        if let Err(e) =
-            provision_worktree(config, &workspace, &path, session_key, true, None, origin, false)
-                .await
+        if let Err(e) = provision_worktree(
+            config,
+            &workspace,
+            &path,
+            session_key,
+            true,
+            None,
+            origin,
+            false,
+        )
+        .await
         {
             tracing::warn!("main-checkout worktree provisioning failed: {e}");
             // Land the ✗ on the checklist row that actually aborted
@@ -2978,8 +2986,17 @@ async fn resolve_or_create_session(
     // This spawn holds `_provisioning_claim` on `path`; tell the reclaim
     // so it discounts our own claim (and only ours) when the branch
     // holder is our own intended path.
-    let provisioned =
-        provision_worktree(config, &workspace, &path, session_key, false, None, origin, true).await;
+    let provisioned = provision_worktree(
+        config,
+        &workspace,
+        &path,
+        session_key,
+        false,
+        None,
+        origin,
+        true,
+    )
+    .await;
     tracing::info!(
         elapsed_ms = prov_start.elapsed().as_millis(),
         ok = provisioned.is_ok(),
@@ -4024,7 +4041,13 @@ async fn provision_worktree(
                         Err(lazybox_git_ops::GitError::BranchHeldLive { holder, .. }) => Some((
                             holder.clone(),
                             reclaim_non_live_managed_holder(
-                                config, &mgr, owner, name, branch, holder, target,
+                                config,
+                                &mgr,
+                                owner,
+                                name,
+                                branch,
+                                holder,
+                                target,
                                 own_claim_on_target,
                             )
                             .await,

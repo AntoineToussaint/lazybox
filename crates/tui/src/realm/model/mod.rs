@@ -6307,9 +6307,10 @@ impl<T: TerminalAdapter> Model<T> {
     /// resolved here, joining the two disjoint field borrows.
     fn refresh_terminal_usage_badges(&mut self) {
         let sidebar = &self.sidebar;
-        self.terminals.refresh_usage_badges(|session_key, agent_id| {
-            sidebar.terminal_usage_badge(session_key.as_str(), agent_id)
-        });
+        self.terminals
+            .refresh_usage_badges(|session_key, agent_id| {
+                sidebar.terminal_usage_badge(session_key.as_str(), agent_id)
+            });
     }
 
     pub fn view(&mut self) {

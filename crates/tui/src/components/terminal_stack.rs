@@ -5485,7 +5485,10 @@ impl TerminalStack {
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
-                (format!("{} ", usage.text), Style::default().fg(theme.text_dim))
+                (
+                    format!("{} ", usage.text),
+                    Style::default().fg(theme.text_dim),
+                )
             };
             used += badge.chars().count();
             spans.push(Span::styled(badge, style));

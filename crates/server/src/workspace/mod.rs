@@ -1194,7 +1194,10 @@ pub(crate) fn migrate_legacy_archived_set(config: &ServerConfig) {
         tracing::warn!("migrate_legacy_archived_set: batch failed ({e}) — leaving legacy blob");
         return;
     }
-    tracing::info!(count = legacy.len(), "migrated legacy archived set to per-key rows");
+    tracing::info!(
+        count = legacy.len(),
+        "migrated legacy archived set to per-key rows"
+    );
 }
 
 /// Remove `key` from the persisted archived set so the next poll can
@@ -1204,7 +1207,7 @@ pub(crate) fn migrate_legacy_archived_set(config: &ServerConfig) {
 ///
 /// A single atomic per-key `delete_kv` — no read-modify-write, so it
 /// can't race a concurrent migration or archive. Legacy-blob keys are
-/// converted to per-key rows by [`migrate_legacy_archived_set`] at
+/// converted to per-key rows by `migrate_legacy_archived_set` at
 /// startup, before any unarchive can run, so this delete always sees a
 /// real row to remove.
 #[must_use]
@@ -1311,10 +1314,7 @@ pub(crate) fn migrate_legacy_session_tombstones(config: &ServerConfig) {
 /// reattached on the next restart.
 #[must_use]
 pub fn tombstone_session_key(config: &ServerConfig, key: &str) -> bool {
-    if let Err(e) = config
-        .store
-        .set_kv(&session_tombstone_row_key(key), "1")
-    {
+    if let Err(e) = config.store.set_kv(&session_tombstone_row_key(key), "1") {
         tracing::warn!("tombstone_session_key: set_kv failed: {e}");
         return false;
     }
@@ -1326,7 +1326,7 @@ pub fn tombstone_session_key(config: &ServerConfig, key: &str) -> bool {
 /// leave a tombstone that would kill the still-present workspace's
 /// session on restart. A single atomic per-key delete; legacy-blob keys
 /// are converted to rows at startup by
-/// [`migrate_legacy_session_tombstones`].
+/// `migrate_legacy_session_tombstones`.
 #[must_use]
 pub fn untombstone_session_key(config: &ServerConfig, key: &str) -> bool {
     if let Err(e) = config.store.delete_kv(&session_tombstone_row_key(key)) {
@@ -3170,8 +3170,7 @@ mod archived_set_tests {
             self.inner.apply_batch(mutations)
         }
         fn get_kv(&self, key: &str) -> Result<Option<String>, StoreError> {
-            if key == lazybox_core::KV_KEY_ARCHIVED
-                && self.fail_legacy_reads.load(Ordering::SeqCst)
+            if key == lazybox_core::KV_KEY_ARCHIVED && self.fail_legacy_reads.load(Ordering::SeqCst)
             {
                 return Err(StoreError::Backend("database is locked".into()));
             }
@@ -3212,12 +3211,12 @@ mod archived_set_tests {
             self.inner.get_kv(key)
         }
         fn set_kv(&self, key: &str, value: &str) -> Result<(), StoreError> {
-            if key == self.trigger_key {
-                if let Some(neighbour) = self.neighbour.lock().take() {
-                    // The concurrent writer commits its own tombstone
-                    // before ours lands.
-                    self.inner.set_kv(&neighbour, "1").unwrap();
-                }
+            if key == self.trigger_key
+                && let Some(neighbour) = self.neighbour.lock().take()
+            {
+                // The concurrent writer commits its own tombstone
+                // before ours lands.
+                self.inner.set_kv(&neighbour, "1").unwrap();
             }
             self.inner.set_kv(key, value)
         }
@@ -3436,10 +3435,10 @@ mod session_tombstone_tests {
             self.inner.get_kv(key)
         }
         fn set_kv(&self, key: &str, value: &str) -> Result<(), StoreError> {
-            if key == self.trigger_key {
-                if let Some(n) = self.neighbour.lock().take() {
-                    self.inner.set_kv(&n, "1").unwrap();
-                }
+            if key == self.trigger_key
+                && let Some(n) = self.neighbour.lock().take()
+            {
+                self.inner.set_kv(&n, "1").unwrap();
             }
             self.inner.set_kv(key, value)
         }
@@ -3496,7 +3495,9 @@ mod session_tombstone_tests {
         );
         crate::workspace::migrate_legacy_session_tombstones(&config);
         assert_eq!(
-            store.get_kv(lazybox_core::KV_KEY_SESSION_TOMBSTONES).unwrap(),
+            store
+                .get_kv(lazybox_core::KV_KEY_SESSION_TOMBSTONES)
+                .unwrap(),
             None,
             "the legacy blob is migrated away and deleted"
         );

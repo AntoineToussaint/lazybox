@@ -32,8 +32,8 @@ pub use autofix::{
 };
 pub use config::{
     KV_KEY_ARCHIVED, KV_KEY_LAYOUT, KV_KEY_SESSION_TOMBSTONES, KV_KEY_SETUP, KV_KEY_THEME,
-    KV_PREFIX_ARCHIVED, KV_PREFIX_SESSION_TOMBSTONE,
-    LinearScope, PaneLayout, PersistedSetup, ProviderConfig,
+    KV_PREFIX_ARCHIVED, KV_PREFIX_SESSION_TOMBSTONE, LinearScope, PaneLayout, PersistedSetup,
+    ProviderConfig,
 };
 pub use conventions::{CommitStyle, Conventions};
 pub use error_class::{ErrorClass, HttpErrorSignals, classify, classify_message, classify_status};

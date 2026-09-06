@@ -856,8 +856,8 @@ mod tests {
             ("archived_workspace:zeta", "1"),
             ("archived_workspace:~tilde", "1"), // '~' (0x7E) > ':' start byte
             ("archived_workspaces_v1", "[\"legacy\"]"), // adjacent, must NOT match
-            ("archived", "x"),                          // shorter, must NOT match
-            ("zzz", "x"),                               // after range, must NOT match
+            ("archived", "x"),                  // shorter, must NOT match
+            ("zzz", "x"),                       // after range, must NOT match
         ] {
             store.set_kv(k, v).unwrap();
         }
@@ -895,9 +895,10 @@ mod tests {
                  SELECT key, value FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key",
             )
             .unwrap()
-            .query_map(rusqlite::params!["archived_workspace:", "archived_workspace;"], |row| {
-                row.get::<_, String>(3)
-            })
+            .query_map(
+                rusqlite::params!["archived_workspace:", "archived_workspace;"],
+                |row| row.get::<_, String>(3),
+            )
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
@@ -910,7 +911,10 @@ mod tests {
 
     #[test]
     fn prefix_upper_bound_boundaries() {
-        assert_eq!(prefix_upper_bound("archived_workspace:").as_deref(), Some("archived_workspace;"));
+        assert_eq!(
+            prefix_upper_bound("archived_workspace:").as_deref(),
+            Some("archived_workspace;")
+        );
         assert_eq!(prefix_upper_bound("ab").as_deref(), Some("ac"));
         // Trailing 0xFF-class char rolls over to bump the previous scalar.
         assert_eq!(prefix_upper_bound("a\u{10FFFF}").as_deref(), Some("b"));

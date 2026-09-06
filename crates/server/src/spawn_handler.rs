@@ -13734,17 +13734,21 @@ mod tests {
         // (meter = false) keeps direct routing even though the proxy is
         // running — so turning the proxy on never redirects a session that
         // didn't ask, and a structured run isn't counted twice (#1109).
+        // `port()` is a process-global `OnceLock` (first setter wins), so an
+        // earlier test that started a real proxy may already own the port and
+        // make this `set_port` a no-op (#1507). Read back whatever port is
+        // actually published and assert against that — the routing behavior,
+        // not a fixed number, is what this test is about.
         crate::proxy::set_port(45999);
+        let port = crate::proxy::port().expect("a proxy port is published");
+        let expected_url = format!("http://127.0.0.1:{port}/anthropic/claude/github-acme-widget-7");
         let mut cfg = lazybox_config::Config::default();
         cfg.agent.metering_proxy = true;
         let claude = lazybox_agents::agent::builtins::Claude;
 
         assert_eq!(
             gateway_env_for_agent(&cfg, Some(&claude), true, false, "github-acme-widget-7"),
-            vec![(
-                "ANTHROPIC_BASE_URL".to_string(),
-                "http://127.0.0.1:45999/anthropic/claude/github-acme-widget-7".to_string()
-            )]
+            vec![("ANTHROPIC_BASE_URL".to_string(), expected_url.clone())]
         );
         // Opted out: no proxy URL, and no gateway configured.
         assert!(
@@ -13756,10 +13760,7 @@ mod tests {
         cfg.agent.meter_all = true;
         assert_eq!(
             gateway_env_for_agent(&cfg, Some(&claude), false, false, "github-acme-widget-7"),
-            vec![(
-                "ANTHROPIC_BASE_URL".to_string(),
-                "http://127.0.0.1:45999/anthropic/claude/github-acme-widget-7".to_string()
-            )]
+            vec![("ANTHROPIC_BASE_URL".to_string(), expected_url.clone())]
         );
         // …but a remote workspace is never routed even under `meter_all`:
         // the proxy URL is this host's loopback, unreachable from the box.

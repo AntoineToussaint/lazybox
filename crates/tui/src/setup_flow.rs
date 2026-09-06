@@ -1378,8 +1378,7 @@ mod tests {
         let path = dir.path().join("config.yaml");
         // Hand-authored: comments, no `setup:` block, default
         // onboarding markers — nothing for `--fresh` to clear.
-        let hand_written =
-            "# my lazybox config\nui:\n  theme: Gruvbox Dark # I like this one\n";
+        let hand_written = "# my lazybox config\nui:\n  theme: Gruvbox Dark # I like this one\n";
         std::fs::write(&path, hand_written).unwrap();
         assert!(
             !clear_persisted_yaml(&path).unwrap(),

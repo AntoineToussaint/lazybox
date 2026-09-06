@@ -61,11 +61,22 @@ pub enum Latch {
     /// Nothing more to do until the poll confirms the terminal state
     /// (which releases the latch).
     Done(Option<String>),
-    /// The attempt settled without merging this head — the fresh
-    /// re-check failed, the merge was rejected, or infrastructure was
-    /// missing. A *changed* commit re-probes; the probe only merges if
-    /// the head moved on.
+    /// The attempt settled without merging this head for a reason that
+    /// can clear WITHOUT a new commit — the fresh re-check found it not
+    /// ready yet (checks still reporting, a review pending, a stacked
+    /// parent still open), or GitHub answered with a "not yet" (required
+    /// checks expected / pending, base branch moved). A *changed* commit
+    /// re-probes in full and merges if the fresh state is green, same
+    /// head or not. Before this distinction a same-head re-green stood
+    /// down forever: a PR armed while CI was still "expected" never
+    /// auto-merged once CI passed.
     Blocked(Option<String>),
+    /// GitHub rejected the merge of this head for a reason only a new
+    /// commit clears — conflicts, a ruleset, missing permissions. A
+    /// *changed* commit re-probes but stands down while the head is
+    /// unchanged, so a permanently-blocked PR doesn't fire a doomed
+    /// mutation (and a red notice) on every poll.
+    Rejected(Option<String>),
 }
 
 /// Daemon-wide auto-merge memory. Own `parking_lot::Mutex` on
@@ -181,12 +192,16 @@ fn approval_from_config(
 }
 
 /// Dispatch ticket for one attempt. `skip_if_head` carries the head a
-/// previous attempt already settled on — the attempt stands down
-/// without merging when the fresh fetch still reports that OID.
+/// previous attempt was REJECTED on — the attempt stands down without
+/// merging when the fresh fetch still reports that OID. `restore` is the
+/// latch to put back when the attempt can't even fetch (a rate pause, a
+/// transport failure) so a probe that never looked keeps its prior
+/// verdict instead of re-firing on every quiet tick.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttemptPlan {
     pub workspace_key: WorkspaceKey,
     pub skip_if_head: Option<String>,
+    pub restore: Option<Latch>,
 }
 
 /// Run the latch state machine for one committed workspace. Returns the
@@ -208,21 +223,29 @@ pub fn plan(
         }
         Signal::Hold => None,
         Signal::Fire => {
-            let skip_if_head = match memory.latch(key) {
-                None => None,
+            let (skip_if_head, restore) = match memory.latch(key) {
+                None => (None, None),
                 // In flight, or already merged this head — never
                 // double-dispatch. (The client-era regression: a
                 // re-broadcast of the same green state must not
                 // double-merge.)
                 Some(Latch::InFlight) | Some(Latch::Done(_)) => return None,
-                Some(Latch::Blocked(head)) if changed => head.clone(),
-                Some(Latch::Blocked(_)) => return None,
+                // A transient block re-probes in full on a change: the
+                // fresh re-check decides, and a green same-head merges.
+                Some(prior @ Latch::Blocked(_)) if changed => (None, Some(prior.clone())),
+                // A rejection re-probes on a change but only merges if
+                // the head moved on.
+                Some(prior @ Latch::Rejected(head)) if changed => {
+                    (head.clone(), Some(prior.clone()))
+                }
+                Some(Latch::Blocked(_)) | Some(Latch::Rejected(_)) => return None,
             };
             memory.settle(key, Some(Latch::InFlight));
             memory.attempts_started += 1;
             Some(AttemptPlan {
                 workspace_key: key.clone(),
                 skip_if_head,
+                restore,
             })
         }
     }
@@ -279,6 +302,18 @@ pub trait MergeBackend {
         ws: &Workspace,
         expected_head_oid: Option<&str>,
     ) -> Result<(), lazybox_core::ProviderError>;
+
+    /// When GitHub has the token on a rate-limit pause (a secondary
+    /// cooldown or an exhausted primary window), the instant it lifts;
+    /// `None` when traffic flows. An attempt stands down without
+    /// fetching while this is set: its interactive probe would only be
+    /// refused — or, worse, answered 403 and lengthen the pause — and a
+    /// fetch failure releases the latch, so before this gate an armed
+    /// green PR re-fired a doomed probe on every commit for the whole
+    /// pause (23 in one afternoon's log).
+    fn paused_until(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        None
+    }
 }
 
 impl MergeBackend for lazybox_gh::GhClient {
@@ -304,6 +339,35 @@ impl MergeBackend for lazybox_gh::GhClient {
     ) -> Result<(), lazybox_core::ProviderError> {
         lazybox_core::TaskProvider::merge(self, ws, expected_head_oid).await
     }
+
+    fn paused_until(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.rate_snapshot()
+            .retry_at
+            .filter(|at| *at > chrono::Utc::now())
+    }
+}
+
+/// Whether a GitHub merge rejection is a "not yet" that the same head can
+/// still clear — required checks that haven't reported or passed yet, a
+/// review that's pending or requested, a base that moved, a merge already
+/// queued — as opposed to a rejection only a new commit clears (conflicts,
+/// a ruleset, permissions). Decides [`Latch::Blocked`] vs
+/// [`Latch::Rejected`] after a failed mutation.
+pub fn transient_merge_rejection(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "status check",
+        // "Head branch was modified" / "Base branch was modified": a
+        // compare-and-swap miss — the next poll carries the moved head.
+        "branch was modified",
+        "changes requested",
+        "approving review",
+        "review is required",
+        "merge already in progress",
+        "in progress",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 /// Resolve the real GitHub client and run the attempt. A missing
@@ -342,7 +406,7 @@ async fn run_real_attempt_with_resolver<F, Fut>(
         .and_then(super::handlers::github_target)
         .is_none()
     {
-        settle(Some(Latch::Blocked(ticket.skip_if_head.clone())));
+        settle(Some(Latch::Blocked(None)));
         return;
     }
 
@@ -353,12 +417,12 @@ async fn run_real_attempt_with_resolver<F, Fut>(
                 workspace = %ticket.workspace_key,
                 "auto-merge: no GitHub client available — standing down"
             );
-            let prior = ticket.skip_if_head.clone();
+            let prior = ticket.restore.clone().or(Some(Latch::Blocked(None)));
             config
                 .poll
                 .auto_merge
                 .lock()
-                .settle(&ticket.workspace_key, Some(Latch::Blocked(prior)));
+                .settle(&ticket.workspace_key, prior);
         }
     }
 }
@@ -429,7 +493,7 @@ pub async fn run_attempt<B: MergeBackend>(
         // merge against. Block rather than release so we don't re-plan
         // an unfixable target every tick.
         tracing::debug!(workspace = %key, "auto-merge: no GitHub target — standing down");
-        settle(Some(Latch::Blocked(ticket.skip_if_head.clone())));
+        settle(Some(Latch::Blocked(None)));
         return;
     };
     let pr_label = ws
@@ -437,6 +501,19 @@ pub async fn run_attempt<B: MergeBackend>(
         .as_ref()
         .map(|p| p.id.key.clone())
         .unwrap_or_else(|| key.as_str().to_string());
+
+    // GitHub has the token paused: don't spend (or lengthen) the pause on
+    // a probe that can't be acted on. Keep the prior verdict; the next
+    // commit after the pause lifts re-probes normally.
+    if let Some(until) = backend.paused_until() {
+        tracing::debug!(
+            workspace = %key,
+            %until,
+            "auto-merge: GitHub rate-limited — deferring the probe"
+        );
+        settle(ticket.restore.clone());
+        return;
+    }
 
     // Fresh eligibility source — the stored row can be a full poll
     // interval stale.
@@ -446,13 +523,13 @@ pub async fn run_attempt<B: MergeBackend>(
             // Transient (network, rate limit): restore the pre-attempt
             // state so a later tick retries cleanly.
             tracing::warn!(workspace = %key, "auto-merge: fresh PR fetch failed: {e}");
-            settle(ticket.skip_if_head.clone().map(|h| Latch::Blocked(Some(h))));
+            settle(ticket.restore.clone());
             return;
         }
     };
     let Some((mut fresh, head)) = fetched else {
         tracing::warn!(workspace = %key, "auto-merge: PR no longer visible — standing down");
-        settle(Some(Latch::Blocked(ticket.skip_if_head.clone())));
+        settle(Some(Latch::Blocked(None)));
         return;
     };
     // The fresh fetch doesn't know the repo's approval policy — stamp it
@@ -460,18 +537,20 @@ pub async fn run_attempt<B: MergeBackend>(
     // approval must not auto-merge). Read fresh, like `merge_on_green_policy`.
     fresh.approval_policy = approval_policy_for(&owner, &repo);
 
-    // Same head a previous attempt already settled on: a red→re-green
-    // of an unchanged head must not merge twice. Refresh local state
-    // and keep the block.
+    // Same head GitHub already REJECTED (conflicts, ruleset, permissions):
+    // only a new commit can clear it, so don't fire the doomed mutation
+    // again. Refresh local state and keep the rejection. A transiently
+    // blocked head (`skip_if_head == None`) falls through to the fresh
+    // re-check and merges if it is green now.
     if let (Some(prior), Some(current)) = (ticket.skip_if_head.as_deref(), head.as_deref())
         && prior == current
     {
         tracing::debug!(
             workspace = %key,
             head = current,
-            "auto-merge: head unchanged since last attempt — standing down"
+            "auto-merge: head unchanged since GitHub rejected it — standing down"
         );
-        settle(Some(Latch::Blocked(head.clone())));
+        settle(Some(Latch::Rejected(head.clone())));
         commit_fresh_task(config, key, fresh).await;
         return;
     }
@@ -556,7 +635,14 @@ pub async fn run_attempt<B: MergeBackend>(
         }
         Err(e) => {
             tracing::warn!(workspace = %key, "auto-merge failed: {}", e.diagnostic());
-            settle(Some(Latch::Blocked(head)));
+            // A "not yet" (checks expected / pending, base moved) keeps
+            // the head re-probable so it merges once it clears; a hard
+            // rejection stands the head down until a new commit.
+            if transient_merge_rejection(&e.user_message()) {
+                settle(Some(Latch::Blocked(head)));
+            } else {
+                settle(Some(Latch::Rejected(head)));
+            }
             // Same loud, persistent surface as a manual merge failure —
             // includes GitHub's reason (branch protection, head moved…),
             // humanized so no raw GraphQL/JSON reaches the footer.
@@ -780,10 +866,47 @@ mod tests {
         );
         let probe = plan(&mut m, &key, Signal::Fire, true).expect("changed commit re-probes");
         assert_eq!(
-            probe.skip_if_head.as_deref(),
-            Some("abc"),
-            "the probe carries the already-settled head for comparison"
+            probe.skip_if_head, None,
+            "a transient block re-probes in full — a green same head merges"
         );
+        assert_eq!(
+            probe.restore,
+            Some(Latch::Blocked(Some("abc".into()))),
+            "a probe that can't fetch restores the prior verdict"
+        );
+    }
+
+    /// A GitHub rejection re-probes on a change but carries the rejected
+    /// head so the attempt stands down while it is unchanged.
+    #[test]
+    fn rejected_reprobe_carries_the_rejected_head() {
+        let mut m = AutoMergeMemory::default();
+        let key = WorkspaceKey::new("github-o-r-1");
+        m.settle(&key, Some(Latch::Rejected(Some("abc".into()))));
+        assert!(plan(&mut m, &key, Signal::Fire, false).is_none());
+        let probe = plan(&mut m, &key, Signal::Fire, true).expect("changed commit re-probes");
+        assert_eq!(probe.skip_if_head.as_deref(), Some("abc"));
+        assert_eq!(probe.restore, Some(Latch::Rejected(Some("abc".into()))));
+    }
+
+    #[test]
+    fn transient_rejections_are_classified() {
+        for msg in [
+            "GraphQL error: 2 of 2 required status checks are expected.",
+            "Required status check \"test\" is in progress.",
+            "Base branch was modified. Review and try the merge again.",
+            "Merge already in progress",
+            "At least 1 approving review is required",
+        ] {
+            assert!(transient_merge_rejection(msg), "{msg}");
+        }
+        for msg in [
+            "Pull Request has merge conflicts",
+            "Repository rule violations found",
+            "not authorized to merge",
+        ] {
+            assert!(!transient_merge_rejection(msg), "{msg}");
+        }
     }
 
     /// Client-era `confirmed_merge_suppresses_a_redundant_auto_merge`:
@@ -820,6 +943,8 @@ mod tests {
         fetch: Result<Option<(Task, Option<String>)>, String>,
         merge_result: Result<(), lazybox_core::ProviderError>,
         merges: parking_lot::Mutex<Vec<Option<String>>>,
+        paused_until: Option<chrono::DateTime<Utc>>,
+        fetches: parking_lot::Mutex<u32>,
     }
 
     impl FakeBackend {
@@ -828,6 +953,8 @@ mod tests {
                 fetch: Ok(Some((fresh, Some(head.into())))),
                 merge_result: Ok(()),
                 merges: parking_lot::Mutex::new(Vec::new()),
+                paused_until: None,
+                fetches: parking_lot::Mutex::new(0),
             }
         }
 
@@ -838,6 +965,8 @@ mod tests {
                 fetch: Ok(Some((fresh, Some(head.into())))),
                 merge_result: Err(err),
                 merges: parking_lot::Mutex::new(Vec::new()),
+                paused_until: None,
+                fetches: parking_lot::Mutex::new(0),
             }
         }
     }
@@ -849,7 +978,12 @@ mod tests {
             _repo: &str,
             _number: u64,
         ) -> Result<Option<(Task, Option<String>)>, String> {
+            *self.fetches.lock() += 1;
             self.fetch.clone()
+        }
+
+        fn paused_until(&self) -> Option<chrono::DateTime<Utc>> {
+            self.paused_until
         }
 
         async fn merge(
@@ -864,10 +998,23 @@ mod tests {
         }
     }
 
+    /// A ticket as `plan` issues it for a REJECTED head (`skip_if_head`
+    /// set, the rejection restored on a fetch failure) or a first attempt.
     fn ticket(ws: &Workspace, skip_if_head: Option<&str>) -> AttemptPlan {
         AttemptPlan {
             workspace_key: ws.key.clone(),
             skip_if_head: skip_if_head.map(|s| s.to_string()),
+            restore: skip_if_head.map(|s| Latch::Rejected(Some(s.to_string()))),
+        }
+    }
+
+    /// A ticket as `plan` issues it for a transiently BLOCKED head: a
+    /// full re-probe with the block restored on a fetch failure.
+    fn blocked_ticket(ws: &Workspace, head: &str) -> AttemptPlan {
+        AttemptPlan {
+            workspace_key: ws.key.clone(),
+            skip_if_head: None,
+            restore: Some(Latch::Blocked(Some(head.to_string()))),
         }
     }
 
@@ -1056,6 +1203,8 @@ mod tests {
             fetch: Ok(Some((fresh, Some("abc123".into())))),
             merge_result: Ok(()),
             merges: parking_lot::Mutex::new(Vec::new()),
+            paused_until: None,
+            fetches: parking_lot::Mutex::new(0),
         };
 
         run_attempt(&config, ticket(&ws, None), &own_policy(), &backend).await;
@@ -1105,11 +1254,11 @@ mod tests {
 
         assert!(
             backend.merges.lock().is_empty(),
-            "an unchanged head must not merge twice"
+            "a head GitHub rejected must not be re-sent unchanged"
         );
         assert_eq!(
             config.poll.auto_merge.lock().latch(&ws.key),
-            Some(&Latch::Blocked(Some("abc123".into())))
+            Some(&Latch::Rejected(Some("abc123".into())))
         );
         // Silent apart from the fresh-state commit's own broadcasts
         // (workspace/project upserts) — no merge outcome and no
@@ -1125,6 +1274,92 @@ mod tests {
                 "suppression must not emit merge/notice events, got {evt:?}"
             );
         }
+    }
+
+    /// The dead end this fixes: a head transiently blocked (required
+    /// checks "expected", a pending review) that goes green on the SAME
+    /// commit must merge on the re-probe — before, it stood down forever
+    /// until someone pushed a new commit.
+    #[tokio::test(flavor = "current_thread")]
+    async fn transient_block_merges_on_the_same_head_once_green() {
+        let ws = armed_ws("o/r#1");
+        let config = config_with(&ws);
+        let backend = FakeBackend::merging(green_task("o/r#1"), "abc123");
+
+        run_attempt(
+            &config,
+            blocked_ticket(&ws, "abc123"),
+            &own_policy(),
+            &backend,
+        )
+        .await;
+
+        assert_eq!(
+            backend.merges.lock().as_slice(),
+            &[Some("abc123".to_string())],
+            "a green same head after a transient block merges"
+        );
+        assert_eq!(
+            config.poll.auto_merge.lock().latch(&ws.key),
+            Some(&Latch::Done(Some("abc123".into())))
+        );
+    }
+
+    /// While GitHub has the token paused, an attempt neither fetches nor
+    /// merges and keeps its prior verdict — no probe storm through the
+    /// pause (23 doomed probes in one afternoon's log).
+    #[tokio::test(flavor = "current_thread")]
+    async fn paused_backend_defers_without_fetching() {
+        let ws = armed_ws("o/r#1");
+        let config = config_with(&ws);
+        let mut backend = FakeBackend::merging(green_task("o/r#1"), "abc123");
+        backend.paused_until = Some(Utc::now() + chrono::Duration::minutes(5));
+
+        run_attempt(
+            &config,
+            blocked_ticket(&ws, "abc123"),
+            &own_policy(),
+            &backend,
+        )
+        .await;
+
+        assert_eq!(*backend.fetches.lock(), 0, "no probe during the pause");
+        assert!(backend.merges.lock().is_empty());
+        assert_eq!(
+            config.poll.auto_merge.lock().latch(&ws.key),
+            Some(&Latch::Blocked(Some("abc123".into()))),
+            "the prior verdict is restored"
+        );
+
+        run_attempt(&config, ticket(&ws, None), &own_policy(), &backend).await;
+        assert_eq!(
+            config.poll.auto_merge.lock().latch(&ws.key),
+            None,
+            "a first attempt releases so the next commit after the pause re-probes"
+        );
+    }
+
+    /// A hard rejection (conflicts) latches `Rejected`: the head stands
+    /// down until a new commit, unlike a transient "not yet".
+    #[tokio::test(flavor = "current_thread")]
+    async fn hard_rejection_latches_rejected() {
+        let ws = armed_ws("o/r#1");
+        let config = config_with(&ws);
+        let backend = FakeBackend::failing(
+            green_task("o/r#1"),
+            "abc123",
+            lazybox_core::ProviderError::permanent(
+                "github",
+                "GraphQL error: Pull Request has merge conflicts",
+            ),
+        );
+
+        run_attempt(&config, ticket(&ws, None), &own_policy(), &backend).await;
+
+        assert_eq!(
+            config.poll.auto_merge.lock().latch(&ws.key),
+            Some(&Latch::Rejected(Some("abc123".into())))
+        );
     }
 
     /// A NEW head re-arms: the re-probe sees a different OID and the
@@ -1258,6 +1493,8 @@ mod tests {
             fetch: Err("rate limited".into()),
             merge_result: Ok(()),
             merges: parking_lot::Mutex::new(Vec::new()),
+            paused_until: None,
+            fetches: parking_lot::Mutex::new(0),
         };
 
         run_attempt(&config, ticket(&ws, None), &own_policy(), &backend).await;
@@ -1276,8 +1513,8 @@ mod tests {
         .await;
         assert_eq!(
             config.poll.auto_merge.lock().latch(&ws.key),
-            Some(&Latch::Blocked(Some("abc123".into()))),
-            "a re-probe that never fetched keeps its blocked head"
+            Some(&Latch::Rejected(Some("abc123".into()))),
+            "a re-probe that never fetched keeps its prior verdict"
         );
     }
 

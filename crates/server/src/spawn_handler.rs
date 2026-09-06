@@ -2898,8 +2898,17 @@ async fn resolve_or_create_session(
         // directory that masqueraded as the shared main checkout —
         // the terminal opened in a non-git folder and the agent's
         // first `git` command was the only thing that noticed.
-        if let Err(e) =
-            provision_worktree(config, &workspace, &path, session_key, true, None, origin).await
+        if let Err(e) = provision_worktree(
+            config,
+            &workspace,
+            &path,
+            session_key,
+            true,
+            None,
+            origin,
+            false,
+        )
+        .await
         {
             tracing::warn!("main-checkout worktree provisioning failed: {e}");
             // Land the ✗ on the checklist row that actually aborted
@@ -2988,8 +2997,20 @@ async fn resolve_or_create_session(
     drop(ownership_guard);
 
     let prov_start = std::time::Instant::now();
-    let provisioned =
-        provision_worktree(config, &workspace, &path, session_key, false, None, origin).await;
+    // This spawn holds `_provisioning_claim` on `path`; tell the reclaim
+    // so it discounts our own claim (and only ours) when the branch
+    // holder is our own intended path.
+    let provisioned = provision_worktree(
+        config,
+        &workspace,
+        &path,
+        session_key,
+        false,
+        None,
+        origin,
+        true,
+    )
+    .await;
     tracing::info!(
         elapsed_ms = prov_start.elapsed().as_millis(),
         ok = provisioned.is_ok(),
@@ -3349,6 +3370,21 @@ pub(crate) fn provisioning_worktree_is_claimed(config: &ServerConfig, candidate:
         .any(|path| paths_match(path, candidate))
 }
 
+/// How many concurrent spawns are provisioning `candidate` right now.
+/// Sums the refcounts of every claim key that resolves to the same real
+/// path (a `/var` vs `/private/var` spelling difference registers as two
+/// keys), so the reclaim decision can tell *its own* single claim apart
+/// from a second spawn racing the same path.
+pub(crate) fn provisioning_worktree_claim_count(config: &ServerConfig, candidate: &Path) -> usize {
+    config
+        .provisioning_worktree_claims
+        .lock()
+        .iter()
+        .filter(|(path, _)| paths_match(path, candidate))
+        .map(|(_, count)| *count)
+        .sum()
+}
+
 async fn reclaim_non_live_managed_holder(
     config: &ServerConfig,
     mgr: &lazybox_git_ops::WorktreeManager,
@@ -3357,9 +3393,19 @@ async fn reclaim_non_live_managed_holder(
     branch: &str,
     holder: &Path,
     intended_path: &Path,
+    own_claim_on_target: bool,
 ) -> BranchHolderReclaim {
-    reclaim_non_live_managed_holder_locked(config, mgr, owner, repo, branch, holder, intended_path)
-        .await
+    reclaim_non_live_managed_holder_locked(
+        config,
+        mgr,
+        owner,
+        repo,
+        branch,
+        holder,
+        intended_path,
+        own_claim_on_target,
+    )
+    .await
 }
 
 async fn reclaim_non_live_managed_holder_locked(
@@ -3370,14 +3416,29 @@ async fn reclaim_non_live_managed_holder_locked(
     branch: &str,
     holder: &Path,
     intended_path: &Path,
+    own_claim_on_target: bool,
 ) -> BranchHolderReclaim {
     // Hold lock only for the critical section: ownership checks. Release
     // immediately before the expensive reclaim operation (which may involve
     // filesystem I/O and git operations).
     {
         let _ownership_guard = config.worktree_ownership_lock.lock().await;
+        // Tell *this* spawn's own provisioning claim apart from another
+        // spawn's in-flight checkout. A holder at our intended path is
+        // usually a stale registration lazybox left behind (an interrupted
+        // `worktree add`), and counting our own claim as a live owner
+        // dead-ended the spawn. But path identity alone is too coarse:
+        // if a second spawn ever races the same path (SpawnCoordinator
+        // dedup bypassed), that path carries *two* claims and treating
+        // both as "ours" would reclaim its worktree out from under it.
+        // Subtract only our own single contribution — anything beyond it
+        // is another spawn's claim and must be preserved.
+        let own_contribution =
+            usize::from(own_claim_on_target && paths_match(holder, intended_path));
+        let claimed_by_another =
+            provisioning_worktree_claim_count(config, holder) > own_contribution;
         if managed_worktree_has_live_session_owner(config, holder)
-            || provisioning_worktree_is_claimed(config, holder)
+            || claimed_by_another
             || managed_worktree_has_live_main_owner(config, holder).await
         {
             return BranchHolderReclaim::Preserved;
@@ -3867,6 +3928,12 @@ async fn provision_worktree(
     on_main: bool,
     existing_branch: Option<&str>,
     origin: lazybox_ipc::SpawnOrigin,
+    // Whether the caller holds a `ProvisioningWorktreeClaim` on `target`.
+    // Threaded into the branch-holder reclaim so it can discount this
+    // spawn's own claim without mistaking a concurrent same-path spawn's
+    // claim for it. Only the isolated per-session spawn path claims its
+    // target; on-main and session-recovery re-provisions pass `false`.
+    own_claim_on_target: bool,
 ) -> Result<String, crate::ServerError> {
     use crate::ServerError;
     use lazybox_git_ops::CheckoutPhase;
@@ -3988,7 +4055,14 @@ async fn provision_worktree(
                         Err(lazybox_git_ops::GitError::BranchHeldLive { holder, .. }) => Some((
                             holder.clone(),
                             reclaim_non_live_managed_holder(
-                                config, &mgr, owner, name, branch, holder, target,
+                                config,
+                                &mgr,
+                                owner,
+                                name,
+                                branch,
+                                holder,
+                                target,
+                                own_claim_on_target,
                             )
                             .await,
                         )),
@@ -4103,6 +4177,7 @@ async fn provision_worktree(
                                         &new_branch,
                                         holder,
                                         target,
+                                        own_claim_on_target,
                                     )
                                     .await,
                                 ))
@@ -4694,6 +4769,9 @@ async fn ensure_worktree_present(
         false,
         expected_branch,
         origin,
+        // This recovery path holds no provisioning claim of its own, so
+        // any claim on the holder belongs to another spawn — preserve it.
+        false,
     )
     .await
     {
@@ -18622,6 +18700,7 @@ mod tests {
                 "feature",
                 &holder,
                 &root.path().join("worktrees").join("other"),
+                true,
             )
             .await,
             BranchHolderReclaim::Preserved,
@@ -18639,11 +18718,195 @@ mod tests {
                 "feature",
                 &holder,
                 &root.path().join("worktrees").join("other"),
+                true,
             )
             .await,
             BranchHolderReclaim::Reclaimed
         );
         assert!(!holder.exists());
+    }
+
+    /// The spawn's *own* provisioning claim must not count as a live
+    /// owner of the holder when the holder IS the intended path: that
+    /// shape is lazybox's own stale registration (an interrupted
+    /// `worktree add`), and treating it as "another live worktree"
+    /// dead-ended every re-spawn of the workspace in the recovery modal.
+    #[tokio::test]
+    async fn own_claim_on_the_intended_path_does_not_preserve_the_holder() {
+        fn git(cwd: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let upstream = tempfile::tempdir().unwrap();
+        git(upstream.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
+        git(upstream.path(), &["add", "."]);
+        git(upstream.path(), &["commit", "-q", "-m", "base"]);
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let manager = config.worktree_manager();
+        let bare = manager.bare_path("acme", "core");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(
+            root.path(),
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &upstream.path().to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+        git(&bare, &["branch", "feature", "main"]);
+        let holder = root.path().join("worktrees").join("self");
+        std::fs::create_dir_all(holder.parent().unwrap()).unwrap();
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                "feature",
+                &holder.to_string_lossy(),
+                "refs/heads/feature",
+            ],
+        );
+
+        // This spawn claims the path it is provisioning — the holder.
+        let own_claim = ProvisioningWorktreeClaim::new(&config, holder.clone());
+        assert_eq!(
+            reclaim_non_live_managed_holder(
+                &config, &manager, "acme", "core", "feature", &holder, &holder, true,
+            )
+            .await,
+            BranchHolderReclaim::Reclaimed,
+            "our own claim on the target is not another spawn's live checkout"
+        );
+        drop(own_claim);
+
+        // A claim by a spawn targeting a *different* path still preserves.
+        let other = root.path().join("worktrees").join("other");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                "feature",
+                &holder.to_string_lossy(),
+                "refs/heads/feature",
+            ],
+        );
+        let _other_claim = ProvisioningWorktreeClaim::new(&config, holder.clone());
+        assert_eq!(
+            reclaim_non_live_managed_holder(
+                &config, &manager, "acme", "core", "feature", &holder, &other, true,
+            )
+            .await,
+            BranchHolderReclaim::Preserved,
+        );
+    }
+
+    /// Finding-1 regression: two spawns race the *same* intended path
+    /// (SpawnCoordinator dedup bypassed). Path identity alone treated
+    /// both claims as "ours" and reclaimed the racing spawn's in-flight
+    /// checkout. With claim *counting*, our own single contribution is
+    /// discounted but the second spawn's claim still preserves the holder.
+    #[tokio::test]
+    async fn a_second_spawn_racing_the_same_path_is_not_reclaimed() {
+        fn git(cwd: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let upstream = tempfile::tempdir().unwrap();
+        git(upstream.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
+        git(upstream.path(), &["add", "."]);
+        git(upstream.path(), &["commit", "-q", "-m", "base"]);
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let manager = config.worktree_manager();
+        let bare = manager.bare_path("acme", "core");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(
+            root.path(),
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &upstream.path().to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+        git(&bare, &["branch", "feature", "main"]);
+        let holder = root.path().join("worktrees").join("self");
+        std::fs::create_dir_all(holder.parent().unwrap()).unwrap();
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                "feature",
+                &holder.to_string_lossy(),
+                "refs/heads/feature",
+            ],
+        );
+
+        // Our own claim on the intended path (== holder), plus a SECOND
+        // spawn that raced onto the very same path.
+        let _own_claim = ProvisioningWorktreeClaim::new(&config, holder.clone());
+        let _racer_claim = ProvisioningWorktreeClaim::new(&config, holder.clone());
+        assert_eq!(
+            reclaim_non_live_managed_holder(
+                &config, &manager, "acme", "core", "feature", &holder, &holder, true,
+            )
+            .await,
+            BranchHolderReclaim::Preserved,
+            "a concurrent spawn's claim on the same path must survive our own reclaim"
+        );
+        assert!(holder.exists(), "the racing spawn's checkout is untouched");
     }
 
     /// A linked (no-worktree) workspace resolves every spawn straight to
@@ -18724,6 +18987,7 @@ mod tests {
             false,
             None,
             lazybox_ipc::SpawnOrigin::Autonomous(lazybox_ipc::AutonomousTrigger::Mention),
+            false,
         )
         .await
         .unwrap();
@@ -18838,6 +19102,7 @@ mod tests {
             false,
             None,
             lazybox_ipc::SpawnOrigin::Interactive,
+            false,
         )
         .await
         .expect("first provision");
@@ -18860,6 +19125,7 @@ mod tests {
             false,
             None,
             lazybox_ipc::SpawnOrigin::Interactive,
+            false,
         )
         .await
         .expect("second provision must not BranchMismatch against its own worktree");
@@ -19079,6 +19345,7 @@ mod tests {
             true,
             None,
             lazybox_ipc::SpawnOrigin::Interactive,
+            false,
         )
         .await
         .expect_err("an unresolved GitHub project must abort provisioning");

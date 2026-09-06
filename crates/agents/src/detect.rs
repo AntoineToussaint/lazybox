@@ -253,11 +253,9 @@ pub fn parse_usage_limit_reset(recent_output: &[u8]) -> Option<String> {
     ]
     .into_iter()
     .flat_map(|keyword| {
-        compact
-            .rmatch_indices(keyword)
-            .filter_map(move |(i, kw)| {
-                reset_token(&compact[i + kw.len()..]).map(|token| (i, token))
-            })
+        compact.rmatch_indices(keyword).filter_map(move |(i, kw)| {
+            reset_token(&compact[i + kw.len()..]).map(|token| (i, token))
+        })
     })
     .max_by_key(|(i, _)| *i)
     .map(|(_, token)| token)
@@ -2675,8 +2673,7 @@ mod tests {
         // ABOVE it. Keyword-first ("resets" before "continuing") would pick
         // the stale `3pm`; comparing recency across all keywords picks the
         // live `1:10pm`.
-        let stale_resets_then_autocontinue =
-            "usage limit reached ∙ resets 3pm\n\
+        let stale_resets_then_autocontinue = "usage limit reached ∙ resets 3pm\n\
              ⏺ Usage limit reached · continuing automatically at 1:10pm · esc or type to cancel";
         assert_eq!(
             parse_usage_limit_reset(stale_resets_then_autocontinue.as_bytes()),

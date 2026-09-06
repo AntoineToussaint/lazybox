@@ -115,7 +115,7 @@ Status is best-effort as of this catalog's first pass; correct it as you audit.
 | [Key-binding system & chords](tui-and-ux.md#key-binding-system--chords) | stable | `tui-core`, `tui` |
 | [Ask Lazybox & shortcut index](tui-and-ux.md#ask-lazybox--shortcut-index) | stable | `tui` |
 | [Settings palette & setup wizard](tui-and-ux.md#settings-palette--setup-wizard) | stable | `tui`, `config` |
-| [Guided tour](tui-and-ux.md#guided-tour) | beta | `tui` |
+| [Onboarding coach](tui-and-ux.md#onboarding-coach) | stable | `tui` |
 | [Activity feed](tui-and-ux.md#activity-feed) | stable | `tui` |
 | [Reply](tui-and-ux.md#reply) | stable | `tui`, providers |
 | [Mouse handling](tui-and-ux.md#mouse-handling) | stable | `tui` |

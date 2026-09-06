@@ -6977,16 +6977,22 @@ async fn commit_pty_reading(
     }
     // A fresh entry into the usage-limit block: mine the reset countdown
     // from the same detect window and broadcast it as the proactive
-    // "time-to-reset" (#1012). `Committed(LimitReached)` is already a
-    // change into the block, so this fires once per episode (mirroring
-    // `detect_and_broadcast_model`'s broadcast-on-change). Emitted only
-    // when a hint parses — the block itself rode `Event::AgentState`
-    // above; clients fold this countdown in where the banner named one,
-    // and degrade to the bare block where it didn't.
+    // "time-to-reset" (#1012). Fires on each committed TRANSITION into a
+    // limit state (mirroring `detect_and_broadcast_model`'s
+    // broadcast-on-change). Emitted only when a hint parses — the block
+    // itself rode `Event::AgentState` above; clients fold this countdown in
+    // where the banner named one, and degrade to the bare block where it
+    // didn't.
     // `AwaitingReset` counts too: the detector classifies Claude's
     // auto-continue banner (`continuing automatically at 1:10pm`) straight
     // to the calm state, and that banner's time is the reset the badge
-    // should show.
+    // should show. Note this makes the auto-`Wait` path
+    // (`LimitReached → AwaitingReset`) broadcast twice per episode — once on
+    // each transition. That is harmless: both re-parse the same lingering
+    // banner and the client handler only stashes the hint (an idempotent
+    // set), and the second fire also recovers a hint the `LimitReached`
+    // reading couldn't yet parse. The pure auto-continue path commits
+    // `AwaitingReset` directly, so it fires exactly once.
     if let lazybox_agents::Outcome::Committed(
         lazybox_ipc::AgentState::LimitReached | lazybox_ipc::AgentState::AwaitingReset,
     ) = outcome

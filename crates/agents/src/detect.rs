@@ -208,10 +208,15 @@ pub const CLAUDE_USAGE_LIMIT_AUTO_CONTINUE_PHRASES: &[&str] =
 /// Parsed from the compacted (space-free, lowercased) buffer, the only
 /// form that survives tmux's cursor-positioned repaint — the banner's
 /// inter-word gaps arrive as cursor moves, not space bytes, so `resets
-/// 3pm` reaches lazybox as `resets3pm`. Every `resets` occurrence is
-/// tried in order and the first that parses a time wins: the chooser's
-/// own "Wait until it resets" line also contains the word but is followed
-/// by a newline, not a digit, so it never captures. Deliberately
+/// 3pm` reaches lazybox as `resets3pm`. Every reset keyword occurrence is
+/// tried and the MOST RECENT (highest offset) one that parses a time wins,
+/// so a prior episode's stale `resets 3pm` still in the window can't shadow
+/// the current banner's countdown. Recency is compared across ALL keywords,
+/// not keyword-first, so an auto-continue tail whose own `resets` line
+/// scrolled out (only `continuing automatically at 1:10pm` left) still wins
+/// over an older `resets`. The chooser's own "Wait until it resets" line
+/// also contains the word but is followed by a newline, not a digit, so it
+/// never captures. Deliberately
 /// conservative — only a leading digit run plus `:` and the am/pm + h/m/s/d
 /// time letters, stopping at the first byte outside that set — so the
 /// trailing `∙` / newline / `❯ 1. wait` never bleeds in, and an
@@ -230,24 +235,32 @@ pub fn parse_usage_limit_reset(recent_output: &[u8]) -> Option<String> {
     // banner still matches.
     last_compact_match_pos(&compact, CLAUDE_USAGE_LIMIT_PHRASES)
         .or_else(|| last_compact_match_pos(&compact, CLAUDE_USAGE_LIMIT_AUTO_CONTINUE_PHRASES))?;
-    // `resets 3pm` first (the banner's own countdown), then the
-    // auto-continue form's `continuing automatically at 1:10pm`, whose
-    // time is the same reset — a window holding only that line (the
-    // spend-limit line above it scrolled out) still yields a hint. The
-    // specific `continuing automatically at/in` keywords are used (not a
-    // bare `automatically`) so ordinary prose like "the deploy continues
-    // automatically 2h after merge" can never be mined as a reset time.
+    // Prefer the banner's own `resets 3pm` countdown, but fall back to the
+    // auto-continue form's `continuing automatically at 1:10pm` (same reset)
+    // for a window holding only that line — the spend-limit line above it
+    // scrolled out. Across all three keywords, the MOST RECENT match that
+    // parses a time wins (max offset), so neither an older episode's stale
+    // `resets` nor the chooser's token-less "Wait until it resets" line can
+    // shadow the live banner's countdown. The specific `continuing
+    // automatically at/in` keywords are used (not a bare `automatically`) so
+    // ordinary prose like "the deploy continues automatically 2h after
+    // merge" can never be mined as a reset time.
+    let compact = compact.as_str();
     [
         "resets",
         "continuingautomaticallyat",
         "continuingautomaticallyin",
     ]
     .into_iter()
-    .find_map(|keyword| {
+    .flat_map(|keyword| {
         compact
-            .match_indices(keyword)
-            .find_map(|(i, kw)| reset_token(&compact[i + kw.len()..]))
+            .rmatch_indices(keyword)
+            .filter_map(move |(i, kw)| {
+                reset_token(&compact[i + kw.len()..]).map(|token| (i, token))
+            })
     })
+    .max_by_key(|(i, _)| *i)
+    .map(|(_, token)| token)
 }
 
 /// Month abbreviations a date-style reset leads with (`resets Aug 30 at
@@ -2639,6 +2652,35 @@ mod tests {
         assert_eq!(
             parse_usage_limit_reset(b"You've hit your weekly limit, resets Sep 3"),
             Some("sep 3".into()),
+        );
+    }
+
+    #[test]
+    fn parses_the_most_recent_reset_when_an_older_one_lingers() {
+        // Two limit episodes still inside the ~16 KiB detect window: an
+        // older `resets 3pm` above the current banner. The forward scan
+        // returned the FIRST match (`3pm`, the stale one); the recency scan
+        // must return the CURRENT banner's time instead.
+        let two_episodes = "usage limit reached ∙ resets 3pm\n\
+             …later, a new episode…\n\
+             usage limit reached ∙ resets 5pm";
+        assert_eq!(
+            parse_usage_limit_reset(two_episodes.as_bytes()),
+            Some("5pm".into()),
+        );
+
+        // Cross-keyword recency: the current auto-continue banner's own
+        // `resets` line scrolled out, leaving only `continuing automatically
+        // at 1:10pm`, while a stale `resets 3pm` from a prior block lingers
+        // ABOVE it. Keyword-first ("resets" before "continuing") would pick
+        // the stale `3pm`; comparing recency across all keywords picks the
+        // live `1:10pm`.
+        let stale_resets_then_autocontinue =
+            "usage limit reached ∙ resets 3pm\n\
+             ⏺ Usage limit reached · continuing automatically at 1:10pm · esc or type to cancel";
+        assert_eq!(
+            parse_usage_limit_reset(stale_resets_then_autocontinue.as_bytes()),
+            Some("1:10pm".into()),
         );
     }
 

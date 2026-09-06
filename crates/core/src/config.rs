@@ -328,7 +328,19 @@ pub const KV_PREFIX_ARCHIVED: &str = "archived_workspace:";
 /// sweep failed to reach is still killed on restart — without also
 /// suppressing a reopened issue from resurfacing. Stored as a
 /// JSON-encoded `Vec<String>`; per-machine, not synced.
+///
+/// Legacy single-blob form; superseded by the per-key rows under
+/// [`KV_PREFIX_SESSION_TOMBSTONE`] for the same reason as
+/// [`KV_KEY_ARCHIVED`] (#1496): a whole-set read-modify-write can drop a
+/// concurrent neighbour's tombstone. Still read and migrated away.
 pub const KV_KEY_SESSION_TOMBSTONES: &str = "session_tombstones_v1";
+
+/// Per-key storage for the session-tombstone set: each key gets its own
+/// kv row `{prefix}{workspace_key}`, so recording a tombstone is a single
+/// atomic write that can't lose a concurrent neighbour (#1496). The
+/// prefix does not collide with the legacy blob
+/// (`session_tombstones_v1`, no colon).
+pub const KV_PREFIX_SESSION_TOMBSTONE: &str = "session_tombstone:";
 
 /// Pane layout knobs. Two splitters today: the sidebar's right edge
 /// (left/right split, **as a percentage of the total width**) and the

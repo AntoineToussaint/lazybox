@@ -106,6 +106,32 @@ impl SqliteStore {
     }
 }
 
+/// Least string strictly greater than every string that starts with
+/// `prefix` — the exclusive upper bound for an index range scan over a
+/// BINARY-collated `TEXT` key. UTF-8 byte order matches code-point
+/// order, so bumping the last scalar value yields a valid, correctly
+/// ordered bound. Returns `None` when no finite bound exists (an empty
+/// prefix, or one consisting entirely of `char::MAX`), so the caller
+/// falls back to a lower-bound-only scan (`key >= prefix`), which is
+/// exact in that case because nothing sorts after such a prefix without
+/// also starting with it.
+fn prefix_upper_bound(prefix: &str) -> Option<String> {
+    let mut chars: Vec<char> = prefix.chars().collect();
+    while let Some(last) = chars.pop() {
+        let mut next = last as u32 + 1;
+        if next == 0xD800 {
+            // Skip the UTF-16 surrogate gap, which holds no scalars.
+            next = 0xE000;
+        }
+        if let Some(nc) = char::from_u32(next) {
+            chars.push(nc);
+            return Some(chars.into_iter().collect());
+        }
+        // `last` was char::MAX; drop it and bump the previous char.
+    }
+    None
+}
+
 impl Store for SqliteStore {
     fn apply_batch(&self, mutations: &[StoreMutation]) -> Result<(), StoreError> {
         let mut conn = self.conn();
@@ -193,17 +219,31 @@ impl Store for SqliteStore {
 
     fn list_kv_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>, StoreError> {
         let conn = self.conn();
-        let mut stmt = conn
-            .prepare(
-                "SELECT key, value
-                 FROM kv
-                 WHERE substr(key, 1, length(?1)) = ?1
-                 ORDER BY key",
-            )
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
-        let rows = stmt
-            .query_map([prefix], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        // Range scan on the PRIMARY KEY index. The former
+        // `substr(key,1,length(?)) = ?` wrapped the indexed column in a
+        // function, so it was non-sargable and forced a full table scan
+        // of the entire kv table on every call — ruinous on the poller's
+        // per-task archived-set read (#1496). `key >= prefix AND key <
+        // upper` is answered directly from the index.
+        let row = |row: &rusqlite::Row| -> rusqlite::Result<(String, String)> {
+            Ok((row.get(0)?, row.get(1)?))
+        };
+        let mut stmt;
+        let rows = match prefix_upper_bound(prefix) {
+            Some(upper) => {
+                stmt = conn
+                    .prepare("SELECT key, value FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key")
+                    .map_err(|e| StoreError::Backend(e.to_string()))?;
+                stmt.query_map(rusqlite::params![prefix, upper], row)
+            }
+            None => {
+                stmt = conn
+                    .prepare("SELECT key, value FROM kv WHERE key >= ?1 ORDER BY key")
+                    .map_err(|e| StoreError::Backend(e.to_string()))?;
+                stmt.query_map(rusqlite::params![prefix], row)
+            }
+        }
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| StoreError::Backend(e.to_string()))
     }
@@ -800,5 +840,80 @@ mod tests {
             None,
             "the first mutation must roll back with the rejected second one"
         );
+    }
+
+    /// The index range scan must return *exactly* the prefixed rows —
+    /// no more, no less. The dangerous case is a key that is a strict
+    /// superstring of the prefix minus its final byte: `archived_workspace:`
+    /// vs the legacy blob `archived_workspaces_v1` (they share
+    /// `archived_workspace`). The range upper bound must exclude the
+    /// latter while including every real `archived_workspace:` row.
+    #[test]
+    fn list_kv_prefix_is_exact_at_adjacent_key_boundaries() {
+        let store = SqliteStore::in_memory().unwrap();
+        for (k, v) in [
+            ("archived_workspace:a", "1"),
+            ("archived_workspace:zeta", "1"),
+            ("archived_workspace:~tilde", "1"), // '~' (0x7E) > ':' start byte
+            ("archived_workspaces_v1", "[\"legacy\"]"), // adjacent, must NOT match
+            ("archived", "x"),                          // shorter, must NOT match
+            ("zzz", "x"),                               // after range, must NOT match
+        ] {
+            store.set_kv(k, v).unwrap();
+        }
+
+        let got: Vec<String> = store
+            .list_kv_prefix("archived_workspace:")
+            .unwrap()
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                "archived_workspace:a".to_string(),
+                "archived_workspace:zeta".to_string(),
+                "archived_workspace:~tilde".to_string(),
+            ],
+            "range scan must match every prefixed key and exclude the adjacent legacy blob"
+        );
+
+        // Empty prefix returns everything (parity with the old substr scan).
+        assert_eq!(store.list_kv_prefix("").unwrap().len(), 6);
+    }
+
+    /// The perf fix's whole point: the prefix scan must be answered from
+    /// the PRIMARY KEY index, not a full table scan. `substr(key,…)=?`
+    /// (the old form) plans as `SCAN kv`; the range form as `SEARCH kv`.
+    #[test]
+    fn list_kv_prefix_uses_the_index_not_a_full_scan() {
+        let store = SqliteStore::in_memory().unwrap();
+        let conn = store.conn();
+        let plan: Vec<String> = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN \
+                 SELECT key, value FROM kv WHERE key >= ?1 AND key < ?2 ORDER BY key",
+            )
+            .unwrap()
+            .query_map(rusqlite::params!["archived_workspace:", "archived_workspace;"], |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let detail = plan.join(" | ");
+        assert!(
+            detail.contains("SEARCH") && !detail.contains("SCAN"),
+            "kv prefix scan must use the index, got plan: {detail}"
+        );
+    }
+
+    #[test]
+    fn prefix_upper_bound_boundaries() {
+        assert_eq!(prefix_upper_bound("archived_workspace:").as_deref(), Some("archived_workspace;"));
+        assert_eq!(prefix_upper_bound("ab").as_deref(), Some("ac"));
+        // Trailing 0xFF-class char rolls over to bump the previous scalar.
+        assert_eq!(prefix_upper_bound("a\u{10FFFF}").as_deref(), Some("b"));
+        assert_eq!(prefix_upper_bound(""), None);
     }
 }

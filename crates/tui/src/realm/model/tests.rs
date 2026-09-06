@@ -4235,7 +4235,7 @@ snippets:
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
             1,
-            "the multi-select survives a cancel",
+            "nothing ran, so the marks stay — only a real action consumes them",
         );
     }
 
@@ -4699,7 +4699,7 @@ snippets:
     /// as every other bulk action. A broadcast that reached nobody also
     /// keeps the marks so the user can retry after spawning an agent.
     #[test]
-    fn broadcast_keeps_selection_after_delivery_and_after_all_skipped() {
+    fn broadcast_consumes_selection_on_delivery_but_keeps_it_when_all_skipped() {
         let (mut m, keys) = model_with_broadcast_targets(&[
             Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
             None,
@@ -4727,7 +4727,7 @@ snippets:
             "all-skipped send must not clear the marks",
         );
 
-        // Delivered broadcast: selection survives (#1449).
+        // Delivered broadcast: the action consumes the selection (#1498).
         let expected_targets = m.sidebar.selected_broadcast_keys();
         m.mount_broadcast_picker();
         assert_eq!(
@@ -4751,8 +4751,8 @@ snippets:
         );
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            2,
-            "successful send keeps the selection live for a follow-up (#1449)",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
     }
 
@@ -4779,7 +4779,7 @@ snippets:
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
             1,
-            "the marks survive a cancelled compose",
+            "nothing ran, so the marks stay — only a real action consumes them",
         );
     }
 
@@ -9945,8 +9945,8 @@ mod merge_focus_follow_tests {
         assert!(targets.contains(&key_b));
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            3,
-            "selection survives the bulk fire so the set can be acted on again (#1449)",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
     }
 
@@ -9968,7 +9968,7 @@ mod merge_focus_follow_tests {
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
             1,
-            "selection survives a no-op bulk update",
+            "a fully-ineligible run leaves the marks so it can be retried",
         );
     }
 
@@ -11991,15 +11991,13 @@ mod merge_focus_follow_tests {
         );
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            2,
-            "selection survives so the set can be acted on again (#1449)",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
-        // The summary names the still-live selection so it isn't invisible
-        // state — the next keypress acts on a set the user can still see.
         let msg = &m.status.notice.as_ref().expect("summary flashed").message;
         assert!(
-            msg.contains("2 still selected"),
-            "summary names the surviving selection: {msg}",
+            !msg.contains("still selected"),
+            "the summary no longer promises a surviving selection: {msg}",
         );
         let _ = keys;
     }
@@ -12007,11 +12005,15 @@ mod merge_focus_follow_tests {
     /// #1449 end-to-end: a selection survives a bulk action so the same set
     /// can be acted on twice — `g d` (close upstream) then `x x` (archive),
     /// the common finishing chain — without re-marking between them.
+    /// #1498 (reverting #1449): a bulk action consumes its selection. The
+    /// `g d` → `x x` chain that motivated keeping it alive now needs an
+    /// explicit re-mark, which is the point — a surviving selection is
+    /// invisible state the next keypress acts on unseen.
     #[test]
-    fn selection_survives_g_d_then_x_x_over_the_same_set() {
+    fn a_bulk_action_consumes_the_selection_so_the_next_one_re_marks() {
         use lazybox_tui_core::action::Action;
         let mut m = build_model();
-        seed_and_select(
+        let keys = seed_and_select(
             &mut m,
             vec![
                 workspace("owner/repo#1", true, Duration::hours(1)),
@@ -12020,28 +12022,35 @@ mod merge_focus_follow_tests {
         );
         assert_eq!(m.sidebar.broadcast_selected_count(), 2);
 
-        // `g d` closes both PRs upstream; the rows stay (state flips on the
-        // next poll), so the marks — and the set — persist.
+        // `g d` closes both PRs upstream and takes the marks with it.
         assert!(m.dispatch_action(&Action::DeleteOrClose).is_empty());
         let close = m.handle_confirmed(true);
         assert_eq!(close.len(), 2, "both PRs close");
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            2,
-            "the selection is still live for the second action",
+            0,
+            "the action consumed the selection",
         );
 
-        // `x x` now archives the very same set with no re-selection.
+        // A second action with no selection falls back to the cursor row
+        // only — it does NOT silently re-run over the old set, which is
+        // exactly the invisible-state hazard this revert removes.
         assert!(m.dispatch_action(&Action::Archive).is_empty());
-        let kill = m.handle_confirmed(true);
-        assert_eq!(kill.len(), 2, "both survivors are archived");
-        assert!(kill.iter().all(|c| matches!(c, IpcCommand::Kill { .. })));
+        let cursor_only = m.handle_confirmed(true);
+        assert_eq!(cursor_only.len(), 1, "focused row only: {cursor_only:?}");
+        assert!(
+            cursor_only
+                .iter()
+                .all(|c| matches!(c, IpcCommand::Kill { .. }))
+        );
+        let _ = keys;
     }
 
-    /// #1449: only `Esc` clears a selection that a bulk action left live.
+    /// `Esc` still clears a selection the user built but hasn't acted on —
+    /// the abandon path. (Clearing *after* an action is now the action's own
+    /// job, #1498.)
     #[test]
-    fn esc_clears_the_selection_a_bulk_action_left_live() {
-        use lazybox_tui_core::action::Action;
+    fn esc_clears_an_unused_selection() {
         use tuirealm::event::{Key, KeyEvent, KeyModifiers};
         let mut m = build_model();
         seed_and_select(
@@ -12053,20 +12062,13 @@ mod merge_focus_follow_tests {
         );
         m.focus = PaneFocus::Sidebar;
         m.set_focus_attr();
-
-        let cmds = m.dispatch_action(&Action::SyncWorkspace);
-        assert_eq!(cmds.len(), 2);
-        assert_eq!(
-            m.sidebar.broadcast_selected_count(),
-            2,
-            "survives the action"
-        );
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
 
         m.dispatch_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
             0,
-            "Esc is the clear gesture",
+            "Esc abandons a selection that was never acted on",
         );
     }
 
@@ -12164,14 +12166,14 @@ mod merge_focus_follow_tests {
             assert_eq!(
                 m.sidebar.broadcast_selected_count(),
                 2,
-                "a deliberate Tab keeps the selection",
+                "a deliberate Tab into the terminal keeps the selection",
             );
         }
         assert_eq!(m.focus, PaneFocus::Terminals, "Tab reached the terminal");
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
             2,
-            "voluntary Tab into the terminal keeps the selection",
+            "a deliberate Tab into the terminal keeps the selection",
         );
     }
 
@@ -12330,8 +12332,8 @@ mod merge_focus_follow_tests {
         );
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            2,
-            "selection survives; the merged row pruned itself out of the Inbox (#1449)",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
     }
 
@@ -12462,7 +12464,7 @@ mod merge_focus_follow_tests {
     /// live and names it in the notice — the immediate `dispatch_bulk_agent`
     /// path used to consume it on `injected > 0`.
     #[test]
-    fn bulk_inject_only_work_keeps_selection_and_names_it() {
+    fn bulk_inject_only_work_consumes_the_selection() {
         use lazybox_ipc::{TerminalId, TerminalKind};
         use lazybox_tui_core::action::Action;
 
@@ -12495,13 +12497,13 @@ mod merge_focus_follow_tests {
         );
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            2,
-            "the inject-only path keeps the selection live (#1449)",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
         let msg = &m.status.notice.as_ref().expect("summary flashed").message;
         assert!(
-            msg.contains("2 still selected"),
-            "the spawn/inject summary names the surviving selection: {msg}",
+            !msg.contains("still selected"),
+            "the summary no longer promises a surviving selection: {msg}",
         );
     }
 
@@ -12534,8 +12536,8 @@ mod merge_focus_follow_tests {
         )));
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            2,
-            "selection survives the bulk spawn so the set can be acted on again (#1449)",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
     }
 
@@ -12648,8 +12650,8 @@ mod merge_focus_follow_tests {
 
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            3,
-            "selection survives the bulk spawn/inject so the set can be reused (#1449)",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
     }
 
@@ -12731,13 +12733,19 @@ mod merge_focus_follow_tests {
         );
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            3,
-            "selection survives delivery so the same set can be reused (#1449)"
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
 
-        // --- `w w` fan-out over the SAME surviving selection (#1449) ---
-        // No re-select: the marks from the snippet delivery are still live,
-        // which is exactly the chain #1449 enables (act on one set twice).
+        // --- `w w` fan-out over the same set, re-marked ---
+        // The snippet delivery consumed the selection (#1498), so the set is
+        // re-marked before the second action. The point of the test is that
+        // both paths fan out *identically* over a selection, not that a
+        // selection outlives an action.
+        for key in &keys {
+            assert!(m.sidebar.focus_workspace_key(key));
+            m.sidebar.toggle_broadcast_select();
+        }
         let work_cmds = m.dispatch_action(&Action::Work);
         let mut work_targets: Vec<u64> = work_cmds
             .iter()
@@ -12837,8 +12845,8 @@ mod merge_focus_follow_tests {
         assert_eq!(closed, expected, "every marked open issue is closed");
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            2,
-            "selection survives so the same set can be archived next (#1449)",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
     }
 
@@ -12910,8 +12918,8 @@ mod merge_focus_follow_tests {
         assert_eq!(closed, expected, "all three marked PRs are closed");
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            3,
-            "selection survives `g d` so the same set can be archived next (#1449)",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
     }
 
@@ -26483,7 +26491,7 @@ mod remote_spawn_tests {
     /// the stale pin then stripped the suffix off the next bulk summary
     /// too). Post-fix only a local spawn arms the pin.
     #[test]
-    fn remote_bulk_spawn_keeps_the_selection_named_and_arms_no_follow() {
+    fn remote_bulk_spawn_consumes_the_selection_and_arms_no_follow() {
         let (mut m, _conn, mut box_rx) = build_model_with_box();
         seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
         m.sidebar.toggle_broadcast_select();
@@ -26507,18 +26515,13 @@ mod remote_spawn_tests {
         );
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            2,
-            "focus never left the sidebar, so the selection survives",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
-        let msg = m
-            .status
-            .notice
-            .as_ref()
-            .map(|n| n.message.clone())
-            .unwrap_or_default();
+        let msg = &m.status.notice.as_ref().expect("summary flashed").message;
         assert!(
-            msg.contains("2 still selected"),
-            "the summary must still name the live selection, got {msg:?}",
+            !msg.contains("still selected"),
+            "the summary no longer promises a surviving selection: {msg}",
         );
     }
 

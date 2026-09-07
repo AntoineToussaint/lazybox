@@ -1228,6 +1228,68 @@ mod tests {
             .to_string()
     }
 
+    /// #1547: a row the program repaints in place (Claude Code's
+    /// collapsed `… +N lines` tool result, rewritten every tick) exists
+    /// once in history, and scrolling the viewport into scrollback must
+    /// show it once. The persistent render state rebuilds every row when
+    /// the viewport pin moves, so each scrolled frame must equal a
+    /// fresh-state full walk — a stale-row skip on the pure-scroll path
+    /// would surface here as a divergence or a repeated row.
+    #[test]
+    fn scrolled_viewport_shows_a_row_repainted_in_place_once() {
+        use libghostty_vt::terminal::ScrollViewport;
+        let mut h = Harness::new(40, 5);
+        let area = Rect::new(0, 0, 40, 5);
+        for i in 0..12 {
+            h.terminal
+                .vt_write(format!("output line {i}\r\n").as_bytes());
+        }
+        let marker = "… +17 lines (ctrl+o to expand)";
+        h.terminal.vt_write(marker.as_bytes());
+        let _ = h.render(area);
+        for _ in 0..27 {
+            h.terminal.vt_write(format!("\r\x1b[2K{marker}").as_bytes());
+            let _ = h.render(area);
+        }
+
+        let count_marker =
+            |buf: &Buffer| (0..5).filter(|&y| row_text(buf, area, y) == marker).count();
+
+        // Page through the whole history from the top: every frame
+        // matches a fresh full walk, and the marker shows up once total.
+        // Rows are keyed by absolute history index so the clamped final
+        // page can't count its overlap with the previous one twice.
+        h.terminal.scroll_viewport(ScrollViewport::Top);
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let frame = h.render(area);
+            let fresh = h.render_via_fresh_state(area);
+            assert_eq!(
+                frame, fresh,
+                "scrolled frame diverged from a fresh full walk"
+            );
+            let before = h.terminal.scrollbar().unwrap().offset;
+            for y in (0..5u16).filter(|&y| row_text(&frame, area, y) == marker) {
+                seen.insert(before + y as u64);
+            }
+            h.terminal.scroll_viewport(ScrollViewport::Delta(5));
+            if h.terminal.scrollbar().unwrap().offset == before {
+                break;
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            1,
+            "the in-place repainted row must appear once in history"
+        );
+
+        // Back at the live bottom it is the last row, once.
+        h.terminal.scroll_viewport(ScrollViewport::Bottom);
+        let bottom = h.render(area);
+        assert_eq!(count_marker(&bottom), 1);
+        assert_eq!(row_text(&bottom, area, 4), marker);
+    }
+
     /// #874 regression: a full, faithful Claude composer redraw with an
     /// inline autosuggestion (ghost text). This pins the whole family the
     /// #844 fix belongs to against a *non-blinking* cursor — the style

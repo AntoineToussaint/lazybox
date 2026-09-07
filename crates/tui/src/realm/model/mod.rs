@@ -4017,18 +4017,26 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Seed the local mastery ledger from the daemon's persisted counts,
-    /// replayed in `Event::MasteryLedger` on connect (#1502). Replaces the
-    /// local view wholesale — the daemon is the authority.
+    /// replayed in `Event::MasteryLedger` on connect (#1502). Merges by
+    /// taking the max of each `(action_id, via)` count rather than clearing
+    /// and replacing: counts are monotonic (`record_action` only ever
+    /// increments), so the daemon's total is normally ≥ the local view and
+    /// wins — but a dispatch may have bumped the local count optimistically
+    /// before its `RecordAction` committed daemon-side, and a clear-then-
+    /// replace would drop that in-flight `+1` until the next replay. Max
+    /// keeps it (and can never regress a real count, since none decrease).
     pub(crate) fn seed_mastery_from_snapshot(
         &mut self,
         counts: Vec<(String, lazybox_ipc::ActionVia, u32)>,
     ) {
-        self.mastery.clear();
         for (action_id, via, count) in counts {
-            self.mastery
+            let entry = self
+                .mastery
                 .entry(action_id)
                 .or_default()
-                .insert(via, count);
+                .entry(via)
+                .or_insert(0);
+            *entry = (*entry).max(count);
         }
     }
 

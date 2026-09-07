@@ -28376,7 +28376,7 @@ mod mastery_ledger_tests {
     }
 
     #[test]
-    fn seed_from_snapshot_replaces_local_ledger() {
+    fn seed_from_snapshot_merges_authoritative_counts() {
         let (mut m, _rx) = model_with_cmd_rx();
         m.dispatch_action_via(&Action::CycleSort, ActionVia::Kbd);
 
@@ -28385,8 +28385,32 @@ mod mastery_ledger_tests {
             ("merge_pr".into(), ActionVia::Menu, 1),
         ]);
 
-        // The daemon is the authority: the pre-seed local bump is dropped.
-        assert_eq!(m.action_uses("cycle_sort"), 0);
+        // A local-only bump absent from the replay is preserved (its own
+        // RecordAction is still in flight), and the daemon's authoritative
+        // count for an action it does carry is adopted.
+        assert_eq!(m.action_uses("cycle_sort"), 1);
         assert_eq!(m.action_uses("merge_pr"), 5);
+    }
+
+    #[test]
+    fn seed_does_not_regress_an_uncommitted_optimistic_bump() {
+        // #1502 regression: a re-subscribe can replay a ledger that doesn't
+        // yet reflect a just-dispatched action (its RecordAction hasn't
+        // committed daemon-side). A clear-then-replace seed would drop the
+        // optimistic +1; the merge-by-max must keep it, then adopt the higher
+        // authoritative count once the daemon catches up.
+        let (mut m, _rx) = model_with_cmd_rx();
+        m.dispatch_action_via(&Action::CycleSort, ActionVia::Kbd);
+        assert_eq!(m.action_uses("cycle_sort"), 1);
+
+        m.seed_mastery_from_snapshot(vec![("cycle_sort".into(), ActionVia::Kbd, 0)]);
+        assert_eq!(
+            m.action_uses("cycle_sort"),
+            1,
+            "seed must not regress an uncommitted optimistic bump",
+        );
+
+        m.seed_mastery_from_snapshot(vec![("cycle_sort".into(), ActionVia::Kbd, 3)]);
+        assert_eq!(m.action_uses("cycle_sort"), 3, "higher authoritative count adopted");
     }
 }

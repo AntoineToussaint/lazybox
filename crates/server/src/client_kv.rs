@@ -240,11 +240,17 @@ pub fn session_costs(store: &dyn lazybox_store::Store) -> Vec<(String, u64)> {
 
 /// Increment the mastery ledger for one invocation of `action_id` through
 /// `via` (#1502): read-modify-write the action's per-channel count map and
-/// persist. Best-effort — a lost write is a bounded under-count of a
-/// rebuildable usage cache, never destructible history.
+/// persist. The RMW runs under `config.mastery_lock` because `RecordAction`
+/// is a detached command dispatched on the concurrent `mutations` JoinSet —
+/// two invocations for the same action can run in parallel, and without the
+/// lock both read the same base count and one increment is lost. Best-effort
+/// otherwise: a failed write is a bounded under-count of a rebuildable usage
+/// cache, never destructible history.
 pub async fn record_action(config: &ServerConfig, action_id: String, via: ActionVia) {
     let store = config.store.clone();
+    let mastery_lock = config.mastery_lock.clone();
     let result = tokio::task::spawn_blocking(move || {
+        let _guard = mastery_lock.lock();
         let kv_key = format!("{MASTERY_KV_PREFIX}{action_id}");
         let mut counts = load_count_map(&*store, &kv_key);
         *counts.entry(via.as_str().to_string()).or_insert(0) += 1;
@@ -402,6 +408,28 @@ mod tests {
         let mut snap = snapshot(&*store).mastery;
         snap.sort();
         assert_eq!(snap, ledger);
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_action_records_never_lose_increments() {
+        // #1502 regression: `record_action` is a detached command run on the
+        // concurrent `mutations` JoinSet, so parallel invocations for the same
+        // action read-modify-write the same kv row. Without `mastery_lock`
+        // around the load→increment→store they interleave and lose increments.
+        // Fire many at once — their blocking sections overlap on the blocking
+        // pool — and assert every one is counted.
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        const N: u32 = 200;
+        let writers = (0..N).map(|_| record_action(&config, "merge_pr".into(), ActionVia::Kbd));
+        futures::future::join_all(writers).await;
+
+        assert_eq!(
+            mastery_ledger(&*store),
+            vec![("merge_pr".to_string(), ActionVia::Kbd, N)],
+            "every concurrent increment must be counted exactly once",
+        );
     }
 
     #[tokio::test]

@@ -407,6 +407,13 @@ pub struct ServerConfig {
     /// delta). Both writers take it inside their blocking section, mirroring
     /// `archive_updates`.
     pub(crate) session_cost_lock: Arc<parking_lot::Mutex<()>>,
+    /// Serializes the mastery-ledger read-modify-write (#1502).
+    /// `client_kv::record_action` loads a per-action channel-count map,
+    /// increments one entry, and stores it back — two concurrent invocations
+    /// for the same action would otherwise both read the same base count and
+    /// lose an increment. Both callers take it inside their blocking section,
+    /// mirroring `session_cost_lock`.
+    pub(crate) mastery_lock: Arc<parking_lot::Mutex<()>>,
     /// Serializes workspace-key allocation through the matching durable
     /// insert. Allocation is a check-then-save loop; without this boundary,
     /// concurrent creates with the same display name can both observe the
@@ -583,6 +590,7 @@ impl ServerConfig {
             deleted_workspaces: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             archive_updates: Arc::new(parking_lot::Mutex::new(())),
             session_cost_lock: Arc::new(parking_lot::Mutex::new(())),
+            mastery_lock: Arc::new(parking_lot::Mutex::new(())),
             workspace_creations: Arc::new(parking_lot::Mutex::new(())),
             undecodable_row_reports: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             event_metrics: Arc::new(metrics::EventMetrics::default()),

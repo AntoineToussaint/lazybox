@@ -1528,7 +1528,7 @@ impl RightPane {
             lines.push(Line::from(spans));
         }
 
-        // Dependency edge (#1521). The row's ` ⛔N ` badge says a task is
+        // Dependency edge (#1521). The row's ` ⊘N ` badge says a task is
         // blocked; the reason lives here, where there's room for it. A
         // free-text `Blocked on:` marker prints verbatim; otherwise the
         // count of declared blockers stands in so "blocked by something"

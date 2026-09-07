@@ -46,13 +46,13 @@ pub struct WorkspaceRowCtx<'a> {
     /// set (they can't be, by the disjoint asking/working sets).
     pub asking: bool,
     /// Any agent in this workspace is in `AgentState::LimitReached` — a
-    /// provider usage / rate-limit block (#847). Renders the `⏳` pill in
+    /// provider usage / rate-limit block (#847). Renders the `⧗` pill in
     /// the shared state slot. Highest precedence: it's the most urgent
     /// "act (externally) before this moves" signal.
     pub limit_reached: bool,
     /// Any agent in this workspace is in `AgentState::AwaitingReset` — the
     /// calm auto-waiting block (lazybox pressed Wait; it's parked until the
-    /// limit resets). Renders the quiet `💤` glyph. Lower precedence than
+    /// limit resets). Renders the quiet `◌` glyph. Lower precedence than
     /// the alerting states and than `working`: it's handled, nothing to act
     /// on, so an actively working sibling wins the slot.
     pub awaiting_reset: bool,
@@ -167,10 +167,10 @@ pub struct WorkspaceRowCtx<'a> {
     /// glance rather than unrelated rows. `None` for standalone PRs.
     pub stack: Option<&'a lazybox_core::StackPosition>,
     /// Number of dependency blockers on this workspace's tasks (#1521; P0
-    /// does not resolve whether they are still open). Renders a ` ⛔N `
+    /// does not resolve whether they are still open). Renders a ` ⊘N `
     /// badge in the passive cluster; nothing when zero.
     pub blocked_by: usize,
-    /// A declared `Blocked on:` reason exists on some task. Renders ` ⛔! `
+    /// A declared `Blocked on:` reason exists on some task. Renders ` ⊘! `
     /// when there are no dependency blockers, else folds into the count
     /// badge (the count already says "blocked"). The reason text itself is
     /// shown in the right pane, not the row.
@@ -533,7 +533,7 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 ///     glyph: the agent is making progress right now.
 ///   - `Done`        → ` ✓ ` (success, bold) — a static glyph: the
 ///     agent finished its turn and is waiting to be looked at (#80).
-///   - `LimitReached`→ ` ⏳ ` (warn, bold) — a static glyph: the agent
+///   - `LimitReached`→ ` ⧗ ` (warn, bold) — a static glyph: the agent
 ///     hit its provider usage limit and is waiting to be resumed (#847).
 ///   - `CreditExhausted` → ` ¢ ` (warn, bold) — the provider credit
 ///     recovery transaction has not completed yet.
@@ -545,7 +545,7 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 ///     ended (clean or crash; #356/#357). Not an alert color — a dead
 ///     agent is a fact to notice, not an emergency.
 ///   - `Idle`        → blank.
-///   - `AwaitingReset` → ` 💤 ` (dim) — a static glyph: lazybox pressed
+///   - `AwaitingReset` → ` ◌ ` (dim) — a static glyph: lazybox pressed
 ///     Wait and the agent is parked, sleeping until its limit resets. Calm,
 ///     not an alert — nothing for you to do.
 /// Reserved width either way so the kind/title to the right don't
@@ -1274,7 +1274,7 @@ fn cell_snippet(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 }
 
 /// The `◆` GitHub-native auto-merge glyph (#778, iconized #1046) — an
-/// accent-colored marker in the same slot family as `⚡`/`🔧`. It's a
+/// accent-colored marker in the same slot family as `⚡`/`⚙`. It's a
 /// standing automation *policy*, so it lives here rather than in the
 /// status column, where it used to hide the `✗` CI-fail glyph on exactly
 /// the armed PRs that most need it. Packs into the merge-arm cluster.
@@ -1319,7 +1319,7 @@ fn cell_arm(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // arm — the one merge-on-green state the user drives with `g g` — so it
     // reads at a glance the way the old ` ARM ` block did, while staying one
     // glyph wide (keeping #1046's column budget). Its passive siblings `◆`
-    // (GitHub-native AUTO) and `🔧` (FIX) stay fg-only, so the block draws
+    // (GitHub-native AUTO) and `⚙` (FIX) stay fg-only, so the block draws
     // the eye to the arm you toggled.
     let style = if ctx.is_cursor {
         ctx.row_style()
@@ -1376,7 +1376,7 @@ fn cell_origin_issue(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     Cell::from_span(Span::styled(label, style))
 }
 
-/// The compact `🔧` auto-fix glyph (iconized #1046). Packs into the shared
+/// The compact `⚙` auto-fix glyph (iconized #1046). Packs into the shared
 /// badge cluster (#813); the focused workspace's full trigger description
 /// lives in the sidebar header.
 fn cell_fix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -3250,7 +3250,7 @@ mod tests {
     }
 
     /// The dependency badge shows a count when the workspace declares
-    /// blockers, and folds to ` ⛔! ` when only a free-text `Blocked on:`
+    /// blockers, and folds to ` ⊘! ` when only a free-text `Blocked on:`
     /// reason exists with no counted edges (#1521).
     #[test]
     fn cell_blocked_shows_count_badge() {

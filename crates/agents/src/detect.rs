@@ -198,7 +198,7 @@ pub const CLAUDE_USAGE_LIMIT_PHRASES: &[&str] = &[
 ///   quiet-settled to `Done`.
 /// - Nothing needs pressing, and the agent will pick its work back up on
 ///   its own, so it classifies straight to the calm
-///   [`AgentState::AwaitingReset`] (`💤 parked, will resume`) rather than
+///   [`AgentState::AwaitingReset`] (`◌ parked, will resume`) rather than
 ///   the alerting `LimitReached` — which would also fire the opt-in
 ///   auto-Wait keystroke into a composer where a keystroke is the cancel.
 ///
@@ -2688,7 +2688,7 @@ mod tests {
         // banner. Without the middot requirement it read `LimitReached`,
         // which — because `UsageLimitAtRest` is deliberately injectable —
         // put a healthy idle agent into the `Shift-K` resume-all set with a
-        // false ⏳ pill. Must stay Idle (a plain, correctly-injectable idle
+        // false ⧗ pill. Must stay Idle (a plain, correctly-injectable idle
         // composer), NOT `LimitReached`.
         let prose_with_time = "you've hit your session limit; it resets 3pm today.\n\n\
              ❯ \n\

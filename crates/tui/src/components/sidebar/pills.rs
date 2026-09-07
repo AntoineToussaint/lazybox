@@ -225,7 +225,7 @@ fn lifecycle_pill(task: &lazybox_core::Task) -> Option<StatusPill> {
     }
     // GitHub-native auto-merge (`task.auto_merge_enabled`) is a standing
     // automation policy, not a task status — it renders as its own row
-    // glyph (`◆`, see `workspace_row::cell_auto`) alongside `⚡` / `🔧`,
+    // glyph (`◆`, see `workspace_row::cell_auto`) alongside `⚡` / `⚙`,
     // never here. Placing it in this chain hid the `✗` CI-fail glyph on
     // exactly the armed PRs that need it most (#778).
     //

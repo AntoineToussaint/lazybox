@@ -362,8 +362,8 @@ pub enum AgentState {
     /// affirmative evidence that clears `LimitReached` — the agent visibly
     /// working again or coming to rest once the reset lands (where
     /// auto-wait injects its continuation nudge). **Not** an alert: no
-    /// desktop/Slack notification, no `⏳ N limited` count, no resume-all
-    /// target — it renders a distinct 💤 badge and otherwise stays quiet.
+    /// desktop/Slack notification, no `⧗ N limited` count, no resume-all
+    /// target — it renders a distinct ◌ badge and otherwise stays quiet.
     ///
     /// Appended last: the socket transport encodes this enum by bincode
     /// ordinal, so it must never be reordered ahead of `CreditExhausted`.

@@ -3348,7 +3348,7 @@ impl GhClient {
         // holding a `parking_lot::Mutex` across the `.await` in
         // `enrich_task_blocked_by` would be a bug. Doing it on the hot path
         // (rather than only on the 5-min sweep) means a hot re-poll of a
-        // blocked issue keeps its `⛔` badge instead of dropping it for a
+        // blocked issue keeps its `⊘` badge instead of dropping it for a
         // tick and re-adding it (flicker); the per-issue TTL cache keeps the
         // steady-state cost to at most one dependencies call per issue per
         // `deps_ttl` window.

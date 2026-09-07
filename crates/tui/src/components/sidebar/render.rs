@@ -1240,13 +1240,13 @@ impl Sidebar {
             // While the bar is capturing keystrokes, fill it with a solid
             // block so it reads unmistakably as a search field — not just
             // another list row you can keep typing "into" (#1099). The
-            // `🔍` glyph + `/` prefix give it the vim `/pattern` shape.
+            // `⌕` glyph + `/` prefix give it the vim `/pattern` shape.
             let field = s.editing;
             let with_field_bg = |st: Style| if field { st.bg(theme.fill) } else { st };
             if field {
                 frame.render_widget(Block::default().style(Style::default().bg(theme.fill)), bar);
             }
-            let prefix = if global { "⌕⌕ " } else { "⌕ /" };
+            let prefix = if global { "⌕ " } else { "⌕ /" };
             let mut spans = vec![
                 Span::styled(
                     prefix,

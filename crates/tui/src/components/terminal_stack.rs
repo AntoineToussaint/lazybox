@@ -12459,7 +12459,7 @@ mod zoom_and_tile_header_tests {
                 Some("· working")
             );
             assert_eq!(label(AgentState::Done, false, compact), Some("✓ done"));
-            // A rate-limited agent needs you too — it shows the `⏳` pill
+            // A rate-limited agent needs you too — it shows the `⧗` pill
             // on both surfaces, not a blank slot.
             assert_eq!(
                 label(AgentState::LimitReached, false, compact),
@@ -12487,7 +12487,7 @@ mod zoom_and_tile_header_tests {
         let theme = crate::theme::current();
 
         // A background rate-limited tile pulls attention just like an
-        // asking one: whole bar warn+bold, with the `⏳ limited` chip.
+        // asking one: whole bar warn+bold, with the `⧗ limited` chip.
         let bg = stack.tile_header_line(TerminalId(2), false, false, 40);
         assert!(
             bg.spans

@@ -3055,7 +3055,7 @@ mod search_tests {
     }
 
     /// While the bar is capturing keystrokes it reads as an unmistakable
-    /// field: the `🔍` glyph, the vim `/` prefix, the typed query, and a
+    /// field: the `⌕` glyph, the vim `/` prefix, the typed query, and a
     /// solid block cursor (#1099).
     #[test]
     fn editing_search_bar_is_a_prominent_field_with_a_block_cursor() {
@@ -3066,6 +3066,39 @@ mod search_tests {
         assert!(bar.contains('⌕'), "search glyph present: {bar:?}");
         assert!(bar.contains('█'), "block cursor while editing: {bar:?}");
         assert!(bar.contains("al"), "shows the typed query: {bar:?}");
+    }
+
+    /// The search-bar prefix leads with a *single* `⌕` — the one the
+    /// header find box uses — in both modes: global has no scope suffix,
+    /// the scoped `/` search keeps the vim `⌕ /` shape. The emoji→text
+    /// swap once collapsed the old `🔍 ⌕ ` global prefix into a doubled
+    /// `⌕⌕`, which this pins against (#1546).
+    #[test]
+    fn search_bar_prefix_is_a_single_glyph() {
+        // Global (unscoped): one ⌕, never the doubled `⌕⌕`.
+        let mut g = sidebar_with_issues(&[("1", "Alpha")]);
+        g.open_global_search();
+        type_query(&mut g, "al");
+        let bar = search_bar_row(&mut g);
+        assert!(bar.contains('⌕'), "global search glyph present: {bar:?}");
+        assert!(
+            !bar.contains("⌕⌕"),
+            "global prefix must not double the glyph: {bar:?}"
+        );
+
+        // Scoped: the vim `⌕ /` prefix, still a single leading glyph.
+        let mut s = sidebar_with_issues(&[("1", "Alpha")]);
+        s.open_search();
+        type_query(&mut s, "al");
+        let bar = search_bar_row(&mut s);
+        assert!(
+            bar.contains("⌕ /"),
+            "scoped search shows the vim `/` prefix: {bar:?}"
+        );
+        assert!(
+            !bar.contains("⌕⌕"),
+            "scoped prefix is a single glyph: {bar:?}"
+        );
     }
 
     /// A search that filters every workspace away shows an explicit

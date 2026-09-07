@@ -130,7 +130,7 @@ pub enum Filter {
     /// The primary task has at least one unmet dependency — a
     /// `blocked_by` edge (native GitHub/Linear relation or the
     /// `Blocked by:` / `Depends on:` body marker) or a declared
-    /// `Blocked on:` reason. This is the same signal the `⛔` row badge
+    /// `Blocked on:` reason. This is the same signal the `⊘` row badge
     /// reads; "what is waiting on something else" is one toggle.
     Blocked,
     /// An issue that can be started right now: it is an issue (not a PR),
@@ -1096,7 +1096,7 @@ mod tests {
     /// The `blocked` predicate reads the workspace-level dependency
     /// helpers, so it fires on a native / body-marker `blocked_by` edge
     /// and on a declared `Blocked on:` reason alike — the same signal the
-    /// `⛔` row badge shows.
+    /// `⊘` row badge shows.
     #[test]
     fn blocked_filter_matches_edges_and_declared_reasons() {
         let agents = HashMap::new();

@@ -5103,8 +5103,8 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Reconcile the escalating usage-limit alert (#1012) with the number
     /// of workspaces whose agent is currently blocked on its provider
-    /// usage limit. The passive `⏳ N limited` header count and the
-    /// per-row `⏳` pills always render; this is the escalation on top of
+    /// usage limit. The passive `⧗ N limited` header count and the
+    /// per-row `⧗` pills always render; this is the escalation on top of
     /// them: a sticky footer banner naming the resume action (and the
     /// parsed reset time where one is known), raised while any agent is
     /// blocked and retracted once they all recover. Gated by
@@ -5159,12 +5159,12 @@ impl<T: TerminalAdapter> Model<T> {
                 lazybox_tui_core::action::ActionKind::ResumeRateLimited,
             )
             .effective_keys_display(&self.action_key_overrides);
-            // Parked (💤 `AwaitingReset`) agents are rate-limited too, but the
+            // Parked (◌ `AwaitingReset`) agents are rate-limited too, but the
             // resume chord deliberately skips them — a "continue" only cancels
             // their auto-continue wait and re-hits the limit. When any coexist
             // with a blocked agent, this standing banner is the one persistent
             // surface that can carry their call-to-action, so name them and the
-            // restart chord that *does* apply; otherwise a resume leaves the 💤
+            // restart chord that *does* apply; otherwise a resume leaves the ◌
             // badges untouched with no on-screen reason why. (Parked-only raises
             // no banner: the gate above is still the blocked count alone, so a
             // self-resolving wait never escalates to a sticky banner on its own.)

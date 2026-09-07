@@ -1751,9 +1751,10 @@ impl<T: TerminalAdapter> Model<T> {
         // hand-curated GLOBAL block, which is how `g` (sidebar refresh)
         // shipped without ever appearing in the help. Now adding an
         // entry to the catalog automatically surfaces it.
+        let used = self.used_action_ids();
         self.mount_modal(
             Id::Help,
-            Help::from_catalog(&self.catalog, self.ui_defaults.terminal_escape_char),
+            Help::from_catalog(&self.catalog, self.ui_defaults.terminal_escape_char, &used),
         );
     }
 

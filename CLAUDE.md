@@ -226,7 +226,12 @@ Each row's `Section` (`Global` / `Workspace` / `Sidebar` / `Activity` /
 collision-detector test fails the build on two bindings colliding
 within a section or at the same rank under a focus. The `?` help is the
 generated Keys screen: every binding by scope with effective
-(post-override) chords. `ui.keymap_preset` selects an in-tree starter
+(post-override) chords. Each flat row the mastery ledger records you
+having used carries a dim `✓`; a leader group carries `✓ used/total`
+progress (a bare `✓` once every chord in it has been used), so the Keys
+screen doubles as a frontier map of shortcuts still worth learning — the
+mark and its legend appear only once you've earned one (#1502).
+`ui.keymap_preset` selects an in-tree starter
 keymap (`default`, `vim`); explicit `ui.action_keys` layers on top.
 The default keymap is leaders-only (#304): grouped actions ship a
 single leader chord, no direct-key aliases — a concept with ≥2 sibling

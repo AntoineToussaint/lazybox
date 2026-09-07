@@ -199,6 +199,8 @@ mod status_pill_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 

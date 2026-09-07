@@ -2710,6 +2710,8 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         kind: Some(lazybox_core::TaskKind::Pr),
         priority: None,
         state_label: None,
+        blocked_by: vec![],
+        blocked_on: None,
     }
 }
 
@@ -3754,6 +3756,8 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
         kind: Some(lazybox_core::TaskKind::Issue),
         priority: None,
         state_label: None,
+        blocked_by: vec![],
+        blocked_on: None,
     }
 }
 

@@ -4096,6 +4096,8 @@ mod tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
 
         // No workspace → not offered.
@@ -4185,6 +4187,8 @@ mod tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
 
         // No workspace → not offered.
@@ -4302,6 +4306,8 @@ mod tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
 
         // No workspace → not offered.
@@ -4382,6 +4388,8 @@ mod tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
         let ws_with_pr = |state: TaskState| {
             let mut ws = Workspace::empty(
@@ -4502,6 +4510,8 @@ mod tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
 
         // Up-to-date PR → not offered.

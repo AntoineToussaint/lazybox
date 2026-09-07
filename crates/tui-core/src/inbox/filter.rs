@@ -696,6 +696,8 @@ mod tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
         let mut ws = Workspace::from_task(task, now());
         ws.key = WorkspaceKey(key.into());
@@ -749,6 +751,8 @@ mod tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
         tweak(&mut task);
         let mut ws = Workspace::from_task(task, now());

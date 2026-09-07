@@ -2162,6 +2162,8 @@ mod merge_pr_details_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -3475,6 +3477,8 @@ mod github_target_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -3587,6 +3591,8 @@ mod prefetch_score_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -3877,6 +3883,8 @@ mod inspect_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
         let mut workspace = Workspace::from_task(task, chrono::Utc::now());
         let mut session = WorkspaceSession::new(
@@ -4364,6 +4372,8 @@ mod inspect_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
         let mut workspace = Workspace::from_task(task, chrono::Utc::now());
         let key = workspace.key.clone();
@@ -4431,6 +4441,8 @@ mod inspect_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
         let workspace = Workspace::from_task(task, chrono::Utc::now());
         let key = workspace.key.clone();
@@ -4493,6 +4505,8 @@ mod inspect_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -5407,6 +5421,8 @@ mod inspect_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
         let workspace = Workspace::from_task(task, chrono::Utc::now());
         let key = workspace.key.clone();
@@ -6367,6 +6383,8 @@ mod post_mutation_refresh_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -6551,6 +6569,8 @@ mod sync_workspace_discovery_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 

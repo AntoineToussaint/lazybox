@@ -482,6 +482,8 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         // Preserve Linear's exact workflow-state name ("In Review",
         // "Todo", …), which `state` above collapses to a canonical set.
         state_label: Some(issue.state.name.clone()),
+        blocked_by: vec![],
+        blocked_on: None,
     }
 }
 

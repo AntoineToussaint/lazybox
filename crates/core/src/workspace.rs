@@ -1213,6 +1213,28 @@ impl Workspace {
             .find_map(|task| task.parent.as_ref())
     }
 
+    /// Every blocker any task in this workspace declares. Looks past the PR
+    /// headline task for the same reason `hierarchy_parent` does: a ticket
+    /// that has acquired a PR must not lose its dependency edges.
+    pub fn hierarchy_blocked_by(&self) -> impl Iterator<Item = &TaskId> {
+        self.pr
+            .iter()
+            .chain(self.gh_issues.iter())
+            .chain(self.linear_issues.iter())
+            .flat_map(|task| task.blocked_by.iter())
+    }
+
+    /// The declared `Blocked on:` reason, if any task in this workspace
+    /// carries one. Looks past the PR headline task like
+    /// `hierarchy_blocked_by`: the first task with a reason wins.
+    pub fn declared_blocker(&self) -> Option<&str> {
+        self.pr
+            .iter()
+            .chain(self.gh_issues.iter())
+            .chain(self.linear_issues.iter())
+            .find_map(|task| task.blocked_on.as_deref())
+    }
+
     /// Whether the headline task has an active qualified claim or a
     /// conservatively preserved legacy [`WORKING_LABEL_NAME`] claim.
     pub fn is_claimed(&self) -> bool {
@@ -2310,7 +2332,37 @@ mod tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
+    }
+
+    #[test]
+    fn hierarchy_blocked_by_looks_past_the_pr_headline() {
+        // A ticket that acquired a PR keeps its dependency edges: the PR
+        // is the headline task, but the attached gh issue carries the
+        // blocker.
+        let mut ws = Workspace::from_task(pr("o/r#1"), now());
+        let mut gh = issue("github", "o/r#2");
+        gh.blocked_by = vec![TaskId {
+            source: "github".into(),
+            key: "o/r#3".into(),
+        }];
+        ws.gh_issues.push(gh);
+
+        let blockers: Vec<_> = ws.hierarchy_blocked_by().collect();
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].key, "o/r#3");
+    }
+
+    #[test]
+    fn declared_blocker_looks_past_the_pr_headline() {
+        let mut ws = Workspace::from_task(pr("o/r#1"), now());
+        let mut gh = issue("github", "o/r#2");
+        gh.blocked_on = Some("waiting on legal".into());
+        ws.gh_issues.push(gh);
+
+        assert_eq!(ws.declared_blocker(), Some("waiting on legal"));
     }
 
     #[test]

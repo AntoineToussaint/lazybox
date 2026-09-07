@@ -3814,10 +3814,7 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
 /// Map body-parsed [`IssueLink`]s to lazybox `TaskId`s, resolving
 /// same-repo GitHub `#N` references against `own_repo`. Linear keys pass
 /// through as `linear`-sourced ids. Order-preserving, deduped.
-fn issue_links_to_task_ids(
-    links: &[lazybox_core::IssueLink],
-    own_repo: &str,
-) -> Vec<TaskId> {
+fn issue_links_to_task_ids(links: &[lazybox_core::IssueLink], own_repo: &str) -> Vec<TaskId> {
     let mut out: Vec<TaskId> = Vec::new();
     for link in links {
         let id = match link {
@@ -4297,8 +4294,14 @@ mod tests {
         assert_eq!(
             task.blocked_by,
             vec![
-                TaskId { source: "github".into(), key: "o/r#3".into() },
-                TaskId { source: "github".into(), key: "owner/repo#9".into() },
+                TaskId {
+                    source: "github".into(),
+                    key: "o/r#3".into()
+                },
+                TaskId {
+                    source: "github".into(),
+                    key: "owner/repo#9".into()
+                },
             ],
         );
         assert_eq!(

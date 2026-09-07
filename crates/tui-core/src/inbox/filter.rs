@@ -1109,7 +1109,10 @@ mod tests {
             }];
         });
         assert!(matches(&edge, Filter::Blocked));
-        assert!(!matches(&edge, Filter::Ready), "a blocked issue is not ready");
+        assert!(
+            !matches(&edge, Filter::Ready),
+            "a blocked issue is not ready"
+        );
 
         // A declared free-text blocker (no edge) still counts as blocked.
         let declared = workspace_with("b", |t| {

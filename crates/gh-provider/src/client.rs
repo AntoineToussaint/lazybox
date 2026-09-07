@@ -5941,9 +5941,7 @@ impl GhClient {
         let deps: Vec<Dep> = match self.inner.get(&route, None::<&()>).await {
             Ok(deps) => deps,
             Err(e) => {
-                tracing::debug!(
-                    "blocked_by lookup for {owner}/{repo}#{number} failed: {e}"
-                );
+                tracing::debug!("blocked_by lookup for {owner}/{repo}#{number} failed: {e}");
                 return Vec::new();
             }
         };
@@ -10022,8 +10020,14 @@ mod tests {
         assert_eq!(
             edges,
             vec![
-                TaskId { source: "github".into(), key: "acme/widget#3".into() },
-                TaskId { source: "github".into(), key: "acme/widget#9".into() },
+                TaskId {
+                    source: "github".into(),
+                    key: "acme/widget#3".into()
+                },
+                TaskId {
+                    source: "github".into(),
+                    key: "acme/widget#9".into()
+                },
             ]
         );
     }
@@ -10035,7 +10039,12 @@ mod tests {
         let base_uri =
             spawn_canned_response_server("404 Not Found", "application/json", "{}").await;
         let client = make_client(&base_uri);
-        assert!(client.issue_blocked_by("acme", "widget", 7).await.is_empty());
+        assert!(
+            client
+                .issue_blocked_by("acme", "widget", 7)
+                .await
+                .is_empty()
+        );
     }
 
     /// `enrich_task_blocked_by` only probes issues that look like they
@@ -10047,14 +10056,9 @@ mod tests {
         // `#3` is already known from the body marker; the API also
         // reports `#3` (dup) and `#9` (new).
         const BODY: &str = r#"[{"number":3},{"number":9}]"#;
-        let base_uri = spawn_counting_response_server(
-            "200 OK",
-            "application/json",
-            "",
-            BODY,
-            hits.clone(),
-        )
-        .await;
+        let base_uri =
+            spawn_counting_response_server("200 OK", "application/json", "", BODY, hits.clone())
+                .await;
         let client = make_client(&base_uri);
 
         let mut issue = task_without_node_id(TaskKind::Issue);
@@ -10070,8 +10074,14 @@ mod tests {
         assert_eq!(
             issue.blocked_by,
             vec![
-                TaskId { source: "github".into(), key: "acme/widget#3".into() },
-                TaskId { source: "github".into(), key: "acme/widget#9".into() },
+                TaskId {
+                    source: "github".into(),
+                    key: "acme/widget#3".into()
+                },
+                TaskId {
+                    source: "github".into(),
+                    key: "acme/widget#9".into()
+                },
             ],
             "native `#9` is added; the shared `#3` is not duplicated"
         );
@@ -10095,14 +10105,9 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn enrich_blocked_by_skips_when_no_signal() {
         let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let base_uri = spawn_counting_response_server(
-            "200 OK",
-            "application/json",
-            "",
-            "[]",
-            hits.clone(),
-        )
-        .await;
+        let base_uri =
+            spawn_counting_response_server("200 OK", "application/json", "", "[]", hits.clone())
+                .await;
         let client = make_client(&base_uri);
 
         // A PR is never probed, even with a blocker-looking body.

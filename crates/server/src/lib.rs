@@ -639,8 +639,11 @@ impl ServerConfig {
         lazybox_git_ops::WorktreeManager::new(self.worktree_root.path.clone())
             .with_github_token(Arc::new(|| {
                 Box::pin(async {
-                    lazybox_gh::credential_chain()
-                        .resolve(lazybox_gh::SOURCE)
+                    let host = lazybox_config::Config::load()
+                        .unwrap_or_default()
+                        .github_host();
+                    lazybox_gh::credential_chain(host.as_deref())
+                        .resolve(&lazybox_gh::credential_scope(host.as_deref()))
                         .await
                         .ok()
                         .map(|c| c.into_token())

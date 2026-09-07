@@ -160,9 +160,11 @@ async fn latest_release_update(store: Option<Arc<dyn Store>>) -> Option<Availabl
 }
 
 async fn fetch_latest_release_tag() -> Option<String> {
+    // Always the public AntoineToussaint/lazybox repo on github.com —
+    // never the user's configured (possibly Enterprise) GitHub host.
     let credential = tokio::time::timeout(
         CREDENTIAL_TIMEOUT,
-        lazybox_gh::credential_chain().resolve(lazybox_gh::SOURCE),
+        lazybox_gh::credential_chain(None).resolve(lazybox_gh::SOURCE),
     )
     .await
     .ok()

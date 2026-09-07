@@ -3679,8 +3679,11 @@ pub(super) async fn sources_for_with_engagement(
     }
 
     if github_parked.is_none() && setup.enabled_providers.contains(lazybox_gh::SOURCE) {
-        match lazybox_gh::credential_chain()
-            .resolve(lazybox_gh::SOURCE)
+        let configured_host = lazybox_config::Config::load()
+            .unwrap_or_default()
+            .github_host();
+        match lazybox_gh::credential_chain(configured_host.as_deref())
+            .resolve(&lazybox_gh::credential_scope(configured_host.as_deref()))
             .await
         {
             Ok(cred) => {
@@ -3722,12 +3725,9 @@ pub(super) async fn sources_for_with_engagement(
                 let client_result: Result<GhClient, lazybox_core::ProviderError> = match cached {
                     Some(existing) => Ok(existing),
                     None => {
-                        let host = lazybox_config::Config::load()
-                            .unwrap_or_default()
-                            .github_host();
                         match tokio::time::timeout(
                             CLIENT_INIT_TIMEOUT,
-                            GhClient::from_credential_with_host(cred, host.as_deref()),
+                            GhClient::from_credential_with_host(cred, configured_host.as_deref()),
                         )
                         .await
                         {

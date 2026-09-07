@@ -179,16 +179,16 @@ agent-autonomy principle in `CLAUDE.md`.
 
 ### 4c. Creating an epic
 
-1. **From a tracker parent** — `x E n` on an issue with sub-issues (or a
+1. **From a tracker parent** — `E n` on an issue with sub-issues (or a
    Linear project): lazybox walks `subIssues` transitively across repos,
    reads dependencies and body markers, and materializes the Epic.
-2. **From the planner role** — spawn a Planner (`x E p`) with the `carve` /
+2. **From the planner role** — spawn a Planner (`E p`) with the `carve` /
    `designissues` brief plus one new instruction: *use `--parent` and
    `--blocked-by` / `Blocked by:` markers so the graph is machine-readable.*
    Lazybox picks it up on the next poll and shows the DAG. The planner's
    prose stays; the structure becomes real.
-3. **Ad hoc** — `x E a` adds the cursor row or the multi-select to an epic;
-   `x E d` adds a blocking edge by picking the blocker from a picker.
+3. **Ad hoc** — `E a` adds the cursor row or the multi-select to an epic;
+   `E d` adds a blocking edge by picking the blocker from a picker.
 
 Issue→PR fold keeps membership (the existing `closes_issues` /
 `linked_tasks` join), so the graph follows the work into its PR.
@@ -212,12 +212,12 @@ shape), rows ordered by **topological wave**, each row carrying:
 Glyphs: `⛔` blocked, `▶` ready, `●` in progress, `⏸` asking, `✓` merged,
 `✗` failed; `w<N>` wave; role badge. The header line **is** the status.
 
-Keys (all under one `x E` leader; which-key popup):
-`n` new · `a` add · `d` add dependency · `r` set role · `s` start next
-ready (spawn workers on every ready member, behind the usual "start N
-agents?" confirm) · `g` graph view · `m` merge order · `p` spawn planner ·
-`x` archive. Plus one global jump, `Shift-E`: next epic member that needs
-you (asking → failed → ready), mirroring `!` / `Shift-F`. Filters gain
+Keys (all under one bare `E` **epic** leader — `Shift-E` is already the
+Error Inbox and bare `E` was verified unbound; which-key popup):
+`E n` new · `E a` add · `E d` add dependency · `E r` set role · `E s` status ·
+`E m` merge order · `E g` graph view · `E p` spawn planner · `E c` spawn
+coordinator · `E x` archive · `E j` jump to the next member that needs you
+(asking → failed → ready → blocked), mirroring `!` / `Shift-F`. Filters gain
 `epic:<name>`, `ready`, `blocked`.
 
 ### 4e. Right pane: the epic overview (the answer to "give me status")
@@ -231,7 +231,7 @@ pane:
 - **Critical path** and **merge order** (topological order of `MergeAfter`).
 - **Per-repo rollup** (reuses `RepoRollupRow`).
 - **Recent epic events** (last 10, see 4f).
-- An **ASCII DAG** by wave — columns are waves, `─┬─` fan-outs; `x E g`
+- An **ASCII DAG** by wave — columns are waves, `─┬─` fan-outs; `E g`
   opens it full-screen, `j/k` moves, `Enter` jumps to the workspace.
 
 Nothing here calls a model. It re-renders on every daemon event.
@@ -270,7 +270,7 @@ Nothing here calls a model. It re-renders on every daemon event.
 
 Roles are a field on `Workspace` (`role: Option<Role>`, next to `hopper` /
 `remote`, the shape those took), set at spawn from the epic action or later
-with `x E r`. The #1173 Pillar-B pipeline (implement → review → fix as fresh
+with `E r`. The #1173 Pillar-B pipeline (implement → review → fix as fresh
 agents) becomes "a member whose DoD includes a Reviewer pass", not a new
 engine.
 
@@ -278,7 +278,7 @@ engine.
 
 Earn it in three notches, each an existing latch shape:
 
-1. **Manual** (ship first): lazybox surfaces *ready*; you press `x E s`.
+1. **Manual** (ship first): lazybox surfaces *ready*; you start the next ready member yourself (`w w` / `a c` on it; `E s` shows the status view).
 2. **Assisted**: an `AUTO` pill on the epic: when a member becomes ready and
    the concurrency cap allows, spawn a Worker (first time confirmed). Uses
    working claims for exclusion and the SpawnCoordinator for safety. This
@@ -301,6 +301,26 @@ blackboard tagged `epic:<key>` + `contract` from a's session; b's Worker
 brief quotes it. The Reviewer checks the implementation against it. No new
 storage — `post_note` / `read_notes` with tags, which exist.
 
+### 4j. Labels: the visible projection
+
+lazybox already treats GitHub labels as live coordination state (`working`,
+`lazybox:w:*`, `lazybox:<agent>`), which is what makes the fleet legible to
+anyone looking at GitHub rather than at lazybox. The epic gets the same
+treatment, so the plan is visible from GitHub, from a Linear/Jira mirror, or
+from any other tool:
+
+| Label | Direction | Meaning |
+|---|---|---|
+| `epic:<key>` | read **and** written | membership — a third membership source next to the anchor's sub-issue chain and explicit assignment, so a planner or a human can add a member from GitHub alone; written on assign, removed on unassign |
+| `lazybox:ready` / `lazybox:blocked` / `lazybox:done` | written only | the derived member status, mutually exclusive, written **only when it changes** and only when the epic opts in (`publish_status_labels`) — zero API calls on a quiet poll |
+| `role:<role>` | read and written | the workspace role (P2); the persisted field wins when both exist |
+| `wave:<n>` | deferred | waves shift whenever an edge changes and would churn labels |
+
+Two rules keep this honest. Labels are **a projection and a membership
+hint, never an input to the status resolver** — otherwise a stale label from
+a dead daemon would freeze status. And label writes go through add/remove,
+never replace, because the `working` claim labels live on the same issues.
+
 ## 5. Tooling we can use with lazybox
 
 | Tool | Use |
@@ -316,11 +336,15 @@ storage — `post_note` / `read_notes` with tags, which exist.
 
 ## 6. Phasing (each slice dogfoodable)
 
+Tracked as epic #1517 with sub-issues #1521 (P0) → #1522 (P1) → #1523 (P2)
+→ #1524 (P3) → #1525 (P4), chained with GitHub sub-issue + blocked-by
+relations so the epic renders as an epic in lazybox once P0 ships.
+
 | Phase | Delivers | New state | Answers |
 |---|---|---|---|
 | **P0 — edges in the inbox** | GitHub provider fills `Task.parent` from sub-issues and reads dependencies + `Blocked by:` markers; Linear reads `blocks`; rows get `⛔ blocked by N` / `▶ ready`; `ready` / `blocked` filters; `Shift-E` jump | none (Task fields) | "what can I start right now" |
-| **P1 — Epic + live status** | Epic record (kv), sidebar tier from a tracker parent, header status line, overview pane, `EpicResolver` + `Event::EpicStatus`, epic events in the inbox, MCP `epic_status` / `epic_ready`, coordinator briefing | `epic:<key>` | **"give me status"** without a model |
-| **P2 — roles** | `Workspace.role`, badges, role prompt preambles, `x E r`, `spawn_worker` MCP tool for Coordinators, Planner spawn with machine-readable-graph instruction | `role` field | who does what, enforced |
+| **P1 — Epic + live status** | Epic record (kv), sidebar tier from a tracker parent, header status line, overview pane, `EpicResolver` + `Event::EpicStatus`, epic events in the inbox, MCP `epic_status` / `epic_ready`, coordinator briefing, `epic:*` + status labels (§4j) | `epic:<key>` | **"give me status"** without a model |
+| **P2 — roles** | `Workspace.role`, badges, role prompt preambles, `E r`, `spawn_worker` MCP tool for Coordinators, Planner spawn with machine-readable-graph instruction, `role:*` labels | `role` field | who does what, enforced |
 | **P3 — graph + merge order** | full-screen DAG, `MergeAfter` edges, merge-order readout, merge-on-green hold | edge kinds | landing order across repos |
 | **P4 — autonomy dial** | `AUTO` latch (assisted dispatch on ready), Reviewer stage, held-merge auto-release | policy latch | the fleet runs the plan; you triage |
 

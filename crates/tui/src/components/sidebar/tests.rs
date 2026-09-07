@@ -2902,6 +2902,29 @@ mod search_tests {
         assert!(!row.contains("merged"), "merged did not fit: {row:?}");
     }
 
+    /// A today-only trailer (no automation on the focused row) must get the
+    /// FULL `trailer_budget`. The 2-cell separator between automation and
+    /// the tally is only due when automation actually precedes it — with an
+    /// empty trailer the tally starts the group and needs none. Regression
+    /// for an unconditional `+ 2` reservation that docked the today strip 2
+    /// cells at every width: at a width where the tally exactly fills the
+    /// budget, the lowest group fell off even though it fit. `3 sessions ·
+    /// 4 merged` is exactly 21 cells; size the pane so the strip's budget is
+    /// exactly 21 and assert `merged` survives.
+    #[test]
+    fn today_only_trailer_gets_the_full_budget() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        set_today(&mut sb, 3, 4, 0);
+        let width = pane_width_for_room(&mut sb, 21);
+        let row = today_row(&mut sb, width);
+        assert!(row.contains("3 sessions"), "{row:?}");
+        assert!(
+            row.contains("4 merged"),
+            "the tally exactly fills the budget with no automation ahead of \
+             it — a phantom separator must not push `merged` off: {row:?}"
+        );
+    }
+
     /// `TodayStats::from_buckets` sums only today's buckets for the metrics
     /// the strip shows, ignoring other days and unrelated metrics.
     #[test]
@@ -3853,7 +3876,34 @@ mod broadcast_select_tests {
             "need both rows selectable: {selectable:?}"
         );
 
+        // `header_height` is cursor-independent by construction (`3 +
+        // usage_row_height`), so asserting it alone is near-tautological —
+        // it can't catch a regression where the automation strip creeps
+        // back onto a *rendered* row of its own. Read the divider's actual
+        // y off the backend instead: the row that is mostly `─`. That is
+        // the last header row, so if the strip ever reserved a line again
+        // the divider — and the whole list under it — would shift.
+        let divider_y = |sb: &mut Sidebar| -> u16 {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+            let backend = TestBackend::new(area.width, area.height);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| sb.render(area, frame, true))
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            (0..area.height)
+                .find(|&y| {
+                    let dashes = (0..area.width)
+                        .filter(|&x| buffer[(x, y)].symbol() == "─")
+                        .count();
+                    dashes * 2 > area.width as usize
+                })
+                .expect("a divider row of `─` must render")
+        };
+
         let baseline = sb.header_height(area);
+        let baseline_divider = divider_y(&mut sb);
         for i in selectable {
             sb.cursor = i;
             assert_eq!(
@@ -3861,10 +3911,20 @@ mod broadcast_select_tests {
                 baseline,
                 "header height moved when the cursor landed on visible row {i}",
             );
+            assert_eq!(
+                divider_y(&mut sb),
+                baseline_divider,
+                "the rendered divider (and the list under it) shifted when \
+                 the cursor landed on visible row {i}",
+            );
         }
         assert_eq!(
             baseline, 3,
             "two content rows plus the divider — no conditional strip",
+        );
+        assert_eq!(
+            baseline_divider, 2,
+            "divider sits on row 2: brand, chip+automation, divider",
         );
     }
 

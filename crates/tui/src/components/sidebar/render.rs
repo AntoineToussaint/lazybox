@@ -241,35 +241,31 @@ impl Sidebar {
         today_line_spans(&stats, inner_width, theme)
     }
 
-    /// Total header rows above the content: the fixed 5 (brand, filter,
-    /// stats, divider, blank) plus the two optional strips. The click
-    /// hit-tests read this so a click resolves to the row actually drawn
-    /// once the usage / today rows shift content down.
+    /// Total header rows above the content: three fixed rows (brand,
+    /// filter chips, divider) plus the optional per-provider usage row.
+    /// The automation strip no longer costs a row of its own — it rides
+    /// the chip row now (#1535) — so the height turns only on whether the
+    /// usage row renders, never on the cursor. The click hit-tests read
+    /// this so a click resolves to the row actually drawn once the usage
+    /// row shifts content down.
     pub fn header_height(&self, area: Rect) -> u16 {
         3 + self.usage_row_height(area)
     }
 
+    /// The focused row's automation strip: the merge automation spelled
+    /// out (#794) and an armed auto-fix. Rides the
+    /// chip row (row 1) since #1535, so it no longer backs a header-height
+    /// reservation — there is only ever the cursor row to describe, and the
+    /// render right-aligns whatever of it fits after the filter chips.
     fn stats_row_spans(
         &self,
         inner_width: usize,
         theme: &crate::theme::Theme,
     ) -> Vec<Span<'static>> {
-        let focused = self.visible.get(self.cursor).and_then(|row| match row {
+        let focused_workspace = self.visible.get(self.cursor).and_then(|row| match row {
             VisibleRow::Workspace(key) => self.workspaces.get(key),
             _ => None,
         });
-        self.stats_row_spans_for(focused, inner_width, theme)
-    }
-
-    /// [`stats_row_spans`] for an explicit workspace, so the height
-    /// reservation can probe every visible row through the same builder
-    /// the render uses and the two can never disagree.
-    fn stats_row_spans_for(
-        &self,
-        focused_workspace: Option<&lazybox_core::Workspace>,
-        inner_width: usize,
-        theme: &crate::theme::Theme,
-    ) -> Vec<Span<'static>> {
         // Assembled
         // width-aware (like the row-0 summary): each group is appended only
         // if it fits whole in the header, so a lower-priority group drops
@@ -406,9 +402,11 @@ impl Sidebar {
         // wraps onto a stranded line):
         //   row 0: LAZYBOX vX.Y.Z  ● N new  ? N input  ✗ N CI  ◔ N review   N items · 7d
         //          (counters compact to `●N ?N ✗N` before dropping)
-        //   row 1: f filter  o recent  # find            N sessions · N merged · $N
-        //   row 2 (only when present): <focused merge/auto-fix/meter automation>
-        //   row 3 (only when present): per-provider usage bars
+        //   row 1: f filter  o recent  # find   <focused merge/auto-fix> N sessions · N merged · $N
+        //          (the focused row's automation and today's tally ride the
+        //          right of this row (#1535); neither costs a header row that
+        //          would shift as the cursor moves)
+        //   row 2 (only when present): per-provider usage bars
         //   then: ── divider ──── and content
         let theme = crate::theme::current();
         let now = self.now();
@@ -734,7 +732,14 @@ impl Sidebar {
                 trailer_used += spans_visual_width(&automation);
                 trailer.extend(automation);
             }
-            let today_room = trailer_budget.saturating_sub(trailer_used + 2);
+            // Reserve the 2-cell separator only when automation actually
+            // precedes the tally; with an empty trailer the tally starts the
+            // group and needs none. Matches the conditional separator in the
+            // append just below — reserving it unconditionally cost the
+            // today-only case 2 cells it should have had (main's budget was
+            // `inner_width - chips - 2`).
+            let today_sep = if trailer.is_empty() { 0 } else { 2 };
+            let today_room = trailer_budget.saturating_sub(trailer_used + today_sep);
             let today = self.today_spans(today_room, theme);
             if !today.is_empty() {
                 if !trailer.is_empty() {

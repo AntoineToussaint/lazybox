@@ -173,7 +173,15 @@ pub const CLAUDE_USAGE_LIMIT_PHRASES: &[&str] = &[
     "hit your individual spend limit",
     "hit your spend limit",
     "session limit resets",
+    // The 5-hour session window (`You've hit your session limit · resets
+    // 3:20pm (America/New_York)`), rendered as the failing tool call's
+    // result line, after which the turn simply ends.
+    "hit your session limit",
     "/rate-limit-options",
+    // Every current limit banner points at `/usage-credits` (`run
+    // /usage-credits to ask your admin …` / `/usage-credits to finish what
+    // you're working on`) — a slash command Claude prints only there.
+    "/usage-credits",
 ];
 
 /// The auto-continue form of the usage-limit block: instead of parking on
@@ -259,6 +267,59 @@ pub fn parse_usage_limit_reset(recent_output: &[u8]) -> Option<String> {
     })
     .max_by_key(|(i, _)| *i)
     .map(|(_, token)| token)
+}
+
+/// Byte offset of the most recent limit-phrase hit whose compacted LINE
+/// carries the machine-rendered banner separator `· resets <time>`
+/// (`… · resets 3:20pm`, `… · resets Aug 30 at 2pm`) — the exact shape
+/// Claude prints for a real limit banner (session and weekly alike join
+/// the phrase to the countdown with a ` · ` middot).
+///
+/// The `·` is load-bearing: this branch is the ONE limit path NOT gated on
+/// the resting composer (a real banner that ended the turn legitimately
+/// rests above `? for shortcuts`), so it is the only path that a mere
+/// MENTION of a limit could reach. Requiring the middot separator — not a
+/// bare `resets <time>` anywhere on the line — is what keeps ordinary prose,
+/// logs and comments ("you've hit your session limit; it resets 3pm") from
+/// reading as a live block: they join the words with punctuation or a space,
+/// never the banner's ` · `. Erring toward this false-negative (missing an
+/// unusually-separated banner) over a false-positive matches the rest of
+/// this module — a spurious block can fire the auto-`Wait` keystroke, a
+/// missed one the user can still act on manually.
+///
+/// Every phrase occurrence is examined, not just the latest hit overall:
+/// the banner's `/usage-credits …` follow-up line is itself a phrase and
+/// sits BELOW the line carrying the reset, so anchoring on the single
+/// most-recent hit would always look at the wrong line. `None` when no
+/// phrase shares a line with a `· resets <time>`.
+fn limit_banner_with_reset_pos(compact: &str) -> Option<usize> {
+    let mut needle = String::new();
+    let mut best: Option<usize> = None;
+    for phrase in CLAUDE_USAGE_LIMIT_PHRASES {
+        needle.clear();
+        needle.extend(
+            phrase
+                .chars()
+                .filter(|c| *c != ' ')
+                .flat_map(char::to_lowercase),
+        );
+        for (pos, _) in compact.match_indices(needle.as_str()) {
+            let start = compact[..pos].rfind('\n').map_or(0, |i| i + 1);
+            let end = compact[pos..].find('\n').map_or(compact.len(), |i| pos + i);
+            let line = &compact[start..end];
+            // The banner joins its countdown with the ` · ` middot
+            // (`limit · resets 3:20pm` → `limit·resets3:20pm`); require it
+            // so a line that merely mentions a limit and, separately, a
+            // reset time is not mistaken for the machine-rendered block.
+            let names_reset = line
+                .match_indices("·resets")
+                .any(|(i, kw)| reset_token(&line[i + kw.len()..]).is_some());
+            if names_reset {
+                best = Some(best.map_or(pos, |b| b.max(pos)));
+            }
+        }
+    }
+    best
 }
 
 /// Month abbreviations a date-style reset leads with (`resets Aug 30 at
@@ -484,6 +545,11 @@ enum Trigger {
     /// (`CLAUDE_USAGE_LIMIT_AUTO_CONTINUE_PHRASES`) — Claude parks itself
     /// and resumes at reset, so the calm `AwaitingReset`.
     UsageLimitAutoContinue,
+    /// A limit banner that ENDED the turn (`You've hit your session limit ·
+    /// resets 3:20pm`, then the end-of-turn summary and the resting
+    /// composer). The composer is live and empty, so unlike `UsageLimit` a
+    /// prompt can be typed into it — it is refused until reset, then works.
+    UsageLimitAtRest,
     /// Selection arrow + numbered options, more recent than the composer.
     StructuralChooser,
     /// `Esc to cancel` permission footer + numbered options.
@@ -740,6 +806,31 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
         d.trigger = Some(Trigger::UsageLimit);
         return d;
     }
+    // The limit can also END the turn instead of raising a chooser: the
+    // session-window banner (`⎿ You've hit your session limit · resets
+    // 3:20pm`) lands as the failing tool call's result, Claude prints its
+    // end-of-turn summary and comes to rest at an empty composer. The
+    // resting footer beneath it is therefore NOT evidence the banner is
+    // stale — it is the shape of this block — yet the `resting_pos` gate
+    // above discards it, so these sessions read Idle, quiet-settled to
+    // `Done`, and `Shift-K` found nothing to resume while every agent on
+    // the account sat limited. Accept the shape when the banner line carries
+    // the machine-rendered ` · resets <time>` separator (`… · resets
+    // 3:20pm`): the agent's own prose about limits ("you've reached your
+    // usage limit before …", "it resets 3pm tomorrow") joins the words with
+    // punctuation or a space, never the banner's ` · `. Only a live working
+    // anchor painted after it clears it — the reset happened and the agent
+    // is running again.
+    //
+    // Skip the multi-phrase line scan entirely when no limit phrase is
+    // present at all (`limit_pos` is `None`) — the common case on this
+    // per-chunk hot path, where the scan would only ever find nothing.
+    let banner_pos = limit_pos.and_then(|_| limit_banner_with_reset_pos(compact));
+    if marker_at_least_as_recent(banner_pos, work_anchor_against(banner_pos)) {
+        d.state = AgentState::LimitReached;
+        d.trigger = Some(Trigger::UsageLimitAtRest);
+        return d;
+    }
 
     // WEAK: arrow + numbered options, gated on the full composer footer
     // (incl. `Tab to amend`) so injected prose / parked prompts stay Idle.
@@ -876,14 +967,17 @@ pub fn claude_ready_for_prompt(recent_output: &[u8]) -> bool {
     let decision = classify(&s, &compact, None);
     // `AwaitingReset` too: under the auto-continue banner the composer is
     // live but any keystroke CANCELS the wait, so a paste there would
-    // abort the parked work rather than queue behind it.
+    // abort the parked work rather than queue behind it. A limit that
+    // ENDED the turn (`UsageLimitAtRest`) is the exception: the composer
+    // is at rest and empty, so a prompt lands normally — Claude refuses it
+    // until reset, then it runs — which is exactly what the `Shift-K`
+    // resume-all "continue" relies on.
     if matches!(
         decision.state,
-        AgentState::InputNeeded
-            | AgentState::LimitReached
-            | AgentState::CreditExhausted
-            | AgentState::AwaitingReset
-    ) {
+        AgentState::InputNeeded | AgentState::CreditExhausted | AgentState::AwaitingReset
+    ) || (decision.state == AgentState::LimitReached
+        && decision.trigger != Some(Trigger::UsageLimitAtRest))
+    {
         return false;
     }
     // Folder-trust prompts don't always render as a numbered chooser
@@ -2521,6 +2615,94 @@ mod tests {
         );
     }
 
+    /// The session-window limit ENDS the turn instead of raising a chooser
+    /// (verbatim from a real session): the banner lands as the failing tool
+    /// call's result, Claude prints its end-of-turn summary and rests at an
+    /// empty composer. The resting footer beneath is the SHAPE of this
+    /// block, not evidence it's stale — gating on it read every such
+    /// session as Idle → `Done`, and `Shift-K` had nothing to resume while
+    /// the whole account sat limited. Must read `LimitReached`, with the
+    /// composer still injectable (that's how resume-all's "continue" lands).
+    #[test]
+    fn session_limit_that_ended_the_turn_reads_as_limit_reached() {
+        let stopped = "    199 +\n\
+             200  func TestReactDeleteUnbindsAndJournals(t *testing.T) {\n\
+             ⎿  You've hit your session limit · resets 3:20pm (America/New_York)\n\
+             /usage-credits to finish what you’re working on.\n\n\
+             ✻ Cooked for 37m 30s · done 12:36 PM\n\n\
+             ❯ \n\
+             ? for shortcuts";
+        assert_eq!(
+            claude_state(stopped.as_bytes()),
+            Some(AgentState::LimitReached),
+        );
+        assert_eq!(
+            parse_usage_limit_reset(stopped.as_bytes()),
+            Some("3:20pm".into()),
+        );
+        assert!(
+            claude_ready_for_prompt(stopped.as_bytes()),
+            "the composer is at rest — a `continue` must be injectable"
+        );
+
+        // Same block under the bypass footer, with Claude's unrelated
+        // "Remote Control disconnected … /login" notice printed after it
+        // (it appears in every session when the signed-in account changes,
+        // running or idle) — still the limit block.
+        let with_notice = "⏺ Agent \"Survey lazybox orchestration primitives\" finished · 3m 5s\n\
+             ⎿  You've hit your session limit · resets 3:20pm (America/New_York)\n\
+             /usage-credits to finish what you’re working on.\n\n\
+             ✻ Churned for 3m 47s · done 12:37 PM\n\n\
+             ⏺ Remote Control disconnected — signed-in claude.ai account or organization \
+             changed on this machine — run /remote-control to start a session for the \
+             current account, or /login to switch back, then /remote-control\n\n\
+             ❯ \n\
+             bypass permissions on (shift+tab to cycle)";
+        assert_eq!(
+            claude_state(with_notice.as_bytes()),
+            Some(AgentState::LimitReached),
+        );
+
+        // The user typed `continue` after the reset and Claude is thinking
+        // again: a live working line after the banner clears the block.
+        let resumed = format!(
+            "{with_notice}\n❯ continue\n\n✢ Thinking… (2s · ↑ 12 tokens · esc to interrupt)"
+        );
+        assert_eq!(claude_state(resumed.as_bytes()), Some(AgentState::Working),);
+
+        // Guard against the false positive this gate trades against: the
+        // agent's own prose about a limit, with no `resets <time>` on the
+        // same line, above a resting footer is still stale → Idle.
+        let prose = "Earlier the run hit your session limit and I waited.\n\
+             It resets every five hours, so we're fine now.\n\n\
+             ❯ \n\
+             ? for shortcuts";
+        assert_eq!(claude_state(prose.as_bytes()), Some(AgentState::Idle));
+
+        // The sharper false positive: prose that mentions the limit AND a
+        // real reset CLOCK time on one line — but joined by ordinary
+        // punctuation, not the banner's ` · ` middot. This is the shape an
+        // agent's own summary ("you've hit your session limit; it resets
+        // 3pm") or a quoted log takes, and it reaches this ungated branch
+        // because it rests above `? for shortcuts` just like the real
+        // banner. Without the middot requirement it read `LimitReached`,
+        // which — because `UsageLimitAtRest` is deliberately injectable —
+        // put a healthy idle agent into the `Shift-K` resume-all set with a
+        // false ⏳ pill. Must stay Idle (a plain, correctly-injectable idle
+        // composer), NOT `LimitReached`.
+        let prose_with_time = "you've hit your session limit; it resets 3pm today.\n\n\
+             ❯ \n\
+             ? for shortcuts";
+        assert_eq!(
+            claude_state(prose_with_time.as_bytes()),
+            Some(AgentState::Idle)
+        );
+
+        // The account-changed notice mentions `/login` but is not an auth
+        // failure — it must not route the session into the re-auth flow.
+        assert!(claude_auth_failure(with_notice.as_bytes()).is_none());
+    }
+
     #[test]
     fn spend_limit_auto_continue_banner_reads_as_awaiting_reset() {
         // #1452 discovered these newer individual-spend-limit / session-limit
@@ -2603,16 +2785,23 @@ mod tests {
         let bypass =
             "earlier you reached your usage limit\nbypass permissions on (shift+tab to cycle)";
         assert_eq!(claude_state(bypass.as_bytes()), Some(AgentState::Idle));
-        // #1337: the weekly-limit wording gets the same gate — a resting
-        // composer redrawn below the banner means the block already cleared.
-        let stale_weekly = "You've hit your weekly limit · resets Aug 30 at 2pm\n? for shortcuts";
+        // A banner that NAMES A RESET on the same line is the machine-
+        // rendered block, and a resting composer beneath it is the shape of
+        // a limit that ended the turn (the 5-hour session window; a
+        // "Stop and wait" pick on the #1337 weekly chooser) — NOT proof it
+        // cleared. That reads `LimitReached` so `Shift-K` can resume it;
+        // only a live working line painted after it clears the block.
+        let at_rest = "You've hit your weekly limit · resets Aug 30 at 2pm\n? for shortcuts";
         assert_eq!(
-            claude_state(stale_weekly.as_bytes()),
-            Some(AgentState::Idle)
+            claude_state(at_rest.as_bytes()),
+            Some(AgentState::LimitReached)
         );
-        // #1452: the spend-limit banner wording gets the same gate — a
-        // finished turn whose prose merely mentioned the individual spend
-        // limit, now at rest, must not flash a spurious block.
+        let resumed = "You've hit your weekly limit · resets Aug 30 at 2pm\n\
+             ✻ Working (3s · esc to interrupt)";
+        assert_eq!(claude_state(resumed.as_bytes()), Some(AgentState::Working));
+        // #1452: the spend-limit wording in the agent's own prose — no
+        // `resets <time>` on the line — above a resting footer is still
+        // stale and must not flash a spurious block.
         let stale_spend = "You've hit your individual spend limit earlier today.\n? for shortcuts";
         assert_eq!(claude_state(stale_spend.as_bytes()), Some(AgentState::Idle));
     }

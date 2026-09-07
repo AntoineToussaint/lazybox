@@ -535,9 +535,42 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
                     }
                 }
             }
+            // Body-marker fallback (#1521): an issue that declares its
+            // blocker in prose ("Blocked by ENG-42", "Depends on
+            // owner/repo#7") is parsed with the same source-agnostic
+            // extractor the GitHub provider uses, and the edges are unioned
+            // in. A bare same-repo `#N` is dropped — Linear has no "own
+            // repo" to resolve it against, so only an explicit `owner/repo#N`
+            // cross-links to a GitHub task.
+            if let Some(desc) = issue.description.as_deref() {
+                for link in lazybox_core::issue_links::extract_blocked_by(desc) {
+                    let id = match link {
+                        lazybox_core::IssueLink::Linear { key } => TaskId {
+                            source: "linear".into(),
+                            key,
+                        },
+                        lazybox_core::IssueLink::GitHub {
+                            repo: Some(repo),
+                            number,
+                        } => TaskId {
+                            source: "github".into(),
+                            key: format!("{repo}#{number}"),
+                        },
+                        lazybox_core::IssueLink::GitHub { repo: None, .. } => continue,
+                    };
+                    if !out.contains(&id) {
+                        out.push(id);
+                    }
+                }
+            }
             out
         },
-        blocked_on: None,
+        // Free-text `Blocked on:` reason declared in the description
+        // (#1521) — the same prose extractor GitHub issues use.
+        blocked_on: issue
+            .description
+            .as_deref()
+            .and_then(lazybox_core::issue_links::extract_blocked_on),
     }
 }
 
@@ -864,6 +897,89 @@ mod tests {
     fn issue_to_task_has_no_blockers_without_relations() {
         let issue = issue_with_attachments(&[]);
         assert!(issue_to_task(&issue, "viewer").blocked_by.is_empty());
+    }
+
+    #[test]
+    fn issue_to_task_parses_body_markers_and_unions_them_with_native_edges() {
+        // #1521: a Linear issue that only declares its blocker in prose was
+        // silently dropped — the provider ran no body-marker parse and
+        // hardcoded `blocked_on: None`. The description below names one
+        // native-overlapping edge (ENG-7), one prose-only Linear edge
+        // (ENG-42), one cross-provider GitHub edge, and a free-text reason.
+        let mut issue = issue_with_attachments(&[]);
+        issue.description = Some(
+            "Depends on ENG-42.\n\
+             Blocked by owner/repo#7.\n\
+             Blocked on: waiting for the infra migration"
+                .into(),
+        );
+        issue.inverse_relations = Some(Relations {
+            nodes: vec![Relation {
+                relation_type: "blocks".into(),
+                issue: Some(RelationIssue {
+                    id: "n7".into(),
+                    identifier: "ENG-7".into(),
+                }),
+            }],
+        });
+
+        let task = issue_to_task(&issue, "viewer");
+        // The native edge leads (inverse relations are scanned first); the
+        // two prose edges follow. Intra-extractor ordering is the extractor's
+        // own concern, so assert on membership + count rather than pinning it.
+        assert_eq!(task.blocked_by.len(), 3, "three distinct edges, no dupes");
+        assert_eq!(
+            task.blocked_by[0],
+            TaskId {
+                source: "linear".into(),
+                key: "ENG-7".into(),
+            },
+            "the native `blocks` relation is listed first",
+        );
+        assert!(
+            task.blocked_by.contains(&TaskId {
+                source: "linear".into(),
+                key: "ENG-42".into(),
+            }),
+            "the prose-only Linear edge is unioned in",
+        );
+        assert!(
+            task.blocked_by.contains(&TaskId {
+                source: "github".into(),
+                key: "owner/repo#7".into(),
+            }),
+            "the cross-provider GitHub edge is unioned in",
+        );
+        assert_eq!(
+            task.blocked_on.as_deref(),
+            Some("waiting for the infra migration"),
+            "the free-text `Blocked on:` reason is parsed from the description",
+        );
+    }
+
+    #[test]
+    fn issue_to_task_body_marker_dedups_against_a_native_edge() {
+        // A prose blocker that repeats a native `blocks` relation must not
+        // double-count.
+        let mut issue = issue_with_attachments(&[]);
+        issue.description = Some("Blocked by ENG-7".into());
+        issue.inverse_relations = Some(Relations {
+            nodes: vec![Relation {
+                relation_type: "blocks".into(),
+                issue: Some(RelationIssue {
+                    id: "n7".into(),
+                    identifier: "ENG-7".into(),
+                }),
+            }],
+        });
+        assert_eq!(
+            issue_to_task(&issue, "viewer").blocked_by,
+            vec![TaskId {
+                source: "linear".into(),
+                key: "ENG-7".into(),
+            }],
+            "the shared ENG-7 is listed once",
+        );
     }
 
     #[test]

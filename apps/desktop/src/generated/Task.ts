@@ -177,6 +177,23 @@ closes_issues: Array<TaskId>,
  */
 linked_tasks: Array<TaskId>,
 /**
+ * Tasks that must be done before this one may start. Providers fill
+ * it from their native "blocked by" relation (GitHub issue
+ * dependencies, Linear `blocks` relations) plus the `Blocked by:` /
+ * `Depends on:` body-marker line lazybox parses for cross-repo edges
+ * GitHub cannot express natively. Order preserved, deduplicated.
+ * Empty for providers without the concept and for older snapshots.
+ */
+blocked_by: Array<TaskId>,
+/**
+ * A declared blocker with a human-readable reason — parsed from a
+ * `Blocked on: <reason>` body line (a decision, a credential, an
+ * outside party). Distinct from [`Task::blocked_by`], which is task
+ * edges; this is free text. Counts as blocked for the badge and the
+ * `blocked` filter. `None` when absent and for older snapshots.
+ */
+blocked_on: string | null,
+/**
  * The provider-native parent task, when this task is nested under
  * another issue/ticket. Providers that do not expose hierarchy leave
  * this empty. The inbox uses it to build a cycle-safe, collapsible

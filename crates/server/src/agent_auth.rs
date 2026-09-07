@@ -494,6 +494,91 @@ pub(crate) async fn resume_agent(
     config: &ServerConfig,
     terminal_id: TerminalId,
 ) -> Option<TerminalId> {
+    resume_agent_with_prompt(config, terminal_id, None).await
+}
+
+/// Stop a usage-limit-blocked agent's process, respawn the same
+/// conversation in its pane (`--resume`), and submit the continuation
+/// prompt once the fresh composer is ready — the "restart with fresh
+/// credentials" half of rate-limit recovery. A plain "continue" (`Shift-K`)
+/// cannot make a running process re-read its credentials after the user
+/// switched account / API key externally; only a respawn does. The kill →
+/// detach → resume sequence is the one the re-auth flow uses for a blocked
+/// pane, minus the interactive login step (the user has already re-authed
+/// outside lazybox), and the nudge rides the spawn-time injector rather
+/// than a blind keystroke so it waits for the booted composer. A pane
+/// without launch metadata, or one mid re-authentication, is rejected
+/// rather than half-restarted.
+pub(crate) async fn restart_agent_and_continue(config: &ServerConfig, terminal_id: TerminalId) {
+    let reject = |message: String| Event::CommandRejected {
+        command: "RestartAgentAndContinue".into(),
+        message,
+    };
+    let Some(context) = config.agent_recovery.context(terminal_id).await else {
+        let _ = config.bus.send(reject(
+            "this agent pane has no resumable launch metadata".into(),
+        ));
+        return;
+    };
+    // Bail if a re-auth flow is mid-flight for this terminal so a kill+respawn
+    // can't stomp an in-progress interactive login. We read `active()` but
+    // deliberately do NOT register ourselves as active. Two invariants make
+    // that safe, and both are load-bearing:
+    //   1. This runs fully inline on the per-terminal FIFO I/O lane
+    //      (`run_io_lane`, keyed by `terminal_id`) — no `tokio::spawn`, no lane
+    //      release — so a second command for THIS terminal (another restart, a
+    //      re-auth) queues behind this call and cannot interleave. The guard
+    //      only has to catch a re-auth *background task* started earlier, which
+    //      registered itself via `begin()` and outlives the lane hop.
+    //   2. We must not call `begin()` here: it claims a global lock keyed by
+    //      `agent_id`, so a concurrent bulk `a R` of two panes running the same
+    //      agent (each on its own terminal lane) would have all but the first
+    //      rejected. Registering would break the headline bulk-restart path.
+    // If either invariant changes (this path spawns, or the lane stops being
+    // per-terminal), two restarts could double-kill/double-spawn — revisit then.
+    if config.agent_recovery.active(terminal_id).await {
+        let _ = config.bus.send(reject(
+            "a re-authentication is already running for this agent".into(),
+        ));
+        return;
+    }
+    if let Some(backend_key) = context.backend_key.clone() {
+        // Carry the conversation (history + any draft) across the swap
+        // exactly as the re-auth flow does before it kills the pane.
+        if let Some((prompt_history, composing_buffer)) =
+            crate::spawn_handler::capture_terminal_conversation_state(config, terminal_id).await
+        {
+            config
+                .agent_recovery
+                .update_conversation(terminal_id, prompt_history, composing_buffer)
+                .await;
+        }
+        let killed = {
+            let _guard = config.terminal.lock_terminal_io(&backend_key).await;
+            config.backend.kill(&backend_key).await
+        };
+        if let Err(error) = killed {
+            let _ = config
+                .bus
+                .send(reject(format!("could not stop the agent: {error}")));
+            return;
+        }
+        crate::spawn_handler::detach_killed_terminal(config, terminal_id, &backend_key).await;
+        config.backend.release(&backend_key).await;
+    }
+    tracing::info!(
+        ?terminal_id,
+        agent = %context.agent_id,
+        "restart-rate-limited: respawning the agent to pick up fresh credentials"
+    );
+    resume_agent_with_prompt(config, terminal_id, Some(crate::auto_wait::resume_prompt())).await;
+}
+
+async fn resume_agent_with_prompt(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    initial_prompt: Option<String>,
+) -> Option<TerminalId> {
     let Some(context) = config.agent_recovery.context(terminal_id).await else {
         let _ = config.bus.send(Event::AgentAuthFinished {
             recovery_terminal_id: terminal_id,
@@ -529,6 +614,7 @@ pub(crate) async fn resume_agent(
         TerminalKind::Agent(context.agent_id.clone()),
         crate::spawn_handler::SpawnOptions {
             cwd: Some(context.cwd.to_string_lossy().into_owned()),
+            initial_prompt,
             on_main: context.on_main,
             model_alias: context.model_alias.clone(),
             resume: true,
@@ -2110,5 +2196,51 @@ mod tests {
             }) if id == terminal_id
         ));
         wait_for_argv(&mock, &["codex", "resume", "--last"]).await;
+    }
+
+    /// `a R`: a limit-blocked agent whose process is still running is
+    /// stopped, its backend released, and the exact conversation respawned
+    /// in its pane through the provider's `--resume <session>` builder — the
+    /// only way a fresh credential is picked up. The conversation carried
+    /// across the swap is the one captured at kill time.
+    #[tokio::test]
+    async fn restart_rate_limited_kills_then_resumes_the_same_conversation() {
+        let (config, mock, terminal_id) = recovery_fixture("claude", Some("sess-limited")).await;
+        let old_backend = config
+            .agent_recovery
+            .context(terminal_id)
+            .await
+            .and_then(|c| c.backend_key)
+            .expect("blocked backend");
+
+        restart_agent_and_continue(&config, terminal_id).await;
+
+        wait_for_argv(&mock, &["claude", "--resume", "sess-limited"]).await;
+        assert!(
+            mock.released_keys().await.contains(&old_backend),
+            "the stopped agent's backend is released, not leaked"
+        );
+        assert_eq!(
+            mock.list().await.expect("list sessions").len(),
+            1,
+            "exactly one live backend remains: the respawned agent"
+        );
+        // The recovery context was consumed by the successful resume.
+        assert!(config.agent_recovery.context(terminal_id).await.is_none());
+    }
+
+    /// A pane with no launch metadata cannot be restarted; the daemon says
+    /// so instead of half-killing something.
+    #[tokio::test]
+    async fn restart_rate_limited_rejects_a_pane_without_metadata() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let mut events = config.bus.subscribe();
+
+        restart_agent_and_continue(&config, TerminalId(4242)).await;
+
+        assert!(matches!(
+            events.try_recv(),
+            Ok(Event::CommandRejected { command, .. }) if command == "RestartAgentAndContinue"
+        ));
     }
 }

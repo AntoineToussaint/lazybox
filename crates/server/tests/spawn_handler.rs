@@ -120,6 +120,14 @@ async fn drain_auto_fix_config(client: &mut lazybox_ipc::Client) {
         matches!(agents, Event::AgentAvailabilityConfig { .. }),
         "expected AgentAvailabilityConfig, got {agents:?}"
     );
+    let keep_awake = timeout(Duration::from_secs(1), client.recv())
+        .await
+        .expect("keep-awake status deadline")
+        .expect("keep-awake status event");
+    assert!(
+        matches!(keep_awake, Event::KeepAwakeStatus { .. }),
+        "expected KeepAwakeStatus, got {keep_awake:?}"
+    );
     let keepmine = timeout(Duration::from_secs(1), client.recv())
         .await
         .expect("snippet keep-mine deadline")
@@ -135,6 +143,14 @@ async fn drain_auto_fix_config(client: &mut lazybox_ipc::Client) {
     assert!(
         matches!(costs, Event::SessionCosts { .. }),
         "expected SessionCosts, got {costs:?}"
+    );
+    let mastery = timeout(Duration::from_secs(1), client.recv())
+        .await
+        .expect("mastery ledger deadline")
+        .expect("mastery ledger event");
+    assert!(
+        matches!(mastery, Event::MasteryLedger { .. }),
+        "expected MasteryLedger, got {mastery:?}"
     );
     let cfg = timeout(Duration::from_secs(1), client.recv())
         .await

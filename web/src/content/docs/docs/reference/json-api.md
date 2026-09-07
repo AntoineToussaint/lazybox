@@ -146,6 +146,27 @@ snapshots, output, scrollback, and resync results use the response body. Raw
 terminal bytes never travel as JSON number arrays. (Consumed by the desktop app;
 the browser web-control client uses `/v1/agents/output` instead.)
 
+## Coordination MCP server (for spawned agents)
+
+Separate from this gateway, the daemon also serves a loopback **MCP server**
+for the agents it spawns. It is not user-configured: at spawn, lazybox mints a
+per-session bearer, writes a private `.mcp.json`, and passes `--mcp-config`
+(Claude today — the built-in agent that accepts an injected MCP config). The
+connection *is* the session, so no tool takes a "who am I" argument.
+
+| Tool | Backed by |
+| --- | --- |
+| `whoami` | The caller's bearer → session key |
+| `list_sessions(filter?)` | The same agent roster as `/v1/agents` |
+| `read_session(workspace, tail?)` | The same snapshot as `/v1/agents/output` |
+| `post_note(text, scope?, tags?)` / `read_notes(scope?, tags?, since?)` | A kv-backed blackboard (`lazybox:note:*`), 50 notes per scope, 16 KB each |
+| `notify_session(workspace, text, submit?)` | The same settle-gated inject as `/v1/agents/inject`; reports a handoff, not a delivery |
+
+Bearers are revoked when a session's last agent terminal ends and persist with
+the bound port across a daemon restart, so a tmux-surviving agent keeps
+working. How agents use it: [Orchestrate multiple agents → the MCP
+bus](/docs/how-to/orchestrate-multiple-agents/#let-agents-coordinate-themselves-the-mcp-bus).
+
 ## Example
 
 ```sh

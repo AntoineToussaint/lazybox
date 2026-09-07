@@ -46,10 +46,11 @@ Work from any non-terminal pane. A focused terminal forwards keys to the PTY; pr
 | `!` | next asking | Jump the cursor to the next workspace whose agent is waiting on input (a quick jump; the workspace picker `` ` `` reaches any workspace). |
 | `Shift-F` | next failing | Jump the cursor to the next PR whose CI is failing (a quick jump; the workspace picker `` ` `` reaches any workspace). |
 | `Shift-L` | next rate-limited | Jump the cursor to the next workspace whose agent hit its provider usage / rate limit (#847). |
+| `Shift-N` | next unread | Jump the cursor to the next workspace with unread activity, wrapping around (#1502). |
 | `.` | focus mode | Maximize the focused workspace's terminal to near-fullscreen behind a slim event header, hiding the sidebar and activity pane. |
 | `Shift-W` | start work | Pick a project, name a workspace, and start the default agent in it — all in one step, from any pane. |
 | `Shift-C` | connect box | Connect to (or disconnect from) the remote box on demand. |
-| `Shift-K` | resume rate-limited | Resume every workspace currently blocked on a usage / rate limit at once — a settle-gated 'continue' injected into each limit-blocked agent. |
+| `Shift-K` | resume rate-limited | Resume every workspace currently blocked on a usage / rate limit at once — a settle-gated 'continue' injected into each limit-blocked agent, for when the limit has reset. |
 | `Ctrl-k` | recover credit | Select the provider's Wait for credit option for the focused blocked agent, wait for its composer, and submit the configured continuation prompt. |
 | `Shift-P` | activity pane | Cycle the activity pane: full feed → one-line summary (new-activity / failing-CI counts) → hidden → full. |
 | `F8 \| Alt-s \| Ctrl-Alt-s` | text selection | Toggle lazybox's mouse capture so the host terminal regains native text selection (trackpad-select + Cmd-C in agent scrollback). |
@@ -78,6 +79,8 @@ Manage the sidebar list itself — only while the sidebar has focus.
 
 | Key | Action | What it does |
 | --- | --- | --- |
+| `{` | prev group | Move the cursor to the previous group header (Space / repo / Focused / Hopper) so a long inbox can be crossed a group at a time (#1502). |
+| `}` | next group | Move the cursor to the next group header (Space / repo / Focused / Hopper) so a long inbox can be crossed a group at a time (#1502). |
 | `f` | filter | Open the filter menu — toggle state (with-agent, CI-failing, conflict, unread, asking, …), role, and kind predicates. |
 | `o` | order | Cycle the sort order (recency → by-role → by-role with section headers). |
 | `Shift-S` | switch mailbox | Cycle the mailbox view (Inbox → Inactive → Snoozed). |
@@ -140,7 +143,7 @@ A focused terminal forwards every key to the PTY; only the chords below are inte
 | `]]x` | Close the focused terminal (tile or active tab) |
 | `]]H` | Open the personal Hopper editor |
 | `]]z` | Toggle tmux-style zoom of the focused tile (maximize / restore); Splits grid only |
-| `]]t` | Toggle whether the next terminal opens as a split or a tab; persists `ui.terminal_new_layout` |
+| `]]t` | Switch this session's terminals between tabs and side-by-side tiles, and set how the next one opens (persists `ui.terminal_new_layout`) |
 
 ### Scrollback
 
@@ -172,6 +175,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 
 | Chord | Action |
 | --- | --- |
+| `a R` | restart rate-limited |
 | `a K` | recover all credit |
 | `a c` | spawn claude |
 | `a x` | spawn codex |

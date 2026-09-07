@@ -2,7 +2,7 @@
 
 How lazybox is laid out and driven from the keyboard and mouse. This page covers
 the pane structure, the action/keybinding system, the overlays (help, settings,
-tour), the activity feed, reply, mouse handling, modals, and desktop
+coach), the activity feed, reply, mouse handling, modals, and desktop
 notifications.
 
 See [`CLAUDE.md` § TUI tiers](../../CLAUDE.md) and
@@ -183,37 +183,61 @@ palette entries. Output persists to `config.yaml` (`PersistedSetup`).
 
 ---
 
-## Guided tour
+## Onboarding coach
 
-**Status:** beta
-**Crate(s):** `tui` (`Tour` modal)
-**Config / flags:** `ui.tour_seen`
-**Key bindings:** `Shift-T`
+**Status:** stable
+**Crate(s):** `tui` (`realm/coach.rs`)
+**Config / flags:** `ui.tour_seen` (auto-launch gate), `ui.coach_step` (resume position)
+**Key bindings:** `Shift-T` (start / end), `Ctrl-n` (skip step), `Ctrl-e` (end)
 
 ### What it does
-A guided walkthrough of lazybox's main workflows, shown once on first run and
-re-openable on demand. Its work card demonstrates how the same `w w` action
-becomes issue implementation, CI repair, or selected-review-comment work, then
-explains running/default-agent and model-tier routing. Snippets get two
-dedicated cards: send a built-in workflow through the real picker, then repeat
-it through persisted Recent memory and read the per-workspace `]N` progress
-cue.
+The coach (#1460) is the successor to the retired 14-card modal tour. Instead of
+a slide deck narrating features, it is a slim two-row rail docked above the
+footer that gives you *one* objective at a time, spotlights the pane it's talking
+about, and *waits* — confirming when you actually perform the action, verified
+against real model state, before advancing. The three panes stay fully visible
+and usable throughout: the rail is carved out of the pane area, never drawn on
+top of it.
+
+The six-step curriculum follows a real first session: open a task, put an agent
+on it (`w`), step back out of the terminal (`]]q`) and see the session keep
+running, come back to it (`Enter` / `` ` ``), notice work happening on its own
+and jump to it (an agent asking, or CI gone red), then quit on purpose knowing
+your sessions outlive the process. Snippets, multi-repo fan-out, Spaces and the
+GitHub actions are deliberately *not* taught here — they belong to later,
+in-context teaching rather than an up-front deck.
+
+Every key the coach shows is resolved from the action catalog at render time, so
+it is always your *effective* binding (honoring `ui.keymap_preset` and
+`ui.action_keys`); a key you have unbound collapses to nothing rather than a
+stale literal. A step that sits unsatisfied long enough offers a hand
+(stuck-detection) rather than sitting there being right.
 
 ### How to use it
-Press `Shift-T` to launch it; it also auto-runs the first time (`ui.tour_seen`
-gates the auto-launch).
+Press `Shift-T` to start the coach; press it again to end it. On a fresh profile
+it also auto-launches once — but only after the inbox has its first task, never
+over an empty inbox. `Ctrl-n` skips the current step and `Ctrl-e` ends the coach;
+both are also clickable on the rail. `ui.tour_seen` is set the first time the
+coach is ended or completed so it doesn't auto-launch again (it remains
+re-invocable via `Shift-T`); `ui.coach_step` persists your position so quitting
+mid-walkthrough resumes where you left off.
 
 ### Test checklist
-- [ ] `Shift-T` opens the tour.
-- [ ] The tour auto-runs on a fresh profile and sets `ui.tour_seen`.
-- [ ] It doesn't auto-run again after being seen.
-- [ ] The work card demonstrates issue, failing-CI, and selected-comment prompts.
-- [ ] The work card explains live/default-agent routing and priority/explicit tiers.
-- [ ] Separate snippet cards exercise fast send/preview and Recent/`]N` memory.
-- [ ] The memory card demonstrates Ask Lazybox hot reload and `Shift-B`.
+- [ ] `Shift-T` starts the coach rail; pressing it again ends it.
+- [ ] On a fresh profile the coach auto-launches once the inbox has a task, and sets `ui.tour_seen` when ended or completed.
+- [ ] It doesn't auto-launch again after being seen.
+- [ ] It never launches over an empty inbox.
+- [ ] Each step confirms only when the corresponding action is actually performed against real model state, not on a bare keypress.
+- [ ] Objective key hints reflect the user's effective bindings under `ui.keymap_preset` / `ui.action_keys` remaps.
+- [ ] `Ctrl-n` skips the current step and `Ctrl-e` ends the coach; both are clickable on the rail.
+- [ ] The resume position persists in `ui.coach_step` across restarts.
 
 ### Known sharp edges
-- Newer surface; content may lag behind feature changes.
+- `Ctrl-n` / `Ctrl-e` are handled directly rather than through the action
+  catalog, so they don't appear in `?` help and aren't remappable via
+  `ui.action_keys`.
+- The persisted auto-launch gate is still named `ui.tour_seen` for
+  compatibility, though the feature is now the coach.
 
 ---
 

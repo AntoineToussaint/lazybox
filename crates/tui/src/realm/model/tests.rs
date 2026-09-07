@@ -1796,15 +1796,220 @@ mod effects_tests {
         assert!(cmds.is_empty(), "blank rename must not emit a command");
     }
 
-    /// `Shift-W` with no projects yet can't resolve a container, so
-    /// it surfaces a nudge instead of mounting a picker.
+    /// `Shift-W` on an empty install mounts the Start sheet instead of
+    /// bouncing to `x p` (#1502): Chat and Repository are always
+    /// offered; Workspace/Project rows need a project.
     #[test]
-    fn start_agent_flow_without_projects_mounts_no_modal() {
+    fn start_agent_flow_without_projects_mounts_the_start_sheet() {
         let mut m = build_model();
         m.start_agent_flow();
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::StartSheet),
+            "no project → the Start sheet, never a dead-end nudge"
+        );
+    }
+
+    /// Start sheet → Chat with no scratch project yet: one
+    /// `CreateProject { scratch }` goes out and the `ProjectUpserted`
+    /// hand-off then creates a dated chat workspace (default agent
+    /// spawned) without a name prompt (#1502).
+    #[test]
+    fn start_sheet_chat_creates_scratch_project_then_workspace() {
+        use lazybox_tui_core::choice::START_SHEET_CHAT;
+        // Keep the daemon end alive so the hand-off's send succeeds and
+        // can be observed.
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(100, 30)).expect("model init");
+        while server.rx.try_recv().is_ok() {}
+        m.start_agent_flow();
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text(START_SHEET_CHAT.into())]);
+        assert!(
+            matches!(&cmds[..], [IpcCommand::CreateProject { name }] if name == "scratch"),
+            "chat first creates the scratch project: {cmds:?}"
+        );
+        assert!(m.modal_stack.is_empty(), "no name prompt for a chat");
+        // The daemon echoes the project.
+        let project = lazybox_core::Project::new(
+            lazybox_core::ProjectKey::local("scratch"),
+            "scratch".to_string(),
+            chrono::Utc::now(),
+        );
+        m.handle_daemon_event(lazybox_ipc::Event::ProjectUpserted(Box::new(project)));
+        let sent: Vec<IpcCommand> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+        match &sent[..] {
+            [
+                IpcCommand::CreateWorkspace {
+                    name,
+                    project_key,
+                    spawn_agent,
+                    ..
+                },
+            ] => {
+                assert!(
+                    name.starts_with("chat-"),
+                    "chat workspaces are dated: {name}"
+                );
+                assert_eq!(*project_key, lazybox_core::ProjectKey::local("scratch"));
+                assert!(spawn_agent.is_some(), "the default agent is spawned in");
+            }
+            other => panic!("expected one CreateWorkspace after the hand-off, got {other:?}"),
+        }
+        assert_eq!(
+            m.pending_workspace_creates.len(),
+            1,
+            "one chat workspace create in flight"
+        );
         assert!(
             m.modal_stack.is_empty(),
-            "no project → footer nudge, no modal"
+            "the hand-off must not mount the name input for a chat"
+        );
+    }
+
+    /// With the scratch project already known, Chat creates the
+    /// workspace at once and picks a fresh suffix when today's name is
+    /// taken (#1502).
+    #[test]
+    fn start_sheet_chat_reuses_scratch_project_and_suffixes_names() {
+        use lazybox_tui_core::choice::START_SHEET_CHAT;
+        let mut m = build_model();
+        let scratch = lazybox_core::ProjectKey::local("scratch");
+        m.handle_daemon_event(lazybox_ipc::Event::ProjectUpserted(Box::new(
+            lazybox_core::Project::new(scratch.clone(), "scratch".to_string(), chrono::Utc::now()),
+        )));
+        let today = format!("chat-{}", chrono::Local::now().format("%m%d"));
+        let mut existing = lazybox_core::Workspace::empty(
+            WorkspaceKey::new("local:scratch/chat"),
+            "main",
+            chrono::Utc::now(),
+        );
+        existing.name = today.clone();
+        existing.project_key = Some(scratch.clone());
+        m.handle_daemon_event(lazybox_ipc::Event::WorkspaceUpserted(std::sync::Arc::new(
+            existing,
+        )));
+        m.start_agent_flow();
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text(START_SHEET_CHAT.into())]);
+        match &cmds[..] {
+            [
+                IpcCommand::CreateWorkspace {
+                    name,
+                    project_key,
+                    spawn_agent,
+                    ..
+                },
+            ] => {
+                assert_eq!(*project_key, scratch);
+                assert_eq!(*name, format!("{today}-2"), "second chat today gets -2");
+                assert!(spawn_agent.is_some(), "default agent rides along");
+            }
+            other => panic!("expected one CreateWorkspace, got {other:?}"),
+        }
+    }
+
+    /// Two rapid `Shift-W → Chat` presses (scratch already known) must
+    /// not both mint the same `chat-MMDD` name: the first create is
+    /// still in flight (no `WorkspaceUpserted` yet) when the second
+    /// runs, so the second reads it from `pending_workspace_creates`
+    /// and suffixes `-2`. Without that, two sidebar rows share one
+    /// label (#1502).
+    #[test]
+    fn back_to_back_chats_suffix_from_pending_creates() {
+        use lazybox_tui_core::choice::START_SHEET_CHAT;
+        let mut m = build_model();
+        let scratch = lazybox_core::ProjectKey::local("scratch");
+        m.handle_daemon_event(lazybox_ipc::Event::ProjectUpserted(Box::new(
+            lazybox_core::Project::new(scratch.clone(), "scratch".to_string(), chrono::Utc::now()),
+        )));
+        let today = format!("chat-{}", chrono::Local::now().format("%m%d"));
+
+        m.start_agent_flow();
+        let first = m.handle_choice_picked(vec![ChoicePayload::Text(START_SHEET_CHAT.into())]);
+        match &first[..] {
+            [IpcCommand::CreateWorkspace { name, .. }] => assert_eq!(*name, today),
+            other => panic!("expected one CreateWorkspace, got {other:?}"),
+        }
+        // The first create is unacknowledged — it lives only in
+        // pending_workspace_creates, not yet in the sidebar.
+        m.start_agent_flow();
+        let second = m.handle_choice_picked(vec![ChoicePayload::Text(START_SHEET_CHAT.into())]);
+        match &second[..] {
+            [IpcCommand::CreateWorkspace { name, .. }] => assert_eq!(
+                *name,
+                format!("{today}-2"),
+                "second chat suffixes off the in-flight first"
+            ),
+            other => panic!("expected one CreateWorkspace, got {other:?}"),
+        }
+    }
+
+    /// Regression (#1502): a `deferred_chat` flag left stuck `true` by a
+    /// scratch-project create whose store write failed (no
+    /// `ProjectUpserted` ever emitted) must NOT ride the NEXT `x p`
+    /// upsert. `deferred_chat` is process-lifetime state, so without the
+    /// scratch-key gate the stale flag would make the user's next real
+    /// project spawn a phantom chat workspace instead of opening the
+    /// name input. The gate means only a scratch upsert can consume it.
+    #[test]
+    fn stuck_deferred_chat_does_not_hijack_a_later_project() {
+        use lazybox_tui_core::choice::START_SHEET_CHAT;
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(100, 30)).expect("model init");
+        while server.rx.try_recv().is_ok() {}
+        // Chat with no scratch yet → CreateProject{scratch} + the flag.
+        m.start_agent_flow();
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text(START_SHEET_CHAT.into())]);
+        assert!(
+            matches!(&cmds[..], [IpcCommand::CreateProject { name }] if name == "scratch"),
+            "chat first creates the scratch project: {cmds:?}"
+        );
+        assert!(m.deferred_chat, "chat is deferred until scratch lands");
+        // The scratch store write fails on the daemon: its
+        // ProjectUpserted never arrives. The user instead creates a
+        // real project via `x p`, which re-aims the deferred focus.
+        m.deferred_focus_project = Some("myproj".to_string());
+        let pk = lazybox_core::ProjectKey::local("myproj");
+        m.handle_daemon_event(lazybox_ipc::Event::ProjectUpserted(Box::new(
+            lazybox_core::Project::new(pk.clone(), "myproj".to_string(), chrono::Utc::now()),
+        )));
+        // The real project opens the name input — NOT a chat workspace.
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::NewWorkspace),
+            "the unrelated project opens the name input, not a chat"
+        );
+        assert!(matches!(
+            &m.modal_flow,
+            Some(super::super::ModalFlow::NewWorkspaceProject { project }) if *project == pk
+        ));
+        let sent: Vec<IpcCommand> = std::iter::from_fn(|| server.rx.try_recv().ok()).collect();
+        assert!(
+            !sent
+                .iter()
+                .any(|c| matches!(c, IpcCommand::CreateWorkspace { .. })),
+            "no phantom chat workspace spawned into the unrelated project: {sent:?}"
+        );
+        // The leaked flag survives harmlessly — only a scratch upsert
+        // consumes it, so a later real Chat still works.
+        assert!(
+            m.deferred_chat,
+            "a non-scratch upsert must leave the flag for the scratch that owns it"
+        );
+    }
+
+    /// The Workspace row appears only when a project sits under the
+    /// cursor; Repository always does (#1502).
+    #[test]
+    fn start_sheet_offers_workspace_row_only_with_a_cursor_project() {
+        use lazybox_tui_core::choice::START_SHEET_REPO;
+        let mut m = build_model();
+        m.start_agent_flow();
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Text(START_SHEET_REPO.into())]);
+        assert!(cmds.is_empty());
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::NewProject),
+            "Repository with no tracked repos falls through to the new-project input"
         );
     }
 
@@ -2913,6 +3118,71 @@ mod effects_tests {
         });
         assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(1)));
         m
+    }
+
+    /// Wiring guard (#1490): `view()` must refresh the agent tabs' usage
+    /// badges from the tracker *before* drawing. Feed a live plan quota, render
+    /// the whole model, and assert the headroom badge reached the tab strip —
+    /// its `◔` glyph is unique to the terminal surface (the sidebar renders
+    /// utilization, never `◔`), so a hit isolates the terminal-stack path from
+    /// the sidebar's own `$ METER` pill. Deleting the refresh call from
+    /// `view()` — the one thing a unit test on the render alone can't catch —
+    /// fails this.
+    #[test]
+    fn view_paints_the_agent_tab_usage_badge() {
+        use lazybox_ipc::{
+            Event as IpcEvent, ProviderQuota, QuotaWindow, TerminalId, TerminalKind,
+        };
+        let mut m = build_model();
+        let ws_key = WorkspaceKey::new("github:o/r#1");
+        let session_key: SessionKey = (&ws_key).into();
+        m.handle_daemon_event(IpcEvent::Snapshot {
+            workspaces: vec![lazybox_core::Workspace::empty(
+                ws_key,
+                "main",
+                chrono::Utc::now(),
+            )],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: session_key.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        // Weekly window at 62% used → 38% headroom, reset far in the future so
+        // it is unambiguously live for the wall clock.
+        m.handle_daemon_event(IpcEvent::AgentProviderQuota {
+            agent_id: "claude".into(),
+            session_key: Some(session_key.clone()),
+            quota: ProviderQuota {
+                five_hour: None,
+                weekly: Some(QuotaWindow {
+                    utilization_bp: 6200,
+                    reset_at: Some(9_999_999_999),
+                }),
+            },
+        });
+
+        m.view();
+        let buffer = m.terminal.raw().backend().buffer();
+        let mut text = String::new();
+        for row in 0..buffer.area.height {
+            for col in 0..buffer.area.width {
+                text.push_str(buffer[(col, row)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(
+            text.contains('◔') && text.contains("38% left"),
+            "the headroom badge must reach the tab strip via view(): {text:?}",
+        );
     }
 
     /// Returning to the terminal pane with a single click restores the
@@ -4170,7 +4440,7 @@ snippets:
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
             1,
-            "the multi-select survives a cancel",
+            "nothing ran, so the marks stay — only a real action consumes them",
         );
     }
 
@@ -4234,6 +4504,72 @@ snippets:
                 .iter()
                 .any(|c| matches!(c, IpcCommand::InjectPrompt { .. })),
             "no agent is rate-limited, so nothing is injected: {cmds:?}",
+        );
+    }
+
+    /// `a R` restarts every agent in the usage-limit block — the alerting
+    /// `LimitReached` AND the parked `AwaitingReset` (a "continue" typed
+    /// into an auto-continue composer would only cancel the wait, but a
+    /// respawn on the new account gets it working now) — with one daemon
+    /// `RestartAgentAndContinue` each, and never touches a working
+    /// sibling. It does not inject anything itself: the daemon owns the
+    /// stop → `--resume` → continuation sequence.
+    #[test]
+    fn restart_rate_limited_targets_blocked_and_parked_agents_only() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent(), agent(), agent()]);
+        for (i, state) in [
+            AgentState::LimitReached,
+            AgentState::Working,
+            AgentState::AwaitingReset,
+            AgentState::Done,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: keys[i].clone(),
+                terminal_id: TerminalId(i as u64 + 1),
+                state,
+            });
+        }
+
+        let cmds = m.dispatch_action(&Action::RestartRateLimited);
+        let mut restarted: Vec<u64> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::RestartAgentAndContinue { terminal_id } => Some(terminal_id.0),
+                _ => None,
+            })
+            .collect();
+        restarted.sort();
+        assert_eq!(
+            restarted,
+            vec![1, 3],
+            "the blocked and the parked agent restart; working / done ones don't: {cmds:?}",
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, IpcCommand::InjectPrompt { .. })),
+            "the continuation is the daemon's job after the respawn, not a client inject: {cmds:?}",
+        );
+    }
+
+    /// With nothing limited, `a R` restarts nothing and says so.
+    #[test]
+    fn restart_rate_limited_with_no_targets_is_a_no_op_hint() {
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, _keys) = model_with_broadcast_targets(&[agent()]);
+        let cmds = m.dispatch_action(&Action::RestartRateLimited);
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, IpcCommand::RestartAgentAndContinue { .. })),
+            "no agent is rate-limited, so nothing restarts: {cmds:?}",
         );
     }
 
@@ -4634,7 +4970,7 @@ snippets:
     /// as every other bulk action. A broadcast that reached nobody also
     /// keeps the marks so the user can retry after spawning an agent.
     #[test]
-    fn broadcast_keeps_selection_after_delivery_and_after_all_skipped() {
+    fn broadcast_consumes_selection_on_delivery_but_keeps_it_when_all_skipped() {
         let (mut m, keys) = model_with_broadcast_targets(&[
             Some(lazybox_ipc::TerminalKind::Agent("claude".into())),
             None,
@@ -4662,7 +4998,7 @@ snippets:
             "all-skipped send must not clear the marks",
         );
 
-        // Delivered broadcast: selection survives (#1449).
+        // Delivered broadcast: the action consumes the selection (#1498).
         let expected_targets = m.sidebar.selected_broadcast_keys();
         m.mount_broadcast_picker();
         assert_eq!(
@@ -4686,8 +5022,8 @@ snippets:
         );
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            2,
-            "successful send keeps the selection live for a follow-up (#1449)",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
     }
 
@@ -4714,7 +5050,7 @@ snippets:
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
             1,
-            "the marks survive a cancelled compose",
+            "nothing ran, so the marks stay — only a real action consumes them",
         );
     }
 
@@ -7914,6 +8250,7 @@ mod stale_input_tests {
                 | Id::Setup
                 | Id::AdoptTarget
                 | Id::StartAgentProject
+                | Id::StartSheet
                 | Id::LlmGatewayUrl
                 | Id::AddScanRoot
                 | Id::SaveViewName
@@ -7975,6 +8312,7 @@ mod stale_input_tests {
             Id::MergeConfirm,
             Id::AdoptTarget,
             Id::StartAgentProject,
+            Id::StartSheet,
             Id::RequestReviewers,
             Id::AddAssignees,
             Id::ManageLabels,
@@ -8566,6 +8904,7 @@ mod modal_input_responsiveness_tests {
             remaining: 98,
             limit: 5000,
             reset_at: chrono::Utc::now() + chrono::Duration::minutes(7),
+            self_throttle: false,
         });
 
         assert!(m.status.bg_poll.is_none());
@@ -8644,6 +8983,36 @@ mod modal_input_responsiveness_tests {
     /// the aliases + target agent for the pick. Esc releases both
     /// without changing anything. Disk-free: mounting only reads the
     /// in-memory tier menus.
+    /// `default_model_labels` resolves each agent's default tier to the
+    /// label the sidebar badge compares against (#1502): the YAML default
+    /// alias wins, the built-in default is the fallback, and an alias no
+    /// tier declares yields no entry (so that agent always badges).
+    #[test]
+    fn default_model_labels_resolve_yaml_then_builtin_default() {
+        use super::super::default_model_labels;
+        let mut pinned = lazybox_core::AgentModels::builtin("claude").unwrap();
+        pinned.default = Some("L".into());
+        let expected = pinned.tier("L").unwrap().label.clone();
+        let labels = default_model_labels(&[("claude".to_string(), pinned)].into());
+        assert_eq!(labels.get(&'C'), Some(&expected));
+
+        let mut builtin = lazybox_core::AgentModels::builtin("claude").unwrap();
+        builtin.default = None;
+        let fallback = lazybox_core::AgentModels::builtin("claude")
+            .and_then(|b| b.default)
+            .and_then(|a| builtin.tier(&a).map(|t| t.label.clone()));
+        let labels = default_model_labels(&[("claude".to_string(), builtin)].into());
+        assert_eq!(labels.get(&'C'), fallback.as_ref());
+
+        let mut unknown = lazybox_core::AgentModels::builtin("claude").unwrap();
+        unknown.default = Some("nope".into());
+        let labels = default_model_labels(&[("claude".to_string(), unknown)].into());
+        assert!(
+            labels.get(&'C').is_none(),
+            "an undeclared alias has no label"
+        );
+    }
+
     #[test]
     fn default_model_picker_offers_tiers_and_cancels_clean() {
         let mut m = build_model();
@@ -9880,8 +10249,8 @@ mod merge_focus_follow_tests {
         assert!(targets.contains(&key_b));
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            3,
-            "selection survives the bulk fire so the set can be acted on again (#1449)",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
     }
 
@@ -9903,7 +10272,7 @@ mod merge_focus_follow_tests {
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
             1,
-            "selection survives a no-op bulk update",
+            "a fully-ineligible run leaves the marks so it can be retried",
         );
     }
 
@@ -11926,15 +12295,13 @@ mod merge_focus_follow_tests {
         );
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            2,
-            "selection survives so the set can be acted on again (#1449)",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
-        // The summary names the still-live selection so it isn't invisible
-        // state — the next keypress acts on a set the user can still see.
         let msg = &m.status.notice.as_ref().expect("summary flashed").message;
         assert!(
-            msg.contains("2 still selected"),
-            "summary names the surviving selection: {msg}",
+            !msg.contains("still selected"),
+            "the summary no longer promises a surviving selection: {msg}",
         );
         let _ = keys;
     }
@@ -11942,11 +12309,15 @@ mod merge_focus_follow_tests {
     /// #1449 end-to-end: a selection survives a bulk action so the same set
     /// can be acted on twice — `g d` (close upstream) then `x x` (archive),
     /// the common finishing chain — without re-marking between them.
+    /// #1498 (reverting #1449): a bulk action consumes its selection. The
+    /// `g d` → `x x` chain that motivated keeping it alive now needs an
+    /// explicit re-mark, which is the point — a surviving selection is
+    /// invisible state the next keypress acts on unseen.
     #[test]
-    fn selection_survives_g_d_then_x_x_over_the_same_set() {
+    fn a_bulk_action_consumes_the_selection_so_the_next_one_re_marks() {
         use lazybox_tui_core::action::Action;
         let mut m = build_model();
-        seed_and_select(
+        let keys = seed_and_select(
             &mut m,
             vec![
                 workspace("owner/repo#1", true, Duration::hours(1)),
@@ -11955,28 +12326,35 @@ mod merge_focus_follow_tests {
         );
         assert_eq!(m.sidebar.broadcast_selected_count(), 2);
 
-        // `g d` closes both PRs upstream; the rows stay (state flips on the
-        // next poll), so the marks — and the set — persist.
+        // `g d` closes both PRs upstream and takes the marks with it.
         assert!(m.dispatch_action(&Action::DeleteOrClose).is_empty());
         let close = m.handle_confirmed(true);
         assert_eq!(close.len(), 2, "both PRs close");
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            2,
-            "the selection is still live for the second action",
+            0,
+            "the action consumed the selection",
         );
 
-        // `x x` now archives the very same set with no re-selection.
+        // A second action with no selection falls back to the cursor row
+        // only — it does NOT silently re-run over the old set, which is
+        // exactly the invisible-state hazard this revert removes.
         assert!(m.dispatch_action(&Action::Archive).is_empty());
-        let kill = m.handle_confirmed(true);
-        assert_eq!(kill.len(), 2, "both survivors are archived");
-        assert!(kill.iter().all(|c| matches!(c, IpcCommand::Kill { .. })));
+        let cursor_only = m.handle_confirmed(true);
+        assert_eq!(cursor_only.len(), 1, "focused row only: {cursor_only:?}");
+        assert!(
+            cursor_only
+                .iter()
+                .all(|c| matches!(c, IpcCommand::Kill { .. }))
+        );
+        let _ = keys;
     }
 
-    /// #1449: only `Esc` clears a selection that a bulk action left live.
+    /// `Esc` still clears a selection the user built but hasn't acted on —
+    /// the abandon path. (Clearing *after* an action is now the action's own
+    /// job, #1498.)
     #[test]
-    fn esc_clears_the_selection_a_bulk_action_left_live() {
-        use lazybox_tui_core::action::Action;
+    fn esc_clears_an_unused_selection() {
         use tuirealm::event::{Key, KeyEvent, KeyModifiers};
         let mut m = build_model();
         seed_and_select(
@@ -11988,20 +12366,13 @@ mod merge_focus_follow_tests {
         );
         m.focus = PaneFocus::Sidebar;
         m.set_focus_attr();
-
-        let cmds = m.dispatch_action(&Action::SyncWorkspace);
-        assert_eq!(cmds.len(), 2);
-        assert_eq!(
-            m.sidebar.broadcast_selected_count(),
-            2,
-            "survives the action"
-        );
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
 
         m.dispatch_key(KeyEvent::new(Key::Esc, KeyModifiers::NONE));
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
             0,
-            "Esc is the clear gesture",
+            "Esc abandons a selection that was never acted on",
         );
     }
 
@@ -12099,14 +12470,14 @@ mod merge_focus_follow_tests {
             assert_eq!(
                 m.sidebar.broadcast_selected_count(),
                 2,
-                "a deliberate Tab keeps the selection",
+                "a deliberate Tab into the terminal keeps the selection",
             );
         }
         assert_eq!(m.focus, PaneFocus::Terminals, "Tab reached the terminal");
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
             2,
-            "voluntary Tab into the terminal keeps the selection",
+            "a deliberate Tab into the terminal keeps the selection",
         );
     }
 
@@ -12265,8 +12636,8 @@ mod merge_focus_follow_tests {
         );
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            2,
-            "selection survives; the merged row pruned itself out of the Inbox (#1449)",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
     }
 
@@ -12324,7 +12695,10 @@ mod merge_focus_follow_tests {
         });
         m.modal_stack.push(Id::SidebarContext);
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(0)]);
-        assert!(cmds.is_empty(), "merge gates on confirm");
+        assert!(
+            !cmds.iter().any(|c| matches!(c, IpcCommand::MergePr { .. })),
+            "merge gates on confirm",
+        );
 
         // Single-target confirm for the clicked row — not a bulk set.
         match &m.modal_flow {
@@ -12397,7 +12771,7 @@ mod merge_focus_follow_tests {
     /// live and names it in the notice — the immediate `dispatch_bulk_agent`
     /// path used to consume it on `injected > 0`.
     #[test]
-    fn bulk_inject_only_work_keeps_selection_and_names_it() {
+    fn bulk_inject_only_work_consumes_the_selection() {
         use lazybox_ipc::{TerminalId, TerminalKind};
         use lazybox_tui_core::action::Action;
 
@@ -12430,13 +12804,13 @@ mod merge_focus_follow_tests {
         );
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            2,
-            "the inject-only path keeps the selection live (#1449)",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
         let msg = &m.status.notice.as_ref().expect("summary flashed").message;
         assert!(
-            msg.contains("2 still selected"),
-            "the spawn/inject summary names the surviving selection: {msg}",
+            !msg.contains("still selected"),
+            "the summary no longer promises a surviving selection: {msg}",
         );
     }
 
@@ -12469,8 +12843,8 @@ mod merge_focus_follow_tests {
         )));
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            2,
-            "selection survives the bulk spawn so the set can be acted on again (#1449)",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
     }
 
@@ -12583,8 +12957,8 @@ mod merge_focus_follow_tests {
 
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            3,
-            "selection survives the bulk spawn/inject so the set can be reused (#1449)",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
     }
 
@@ -12666,13 +13040,19 @@ mod merge_focus_follow_tests {
         );
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            3,
-            "selection survives delivery so the same set can be reused (#1449)"
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
 
-        // --- `w w` fan-out over the SAME surviving selection (#1449) ---
-        // No re-select: the marks from the snippet delivery are still live,
-        // which is exactly the chain #1449 enables (act on one set twice).
+        // --- `w w` fan-out over the same set, re-marked ---
+        // The snippet delivery consumed the selection (#1498), so the set is
+        // re-marked before the second action. The point of the test is that
+        // both paths fan out *identically* over a selection, not that a
+        // selection outlives an action.
+        for key in &keys {
+            assert!(m.sidebar.focus_workspace_key(key));
+            m.sidebar.toggle_broadcast_select();
+        }
         let work_cmds = m.dispatch_action(&Action::Work);
         let mut work_targets: Vec<u64> = work_cmds
             .iter()
@@ -12772,8 +13152,8 @@ mod merge_focus_follow_tests {
         assert_eq!(closed, expected, "every marked open issue is closed");
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            2,
-            "selection survives so the same set can be archived next (#1449)",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
     }
 
@@ -12845,8 +13225,8 @@ mod merge_focus_follow_tests {
         assert_eq!(closed, expected, "all three marked PRs are closed");
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            3,
-            "selection survives `g d` so the same set can be archived next (#1449)",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
     }
 
@@ -16489,8 +16869,10 @@ mod destructive_confirm_tests {
 
         // Row 1 is Archive in the stashed action list.
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(1)]);
+        // The gesture is recorded (mastery ledger, #1502), but the
+        // destructive Kill must still gate on the confirm modal.
         assert!(
-            cmds.is_empty(),
+            !cmds.iter().any(|c| matches!(c, IpcCommand::Kill { .. })),
             "Archive picked from the context menu must not emit Kill directly: {cmds:?}",
         );
         assert_eq!(
@@ -16521,8 +16903,10 @@ mod destructive_confirm_tests {
 
         // Row 0 is MergePr in the stashed action list.
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(0)]);
+        // The gesture is recorded (mastery ledger, #1502), but the
+        // destructive MergePr must still gate on the confirm modal.
         assert!(
-            cmds.is_empty(),
+            !cmds.iter().any(|c| matches!(c, IpcCommand::MergePr { .. })),
             "MergePr picked from the context menu must not emit MergePr directly: {cmds:?}",
         );
         assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
@@ -17857,7 +18241,7 @@ mod workspace_focus_memory_tests {
             m.__test_sidebar_mut().focus_workspace_key(key),
             "workspace {key:?} should be in the sidebar",
         );
-        sidebar_rect.y + 5 + m.sidebar().cursor() as u16
+        sidebar_rect.y + m.sidebar().header_height(sidebar_rect) + m.sidebar().cursor() as u16
     }
 
     #[test]
@@ -20331,7 +20715,7 @@ mod click_outside_modal_dismiss_tests {
             m.__test_sidebar_mut().focus_workspace_key(key),
             "workspace {key:?} should be in the sidebar",
         );
-        sidebar_rect.y + 5 + m.sidebar().cursor() as u16
+        sidebar_rect.y + m.sidebar().header_height(sidebar_rect) + m.sidebar().cursor() as u16
     }
 
     /// The headline repro: with the provisioning checklist up, clicking a
@@ -20520,12 +20904,13 @@ mod click_outside_modal_dismiss_tests {
         );
     }
 
-    /// A left-click on the footer's `… +N ? all` overflow cell opens the
-    /// `?` catalog so the elided hints are reachable — the count is no
-    /// longer a dead end (#805). The footer sits outside every pane, so
+    /// A left-click on the footer's `… +N more` overflow cell pops
+    /// exactly the hints the bar could not fit — the count is not a
+    /// dead end (#805, #1502). The footer sits outside every pane, so
     /// this handler is the only thing that claims the click.
     #[test]
-    fn footer_overflow_click_opens_help() {
+    fn footer_overflow_click_pops_the_dropped_hints() {
+        use crate::realm::components::footer::FooterOverflow;
         let mut m = build_model();
         m.handle_daemon_event(IpcEvent::Snapshot {
             workspaces: vec![empty_ws("github:o/r#1")],
@@ -20536,22 +20921,62 @@ mod click_outside_modal_dismiss_tests {
         });
         let area = Rect::new(0, 0, 120, 40);
         // Simulate the last render having placed the overflow cell at the
-        // right end of the footer row.
+        // right end of the footer row, hiding two hints.
         let cell = Rect::new(100, 39, 10, 1);
-        m.footer_overflow_rect = Some(cell);
-        assert!(m.modal_stack.is_empty(), "no modal before the click");
+        let dropped = vec![
+            crate::pane::Binding {
+                keys: std::borrow::Cow::Borrowed("x n"),
+                label: std::borrow::Cow::Borrowed("new workspace"),
+            },
+            crate::pane::Binding {
+                keys: std::borrow::Cow::Borrowed("Shift-T"),
+                label: std::borrow::Cow::Borrowed("coach"),
+            },
+        ];
+        m.footer_overflow = Some(FooterOverflow {
+            rect: cell,
+            dropped: dropped.clone(),
+        });
+        assert!(m.footer_more_popup.is_none(), "no popup before the click");
         m.dispatch_mouse_in(left_down(cell.x + 2, cell.y), area);
-        assert_eq!(
-            m.modal_stack.last(),
-            Some(&Id::HelpAsk),
-            "clicking the overflow cell must open the `?` catalog",
+        let rows = m
+            .footer_more_popup
+            .clone()
+            .expect("clicking the overflow cell must pop the hidden hints");
+        let expected: Vec<(String, String)> = dropped
+            .iter()
+            .map(|b| (b.keys.to_string(), b.label.to_string()))
+            .collect();
+        assert_eq!(rows, expected, "popup must list exactly the dropped cells");
+        assert!(
+            !m.modal_stack.contains(&Id::HelpAsk),
+            "the popup replaces the old bounce into Ask Lazybox",
+        );
+        // The popup is informational: the next key closes it and is
+        // still handled (here `j` moves the sidebar cursor).
+        m.dispatch_key(tuirealm::event::KeyEvent::new(
+            tuirealm::event::Key::Char('j'),
+            tuirealm::event::KeyModifiers::NONE,
+        ));
+        assert!(
+            m.footer_more_popup.is_none(),
+            "any key must close the popup"
+        );
+        // A second click on the cell toggles it closed.
+        m.dispatch_mouse_in(left_down(cell.x + 2, cell.y), area);
+        assert!(m.footer_more_popup.is_some());
+        m.dispatch_mouse_in(left_down(cell.x + 2, cell.y), area);
+        assert!(
+            m.footer_more_popup.is_none(),
+            "clicking the cell again closes the popup"
         );
     }
 
-    /// A click that misses the overflow cell must not open help — only
-    /// the cell itself is the escape hatch (#805).
+    /// A click that misses the overflow cell must not pop anything —
+    /// only the cell itself is the affordance (#805).
     #[test]
-    fn click_off_footer_overflow_leaves_help_closed() {
+    fn click_off_footer_overflow_pops_nothing() {
+        use crate::realm::components::footer::FooterOverflow;
         let mut m = build_model();
         m.handle_daemon_event(IpcEvent::Snapshot {
             workspaces: vec![empty_ws("github:o/r#1")],
@@ -20561,11 +20986,14 @@ mod click_outside_modal_dismiss_tests {
             dismissed_updates: Vec::new(),
         });
         let area = Rect::new(0, 0, 120, 40);
-        m.footer_overflow_rect = Some(Rect::new(100, 39, 10, 1));
+        m.footer_overflow = Some(FooterOverflow {
+            rect: Rect::new(100, 39, 10, 1),
+            dropped: Vec::new(),
+        });
         m.dispatch_mouse_in(left_down(1, 1), area);
         assert!(
-            !m.modal_stack.contains(&Id::HelpAsk),
-            "a click away from the overflow cell must not open help",
+            m.footer_more_popup.is_none() && !m.modal_stack.contains(&Id::HelpAsk),
+            "a click away from the overflow cell must not pop anything",
         );
     }
 }
@@ -24198,6 +24626,38 @@ mod spawn_focus_steal_tests {
         );
     }
 
+    /// `/foo⏎` opens the top match: Enter on a live query commits the
+    /// filter AND moves focus off the sidebar, the same way a plain
+    /// Enter on the row would (#1502). An empty query only closes the
+    /// bar and stays put.
+    #[test]
+    fn search_enter_opens_the_top_match() {
+        use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
+        let mut m = build_model();
+        let ws = pr_workspace("owner/repo#1");
+        let k: SessionKey = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&k));
+        assert_eq!(m.focus, PaneFocus::Sidebar);
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenSearch);
+        m.dispatch_key(RealmKey::new(Key::Char('o'), RealmMods::NONE));
+        m.dispatch_key(RealmKey::new(Key::Enter, RealmMods::NONE));
+        assert!(!m.sidebar.search_editing(), "Enter commits the search");
+        assert_ne!(
+            m.focus,
+            PaneFocus::Sidebar,
+            "Enter on a live query opens the top match"
+        );
+
+        let mut m = build_model();
+        let ws = pr_workspace("owner/repo#1");
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        m.dispatch_action(&lazybox_tui_core::action::Action::OpenSearch);
+        m.dispatch_key(RealmKey::new(Key::Enter, RealmMods::NONE));
+        assert!(m.sidebar.search().is_none(), "empty query closes the bar");
+        assert_eq!(m.focus, PaneFocus::Sidebar, "and focus stays put");
+    }
+
     #[test]
     fn spawn_never_steals_focus_while_search_is_being_typed() {
         let mut m = build_model();
@@ -26418,7 +26878,7 @@ mod remote_spawn_tests {
     /// the stale pin then stripped the suffix off the next bulk summary
     /// too). Post-fix only a local spawn arms the pin.
     #[test]
-    fn remote_bulk_spawn_keeps_the_selection_named_and_arms_no_follow() {
+    fn remote_bulk_spawn_consumes_the_selection_and_arms_no_follow() {
         let (mut m, _conn, mut box_rx) = build_model_with_box();
         seed_focused(&mut m, "owner/repo#1", Duration::hours(1));
         m.sidebar.toggle_broadcast_select();
@@ -26442,18 +26902,13 @@ mod remote_spawn_tests {
         );
         assert_eq!(
             m.sidebar.broadcast_selected_count(),
-            2,
-            "focus never left the sidebar, so the selection survives",
+            0,
+            "a bulk action consumes its selection (#1498)",
         );
-        let msg = m
-            .status
-            .notice
-            .as_ref()
-            .map(|n| n.message.clone())
-            .unwrap_or_default();
+        let msg = &m.status.notice.as_ref().expect("summary flashed").message;
         assert!(
-            msg.contains("2 still selected"),
-            "the summary must still name the live selection, got {msg:?}",
+            !msg.contains("still selected"),
+            "the summary no longer promises a surviving selection: {msg}",
         );
     }
 
@@ -27076,6 +27531,33 @@ mod focus_indicator_and_burst_guard_tests {
         (0..buffer.area.width)
             .map(|col| buffer[(col, last)].symbol())
             .collect::<String>()
+    }
+
+    /// Keep-awake is daemon status, so it shows in the footer's status
+    /// slot (lowest priority) rather than the sidebar header (#1502), and
+    /// admits "AC only" on battery (#1485).
+    #[test]
+    fn footer_shows_keep_awake_as_status() {
+        let mut m = build_model();
+        assert!(!footer_text(&mut m).contains("awake"));
+        m.handle_daemon_event(IpcEvent::KeepAwakeStatus {
+            active: true,
+            on_battery: false,
+        });
+        let footer = footer_text(&mut m);
+        assert!(footer.contains("☼"), "{footer:?}");
+        assert!(footer.contains("awake"), "{footer:?}");
+        assert!(!footer.contains("AC only"), "{footer:?}");
+        m.handle_daemon_event(IpcEvent::KeepAwakeStatus {
+            active: true,
+            on_battery: true,
+        });
+        assert!(footer_text(&mut m).contains("awake (AC only)"));
+        m.handle_daemon_event(IpcEvent::KeepAwakeStatus {
+            active: false,
+            on_battery: false,
+        });
+        assert!(!footer_text(&mut m).contains("awake"));
     }
 
     /// With focus in a live agent terminal the footer names the agent
@@ -27950,6 +28432,106 @@ mod pr_details_debounce_tests {
         assert!(
             !detail_fetches(&mut cmd_rx).contains(&keys[1].to_string()),
             "no fetch may fire for a removed workspace"
+        );
+    }
+}
+
+mod mastery_ledger_tests {
+    //! The mastery ledger (#1502): every catalog dispatch records one
+    //! invocation with its `via` channel, both bumped locally for live
+    //! reads and emitted as a `Command::RecordAction` for the daemon to
+    //! persist; a reconnect seeds the local counts from the daemon's
+    //! replayed `Event::MasteryLedger`.
+    use super::super::Model;
+    use lazybox_ipc::{ActionVia, Client, Command as IpcCommand, EVENT_CHANNEL_CAPACITY};
+    use lazybox_tui_core::action::Action;
+    use tokio::sync::mpsc;
+    use tuirealm::ratatui::layout::Size;
+
+    fn model_with_cmd_rx() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        mpsc::UnboundedReceiver<IpcCommand>,
+    ) {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let model = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        (model, cmd_rx)
+    }
+
+    #[test]
+    fn dispatch_via_bumps_local_count_and_returns_record_command() {
+        let (mut m, _rx) = model_with_cmd_rx();
+        assert_eq!(m.action_uses("cycle_sort"), 0);
+
+        let cmds = m.dispatch_action_via(&Action::CycleSort, ActionVia::Kbd);
+
+        assert_eq!(m.action_uses("cycle_sort"), 1, "local count bumped");
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::RecordAction { action_id, via }
+                    if action_id == "cycle_sort" && *via == ActionVia::Kbd
+            )),
+            "the RecordAction command rides the dispatched effects",
+        );
+    }
+
+    #[test]
+    fn counts_accumulate_across_channels() {
+        let (mut m, _rx) = model_with_cmd_rx();
+        m.dispatch_action_via(&Action::CycleSort, ActionVia::Kbd);
+        m.dispatch_action_via(&Action::CycleSort, ActionVia::Kbd);
+        m.dispatch_action_via(&Action::CycleSort, ActionVia::Menu);
+
+        // `action_uses` totals every channel for the action.
+        assert_eq!(m.action_uses("cycle_sort"), 3);
+    }
+
+    #[test]
+    fn seed_from_snapshot_merges_authoritative_counts() {
+        let (mut m, _rx) = model_with_cmd_rx();
+        m.dispatch_action_via(&Action::CycleSort, ActionVia::Kbd);
+
+        m.seed_mastery_from_snapshot(vec![
+            ("merge_pr".into(), ActionVia::Kbd, 4),
+            ("merge_pr".into(), ActionVia::Menu, 1),
+        ]);
+
+        // A local-only bump absent from the replay is preserved (its own
+        // RecordAction is still in flight), and the daemon's authoritative
+        // count for an action it does carry is adopted.
+        assert_eq!(m.action_uses("cycle_sort"), 1);
+        assert_eq!(m.action_uses("merge_pr"), 5);
+    }
+
+    #[test]
+    fn seed_does_not_regress_an_uncommitted_optimistic_bump() {
+        // #1502 regression: a re-subscribe can replay a ledger that doesn't
+        // yet reflect a just-dispatched action (its RecordAction hasn't
+        // committed daemon-side). A clear-then-replace seed would drop the
+        // optimistic +1; the merge-by-max must keep it, then adopt the higher
+        // authoritative count once the daemon catches up.
+        let (mut m, _rx) = model_with_cmd_rx();
+        m.dispatch_action_via(&Action::CycleSort, ActionVia::Kbd);
+        assert_eq!(m.action_uses("cycle_sort"), 1);
+
+        m.seed_mastery_from_snapshot(vec![("cycle_sort".into(), ActionVia::Kbd, 0)]);
+        assert_eq!(
+            m.action_uses("cycle_sort"),
+            1,
+            "seed must not regress an uncommitted optimistic bump",
+        );
+
+        m.seed_mastery_from_snapshot(vec![("cycle_sort".into(), ActionVia::Kbd, 3)]);
+        assert_eq!(
+            m.action_uses("cycle_sort"),
+            3,
+            "higher authoritative count adopted"
         );
     }
 }

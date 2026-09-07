@@ -33,8 +33,8 @@ mod upsert;
 pub use auto_merge::AutoMergeMemory;
 pub use scheduler::{
     CURSOR_TTL, DEFAULT_ROUND_ROBIN_N, RoundRobinPick, RoundRobinState, pick_repos_for_tick,
-    pick_repos_for_tick_budgeted, plan_round_robin_tick, plan_round_robin_tick_budgeted,
-    will_run_global,
+    pick_repos_for_tick_budgeted, plan_repo_rotation, plan_round_robin_tick,
+    plan_round_robin_tick_budgeted, rotation_fanout, will_run_global,
 };
 
 pub(crate) use handlers::resolve_gh_client_result;
@@ -56,7 +56,7 @@ pub use sources::{
     build_pr_search_qualifiers, default_sources, filter_github_tasks,
     filter_github_tasks_with_watches, filter_linear_tasks, gh_client_reusable,
     github_scopes_from_filters, github_watch_repos_from_filters, label_spawn_actions,
-    readmit_mentioned_tasks, sources_for,
+    readmit_mentioned_tasks, repo_roster, sources_for,
 };
 use sources::{dispatch_action, sources_for_with_engagement};
 pub use upsert::upsert;
@@ -132,9 +132,18 @@ pub struct EngagementSnapshot {
     cold_only_repos: std::collections::HashSet<String>,
     active_repos: std::collections::HashSet<String>,
     sessioned_repos: std::collections::HashSet<String>,
+    live_agent_repos: std::collections::HashSet<String>,
 }
 
 impl EngagementSnapshot {
+    /// Repos backing a workspace with a LIVE agent terminal right now.
+    /// Force-included in every repo-first rotation tick so the repo an
+    /// agent is pushing to refreshes at the base cadence; merely
+    /// session-bearing repos rotate stalest-first like the rest.
+    pub fn live_agent_repos(&self) -> &std::collections::HashSet<String> {
+        &self.live_agent_repos
+    }
+
     pub fn tier_for(&self, key: &WorkspaceKey) -> EngagementTier {
         self.entries
             .get(key.as_str())
@@ -236,8 +245,7 @@ fn select_engagement_snapshot(
     let mut eligible: Vec<&EngagementCandidate> = candidates
         .iter()
         .filter(|candidate| {
-            candidate.sessioned
-                || candidate.live_agent
+            candidate.live_agent
                 || focused_workspace == Some(candidate.workspace_key.as_str())
                 || (!candidate.cold
                     && candidate.own_open_pr
@@ -260,14 +268,20 @@ fn select_engagement_snapshot(
             })
     });
 
-    // Sessioned workspaces (Tier 0) are ALWAYS hot — uncapped, bounded
-    // only by how many worktrees the user has open. `HOT_SET_MAX` caps
-    // only the remaining engagement signals (focus / live agent / recent
-    // own PR) so those can't drown out a repo the user is working in.
+    // Hot = the rows whose freshness the user is waiting on RIGHT NOW:
+    // the focused row and every row with a live agent (uncapped — they
+    // ride one batched `nodes(ids:)` query), plus recent own PRs capped
+    // at `HOT_SET_MAX`. A merely session-bearing workspace (an idle
+    // worktree / shell) is NOT hot on its own any more: with 20-40 open
+    // worktrees that pinned the whole loop on the 15s hot cadence around
+    // the clock. Its repo is still force-included in every repo-first
+    // rotation tick (`sessioned_repos`), so it refreshes at the base
+    // cadence rather than every 15 seconds.
     let mut hot_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut capped_used = 0usize;
     for candidate in eligible {
-        if candidate.sessioned {
+        let focused = focused_workspace == Some(candidate.workspace_key.as_str());
+        if focused || candidate.live_agent {
             hot_keys.insert(candidate.workspace_key.as_str().to_string());
         } else if capped_used < HOT_SET_MAX {
             hot_keys.insert(candidate.workspace_key.as_str().to_string());
@@ -281,9 +295,13 @@ fn select_engagement_snapshot(
     let mut repos = std::collections::HashSet::new();
     let mut non_cold_repos = std::collections::HashSet::new();
     let mut sessioned_repos = std::collections::HashSet::new();
+    let mut live_agent_repos = std::collections::HashSet::new();
     for candidate in candidates {
         if candidate.sessioned {
             sessioned_repos.insert(candidate.repo.clone());
+        }
+        if candidate.live_agent {
+            live_agent_repos.insert(candidate.repo.clone());
         }
         let focused = focused_workspace == Some(candidate.workspace_key.as_str());
         let tier = if hot_keys.contains(candidate.workspace_key.as_str()) {
@@ -349,6 +367,7 @@ fn select_engagement_snapshot(
         cold_only_repos,
         active_repos: non_cold_repos,
         sessioned_repos,
+        live_agent_repos,
     }
 }
 
@@ -459,6 +478,101 @@ pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnaps
 }
 
 #[cfg(test)]
+mod polled_list_tests {
+    use super::{PolledScope, repo_first_polled_scope, repo_in_polled_list};
+
+    #[test]
+    fn repo_in_polled_list_matches_repo_and_org() {
+        let polled = vec!["acme".to_string(), "zed/editor".to_string()];
+        assert!(repo_in_polled_list("acme/widgets", &polled));
+        assert!(repo_in_polled_list("zed/editor", &polled));
+        assert!(!repo_in_polled_list("zed/other", &polled));
+        assert!(!repo_in_polled_list("acmeco/x", &polled));
+        assert!(!repo_in_polled_list("acme/widgets", &[]));
+    }
+
+    /// A rotation slice or any windowed pass has no deletion authority.
+    #[test]
+    fn rotation_and_windowed_passes_never_delete() {
+        let completed = vec!["acme".to_string()];
+        let roster = vec!["acme".to_string()];
+        assert_eq!(
+            repo_first_polled_scope(false, false, &completed, &roster),
+            PolledScope::Repos(Vec::new())
+        );
+        assert_eq!(
+            repo_first_polled_scope(true, true, &completed, &roster),
+            PolledScope::Repos(Vec::new())
+        );
+    }
+
+    /// A reconcile batch reports the members it swept AND the current
+    /// in-scope universe, so `rescope` can both retire gone rows within
+    /// the swept members and retire rows for a de-scoped repo (one no
+    /// longer in the roster). Replaces the old whole-roster-only
+    /// `Exhaustive`, which batching had made unreachable for any 2+-repo
+    /// roster (#1501 review 🔴).
+    #[test]
+    fn reconcile_batch_reports_swept_members_and_the_in_scope_universe() {
+        let completed = vec!["acme".to_string()];
+        let in_scope = vec!["acme".to_string(), "zed/editor".to_string()];
+        assert_eq!(
+            repo_first_polled_scope(true, false, &completed, &in_scope),
+            PolledScope::Reconcile {
+                swept: completed,
+                roster: in_scope,
+            }
+        );
+    }
+
+    /// A PARTIAL reconcile — one member (e.g. an `org:` scope past the
+    /// 100-open-PR page cap) erroring on every pass — must NOT surrender
+    /// retirement authority for the members that DID complete. Those still
+    /// appear in `swept`; the erroring member (still in `roster`, absent
+    /// from `swept`) is preserved rather than deleted or de-scoped.
+    #[test]
+    fn partial_reconcile_sweeps_only_completed_members() {
+        let completed = vec!["acme".to_string()];
+        let in_scope = vec!["acme".to_string(), "zed/editor".to_string()];
+        assert_eq!(
+            repo_first_polled_scope(true, false, &completed, &in_scope),
+            PolledScope::Reconcile {
+                swept: completed,
+                roster: in_scope,
+            },
+            "a truncating member must not veto retirement for the completed ones"
+        );
+    }
+
+    /// The core of the review's 🔴 finding, at the rescope decision: a
+    /// batched reconcile must retire a de-scoped repo's leftovers, retire
+    /// gone rows within its swept members, and PRESERVE a roster member
+    /// swept by a different batch of the same reconcile (this tick never
+    /// fetched it, so its absence from `polled` is not evidence it is
+    /// gone).
+    #[test]
+    fn reconcile_scope_retires_de_scoped_and_swept_but_preserves_other_batch() {
+        let scope = PolledScope::Reconcile {
+            swept: vec!["acme/widgets".to_string()],
+            roster: vec!["acme/widgets".to_string(), "acme/api".to_string()],
+        };
+        let authoritative = |repo: &str| match &scope {
+            PolledScope::Reconcile { swept, roster } => {
+                repo_in_polled_list(repo, swept)
+                    || (!roster.is_empty() && !repo_in_polled_list(repo, roster))
+            }
+            _ => unreachable!(),
+        };
+        // Swept this batch → its gone rows are retirable.
+        assert!(authoritative("acme/widgets"));
+        // De-scoped (not in the roster at all) → retirable.
+        assert!(authoritative("old/removed"));
+        // In the roster but swept by ANOTHER batch → preserved.
+        assert!(!authoritative("acme/api"));
+    }
+}
+
+#[cfg(test)]
 mod engagement_tier_tests {
     use super::*;
     use lazybox_core::{
@@ -541,7 +655,8 @@ mod engagement_tier_tests {
         let candidates: Vec<_> = (1..=8).map(candidate).collect();
         let focused = WorkspaceKey::new("github:o/r#8");
         let snapshot = select_engagement_snapshot(candidates, Some(focused.as_str()), Utc::now());
-        assert_eq!(snapshot.hot_count(), HOT_SET_MAX);
+        // Focus rides above the cap; the recent own PRs share `HOT_SET_MAX`.
+        assert_eq!(snapshot.hot_count(), HOT_SET_MAX + 1);
         assert_eq!(snapshot.tier_for(&focused), EngagementTier::Hot);
         assert!(
             snapshot
@@ -572,11 +687,12 @@ mod engagement_tier_tests {
         assert!(!snapshot.cold_only_repos().contains("o/warm"));
     }
 
-    /// Every sessioned workspace stays hot even when there are more of
-    /// them than `HOT_SET_MAX` — the Tier 0 cap-bypass. Pre-fix the
-    /// `.take(HOT_SET_MAX)` dropped session-bearing repos past the top 3.
+    /// Session-bearing workspaces are NOT hot on their own any more:
+    /// 20+ idle worktrees used to pin the loop on the 15s hot cadence.
+    /// Their repos still register as `sessioned_repos` (forced into
+    /// every repo-first rotation tick) and never park as cold.
     #[test]
-    fn all_sessioned_repos_stay_hot_beyond_the_cap() {
+    fn sessioned_repos_are_forced_into_rotation_but_not_hot() {
         let candidates: Vec<_> = (1..=6)
             .map(|n| {
                 let mut c = candidate(n);
@@ -589,22 +705,18 @@ mod engagement_tier_tests {
         let keys: Vec<_> = candidates.iter().map(|c| c.workspace_key.clone()).collect();
 
         let snapshot = select_engagement_snapshot(candidates, None, Utc::now());
-        assert!(
-            snapshot.hot_count() >= 6,
-            "all 6 sessioned repos must be hot"
-        );
+        assert_eq!(snapshot.hot_count(), 0, "idle sessions must not be hot");
         for key in &keys {
-            assert_eq!(snapshot.tier_for(key), EngagementTier::Hot);
+            assert_eq!(snapshot.tier_for(key), EngagementTier::Warm);
         }
         assert_eq!(snapshot.sessioned_repos().len(), 6);
         assert!(snapshot.cold_only_repos().is_empty());
     }
 
-    /// A persisted-but-idle session (no live agent PTY, no own PR) is
-    /// engaged, not cold — the signal is `workspace.sessions`, not a
-    /// live Agent terminal. A shell session behaves identically.
+    /// A snoozed / terminal row with a persisted-but-idle session stays
+    /// cold for freshness purposes, but its repo is still session-bearing.
     #[test]
-    fn persisted_session_without_live_agent_is_engaged() {
+    fn persisted_session_without_live_agent_is_cold_but_sessioned() {
         let mut idle = candidate(1);
         idle.cold = true;
         idle.own_open_pr = false;
@@ -613,27 +725,24 @@ mod engagement_tier_tests {
         let key = idle.workspace_key.clone();
 
         let snapshot = select_engagement_snapshot(vec![idle], None, Utc::now());
-        assert_eq!(snapshot.tier_for(&key), EngagementTier::Hot);
+        assert_eq!(snapshot.tier_for(&key), EngagementTier::Cold);
         assert!(snapshot.sessioned_repos().contains("o/r"));
-        assert!(snapshot.cold_only_repos().is_empty());
     }
 
-    /// Non-sessioned engagement signals (focus / live agent / recent own
-    /// PR) still share the `HOT_SET_MAX` cap so they can't drown out the
-    /// round-robin, while sessioned repos ride above it.
+    /// Live agents and focus are uncapped hot; recent own PRs share the
+    /// `HOT_SET_MAX` cap.
     #[test]
-    fn non_sessioned_hot_stays_capped_alongside_uncapped_sessioned() {
-        let mut sessioned: Vec<_> = (1..=4)
+    fn live_agents_uncapped_own_prs_capped() {
+        let mut live: Vec<_> = (1..=4)
             .map(|n| {
                 let mut c = candidate(n);
                 c.own_open_pr = false;
-                c.sessioned = true;
+                c.live_agent = true;
                 c.repo = format!("o/s{n}");
                 c
             })
             .collect();
-        // Five recent own-PR (non-sessioned) candidates competing for the
-        // 3 capped slots.
+        // Five recent own-PR candidates competing for the 3 capped slots.
         let recent: Vec<_> = (10..=14)
             .map(|n| {
                 let mut c = candidate(n);
@@ -641,10 +750,10 @@ mod engagement_tier_tests {
                 c
             })
             .collect();
-        sessioned.extend(recent);
+        live.extend(recent);
 
-        let snapshot = select_engagement_snapshot(sessioned, None, Utc::now());
-        // 4 sessioned (uncapped) + 3 capped own-PR = 7 hot.
+        let snapshot = select_engagement_snapshot(live, None, Utc::now());
+        // 4 live agents (uncapped) + 3 capped own-PR = 7 hot.
         assert_eq!(snapshot.hot_count(), 7);
     }
 
@@ -660,6 +769,7 @@ mod engagement_tier_tests {
         assert_eq!(snapshot.tier_for(&key), EngagementTier::Hot);
         assert!(snapshot.signals_for(&key).live_agent);
         assert!(snapshot.cold_only_repos().is_empty());
+        assert!(snapshot.live_agent_repos().contains("o/r"));
     }
 
     #[test]
@@ -829,7 +939,9 @@ mod engagement_tier_tests {
         assert!(config.terminal.metadata_map().await.is_empty());
 
         let snapshot = refresh_github_engagement(&config).await;
-        assert_eq!(snapshot.tier_for(&key), EngagementTier::Hot);
+        // An idle shell session is session-bearing (its repo is forced
+        // into every rotation tick) but not hot on its own.
+        assert_eq!(snapshot.tier_for(&key), EngagementTier::Warm);
         assert!(!snapshot.signals_for(&key).live_agent);
         assert!(snapshot.sessioned_repos().contains("o/r"));
     }
@@ -1007,6 +1119,44 @@ pub enum PolledScope {
     /// must be preserved — we have no information about them this
     /// tick.
     Repos(Vec<String>),
+    /// One batch of a (possibly multi-tick) repo-first reconcile.
+    /// Authoritative to retire two disjoint sets, and nothing else:
+    ///
+    /// - `swept` — the members whose every query completed THIS tick.
+    ///   Their gone rows (not in `polled`) are retired, exactly like
+    ///   [`PolledScope::Repos`]. A roster member swept in a DIFFERENT
+    ///   batch of the same reconcile is in `roster` but not `swept`, so
+    ///   its live rows are preserved (this tick never fetched them).
+    /// - Rows whose repo is in NEITHER `swept` NOR `roster` — a repo the
+    ///   user de-scoped entirely. Such a repo cannot have a live in-scope
+    ///   row, so retiring its leftovers is safe on ANY batch. This is the
+    ///   authority `Exhaustive` used to carry for the whole-roster
+    ///   single-tick reconcile; expressing it per-batch is what lets a
+    ///   BATCHED reconcile still retire de-scoped rows without the
+    ///   per-tick-complete assumption `Exhaustive` makes (which, under
+    ///   batching, would delete the OTHER batches' live rows).
+    ///
+    /// `roster` is the current in-scope universe (roster ∪ session-bearing
+    /// repos). Never produced with an empty `roster` — an empty roster is
+    /// not repo-first, so it never reaches this path.
+    Reconcile {
+        swept: Vec<String>,
+        roster: Vec<String>,
+    },
+}
+
+/// Whether `repo` (`owner/name`) is covered by a [`PolledScope::Repos`]
+/// list. A list entry is either a repo (`owner/name`, exact match) or a
+/// bare org scope (`owner`) that covers every repo under it.
+pub fn repo_in_polled_list(repo: &str, polled: &[String]) -> bool {
+    polled.iter().any(|entry| {
+        if entry.contains('/') {
+            entry == repo
+        } else {
+            repo.split_once('/')
+                .is_some_and(|(owner, _)| owner == entry)
+        }
+    })
 }
 
 /// Decide what coverage the GitHub source reports to `rescope` for a
@@ -1042,6 +1192,39 @@ pub fn gh_polled_scope(
         PolledScope::Exhaustive
     } else {
         PolledScope::Repos(repos.to_vec())
+    }
+}
+
+/// Repo-first equivalent of [`gh_polled_scope`]. Deletion authority
+/// belongs only to a reconcile pass (unwindowed over the roster):
+///
+/// - A rotation slice — or any windowed pass — reports empty coverage.
+/// - A reconcile batch reports [`PolledScope::Reconcile`] carrying
+///   `completed_members` (the members whose exhaustive open-set queries
+///   all succeeded THIS tick — even a PARTIAL reconcile lists the ones
+///   that completed, so a single truncating/erroring member no longer
+///   vetoes retirement for the rest) and the current `in_scope`
+///   universe. That variant retires gone rows within the swept members
+///   AND rows whose repo has left the roster entirely (a de-scoped
+///   repo). It replaces the old `Exhaustive` reconcile output, which was
+///   only ever reachable when the WHOLE roster fit one batch — i.e.
+///   essentially a single-repo roster under the default cadence, so it
+///   silently stopped retiring de-scoped rows once the reconcile was
+///   split into fan-out batches (#1501 review 🔴/🟡). `completed_members`
+///   may hold `org` entries; [`repo_in_polled_list`] expands them so a
+///   completed org member still retires its children.
+pub fn repo_first_polled_scope(
+    reconcile: bool,
+    windowed: bool,
+    completed_members: &[String],
+    in_scope: &[String],
+) -> PolledScope {
+    if !reconcile || windowed {
+        return PolledScope::Repos(Vec::new());
+    }
+    PolledScope::Reconcile {
+        swept: completed_members.to_vec(),
+        roster: in_scope.to_vec(),
     }
 }
 
@@ -1093,6 +1276,14 @@ pub struct TickState {
     /// — adding TTL pruning or a dynamic-N knob doesn't touch this
     /// struct.
     pub round_robin: RoundRobinState,
+    /// Repo-first reconcile in progress: roster members still owed an
+    /// unwindowed sweep. A reconcile of N members is N×3 requests; run
+    /// in one tick it drained the local request bucket (30, refilling
+    /// 30/min) and left the heartbeat, detail prefetch and the user's
+    /// own `g m` pre-check refused for ~3 minutes behind a
+    /// "rate-limited" footer. It is now drained a fan-out-sized batch
+    /// per warm tick; the sweep timer re-arms when this empties.
+    pub(crate) reconcile_pending: Vec<String>,
     /// Consecutive polls in which each task (keyed by task id) has
     /// reported `Mergeable::Unknown`. Drives the fast-repoll cap:
     /// only the first [`UNKNOWN_MERGEABLE_MAX_FAST_PROBES`] Unknown
@@ -1152,6 +1343,7 @@ impl Default for TickState {
             prompted_out_of_scope: Default::default(),
             prefetched_pr_details: Default::default(),
             round_robin: Default::default(),
+            reconcile_pending: Vec::new(),
             unknown_mergeable_probes: Default::default(),
             retryable_streak: Default::default(),
             implicit_gh_scopes: None,
@@ -1389,6 +1581,8 @@ struct GithubRateLimitWait {
     remaining: u32,
     limit: u32,
     reset_at: chrono::DateTime<Utc>,
+    /// Lazybox's own pacing (see `Event::GithubRateLimitWait::self_throttle`).
+    self_throttle: bool,
 }
 
 impl GithubRateLimitWait {
@@ -1409,6 +1603,7 @@ impl GithubRateLimitWait {
             remaining: self.remaining,
             limit: self.limit,
             reset_at: self.reset_at,
+            self_throttle: self.self_throttle,
         }
     }
 }
@@ -1425,6 +1620,7 @@ fn github_rate_limit_wait(
             remaining: remote.map_or(0, |limit| limit.remaining),
             limit: remote.map_or(0, |limit| limit.limit),
             reset_at: retry_at,
+            self_throttle: false,
         });
     }
     let remote = snapshot.remote.as_ref()?;
@@ -1433,6 +1629,7 @@ fn github_rate_limit_wait(
             remaining: remote.remaining,
             limit: remote.limit,
             reset_at: remote.reset_at,
+            self_throttle: false,
         },
     )
 }
@@ -1496,6 +1693,9 @@ fn github_self_throttle_wait(
         remaining: remote.map_or(0, |limit| limit.remaining),
         limit: remote.map_or(0, |limit| limit.limit),
         reset_at,
+        // Above the low threshold this is lazybox pacing itself; at the
+        // floor the remote window is the honest wait.
+        self_throttle: !remote_exhausted,
     })
 }
 
@@ -2397,7 +2597,22 @@ pub async fn rescope_with_state(
                 Some(PolledScope::Repos(repos)) => task
                     .repo
                     .as_deref()
-                    .is_some_and(|r| repos.iter().any(|x| x == r)),
+                    .is_some_and(|r| repo_in_polled_list(r, repos)),
+                // A reconcile batch retires within the members it swept
+                // this tick, AND retires rows for a repo that has left the
+                // roster entirely (de-scoped) — that repo has no live
+                // in-scope row, so its leftovers are safe to reap on any
+                // batch. A row whose repo is still in the roster but was
+                // swept by a DIFFERENT batch is neither `swept` nor
+                // out-of-`roster`, so it is preserved. The non-empty
+                // `roster` guard is defence-in-depth: an empty universe
+                // must never make every row read as "de-scoped".
+                Some(PolledScope::Reconcile { swept, roster }) => {
+                    task.repo.as_deref().is_some_and(|r| {
+                        repo_in_polled_list(r, swept)
+                            || (!roster.is_empty() && !repo_in_polled_list(r, roster))
+                    })
+                }
             };
             if !in_authoritative_scope {
                 tracing::debug!(
@@ -2974,7 +3189,28 @@ async fn run_one_tick_with_notifications(
     let setup = match lazybox_config::Config::load() {
         Ok(c) => crate::persisted_from_config(&c),
         Err(e) => {
+            // An unparseable config used to be a WARN line and nothing
+            // else: every tick returned early, no provider error was
+            // broadcast, and the inbox simply froze with a healthy-looking
+            // sync status (2026-09-05: a newer build wrote a field this
+            // daemon couldn't parse, and sync was dead for 88 minutes).
+            // Surface it as a permanent, debounced GitHub error so the
+            // TUI names the file and the fix; it clears on the next
+            // successful tick.
             tracing::warn!("polling: config.yaml load failed: {e}");
+            let mut state = checkout_poll_state(&config.poll).await;
+            state.broadcast_error_debounced(
+                &config.bus,
+                lazybox_gh::SOURCE,
+                &lazybox_core::ProviderError::permanent(
+                    lazybox_gh::SOURCE,
+                    format!(
+                        "sync paused: ~/.lazybox/config.yaml failed to parse ({e}) — fix the file; \
+                         polling resumes on the next tick"
+                    ),
+                ),
+            );
+            restore_poll_state(&config.poll, state).await;
             return TickSummary::default();
         }
     };
@@ -3967,18 +4203,56 @@ async fn commit_merge(
     match commit_workspace_move(
         config,
         vec![(pr_key.clone(), pr_ws)],
-        deletes,
+        deletes.clone(),
         terminal_moves,
         post_commit_events,
         workspace_guards,
     )
     .await
     {
-        Ok(outcome) => outcome,
+        Ok(outcome) => {
+            fold_issue_costs_into_pr(config, &deletes, &pr_key).await;
+            outcome
+        }
         Err(error) => {
             report_commit_error(config, "merge issue workspace into PR", &error);
             CommitOutcome::Unchanged
         }
+    }
+}
+
+/// The cost half of the issue→PR collapse: fold each absorbed issue's
+/// durable metered total into the PR's row so the PR's price covers the
+/// whole line of work (issue-phase spend included), then re-ship the
+/// per-session costs so every connected client's tracker picks up the PR's
+/// new total (its hydrate is max-not-add, so a replay can't double it).
+/// Runs after the workspace commit so a failed merge leaves the rows put.
+async fn fold_issue_costs_into_pr(
+    config: &ServerConfig,
+    issue_keys: &[WorkspaceKey],
+    pr_key: &WorkspaceKey,
+) {
+    let store = config.store.clone();
+    let cost_lock = config.session_cost_lock.clone();
+    let issue_keys: Vec<String> = issue_keys.iter().map(|k| k.as_str().to_string()).collect();
+    let pr_key = pr_key.as_str().to_string();
+    let costs = tokio::task::spawn_blocking(move || {
+        // Hold the shared cost lock across the whole fold so each move's
+        // read-modify-write, and the final snapshot read, can't interleave
+        // with a concurrent `add_session_cost` on the same PR key and lose an
+        // update (see `ServerConfig::session_cost_lock`).
+        let _guard = cost_lock.lock();
+        let mut moved_any = false;
+        for issue_key in &issue_keys {
+            moved_any |= crate::client_kv::move_session_cost(&*store, issue_key, &pr_key);
+        }
+        moved_any.then(|| crate::client_kv::session_costs(&*store))
+    })
+    .await
+    .ok()
+    .flatten();
+    if let Some(costs) = costs {
+        let _ = config.bus.send(lazybox_ipc::Event::SessionCosts { costs });
     }
 }
 
@@ -5313,6 +5587,97 @@ mod rescope_collapse_tests {
             source_scopes,
             all_full: true,
         }
+    }
+
+    fn gh_task_in(repo: &str, number: u64, state: TaskState) -> Task {
+        let key = format!("{repo}#{number}");
+        let url = format!("https://github.com/{repo}/pull/{number}");
+        let mut t = gh_task(&key, &url, state, vec![]);
+        t.repo = Some(repo.to_string());
+        t
+    }
+
+    fn reconcile_github_tick(
+        polled: Vec<WorkspaceKey>,
+        swept: &[&str],
+        roster: &[&str],
+    ) -> TickOutcome {
+        let mut source_scopes = std::collections::HashMap::new();
+        source_scopes.insert(
+            "github".to_string(),
+            PolledScope::Reconcile {
+                swept: swept.iter().map(|s| s.to_string()).collect(),
+                roster: roster.iter().map(|s| s.to_string()).collect(),
+            },
+        );
+        TickOutcome {
+            polled,
+            any_source_succeeded: true,
+            retry_after_secs: None,
+            saw_unknown_mergeable: false,
+            source_scopes,
+            all_full: true,
+        }
+    }
+
+    /// Regression for the #1501 review's 🔴 finding. A repo-first
+    /// reconcile is drained in fan-out batches, so no single tick sweeps
+    /// the whole roster — the old whole-roster `Exhaustive` scope became
+    /// unreachable and de-scoped repos' rows leaked forever. One reconcile
+    /// batch (`PolledScope::Reconcile`) must, in a single tick:
+    ///   - retire a gone row within a member it swept this tick,
+    ///   - retire a row whose repo has left the roster entirely (de-scoped),
+    ///   - PRESERVE a live row for a roster member swept by a DIFFERENT
+    ///     batch (absent from this tick's poll only because this tick
+    ///     never fetched it), and
+    ///   - preserve a still-open row it swept this tick.
+    #[tokio::test]
+    async fn reconcile_batch_retires_de_scoped_and_gone_but_keeps_other_batch() {
+        let store = Arc::new(lazybox_store::MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        // Swept this batch, still open upstream → in the poll → survives.
+        let widgets_open =
+            Workspace::from_task(gh_task_in("acme/widgets", 1, TaskState::Open), Utc::now());
+        // Swept this batch, gone upstream (closed/merged) → not polled.
+        let widgets_gone =
+            Workspace::from_task(gh_task_in("acme/widgets", 2, TaskState::Open), Utc::now());
+        // Roster member swept by ANOTHER batch → not polled THIS tick.
+        let api_other_batch =
+            Workspace::from_task(gh_task_in("acme/api", 9, TaskState::Open), Utc::now());
+        // Repo removed from the roster entirely (de-scoped) → not polled.
+        let de_scoped =
+            Workspace::from_task(gh_task_in("old/removed", 3, TaskState::Open), Utc::now());
+        for ws in [&widgets_open, &widgets_gone, &api_other_batch, &de_scoped] {
+            assert!(!ws.local, "provider PR workspaces are local=false");
+            seed(&store, ws);
+        }
+
+        let outcome = reconcile_github_tick(
+            vec![widgets_open.key.clone()],
+            &["acme/widgets"],
+            &["acme/widgets", "acme/api"],
+        );
+        let mut state = TickState::default();
+        rescope_with_state(&config, &outcome, &mut state).await;
+
+        assert!(
+            load_workspace(&config, &widgets_open.key).is_some(),
+            "a still-open row the batch swept must survive"
+        );
+        assert!(
+            load_workspace(&config, &widgets_gone.key).is_none(),
+            "a gone row within a swept member must be retired"
+        );
+        assert!(
+            load_workspace(&config, &api_other_batch.key).is_some(),
+            "a member swept by another batch must be preserved, not deleted"
+        );
+        assert!(
+            load_workspace(&config, &de_scoped.key).is_none(),
+            "a de-scoped repo's leftover row must be retired (the capability \
+             the batched reconcile lost when Exhaustive became unreachable)"
+        );
     }
 
     /// Regression for #924: switching GitHub identity re-scopes the

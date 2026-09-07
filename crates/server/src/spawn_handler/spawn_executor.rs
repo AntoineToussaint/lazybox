@@ -165,7 +165,7 @@ pub(super) async fn execute_spawn_plan(
             config,
             &kind,
             terminal_id,
-            &hook_command(&exe, &backend_key),
+            &hook_command(&exe, &backend_key, flags.mcp_wired),
         );
     }
     if flags.uses_argv_hooks {

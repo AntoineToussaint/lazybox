@@ -23,7 +23,9 @@ pub use pty::{
     CreditRecoveryProtocol, EncodedPrompt, PromptFraming, PromptIntent, PromptShape, PtyProtocol,
     ReadinessPolicy, trim_leading_blank_lines,
 };
-pub use session_context::lazybox_session_context;
+pub use session_context::{
+    lazybox_mcp_coordination_context, lazybox_session_context, lazybox_session_context_with_mcp,
+};
 pub use state_machine::{
     AgentStateMachine, HOOK_STALENESS, HookAuthority, Liveness, Outcome, PtyReading, Reading,
 };

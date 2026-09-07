@@ -72,6 +72,12 @@ impl<T: TerminalAdapter> Model<T> {
     /// global escapes, and forwards everything else to the focused
     /// pane wrapper.
     pub(super) fn handle_pane_key(&mut self, key: RealmKey) {
+        // The footer's `+N more` popup is informational (#1502): any key
+        // closes it and is then handled normally, so a hint the user
+        // just read fires on the very next press.
+        if self.footer_more_popup.take().is_some() {
+            self.redraw = true;
+        }
         // Snapshot the steady focus for the selected workspace before
         // this key mutates anything, so a later re-select can restore it
         // (#182).
@@ -90,10 +96,22 @@ impl<T: TerminalAdapter> Model<T> {
         // chord below). `Esc` / `Enter` close it from inside the same
         // handler.
         if self.focus == PaneFocus::Sidebar && self.sidebar.search_editing() {
-            self.sidebar.handle_search_key(realm_key_to_crossterm(&key));
+            let open_match = self.sidebar.handle_search_key(realm_key_to_crossterm(&key));
             // Filtering may have moved the selection; keep the right
             // pane / terminals in step.
             self.sync_panes();
+            // `Enter` on a live query commits the filter AND opens the
+            // top match (#1502) — the same focus move as the sidebar's
+            // plain Enter, so `/foo⏎` lands in the workspace instead of
+            // needing a second Enter nobody documented.
+            if open_match && self.sidebar.selected_workspace().is_some() {
+                self.q_latch.disarm();
+                self.set_focus(if self.activity_pane_visible() {
+                    PaneFocus::Right
+                } else {
+                    PaneFocus::Terminals
+                });
+            }
             self.redraw = true;
             return;
         }
@@ -154,7 +172,7 @@ impl<T: TerminalAdapter> Model<T> {
                 self.leader.take();
                 self.leader_highlight = None;
                 self.q_latch.disarm();
-                let cmds = self.dispatch_action(&action);
+                let cmds = self.dispatch_action_via(&action, lazybox_ipc::ActionVia::Kbd);
                 self.flush_dispatched_cmds(cmds);
                 self.sync_panes();
                 return;
@@ -187,7 +205,7 @@ impl<T: TerminalAdapter> Model<T> {
                     self.leader_highlight = None;
                     self.leader_fallback = None;
                     self.q_latch.disarm();
-                    let cmds = self.dispatch_action(&action);
+                    let cmds = self.dispatch_action_via(&action, lazybox_ipc::ActionVia::Kbd);
                     self.flush_dispatched_cmds(cmds);
                     self.sync_panes();
                     return;
@@ -203,7 +221,7 @@ impl<T: TerminalAdapter> Model<T> {
             self.leader_fallback = None;
             if let Some(action) = direct {
                 self.q_latch.disarm();
-                let cmds = self.dispatch_action(&action);
+                let cmds = self.dispatch_action_via(&action, lazybox_ipc::ActionVia::Kbd);
                 self.flush_dispatched_cmds(cmds);
                 self.sync_panes();
                 return;
@@ -841,7 +859,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // Any catalog dispatch counts as "non-quit key" so
                 // the q q chord resets.
                 self.q_latch.disarm();
-                let dispatched = self.dispatch_action(&action);
+                let dispatched = self.dispatch_action_via(&action, lazybox_ipc::ActionVia::Kbd);
                 // Drain queued cmds + early return — the catalog
                 // handled the key, the pane shouldn't see it.
                 self.flush_dispatched_cmds(dispatched);
@@ -1195,7 +1213,7 @@ impl<T: TerminalAdapter> Model<T> {
             LeaderCmd::CloseTerminal => self.terminals.close_focused_tile(cmds),
             LeaderCmd::ZoomTile if self.focus_multi_pane_active() => self.toggle_focus_pane_zoom(),
             LeaderCmd::ZoomTile => self.toggle_terminal_zoom(),
-            LeaderCmd::ToggleNewLayout => self.toggle_terminal_new_layout(),
+            LeaderCmd::ToggleNewLayout => self.toggle_terminal_new_layout(cmds),
             LeaderCmd::CycleFocusLayout => self.cycle_focus_layout(),
         }
     }
@@ -1327,15 +1345,30 @@ impl<T: TerminalAdapter> Model<T> {
     /// runtime flip lands first (it can't fail); a write error only
     /// costs persistence, which we surface but don't roll back — the
     /// user's explicit toggle still holds for this session.
-    fn toggle_terminal_new_layout(&mut self) {
-        let now = self.terminals.toggle_terminal_new_layout();
+    fn toggle_terminal_new_layout(&mut self, cmds: &mut Vec<IpcCommand>) {
+        // Rearrange the terminals that are already open, when there are
+        // any (#1508), and fall back to flipping the preference alone on
+        // an empty pane. Before this, `]]t` only ever governed the *next*
+        // spawn — and because `auto_split_on_spawn` keeps an already-split
+        // session splitting regardless of the preference, a workspace that
+        // had split once could never be talked back into tabs. Pressing
+        // the key there did nothing visible.
+        let (now, rearranged) = match self.terminals.toggle_session_layout(cmds) {
+            Some(now) => (now, true),
+            None => (self.terminals.toggle_terminal_new_layout(), false),
+        };
         let word = match now {
             lazybox_config::NewTerminalLayout::Split => "split",
             lazybox_config::NewTerminalLayout::Tabs => "tabs",
         };
+        let what = if rearranged {
+            format!("terminals: {word} (new ones too)")
+        } else {
+            format!("new terminals open as {word}")
+        };
         match lazybox_config::Config::save_with(|c| c.ui.terminal_new_layout = now) {
-            Ok(()) => self.flash_info(format!("new terminals open as {word}")),
-            Err(e) => self.flash_info(format!("new terminals open as {word} (couldn't save: {e})")),
+            Ok(()) => self.flash_info(what),
+            Err(e) => self.flash_info(format!("{what} (couldn't save: {e})")),
         }
         self.redraw = true;
     }
@@ -1862,19 +1895,34 @@ impl<T: TerminalAdapter> Model<T> {
                     self.sync_panes();
                     self.redraw = true;
                 }
-                // A left-click on the footer's `… +N ? all` overflow
-                // cell opens `?` so the elided hints are reachable — the
-                // count is no longer a dead end (#805). The footer sits
+                // Any click closes the footer's `+N more` popup (#1502)
+                // and then routes normally; a click on the overflow cell
+                // itself toggles it.
+                let more_was_open = self.footer_more_popup.take().is_some();
+                if more_was_open {
+                    self.redraw = true;
+                }
+                // A left-click on the footer's `… +N more` overflow cell
+                // pops exactly the hints the bar could not fit, so the
+                // count is not a dead end (#805, #1502). The footer sits
                 // outside every pane rect, so this is the only handler
                 // that claims the click; checked before pane routing.
                 if matches!(button, crossterm::event::MouseButton::Left)
-                    && self
-                        .footer_overflow_rect
-                        .is_some_and(|r| rect_contains(r, m.column, m.row))
+                    && let Some(overflow) = self
+                        .footer_overflow
+                        .as_ref()
+                        .filter(|o| rect_contains(o.rect, m.column, m.row))
                 {
-                    self.q_latch.disarm();
-                    self.cancel_leader_chords();
-                    self.mount_help_ask();
+                    if !more_was_open {
+                        let rows = overflow
+                            .dropped
+                            .iter()
+                            .map(|b| (b.keys.to_string(), b.label.to_string()))
+                            .collect();
+                        self.q_latch.disarm();
+                        self.cancel_leader_chords();
+                        self.footer_more_popup = Some(rows);
+                    }
                     self.redraw = true;
                     return;
                 }
@@ -2941,7 +2989,11 @@ pub(super) fn action_from_kind(
         ActionKind::JumpToAsking => Action::JumpToAsking,
         ActionKind::JumpToFailingCi => Action::JumpToFailingCi,
         ActionKind::JumpToLimited => Action::JumpToLimited,
+        ActionKind::JumpToUnread => Action::JumpToUnread,
+        ActionKind::JumpPrevGroup => Action::JumpPrevGroup,
+        ActionKind::JumpNextGroup => Action::JumpNextGroup,
         ActionKind::ResumeRateLimited => Action::ResumeRateLimited,
+        ActionKind::RestartRateLimited => Action::RestartRateLimited,
         ActionKind::RecoverAgentCredit => Action::RecoverAgentCredit,
         ActionKind::RecoverAllAgentCredit => Action::RecoverAllAgentCredit,
         ActionKind::StartAgent => Action::StartAgent,

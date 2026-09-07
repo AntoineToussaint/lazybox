@@ -759,14 +759,16 @@ pub async fn start(config: ServerConfig) -> std::io::Result<std::net::SocketAddr
 /// Bind a loopback TCP listener, preferring `desired_port` and falling back to
 /// an ephemeral port (with a warning) when it's unavailable. `SO_REUSEADDR`
 /// lets the reused port bind through a prior socket's lingering `TIME_WAIT`.
-fn bind_loopback(desired_port: Option<u16>) -> std::io::Result<tokio::net::TcpListener> {
+/// Shared with the metering proxy, which bakes its port into every metered
+/// agent's `*_BASE_URL` the same way the MCP endpoint is baked (#1420).
+pub(crate) fn bind_loopback(desired_port: Option<u16>) -> std::io::Result<tokio::net::TcpListener> {
     if let Some(port) = desired_port.filter(|port| *port != 0) {
         match bind_loopback_port(port) {
             Ok(listener) => return Ok(listener),
             Err(error) => tracing::warn!(
                 port,
                 %error,
-                "mcp: reusing prior port failed — reattached agents lose coordination until respawn; binding a fresh port"
+                "reusing prior loopback port failed — agents that survived the restart keep dialing it until respawn; binding a fresh port"
             ),
         }
     }

@@ -78,11 +78,57 @@ pub fn render(
     rows: &[(String, String)],
     highlight: Option<usize>,
 ) {
+    // Title: the armed prefix (plus its group's name when it has one)
+    // so the user sees which chord is in flight (e.g. "g ▸ github").
+    let title_text = match group {
+        Some(g) => format!(" {} ▸ {g} ", prefix.display()),
+        None => format!(" {} … ", prefix.display()),
+    };
+    render_panel(
+        frame,
+        area,
+        &title_text,
+        rows,
+        highlight,
+        "↑↓ select · ↵ · Esc",
+    );
+}
+
+/// Render the footer's `… +N more` popup (#1502): the hint cells the
+/// bottom bar could not fit, in the order the bar would have shown
+/// them. Same chrome as the leader popup so the two read as one
+/// family. Purely informational — the next key press (or click)
+/// closes it and is processed normally, so nothing is swallowed.
+pub fn render_more(frame: &mut Frame, area: Rect, rows: &[(String, String)]) {
+    render_panel(frame, area, " more keys ", rows, None, "any key closes");
+}
+
+/// Shared panel body for the which-key family: a `surface` box anchored
+/// bottom-left above the footer, a bold dim title, one `key  label` row
+/// per entry, and a dim navigation hint on the last row. Width grows
+/// past `PANEL_W` to fit the longest row (the footer's labels can be
+/// wider than a leader continuation), clamped to the frame.
+fn render_panel(
+    frame: &mut Frame,
+    area: Rect,
+    title_text: &str,
+    rows: &[(String, String)],
+    highlight: Option<usize>,
+    hint: &str,
+) {
     let theme = crate::theme::current();
     // Title + one row per continuation + a footer hint, plus a blank row
     // top and bottom for breathing room.
     let panel_h = (rows.len() as u16 + 4).min(area.height);
-    let panel_w = PANEL_W.min(area.width);
+    let widest_row = rows
+        .iter()
+        .map(|(k, l)| 2 + k.chars().count() + 2 + l.chars().count() + 1)
+        .max()
+        .unwrap_or(0) as u16;
+    let panel_w = PANEL_W
+        .max(widest_row)
+        .max(title_text.chars().count() as u16)
+        .min(area.width);
     let panel = Rect {
         x: area.x,
         y: area
@@ -96,14 +142,8 @@ pub fn render(
     frame.render_widget(Clear, panel);
     frame.render_widget(Block::default().style(bg), panel);
 
-    // Title: the armed prefix (plus its group's name when it has one)
-    // so the user sees which chord is in flight (e.g. "g ▸ github").
-    let title_text = match group {
-        Some(g) => format!(" {} ▸ {g} ", prefix.display()),
-        None => format!(" {} … ", prefix.display()),
-    };
     let title = Line::from(Span::styled(
-        title_text,
+        title_text.to_string(),
         Style::default()
             .bg(theme.surface)
             .fg(theme.text_dim)
@@ -139,10 +179,7 @@ pub fn render(
         );
     }
 
-    // Footer hint: the two ways to pick (type the key, or move the
-    // highlight and confirm) plus cancel — the affordance the arrow
-    // navigation would otherwise be invisible without (#343).
-    render_nav_hint(frame, panel, "↑↓ select · ↵ · Esc", theme);
+    render_nav_hint(frame, panel, hint, theme);
 }
 
 /// Draw the bottom-row navigation hint for a popup panel. Dim, matching
@@ -376,6 +413,40 @@ mod tests {
         // A user who remapped quit to `x x` should be told to press x.
         let out = render_to_string("x x");
         assert!(out.contains("x again to quit"));
+    }
+
+    /// The footer's `+N more` popup lists every hidden hint (key and
+    /// label), titles itself, widens past the leader default to fit a
+    /// long footer label, and tells the user any key closes it (#1502).
+    #[test]
+    fn more_popup_lists_the_dropped_hints_and_fits_long_labels() {
+        let rows = vec![
+            ("x n".to_string(), "new workspace".to_string()),
+            ("Shift-T".to_string(), "coach".to_string()),
+            ("Space".to_string(), "collapse this repo group".to_string()),
+        ];
+        let (w, h) = (80u16, 24u16);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| render_more(f, Rect::new(0, 0, w, h), &rows))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        let out: String = (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(out.contains("more keys"), "missing title: {out}");
+        for (k, l) in &rows {
+            let line = out
+                .lines()
+                .find(|line| line.contains(l.as_str()))
+                .unwrap_or_else(|| panic!("row {l:?} missing: {out}"));
+            assert!(
+                line.contains(k.as_str()),
+                "key {k:?} missing on its row: {line}"
+            );
+        }
+        assert!(out.contains("any key closes"), "missing close hint: {out}");
+        assert!(!out.contains('▸'), "informational popup has no highlight");
     }
 
     fn render_leader(rows: &[(String, String)]) -> String {

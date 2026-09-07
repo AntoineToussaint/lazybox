@@ -2,7 +2,9 @@
 //!
 //! Requires network access to the host plus:
 //! - `LAZYBOX_GHES_HOST` — bare hostname (e.g. `ghe.example.com`)
-//! - a token the credential chain resolves (`LAZYBOX_GITHUB_TOKEN` / `GH_TOKEN`)
+//! - a token the credential chain resolves (`LAZYBOX_GITHUB_TOKEN` / `GH_TOKEN`,
+//!   or `gh auth login --hostname <host>` for the `gh auth token --hostname`
+//!   fallback)
 //!
 //! Run explicitly:
 //! `cargo test -p lazybox-gh --test ghes_live -- --ignored --nocapture`
@@ -14,8 +16,8 @@ use std::time::Duration;
 async fn ghes_rest_and_graphql_smoke() {
     let body = async {
         let host = std::env::var("LAZYBOX_GHES_HOST").expect("LAZYBOX_GHES_HOST not set");
-        let cred = lazybox_gh::credential_chain()
-            .resolve(lazybox_gh::SOURCE)
+        let cred = lazybox_gh::credential_chain(Some(&host))
+            .resolve(&lazybox_gh::credential_scope(Some(&host)))
             .await
             .expect("no GitHub credential resolved");
 

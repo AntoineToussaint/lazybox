@@ -15,6 +15,8 @@
 //! over both transports.
 
 use crate::ServerConfig;
+use lazybox_ipc::ActionVia;
+use std::collections::BTreeMap;
 
 /// kv key for the global most-recently-used snippet list. Unchanged from
 /// the TUI's old direct-write key so an existing in-process user's MRU
@@ -33,6 +35,11 @@ const SNIPPET_KEEPMINE_KV_KEY: &str = "snippet_keepmine";
 /// string). Lets the per-workspace `$ METER · $cost` figure survive a
 /// restart (#1389).
 const SESSION_COST_KV_PREFIX: &str = "meter-cost:";
+/// kv key prefix for the mastery ledger, one row per catalog action
+/// (`mastery:<action_id>` → a JSON `{ "<via>": count }` map). Lets the
+/// per-action usage counts feed onboarding chrome and survive a restart,
+/// shared across in-process and `--connect` clients (#1502).
+const MASTERY_KV_PREFIX: &str = "mastery:";
 
 /// Record `key` as the freshly-used snippet: de-duplicate, move it to the
 /// front, cap the list, and persist. Best-effort — a write failure just
@@ -125,16 +132,20 @@ pub fn snippet_keepmine(store: &dyn lazybox_store::Store) -> Vec<String> {
 
 /// Add `delta_micros` to the persisted running cost for `session_key`, so
 /// the per-workspace meter figure accumulates across a restart (#1389).
-/// Read-modify-write on the blocking pool; callers invoke it one at a time
-/// (the metering subscriber awaits each), so no two writes race the same
-/// key. Best-effort — a lost write is a bounded under-count, never
-/// destructive.
+/// Read-modify-write on the blocking pool. The metering subscriber is no
+/// longer the only writer of this keyspace — the issue→PR fold
+/// ([`move_session_cost`]) read-modify-writes the same keys from a different
+/// task — so the RMW runs under `config.session_cost_lock` to keep the two
+/// from interleaving and losing an update. Best-effort — a lost write is a
+/// bounded under-count, never destructive.
 pub async fn add_session_cost(config: &ServerConfig, session_key: String, delta_micros: u64) {
     if delta_micros == 0 {
         return;
     }
     let store = config.store.clone();
+    let cost_lock = config.session_cost_lock.clone();
     let result = tokio::task::spawn_blocking(move || {
+        let _guard = cost_lock.lock();
         let kv_key = format!("{SESSION_COST_KV_PREFIX}{session_key}");
         let current = store
             .get_kv(&kv_key)
@@ -153,11 +164,52 @@ pub async fn add_session_cost(config: &ServerConfig, session_key: String, delta_
     }
 }
 
-/// Drop the persisted cost row for `session_key` — called when its
-/// workspace is archived/deleted so the total doesn't linger in the store
-/// (and re-ship in every future `Event::SessionCosts`) forever (#1389).
-/// Best-effort: a failed delete just leaves a dead row that renders under no
-/// workspace, never destructible history.
+/// Fold the persisted cost of `from` into `to` and drop the `from` row —
+/// the aggregation step when one line of work collapses into another (an
+/// issue workspace absorbed by the PR it produced). Without it the issue's
+/// spend stays orphaned under a key no workspace renders and the PR's
+/// "price" starts from zero. Synchronous read-modify-write, for callers
+/// already on the blocking pool. Returns whether anything moved — `false`
+/// for a `from` with no row, a self-move, or a failed write — so a caller
+/// knows whether the per-session costs need re-shipping.
+///
+/// Production callers MUST hold `ServerConfig::session_cost_lock` for the
+/// duration of this call: it read-modify-writes the same `meter-cost:` keys
+/// as [`add_session_cost`], and without the shared lock the two interleave
+/// and lose an update. (Single-threaded tests call it directly.)
+pub fn move_session_cost(store: &dyn lazybox_store::Store, from: &str, to: &str) -> bool {
+    if from == to {
+        return false;
+    }
+    let read = |key: &str| -> u64 {
+        store
+            .get_kv(&format!("{SESSION_COST_KV_PREFIX}{key}"))
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let moving = read(from);
+    if moving == 0 {
+        return false;
+    }
+    let total = read(to).saturating_add(moving);
+    if let Err(e) = store.set_kv(&format!("{SESSION_COST_KV_PREFIX}{to}"), &total.to_string()) {
+        tracing::warn!("move session cost `{from}` → `{to}` failed: {e}");
+        return false;
+    }
+    clear_session_cost(store, from);
+    true
+}
+
+/// Drop the persisted cost row for `session_key`. Called on a genuine
+/// workspace teardown — a delete/retire/rescope, the non-archiving
+/// [`WorkspaceRemovalReason`](crate::workspace)s (via
+/// `reclaim_workspace_worktrees`) — and when a row's cost has been folded
+/// into another key ([`move_session_cost`]). Deliberately NOT called on an
+/// archive: an archived merged PR's total is the durable "what did this PR
+/// cost" record, so it stays. Best-effort: a failed delete just leaves a
+/// dead row that renders under no workspace, never destructible history.
 pub fn clear_session_cost(store: &dyn lazybox_store::Store, session_key: &str) {
     let kv_key = format!("{SESSION_COST_KV_PREFIX}{session_key}");
     if let Err(e) = store.delete_kv(&kv_key) {
@@ -186,6 +238,67 @@ pub fn session_costs(store: &dyn lazybox_store::Store) -> Vec<(String, u64)> {
     }
 }
 
+/// Increment the mastery ledger for one invocation of `action_id` through
+/// `via` (#1502): read-modify-write the action's per-channel count map and
+/// persist. The RMW runs under `config.mastery_lock` because `RecordAction`
+/// is a detached command dispatched on the concurrent `mutations` JoinSet —
+/// two invocations for the same action can run in parallel, and without the
+/// lock both read the same base count and one increment is lost. Best-effort
+/// otherwise: a failed write is a bounded under-count of a rebuildable usage
+/// cache, never destructible history.
+pub async fn record_action(config: &ServerConfig, action_id: String, via: ActionVia) {
+    let store = config.store.clone();
+    let mastery_lock = config.mastery_lock.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _guard = mastery_lock.lock();
+        let kv_key = format!("{MASTERY_KV_PREFIX}{action_id}");
+        let mut counts = load_count_map(&*store, &kv_key);
+        *counts.entry(via.as_str().to_string()).or_insert(0) += 1;
+        let json = serde_json::to_string(&counts).map_err(|e| e.to_string())?;
+        store.set_kv(&kv_key, &json).map_err(|e| e.to_string())
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!("record action mastery failed: {e}"),
+        Err(e) => tracing::warn!("record action mastery task failed: {e}"),
+    }
+}
+
+/// The whole mastery ledger flattened to `(action_id, via, count)` triples,
+/// for replay to a fresh subscriber (pushed as its own
+/// [`lazybox_ipc::Event::MasteryLedger`] right after the snapshot, #1502).
+/// Rows or channel tokens that don't parse are skipped — the ledger is a
+/// rebuildable cache, never destructible history.
+pub fn mastery_ledger(store: &dyn lazybox_store::Store) -> Vec<(String, ActionVia, u32)> {
+    let rows = match store.list_kv_prefix(MASTERY_KV_PREFIX) {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!("read mastery ledger failed: {e}");
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for (key, value) in rows {
+        let Some(action_id) = key.strip_prefix(MASTERY_KV_PREFIX) else {
+            continue;
+        };
+        let counts: BTreeMap<String, u32> = match serde_json::from_str(&value) {
+            Ok(counts) => counts,
+            Err(e) => {
+                tracing::warn!("parse mastery row `{key}` failed: {e}");
+                continue;
+            }
+        };
+        for (token, count) in counts {
+            if let Some(via) = ActionVia::from_wire(&token) {
+                out.push((action_id.to_string(), via, count));
+            }
+        }
+    }
+    out
+}
+
 /// Load both client-preference lists for an outgoing snapshot. Runs on the
 /// blocking pool alongside the workspace/project load.
 pub fn snapshot(store: &dyn lazybox_store::Store) -> ClientKvSnapshot {
@@ -194,6 +307,7 @@ pub fn snapshot(store: &dyn lazybox_store::Store) -> ClientKvSnapshot {
         dismissed_updates: load_list(store, DISMISSED_UPDATES_KV_KEY),
         snippet_keepmine: load_list(store, SNIPPET_KEEPMINE_KV_KEY),
         session_costs: session_costs(store),
+        mastery: mastery_ledger(store),
     }
 }
 
@@ -210,6 +324,27 @@ pub struct ClientKvSnapshot {
     /// snapshot bundle and replayed on connect as `Event::SessionCosts` so the
     /// per-workspace `$ METER` figure survives a restart.
     pub session_costs: Vec<(String, u64)>,
+    /// The mastery ledger as `(action_id, via, count)` triples. Loaded with
+    /// the snapshot bundle and replayed on connect as `Event::MasteryLedger`
+    /// so per-action usage counts survive a restart (#1502).
+    pub mastery: Vec<(String, ActionVia, u32)>,
+}
+
+/// Read a JSON `{ "<via>": count }` map from `key`, degrading to empty on
+/// any miss, read error, or parse error — the mastery ledger is a
+/// rebuildable cache, never destructible history.
+fn load_count_map(store: &dyn lazybox_store::Store, key: &str) -> BTreeMap<String, u32> {
+    match store.get_kv(key) {
+        Ok(Some(json)) => serde_json::from_str(&json).unwrap_or_else(|e| {
+            tracing::warn!("parse mastery map `{key}` failed: {e}");
+            BTreeMap::new()
+        }),
+        Ok(None) => BTreeMap::new(),
+        Err(e) => {
+            tracing::warn!("read mastery map `{key}` failed: {e}");
+            BTreeMap::new()
+        }
+    }
 }
 
 /// Read a JSON `Vec<String>` from `key`, degrading to empty on any miss,
@@ -250,6 +385,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mastery_counts_accumulate_per_action_and_channel() {
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        record_action(&config, "merge_pr".into(), ActionVia::Kbd).await;
+        record_action(&config, "merge_pr".into(), ActionVia::Kbd).await;
+        record_action(&config, "merge_pr".into(), ActionVia::Menu).await;
+        record_action(&config, "archive".into(), ActionVia::Mouse).await;
+
+        let mut ledger = mastery_ledger(&*store);
+        ledger.sort();
+        assert_eq!(
+            ledger,
+            vec![
+                ("archive".to_string(), ActionVia::Mouse, 1),
+                ("merge_pr".to_string(), ActionVia::Kbd, 2),
+                ("merge_pr".to_string(), ActionVia::Menu, 1),
+            ],
+        );
+        // The snapshot bundle carries the same ledger for hydration.
+        let mut snap = snapshot(&*store).mastery;
+        snap.sort();
+        assert_eq!(snap, ledger);
+    }
+
+    #[tokio::test]
+    async fn concurrent_same_action_records_never_lose_increments() {
+        // #1502 regression: `record_action` is a detached command run on the
+        // concurrent `mutations` JoinSet, so parallel invocations for the same
+        // action read-modify-write the same kv row. Without `mastery_lock`
+        // around the load→increment→store they interleave and lose increments.
+        // Fire many at once — their blocking sections overlap on the blocking
+        // pool — and assert every one is counted.
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        const N: u32 = 200;
+        let writers = (0..N).map(|_| record_action(&config, "merge_pr".into(), ActionVia::Kbd));
+        futures::future::join_all(writers).await;
+
+        assert_eq!(
+            mastery_ledger(&*store),
+            vec![("merge_pr".to_string(), ActionVia::Kbd, N)],
+            "every concurrent increment must be counted exactly once",
+        );
+    }
+
+    #[tokio::test]
     async fn update_dismissal_is_idempotent_set() {
         let store = Arc::new(MemoryStore::new());
         let config = ServerConfig::with_store(store.clone());
@@ -285,6 +468,56 @@ mod tests {
         // The snapshot bundle carries the same figures for hydration.
         let snap = snapshot(&*store);
         assert_eq!(snap.session_costs.len(), 2);
+    }
+
+    /// The issue→PR fold: the issue's total lands on the PR's row (added to
+    /// anything the PR already accrued) and the issue row is gone, so the
+    /// PR's price spans the whole line of work. A key with no row, or a
+    /// self-move, is a no-op.
+    #[tokio::test]
+    async fn move_session_cost_folds_issue_total_into_pr() {
+        let store = Arc::new(MemoryStore::new());
+        let config = ServerConfig::with_store(store.clone());
+
+        add_session_cost(&config, "github:o/r#7".into(), 1_200_000).await; // issue
+        add_session_cost(&config, "github:o/r#42".into(), 300_000).await; // PR
+
+        assert!(move_session_cost(&*store, "github:o/r#7", "github:o/r#42"));
+
+        let mut costs = session_costs(&*store);
+        costs.sort();
+        assert_eq!(costs, vec![("github:o/r#42".to_string(), 1_500_000)]);
+
+        // No source row → nothing changes; self-move → nothing changes.
+        assert!(!move_session_cost(
+            &*store,
+            "github:o/r#999",
+            "github:o/r#42"
+        ));
+        assert!(!move_session_cost(
+            &*store,
+            "github:o/r#42",
+            "github:o/r#42"
+        ));
+        assert_eq!(
+            session_costs(&*store),
+            vec![("github:o/r#42".to_string(), 1_500_000)]
+        );
+
+        // A PR with no row yet still receives the fold (the row-count stays
+        // flat here — one leaves, one appears — which is exactly the case a
+        // count-based "did anything move" check would miss).
+        add_session_cost(&config, "github:o/r#8".into(), 700_000).await;
+        assert!(move_session_cost(&*store, "github:o/r#8", "github:o/r#43"));
+        let mut costs = session_costs(&*store);
+        costs.sort();
+        assert_eq!(
+            costs,
+            vec![
+                ("github:o/r#42".to_string(), 1_500_000),
+                ("github:o/r#43".to_string(), 700_000),
+            ]
+        );
     }
 
     #[tokio::test]

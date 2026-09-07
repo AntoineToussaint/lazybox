@@ -293,11 +293,19 @@ async fn subscribe_is_admitted_only_once_per_connection() {
     ));
     assert!(matches!(
         client.recv().await,
+        Some(Event::KeepAwakeStatus { .. })
+    ));
+    assert!(matches!(
+        client.recv().await,
         Some(Event::SnippetKeepMine { .. })
     ));
     assert!(matches!(
         client.recv().await,
         Some(Event::SessionCosts { .. })
+    ));
+    assert!(matches!(
+        client.recv().await,
+        Some(Event::MasteryLedger { .. })
     ));
     assert!(matches!(
         client.recv().await,

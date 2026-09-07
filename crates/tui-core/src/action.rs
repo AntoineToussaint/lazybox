@@ -432,12 +432,28 @@ pub enum Action {
     /// blocked on a provider usage / rate limit (`Shift-L`, #847). Wraps
     /// around. The rate-limited analog of [`Action::JumpToAsking`].
     JumpToLimited,
+    /// Jump the sidebar cursor to the next workspace with unread
+    /// activity (`Shift-N`, #1502). Wraps around.
+    JumpToUnread,
+    /// Move the sidebar cursor to the previous group header (`{`,
+    /// #1502). Clamps at the first.
+    JumpPrevGroup,
+    /// Move the sidebar cursor to the next group header (`}`, #1502).
+    /// Clamps at the last.
+    JumpNextGroup,
     /// Resume every workspace currently blocked on a usage / rate limit
     /// (`Shift-K`, #847): a one-shot settle-gated inject fan-out of a
     /// "continue" prompt across exactly the limit-blocked set, reusing the
     /// `Shift-B` broadcast delivery. The bulk companion to re-authing with
     /// another account — no visiting each terminal.
     ResumeRateLimited,
+    /// Restart every usage-limit-blocked agent so it picks up fresh
+    /// credentials (stop the process, respawn the same conversation with
+    /// `--resume`, then continue). The companion to `ResumeRateLimited` for
+    /// after the user switched Claude account / API key externally — a
+    /// running process never re-reads its credentials, so a plain
+    /// "continue" just hits the limit again.
+    RestartRateLimited,
     /// Recover the focused agent from a provider credit chooser and continue
     /// its interrupted turn.
     RecoverAgentCredit,
@@ -630,7 +646,11 @@ pub enum ActionKind {
     JumpToAsking,
     JumpToFailingCi,
     JumpToLimited,
+    JumpToUnread,
+    JumpPrevGroup,
+    JumpNextGroup,
     ResumeRateLimited,
+    RestartRateLimited,
     RecoverAgentCredit,
     RecoverAllAgentCredit,
     ToggleFocusMode,
@@ -677,10 +697,12 @@ impl ActionKind {
         Self::JumpToAsking,
         Self::JumpToFailingCi,
         Self::JumpToLimited,
+        Self::JumpToUnread,
         Self::ToggleFocusMode,
         Self::StartAgent,
         Self::ConnectBox,
         Self::ResumeRateLimited,
+        Self::RestartRateLimited,
         Self::RecoverAgentCredit,
         Self::RecoverAllAgentCredit,
         Self::ToggleActivityPane,
@@ -743,6 +765,8 @@ impl ActionKind {
         Self::Reply,
         Self::EditNotes,
         // Sidebar list management
+        Self::JumpPrevGroup,
+        Self::JumpNextGroup,
         Self::OpenFilterMenu,
         Self::CycleSort,
         Self::CycleMailbox,
@@ -921,7 +945,11 @@ impl Action {
             Action::JumpToAsking => ActionKind::JumpToAsking,
             Action::JumpToFailingCi => ActionKind::JumpToFailingCi,
             Action::JumpToLimited => ActionKind::JumpToLimited,
+            Action::JumpToUnread => ActionKind::JumpToUnread,
+            Action::JumpPrevGroup => ActionKind::JumpPrevGroup,
+            Action::JumpNextGroup => ActionKind::JumpNextGroup,
             Action::ResumeRateLimited => ActionKind::ResumeRateLimited,
+            Action::RestartRateLimited => ActionKind::RestartRateLimited,
             Action::RecoverAgentCredit => ActionKind::RecoverAgentCredit,
             Action::RecoverAllAgentCredit => ActionKind::RecoverAllAgentCredit,
             Action::ToggleFocusMode => ActionKind::ToggleFocusMode,
@@ -1111,11 +1139,41 @@ impl ActionDef {
                 describe: "Jump the cursor to the next workspace whose agent hit its provider usage / rate limit (#847). Pair with Shift-K to resume them all after re-authing.",
                 section: Section::Global,
             },
+            ActionKind::JumpToUnread => &Self {
+                kind: ActionKind::JumpToUnread,
+                default_keys: "Shift-N",
+                label: "next unread",
+                describe: "Jump the cursor to the next workspace with unread activity, wrapping around (#1502). The keyboard answer to the `●N` badge — no filter mode needed.",
+                section: Section::Global,
+            },
+            ActionKind::JumpPrevGroup => &Self {
+                kind: ActionKind::JumpPrevGroup,
+                default_keys: "{",
+                label: "prev group",
+                describe: "Move the cursor to the previous group header (Space / repo / Focused / Hopper) so a long inbox can be crossed a group at a time (#1502).",
+                section: Section::Sidebar,
+            },
+            ActionKind::JumpNextGroup => &Self {
+                kind: ActionKind::JumpNextGroup,
+                default_keys: "}",
+                label: "next group",
+                describe: "Move the cursor to the next group header (Space / repo / Focused / Hopper) so a long inbox can be crossed a group at a time (#1502).",
+                section: Section::Sidebar,
+            },
             ActionKind::ResumeRateLimited => &Self {
                 kind: ActionKind::ResumeRateLimited,
                 default_keys: "Shift-K",
                 label: "resume rate-limited",
-                describe: "Resume every workspace currently blocked on a usage / rate limit at once — a settle-gated 'continue' injected into each limit-blocked agent. Use after switching Claude account / API key externally so you don't visit each terminal.",
+                describe: "Resume every workspace currently blocked on a usage / rate limit at once — a settle-gated 'continue' injected into each limit-blocked agent, for when the limit has reset. If you switched Claude account / API key instead, use `a R` (restart rate-limited): a running process never re-reads its credentials.",
+                section: Section::Global,
+            },
+            ActionKind::RestartRateLimited => &Self {
+                kind: ActionKind::RestartRateLimited,
+                // Under the agent leader like `a K`: a direct modifier chord
+                // would need the kitty keyboard protocol most emulators lack.
+                default_keys: "a R",
+                label: "restart rate-limited",
+                describe: "Restart every agent currently blocked or parked on a usage / rate limit so it picks up fresh credentials: stop its process, respawn the same conversation in the same pane (--resume), then submit the configured continuation prompt. Use after switching Claude account / API key externally; a plain 'continue' (Shift-K) would only hit the limit again.",
                 section: Section::Global,
             },
             ActionKind::RecoverAgentCredit => &Self {
@@ -2336,7 +2394,11 @@ impl ActionKind {
             ActionKind::JumpToAsking => "jump_to_asking",
             ActionKind::JumpToFailingCi => "jump_to_failing_ci",
             ActionKind::JumpToLimited => "jump_to_limited",
+            ActionKind::JumpToUnread => "jump_to_unread",
+            ActionKind::JumpPrevGroup => "jump_prev_group",
+            ActionKind::JumpNextGroup => "jump_next_group",
             ActionKind::ResumeRateLimited => "resume_rate_limited",
+            ActionKind::RestartRateLimited => "restart_rate_limited",
             ActionKind::RecoverAgentCredit => "recover_agent_credit",
             ActionKind::RecoverAllAgentCredit => "recover_all_agent_credit",
             ActionKind::ToggleFocusMode => "toggle_focus_mode",
@@ -2543,7 +2605,9 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::ConvertToDraft
         | ActionKind::MarkReady
         | ActionKind::ViewDiff => Some("github"),
-        ActionKind::SpawnAgent | ActionKind::RecoverAllAgentCredit => Some("agent"),
+        ActionKind::SpawnAgent
+        | ActionKind::RecoverAllAgentCredit
+        | ActionKind::RestartRateLimited => Some("agent"),
         ActionKind::SpawnAgentRemote => Some("remote"),
         ActionKind::Work | ActionKind::WorkWith => Some("work"),
         ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Some("main branch"),
@@ -3354,7 +3418,11 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::JumpToAsking
         | ActionKind::JumpToFailingCi
         | ActionKind::JumpToLimited
+        | ActionKind::JumpToUnread
+        | ActionKind::JumpPrevGroup
+        | ActionKind::JumpNextGroup
         | ActionKind::ResumeRateLimited
+        | ActionKind::RestartRateLimited
         | ActionKind::RecoverAgentCredit
         | ActionKind::RecoverAllAgentCredit
         | ActionKind::ConnectBox

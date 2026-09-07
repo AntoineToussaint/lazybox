@@ -136,6 +136,24 @@ pub struct WorkspaceRowCtx<'a> {
     /// `⤓` glyph to its warn color so a stuck (dirty/diverged) worktree
     /// reads at a glance. Only meaningful when `track_main`.
     pub track_main_behind: bool,
+    /// This workspace has the per-workspace meter *armed* (`Workspace::metered`,
+    /// toggled with `x $`): while set, its agent spawns route through lazybox's
+    /// local metering proxy — effective only when `agent.metering_proxy` is on
+    /// and the proxy is running, otherwise inert (#1488). Renders a `$` in the
+    /// passive badge cluster — the *durable* cue that the canary is armed,
+    /// matching (and gated on the same field as) the sidebar header's
+    /// ` $ METER ` pill. Before this, that per-workspace signal lived only in
+    /// the header, drawn from the focused row alone, so you couldn't see which
+    /// rows were armed without visiting each one. Reflects the per-workspace
+    /// opt-in only: Space-tier (`agent.metered_spaces`) and blanket
+    /// (`meter_all`) metering don't light it — exactly as they don't light the
+    /// header pill, so the two surfaces can't drift.
+    pub metered: bool,
+    /// The issue this PR was opened from, as `(identifier, extra)` —
+    /// `("298", 0)` / `("ENG-12", 2)` (#1528). Renders a `←298` chip so a
+    /// collapsed issue→PR row still says where it came from; the collapse
+    /// otherwise hides the issue entirely outside the activity pane.
+    pub origin_issue: Option<(String, usize)>,
     /// This workspace carries a non-empty local note
     /// (`Workspace::has_notes` — issue #458). Renders a small ` ✎ ` pill
     /// so the user can see, at a glance, which rows have a scratchpad.
@@ -182,18 +200,20 @@ pub struct WorkspaceRowCtx<'a> {
     pub repo_prefix: Option<String>,
 }
 
+/// Gutter glyph on the cursor row: a left-edge accent bar (U+258E). The
+/// ASCII fallback is `>`.
+pub const CURSOR_BAR: &str = "▎";
+
 impl<'a> WorkspaceRowCtx<'a> {
-    /// Cursor row background. Drives `Row::fill_style` so every
-    /// column's padding inherits the highlight bg — without this
-    /// the cursor row looked broken (highlight stopping mid-row).
+    /// Row band. Drives `Row::fill_style` so every column's padding
+    /// inherits the highlight bg — without this the cursor row looked
+    /// broken (highlight stopping mid-row). The cursor row is banded in
+    /// BOTH focus states and a multi-selected row is banded too
+    /// (`Theme::row_band`, #1502).
     pub fn row_style(&self) -> Style {
-        if self.is_cursor && self.focused {
-            self.theme.row_focused()
-        } else if self.is_cursor {
-            self.theme.row_unfocused()
-        } else {
-            Style::default()
-        }
+        self.theme
+            .row_band(self.is_cursor, self.focused, self.is_selected)
+            .unwrap_or_default()
     }
 
     fn raw_title(&self) -> &'a str {
@@ -225,7 +245,7 @@ impl<'a> WorkspaceRowCtx<'a> {
 ///
 /// Order (left → right):
 ///
-/// 0. Prefix — `▶` (cursor) / ` ` (no cursor). A single shared
+/// 0. Prefix — `▎` accent bar (cursor) / `✓` (selected) / ` `. A single shared
 ///    selection gutter: the marker occupies one column reused across
 ///    every row type, instead of a 2-col marker re-added at each depth
 ///    (issue #231). Rows sit one column in from the repo header's
@@ -385,10 +405,13 @@ fn cell_prefix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // caret win this single-cell gutter would hide the mark on the very
     // row you just pressed `v` on — the "no immediate feedback" bug
     // (issue #786). Selection wins the glyph; cursor keeps the highlight.
+    // The cursor row is a full-row band (`row_style`), so its gutter
+    // glyph is a slim accent bar rather than an arrow: it marks the
+    // band's edge instead of competing with it (#1502).
     let s = if ctx.is_selected {
         "✓"
     } else if ctx.is_cursor {
-        "▶"
+        if ctx.ascii_glyphs { ">" } else { CURSOR_BAR }
     } else {
         " "
     };
@@ -897,13 +920,12 @@ fn cell_unread(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     } else {
         " ●99+".to_string()
     };
-    let style = if ctx.is_cursor {
-        ctx.row_style()
-    } else {
-        Style::default()
-            .fg(ctx.theme.hover)
-            .add_modifier(Modifier::BOLD)
-    };
+    // Keep the unread color on the band: the dot is a signal, not
+    // decoration, so the cursor row must not flatten it (#1502).
+    let style = ctx
+        .row_style()
+        .fg(ctx.theme.hover)
+        .add_modifier(Modifier::BOLD);
     Cell::from_span(Span::styled(text, style))
 }
 
@@ -1095,7 +1117,7 @@ fn pack_badges(cells: impl IntoIterator<Item = Cell>) -> Cell {
 /// The passive-info badge cluster (#813): the low-signal badges the row
 /// carries, packed into one right-aligned cell instead of five anchored
 /// columns (#524). Left → right, least → most consequential: `⎇ local` →
-/// `✎` → `]N` → `⤓main`/`behind` → `FIX`. The two merge-when-green arms
+/// `✎` → `]N` → `⤓main`/`behind` → `$` → `FIX`. The two merge-when-green arms
 /// live in [`cell_merge_arms`] instead, at a higher drop priority, so this
 /// decoration sheds first under width pressure while the arms survive —
 /// the graduated shedding the per-badge priorities gave before the pack.
@@ -1111,7 +1133,9 @@ fn cell_badges(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         cell_notes(ctx),
         cell_snippet(ctx),
         cell_track_main(ctx),
+        cell_metered(ctx),
         cell_fix(ctx),
+        cell_origin_issue(ctx),
     ])
 }
 
@@ -1282,6 +1306,59 @@ fn cell_arm(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         format!(" {} ", crate::components::sidebar::ARM_GLYPH),
         style,
     ))
+}
+
+/// The ` $ ` metering badge (#1488): this workspace has the per-workspace
+/// meter *armed* (`Workspace::metered`, `x $`), so its spawns route through
+/// the metering proxy while it's set — effective only when the proxy is
+/// running, otherwise inert. Like the header's `$ METER` pill, this reflects
+/// the armed opt-in, not confirmed billing: it shows even with the proxy off.
+///
+/// Accent, not warn — metering is *observation*, not an automation that will
+/// act on the PR (`FIX` / `ARM` earn warn). One glyph, packed into the shared
+/// passive cluster like `✎` / `]N` / `⤓main`, so an armed canary is legible
+/// across the whole sidebar rather than only on the focused row.
+/// The ` ←298 ` originating-issue chip (#1528): this PR closes that
+/// issue, and the issue→PR collapse folded them into this one row.
+///
+/// Without it the row shows only the PR, and the issue it came from is
+/// invisible in the sidebar — you have to open the activity pane to learn
+/// that a PR is "the fix for #298", which is exactly the association you
+/// want while scanning. `+N` when the PR closes more than one.
+///
+/// Coloured like an issue glyph (`theme.hover`), not like the PR, so the
+/// eye reads it as a reference *out* to something else rather than more
+/// PR metadata.
+fn cell_origin_issue(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    let Some((id, extra)) = ctx.origin_issue.as_ref() else {
+        return Cell::empty();
+    };
+    let arrow = if ctx.ascii_glyphs { "<-" } else { "←" };
+    let label = if *extra > 0 {
+        format!(" {arrow}{id}+{extra} ")
+    } else {
+        format!(" {arrow}{id} ")
+    };
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default().fg(ctx.theme.hover)
+    };
+    Cell::from_span(Span::styled(label, style))
+}
+
+fn cell_metered(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    if !ctx.metered {
+        return Cell::empty();
+    }
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default()
+            .fg(ctx.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    };
+    Cell::from_span(Span::styled(" $ ".to_string(), style))
 }
 
 /// The compact `🔧` auto-fix glyph (iconized #1046). Packs into the shared
@@ -1561,6 +1638,8 @@ mod tests {
             auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
+            metered: false,
+            origin_issue: None,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
@@ -1594,7 +1673,7 @@ mod tests {
     }
 
     /// Regression for issue #231: the row prefix is a single shared
-    /// 1-cell selection gutter (`▶` / ` `), not a 2-cell marker re-added
+    /// 1-cell selection gutter (`▎` / ` `), not a 2-cell marker re-added
     /// at every depth. Reclaims one column of title room on every
     /// workspace row (and #121's earlier 4→2 cut goes the rest of the
     /// way to 1).
@@ -1613,7 +1692,9 @@ mod tests {
         ctx.is_cursor = true;
         let cell = cell_prefix(&ctx);
         assert_eq!(cell.width(), 1);
-        assert_eq!(cell_text(&cell), "▶");
+        assert_eq!(cell_text(&cell), CURSOR_BAR);
+        ctx.ascii_glyphs = true;
+        assert_eq!(cell_text(&cell_prefix(&ctx)), ">");
 
         // The fixed prefix column matches the cell width so the table
         // doesn't pad the inset back out.
@@ -1661,7 +1742,7 @@ mod tests {
             let cell = cell_prefix(&ctx);
 
             assert_eq!(cell.width(), 1, "theme: {}", theme.name);
-            assert_eq!(cell_text(&cell), "▶", "theme: {}", theme.name);
+            assert_eq!(cell_text(&cell), CURSOR_BAR, "theme: {}", theme.name);
             assert_eq!(
                 cell.spans[0].style.fg,
                 Some(theme.accent),
@@ -1674,6 +1755,85 @@ mod tests {
                 theme.name
             );
         }
+    }
+
+    /// The cursor row is a full-row band in BOTH focus states (#1502):
+    /// the `fill` bg persists while the user types in the workspace's
+    /// terminal, and only the focused pane's cursor is bold. A
+    /// multi-selected row gets the band too, unbolded.
+    #[test]
+    fn cursor_row_band_persists_when_pane_unfocused_across_themes() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        for theme in crate::theme::BUILT_IN_THEMES {
+            let mut ctx = ctx_for(&ws, &task, theme);
+            ctx.is_cursor = true;
+            ctx.focused = true;
+            let focused = ctx.row_style();
+            assert_eq!(focused.bg, Some(theme.fill), "theme: {}", theme.name);
+            assert!(
+                focused.add_modifier.contains(Modifier::BOLD),
+                "focused cursor is bold: {}",
+                theme.name
+            );
+            ctx.focused = false;
+            let unfocused = ctx.row_style();
+            assert_eq!(
+                unfocused.bg,
+                Some(theme.fill),
+                "unfocused cursor keeps the band: {}",
+                theme.name
+            );
+            assert!(
+                !unfocused.add_modifier.contains(Modifier::BOLD),
+                "unfocused cursor is not bold: {}",
+                theme.name
+            );
+            ctx.is_cursor = false;
+            ctx.is_selected = true;
+            assert_eq!(
+                ctx.row_style().bg,
+                Some(theme.fill),
+                "selected row is banded: {}",
+                theme.name
+            );
+            ctx.is_selected = false;
+            assert_eq!(
+                ctx.row_style(),
+                Style::default(),
+                "plain row: {}",
+                theme.name
+            );
+        }
+    }
+
+    /// The unread dot keeps its `hover` color on the cursor band — a
+    /// signal must not flatten into the highlight (#1502).
+    #[test]
+    fn unread_badge_keeps_its_color_on_the_cursor_row() {
+        let mut task = make_task("owner/repo#1", "x");
+        task.recent_activity = (0..3)
+            .map(|i| lazybox_core::Activity {
+                author: "reviewer".into(),
+                body: format!("comment {i}"),
+                created_at: fixed_time() - chrono::Duration::minutes(i),
+                kind: lazybox_core::ActivityKind::Comment,
+                node_id: None,
+                path: None,
+                line: None,
+                diff_hunk: None,
+                thread_id: None,
+            })
+            .collect();
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        assert_eq!(ws.unread_count(), 3, "fixture carries three unread items");
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.is_cursor = true;
+        let cell = cell_unread(&ctx);
+        assert_eq!(cell_text(&cell).trim(), "●3");
+        assert_eq!(cell.spans[0].style.fg, Some(theme.hover));
+        assert_eq!(cell.spans[0].style.bg, Some(theme.fill));
     }
 
     #[test]
@@ -1992,6 +2152,8 @@ mod tests {
             auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
+            metered: false,
+            origin_issue: None,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
@@ -2559,6 +2721,8 @@ mod tests {
             auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
+            metered: false,
+            origin_issue: None,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
@@ -2861,6 +3025,117 @@ mod tests {
     }
 
     /// The shared auto-fix column stays compact even on the cursor row.
+    /// #1488: a metered workspace carries a durable `$` on its row. Before
+    /// this the only per-workspace cue was a header pill drawn from the
+    /// focused row, so you couldn't tell which workspaces were metered
+    /// without visiting each one.
+    /// #1528: the issue→PR collapse folds an issue and its PR into one
+    /// row, and the row then shows only the PR — the issue it came from
+    /// disappears from the sidebar entirely. The chip puts it back.
+    #[test]
+    fn cell_origin_issue_names_the_issue_a_pr_closes() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+
+        // A PR that closes nothing renders nothing, so the column
+        // collapses for a sidebar with no linked rows.
+        assert_eq!(cell_origin_issue(&ctx).width(), 0);
+
+        ctx.origin_issue = Some(("298".to_string(), 0));
+        let cell = cell_origin_issue(&ctx);
+        assert_eq!(cell_text(&cell), " ←298 ");
+        assert_eq!(
+            cell.spans[0].style.fg,
+            Some(theme.hover),
+            "coloured as an issue reference, not as more PR metadata",
+        );
+
+        // More than one closed issue: name the first, count the rest.
+        ctx.origin_issue = Some(("298".to_string(), 2));
+        assert_eq!(cell_text(&cell_origin_issue(&ctx)), " ←298+2 ");
+
+        // A Linear ticket carries its tracker key, not a bare number.
+        ctx.origin_issue = Some(("ENG-12".to_string(), 0));
+        assert_eq!(cell_text(&cell_origin_issue(&ctx)), " ←ENG-12 ");
+
+        // `display.ascii_glyphs` keeps it readable without a Nerd Font.
+        ctx.ascii_glyphs = true;
+        assert_eq!(cell_text(&cell_origin_issue(&ctx)), " <-ENG-12 ");
+    }
+
+    /// It rides the shared passive cluster, so it packs with the other
+    /// decorations instead of reserving its own column.
+    #[test]
+    fn origin_issue_badge_packs_into_the_passive_cluster() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.origin_issue = Some(("298".to_string(), 0));
+        ctx.has_notes = true;
+
+        let text = cell_text(&cell_badges(&ctx));
+        assert!(text.contains("←298"), "origin chip missing: {text:?}");
+        assert!(text.contains('✎'), "notes badge missing: {text:?}");
+    }
+
+    #[test]
+    fn cell_metered_marks_a_metered_workspace() {
+        let task = make_task("owner/repo#1", "x");
+        let mut ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+
+        // Not metered → nothing, so the column collapses for a sidebar
+        // where no row is metered.
+        let ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(cell_metered(&ctx).width(), 0);
+
+        ws.metered = true;
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.metered = true;
+        let cell = cell_metered(&ctx);
+        assert_eq!(cell_text(&cell), " $ ");
+        assert_eq!(
+            cell.spans[0].style.fg,
+            Some(theme.accent),
+            "metering observes; it doesn't act on the PR the way FIX/ARM do",
+        );
+
+        // On the cursor row the badge inherits the row highlight so the
+        // fill stays legible — same rule every other badge follows.
+        ctx.is_cursor = true;
+        assert_eq!(cell_metered(&ctx).spans[0].style, ctx.row_style());
+    }
+
+    /// The badge rides the shared passive cluster, so it packs with the
+    /// other decorations instead of reserving its own column.
+    #[test]
+    fn metered_badge_packs_into_the_passive_cluster() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.metered = true;
+        ctx.has_notes = true;
+        ctx.auto_fix_ci_armed = true;
+
+        let text = cell_text(&cell_badges(&ctx));
+        assert!(text.contains('$'), "metered badge missing: {text:?}");
+        assert!(text.contains('✎'), "notes badge missing: {text:?}");
+
+        // Ordering (#813 doctrine, least → most consequential): metering is
+        // passive observation, so `$` packs *before* the `FIX` automation
+        // glyph — not after it as the most-consequential badge.
+        let dollar = text.find('$').expect("metered badge present");
+        let fix = text.find('🔧').expect("fix badge present");
+        assert!(
+            dollar < fix,
+            "metered `$` must render before the FIX glyph: {text:?}",
+        );
+    }
+
     #[test]
     fn cell_fix_stays_compact_on_the_cursor_row() {
         let mut task = make_task("owner/repo#1", "x");
@@ -3926,6 +4201,8 @@ mod tests {
             auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
+            metered: false,
+            origin_issue: None,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,

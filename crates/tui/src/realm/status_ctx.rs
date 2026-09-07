@@ -27,6 +27,8 @@ pub(crate) enum SyncOutcome {
         remaining: u32,
         limit: u32,
         reset_at: DateTime<Utc>,
+        /// Lazybox's own pacing, not a GitHub-imposed limit.
+        self_throttle: bool,
     },
     /// Poll failed. `kind` is the `ProviderErrorKind` string
     /// ("retryable" / "auth" / "permanent" / ""), `message` the
@@ -82,7 +84,13 @@ impl SyncLog {
         self.record(source, Utc::now(), SyncOutcome::Ok { count });
     }
 
-    pub fn note_rate_limited(&mut self, remaining: u32, limit: u32, reset_at: DateTime<Utc>) {
+    pub fn note_rate_limited(
+        &mut self,
+        remaining: u32,
+        limit: u32,
+        reset_at: DateTime<Utc>,
+        self_throttle: bool,
+    ) {
         self.record(
             "github",
             Utc::now(),
@@ -90,6 +98,7 @@ impl SyncLog {
                 remaining,
                 limit,
                 reset_at,
+                self_throttle,
             },
         );
     }
@@ -299,6 +308,8 @@ pub(crate) struct GithubRateLimitWait {
     pub remaining: u32,
     pub limit: u32,
     pub reset_at: DateTime<Utc>,
+    /// Lazybox's own pacing, not a GitHub-imposed limit.
+    pub self_throttle: bool,
     last_tick: Instant,
 }
 
@@ -335,18 +346,34 @@ impl DiscoveryBehind {
 
 impl GithubRateLimitWait {
     pub fn label(&self) -> String {
-        rate_limit_wait_label(self.remaining, self.limit, self.reset_at, Utc::now())
+        rate_limit_wait_label(
+            self.remaining,
+            self.limit,
+            self.reset_at,
+            self.self_throttle,
+            Utc::now(),
+        )
     }
 }
 
+/// Footer label for a GitHub wait. A self-throttle is lazybox pacing its
+/// OWN background requests while the budget is healthy — the user's
+/// actions (`g m`, `g s`, replies) still go through — so it must not read
+/// as GitHub blocking anything.
 pub(crate) fn rate_limit_wait_label(
     remaining: u32,
     limit: u32,
     reset_at: DateTime<Utc>,
+    self_throttle: bool,
     now: DateTime<Utc>,
 ) -> String {
+    let head = if self_throttle {
+        "pacing GitHub sync"
+    } else {
+        "GitHub rate-limited"
+    };
     format!(
-        "GitHub rate-limited · {}",
+        "{head} · {}",
         rate_limit_wait_detail(remaining, limit, reset_at, now)
     )
 }
@@ -745,6 +772,7 @@ impl StatusCtx {
         remaining: u32,
         limit: u32,
         reset_at: DateTime<Utc>,
+        self_throttle: bool,
     ) {
         if self
             .bg_poll
@@ -757,6 +785,7 @@ impl StatusCtx {
             remaining,
             limit,
             reset_at,
+            self_throttle,
             last_tick: Instant::now(),
         });
     }
@@ -1213,7 +1242,7 @@ mod tests {
         s.note_poll_progress("github", "Fetching issues");
         assert!(s.bg_poll.is_some());
 
-        s.note_github_rate_limit_wait(98, 5000, reset_at);
+        s.note_github_rate_limit_wait(98, 5000, reset_at, false);
         assert!(s.bg_poll.is_none());
         assert!(s.github_rate_limit_wait.is_some());
 
@@ -1230,8 +1259,15 @@ mod tests {
         let reset_at = Utc.with_ymd_and_hms(2026, 7, 30, 7, 23, 22).unwrap();
 
         assert_eq!(
-            rate_limit_wait_label(98, 5000, reset_at, now),
+            rate_limit_wait_label(98, 5000, reset_at, false, now),
             "GitHub rate-limited · ~7m · 07:23 UTC · 98/5000 left"
+        );
+        // Lazybox pacing itself with a healthy budget is not a GitHub
+        // limit and must not be labelled as one (the footer that made a
+        // GitHub-side merge rejection read as "rate-limited, can't merge").
+        assert_eq!(
+            rate_limit_wait_label(4053, 5000, reset_at, true, now),
+            "pacing GitHub sync · ~7m · 07:23 UTC · 4053/5000 left"
         );
     }
 
@@ -1242,7 +1278,7 @@ mod tests {
         assert!(s.note_poll_failed("github"));
         assert!(s.bg_poll.is_none());
 
-        s.note_github_rate_limit_wait(98, 5000, Utc::now() + chrono::Duration::minutes(7));
+        s.note_github_rate_limit_wait(98, 5000, Utc::now() + chrono::Duration::minutes(7), false);
         assert!(s.note_poll_failed("github"));
         assert!(s.github_rate_limit_wait.is_none());
     }
@@ -1251,7 +1287,7 @@ mod tests {
     fn rate_limit_wait_expires_without_a_follow_up_daemon_event() {
         let mut s = StatusCtx::new();
         let reset_at = Utc::now() + chrono::Duration::minutes(7);
-        s.note_github_rate_limit_wait(98, 5000, reset_at);
+        s.note_github_rate_limit_wait(98, 5000, reset_at, false);
 
         assert!(!s.tick_github_rate_limit_wait(reset_at - chrono::Duration::seconds(1)));
         assert!(s.github_rate_limit_wait.is_some());

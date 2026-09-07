@@ -586,9 +586,53 @@ fn render_shows_cursor_marker_on_selected_workspace() {
     let rendered = render_to_string(&mut s, 80, 10, true);
     let cursor_line = rendered
         .lines()
-        .find(|l| l.contains('▶'))
+        .find(|l| l.contains('▎'))
         .unwrap_or_else(|| panic!("expected cursor marker; got:\n{rendered}"));
     assert!(cursor_line.contains("o/r#1"));
+}
+
+/// The cursor row is a full-row band in BOTH focus states (#1502): every
+/// cell of the row carries the theme `fill` background whether or not the
+/// sidebar has focus, so the open workspace stays obvious while the user
+/// types in its terminal. Only the focused pane's band is bold.
+#[test]
+fn cursor_row_is_a_full_band_in_both_focus_states() {
+    let theme = lazybox_tui::theme::current();
+    for focused in [true, false] {
+        let mut s = populated_sidebar();
+        let (width, height) = (60u16, 10u16);
+        let backend = TestBackend::new(width, height);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|frame| {
+            s.render(Rect::new(0, 0, width, height), frame, focused);
+        })
+        .unwrap();
+        let buffer = term.backend().buffer();
+        let cursor_y = (0..height)
+            .find(|&y| (0..width).any(|x| buffer[(x, y)].symbol() == "▎"))
+            .unwrap_or_else(|| panic!("no cursor bar rendered (focused={focused})"));
+        // The sidebar keeps a 1-col pad on the left and the scrollbar
+        // gutter on the right outside every row rect; the band spans
+        // everything in between.
+        let inner = 1..width - 1;
+        for x in inner.clone() {
+            let cell = &buffer[(x, cursor_y)];
+            assert_eq!(
+                cell.bg,
+                theme.fill,
+                "col {x} of the cursor row lacks the band (focused={focused}): {:?}",
+                cell.symbol()
+            );
+        }
+        // (Bold-vs-not per focus state is pinned at the row-style level in
+        // `workspace_row`; individual cells like the accent bar stay bold
+        // in both states.)
+        // No other workspace row is banded.
+        let banded_rows = (0..height)
+            .filter(|&y| inner.clone().all(|x| buffer[(x, y)].bg == theme.fill))
+            .count();
+        assert_eq!(banded_rows, 1, "exactly one banded row (focused={focused})");
+    }
 }
 
 #[test]
@@ -629,7 +673,7 @@ fn render_windows_list_to_keep_cursor_visible_with_scrollbar() {
     let bottom = render_to_string(&mut s, 40, 12, true);
     let cursor_line = bottom
         .lines()
-        .find(|l| l.contains('▶'))
+        .find(|l| l.contains('▎'))
         .unwrap_or_else(|| panic!("expected cursor marker; got:\n{bottom}"));
     assert!(
         cursor_line.contains("o/r#20"),
@@ -714,7 +758,7 @@ fn keyboard_nav_reanchors_wheel_scrolled_viewport() {
         "render re-anchored the viewport onto the cursor row"
     );
     assert!(
-        rendered.contains('▶'),
+        rendered.contains('▎'),
         "cursor marker back on screen; got:\n{rendered}"
     );
 }
@@ -2103,6 +2147,191 @@ fn bang_jumps_to_next_asking_workspace() {
     let moved = s.focus_next_asking_workspace();
     assert!(moved, "must report a move when a target exists");
     assert_eq!(s.selected_session_key(), Some(&k2));
+}
+
+/// A sidebar of `n` workspaces in one repo, cursor on the first, with
+/// the viewport height recorded by a render at `height` rows (#1502).
+fn long_sidebar(n: usize, height: u16) -> Sidebar {
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let workspaces: Vec<_> = (1..=n)
+        .map(|i| {
+            make_workspace(
+                "owner/repo",
+                &format!("o/r#{i}"),
+                now - Duration::seconds(i as i64),
+            )
+        })
+        .collect();
+    s.on_event(&Event::Snapshot {
+        workspaces,
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    let _ = render_to_string(&mut s, 60, height, true);
+    s
+}
+
+/// PgDn / PgUp move a viewport of rows, Ctrl-d / Ctrl-u half of one,
+/// both clamped at the ends; Home / End hit the edges (#1502).
+#[test]
+fn paging_and_edge_keys_move_the_cursor_by_the_viewport() {
+    let mut s = long_sidebar(40, 20);
+    let mut cmds = Vec::new();
+    let start = s.cursor();
+    s.handle_key(key_code(KeyCode::PageDown), &mut cmds);
+    let after_page = s.cursor();
+    assert!(
+        after_page > start + 5,
+        "PgDn moves a page: {start} → {after_page}"
+    );
+    s.handle_key(key_code(KeyCode::PageUp), &mut cmds);
+    assert_eq!(s.cursor(), start, "PgUp returns");
+    s.handle_key(
+        KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        &mut cmds,
+    );
+    let half = s.cursor() - start;
+    assert!(
+        half > 0 && half < after_page - start,
+        "Ctrl-d is half a page: {half}"
+    );
+    s.handle_key(
+        KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        &mut cmds,
+    );
+    assert_eq!(s.cursor(), start, "Ctrl-u returns");
+    s.handle_key(key_code(KeyCode::End), &mut cmds);
+    let last = s.cursor();
+    assert!(last > after_page, "End jumps to the last row");
+    s.handle_key(key_code(KeyCode::PageDown), &mut cmds);
+    assert_eq!(s.cursor(), last, "PgDn clamps at the end");
+    s.handle_key(key_code(KeyCode::Home), &mut cmds);
+    assert_eq!(s.cursor(), 0, "Home is the first row");
+    s.handle_key(key_code(KeyCode::PageUp), &mut cmds);
+    assert_eq!(s.cursor(), 0, "PgUp clamps at the top");
+}
+
+/// `}` / `{` hop between group headers and clamp at the ends (#1502).
+#[test]
+fn group_hop_lands_on_headers_and_clamps() {
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![
+            make_workspace("owner/alpha", "o/a#1", now),
+            make_workspace("owner/alpha", "o/a#2", now - Duration::seconds(1)),
+            make_workspace("owner/beta", "o/b#1", now - Duration::seconds(2)),
+            make_workspace("owner/gamma", "o/g#1", now - Duration::seconds(3)),
+        ],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    let is_header = |s: &Sidebar| {
+        matches!(
+            s.visible_rows().get(s.cursor()),
+            Some(VisibleRow::RepoHeader(_) | VisibleRow::SpaceHeader(_))
+        )
+    };
+    assert!(!is_header(&s), "cursor starts on a workspace row");
+    assert!(
+        s.move_cursor_to_group(true),
+        "next-group finds the next header"
+    );
+    assert!(is_header(&s));
+    let first_hop = s.cursor();
+    assert!(s.move_cursor_to_group(true));
+    assert!(
+        is_header(&s) && s.cursor() > first_hop,
+        "next-group keeps advancing"
+    );
+    while s.move_cursor_to_group(true) {}
+    let last = s.cursor();
+    assert!(
+        !s.move_cursor_to_group(true),
+        "next-group clamps at the last header"
+    );
+    assert_eq!(s.cursor(), last);
+    assert!(s.move_cursor_to_group(false), "prev-group goes back");
+    assert!(is_header(&s) && s.cursor() < last);
+    while s.move_cursor_to_group(false) {}
+    assert!(
+        !s.move_cursor_to_group(false),
+        "prev-group clamps at the first header"
+    );
+}
+
+/// `Shift-N` cycles through workspaces with unread activity, wrapping,
+/// and reports nothing to jump to when the inbox is all read (#1502).
+#[test]
+fn next_unread_cycles_with_wrap_and_reports_none() {
+    let mut s = Sidebar::new(PaneId::new(1));
+    let now = Utc::now();
+    let unread = |key: &str, secs: i64| {
+        let mut t = make_task("owner/repo", key, now - Duration::seconds(secs));
+        t.recent_activity.push(lazybox_core::Activity {
+            author: "reviewer".into(),
+            body: "ping".into(),
+            created_at: now,
+            kind: lazybox_core::ActivityKind::Comment,
+            node_id: None,
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        });
+        Workspace::from_task(t, now)
+    };
+    let w1 = make_workspace("owner/repo", "o/r#1", now);
+    let w2 = unread("o/r#2", 1);
+    let w3 = make_workspace("owner/repo", "o/r#3", now - Duration::seconds(2));
+    let w4 = unread("o/r#4", 3);
+    let (k2, k4) = (ws_key(&w2), ws_key(&w4));
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![w1, w2, w3, w4],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    assert!(s.focus_next_unread_workspace());
+    assert_eq!(s.selected_session_key(), Some(&k2));
+    assert!(s.focus_next_unread_workspace());
+    assert_eq!(s.selected_session_key(), Some(&k4));
+    assert!(s.focus_next_unread_workspace(), "wraps around");
+    assert_eq!(s.selected_session_key(), Some(&k2));
+
+    let mut quiet = populated_sidebar();
+    assert!(
+        !quiet.focus_next_unread_workspace(),
+        "nothing unread → no move"
+    );
+}
+
+/// `Enter` on a live search query commits the filter AND asks the host
+/// to open the top match; an empty query just closes the bar (#1502).
+#[test]
+fn search_enter_commits_and_opens_the_top_match() {
+    let mut s = populated_sidebar();
+    s.open_search();
+    for c in "r#2".chars() {
+        s.handle_search_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+    }
+    assert!(
+        s.handle_search_key(key_code(KeyCode::Enter)),
+        "Enter on a query opens the match"
+    );
+    assert!(!s.search_editing(), "and commits the filter");
+    let mut empty = populated_sidebar();
+    empty.open_search();
+    assert!(
+        !empty.handle_search_key(key_code(KeyCode::Enter)),
+        "Enter on an empty query only closes the bar"
+    );
 }
 
 #[test]

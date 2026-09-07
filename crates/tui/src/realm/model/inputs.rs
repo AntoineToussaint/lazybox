@@ -295,6 +295,39 @@ impl<T: TerminalAdapter> Model<T> {
         cmds
     }
 
+    /// `a R` — restart every limited agent so it picks up fresh credentials
+    /// (stop, respawn the same conversation with `--resume`, continue). One
+    /// `RestartAgentAndContinue` per terminal; the daemon owns the swap and
+    /// the settle-gated continuation. Unlike the plain resume this also
+    /// takes the *parked* `AwaitingReset` agents (auto-Wait pressed, or
+    /// Claude's own auto-continue): a "continue" typed into those would
+    /// only cancel the wait, but a respawn on the new account gets them
+    /// working now instead of at the reset.
+    pub(super) fn restart_rate_limited_agents(&mut self) -> Vec<IpcCommand> {
+        let terminals = self.sidebar.limited_terminals();
+        if terminals.is_empty() {
+            self.flash_hint("no rate-limited agents to restart");
+            return Vec::new();
+        }
+        let cmds: Vec<IpcCommand> = terminals
+            .iter()
+            .map(|terminal_id| IpcCommand::RestartAgentAndContinue {
+                terminal_id: *terminal_id,
+            })
+            .collect();
+        let restarted = terminals.len();
+        let plural = if restarted == 1 { "" } else { "s" };
+        // "up to": the daemon rejects a pane with no launch metadata or one
+        // mid re-authentication (`CommandRejected`), so the client cannot
+        // promise all N will restart — this is a kill+respawn, and claiming a
+        // destructive action happened when it was refused is the worse error.
+        self.flash_info(format!(
+            "restarting up to {restarted} rate-limited agent{plural} with fresh credentials"
+        ));
+        self.redraw = true;
+        cmds
+    }
+
     pub(super) fn recover_agent_credit(&mut self, bulk: bool) -> Vec<IpcCommand> {
         let targets = if bulk {
             self.sidebar.credit_exhausted_terminals()
@@ -424,6 +457,43 @@ impl<T: TerminalAdapter> Model<T> {
         self.maybe_mount_next_merge_prompt();
     }
 
+    /// Commands that create `name` under `project_key` AND land the user
+    /// in a live session immediately: creating a workspace and then
+    /// having to know to press `c` was the main first-run friction, so
+    /// the daemon spawns the configured default agent into the new
+    /// workspace (see the `CreateWorkspace` server handler). Shared by
+    /// the new-workspace name input and the Start sheet's Chat row
+    /// (#1502).
+    pub(super) fn create_workspace_cmds(
+        &mut self,
+        project_key: lazybox_core::ProjectKey,
+        name: String,
+    ) -> Vec<IpcCommand> {
+        let spawn_agent = Some(self.sidebar.default_agent().to_string());
+        let client_request_id = uuid::Uuid::new_v4().hyphenated().to_string();
+        self.pending_workspace_creates.insert(
+            client_request_id.clone(),
+            super::PendingWorkspaceCreate {
+                name: name.clone(),
+                spawn_agent: spawn_agent.is_some(),
+                workspace_key: None,
+            },
+        );
+        tracing::info!(
+            workspace_name = %name,
+            project_key = %project_key,
+            %client_request_id,
+            ?spawn_agent,
+            "creating new pre-PR workspace under project",
+        );
+        vec![IpcCommand::CreateWorkspace {
+            name,
+            project_key,
+            spawn_agent,
+            client_request_id: Some(client_request_id),
+        }]
+    }
+
     /// Input modal submit (single-line text). Dispatch by which
     /// Input modal is currently on top. Handles `NewWorkspace`
     /// (→ `CreateWorkspace`), `RequestReviewers`, `AddAssignees`.
@@ -445,36 +515,7 @@ impl<T: TerminalAdapter> Model<T> {
                 };
                 match (name.is_empty(), project_key) {
                     (false, Some(project_key)) => {
-                        // Land the user in a live session immediately:
-                        // creating a workspace and then having to know to
-                        // press `c` was the main first-run friction. The
-                        // daemon spawns the configured default agent into
-                        // the new workspace (see `CreateWorkspace`
-                        // server handler). Same behavior for the global
-                        // "start agent" shortcut, which funnels here.
-                        let spawn_agent = Some(self.sidebar.default_agent().to_string());
-                        let client_request_id = uuid::Uuid::new_v4().hyphenated().to_string();
-                        self.pending_workspace_creates.insert(
-                            client_request_id.clone(),
-                            super::PendingWorkspaceCreate {
-                                name: name.clone(),
-                                spawn_agent: spawn_agent.is_some(),
-                                workspace_key: None,
-                            },
-                        );
-                        tracing::info!(
-                            workspace_name = %name,
-                            project_key = %project_key,
-                            %client_request_id,
-                            ?spawn_agent,
-                            "creating new pre-PR workspace under project",
-                        );
-                        cmds.push(IpcCommand::CreateWorkspace {
-                            name,
-                            project_key,
-                            spawn_agent,
-                            client_request_id: Some(client_request_id),
-                        });
+                        cmds.extend(self.create_workspace_cmds(project_key, name));
                     }
                     (false, None) => {
                         tracing::warn!(
@@ -1519,13 +1560,14 @@ showing keybinding search only",
                 }) = self.modal_flow.take()
                 {
                     if yes {
-                        // Selection survives the spawn so the same set can
-                        // be acted on again (#1449); Esc / a projection
-                        // prune are the only clears.
+                        // The confirmed spawn consumes its selection
+                        // (#1498) — `steps` is already snapshotted, so
+                        // clearing can't shrink what runs.
+                        let acted = steps.len();
                         if let Some(target) = follow {
                             self.spawn_follow_to = Some(target);
                         }
-                        self.flash_bulk_outcome(summary);
+                        self.flash_bulk_outcome(summary, acted);
                         self.redraw = true;
                         cmds.extend(self.run_bulk_agent_steps(steps));
                     } else {
@@ -1803,7 +1845,8 @@ showing keybinding search only",
                 self.setup.runner = Some(runner);
                 // Layer 2: turn the pure Screen into a widget. Loading
                 // screens hand back a producer the executor delivers into.
-                let (component, result) = crate::realm::setup_screen::render(screen);
+                let (component, result) =
+                    crate::realm::setup_screen::render_with(screen, &self.action_key_overrides);
                 self.mount_setup_modal(component);
                 // Layer 3: run the paired effect (if any) against the
                 // registered scope sources. Result flows back as

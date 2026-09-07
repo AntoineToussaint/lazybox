@@ -96,7 +96,8 @@ crates/
                    #   Also: per-provider LLM-gateway base-URL env injection
                    #   (ANTHROPIC_BASE_URL / OPENAI_BASE_URL ← agent.llm_gateway_url).
   server/          # Server library: PTY lifecycle, ring buffers, provider
-                   #   polling, agent runs, JSON API gateway.
+                   #   polling, agent runs, JSON API gateway, cross-agent
+                   #   coordination MCP server (mcp.rs).
 
   # ── client / binary ─────────────────────────────────────────────────
   tui-core/        # Ratatui-free TUI logic: action catalog, intent
@@ -140,6 +141,14 @@ crates/
     `SetupRunner` state machine driving Choice/Loading/Error modals.
 - **Event bus**: `tokio::sync::broadcast` inside the daemon. Providers
   produce; subscribers (TUI clients, JSON API gateway) consume.
+- **GitHub discovery is repo-first** (see
+  [`docs/sync-performance.md`](docs/sync-performance.md#repo-first-discovery)):
+  with scoped/watched repos, the daemon sweeps every roster member with
+  one windowed PR query + one issue query on a rotation sized by
+  `providers.github.repo_refresh_interval` (default 5 min); a 30-min /
+  `Shift-R` reconcile sweeps the whole roster unwindowed and is the only
+  pass allowed to retire rows. The user-centric `involves:USER` global
+  sweep only runs when no scopes are configured.
 - **Credential chain**: `EnvProvider("GH_TOKEN") → EnvProvider("GITHUB_TOKEN") → CommandProvider("gh auth token")`. Trait-based, extensible (Vault, Keychain, OAuth).
 - **Store**: `Store` trait with `SqliteStore` backend at `~/.lazybox/v2/state.db`.
   Read/unread, snooze, and session metadata persist across launches.
@@ -154,9 +163,19 @@ crates/
   stream-json --output-format stream-json` for non-terminal clients (Tauri,
   iOS, JSON API). Raw JSON is preserved alongside normalized events.
 - **Agent autonomy**: spawned Claude Code sessions drive the repo directly
-  with `gh` and `git`. Lazybox does not wrap these actions behind an
+  with `gh` and `git`. Lazybox does not wrap *repo actions* behind an
   MCP/tool-approval layer — the agent has the same tools it would in any
   other worktree.
+- **Cross-agent coordination bus** (`crates/server/src/mcp.rs`, #1420/#1433):
+  the one MCP server lazybox *does* ship is a coordination surface, not a
+  repo-action wrapper. Each spawned Claude session gets a per-session bearer
+  + `--mcp-config` pointing at a loopback `rmcp` endpoint (identity is the
+  connection), exposing `whoami` / `list_sessions` / `read_session` (pull),
+  `post_note` / `read_notes` (a persistent kv-backed blackboard, the primary
+  medium), and `notify_session` (the settle-gated inject as a tool). Agents
+  learn the tools from the `SessionStart` briefing
+  (`crates/agents/src/session_context.rs`). Design:
+  [`docs/mcp-coordination.md`](docs/mcp-coordination.md).
 
 ### Adding a new provider
 
@@ -207,7 +226,12 @@ Each row's `Section` (`Global` / `Workspace` / `Sidebar` / `Activity` /
 collision-detector test fails the build on two bindings colliding
 within a section or at the same rank under a focus. The `?` help is the
 generated Keys screen: every binding by scope with effective
-(post-override) chords. `ui.keymap_preset` selects an in-tree starter
+(post-override) chords. Each flat row the mastery ledger records you
+having used carries a dim `✓`; a leader group carries `✓ used/total`
+progress (a bare `✓` once every chord in it has been used), so the Keys
+screen doubles as a frontier map of shortcuts still worth learning — the
+mark and its legend appear only once you've earned one (#1502).
+`ui.keymap_preset` selects an in-tree starter
 keymap (`default`, `vim`); explicit `ui.action_keys` layers on top.
 The default keymap is leaders-only (#304): grouped actions ship a
 single leader chord, no direct-key aliases — a concept with ≥2 sibling
@@ -215,14 +239,27 @@ actions gets a leader group (named in `leader_group_label`); only true
 primary actions (`w`, `Enter`, navigation) earn top-level keys. The
 footer hint bar reads each pane's `contextual_bindings()`, collapsing
 a leader group into one cell (`g ▸ github`, `a ▸ agent`) — the
-which-key popup and `?` help reuse the same group labels.
+which-key popup and `?` help reuse the same group labels. When the bar
+is narrower than its cells it ends in a `… +N more` cell: clicking it
+pops exactly the hidden hints in which-key chrome (any key closes it
+and is still handled), and `?`'s empty prompt lists every key of the
+focused pane, hidden ones included, so the keyboard path never needs
+the mouse (#1502).
 
 **Global**: `Tab` cycle panes, `?` help, `q q` quit, `,` settings,
 `t` theme picker (live-preview palette list; the choice persists to
-`ui.theme`), `Shift-W` start agent from anywhere (pick a project,
-name a workspace, spawn the default agent — one flow, any pane),
+`ui.theme`), `Shift-W` the **Start sheet** from anywhere (#1502) — one
+modal that works on an empty install: `Chat` (a dated workspace under a
+`scratch` local project with the default agent spawned in, no repo, no
+name to type), `Repository…` (the `x p` repo picker), `Workspace` (the
+`x n` name input under the cursor's project, when there is one), and
+`Project…` (the project picker); the empty-inbox doctor and the splash
+render their keys from the catalog, so a remap never shows a stale key,
+and `lazybox --fresh` forgets the wizard answers + onboarding markers in
+`config.yaml` (not just `state.db`) so setup and the coach replay,
 `]` browse snippets (read-only catalog; `e` there opens the YAML),
-`Shift-R` refresh, `Ctrl-L` force a full repaint (recovery for a
+`Shift-R` refresh (sweep every scoped repo now — an unwindowed
+repo-first reconcile), `Ctrl-L` force a full repaint (recovery for a
 stale/garbled screen; resize and focus-regain also repaint
 automatically), `Shift-T` coach (the onboarding coach rail — one
 objective at a time, gated on you doing it; press again to end it,
@@ -267,7 +304,26 @@ they extend the multi-select instead — #932), `F8` /
 selection), mouse-click any pane to focus it, mouse-drag splitters to
 resize.
 
-**Sidebar**: `j/k` or arrows navigate, `Enter` open (focus activity),
+**Sidebar**: the header is three fixed rows (#1502): brand + dim
+version + every attention counter (`● new`, `? input`, `⏳ limited`,
+`✗ CI`, `◔ review` — compacting to `●6 ?1 ✗3` and shedding the version
+before any counter drops, never wrapping) with the item count right;
+the filter / sort / find chips with today's tally right-aligned (no
+`$0.00`); then a divider with the list directly under it. The focused
+row's automation phrase (`AUTO-MERGE · GitHub`, `AUTO-FIX ON`, `$ METER`)
+and the per-provider usage bars each take a row only when present.
+Keep-awake (`☼ awake`) is daemon status and lives in the footer's
+status slot. A row's `◆` model badge marks a deviation only: a single
+agent running its default tier (`agents.<id>.models.default`, else the
+built-in default) shows no badge, a Sonnet run beside an Opus default
+shows `◆S`. The cursor row is a full-row band (theme `fill`) with a
+`▎` accent bar in the gutter, kept — unbolded — while another pane has
+focus so the open workspace stays obvious; multi-selected rows share the
+band behind their `✓` (#1502). `j/k` or arrows navigate, `PgUp`/`PgDn` a
+viewport, `Ctrl-u`/`Ctrl-d` half of one, `Home`/`End` the edges, `{`/`}`
+hop between group headers, `Shift-N` jumps to the next unread workspace
+(wrapping, like `!` / `Shift-F`), `/` then `Enter` on a live query
+commits the filter AND opens the top match (#1502), `Enter` open (focus activity),
 `w w` work on this (contextual agent prompt), `s` shell, `e` editor,
 `m` mark read, `z` snooze, `f` open the filter
 menu (a multi-select over state / role / kind predicates — with-agent,
@@ -350,12 +406,13 @@ running an agent; `g m` merge, `g u` update-branch, `z` snooze,
 `x x` archive, `m` mark-read, `g s` sync, `g g` arm-auto-merge,
 `g d` delete-or-close, and `x c` close-issue apply per target,
 running the eligible ones and summarizing what was
-skipped and why. The selection **survives a bulk action** (#1449) so a
-set can be acted on more than once — the common finishing chain is `g d`
-then `x x` over the *same* rows — and every bulk summary names the
-still-live selection (`… · N still selected`); it clears only on `Esc`
-or when a row leaves the projection (the `recompute_visible` prune, so an
-archived row's mark prunes with it). Destructive bulk actions confirm
+skipped and why. A bulk action **consumes its selection** (#1498,
+reverting #1449): once anything actually ran, the marks are dropped, so
+acting on the same set twice means re-marking it. A run where every
+target was ineligible ("nothing to merge") keeps the marks so it can be
+retried. `Esc` still clears a selection you built but haven't acted on,
+and a row leaving the projection prunes its own mark
+(`recompute_visible`, so an archived row's mark goes with it). Destructive bulk actions confirm
 with the count + an affected list + the eligible/skipped split (e.g.
 "Merge 3 of 5 selected PRs?", "Close 3 PRs without merging and delete 1
 issue?"), snapshotting the selection at mount so a poll under
@@ -411,7 +468,16 @@ declared per agent under `agents.<id>.models` in YAML (an ordered
 Claude ships a built-in Haiku/Sonnet/Opus menu, other agents define
 their own. The alias is agent-agnostic at the chord — the daemon maps
 it to whatever agent the spawn targets — and the picked tier's label
-rides a `◆ Opus` tab badge. `g` is a leader that
+rides a `◆ Opus` tab badge. The `a` leader also carries the bulk
+**rate-limit recovery** chord `a R` (restart rate-limited): for every
+agent blocked (`⏳ LimitReached`) or parked (`💤 AwaitingReset`) on a
+usage limit, the daemon stops its process, respawns the same
+conversation in the same pane (`--resume`), and submits the configured
+continuation prompt — the way to pick up fresh credentials after
+switching Claude account / API key externally, since a running process
+never re-reads them. `Shift-K` (resume rate-limited) stays the
+lightweight sibling for when the limit has simply reset: it injects a
+settle-gated `continue` into each `LimitReached` agent. `g` is a leader that
 opens the **github** group the same way: `g m` merge, `g u` update
 branch (the "Update branch" button — merge base into head; only on a
 PR behind its base, #484), `g g` toggle
@@ -421,9 +487,9 @@ own PR, no conflicts, no changes requested; only while lazybox runs),
 listing merge-on-green, per-session auto-fix arm/disarm, and
 GitHub-native auto-merge status for the focused PR/issue, each toggled
 in place; #363), `g r` reviewers, `g a` assignees, `g l` labels,
-`g s` sync (a targeted re-poll of just the focused workspace's own
-PR/issue instead of the global `Shift-R` sweep — cheap when you're
-waiting on one PR's CI; #456), `g o` open in browser, `g d` delete issue / close PR (confirmed
+`g s` sync (re-poll the focused workspace's own PR/issue AND its
+repo's open PRs + issues, interactive priority — "sync this repo now",
+versus the roster-wide `Shift-R` sweep; #456, #1390), `g o` open in browser, `g d` delete issue / close PR (confirmed
 first, naming the target; an issue is hard-deleted when the token
 has admin rights, else closed as not-planned with a notice; a PR is
 closed without merging; #408) — leader chords only, the legacy
@@ -511,9 +577,12 @@ is forwarded as an interrupt. Tile management rides the same leader
 (#286): `]]|` / `]]-` split, `]]<arrow>` moves tile focus (cycles
 tabs in Tabs mode), `]]x` closes the focused terminal (tile or active
 tab) — `Ctrl-w` is no longer a lazybox prefix and reaches the inner
-program (readline word-erase). `]]t` toggles whether a new shell/agent
-opens as a split or a tab (#361), persisting `ui.terminal_new_layout`;
-the `]]` popup's `t` row shows the current setting.
+program (readline word-erase). `]]t` switches this session's terminals
+between **tabs and side-by-side tiles** and sets how the next one opens
+(#1508, extending #361), persisting `ui.terminal_new_layout`. It converts
+what's already open in both directions — terminal order preserved, the
+focused one still focused — and on an empty pane flips the preference
+alone; the `]]` popup's `t` row names the layout it switches *to*.
 `Shift-PgUp/PgDn` scroll the
 scrollback, `Shift-Home/End` jump top/bottom (mouse wheel works too).
 

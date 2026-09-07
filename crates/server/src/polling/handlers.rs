@@ -728,36 +728,59 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
     if let Some((owner, repo, number)) = ws.pr.as_ref().and_then(github_target)
         && let Some(client) = resolve_gh_client(config).await
     {
-        match client
-            .fetch_single_pr_with_head_interactive(&owner, &repo, number)
-            .await
-        {
-            Ok(Some((fresh, head))) => {
-                // Reflect GitHub truth in the store so the CONFLICT / READY
-                // pills and any next action read fresh state.
-                super::upsert(config, fresh.clone()).await;
-                match classify_fresh_pr(&fresh, head) {
-                    FreshMergeCheck::Conflict => {
-                        let _ = config.bus.send(Event::PrMergeFailed {
-                            workspace_key: workspace_key.clone(),
-                            pr_label: fresh.id.key.clone(),
-                            reason: "the branch has merge conflicts".to_string(),
-                            conflict: true,
-                        });
-                        return;
-                    }
-                    FreshMergeCheck::Proceed { head } => {
-                        merge_ws.pr = Some(fresh);
-                        expected_head = head;
+        // While GitHub has us on a secondary cooldown, interactive
+        // requests are rationed and each one GitHub still refuses
+        // lengthens the pause. The fresh pre-check is optional; the
+        // mutation is what the user asked for. Spend the ration on the
+        // merge itself and merge from the cached row — GitHub remains
+        // the authority at merge time, so a stale head or conflict still
+        // gets its own rejection.
+        let paused_until = client
+            .rate_snapshot()
+            .retry_at
+            .filter(|at| *at > chrono::Utc::now());
+        if let Some(paused_until) = paused_until {
+            tracing::info!(
+                "merge {workspace_key}: GitHub rate-limited until {paused_until} — \
+                 skipping the fresh pre-merge check, merging from cached state"
+            );
+            let _ = config.bus.send(Event::provider_error_retryable(
+                "merge",
+                "GitHub is rate-limited — merging from the last synced state without a fresh pre-check",
+            ));
+        }
+        if paused_until.is_none() {
+            match client
+                .fetch_single_pr_with_head_interactive(&owner, &repo, number)
+                .await
+            {
+                Ok(Some((fresh, head))) => {
+                    // Reflect GitHub truth in the store so the CONFLICT / READY
+                    // pills and any next action read fresh state.
+                    super::upsert(config, fresh.clone()).await;
+                    match classify_fresh_pr(&fresh, head) {
+                        FreshMergeCheck::Conflict => {
+                            let _ = config.bus.send(Event::PrMergeFailed {
+                                workspace_key: workspace_key.clone(),
+                                pr_label: fresh.id.key.clone(),
+                                reason: "the branch has merge conflicts".to_string(),
+                                conflict: true,
+                            });
+                            return;
+                        }
+                        FreshMergeCheck::Proceed { head } => {
+                            merge_ws.pr = Some(fresh);
+                            expected_head = head;
+                        }
                     }
                 }
-            }
-            // PR no longer visible (merged out-of-band / transferred /
-            // scope revoked): fall through and let the mutation surface
-            // GitHub's own verdict.
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!("merge {workspace_key}: pre-merge status fetch failed: {e}");
+                // PR no longer visible (merged out-of-band / transferred /
+                // scope revoked): fall through and let the mutation surface
+                // GitHub's own verdict.
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("merge {workspace_key}: pre-merge status fetch failed: {e}");
+                }
             }
         }
     }
@@ -1661,13 +1684,13 @@ pub(crate) async fn resolve_gh_client_result(config: &ServerConfig) -> Result<Gh
     if let Some(client) = config.poll.cached_gh_client() {
         return Ok(client);
     }
-    let cred = lazybox_gh::credential_chain()
-        .resolve(lazybox_gh::SOURCE)
-        .await
-        .map_err(|error| format!("github credentials: {error}"))?;
     let host = lazybox_config::Config::load()
         .unwrap_or_default()
         .github_host();
+    let cred = lazybox_gh::credential_chain(host.as_deref())
+        .resolve(&lazybox_gh::credential_scope(host.as_deref()))
+        .await
+        .map_err(|error| format!("github credentials: {error}"))?;
     let client = GhClient::from_credential_with_host(cred, host.as_deref())
         .await
         .map_err(|error| format!("github client init: {error}"))?;

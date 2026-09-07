@@ -302,9 +302,15 @@ fn outcome_span(e: &SyncEntry, theme: &crate::theme::Theme, now: DateTime<Utc>) 
             remaining,
             limit,
             reset_at,
+            self_throttle,
         } => Span::styled(
             format!(
-                "rate-limited · {}",
+                "{} · {}",
+                if *self_throttle {
+                    "pacing"
+                } else {
+                    "rate-limited"
+                },
                 crate::realm::status_ctx::rate_limit_wait_detail(
                     *remaining, *limit, *reset_at, now
                 )
@@ -432,6 +438,7 @@ mod tests {
                 remaining: 98,
                 limit: 5000,
                 reset_at: now + chrono::Duration::minutes(7),
+                self_throttle: false,
             },
         }
     }
@@ -600,6 +607,7 @@ mod tests {
                 remaining: 98,
                 limit: 5000,
                 reset_at: n - chrono::Duration::minutes(1),
+                self_throttle: false,
             },
         };
         let mut comp = SyncStatus::new(vec![entry.clone()], vec![entry], n);

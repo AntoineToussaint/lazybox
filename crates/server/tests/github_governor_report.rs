@@ -266,6 +266,12 @@ fn sync_cursors_survive_a_real_sqlite_restart() {
         last_pr_sweep_at: Some(Utc.with_ymd_and_hms(2026, 7, 30, 10, 1, 0).unwrap()),
         last_merged_sweep_at: Some(Utc.with_ymd_and_hms(2026, 7, 30, 10, 2, 0).unwrap()),
         last_full_reconcile_at: Some(Utc.with_ymd_and_hms(2026, 7, 30, 10, 0, 0).unwrap()),
+        repo_windows: [(
+            "acme/widgets".to_string(),
+            Utc.with_ymd_and_hms(2026, 7, 30, 10, 3, 0).unwrap(),
+        )]
+        .into_iter()
+        .collect(),
     };
 
     {

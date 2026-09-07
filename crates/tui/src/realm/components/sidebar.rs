@@ -261,10 +261,22 @@ impl Sidebar {
         self.focused = focused;
     }
 
-    /// Record whether `ui.keep_awake` is on so the header can badge
-    /// active sleep inhibition.
-    pub fn set_keep_awake(&mut self, keep_awake: bool) {
-        self.inner.set_keep_awake(keep_awake);
+    /// Record the daemon's authoritative keep-awake status (holding +
+    /// power source) so the header badges active sleep inhibition and
+    /// tells the truth about what it protects (#1485).
+    pub fn set_keep_awake_status(&mut self, active: bool, on_battery: bool) {
+        self.inner.set_keep_awake_status(active, on_battery);
+    }
+
+    /// See `Sidebar::keep_awake_status` (#1502).
+    pub fn keep_awake_status(&self) -> Option<bool> {
+        self.inner.keep_awake_status()
+    }
+
+    /// Rows of header chrome above the first list row for a pane of
+    /// this size — the offset every click hit-test uses (#1502).
+    pub fn header_height(&self, area: Rect) -> u16 {
+        self.inner.header_height(area)
     }
 
     /// Record whether `ui.auto_wait_on_limit` is on so the rising-edge
@@ -283,6 +295,11 @@ impl Sidebar {
     /// abbreviates the model badge (`◆O`, #1068).
     pub fn set_model_shorts(&mut self, shorts: std::collections::HashMap<(char, String), String>) {
         self.inner.set_model_shorts(shorts);
+    }
+
+    /// Replace the `badge_letter → default tier label` map (#1502).
+    pub fn set_default_model_labels(&mut self, defaults: std::collections::HashMap<char, String>) {
+        self.inner.set_default_model_labels(defaults);
     }
 
     /// Record whether `ui.usage_summary` is on — gates the always-visible
@@ -364,6 +381,16 @@ impl Sidebar {
         self.inner.note_provider_quota(agent_id, session_key, quota);
     }
 
+    /// The live spend/headroom badge for an agent terminal (#1490): plan-quota
+    /// headroom when known, else the session's metered cost.
+    pub fn terminal_usage_badge(
+        &self,
+        session_key: &str,
+        agent_id: &str,
+    ) -> Option<crate::components::terminal_stack::UsageBadge> {
+        self.inner.terminal_usage_badge(session_key, agent_id)
+    }
+
     /// Attribute a usage-limit reset hint to a terminal's agent
     /// (`AgentUsageLimit`).
     pub fn note_usage_limit_reset(&mut self, terminal_id: lazybox_ipc::TerminalId, hint: String) {
@@ -377,9 +404,10 @@ impl Sidebar {
     }
 
     /// Feed one keystroke into the open search bar. See
-    /// `Sidebar::handle_search_key`.
-    pub fn handle_search_key(&mut self, key: crossterm::event::KeyEvent) {
-        self.inner.handle_search_key(key);
+    /// `Sidebar::handle_search_key`; `true` when `Enter` committed a
+    /// live query and the top match should open (#1502).
+    pub fn handle_search_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
+        self.inner.handle_search_key(key)
     }
 
     /// True when `(col, row)` lands on the bottom `/` search input bar.
@@ -434,6 +462,15 @@ impl Sidebar {
     /// Delegates to the inner pane (issue #1461).
     pub fn set_inbox_health(&mut self, health: crate::components::sidebar::InboxHealth) {
         self.inner.set_inbox_health(health);
+    }
+
+    /// Install the user's `ui.action_keys` overrides so the doctor
+    /// panel renders effective keys (#1502). Delegates to the inner pane.
+    pub fn set_action_key_overrides(
+        &mut self,
+        overrides: std::collections::BTreeMap<String, String>,
+    ) {
+        self.inner.set_action_key_overrides(overrides);
     }
 
     #[cfg(test)]
@@ -767,9 +804,26 @@ impl Sidebar {
         self.inner.focus_next_limit_reached_workspace()
     }
 
+    /// Move the cursor onto the next workspace with unread activity,
+    /// wrapping around. Backs the `Shift-N` global key (#1502).
+    pub fn focus_next_unread_workspace(&mut self) -> bool {
+        self.inner.focus_next_unread_workspace()
+    }
+
+    /// Move the cursor to the previous / next group header. Backs the
+    /// `{` / `}` sidebar keys (#1502).
+    pub fn move_cursor_to_group(&mut self, forward: bool) -> bool {
+        self.inner.move_cursor_to_group(forward)
+    }
+
     /// See `Sidebar::limit_reached_terminals`.
     pub fn limit_reached_terminals(&self) -> Vec<lazybox_ipc::TerminalId> {
         self.inner.limit_reached_terminals()
+    }
+
+    /// See `Sidebar::limited_terminals`.
+    pub fn limited_terminals(&self) -> Vec<lazybox_ipc::TerminalId> {
+        self.inner.limited_terminals()
     }
 
     /// See `Sidebar::limit_reached_workspace_count`.

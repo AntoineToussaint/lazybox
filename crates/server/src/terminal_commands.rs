@@ -70,6 +70,7 @@ pub(crate) async fn run_io_router(
             | Command::DeliverSnippet { terminal_id, .. }
             | Command::RecoverAgentCredit { terminal_id, .. }
             | Command::ResumeAgent { terminal_id }
+            | Command::RestartAgentAndContinue { terminal_id }
             | Command::ReauthenticateAgent { terminal_id, .. }
             | Command::CancelAgentReauthentication { terminal_id } => *terminal_id,
             other => {
@@ -88,6 +89,7 @@ pub(crate) async fn run_io_router(
             Command::DeliverSnippet { .. }
                 | Command::RecoverAgentCredit { .. }
                 | Command::ResumeAgent { .. }
+                | Command::RestartAgentAndContinue { .. }
                 | Command::ReauthenticateAgent { .. }
                 | Command::CancelAgentReauthentication { .. }
         );
@@ -311,6 +313,9 @@ async fn run_io_lane(
             Command::ResumeAgent { .. } => {
                 crate::agent_auth::resume_agent(&config, terminal_id).await;
             }
+            Command::RestartAgentAndContinue { .. } => {
+                crate::agent_auth::restart_agent_and_continue(&config, terminal_id).await;
+            }
             Command::ReauthenticateAgent { switch_account, .. } => {
                 crate::agent_auth::start_reauthentication(
                     &config,
@@ -491,6 +496,7 @@ pub(crate) fn reject_command(event_tx: &EventSender, command: &Command, reason: 
         Command::DeliverSnippet { .. } => "DeliverSnippet",
         Command::RecoverAgentCredit { .. } => "RecoverAgentCredit",
         Command::ResumeAgent { .. } => "ResumeAgent",
+        Command::RestartAgentAndContinue { .. } => "RestartAgentAndContinue",
         Command::ReauthenticateAgent { .. } => "ReauthenticateAgent",
         Command::CancelAgentReauthentication { .. } => "CancelAgentReauthentication",
         Command::RecordUserMessage { .. } => "RecordUserMessage",
@@ -662,6 +668,100 @@ mod tests {
                 mock.list().await.expect("list").contains(&key),
                 "cancelling authentication must leave the blocked agent recoverable"
             );
+            router.abort();
+            let _ = router.await;
+        })
+        .await
+        .expect("test deadline exceeded");
+    }
+
+    /// `a R` end-to-end through the daemon's routing: a `RestartAgentAndContinue`
+    /// fed into `run_io_router` (the lane `command_lane` assigns it) must reach
+    /// `agent_auth::restart_agent_and_continue` and respawn the conversation.
+    /// This guards the routing path itself — the handler and the client emitter
+    /// are unit-tested elsewhere, but the router is the load-bearing hop, and
+    /// an unrecognized command silently falls into the `other =>` drop arm.
+    #[tokio::test]
+    async fn restart_agent_and_continue_routes_through_the_io_router() {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let (config, mock) = ServerConfig::in_memory_with_mock();
+            let terminal_id = TerminalId(883);
+            let key = mock
+                .spawn(
+                    &["claude".into()],
+                    Some(std::path::Path::new("/tmp")),
+                    &[],
+                    "limited-agent",
+                )
+                .await
+                .expect("spawn");
+            let session_key = lazybox_core::SessionKey::new("github:owner/repo#883");
+            config
+                .terminal
+                .register_terminal(
+                    terminal_id,
+                    key.clone(),
+                    session_key.clone(),
+                    lazybox_ipc::TerminalKind::Agent("claude".into()),
+                )
+                .await;
+            config
+                .agent_recovery
+                .remember_spawn(crate::agent_auth::AgentResumeContext {
+                    terminal_id,
+                    session_key,
+                    session_id: None,
+                    agent_id: "claude".into(),
+                    cwd: "/tmp".into(),
+                    backend_key: Some(key.clone()),
+                    on_main: false,
+                    model_alias: None,
+                    access: lazybox_ipc::AgentRunAccess::Default,
+                    no_permission: false,
+                    provider_session_id: Some("sess-limited".into()),
+                    prompt_history: Vec::new(),
+                    composing_buffer: None,
+                })
+                .await;
+
+            let (event_tx, _event_rx) = mpsc::unbounded_channel();
+            let event_tx = EventSender::from_unbounded(event_tx);
+            let (command_tx, command_rx) = mpsc::channel(ROUTER_CAPACITY);
+            let router = tokio::spawn(run_io_router(config.clone(), event_tx, command_rx));
+
+            command_tx
+                .send(Command::RestartAgentAndContinue { terminal_id })
+                .await
+                .expect("router open");
+
+            // Strip the `nice -n <N>` fleet-priority wrapper the respawn adds.
+            fn strip_nice(argv: &[String]) -> &[String] {
+                match argv {
+                    [first, flag, _n, rest @ ..] if first == "nice" && flag == "-n" => rest,
+                    other => other,
+                }
+            }
+            let expected = ["claude", "--resume", "sess-limited"];
+            let mut respawned = false;
+            for _ in 0..10_000 {
+                if mock.all_argv().await.iter().any(|argv| {
+                    strip_nice(argv)
+                        .iter()
+                        .map(String::as_str)
+                        .take(expected.len())
+                        .eq(expected.iter().copied())
+                }) {
+                    respawned = true;
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                respawned,
+                "RestartAgentAndContinue must route through the io router to the respawn; \
+                 an unrouted command would drop at the router's `other =>` arm"
+            );
+
             router.abort();
             let _ = router.await;
         })

@@ -2203,6 +2203,25 @@ impl Sidebar {
         ids
     }
 
+    /// Only the *parked* agent terminals (`AwaitingReset`) — the ones a
+    /// plain resume (`Shift-K`) deliberately leaves alone because a
+    /// "continue" typed into their auto-continue composer would just
+    /// cancel the wait and re-hit the limit. Counted directly rather than
+    /// derived from [`Self::limited_terminals`] minus
+    /// [`Self::limit_reached_terminals`], so the count says what it means
+    /// regardless of what else is limited. Sorted like
+    /// [`Self::limit_reached_terminals`].
+    pub fn awaiting_reset_terminals(&self) -> Vec<TerminalId> {
+        let mut ids: Vec<TerminalId> = self
+            .agent_terminal_states
+            .iter()
+            .filter(|(_, (_, state))| *state == lazybox_ipc::AgentState::AwaitingReset)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_by_key(|id| id.0);
+        ids
+    }
+
     pub fn credit_exhausted_terminals(&self) -> Vec<TerminalId> {
         let mut ids: Vec<TerminalId> = self
             .agent_terminal_states

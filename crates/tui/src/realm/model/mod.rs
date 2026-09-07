@@ -5155,8 +5155,36 @@ impl<T: TerminalAdapter> Model<T> {
                 .map(|r| format!(" · resets {r}"))
                 .unwrap_or_default();
             let plural = if count == 1 { "" } else { "s" };
+            // The resume chord is remappable (`ui.action_keys.resume_rate_limited`);
+            // resolve the effective key so the banner never names a chord the
+            // user has rebound away.
+            let resume_keys = lazybox_tui_core::action::ActionDef::for_kind(
+                lazybox_tui_core::action::ActionKind::ResumeRateLimited,
+            )
+            .effective_keys_display(&self.action_key_overrides);
+            // Parked (💤 `AwaitingReset`) agents are rate-limited too, but the
+            // resume chord deliberately skips them — a "continue" only cancels
+            // their auto-continue wait and re-hits the limit. When any coexist
+            // with a blocked agent, this standing banner is the one persistent
+            // surface that can carry their call-to-action, so name them and the
+            // restart chord that *does* apply; otherwise a resume leaves the 💤
+            // badges untouched with no on-screen reason why. (Parked-only raises
+            // no banner: the gate above is still the blocked count alone, so a
+            // self-resolving wait never escalates to a sticky banner on its own.)
+            let parked = self.sidebar.awaiting_reset_terminals().len();
+            let parked_clause = if parked > 0 {
+                let restart_keys = lazybox_tui_core::action::ActionDef::for_kind(
+                    lazybox_tui_core::action::ActionKind::RestartRateLimited,
+                )
+                .effective_keys_display(&self.action_key_overrides);
+                format!(" · {parked} parked, {restart_keys} to restart")
+            } else {
+                String::new()
+            };
             self.flash(
-                format!("{USAGE_LIMIT_PREFIX}{count} agent{plural} rate-limited{reset} — Shift-K to resume"),
+                format!(
+                    "{USAGE_LIMIT_PREFIX}{count} agent{plural} rate-limited{reset} — {resume_keys} to resume{parked_clause}"
+                ),
                 crate::realm::components::footer::NoticeSeverity::Permanent,
             );
         }

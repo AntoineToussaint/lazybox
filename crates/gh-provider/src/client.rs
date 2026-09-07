@@ -2265,7 +2265,7 @@ impl GhClient {
         self
     }
 
-    /// Tie the native-dependency cache freshness ([`deps_ttl`](Self::deps_ttl))
+    /// Tie the native-dependency cache freshness (`deps_ttl`)
     /// to the configured `repo_refresh_interval`, so native `blocked_by`
     /// edges refresh on the same cadence as the rest of a row: tightening the
     /// refresh interval also tightens how stale an edge set can get, rather
@@ -2634,8 +2634,8 @@ impl GhClient {
     pub const ISSUE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(90);
 
     /// Default freshness bound for a learned native `blocked_by` edge set
-    /// before [`issue_blocked_by`](Self::issue_blocked_by) is asked again —
-    /// the fallback for [`deps_ttl`](Self::deps_ttl) when the configured
+    /// before `issue_blocked_by` is asked again —
+    /// the fallback for `deps_ttl` when the configured
     /// `repo_refresh_interval` was never wired in
     /// ([`with_repo_refresh_interval`](Self::with_repo_refresh_interval)).
     /// Matches the *default* `repo_refresh_interval` (5 min) so, at steady

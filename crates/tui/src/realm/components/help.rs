@@ -1228,7 +1228,7 @@ mod tests {
                 .iter()
                 .map(|group| group.label)
                 .collect::<Vec<_>>(),
-            ["work", "agent", "main branch", "github", "workspace"],
+            ["work", "agent", "main branch", "github", "workspace", "epic"],
         );
     }
 

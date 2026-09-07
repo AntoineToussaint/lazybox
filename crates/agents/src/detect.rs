@@ -305,6 +305,14 @@ pub fn parse_usage_limit_reset(recent_output: &[u8]) -> Option<String> {
 /// this module — a spurious block can fire the auto-`Wait` keystroke, a
 /// missed one the user can still act on manually.
 ///
+/// A verbatim quote of the middot form — an agent pasting a transcript, or
+/// rendering this module's own doc/test examples — is the residual false
+/// positive this cannot exclude: it is byte-for-byte identical to the real
+/// weekly-limit banner left at rest by the #1337 "Stop and wait" pick (also
+/// a plain `· resets` line with no `⎿` tool-result chrome above a resting
+/// composer), so no local screen signal separates them. The trade is
+/// deliberate — see `a_usage_limit_phrase_above_a_resting_composer_is_stale_scrollback`.
+///
 /// Every phrase occurrence is examined, not just the latest hit overall:
 /// the banner's `/usage-credits …` follow-up line is itself a phrase and
 /// sits BELOW the line carrying the reset, so anchoring on the single
@@ -362,6 +370,60 @@ fn limit_banner_with_reset_pos(compact: &str) -> Option<usize> {
         }
     }
     best
+}
+
+/// Option rows Claude renders on a prompt that ALSO takes typed text: the
+/// `AskUserQuestion` chooser ends with `N. Type something.` and `N+1. Chat
+/// about this`, and typing at it composes a free-text answer (the digits
+/// pick a row). The "Interrupted · What should Claude do instead?" screen
+/// is a plain composer. Compacted (space-free, lowercased) forms.
+const CLAUDE_FREE_TEXT_PROMPT_MARKERS: &[&str] = &[
+    "typesomething",
+    "chataboutthis",
+    "whatshouldclaudedoinstead",
+];
+
+/// The interaction shape of the `InputNeeded` prompt on screen — what a
+/// pasted prompt would do to it. A permission dialog (`Do you want to
+/// proceed? 1. Yes 2. No`) or a bare Y/N gate owns input: a paste is eaten,
+/// so the injector must wait for the answer (`Chooser`). An
+/// `AskUserQuestion` chooser or the interrupted-turn prompt accepts typed
+/// text as the answer (`FreeText`), so a paste delivers immediately — the
+/// snippet IS the answer, and holding it would deadlock on a prompt that is
+/// waiting for exactly that input.
+///
+/// Decided from the tail of the screen (the last 14 non-empty lines, where
+/// the live prompt sits), never from scrollback: a stale `Type something`
+/// row from an already-answered question above a fresh permission dialog
+/// must not unlock the dialog. Presence in the tail is not enough — the
+/// free-text marker must be the BOTTOM-MOST prompt. Both an answered
+/// AskUserQuestion (its `Type something` row) and a fresh permission dialog
+/// can sit within the same 14-line window, and a bare presence check read
+/// that as `FreeText`, delivering the paste straight into a Y/N dialog that
+/// eats it. So a permission dialog appearing BELOW the last free-text marker
+/// (a `do you want to …` consent phrase or a `1. Yes` / `(y/n)` choice gate,
+/// which the free-text AskUserQuestion / interrupted-turn shapes never
+/// render) wins: the live prompt is the `Chooser`.
+pub fn claude_prompt_shape(recent_output: &[u8]) -> PromptShape {
+    let s = strip_ansi_lossy(recent_output);
+    let compact = compact_lower(&s);
+    let tail = last_nonempty_lines(&compact, 14);
+    let free_text_pos = CLAUDE_FREE_TEXT_PROMPT_MARKERS
+        .iter()
+        .filter_map(|marker| tail.rfind(marker))
+        .max();
+    let Some(free_text_pos) = free_text_pos else {
+        return PromptShape::Chooser;
+    };
+    // A Y/N permission dialog rendered below the free-text marker owns input.
+    let dialog_pos = last_compact_match_pos(&tail, CLAUDE_STANDALONE_PROMPT_PHRASES)
+        .into_iter()
+        .chain(last_compact_match_pos(&tail, CLAUDE_CHOICE_MARKERS))
+        .max();
+    match dialog_pos {
+        Some(dialog_pos) if dialog_pos > free_text_pos => PromptShape::Chooser,
+        _ => PromptShape::FreeText,
+    }
 }
 
 /// Month abbreviations a date-style reset leads with (`resets Aug 30 at
@@ -860,8 +922,11 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
     // file), firing a false `LimitReached` and its stray auto-`Wait`
     // keystroke. `limit_pos` above keeps the full list so the at-rest gate
     // still sees the banner.
-    let chooser_limit_pos =
-        last_compact_match_pos_excluding(compact, CLAUDE_USAGE_LIMIT_PHRASES, CLAUDE_LIMIT_BANNER_ONLY_PHRASES);
+    let chooser_limit_pos = last_compact_match_pos_excluding(
+        compact,
+        CLAUDE_USAGE_LIMIT_PHRASES,
+        CLAUDE_LIMIT_BANNER_ONLY_PHRASES,
+    );
     if marker_at_least_as_recent(
         chooser_limit_pos,
         resting_pos.max(work_anchor_against(chooser_limit_pos)),
@@ -2619,8 +2684,12 @@ mod tests {
 
         // Newer bypass footer carrying only the `⏵⏵` glyph (no
         // `shift+tab to cycle`): a single such footer is still one live frame.
-        let bypass_glyph = "✻ Crunched for 30s · 2 shells still running\n⏵⏵ bypass permissions on · ← for agents";
-        assert_eq!(claude_state(bypass_glyph.as_bytes()), Some(AgentState::Working));
+        let bypass_glyph =
+            "✻ Crunched for 30s · 2 shells still running\n⏵⏵ bypass permissions on · ← for agents";
+        assert_eq!(
+            claude_state(bypass_glyph.as_bytes()),
+            Some(AgentState::Working)
+        );
     }
 
     #[test]
@@ -2641,7 +2710,10 @@ mod tests {
              ⏵⏵ bypass permissions on · ← for agents\n\
              ✓ all shells finished — summary below\n\
              ⏵⏵ bypass permissions on · ← for agents";
-        assert_eq!(claude_state(stale_bypass.as_bytes()), Some(AgentState::Idle));
+        assert_eq!(
+            claude_state(stale_bypass.as_bytes()),
+            Some(AgentState::Idle)
+        );
     }
 
     #[test]
@@ -2884,6 +2956,74 @@ mod tests {
         );
     }
 
+    /// The shape a paste would meet on an `InputNeeded` screen. Claude's
+    /// `AskUserQuestion` chooser and the interrupted-turn prompt take typed
+    /// text, so a snippet delivers immediately; a permission / Y-N dialog
+    /// owns input, so the injector waits. Every PTY-detected `?` used to be
+    /// presumed a chooser, which held snippets and `w w` on prompts that
+    /// were literally asking for text.
+    #[test]
+    fn claude_prompt_shape_splits_free_text_prompts_from_permission_dialogs() {
+        // Verbatim AskUserQuestion chooser (lodestar-208).
+        let ask = "  4. Just report, do nothing yet\n\
+             Hold all changes. You want to route the slicing/ordering across repos yourself first.\n\
+             5. Type something.\n\
+             ────────────────────────────────────────\n\
+             6. Chat about this\n\
+             Enter to select · ↑/↓ to navigate · Esc to cancel";
+        assert_eq!(claude_prompt_shape(ask.as_bytes()), PromptShape::FreeText);
+
+        // The interrupted-turn prompt is a plain composer.
+        let interrupted = "⎿  Interrupted · What should Claude do instead?\n\
+             ❯\n\
+             ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents";
+        assert_eq!(
+            claude_prompt_shape(interrupted.as_bytes()),
+            PromptShape::FreeText
+        );
+
+        // A permission dialog owns input (verbatim infra-base-697).
+        let permission = " Dangerous rm operation on possibly-empty variable path: \"$SP\"/*.png\n\
+             Do you want to proceed?\n\
+             ❯ 1. Yes\n\
+               2. No\n\
+             Esc to cancel · Tab to amend";
+        assert_eq!(
+            claude_prompt_shape(permission.as_bytes()),
+            PromptShape::Chooser
+        );
+
+        // A stale `Type something` from an answered question higher up must
+        // not unlock a fresh permission dialog below it.
+        let stale_then_permission = format!("{ask}\n{}\n{permission}", "x\n".repeat(20));
+        assert_eq!(
+            claude_prompt_shape(stale_then_permission.as_bytes()),
+            PromptShape::Chooser
+        );
+
+        // The bug the 20-line gap masked: with only a SMALL gap, the stale
+        // free-text marker and the fresh permission dialog both fall inside
+        // the 14-line tail. A bare presence check saw `Type something` and
+        // returned `FreeText`, delivering the paste into the Y/N dialog that
+        // eats it. The dialog is BELOW the marker, so it owns input →
+        // `Chooser`.
+        let close_stale_then_permission = format!("{ask}\ncontinuing\n{permission}");
+        assert_eq!(
+            claude_prompt_shape(close_stale_then_permission.as_bytes()),
+            PromptShape::Chooser
+        );
+
+        // The converse must still hold: a live free-text prompt BELOW an
+        // already-answered permission dialog reads `FreeText` (the bottom-most
+        // prompt wins in both directions, not a blanket "any dialog →
+        // Chooser").
+        let permission_then_free_text = format!("{permission}\napproved\n{ask}");
+        assert_eq!(
+            claude_prompt_shape(permission_then_free_text.as_bytes()),
+            PromptShape::FreeText
+        );
+    }
+
     /// The session-window limit ENDS the turn instead of raising a chooser
     /// (verbatim from a real session): the banner lands as the failing tool
     /// call's result, Claude prints its end-of-turn summary and rests at an
@@ -3062,13 +3202,19 @@ mod tests {
                 "banner-only phrase {p:?} must remain in the full list",
             );
         }
-        let full = last_compact_match_pos(&compact_lower("run /usage-credits now"), CLAUDE_USAGE_LIMIT_PHRASES);
+        let full = last_compact_match_pos(
+            &compact_lower("run /usage-credits now"),
+            CLAUDE_USAGE_LIMIT_PHRASES,
+        );
         let plain = last_compact_match_pos_excluding(
             &compact_lower("run /usage-credits now"),
             CLAUDE_USAGE_LIMIT_PHRASES,
             CLAUDE_LIMIT_BANNER_ONLY_PHRASES,
         );
-        assert!(full.is_some() && plain.is_none(), "the plain scan drops banner-only phrases");
+        assert!(
+            full.is_some() && plain.is_none(),
+            "the plain scan drops banner-only phrases"
+        );
     }
 
     #[test]

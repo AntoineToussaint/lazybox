@@ -20,8 +20,9 @@ use tuirealm::state::State;
 
 /// One binding row in the Keys screen, plus whether the user has
 /// exercised it. `used` is read from the mastery ledger (#1502) — a
-/// dim `✓` marks a shortcut you've invoked at least once (through any
-/// channel), so the eye is drawn to the ones still worth learning.
+/// dim `✓` marks a shortcut invoked at least once, counting every
+/// channel the ledger records (keyboard and menu today), so the eye is
+/// drawn to the ones still worth learning.
 pub struct HelpBinding {
     pub binding: Binding,
     pub used: bool,

@@ -8562,7 +8562,20 @@ async fn handle_inject_prompt_inner(
         )
         .await
         {
-            Ok(true) => {
+            // `Ok(_)` means the paste LANDED in the agent's composer and the
+            // submit Enter was sent (with the resend ladder behind it). The
+            // bool only says whether the agent acknowledged the submit
+            // (`UserPromptSubmit` hook / a `Working` transition) inside the
+            // confirmation window. That acknowledgement is the agent's
+            // business; what lazybox sent is not conditional on it. The
+            // delivery is therefore recorded either way — the row's `]N`
+            // count, the Recent MRU and the "sent snippet" notice reflect
+            // what was written — and an unconfirmed submit is reported as
+            // such (the resend loop already raised its own loud give-up)
+            // instead of vanishing: before, `Ok(false)` recorded nothing and
+            // said nothing, so a snippet whose hook arrived late looked like
+            // it was never sent at all.
+            Ok(confirmed) => {
                 if let Some(snippet) = snippet_for_confirm {
                     let prompt = UserPrompt {
                         text: snippet.body.clone(),
@@ -8572,6 +8585,14 @@ async fn handle_inject_prompt_inner(
                             category: snippet.category,
                         },
                     };
+                    if !confirmed {
+                        tracing::warn!(
+                            terminal_id = ?id,
+                            snippet = %snippet.snippet_key,
+                            "inject_prompt: snippet pasted and Enter sent, but the agent never \
+                             acknowledged the submit — recording the delivery anyway"
+                        );
+                    }
                     record_confirmed_snippet(
                         &config_for_confirm,
                         id,
@@ -8582,7 +8603,6 @@ async fn handle_inject_prompt_inner(
                     .await;
                 }
             }
-            Ok(false) => {}
             Err(PromptWriteError::Initial(e)) => {
                 tracing::warn!("inject_prompt: initial write failed: {e}");
                 let _ = bus.send(Event::TerminalInputRejected {
@@ -16701,6 +16721,97 @@ mod tests {
         assert!(
             gave_up_loudly,
             "exhausting the resends must surface a user-visible error"
+        );
+    }
+
+    /// A snippet whose paste landed and whose Enter was sent is a delivery
+    /// whether or not the agent acknowledges the submit inside the confirm
+    /// window. Before, an unconfirmed submit recorded nothing — no `]N`
+    /// count on the row, no Recent entry, no "sent snippet" notice — so a
+    /// slow or lost `UserPromptSubmit` hook made a sent snippet look like it
+    /// was never sent. The count reflects what lazybox wrote, not what
+    /// Claude Code reported back.
+    #[tokio::test(start_paused = true)]
+    async fn unconfirmed_snippet_submit_is_still_recorded_as_delivered() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let session_key = SessionKey::new("unconfirmed-snippet");
+        let workspace = Workspace::empty(
+            WorkspaceKey::new(session_key.as_str().to_string()),
+            "main",
+            Utc::now(),
+        );
+        config
+            .store
+            .save_workspace(&WorkspaceRecord {
+                key: workspace.key.as_str().into(),
+                created_at: workspace.created_at,
+                workspace_json: Some(
+                    serde_json::to_string(&workspace).expect("serialize workspace"),
+                ),
+            })
+            .expect("save workspace");
+        let backend_key = mock
+            .spawn(&["claude".into()], None, &[], "unconfirmed-snippet")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(4243);
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            session_key.clone(),
+            "claude",
+            Some(lazybox_ipc::AgentState::Done),
+            None,
+        )
+        .await;
+        let mut events = config.bus.subscribe();
+
+        // The mock never fires a hook or paints a Working line, so every
+        // resend goes unconfirmed and the ladder gives up.
+        handle_deliver_snippet(
+            &config,
+            id,
+            "rev".into(),
+            "review".into(),
+            "review this".into(),
+            true,
+        )
+        .await;
+
+        let delivered = tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                match events.recv().await {
+                    Ok(Event::SnippetDelivered {
+                        terminal_id,
+                        snippet_key,
+                        ..
+                    }) if terminal_id == id => return snippet_key,
+                    Ok(_) => {}
+                    Err(error) => panic!("bus closed: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("an unconfirmed submit still announces the delivery");
+        assert_eq!(delivered, "rev");
+        let stored = config
+            .store
+            .get_workspace(&workspace.key)
+            .expect("read workspace")
+            .and_then(|record| record.workspace_json)
+            .map(|json| serde_json::from_str::<Workspace>(&json).expect("decode workspace"))
+            .expect("workspace row");
+        assert_eq!(
+            stored.sent_snippets.total(),
+            1,
+            "the row's snippet count reflects what lazybox wrote"
+        );
+        let written =
+            String::from_utf8_lossy(&mock.writes_for(&backend_key).await.concat()).to_string();
+        assert!(
+            written.contains("review this"),
+            "the body landed: {written}"
         );
     }
 

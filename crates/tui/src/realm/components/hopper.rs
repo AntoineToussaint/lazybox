@@ -204,7 +204,7 @@ impl HopperEditor {
             return;
         }
         if self.current().key.is_some() {
-            self.error = Some("Use Ctrl-X to cancel or Ctrl-K to delete this item".into());
+            self.error = Some("Use Ctrl-X to cancel or Ctrl-Delete to delete this item".into());
             return;
         }
         let removed = self.rows.remove(self.row);
@@ -608,8 +608,8 @@ impl Component for HopperEditor {
                     Span::raw(" done  "),
                     Span::styled("Ctrl-X", Style::default().fg(theme.text_dim).bold()),
                     Span::raw(" cancel  "),
-                    Span::styled("Ctrl-K", Style::default().fg(theme.error).bold()),
-                    Span::raw(" delete line"),
+                    Span::styled("Ctrl-Delete", Style::default().fg(theme.error).bold()),
+                    Span::raw(" delete"),
                 ]),
                 Line::from(vec![
                     Span::styled("Enter", Style::default().fg(theme.success).bold()),
@@ -617,6 +617,8 @@ impl Component for HopperEditor {
                     Span::styled("↑↓", Style::default().fg(theme.text_dim).bold()),
                     Span::raw(" move  "),
                     Span::styled("Ctrl-S", Style::default().fg(theme.success).bold()),
+                    Span::raw(" / "),
+                    Span::styled("Ctrl-Enter", Style::default().fg(theme.success).bold()),
                     Span::raw(" save  "),
                     Span::styled("Esc", Style::default().fg(theme.error).bold()),
                     Span::raw(" close"),
@@ -715,25 +717,33 @@ impl AppComponent<Msg, UserEvent> for HopperEditor {
             }
             return None;
         }
-        if ctrl && matches!(key.code, Key::Char('s')) {
+        // Save has two chords because Ctrl-S is terminal flow-control
+        // (XOFF) on many setups and can be swallowed or freeze the pane;
+        // Ctrl-Enter is the fallback (matching the reply Textarea's submit
+        // idiom). Enter alone stays "next item" here.
+        if ctrl && matches!(key.code, Key::Char('s') | Key::Enter) {
             return self.drafts().map(Msg::HopperSubmitted);
         }
         if ctrl && matches!(key.code, Key::Char('d')) {
             return self.move_current_to_history(Outcome::Done);
         }
-        // Cancel and delete need chords every terminal can deliver.
-        // Ctrl+letter is the only reliable command idiom inside a text
-        // editor (like Ctrl-S / Ctrl-D above): many emulators send plain
-        // 0x7f/0x08 for Backspace with no modifier bit, so a
-        // modifier+Backspace combo is unreachable there. Ctrl-X (cancel)
-        // and Ctrl-K (delete line) are the primary paths; the
-        // modifier+Delete/Backspace combos below are convenience aliases
-        // for terminals that do report them.
+        // The reversible outcomes take a Ctrl+letter — the only command
+        // idiom every terminal delivers inside a text field (like Ctrl-S /
+        // Ctrl-D above), since many emulators send plain 0x7f/0x08 for
+        // Backspace with no modifier bit. Ctrl-X cancels (its × mirrors the
+        // canceled glyph in History); a misfire only files the item into
+        // History, undoable with `r`.
+        //
+        // Deletion is destructive and does NOT sit on a Ctrl+letter: on
+        // readline (and lazybox's own reply Textarea) Ctrl-K is
+        // kill-to-EOL, a harmless edit — reusing it to reap a workspace is
+        // the exact muscle-memory footgun #1422 removes. Delete lives only
+        // on the Delete keys (Ctrl-Delete / Ctrl-Backspace, confirm-gated
+        // downstream); where an emulator can't report the modifier they
+        // degrade to a harmless character edit rather than a silent kill,
+        // and the sidebar's own delete stays available.
         if ctrl && matches!(key.code, Key::Char('x')) {
             return self.move_current_to_history(Outcome::Canceled);
-        }
-        if ctrl && matches!(key.code, Key::Char('k')) {
-            return self.delete_current_line();
         }
         if ctrl && matches!(key.code, Key::Delete | Key::Backspace) {
             return self.delete_current_line();
@@ -886,17 +896,38 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_k_deletes_whole_line_on_every_terminal() {
+    fn ctrl_k_no_longer_reaps_a_workspace() {
+        // #1422: Ctrl-K is readline kill-to-EOL, a harmless edit. It must
+        // not delete a workspace — the destructive path moved onto the
+        // Delete keys.
         let existing = item("First");
         let existing_key = existing.key.clone();
         let mut editor = HopperEditor::new(vec![existing]);
         editor.on(&key(Key::Up));
         assert_eq!(
             editor.on(&modified(Key::Char('k'), KeyModifiers::CONTROL)),
-            Some(Msg::HopperDeleteRequested(existing_key))
+            None
         );
         assert!(editor.history.is_empty());
-        assert_eq!(editor.rows.len(), 1);
+        let drafts = editor.drafts().expect("valid drafts");
+        assert_eq!(drafts[0].workspace_key, Some(existing_key));
+        assert_eq!(drafts[0].name, "First");
+    }
+
+    #[test]
+    fn ctrl_enter_saves_when_ctrl_s_is_swallowed() {
+        // #1422: Ctrl-S is XOFF on many terminals; Ctrl-Enter is the
+        // fallback save path. Enter alone stays "next item".
+        let mut editor = HopperEditor::new(vec![item("First")]);
+        editor.on(&key(Key::Up));
+        editor.on(&key(Key::End));
+        editor.on(&key(Key::Enter));
+        editor.on(&key(Key::Char('N')));
+        let submitted = editor.on(&modified(Key::Enter, KeyModifiers::CONTROL));
+        let Some(Msg::HopperSubmitted(drafts)) = submitted else {
+            panic!("Ctrl-Enter must submit: {submitted:?}");
+        };
+        assert_eq!(drafts[1].name, "N");
     }
 
     #[test]
@@ -980,13 +1011,14 @@ mod tests {
     fn command_hints_wrap_without_hiding_the_delete_or_save_chords() {
         let mut editor = HopperEditor::new(vec![item("First")]);
         let rendered = render(&mut editor, 60, 24);
-        // The help leads with the terminal-portable Ctrl+letter chords,
-        // not the modifier+Backspace aliases that emulators may swallow.
         assert!(rendered.contains("Ctrl-X"), "{rendered}");
         assert!(rendered.contains("cancel"), "{rendered}");
-        assert!(rendered.contains("Ctrl-K"), "{rendered}");
-        assert!(rendered.contains("delete line"), "{rendered}");
+        // Delete moved off the readline-clashing Ctrl-K onto the Delete
+        // keys, and save gained a Ctrl-Enter fallback for XOFF (#1422).
+        assert!(rendered.contains("Ctrl-Delete"), "{rendered}");
+        assert!(!rendered.contains("Ctrl-K"), "{rendered}");
         assert!(rendered.contains("Ctrl-S"), "{rendered}");
+        assert!(rendered.contains("Ctrl-Enter"), "{rendered}");
     }
 
     #[test]

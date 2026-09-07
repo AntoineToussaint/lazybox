@@ -314,6 +314,19 @@ pub struct WriteContext {
     pub agent_state_generation: Option<u64>,
 }
 
+/// Diagnostic breadcrumb for who currently holds a `terminal_io` lock.
+/// Recorded the instant the lock is acquired and cleared when the lock is
+/// forgotten at teardown, so a removal that times out joining the guard can
+/// name the *holder* (source location + how long held) rather than only the
+/// terminal it is stuck behind. When the lock is contended — the only time a
+/// join times out — the last acquirer IS the current holder, since no one else
+/// can have taken it since.
+#[derive(Clone, Copy)]
+pub(crate) struct IoHold {
+    pub location: &'static std::panic::Location<'static>,
+    pub since: tokio::time::Instant,
+}
+
 /// Immutable facts captured by the atomic teardown claim.
 pub(crate) struct TerminalTeardownClaim {
     pub meta: Option<(SessionKey, TerminalKind)>,
@@ -340,6 +353,11 @@ pub struct TerminalRegistry {
     /// backend session rather than stored inside the terminal entry.
     terminal_persistence_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     terminal_io_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Current/last acquirer of each `terminal_io` lock (keyed by backend key),
+    /// for self-diagnosing the wedge a bounded removal reports. Written after
+    /// the lock is taken, cleared by `forget_terminal_io_lock` at teardown so
+    /// it never outgrows the set of live terminals.
+    io_lock_holders: Arc<parking_lot::Mutex<HashMap<String, IoHold>>>,
     /// Per-terminal agent-state transition order (#1256). One guard spans a
     /// whole fold → persist → commit → broadcast transaction, so transitions
     /// for a single terminal remain strictly ordered while the global
@@ -1209,19 +1227,57 @@ impl TerminalRegistry {
         self.terminal_persistence_locks.lock().remove(backend_key);
     }
 
-    pub(crate) async fn lock_terminal_io(
+    /// Acquire a terminal's I/O serialization lock, recording the caller's
+    /// source location as the holder for wedge diagnostics. Not `async fn`:
+    /// `#[track_caller]` only captures the true caller on a synchronous
+    /// prologue, so the location is snapshotted at call time and the await
+    /// happens in the returned future.
+    #[track_caller]
+    pub(crate) fn lock_terminal_io(
         &self,
         backend_key: &str,
-    ) -> tokio::sync::OwnedMutexGuard<()> {
+    ) -> impl std::future::Future<Output = tokio::sync::OwnedMutexGuard<()>> + 'static {
+        self.lock_terminal_io_tracked(backend_key, std::panic::Location::caller())
+    }
+
+    /// As [`Self::lock_terminal_io`], but with an explicitly forwarded holder
+    /// location. `acquire_live` uses this to attribute the hold to *its* caller
+    /// rather than to itself, since `#[track_caller]` cannot re-forward through
+    /// a wrapper.
+    pub(crate) fn lock_terminal_io_tracked(
+        &self,
+        backend_key: &str,
+        location: &'static std::panic::Location<'static>,
+    ) -> impl std::future::Future<Output = tokio::sync::OwnedMutexGuard<()>> + 'static {
         let entry = {
             let mut locks = self.terminal_io_locks.lock();
             locks.entry(backend_key.to_string()).or_default().clone()
         };
-        entry.lock_owned().await
+        let holders = self.io_lock_holders.clone();
+        let key = backend_key.to_string();
+        async move {
+            let guard = entry.lock_owned().await;
+            holders.lock().insert(
+                key,
+                IoHold {
+                    location,
+                    since: tokio::time::Instant::now(),
+                },
+            );
+            guard
+        }
+    }
+
+    /// The current/last recorded holder of a terminal's I/O lock, for wedge
+    /// diagnostics. Meaningful when the lock is contended (a join timed out):
+    /// the last acquirer is then necessarily the current holder.
+    pub(crate) fn io_lock_holder(&self, backend_key: &str) -> Option<IoHold> {
+        self.io_lock_holders.lock().get(backend_key).copied()
     }
 
     pub(crate) fn forget_terminal_io_lock(&self, backend_key: &str) {
         self.terminal_io_locks.lock().remove(backend_key);
+        self.io_lock_holders.lock().remove(backend_key);
     }
 
     /// Serialize agent-state transitions for one terminal (#1256). Held

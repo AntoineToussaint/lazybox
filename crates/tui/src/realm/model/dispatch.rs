@@ -2271,6 +2271,14 @@ impl<T: TerminalAdapter> Model<T> {
                     self.flash_hint("nothing unread");
                 }
             }
+            Action::JumpToBlocked => {
+                if self.sidebar.focus_next_blocked_workspace() {
+                    self.set_focus(PaneFocus::Sidebar);
+                    self.redraw = true;
+                } else {
+                    self.flash_hint("no blocked tasks");
+                }
+            }
             Action::JumpPrevGroup | Action::JumpNextGroup => {
                 if self
                     .sidebar

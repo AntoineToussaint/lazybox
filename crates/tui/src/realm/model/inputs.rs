@@ -270,8 +270,35 @@ impl<T: TerminalAdapter> Model<T> {
     /// means), so none fall through to the spawn / skip cases.
     pub(super) fn resume_rate_limited_agents(&mut self) -> Vec<IpcCommand> {
         let terminals = self.sidebar.limit_reached_terminals();
+        // The 💤 agents are rate-limited too — parked on Claude's
+        // auto-continue wait — but a "continue" typed into that composer
+        // CANCELS the wait and only hits the limit again, so resume-all
+        // leaves them alone by design. Whether or not any alerting agent
+        // resumed, ignoring the parked ones silently reads as a lie while
+        // their badges are on screen: name them and point at the action
+        // that does apply to them. Counted directly (not `limited` minus
+        // `limit_reached`) so the number is right in the mixed case too.
+        let parked = self.sidebar.awaiting_reset_terminals().len();
+        // The restart key is remappable (`ui.action_keys.restart_rate_limited`);
+        // resolve the effective chord so the hint never names a key the
+        // user has rebound away.
+        let restart_keys = lazybox_tui_core::action::ActionDef::for_kind(
+            lazybox_tui_core::action::ActionKind::RestartRateLimited,
+        )
+        .effective_keys_display(&self.action_key_overrides);
+        let parked_clause = |parked: usize| {
+            let plural = if parked == 1 { "" } else { "s" };
+            format!(
+                "{parked} agent{plural} parked on the auto-continue wait — they resume by \
+                 themselves at the reset; {restart_keys} restarts them now with fresh credentials"
+            )
+        };
         if terminals.is_empty() {
-            self.flash_hint("no rate-limited agents to resume");
+            if parked == 0 {
+                self.flash_hint("no rate-limited agents to resume");
+            } else {
+                self.flash_hint(parked_clause(parked));
+            }
             return Vec::new();
         }
         let mut cmds = Vec::new();
@@ -290,7 +317,17 @@ impl<T: TerminalAdapter> Model<T> {
         }
         let resumed = terminals.len();
         let plural = if resumed == 1 { "" } else { "s" };
-        self.flash_info(format!("resuming {resumed} rate-limited agent{plural}"));
+        // Mixed case: some agents resumed, but any parked siblings were
+        // deliberately skipped — say so rather than let their untouched
+        // badges look like a bug.
+        if parked == 0 {
+            self.flash_info(format!("resuming {resumed} rate-limited agent{plural}"));
+        } else {
+            self.flash_info(format!(
+                "resuming {resumed} rate-limited agent{plural}; {}",
+                parked_clause(parked)
+            ));
+        }
         self.redraw = true;
         cmds
     }

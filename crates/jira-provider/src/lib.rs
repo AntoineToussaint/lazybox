@@ -439,6 +439,10 @@ fn issue_to_task(issue: &Issue, base: &str, viewer_account_id: &str) -> Task {
         changed_files: 0,
         closes_issues: vec![],
         linked_tasks: vec![],
+        // Jira's dependency links aren't projected yet (#1521); keep the
+        // provider compiling with empty edges.
+        blocked_by: vec![],
+        blocked_on: None,
         parent: f.parent.as_ref().map(|p| TaskId {
             source: SOURCE.into(),
             key: p.key.clone(),

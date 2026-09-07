@@ -368,6 +368,7 @@ mod tests {
             reactions: Some(GqlReactionView {
                 viewer_has_reacted: body_eyes,
             }),
+            parent: None,
         }
     }
 

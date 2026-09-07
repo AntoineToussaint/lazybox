@@ -2125,13 +2125,14 @@ pub struct AgentSection {
     #[serde(default)]
     pub metering_proxy: bool,
     /// Route EVERY interactive agent spawn through the metering proxy when
-    /// `metering_proxy` is on. Off by default: metering is opt-in
-    /// **per session** — a spawn is proxied only when it explicitly asks
-    /// (the per-workspace meter toggle, `$ meter`), so `metering_proxy: true`
-    /// alone just makes the proxy *run* and never redirects a session that
-    /// didn't opt in. Set this `true` to restore blanket metering once you
-    /// trust the proxy (e.g. for fleet-wide cost), accepting that a proxy
-    /// fault then affects every session rather than one canary.
+    /// `metering_proxy` is on, ignoring the per-workspace flag. Off by
+    /// default: routing is decided **per workspace** by
+    /// `Workspace::metered` — on for every new workspace, off for records
+    /// persisted before that default, toggled with `x $` — so
+    /// `metering_proxy: true` alone makes the proxy run and meters new
+    /// workspaces while leaving an explicitly un-metered one alone. Set this
+    /// `true` for blanket metering (e.g. fleet-wide cost including legacy
+    /// rows), accepting that a proxy fault then affects every session.
     #[serde(default)]
     pub meter_all: bool,
     /// Per-model price overrides for cost attribution, keyed by **model-id

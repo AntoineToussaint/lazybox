@@ -182,7 +182,7 @@
           "linear_issues": [],
           "linked_checkout": null,
           "local": false,
-          "metered": false,
+          "metered": true,
           "name": "PR o/r#42",
           "notes": "",
           "policies": {
@@ -196,6 +196,8 @@
             "author": "",
             "auto_merge_enabled": false,
             "base_branch": null,
+            "blocked_by": [],
+            "blocked_on": null,
             "body": null,
             "branch": null,
             "changed_files": 0,

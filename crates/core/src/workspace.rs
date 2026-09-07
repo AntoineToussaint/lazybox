@@ -299,9 +299,10 @@ pub enum CleanupPrompt {
 ///   and `Workspace::woke_at` (the announced-re-entry stamp). Both
 ///   optional with `#[serde(default)]`, so older records read back
 ///   cleanly.
-/// - 9: `Workspace::metered` (per-workspace metering-proxy opt-in, the
-///   `$ meter` canary). Optional with `#[serde(default)]`, so older
-///   records read back cleanly (defaulting to unmetered).
+/// - 9: `Workspace::metered` (per-workspace metering-proxy routing).
+///   Optional with `#[serde(default)]`, so older records read back
+///   cleanly (defaulting to unmetered — only a *new* workspace defaults
+///   to metered, via the constructor, never the deserializer).
 /// - 10: `HopperMeta::canceled_at` (reversible cancellation, distinct
 ///   from both completion and destructive deletion).
 pub const WORKSPACE_SCHEMA_VERSION: u32 = 10;
@@ -506,10 +507,12 @@ pub struct Workspace {
     #[serde(default)]
     pub track_main: bool,
     /// Route this workspace's agent LLM traffic through the local metering
-    /// proxy (the per-workspace `$ meter` canary, #per-session cost). Sticky:
-    /// every spawn here — fresh, restart, or re-spawn — is metered while this
-    /// is set, so cost/tokens/rate accrue per workspace without affecting any
-    /// other session. User-toggled, persisted in the workspace JSON blob.
+    /// proxy (#per-session cost). **On for every new workspace** (see
+    /// [`Workspace::empty`]); `x $` toggles it per workspace. Sticky: every
+    /// spawn here — fresh, restart, or re-spawn — is metered while this is
+    /// set, so cost/tokens/rate accrue per workspace without affecting any
+    /// other session. Persisted in the workspace JSON blob; a record written
+    /// before the on-by-default change reads back unmetered (serde default).
     /// Effective only when `agent.metering_proxy` is enabled and the proxy is
     /// running; otherwise inert.
     #[serde(default)]
@@ -575,7 +578,13 @@ impl Workspace {
         let branch = branch.into();
         Self {
             schema: WORKSPACE_SCHEMA_VERSION,
-            metered: false,
+            // Metering is on by default for every NEW workspace so cost
+            // accrues from the first spawn without a per-row opt-in; it's
+            // still inert until `agent.metering_proxy` runs, and `x $`
+            // turns it off per workspace. Records persisted before this
+            // default deserialize as unmetered (serde default `false`) —
+            // an existing workspace's choice is never flipped underneath it.
+            metered: true,
             name: key.as_str().to_string(),
             key,
             project_key: None,
@@ -1202,6 +1211,35 @@ impl Workspace {
             .chain(self.gh_issues.iter())
             .chain(self.linear_issues.iter())
             .find_map(|task| task.parent.as_ref())
+    }
+
+    /// Every *distinct* blocker any task in this workspace declares, in
+    /// first-seen order. Looks past the PR headline task for the same reason
+    /// `hierarchy_parent` does: a ticket that has acquired a PR must not lose
+    /// its dependency edges. The edges are de-duplicated across tasks — a
+    /// single blocking task referenced by two of this workspace's tasks (a
+    /// gh issue and its PR, or two sibling sub-issues) is one blocker of the
+    /// workspace, not two, so the `⛔N` badge and the "N blockers" line count
+    /// it once.
+    pub fn hierarchy_blocked_by(&self) -> impl Iterator<Item = &TaskId> {
+        let mut seen = std::collections::HashSet::new();
+        self.pr
+            .iter()
+            .chain(self.gh_issues.iter())
+            .chain(self.linear_issues.iter())
+            .flat_map(|task| task.blocked_by.iter())
+            .filter(move |id| seen.insert(*id))
+    }
+
+    /// The declared `Blocked on:` reason, if any task in this workspace
+    /// carries one. Looks past the PR headline task like
+    /// `hierarchy_blocked_by`: the first task with a reason wins.
+    pub fn declared_blocker(&self) -> Option<&str> {
+        self.pr
+            .iter()
+            .chain(self.gh_issues.iter())
+            .chain(self.linear_issues.iter())
+            .find_map(|task| task.blocked_on.as_deref())
     }
 
     /// Whether the headline task has an active qualified claim or a
@@ -2301,7 +2339,69 @@ mod tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
+    }
+
+    #[test]
+    fn hierarchy_blocked_by_looks_past_the_pr_headline() {
+        // A ticket that acquired a PR keeps its dependency edges: the PR
+        // is the headline task, but the attached gh issue carries the
+        // blocker.
+        let mut ws = Workspace::from_task(pr("o/r#1"), now());
+        let mut gh = issue("github", "o/r#2");
+        gh.blocked_by = vec![TaskId {
+            source: "github".into(),
+            key: "o/r#3".into(),
+        }];
+        ws.gh_issues.push(gh);
+
+        let blockers: Vec<_> = ws.hierarchy_blocked_by().collect();
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].key, "o/r#3");
+    }
+
+    #[test]
+    fn hierarchy_blocked_by_dedups_a_blocker_shared_across_tasks() {
+        // The workspace's PR and its attached gh issue both list `o/r#3`
+        // as a blocker. It's one blocker of the workspace, so the count
+        // surfaces (badge, right-pane line) must not double it.
+        let shared = TaskId {
+            source: "github".into(),
+            key: "o/r#3".into(),
+        };
+        let mut headline = pr("o/r#1");
+        headline.blocked_by = vec![shared.clone()];
+        let mut ws = Workspace::from_task(headline, now());
+        let mut gh = issue("github", "o/r#2");
+        gh.blocked_by = vec![
+            shared.clone(),
+            TaskId {
+                source: "github".into(),
+                key: "o/r#4".into(),
+            },
+        ];
+        ws.gh_issues.push(gh);
+
+        let blockers: Vec<_> = ws.hierarchy_blocked_by().collect();
+        assert_eq!(
+            blockers.len(),
+            2,
+            "shared `o/r#3` counted once, plus the distinct `o/r#4`"
+        );
+        assert_eq!(blockers[0].key, "o/r#3", "first-seen order preserved");
+        assert_eq!(blockers[1].key, "o/r#4");
+    }
+
+    #[test]
+    fn declared_blocker_looks_past_the_pr_headline() {
+        let mut ws = Workspace::from_task(pr("o/r#1"), now());
+        let mut gh = issue("github", "o/r#2");
+        gh.blocked_on = Some("waiting on legal".into());
+        ws.gh_issues.push(gh);
+
+        assert_eq!(ws.declared_blocker(), Some("waiting on legal"));
     }
 
     #[test]
@@ -3914,6 +4014,30 @@ mod tests {
         w
     }
 
+    /// Metering is on by default for a NEW workspace — both the scratch
+    /// constructor and the task-minted path — so cost accrues from the first
+    /// spawn. A record persisted without the field (written before the
+    /// default flipped, or by an older build) still reads back unmetered:
+    /// the default lives in the constructor, never the deserializer, so an
+    /// existing workspace's explicit choice is never flipped underneath it.
+    #[test]
+    fn new_workspaces_meter_by_default_but_legacy_records_read_unmetered() {
+        assert!(Workspace::empty(WorkspaceKey::new("scratch"), "main", now()).metered);
+        assert!(Workspace::from_task(pr("o/r#1"), now()).metered);
+
+        let mut persisted = Workspace::empty(WorkspaceKey::new("old"), "main", now());
+        persisted.metered = false;
+        let mut json: serde_json::Value = serde_json::to_value(&persisted).unwrap();
+        json.as_object_mut().unwrap().remove("metered");
+        let read: Workspace = serde_json::from_value(json).unwrap();
+        assert!(!read.metered, "a record without the field stays unmetered");
+
+        // An explicit `false` round-trips as `false`.
+        let round: Workspace =
+            serde_json::from_str(&serde_json::to_string(&persisted).unwrap()).unwrap();
+        assert!(!round.metered);
+    }
+
     /// #1389: a workspace metered while worked as an issue must keep
     /// metering after it collapses into its PR — the meter follows the
     /// line of work, so an issue→PR rebadge can't silently stop it.
@@ -3923,7 +4047,9 @@ mod tests {
         source.metered = true;
 
         let mut pr_target = Workspace::from_task(pr("o/r#1"), now());
-        assert!(!pr_target.metered, "destination starts unmetered");
+        // New workspaces meter by default; force the destination off so the
+        // carry is what turns it on.
+        pr_target.metered = false;
         pr_target.absorb_user_state_from(&source);
         assert!(pr_target.metered, "metered source keeps the PR metered");
 

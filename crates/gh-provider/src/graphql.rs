@@ -2058,6 +2058,10 @@ query($owner: String!, $name: String!, $number: Int!) {
         }
       }
       repository { nameWithOwner }
+      parent {
+        number
+        repository { nameWithOwner }
+      }
     }
   }
   rateLimit {
@@ -2710,6 +2714,8 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         kind: Some(lazybox_core::TaskKind::Pr),
         priority: None,
         state_label: None,
+        blocked_by: vec![],
+        blocked_on: None,
     }
 }
 
@@ -3517,6 +3523,10 @@ query($query: String!, $first: Int!, $after: String) {
         repository {
           nameWithOwner
         }
+        parent {
+          number
+          repository { nameWithOwner }
+        }
       }
     }
   }
@@ -3563,12 +3573,28 @@ pub struct GqlIssue {
     /// semantics + why lazybox uses 👀 as an idempotency marker.
     #[serde(default)]
     pub reactions: Option<GqlReactionView>,
+    /// GitHub sub-issue parent, when this issue is a sub-issue. The edge
+    /// is native and authoritative — the child names the parent by
+    /// number and repo. `default` so a host or query that omits `parent`
+    /// (older GHES, PR search) deserializes fine as `None`.
+    #[serde(default)]
+    pub parent: Option<GqlIssueParent>,
 }
 
 #[derive(Deserialize, Debug)]
 pub struct GqlIssueRepo {
     #[serde(rename = "nameWithOwner")]
     pub name_with_owner: String,
+}
+
+/// The parent issue of a GitHub sub-issue: its number and repository.
+/// Cross-repo sub-issues are possible, so the repo is carried explicitly
+/// rather than assumed same-repo.
+#[derive(Deserialize, Debug)]
+pub struct GqlIssueParent {
+    pub number: u64,
+    #[serde(default)]
+    pub repository: Option<GqlIssueRepo>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -3693,6 +3719,29 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
         .find(|a| a.author != my_username)
         .map(|a| a.author.clone());
 
+    // Sub-issue parent — native, authoritative. A cross-repo parent
+    // names its own repo; a same-repo one falls back to this issue's repo.
+    let parent = issue.parent.as_ref().map(|p| TaskId {
+        source: "github".into(),
+        key: format!(
+            "{}#{}",
+            p.repository
+                .as_ref()
+                .map(|r| r.name_with_owner.as_str())
+                .unwrap_or(repo.as_str()),
+            p.number
+        ),
+    });
+
+    // Body-marker `blocked_by` edges (`Blocked by: #7`, `Depends on:
+    // owner/repo#3`). Native issue-dependency edges are unioned in later
+    // by the client's REST enrichment; this is the cheap, offline half.
+    let blocked_by: Vec<TaskId> = issue
+        .body
+        .as_deref()
+        .map(|b| issue_links_to_task_ids(&lazybox_core::issue_links::extract_blocked_by(b), &repo))
+        .unwrap_or_default();
+
     Task {
         id: TaskId {
             source: "github".into(),
@@ -3750,11 +3799,39 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
         changed_files: 0,
         closes_issues: vec![],
         linked_tasks: vec![],
-        parent: None,
+        parent,
         kind: Some(lazybox_core::TaskKind::Issue),
         priority: None,
         state_label: None,
+        blocked_by,
+        blocked_on: issue
+            .body
+            .as_deref()
+            .and_then(lazybox_core::issue_links::extract_blocked_on),
     }
+}
+
+/// Map body-parsed [`IssueLink`]s to lazybox `TaskId`s, resolving
+/// same-repo GitHub `#N` references against `own_repo`. Linear keys pass
+/// through as `linear`-sourced ids. Order-preserving, deduped.
+fn issue_links_to_task_ids(links: &[lazybox_core::IssueLink], own_repo: &str) -> Vec<TaskId> {
+    let mut out: Vec<TaskId> = Vec::new();
+    for link in links {
+        let id = match link {
+            lazybox_core::IssueLink::GitHub { repo, number } => TaskId {
+                source: "github".into(),
+                key: format!("{}#{number}", repo.as_deref().unwrap_or(own_repo)),
+            },
+            lazybox_core::IssueLink::Linear { key } => TaskId {
+                source: "linear".into(),
+                key: key.clone(),
+            },
+        };
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -4141,6 +4218,7 @@ mod tests {
                 name_with_owner: "o/r".into(),
             }),
             reactions: None,
+            parent: None,
         }
     }
 
@@ -4162,6 +4240,75 @@ mod tests {
         let issue = make_issue(1, "t", Some("alice"), &[]);
         let task = issue_to_task(&issue, "bob");
         assert_eq!(task.author, "alice");
+    }
+
+    #[test]
+    fn issue_to_task_has_no_parent_or_blockers_by_default() {
+        let task = issue_to_task(&make_issue(1, "t", Some("alice"), &[]), "bob");
+        assert_eq!(task.parent, None);
+        assert!(task.blocked_by.is_empty());
+        assert_eq!(task.blocked_on, None);
+    }
+
+    #[test]
+    fn issue_to_task_maps_sub_issue_parent() {
+        let mut issue = make_issue(7, "child", Some("alice"), &[]);
+        issue.parent = Some(GqlIssueParent {
+            number: 3,
+            repository: Some(GqlIssueRepo {
+                name_with_owner: "o/r".into(),
+            }),
+        });
+        let task = issue_to_task(&issue, "bob");
+        assert_eq!(
+            task.parent,
+            Some(TaskId {
+                source: "github".into(),
+                key: "o/r#3".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn issue_to_task_parent_defaults_to_own_repo() {
+        // A parent node with no repository (older host) resolves against
+        // the child's own repo.
+        let mut issue = make_issue(7, "child", Some("alice"), &[]);
+        issue.parent = Some(GqlIssueParent {
+            number: 3,
+            repository: None,
+        });
+        let task = issue_to_task(&issue, "bob");
+        assert_eq!(task.parent.map(|p| p.key), Some("o/r#3".to_string()));
+    }
+
+    #[test]
+    fn issue_to_task_parses_blocked_by_from_body() {
+        let mut issue = make_issue(7, "child", Some("alice"), &[]);
+        issue.body = Some(
+            "Kicking off the migration.\n\nBlocked by: #3\nDepends on owner/repo#9\n\
+             Blocked on: waiting for the infra rollout"
+                .into(),
+        );
+        let task = issue_to_task(&issue, "bob");
+        assert_eq!(
+            task.blocked_by,
+            vec![
+                TaskId {
+                    source: "github".into(),
+                    key: "o/r#3".into()
+                },
+                TaskId {
+                    source: "github".into(),
+                    key: "owner/repo#9".into()
+                },
+            ],
+        );
+        assert_eq!(
+            task.blocked_on.as_deref(),
+            Some("waiting for the infra rollout"),
+            "the free-text `Blocked on:` reason is captured too",
+        );
     }
 
     #[test]

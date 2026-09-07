@@ -249,19 +249,39 @@ impl Sidebar {
         3 + self.stats_row_height(area) + self.usage_row_height(area)
     }
 
-    /// Height of the focused-row automation strip (row 2): `1` when the
-    /// cursor row carries merge automation, an auto-fix arm, or metering
-    /// worth spelling out, `0` otherwise — the row is omitted rather than
-    /// left blank so the list starts two rows higher for most cursors
-    /// (#1502 readability pass).
+    /// Height of the automation strip (row 2): `1` when *any visible row*
+    /// would render something into it at this width, `0` otherwise.
+    ///
+    /// Reserved from the visible set rather than from the cursor (#1535).
+    /// #1502 omitted the row whenever the *focused* row had nothing to
+    /// say, which reclaims a line — but it also meant every `j`/`k` across
+    /// an armed workspace grew or shrank the header, shoving the whole
+    /// list down a row and back while the user was reading it. Content
+    /// moving under a moving cursor is worse than a row spent, and it
+    /// fires exactly when you are navigating.
+    ///
+    /// Reserving on the visible set keeps every property that mattered:
+    /// an inbox with nothing armed still gets the line back, #794's
+    /// drop-the-label-whole behaviour survives (the probe runs at this
+    /// width, so a label that cannot fit reserves nothing), and an inbox
+    /// that does have armed rows holds a stable header while you move
+    /// through it. The strip renders blank on cursors with nothing to say.
     pub(super) fn stats_row_height(&self, area: Rect) -> u16 {
         let inner_width = area.width.saturating_sub(2) as usize;
         let theme = crate::theme::current();
-        if self.stats_row_spans(inner_width, theme).is_empty() {
-            0
-        } else {
-            1
-        }
+        // Probing each visible workspace through the same builder the
+        // render uses is what keeps the reservation exact: a fourth group
+        // added to the strip is reserved for automatically, instead of
+        // rendering into an unreserved row and being clipped away.
+        // `any` short-circuits on the first row that fills it.
+        u16::from(self.visible.iter().any(|row| match row {
+            VisibleRow::Workspace(key) => self.workspaces.get(key).is_some_and(|workspace| {
+                !self
+                    .stats_row_spans_for(Some(workspace), inner_width, theme)
+                    .is_empty()
+            }),
+            _ => false,
+        }))
     }
 
     /// The focused row's automation strip (row 2): merge automation
@@ -273,6 +293,22 @@ impl Sidebar {
         inner_width: usize,
         theme: &crate::theme::Theme,
     ) -> Vec<Span<'static>> {
+        let focused = self.visible.get(self.cursor).and_then(|row| match row {
+            VisibleRow::Workspace(key) => self.workspaces.get(key),
+            _ => None,
+        });
+        self.stats_row_spans_for(focused, inner_width, theme)
+    }
+
+    /// [`stats_row_spans`] for an explicit workspace, so the height
+    /// reservation can probe every visible row through the same builder
+    /// the render uses and the two can never disagree.
+    fn stats_row_spans_for(
+        &self,
+        focused_workspace: Option<&lazybox_core::Workspace>,
+        inner_width: usize,
+        theme: &crate::theme::Theme,
+    ) -> Vec<Span<'static>> {
         // Assembled
         // width-aware (like the row-0 summary): each group is appended only
         // if it fits whole in the header, so a lower-priority group drops
@@ -280,14 +316,9 @@ impl Sidebar {
         // matters most for the merge-automation phrase (#794) — a truncated
         // " AUTO-MERGE · GitHub, works offli…" would drop exactly the
         // durability word that is the point of the label. Priority, highest
-        // first: focused merge automation, then armed auto-fix, then the
-        // global CI / review tallies. The focused row's own automation
-        // outranks the global tallies deliberately — it is the context for
-        // the row under the cursor, not an inbox-wide count.
-        let focused_workspace = self.visible.get(self.cursor).and_then(|row| match row {
-            VisibleRow::Workspace(key) => self.workspaces.get(key),
-            _ => None,
-        });
+        // first: merge automation, then armed auto-fix, then the metering
+        // canary — all three describe the focused row. The CI / review
+        // tallies this comment once listed moved to row 0 (#1502).
         // Spell out the focused row's merge automation in words — the
         // compact ` ARM ` / ` AUTO ` pills look alike but guarantee
         // different things (#794). GitHub-native auto-merge wins when both
@@ -322,24 +353,10 @@ impl Sidebar {
                 (false, false) => None,
             }
         });
-        // Metering canary: the focused workspace is routed through the
-        // metering proxy (`$ meter`), so show it plus its accrued per-session
-        // cost the moment any priced usage lands. `$ METER` alone until the
-        // first response is priced (proxy off / unknown model → no cost).
-        let focused_meter = focused_workspace.and_then(|workspace| {
-            if !workspace.metered {
-                return None;
-            }
-            let cost = self.usage.cost_micros_for_session(workspace.key.as_str());
-            Some(if cost > 0 {
-                format!(
-                    " $ METER · {} ",
-                    lazybox_tui_core::usage::format_cost_micros(cost)
-                )
-            } else {
-                " $ METER ".to_string()
-            })
-        });
+        // No per-workspace metering pill here: with metering on by default
+        // it would sit on nearly every focused row. The per-workspace figure
+        // lives in the right panel's workspace header (the agent terminal's
+        // `◔ 5h 32% left · $7.24`), aggregates on the Space header.
 
         // Append `group` (with a 2-cell separator once the line is
         // non-empty) only when the whole group still fits `budget`, so a
@@ -391,20 +408,6 @@ impl Sidebar {
                     label,
                     Style::default()
                         .bg(theme.warn)
-                        .fg(ratatui::style::Color::Black)
-                        .add_modifier(Modifier::BOLD),
-                )],
-            );
-        }
-        if let Some(label) = focused_meter {
-            try_append(
-                &mut stats_spans,
-                &mut used,
-                budget,
-                vec![Span::styled(
-                    label,
-                    Style::default()
-                        .bg(theme.accent)
                         .fg(ratatui::style::Color::Black)
                         .add_modifier(Modifier::BOLD),
                 )],
@@ -752,11 +755,21 @@ impl Sidebar {
 
         // Row 2 (only when present) — the focused row's automation,
         // spelled out (#794). CI / review tallies moved to row 0 (#1502).
-        let stats_spans = self.stats_row_spans(inner_width as usize, theme);
-        let stats_h: u16 = if stats_spans.is_empty() { 0 } else { 1 };
+        //
+        // Reserve the row from the *visible set* (#1535), not the focused
+        // row: `stats_row_height` returns 1 whenever any visible row would
+        // fill the strip, so the header keeps a fixed height as the cursor
+        // moves and the list never shifts under it. The strip still renders
+        // the *focused* row's automation — blank on a cursor with nothing
+        // to say. Layout and `header_height()` (mouse hit-testing) must
+        // reserve through the same probe, or a click maps to the wrong row.
+        let stats_h: u16 = self.stats_row_height(area);
         if stats_h == 1 && area.height >= 3 {
-            let row2 = Rect::new(area.x + l_pad, area.y + 2, inner_width, 1);
-            frame.render_widget(Paragraph::new(Line::from(stats_spans)), row2);
+            let stats_spans = self.stats_row_spans(inner_width as usize, theme);
+            if !stats_spans.is_empty() {
+                let row2 = Rect::new(area.x + l_pad, area.y + 2, inner_width, 1);
+                frame.render_widget(Paragraph::new(Line::from(stats_spans)), row2);
+            }
         }
 
         // Row 3 (when present) — the always-visible per-provider usage
@@ -948,8 +961,13 @@ impl Sidebar {
                     // trailed by the Space's accrued cost once any priced usage
                     // lands (#1389) — the legible per-Space figure, summed over
                     // its workspaces and durable across restarts.
-                    if self.metered_spaces.contains(name) {
-                        let cost = self.space_cost_micros(name);
+                    // The cost shows whenever the Space has accrued any —
+                    // with metering on by default (new workspaces) and
+                    // `meter_all`, most spend lands without the Space-tier
+                    // toggle, and the figure is the point. A bare `$` marks
+                    // a Space-toggled Space that hasn't spent yet.
+                    let cost = self.space_cost_micros(name);
+                    if cost > 0 || self.metered_spaces.contains(name) {
                         let badge = if cost > 0 {
                             format!(" $ {}", lazybox_tui_core::usage::format_cost_micros(cost))
                         } else {
@@ -1902,7 +1920,6 @@ impl Sidebar {
                 }),
                 track_main: workspace.is_some_and(|w| w.track_main),
                 track_main_behind: workspace.is_some_and(|w| w.track_main && w.track_main_behind),
-                metered: workspace.is_some_and(|w| w.metered),
                 origin_issue: workspace.and_then(crate::components::task_label::originating_issue),
                 has_notes: workspace.is_some_and(|w| w.has_notes()),
                 sent_snippet_count: workspace.map_or(0, |w| w.sent_snippets.total()),
@@ -1924,6 +1941,12 @@ impl Sidebar {
                 }),
                 ticket_tree: self.ticket_tree.get(key).copied(),
                 stack: self.stacks.get(key),
+                // Dependency edges (#1521): the count of declared blockers
+                // across this workspace's tasks, and whether any task
+                // carries a free-text `Blocked on:` reason. P0 renders the
+                // declared edges; it does not resolve whether they're open.
+                blocked_by: workspace.map_or(0, |w| w.hierarchy_blocked_by().count()),
+                blocked_on: workspace.is_some_and(|w| w.declared_blocker().is_some()),
                 model_shorts: &self.model_shorts,
                 highlight_query,
                 // Focused rows are lifted out of their repo group, so name

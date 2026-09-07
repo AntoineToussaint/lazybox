@@ -2,18 +2,19 @@
 
 # 📥 lazybox
 
-**Run a fleet of coding agents from your terminal — and step in when it
-matters.** Every task gets its own isolated git worktree and a live embedded
+**Run a fleet of coding agents from one terminal — and land the work, not just
+launch it.** Every task gets its own isolated git worktree and a live embedded
 terminal for Claude Code, Codex, Cursor, or a shell, so you can spin up and
-juggle many agents without ever managing worktrees by hand. Useful even with a
-quiet GitHub.
+juggle *many* agents without ever touching a worktree by hand.
 
-Wire up GitHub or Linear and it's also a **reactive inbox**: instead of
+Wire up GitHub or Linear and it becomes a **reactive inbox**: instead of
 refreshing, events flow to you — new comments, CI failures, and review requests
-surface as they land, with per-row read/unread tracking.
+surface as they land, with per-row read/unread tracking. Then **automation
+policies** finish the job — auto-merge clean PRs on green, auto-fix failing CI —
+so the fleet's output lands without you babysitting the finish line.
 
 Think a TUI inbox (lazygit-style) where every row is also a ready-to-run
-workspace — built for developers juggling many PRs and AI coding agents at once.
+workspace — built for developers driving many PRs and AI coding agents at once.
 
 [![Latest release](https://img.shields.io/github/v/release/AntoineToussaint/lazybox?logo=github&label=release&color=6f42c1)](https://github.com/AntoineToussaint/lazybox/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/AntoineToussaint/lazybox/ci.yml?branch=main&logo=githubactions&logoColor=white&label=CI)](https://github.com/AntoineToussaint/lazybox/actions/workflows/ci.yml)
@@ -27,42 +28,57 @@ workspace — built for developers juggling many PRs and AI coding agents at onc
 
 <div align="center">
 
-<video src="https://github.com/user-attachments/assets/c3f11255-5cba-4904-8c58-299ebfcccef6" poster="demo/hero.png" controls muted autoplay loop playsinline width="900">
-  <img src="demo/hero.gif" alt="lazybox: the inbox on the left listing live PRs and issues across repos, an opened workspace with description, activity, and embedded agent terminals on the right" />
-</video>
+<a href="https://lazybox.ai" title="Watch the video demo on lazybox.ai">
+  <img src="demo/lazybox.gif" width="900" alt="lazybox: the inbox on the left listing live PRs and issues across repos — model-tier and agent-state badges on each row — and an opened workspace on the right with description, activity, and a live agent terminal streaming work" />
+</a>
 
 </div>
 
-<sub>Video not playing? Here's the [animated GIF](demo/hero.gif) and a [static screenshot](demo/hero.png). There's also a fully reproducible `--demo` fleet demo — code, not a recording — driven by [`demo/lazybox.tape`](demo/lazybox.tape).</sub>
+<sub>▶ **[Watch the video demo on lazybox.ai](https://lazybox.ai)** · or a
+[static screenshot](demo/lazybox.png). The demo is **code, not a recording** — a
+fully reproducible `--demo` fleet driven by
+[`demo/lazybox.tape`](demo/lazybox.tape).</sub>
 
 ## ✨ Highlights
 
 - **📨 Reactive inbox** — new comments, CI failures, and review requests surface automatically, with per-row read/unread tracking. No refreshing.
 - **🌳 A worktree per task** — every row opens an isolated git worktree, so PRs never step on each other's working trees.
 - **🤖 Point at the work and press `w w`** — lazybox turns the focused issue, CI failure, conflict, or selected review comments into the right brief, then reuses the running agent or starts your default in the task worktree.
+- **🛬 Automation policies that land the work** — arm auto-merge-on-green to merge clean PRs once CI passes, or auto-fix to spawn an agent at failing CI. The finish line is where a fleet actually bottlenecks; these ship in the binary. See [Manage automation policies](https://lazybox.ai/docs/how-to/manage-automation-policies/).
 - **🎚️ GitHub-controlled compute** — a `best` / `high` / `medium` / `low` label or `@best` / `@high` / `@medium` / `@low` task-body marker maps through the target agent's model tiers, so GitHub can choose model and reasoning effort before work starts. `best` is the strongest configured tier — pin model *and* max effort together.
+- **📡 Drive many at once** — `v` multi-selects workspaces across repos; every bulk-appropriate action (`w w`, merge, snooze, archive) then targets the whole set, and `Shift-B` broadcasts one instruction to every selected agent.
 - **⚡ Repeatable workflows with memory** — `]]srev` sends a complete review workflow in one action; Recent remembers what you reuse, and each workspace's `]N` badge tracks up to 12 recently distinct snippet workflows.
 - **🖥️ Embedded terminals** — a live PTY per workspace (split & tile them), powered by a vendored ghostty VT parser.
 - **🔌 Source-agnostic** — GitHub and Linear today, surfacing in one inbox behind the same interface, with an optional Slack mirror.
 - **🛰️ Remote-friendly** — a client/daemon split runs over an SSH-forwarded socket for working against a remote box.
 
-## Performance and reliability
+## How lazybox compares
 
-**Responsiveness under load:**
+A lot of tools now run several agents in parallel — that part is table stakes.
+What sets lazybox apart is **what surrounds** the agents: a reactive
+multi-provider inbox, tag-to-spawn from a GitHub label, and automation policies
+that land the work — all in core, not bolted on as plugins.
 
-- **Async bus-lag recovery** — when clients lag behind the event bus, recovery snapshots are built asynchronously off the serve loop, so the UI never freezes (previously up to 4-second stalls).
-- **Polling backoff** — the scheduler exponentially backs off on empty polls (5s → 10s → ... → 150s max) to reduce idle CPU, resetting to base interval when data arrives. Instant on user refresh.
-- **Lock scope reduction** — provider registry operations are single-acquisition (acquire, copy, release) so slow I/O doesn't serialize unrelated operations. Keystroke dispatch is off the global queue entirely.
-- **Per-terminal event gating** — resync requests are per-terminal, so one congested connection doesn't cascade backpressure to all others.
+The nearest architectural cousin, [herdr](https://herdr.dev), is an excellent
+agent-native *runtime* (a background daemon owns the PTYs and flags the stuck
+agent) — but its PR inbox, auto-merge, and auto-fix live in a plugin ecosystem,
+where lazybox ships them first-class. For an honest, sourced side-by-side against
+herdr, Conductor, Warp, Claude Squad, Vibe Kanban, Crystal, Sculptor,
+container-use, and Amp — including where another tool is the better fit — see
+**[How lazybox compares](https://lazybox.ai/docs/explanation/comparison/)**.
 
-**Terminal integrity:**
+## Built for load
 
-- **Ring buffer validation** — capacity is validated at init (must be nonzero and ≤100 MiB) to catch misconfiguration before it silently loses data.
-- **Per-terminal byte ceiling** — output buffers cap at 64 MiB; crashed agents drop their VT and render a freeze-frame rather than exhausting memory.
-- **DEC-mode sync** — terminal modes (bold, color, charset) stay synchronized between server and client; replays are never torn, and resize events are sequenced with output to prevent mid-redraw corruption.
-- **Archive reconciliation** — archived status is checked per-item during each poll, so reopened PRs and unarchived issues resurface correctly.
+Running many agents means many PTYs, many pollers, and a UI that must stay
+responsive under all of it. A few of the things that keep it smooth:
 
-For deep dives on these improvements, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
+- **Async bus-lag recovery** — recovery snapshots are built off the serve loop, so a lagging client never freezes the UI (previously up to 4-second stalls).
+- **Polling backoff** — the scheduler backs off exponentially on empty polls (5s → 150s max) and resets the moment data arrives; instant on user refresh.
+- **Per-terminal event gating** — resyncs are per-terminal, so one congested connection can't cascade backpressure across all of them.
+- **Terminal integrity** — validated ring-buffer capacity, a 64 MiB per-terminal byte ceiling (a crashed agent renders a freeze-frame instead of exhausting memory), and DEC-mode sync so replays are never torn mid-redraw.
+
+Deep dives live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
+[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
 
 ## Install
 
@@ -120,8 +136,9 @@ sudo pacman -S --needed base-devel pkgconf libc++ libc++abi
 
 Install details (Homebrew and contributor source builds), build notes, and
 troubleshooting are in the [Quickstart](https://lazybox.ai/docs/tutorials/quickstart/).
-Release history is in [`CHANGELOG.md`](CHANGELOG.md), and private vulnerability
-reports follow [`SECURITY.md`](SECURITY.md).
+Release history is in [`CHANGELOG.md`](CHANGELOG.md) and
+[`RELEASE_NOTES.md`](RELEASE_NOTES.md); private vulnerability reports follow
+[`SECURITY.md`](SECURITY.md).
 
 ## First 60 seconds
 
@@ -167,9 +184,9 @@ an orientation of every command.
 
 - **[Quickstart](https://lazybox.ai/docs/tutorials/quickstart/)** — install → run → your first win, in ~5 minutes.
 - **[Core workflows](https://lazybox.ai/docs/tutorials/core-workflows/)** — transparent worktrees, attention-driven agent orchestration, snippets with memory, issue→PR continuity, restart-safe sessions, and the complete GitHub loop.
-- **[How-to guides](https://lazybox.ai/docs/how-to/)** — add a repo, run an agent per workspace, per-repo env/mounts, remote over SSH, mirror to Slack.
+- **[How-to guides](https://lazybox.ai/docs/how-to/)** — add a repo, run an agent per workspace, manage automation policies, orchestrate multiple agents, remote over SSH, mirror to Slack.
 - **[Reference](https://lazybox.ai/docs/reference/)** — every [CLI command](https://lazybox.ai/docs/reference/cli/), the full [keybindings](https://lazybox.ai/docs/reference/keybindings/), and the [`~/.lazybox/config.yaml`](https://lazybox.ai/docs/reference/configuration/) schema.
-- **[Explanation](https://lazybox.ai/docs/explanation/)** — the [mental model](https://lazybox.ai/docs/explanation/mental-model/) (worktree- and agent-per-workspace) and the [architecture](https://lazybox.ai/docs/explanation/architecture/).
+- **[Explanation](https://lazybox.ai/docs/explanation/)** — the [mental model](https://lazybox.ai/docs/explanation/mental-model/), the [architecture](https://lazybox.ai/docs/explanation/architecture/), and [how lazybox compares](https://lazybox.ai/docs/explanation/comparison/).
 
 Copy-paste config starters live in [`examples/`](examples/). Deep architecture
 notes are in [`CLAUDE.md`](CLAUDE.md) and [`DESIGN.md`](DESIGN.md); the
@@ -189,23 +206,24 @@ to focus it, drag the splitters to resize, wheel-scroll, and right-click links
 | `Tab` | Cycle Sidebar → Activity → Terminals |
 | `↑` / `↓` · `Enter` | Navigate the inbox (`j` / `k` also works) · open a workspace |
 | `a` · `s` | Agent menu (which-key popup): `a c` Claude · `a x` Codex · `a u` Cursor · `s` spawns a shell (`a c` needs the `claude` CLI on `PATH`; `s` always works) |
-| `w` | Work menu (which-key popup): `w w` uses the default/running agent · `w c` Claude · `w x` Codex · `w u` Cursor · `w S/M/L` chooses a model tier |
-| `x` | Workspace menu: `x n` new workspace · `x p` new project · `x a` adopt sessions · `x j` join into PR · `x z` long snooze · `x x` archive · `x c` close issue |
+| `w` | Work menu (which-key popup): `w w` uses the default/running agent · `w S/M/L` chooses a model tier |
+| `v` · `Shift-B` | Multi-select workspaces across repos · broadcast one instruction to the whole selection |
+| `x` | Workspace menu: `x n` new workspace · `x p` new project · `x s` send to session · `x j` join into PR · `x z` long snooze · `x x` archive · `x c` close issue |
 | `m` · `r` | Mark read · reply |
-| `g` | GitHub menu (which-key popup): `g m` merge · `g g` auto-merge on green · `g r` reviewers · `g a` assignees · `g l` labels · `g o` open in browser |
+| `g` | GitHub menu (which-key popup): `g m` merge · `g g` auto-merge on green · `g p` policies · `g r` reviewers · `g a` assignees · `g l` labels · `g o` open in browser |
 | `,` · `?` · `q q` | Settings · Ask Lazybox · quit |
 | `]]` | Terminal leader (which-key popup): `]]q` back to the sidebar · `]]s` snippets · `]]f` focus mode · `]]\|` / `]]-` split · `]]x` close |
 
 Power moves, once the basics feel natural:
 
-- **Model tiers** — a GitHub `best` / `high` / `medium` / `low` label (or `@best` / `@high` / `@medium` / `@low` task-body marker) automatically chooses the target agent's configured model and reasoning-effort arguments at spawn; `best` picks the strongest configured tier (model *and* max effort) and wins over a co-declared `high`. `w S` / `w M` / `w L` is the direct in-TUI override; Claude ships a Haiku/Sonnet/Opus menu and other agents configure theirs under `agents.<id>.models`. Map a priority to a tier under `agents.<id>.models.priority` (e.g. `best: B`); an alias no tier defines warns at config load rather than silently spawning the agent's own default. The picked tier rides a `◆ Opus` tab badge.
+- **Model tiers** — a GitHub `best` / `high` / `medium` / `low` label (or `@best` / `@high` / `@medium` / `@low` task-body marker) automatically chooses the target agent's configured model and reasoning-effort arguments at spawn; `best` picks the strongest configured tier (model *and* max effort) and wins over a co-declared `high`. `w S` / `w M` / `w L` is the direct in-TUI override; Claude ships a Haiku/Sonnet/Opus menu and other agents configure theirs under `agents.<id>.models`. The picked tier rides a `◆ Opus` tab badge.
 - **Multi-agent orchestration** — `v` selects workspaces across repos, then `Shift-B` lets you review one snippet-seeded or free-text instruction and safely fan it out; follow the [broadcast guide](https://lazybox.ai/docs/how-to/orchestrate-multiple-agents/).
+- **Automation policies** — `g p` opens the unified policies menu: merge-on-green, per-session auto-fix, and GitHub-native auto-merge, each toggled in place. Armed policies show as row pills (`ARM`, `FIX`).
 - **Cross-agent bus** — every spawned Claude session is wired to a daemon-hosted MCP server: `list_sessions` / `read_session` to see what siblings are doing, `post_note` / `read_notes` for a persistent cross-repo blackboard, `notify_session` to push an instruction into another agent. Agents are briefed on it at session start, so "check the blackboard first" just works. See [cross-agent coordination](docs/features/terminals-and-agents.md#cross-agent-coordination-mcp-bus).
-- **Focus mode** — `.` (or `]]f` from a terminal) near-fullscreens the agent terminal; `]]<digit>` jumps straight to the Nth agent workspace.
+- **Focus mode** — `.` (or `]]f` from a terminal) near-fullscreens the agent terminal; `]]<digit>` jumps straight to the Nth starred workspace, and `]]v` cycles multi-pane layouts.
 - **On main** — `b` leader (`b c` / `b s`, confirmed first) runs an agent or shell on the repo's shared main checkout instead of a worktree; the tab carries a `⎇ main` badge.
 - **Jump anywhere** — `` ` `` opens a fuzzy workspace picker across all repos (from a terminal: `]]` then `` ` ``); `!` jumps to an agent waiting on input, `Shift-F` to failing CI.
 - **Themes & messages** — `t` opens a live-preview theme picker; `Shift-M` shows the log of recent footer notices.
-- **Snippet workflows** — `]]s<key>` sends a built-in, global, or launch-directory workflow; Recent persists what you reuse, `]N` tracks up to 12 recently distinct workflows per workspace, and `Shift-B` broadcasts one across selected agents. See [`docs/snippets.md`](docs/snippets.md).
 
 The [full keybinding reference](https://lazybox.ai/docs/reference/keybindings/) covers every pane.
 
@@ -245,3 +263,4 @@ author directly.
 ## License
 
 MIT — see [`LICENSE`](LICENSE).
+</content>

@@ -152,6 +152,17 @@
         "key": "ENG-42"
       }
     ],
+    "blocked_by": [
+      {
+        "source": "github",
+        "key": "acme/widget#3"
+      },
+      {
+        "source": "github",
+        "key": "acme/other#9"
+      }
+    ],
+    "blocked_on": "waiting on the infra rollout",
     "parent": null,
     "kind": "Pr",
     "priority": null,
@@ -230,6 +241,17 @@
           "key": "ENG-42"
         }
       ],
+      "blocked_by": [
+        {
+          "source": "github",
+          "key": "acme/widget#3"
+        },
+        {
+          "source": "github",
+          "key": "acme/other#9"
+        }
+      ],
+      "blocked_on": "waiting on the infra rollout",
       "parent": null,
       "kind": "Issue",
       "priority": null,
@@ -309,6 +331,17 @@
           "key": "ENG-42"
         }
       ],
+      "blocked_by": [
+        {
+          "source": "github",
+          "key": "acme/widget#3"
+        },
+        {
+          "source": "github",
+          "key": "acme/other#9"
+        }
+      ],
+      "blocked_on": "waiting on the infra rollout",
       "parent": null,
       "kind": "Issue",
       "priority": null,
@@ -363,8 +396,8 @@
   ],
   "seen_count": 1,
   "read_indices": [
-    0,
-    2
+    2,
+    0
   ],
   "snoozed_until": "2026-03-14T18:00:00Z",
   "snooze_wake": "ci-settled",

@@ -52,6 +52,7 @@ const ISSUE_NODE_FIELDS: &str = r#"
       parent { id identifier }
       labels(first: 10) { nodes { name } }
       attachments(first: 20) { nodes { url } }
+      inverseRelations(first: 20) { nodes { type issue { id identifier } } }
       comments(first: 20, orderBy: createdAt) { nodes { id body createdAt user { id name } } }
 "#;
 
@@ -222,10 +223,40 @@ pub struct Issue {
     /// GitHub URL — the authoritative cross-provider link (#922).
     #[serde(default)]
     pub attachments: Option<Attachments>,
+    /// Relations where THIS issue is the target. A `blocks`-typed inverse
+    /// relation means the other issue blocks this one — the native
+    /// `blocked_by` edge (#1521). `default` so a host or query that omits
+    /// the field deserializes as `None`.
+    #[serde(rename = "inverseRelations", default)]
+    pub inverse_relations: Option<Relations>,
     /// The issue's comment thread — drives `recent_activity` and the
     /// real `needs_reply` / `last_commenter` signals (#1060).
     #[serde(default)]
     pub comments: Option<Comments>,
+}
+
+/// A connection of issue relations (`relations` or `inverseRelations`).
+#[derive(Deserialize, Debug)]
+pub struct Relations {
+    #[serde(default)]
+    pub nodes: Vec<Relation>,
+}
+
+/// One issue relation. For an `inverseRelations` entry, `issue` is the
+/// OTHER end (the source of the relation); with `relation_type == "blocks"`
+/// that source blocks the issue carrying this inverse relation.
+#[derive(Deserialize, Debug)]
+pub struct Relation {
+    #[serde(rename = "type")]
+    pub relation_type: String,
+    #[serde(default)]
+    pub issue: Option<RelationIssue>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct RelationIssue {
+    pub id: String,
+    pub identifier: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -482,6 +513,64 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         // Preserve Linear's exact workflow-state name ("In Review",
         // "Todo", …), which `state` above collapses to a canonical set.
         state_label: Some(issue.state.name.clone()),
+        // Native `blocked_by` edges: inverse relations of type "blocks"
+        // name the issue that blocks this one (#1521). Order-preserving,
+        // deduped, skipping any relation with no resolved source issue.
+        blocked_by: {
+            let mut out: Vec<TaskId> = Vec::new();
+            if let Some(relations) = issue.inverse_relations.as_ref() {
+                for rel in &relations.nodes {
+                    if rel.relation_type != "blocks" {
+                        continue;
+                    }
+                    let Some(src) = rel.issue.as_ref() else {
+                        continue;
+                    };
+                    let id = TaskId {
+                        source: "linear".into(),
+                        key: src.identifier.clone(),
+                    };
+                    if !out.contains(&id) {
+                        out.push(id);
+                    }
+                }
+            }
+            // Body-marker fallback (#1521): an issue that declares its
+            // blocker in prose ("Blocked by ENG-42", "Depends on
+            // owner/repo#7") is parsed with the same source-agnostic
+            // extractor the GitHub provider uses, and the edges are unioned
+            // in. A bare same-repo `#N` is dropped — Linear has no "own
+            // repo" to resolve it against, so only an explicit `owner/repo#N`
+            // cross-links to a GitHub task.
+            if let Some(desc) = issue.description.as_deref() {
+                for link in lazybox_core::issue_links::extract_blocked_by(desc) {
+                    let id = match link {
+                        lazybox_core::IssueLink::Linear { key } => TaskId {
+                            source: "linear".into(),
+                            key,
+                        },
+                        lazybox_core::IssueLink::GitHub {
+                            repo: Some(repo),
+                            number,
+                        } => TaskId {
+                            source: "github".into(),
+                            key: format!("{repo}#{number}"),
+                        },
+                        lazybox_core::IssueLink::GitHub { repo: None, .. } => continue,
+                    };
+                    if !out.contains(&id) {
+                        out.push(id);
+                    }
+                }
+            }
+            out
+        },
+        // Free-text `Blocked on:` reason declared in the description
+        // (#1521) — the same prose extractor GitHub issues use.
+        blocked_on: issue
+            .description
+            .as_deref()
+            .and_then(lazybox_core::issue_links::extract_blocked_on),
     }
 }
 
@@ -719,6 +808,7 @@ mod tests {
                     .map(|u| Attachment { url: (*u).into() })
                     .collect(),
             }),
+            inverse_relations: None,
             comments: None,
         }
     }
@@ -759,6 +849,144 @@ mod tests {
                 source: "linear".into(),
                 key: "ENG-7".into(),
             })
+        );
+    }
+
+    #[test]
+    fn issue_to_task_maps_blocking_inverse_relations_to_blocked_by() {
+        let mut issue = issue_with_attachments(&[]);
+        issue.inverse_relations = Some(Relations {
+            nodes: vec![
+                // ENG-7 blocks this issue — a native `blocked_by` edge.
+                Relation {
+                    relation_type: "blocks".into(),
+                    issue: Some(RelationIssue {
+                        id: "n7".into(),
+                        identifier: "ENG-7".into(),
+                    }),
+                },
+                // A merely-related issue is not a blocker.
+                Relation {
+                    relation_type: "related".into(),
+                    issue: Some(RelationIssue {
+                        id: "n9".into(),
+                        identifier: "ENG-9".into(),
+                    }),
+                },
+                // A duplicate of ENG-7 (same identifier) must not double-count.
+                Relation {
+                    relation_type: "blocks".into(),
+                    issue: Some(RelationIssue {
+                        id: "n7".into(),
+                        identifier: "ENG-7".into(),
+                    }),
+                },
+            ],
+        });
+        assert_eq!(
+            issue_to_task(&issue, "viewer").blocked_by,
+            vec![TaskId {
+                source: "linear".into(),
+                key: "ENG-7".into(),
+            }],
+            "only `blocks`-typed inverse relations become edges, deduped",
+        );
+    }
+
+    #[test]
+    fn issue_to_task_has_no_blockers_without_relations() {
+        let issue = issue_with_attachments(&[]);
+        assert!(issue_to_task(&issue, "viewer").blocked_by.is_empty());
+    }
+
+    #[test]
+    fn issue_to_task_parses_body_markers_and_unions_them_with_native_edges() {
+        // #1521: a Linear issue that only declares its blocker in prose was
+        // silently dropped — the provider ran no body-marker parse and
+        // hardcoded `blocked_on: None`. The description below names one
+        // native-overlapping edge (ENG-7), one prose-only Linear edge
+        // (ENG-42), one cross-provider GitHub edge, and a free-text reason.
+        let mut issue = issue_with_attachments(&[]);
+        issue.description = Some(
+            "Depends on ENG-42.\n\
+             Blocked by owner/repo#7.\n\
+             Blocked on: waiting for the infra migration"
+                .into(),
+        );
+        issue.inverse_relations = Some(Relations {
+            nodes: vec![Relation {
+                relation_type: "blocks".into(),
+                issue: Some(RelationIssue {
+                    id: "n7".into(),
+                    identifier: "ENG-7".into(),
+                }),
+            }],
+        });
+
+        let task = issue_to_task(&issue, "viewer");
+        // The native edge leads (inverse relations are scanned first); the
+        // two prose edges follow. Intra-extractor ordering is the extractor's
+        // own concern, so assert on membership + count rather than pinning it.
+        assert_eq!(task.blocked_by.len(), 3, "three distinct edges, no dupes");
+        assert_eq!(
+            task.blocked_by[0],
+            TaskId {
+                source: "linear".into(),
+                key: "ENG-7".into(),
+            },
+            "the native `blocks` relation is listed first",
+        );
+        assert!(
+            task.blocked_by.contains(&TaskId {
+                source: "linear".into(),
+                key: "ENG-42".into(),
+            }),
+            "the prose-only Linear edge is unioned in",
+        );
+        assert!(
+            task.blocked_by.contains(&TaskId {
+                source: "github".into(),
+                key: "owner/repo#7".into(),
+            }),
+            "the cross-provider GitHub edge is unioned in",
+        );
+        assert_eq!(
+            task.blocked_on.as_deref(),
+            Some("waiting for the infra migration"),
+            "the free-text `Blocked on:` reason is parsed from the description",
+        );
+    }
+
+    #[test]
+    fn issue_to_task_body_marker_dedups_against_a_native_edge() {
+        // A prose blocker that repeats a native `blocks` relation must not
+        // double-count.
+        let mut issue = issue_with_attachments(&[]);
+        issue.description = Some("Blocked by ENG-7".into());
+        issue.inverse_relations = Some(Relations {
+            nodes: vec![Relation {
+                relation_type: "blocks".into(),
+                issue: Some(RelationIssue {
+                    id: "n7".into(),
+                    identifier: "ENG-7".into(),
+                }),
+            }],
+        });
+        assert_eq!(
+            issue_to_task(&issue, "viewer").blocked_by,
+            vec![TaskId {
+                source: "linear".into(),
+                key: "ENG-7".into(),
+            }],
+            "the shared ENG-7 is listed once",
+        );
+    }
+
+    #[test]
+    fn query_requests_inverse_relations() {
+        assert!(
+            ISSUE_NODE_FIELDS.contains("inverseRelations"),
+            "blocked_by edges require the inverse-relation graph: {ISSUE_NODE_FIELDS}"
         );
     }
 

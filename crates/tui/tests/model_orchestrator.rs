@@ -1034,6 +1034,8 @@ fn task_with_issue(key: &str, title: &str, body: Option<&str>) -> lazybox_core::
         parent: None,
         priority: None,
         state_label: None,
+        blocked_by: vec![],
+        blocked_on: None,
     }
 }
 
@@ -1304,6 +1306,8 @@ fn task_with_pr(key: &str) -> lazybox_core::Task {
         parent: None,
         priority: None,
         state_label: None,
+        blocked_by: vec![],
+        blocked_on: None,
     }
 }
 

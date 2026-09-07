@@ -43,7 +43,7 @@ const KEYWORDS: &[&str] = &[
 /// shape and means re-parsing the same body returns the same value).
 pub fn extract(body: &str) -> Vec<IssueLink> {
     let mut out = BTreeSet::new();
-    for token in tokenize(body) {
+    for token in tokenize_with(body, KEYWORDS, 80) {
         if let Some(link) = parse_link_after_keyword(&token) {
             out.insert(link);
         }
@@ -51,10 +51,94 @@ pub fn extract(body: &str) -> Vec<IssueLink> {
     out.into_iter().collect()
 }
 
+/// Keywords that introduce a *blocking* reference. Multi-word entries work
+/// because the matcher is a plain substring compare on the lowercased body,
+/// and the separator check already admits `Blocked by: owner/repo#7`.
+///
+/// The `blocked on` forms are here too, even though they primarily introduce
+/// a free-text reason (see [`BLOCKED_ON_KEYWORDS`]): a `Blocked on: #5`
+/// names a *task*, and [`extract_blocked_on`] hands such link-shaped
+/// occurrences off to this parser. If `blocked on` were absent here that
+/// hand-off would land nowhere and the reference would be lost — so both
+/// parsers must recognize the keyword and each keeps only the shape it owns
+/// (this one keeps links; `extract_blocked_on` keeps prose).
+const BLOCKED_KEYWORDS: &[&str] = &[
+    "blocked by",
+    "blocked-by",
+    "blockedby",
+    "blocked on",
+    "blocked-on",
+    "blockedon",
+    "depends on",
+    "depends-on",
+    "dependson",
+];
+
+/// Every `Blocked by:` / `Depends on:` reference in `body`, deduplicated,
+/// deterministic order. Same link grammar as [`extract`].
+pub fn extract_blocked_by(body: &str) -> Vec<IssueLink> {
+    let mut out = BTreeSet::new();
+    for token in tokenize_with(body, BLOCKED_KEYWORDS, 80) {
+        if let Some(link) = parse_link_after_keyword(&token) {
+            out.insert(link);
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Whether `body` mentions any blocking keyword at all — a cheap
+/// substring pre-check, not a parse. Callers use it to decide whether an
+/// issue is plausibly in a dependency graph before spending a network
+/// round-trip (GitHub's issue-dependencies REST API): a body with no
+/// `Blocked by:` / `Depends on:` token can be skipped. Keeps the keyword
+/// list single-sourced with [`extract_blocked_by`].
+pub fn body_mentions_blocker(body: &str) -> bool {
+    let lower = body.to_lowercase();
+    BLOCKED_KEYWORDS.iter().any(|kw| lower.contains(kw))
+}
+
+/// Keywords that introduce a *declared* (free-text) blocker.
+const BLOCKED_ON_KEYWORDS: &[&str] = &["blocked on", "blocked-on", "blockedon"];
+
+/// Maximum length of a declared `Blocked on:` reason before truncation.
+const BLOCKED_ON_MAX: usize = 200;
+
+/// `Blocked on: <reason>` — a declared blocker with a human-readable reason
+/// (a decision, a credential, an outside party). Returns the rest of that
+/// line, trimmed, capped at 200 chars; the LAST such line wins so an
+/// updated reason replaces the old one. `None` when absent or empty.
+/// Distinct from [`extract_blocked_by`], which yields task links: if the
+/// text after the keyword parses as a link, it is a `blocked_by` edge and
+/// this returns `None` for that occurrence.
+pub fn extract_blocked_on(body: &str) -> Option<String> {
+    let mut reason = None;
+    for token in tokenize_with(body, BLOCKED_ON_KEYWORDS, BLOCKED_ON_MAX * 4 + 16) {
+        // An ambiguous `Blocked on #12` is a task edge, not free text —
+        // defer to `extract_blocked_by` and skip it here.
+        if parse_link_after_keyword(&token).is_some() {
+            continue;
+        }
+        let line = token
+            .trim_start_matches(|c: char| c.is_whitespace() || c == ':')
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim();
+        if line.is_empty() {
+            continue;
+        }
+        let capped: String = line.chars().take(BLOCKED_ON_MAX).collect();
+        reason = Some(capped);
+    }
+    reason
+}
+
 /// Split the body into "after-keyword" candidate strings. We look at
-/// every position after a closing keyword and grab the next ~80 chars
-/// to scan, since "Fixes #1, #2, #3" should hit all three.
-fn tokenize(body: &str) -> Vec<String> {
+/// every position after one of `keywords` and grab the next `window` bytes
+/// to scan, since "Fixes #1, #2, #3" should hit all three. The link
+/// extractors use a small window; the free-text `Blocked on:` reason needs
+/// a wider one so a long line survives to its own 200-char cap.
+fn tokenize_with(body: &str, keywords: &[&str], window: usize) -> Vec<String> {
     let lower = body.to_lowercase();
     let mut tokens = Vec::new();
     let bytes = lower.as_bytes();
@@ -68,7 +152,7 @@ fn tokenize(body: &str) -> Vec<String> {
             i += 1;
             continue;
         }
-        for kw in KEYWORDS {
+        for kw in keywords {
             if lower[i..].starts_with(kw) {
                 let after = i + kw.len();
                 if after >= bytes.len() {
@@ -80,12 +164,12 @@ fn tokenize(body: &str) -> Vec<String> {
                 if !next.is_ascii_whitespace() && next != b':' {
                     continue;
                 }
-                // Take ~80 chars past the keyword. Snap `end` back to
+                // Take `window` bytes past the keyword. Snap `end` back to
                 // a char boundary so multi-byte chars (`…`, em-dash,
-                // emoji, …) sitting on the 80-byte window edge don't
+                // emoji, …) sitting on the window edge don't
                 // panic when we slice. `floor_char_boundary` is
                 // unstable, so walk back manually.
-                let mut end = (after + 80).min(body.len());
+                let mut end = (after + window).min(body.len());
                 while end > after && !body.is_char_boundary(end) {
                     end -= 1;
                 }
@@ -304,5 +388,155 @@ mod tests {
                 number: 73,
             }],
         );
+    }
+
+    #[test]
+    fn blocked_by_extracts_same_repo() {
+        assert_eq!(
+            extract_blocked_by("Blocked by: #4"),
+            vec![IssueLink::GitHub {
+                repo: None,
+                number: 4
+            }]
+        );
+    }
+
+    #[test]
+    fn blocked_by_extracts_cross_repo() {
+        assert_eq!(
+            extract_blocked_by("blocked by owner/repo#4"),
+            vec![IssueLink::GitHub {
+                repo: Some("owner/repo".into()),
+                number: 4
+            }]
+        );
+    }
+
+    #[test]
+    fn blocked_by_accepts_depends_on_and_hyphenated_forms() {
+        for body in [
+            "Depends on #7",
+            "depends-on #7",
+            "DependsOn #7",
+            "blocked-by #7",
+            "BlockedBy #7",
+        ] {
+            assert_eq!(
+                extract_blocked_by(body),
+                vec![IssueLink::GitHub {
+                    repo: None,
+                    number: 7
+                }],
+                "body: {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn blocked_by_ignores_closes_keywords() {
+        // A closing keyword is not a blocking keyword.
+        assert!(extract_blocked_by("Closes #3").is_empty());
+    }
+
+    #[test]
+    fn body_mentions_blocker_detects_keywords_without_a_link() {
+        // The pre-check fires on the keyword alone, before any parse.
+        assert!(body_mentions_blocker("Blocked by: TBD, need infra"));
+        assert!(body_mentions_blocker("This depends on the migration"));
+        assert!(body_mentions_blocker("blockedby whatever"));
+        // Closing keywords and plain prose do not.
+        assert!(!body_mentions_blocker("Closes #3\n\nregular description"));
+        assert!(!body_mentions_blocker(""));
+    }
+
+    #[test]
+    fn closes_ignores_blocked_by_keywords() {
+        // Regression: `extract` (closing links) must not pick up a
+        // `Blocked by:` reference.
+        assert!(extract("Blocked by: #9").is_empty());
+    }
+
+    #[test]
+    fn blocked_by_dedupes_and_sorts() {
+        let body = "Blocked by #2. Also depends on #1. Blocked by #2 again.";
+        assert_eq!(
+            extract_blocked_by(body),
+            vec![
+                IssueLink::GitHub {
+                    repo: None,
+                    number: 1
+                },
+                IssueLink::GitHub {
+                    repo: None,
+                    number: 2
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn blocked_by_does_not_panic_on_multibyte_window() {
+        let body = "Blocked by #73.\n\nSummary: …";
+        assert_eq!(
+            extract_blocked_by(body),
+            vec![IssueLink::GitHub {
+                repo: None,
+                number: 73,
+            }]
+        );
+    }
+
+    #[test]
+    fn blocked_on_returns_trimmed_reason_last_line_wins() {
+        let body = "Blocked on: waiting on a design decision\n\nBlocked on: legal review pending";
+        assert_eq!(
+            extract_blocked_on(body).as_deref(),
+            Some("legal review pending")
+        );
+    }
+
+    #[test]
+    fn blocked_on_defers_to_blocked_by_when_the_text_is_a_link() {
+        // `Blocked on #12` is a task edge, not a free-text reason: the
+        // reason extractor yields nothing so it doesn't shadow the edge.
+        assert_eq!(extract_blocked_on("Blocked on #12"), None);
+        assert_eq!(extract_blocked_on("Blocked on owner/repo#12"), None);
+    }
+
+    #[test]
+    fn blocked_on_link_is_captured_as_an_edge_not_dropped() {
+        // Regression: `Blocked on: #5` is a task edge. The reason extractor
+        // defers it (returns None), so the edge extractor MUST claim it —
+        // otherwise the reference is silently lost. This only works because
+        // `blocked on` is in BLOCKED_KEYWORDS as well as BLOCKED_ON_KEYWORDS.
+        assert_eq!(extract_blocked_on("Blocked on: #5"), None);
+        assert_eq!(
+            extract_blocked_by("Blocked on: #5"),
+            vec![IssueLink::GitHub {
+                repo: None,
+                number: 5
+            }],
+        );
+        assert_eq!(
+            extract_blocked_by("Blocked on owner/repo#12"),
+            vec![IssueLink::GitHub {
+                repo: Some("owner/repo".into()),
+                number: 12
+            }],
+        );
+        // A prose reason under the same keyword stays a reason, not an edge.
+        assert_eq!(
+            extract_blocked_on("Blocked on: waiting on legal").as_deref(),
+            Some("waiting on legal")
+        );
+        assert!(extract_blocked_by("Blocked on: waiting on legal").is_empty());
+    }
+
+    #[test]
+    fn blocked_on_caps_length() {
+        let reason = "x".repeat(500);
+        let body = format!("Blocked on: {reason}");
+        let got = extract_blocked_on(&body).unwrap();
+        assert_eq!(got.chars().count(), 200);
     }
 }

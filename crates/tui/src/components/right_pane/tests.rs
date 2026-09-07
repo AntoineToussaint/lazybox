@@ -810,6 +810,8 @@ mod has_visible_content_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -911,6 +913,8 @@ mod summary_render_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -1039,6 +1043,8 @@ mod mark_workspace_merged_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -1138,6 +1144,8 @@ mod description_expand_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -1852,6 +1860,8 @@ mod linked_issue_modal_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -1978,6 +1988,8 @@ mod originating_issue_header_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -2308,6 +2320,8 @@ prose.\n\nThird paragraph with yet more content to guarantee multiple rows.";
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 

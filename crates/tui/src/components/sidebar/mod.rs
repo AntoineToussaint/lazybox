@@ -318,6 +318,12 @@ pub struct Sidebar {
     /// so two agents sharing a tier label keep distinct shorts. Refreshed
     /// whenever the model menus reload (`set_model_shorts`).
     model_shorts: HashMap<(char, String), String>,
+    /// `badge_letter → label` of each agent's DEFAULT model tier
+    /// (`agents.<id>.models.default`, else the built-in default). A row
+    /// whose single agent runs its default tier shows no `◆` badge — the
+    /// badge marks a deliberate deviation, so `◆Op` on thirty rows stops
+    /// being wallpaper (#1502). Fed by `set_default_model_labels`.
+    default_model_labels: HashMap<char, String>,
     /// Built-in agent registry, consulted so an agent's display badge
     /// (`C` / `X` / `U`) comes from the agent itself rather than a
     /// hardcoded match here — a new agent declares its own letter and
@@ -635,6 +641,7 @@ impl Sidebar {
             running_terminals: HashMap::new(),
             terminal_models: HashMap::new(),
             model_shorts: HashMap::new(),
+            default_model_labels: HashMap::new(),
             agent_registry: lazybox_tui_core::agents::registry(),
             attention: lazybox_config::AttentionConfig::default(),
             inbox_health: InboxHealth::default(),
@@ -729,6 +736,20 @@ impl Sidebar {
     /// menu whenever the menus reload (#1068).
     pub fn set_model_shorts(&mut self, shorts: HashMap<(char, String), String>) {
         self.model_shorts = shorts;
+    }
+
+    /// Replace the `badge_letter → default tier label` map that hides the
+    /// model badge on rows running their agent's default tier (#1502).
+    pub fn set_default_model_labels(&mut self, defaults: HashMap<char, String>) {
+        self.default_model_labels = defaults;
+    }
+
+    /// Whether `model` is `letter`'s default tier — the badge is for
+    /// deviations, so a default-tier run shows none (#1502).
+    fn is_default_model(&self, letter: char, model: &str) -> bool {
+        self.default_model_labels
+            .get(&letter)
+            .is_some_and(|default| default == model)
     }
 
     /// Record whether `ui.usage_summary` is on — gates the always-visible
@@ -3301,7 +3322,9 @@ impl Sidebar {
         per_letter
             .into_iter()
             .filter_map(|(letter, (count, model))| match model {
-                Some(model) if count == 1 => Some((letter, model)),
+                Some(model) if count == 1 && !self.is_default_model(letter, &model) => {
+                    Some((letter, model))
+                }
                 _ => None,
             })
             .collect()
@@ -3364,7 +3387,9 @@ impl Sidebar {
                 let labels = per_letter
                     .into_iter()
                     .filter_map(|(letter, (count, model))| match model {
-                        Some(model) if count == 1 => Some((letter, model)),
+                        Some(model) if count == 1 && !self.is_default_model(letter, &model) => {
+                            Some((letter, model))
+                        }
                         _ => None,
                     })
                     .collect();

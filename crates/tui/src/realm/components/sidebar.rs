@@ -297,6 +297,11 @@ impl Sidebar {
         self.inner.set_model_shorts(shorts);
     }
 
+    /// Replace the `badge_letter → default tier label` map (#1502).
+    pub fn set_default_model_labels(&mut self, defaults: std::collections::HashMap<char, String>) {
+        self.inner.set_default_model_labels(defaults);
+    }
+
     /// Record whether `ui.usage_summary` is on — gates the always-visible
     /// per-provider usage row in the header (#1059).
     pub fn set_usage_summary(&mut self, show: bool) {

@@ -5647,6 +5647,43 @@ mod agent_model_badge_tests {
         assert_eq!(models(&sb, &ws), vec![('C', "Opus".to_string())]);
     }
 
+    /// The badge marks a deviation from the agent's default tier (#1502):
+    /// a run on the default shows none, a run on another tier shows it,
+    /// and an agent with no known default always badges.
+    #[test]
+    fn default_tier_run_shows_no_badge_but_a_deviation_does() {
+        let a: SessionKey = (&WorkspaceKey::new("github:o/r#1")).into();
+        let b: SessionKey = (&WorkspaceKey::new("github:o/r#2")).into();
+        let c: SessionKey = (&WorkspaceKey::new("github:o/r#3")).into();
+        let mut sb = Sidebar::new(PaneId::new(1));
+        sb.set_default_model_labels([('C', "Opus".to_string())].into_iter().collect());
+        spawn(&mut sb, 1, &a, "claude", Some("Opus"));
+        spawn(&mut sb, 2, &b, "claude", Some("Sonnet"));
+        spawn(&mut sb, 3, &c, "codex", Some("gpt-5.5 · xhigh"));
+        assert_eq!(models(&sb, &a), vec![], "default tier: no badge");
+        assert_eq!(
+            models(&sb, &b),
+            vec![('C', "Sonnet".to_string())],
+            "a deviation still badges"
+        );
+        assert_eq!(
+            models(&sb, &c),
+            vec![('X', "gpt-5.5 · xhigh".to_string())],
+            "an agent without a known default always badges"
+        );
+        // The bulk path agrees with the per-key reference (#1031).
+        let bulk = sb.agent_models_by_key();
+        for key in [&a, &b, &c] {
+            assert_eq!(
+                bulk.get(key).cloned().unwrap_or_default(),
+                sb.agent_models(key)
+            );
+        }
+        // Clearing the defaults brings the badge back.
+        sb.set_default_model_labels(HashMap::new());
+        assert_eq!(models(&sb, &a), vec![('C', "Opus".to_string())]);
+    }
+
     #[test]
     fn spawn_without_a_tier_shows_no_label() {
         let ws: SessionKey = (&WorkspaceKey::new("github:o/r#2")).into();

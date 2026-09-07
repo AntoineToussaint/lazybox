@@ -1441,6 +1441,32 @@ pub enum PaneFocus {
     Terminals,
 }
 
+/// `badge_letter → label` of every agent's default tier: the YAML
+/// `agents.<id>.models.default` alias when set, else the built-in default
+/// alias, resolved against the agent's declared tiers (falling back to the
+/// built-in tier list). Agents with no resolvable default are absent, so
+/// their runs always badge (#1502).
+pub(crate) fn default_model_labels(
+    models: &std::collections::BTreeMap<String, lazybox_core::AgentModels>,
+) -> std::collections::HashMap<char, String> {
+    let registry = lazybox_tui_core::agents::registry();
+    models
+        .iter()
+        .filter_map(|(agent_id, m)| {
+            let builtin = lazybox_core::AgentModels::builtin(agent_id);
+            let alias = m
+                .default
+                .clone()
+                .or_else(|| builtin.as_ref().and_then(|b| b.default.clone()))?;
+            let label = m
+                .tier(&alias)
+                .or_else(|| builtin.as_ref().and_then(|b| b.tier(&alias)))
+                .map(|t| t.label.clone())?;
+            Some((registry.badge_for(agent_id), label))
+        })
+        .collect()
+}
+
 impl PaneFocus {
     /// Human name used by the help surfaces ("keys in the sidebar").
     pub(crate) fn title(self) -> &'static str {
@@ -4508,6 +4534,10 @@ impl<T: TerminalAdapter> Model<T> {
             })
             .collect();
         self.sidebar.set_model_shorts(shorts);
+        // The badge marks a deviation from the agent's default tier, so
+        // hand the sidebar each agent's default label (#1502).
+        self.sidebar
+            .set_default_model_labels(default_model_labels(&models));
         self.agent_models = models;
         self.rebuild_catalog();
     }

@@ -92,6 +92,12 @@ pub(crate) struct SpawnFlags {
     pub on_main: bool,
     pub resume: bool,
     pub uses_argv_hooks: bool,
+    /// This spawn was wired to the cross-agent coordination MCP bus (#1420):
+    /// `provision_for_spawn` returned a config, so `--mcp-config` is on the
+    /// argv. Drives whether the `SessionStart` briefing may claim the bus is
+    /// connected — a ReadOnly/unprovisioned Claude session still gets the base
+    /// blurb but must NOT be told about tools it cannot call.
+    pub mcp_wired: bool,
 }
 
 pub(crate) struct SpawnPlan {
@@ -201,13 +207,16 @@ pub(crate) fn build_spawn_plan(
     // agent's own flag builder) because only the daemon knows the bound
     // endpoint and the per-session token behind the file. Read-only launches
     // restrict the tool allowlist, so an MCP tool wouldn't be callable — skip.
-    let mut argv = argv;
-    if let Some(path) = mcp_config_path.as_ref()
+    // The same condition drives `SpawnFlags::mcp_wired`, so the SessionStart
+    // briefing's "the bus is connected" claim can never diverge from whether
+    // `--mcp-config` is actually on the argv.
+    let mcp_wired = mcp_config_path.is_some()
         && access == AgentRunAccess::Default
         && agent
             .as_deref()
-            .is_some_and(|agent| agent.supports_mcp_config())
-    {
+            .is_some_and(|agent| agent.supports_mcp_config());
+    let mut argv = argv;
+    if mcp_wired && let Some(path) = mcp_config_path.as_ref() {
         argv.push("--mcp-config".into());
         argv.push(path.to_string_lossy().into_owned());
     }
@@ -334,6 +343,7 @@ pub(crate) fn build_spawn_plan(
             on_main: landed_on_main,
             resume,
             uses_argv_hooks,
+            mcp_wired,
         },
     })
 }
@@ -679,9 +689,46 @@ mod tests {
                 on_main: false,
                 resume: false,
                 uses_argv_hooks: false,
+                // No config provisioned in this input, so the bus is not wired.
+                mcp_wired: false,
             }
         );
         assert_eq!(plan.model_label.as_deref(), Some("Sonnet"));
+    }
+
+    #[test]
+    fn mcp_wired_tracks_provisioning_and_gates_on_default_access() {
+        let cfg = lazybox_config::Config::default();
+
+        // Provisioned config on a Default-access Claude spawn: wired, and the
+        // argv carries `--mcp-config`.
+        let mut wired = input(TerminalKind::Agent("claude".into()));
+        wired.mcp_config_path = Some(PathBuf::from("/run/lazybox/mcp-42.json"));
+        let plan = build_spawn_plan(wired, &cfg, &Registry::default_builtins()).expect("plan");
+        assert!(plan.flags.mcp_wired, "a provisioned Default spawn is wired");
+        assert!(
+            plan.argv.iter().any(|a| a == "--mcp-config"),
+            "wired spawn must carry --mcp-config: {:?}",
+            plan.argv
+        );
+
+        // A ReadOnly launch is never provisioned (provision_for_spawn returns
+        // None), so even a stray config path must not flip the flag — the
+        // SessionStart briefing would otherwise claim a bus the session cannot
+        // reach.
+        let mut readonly = input(TerminalKind::Agent("claude".into()));
+        readonly.access = AgentRunAccess::ReadOnly;
+        readonly.mcp_config_path = Some(PathBuf::from("/run/lazybox/mcp-42.json"));
+        let plan = build_spawn_plan(readonly, &cfg, &Registry::default_builtins()).expect("plan");
+        assert!(
+            !plan.flags.mcp_wired,
+            "a ReadOnly spawn is not on the bus even with a config path"
+        );
+        assert!(
+            !plan.argv.iter().any(|a| a == "--mcp-config"),
+            "ReadOnly spawn must not carry --mcp-config: {:?}",
+            plan.argv
+        );
     }
 
     #[test]

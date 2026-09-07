@@ -96,7 +96,8 @@ crates/
                    #   Also: per-provider LLM-gateway base-URL env injection
                    #   (ANTHROPIC_BASE_URL / OPENAI_BASE_URL ← agent.llm_gateway_url).
   server/          # Server library: PTY lifecycle, ring buffers, provider
-                   #   polling, agent runs, JSON API gateway.
+                   #   polling, agent runs, JSON API gateway, cross-agent
+                   #   coordination MCP server (mcp.rs).
 
   # ── client / binary ─────────────────────────────────────────────────
   tui-core/        # Ratatui-free TUI logic: action catalog, intent
@@ -162,9 +163,19 @@ crates/
   stream-json --output-format stream-json` for non-terminal clients (Tauri,
   iOS, JSON API). Raw JSON is preserved alongside normalized events.
 - **Agent autonomy**: spawned Claude Code sessions drive the repo directly
-  with `gh` and `git`. Lazybox does not wrap these actions behind an
+  with `gh` and `git`. Lazybox does not wrap *repo actions* behind an
   MCP/tool-approval layer — the agent has the same tools it would in any
   other worktree.
+- **Cross-agent coordination bus** (`crates/server/src/mcp.rs`, #1420/#1433):
+  the one MCP server lazybox *does* ship is a coordination surface, not a
+  repo-action wrapper. Each spawned Claude session gets a per-session bearer
+  + `--mcp-config` pointing at a loopback `rmcp` endpoint (identity is the
+  connection), exposing `whoami` / `list_sessions` / `read_session` (pull),
+  `post_note` / `read_notes` (a persistent kv-backed blackboard, the primary
+  medium), and `notify_session` (the settle-gated inject as a tool). Agents
+  learn the tools from the `SessionStart` briefing
+  (`crates/agents/src/session_context.rs`). Design:
+  [`docs/mcp-coordination.md`](docs/mcp-coordination.md).
 
 ### Adding a new provider
 

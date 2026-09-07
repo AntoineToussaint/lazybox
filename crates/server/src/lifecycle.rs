@@ -236,10 +236,22 @@ pub fn parse_hook_correlation(args: &[String]) -> (Option<String>, Option<u64>) 
 /// `--emit-session-context` marker is present — the marker Claude's hook
 /// command carries and Codex's omits, so Codex's `SessionStart` stays a no-op
 /// until an equivalent stdout-as-context channel is verified for it.
-fn session_context_to_emit(args: &[String], hook: &lazybox_ipc::HookEvent) -> Option<&'static str> {
+///
+/// The cross-agent coordination paragraph is appended only when the spawn
+/// also carried `--emit-mcp-context` — the marker the daemon adds solely for a
+/// session actually wired to the MCP bus (`SpawnFlags::mcp_wired`). A ReadOnly
+/// "Ask lazybox" launch is never provisioned, so it gets the base blurb but is
+/// not told about six tools it cannot call.
+fn session_context_to_emit(args: &[String], hook: &lazybox_ipc::HookEvent) -> Option<String> {
     let marked = args.iter().any(|arg| arg == "--emit-session-context");
-    (hook.kind == lazybox_ipc::HookEventKind::SessionStart && marked)
-        .then(lazybox_agents::lazybox_session_context)
+    if hook.kind != lazybox_ipc::HookEventKind::SessionStart || !marked {
+        return None;
+    }
+    if args.iter().any(|arg| arg == "--emit-mcp-context") {
+        Some(lazybox_agents::lazybox_session_context_with_mcp())
+    } else {
+        Some(lazybox_agents::lazybox_session_context().to_string())
+    }
 }
 
 fn read_stdin_to_string() -> String {
@@ -282,10 +294,11 @@ mod hook_tests {
             "--emit-session-context".to_string(),
         ];
 
-        // Marked SessionStart → the capability blurb.
+        // Marked SessionStart, no MCP marker → the base capability blurb, and
+        // NOT the bus paragraph (this is the ReadOnly/unprovisioned case).
         assert_eq!(
             session_context_to_emit(&marked, &hook("SessionStart")),
-            Some(lazybox_agents::lazybox_session_context()),
+            Some(lazybox_agents::lazybox_session_context().to_string()),
         );
         // Every other event stays silent, even when marked.
         for other in ["Stop", "UserPromptSubmit", "PreToolUse", "Notification"] {
@@ -296,6 +309,29 @@ mod hook_tests {
         assert_eq!(
             session_context_to_emit(&unmarked, &hook("SessionStart")),
             None
+        );
+    }
+
+    #[test]
+    fn mcp_paragraph_emitted_only_when_the_bus_marker_is_present() {
+        let base = vec![
+            "--backend-key".to_string(),
+            "lzb-1".to_string(),
+            "--emit-session-context".to_string(),
+        ];
+        let mut with_mcp = base.clone();
+        with_mcp.push("--emit-mcp-context".to_string());
+
+        // Wired spawn (both markers) → base + coordination paragraph.
+        assert_eq!(
+            session_context_to_emit(&with_mcp, &hook("SessionStart")),
+            Some(lazybox_agents::lazybox_session_context_with_mcp()),
+        );
+        // Base-only emission never names a bus-only tool.
+        let base_text = session_context_to_emit(&base, &hook("SessionStart")).expect("base");
+        assert!(
+            !base_text.contains("post_note") && !base_text.contains("blackboard"),
+            "unwired briefing must not advertise the bus: {base_text}"
         );
     }
 

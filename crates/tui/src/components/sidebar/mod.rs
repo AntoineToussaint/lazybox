@@ -703,6 +703,13 @@ impl Sidebar {
         self.keep_awake_on_battery = on_battery;
     }
 
+    /// The daemon's keep-awake state for the footer's status slot
+    /// (#1502): `Some(on_battery)` while the inhibitor is held, `None`
+    /// otherwise.
+    pub fn keep_awake_status(&self) -> Option<bool> {
+        self.keep_awake_active.then_some(self.keep_awake_on_battery)
+    }
+
     /// Record whether `ui.auto_wait_on_limit` is on. When set, the rising-edge
     /// rate-limit alert (desktop notification + footer notice) is suppressed:
     /// the daemon parks the block to the calm `AwaitingReset`, so a handled

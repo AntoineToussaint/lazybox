@@ -18145,7 +18145,7 @@ mod workspace_focus_memory_tests {
             m.__test_sidebar_mut().focus_workspace_key(key),
             "workspace {key:?} should be in the sidebar",
         );
-        sidebar_rect.y + 5 + m.sidebar().cursor() as u16
+        sidebar_rect.y + m.sidebar().header_height(sidebar_rect) + m.sidebar().cursor() as u16
     }
 
     #[test]
@@ -20619,7 +20619,7 @@ mod click_outside_modal_dismiss_tests {
             m.__test_sidebar_mut().focus_workspace_key(key),
             "workspace {key:?} should be in the sidebar",
         );
-        sidebar_rect.y + 5 + m.sidebar().cursor() as u16
+        sidebar_rect.y + m.sidebar().header_height(sidebar_rect) + m.sidebar().cursor() as u16
     }
 
     /// The headline repro: with the provisioning checklist up, clicking a
@@ -27435,6 +27435,33 @@ mod focus_indicator_and_burst_guard_tests {
         (0..buffer.area.width)
             .map(|col| buffer[(col, last)].symbol())
             .collect::<String>()
+    }
+
+    /// Keep-awake is daemon status, so it shows in the footer's status
+    /// slot (lowest priority) rather than the sidebar header (#1502), and
+    /// admits "AC only" on battery (#1485).
+    #[test]
+    fn footer_shows_keep_awake_as_status() {
+        let mut m = build_model();
+        assert!(!footer_text(&mut m).contains("awake"));
+        m.handle_daemon_event(IpcEvent::KeepAwakeStatus {
+            active: true,
+            on_battery: false,
+        });
+        let footer = footer_text(&mut m);
+        assert!(footer.contains("☼"), "{footer:?}");
+        assert!(footer.contains("awake"), "{footer:?}");
+        assert!(!footer.contains("AC only"), "{footer:?}");
+        m.handle_daemon_event(IpcEvent::KeepAwakeStatus {
+            active: true,
+            on_battery: true,
+        });
+        assert!(footer_text(&mut m).contains("awake (AC only)"));
+        m.handle_daemon_event(IpcEvent::KeepAwakeStatus {
+            active: false,
+            on_battery: false,
+        });
+        assert!(!footer_text(&mut m).contains("awake"));
     }
 
     /// With focus in a live agent terminal the footer names the agent

@@ -471,7 +471,9 @@ pub fn render(
         .bg(theme.surface)
         .fg(theme.accent)
         .add_modifier(Modifier::BOLD);
-    let label_style = Style::default().bg(theme.surface).fg(theme.text_dim);
+    // Labels read at full strength (normal weight) so the hint bar is
+    // legible at a glance; keys stay accent-bold, separators dim (#1502).
+    let label_style = Style::default().bg(theme.surface).fg(theme.text_strong);
     let sep_style = Style::default().bg(theme.surface).fg(theme.chrome);
     for (i, b) in keymap.iter().enumerate() {
         if i > 0 {

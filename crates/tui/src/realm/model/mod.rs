@@ -6483,8 +6483,25 @@ impl<T: TerminalAdapter> Model<T> {
                 Some(box_status)
             } else if let Some(bg) = self.status.bg_poll.as_ref() {
                 Some((bg.spinner_glyph(), bg.label()))
+            } else if let Some(steady) = self.status.remote_status_steady() {
+                Some(steady)
             } else {
-                self.status.remote_status_steady()
+                // Keep-awake is daemon status, not inbox attention, so it
+                // sits in the footer's status slot as the lowest-priority
+                // fallback instead of crowding the sidebar header (#1502).
+                // On battery the OS honours neither system sleep nor a
+                // closed lid, so say what the assertion actually protects
+                // (#1485).
+                self.sidebar.keep_awake_status().map(|on_battery| {
+                    (
+                        "☼",
+                        if on_battery {
+                            "awake (AC only)".to_string()
+                        } else {
+                            "awake".to_string()
+                        },
+                    )
+                })
             };
         // Resolve the focused pane's CONTEXTUAL bindings for the
         // footer hint bar. Contextual = state-aware short list

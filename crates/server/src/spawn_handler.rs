@@ -7967,6 +7967,21 @@ impl PendingInjectionGuard {
             displaced,
         )
     }
+
+    /// Whether a newer injection has superseded this one — the coordinator's
+    /// slot for this terminal no longer points at our cancel handle (a later
+    /// `claim` replaced it). Level-triggered, so it catches a supersession
+    /// that landed while this task was between steps. The `while blocked`
+    /// waiter reacts to the same event edge-wise via `cancel.notified()`; this
+    /// is the check the immediately-ready delivery path uses, which has no
+    /// such loop — without it a prompt superseded after `claim` but before the
+    /// write still reached the PTY, delivering both the stale and the fresh
+    /// prompt.
+    fn superseded(&self) -> bool {
+        let map = self.pending.lock();
+        !map.get(&self.terminal_id)
+            .is_some_and(|current| std::sync::Arc::ptr_eq(current, &self.cancel))
+    }
 }
 
 impl Drop for PendingInjectionGuard {
@@ -8455,7 +8470,7 @@ async fn handle_inject_prompt_inner(
     let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
         let cancel = pending_injection.cancel.clone();
-        let _pending_injection = pending_injection;
+        let pending_injection = pending_injection;
         let deadline = tokio::time::Instant::now() + INJECT_INPUT_DEADLINE;
         let mut events = events;
         let mut blocked = blocked;
@@ -8543,6 +8558,23 @@ async fn handle_inject_prompt_inner(
             );
             return;
         };
+        // Latest wins on the immediately-ready path too. The `while blocked`
+        // loop observes supersession through `cancel.notified()`, but a
+        // non-blocked injection never enters it — so a prompt superseded by a
+        // re-sent `w w` / snippet after `claim` but before this write would
+        // otherwise deliver BOTH copies. Re-checked while holding the
+        // interaction lock (`interaction`), which serializes against the
+        // superseding task's own write, so the stale copy drops here and only
+        // the newest prompt reaches the PTY. No `TerminalInputRejected` is
+        // emitted: the user's newer prompt is being delivered, nothing is
+        // lost from their seat.
+        if pending_injection.superseded() {
+            tracing::info!(
+                terminal_id = ?id,
+                "inject_prompt: ready injection superseded by a newer prompt before write"
+            );
+            return;
+        }
         if let Some(tx) = registered_tx.take() {
             let _ = tx.send(());
         }
@@ -14951,6 +14983,98 @@ mod tests {
         })
         .await
         .expect("injection reservation released after delivery");
+    }
+
+    /// Two immediately-ready (free-text) injections race with no gate to
+    /// serialize them. The older task, superseded by the newer `claim`, must
+    /// drop at the interaction lock instead of also writing — otherwise the
+    /// agent receives BOTH prompts. The chooser case
+    /// (`newer_prompt_supersedes_an_injection_held_behind_a_chooser`) is caught
+    /// edge-wise by `cancel.notified()` inside the wait loop; the non-blocked
+    /// path has no such loop, so `PendingInjectionGuard::superseded()` is the
+    /// only guard. This test holds the interaction lock to force the ordering
+    /// the fix protects against: first claims, second supersedes, only then
+    /// can either write. Before the fix both prompts reached the PTY.
+    #[tokio::test]
+    async fn newer_immediately_ready_injection_supersedes_the_older_before_write() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "ready-supersede")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(726);
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            SessionKey::new("ready-supersede"),
+            "claude",
+            Some(lazybox_ipc::AgentState::InputNeeded),
+            Some(lazybox_agents::PromptShape::FreeText),
+        )
+        .await;
+
+        // Hold the interaction lock so both inject tasks park at
+        // `acquire_live`. Without this the first task, being free-text, would
+        // acquire the lock and write before the second even claimed — there
+        // would be no race to guard.
+        let io_guard = config.terminal.lock_terminal_io(&backend_key).await;
+
+        // First inject: claims the slot synchronously, then its task blocks on
+        // the interaction lock we hold.
+        let config_a = config.clone();
+        let first = tokio::spawn(async move {
+            handle_inject_prompt(&config_a, id, "first", None, false).await;
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while config.spawn.pending_prompt_injections.lock().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first injection claims the slot");
+
+        // Second inject: supersedes the first (same slot, newer cancel
+        // handle), then its task also blocks on the lock.
+        let config_b = config.clone();
+        let second = tokio::spawn(async move {
+            handle_inject_prompt(&config_b, id, "second", None, false).await;
+        });
+        tokio::time::sleep(INJECT_RECLASSIFY_POLL).await;
+        assert_eq!(
+            config.spawn.pending_prompt_injections.lock().len(),
+            1,
+            "one injection slot per terminal — the newer claim replaces the older"
+        );
+
+        // Release the gate: both tasks race for the lock. The superseded older
+        // task must drop at the `superseded()` check; only "second" lands.
+        drop(io_guard);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let written =
+                    String::from_utf8_lossy(&mock.writes_for(&backend_key).await.concat())
+                        .to_string();
+                if written.contains("second") {
+                    assert!(
+                        !written.contains("first"),
+                        "the superseded prompt must not land: {written}"
+                    );
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the newer prompt is delivered once the gate clears");
+
+        let _ = first.await;
+        let _ = second.await;
+        assert!(
+            config.spawn.pending_prompt_injections.lock().is_empty(),
+            "both injection reservations released"
+        );
     }
 
     /// A deferred inject must release the instant a live re-read shows the

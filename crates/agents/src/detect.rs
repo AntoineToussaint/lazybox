@@ -922,8 +922,11 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
     // file), firing a false `LimitReached` and its stray auto-`Wait`
     // keystroke. `limit_pos` above keeps the full list so the at-rest gate
     // still sees the banner.
-    let chooser_limit_pos =
-        last_compact_match_pos_excluding(compact, CLAUDE_USAGE_LIMIT_PHRASES, CLAUDE_LIMIT_BANNER_ONLY_PHRASES);
+    let chooser_limit_pos = last_compact_match_pos_excluding(
+        compact,
+        CLAUDE_USAGE_LIMIT_PHRASES,
+        CLAUDE_LIMIT_BANNER_ONLY_PHRASES,
+    );
     if marker_at_least_as_recent(
         chooser_limit_pos,
         resting_pos.max(work_anchor_against(chooser_limit_pos)),
@@ -2681,8 +2684,12 @@ mod tests {
 
         // Newer bypass footer carrying only the `⏵⏵` glyph (no
         // `shift+tab to cycle`): a single such footer is still one live frame.
-        let bypass_glyph = "✻ Crunched for 30s · 2 shells still running\n⏵⏵ bypass permissions on · ← for agents";
-        assert_eq!(claude_state(bypass_glyph.as_bytes()), Some(AgentState::Working));
+        let bypass_glyph =
+            "✻ Crunched for 30s · 2 shells still running\n⏵⏵ bypass permissions on · ← for agents";
+        assert_eq!(
+            claude_state(bypass_glyph.as_bytes()),
+            Some(AgentState::Working)
+        );
     }
 
     #[test]
@@ -2703,7 +2710,10 @@ mod tests {
              ⏵⏵ bypass permissions on · ← for agents\n\
              ✓ all shells finished — summary below\n\
              ⏵⏵ bypass permissions on · ← for agents";
-        assert_eq!(claude_state(stale_bypass.as_bytes()), Some(AgentState::Idle));
+        assert_eq!(
+            claude_state(stale_bypass.as_bytes()),
+            Some(AgentState::Idle)
+        );
     }
 
     #[test]
@@ -3192,13 +3202,19 @@ mod tests {
                 "banner-only phrase {p:?} must remain in the full list",
             );
         }
-        let full = last_compact_match_pos(&compact_lower("run /usage-credits now"), CLAUDE_USAGE_LIMIT_PHRASES);
+        let full = last_compact_match_pos(
+            &compact_lower("run /usage-credits now"),
+            CLAUDE_USAGE_LIMIT_PHRASES,
+        );
         let plain = last_compact_match_pos_excluding(
             &compact_lower("run /usage-credits now"),
             CLAUDE_USAGE_LIMIT_PHRASES,
             CLAUDE_LIMIT_BANNER_ONLY_PHRASES,
         );
-        assert!(full.is_some() && plain.is_none(), "the plain scan drops banner-only phrases");
+        assert!(
+            full.is_some() && plain.is_none(),
+            "the plain scan drops banner-only phrases"
+        );
     }
 
     #[test]

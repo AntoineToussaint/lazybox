@@ -136,19 +136,21 @@ pub struct WorkspaceRowCtx<'a> {
     /// `⤓` glyph to its warn color so a stuck (dirty/diverged) worktree
     /// reads at a glance. Only meaningful when `track_main`.
     pub track_main_behind: bool,
-    /// This workspace has the per-workspace meter *armed* (`Workspace::metered`,
-    /// toggled with `x $`): while set, its agent spawns route through lazybox's
-    /// local metering proxy — effective only when `agent.metering_proxy` is on
-    /// and the proxy is running, otherwise inert (#1488). Renders a `$` in the
-    /// passive badge cluster — the *durable* cue that the canary is armed,
-    /// matching (and gated on the same field as) the sidebar header's
-    /// ` $ METER ` pill. Before this, that per-workspace signal lived only in
-    /// the header, drawn from the focused row alone, so you couldn't see which
-    /// rows were armed without visiting each one. Reflects the per-workspace
-    /// opt-in only: Space-tier (`agent.metered_spaces`) and blanket
-    /// (`meter_all`) metering don't light it — exactly as they don't light the
-    /// header pill, so the two surfaces can't drift.
+    /// This workspace routes its agent spawns through the metering proxy
+    /// (`Workspace::metered`, `x $`). Informational only on the row now that
+    /// metering is on by default for new workspaces: the row cue is the
+    /// accrued figure (`cost_micros`), not the armed flag — a bare `$` on
+    /// nearly every row would say nothing. The focused row's header pill
+    /// (` $ METER `) still reflects this flag.
     pub metered: bool,
+    /// This workspace's accrued metered cost in micro-USD
+    /// (`UsageTracker::cost_micros_for_session`, #1488 → per-row figure).
+    /// Renders ` $0.42 ` in the passive badge cluster once anything priced
+    /// has landed; `0` renders nothing, never a misleading `$0.00`. Summed
+    /// across the workspace's sessions and durable across restarts, so a
+    /// PR's running price is legible across the whole sidebar without
+    /// visiting each row.
+    pub cost_micros: u64,
     /// This workspace carries a non-empty local note
     /// (`Workspace::has_notes` — issue #458). Renders a small ` ✎ ` pill
     /// so the user can see, at a glance, which rows have a scratchpad.
@@ -1298,18 +1300,17 @@ fn cell_arm(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     ))
 }
 
-/// The ` $ ` metering badge (#1488): this workspace has the per-workspace
-/// meter *armed* (`Workspace::metered`, `x $`), so its spawns route through
-/// the metering proxy while it's set — effective only when the proxy is
-/// running, otherwise inert. Like the header's `$ METER` pill, this reflects
-/// the armed opt-in, not confirmed billing: it shows even with the proxy off.
+/// The ` $0.42 ` cost badge (#1488): this workspace's accrued metered spend,
+/// once anything priced has landed. Confirmed billing, not the armed flag —
+/// with metering on by default a bare "armed" glyph would light nearly every
+/// row and say nothing, while the figure is the row's running price.
 ///
 /// Accent, not warn — metering is *observation*, not an automation that will
-/// act on the PR (`FIX` / `ARM` earn warn). One glyph, packed into the shared
-/// passive cluster like `✎` / `]N` / `⤓main`, so an armed canary is legible
-/// across the whole sidebar rather than only on the focused row.
+/// act on the PR (`FIX` / `ARM` earn warn). Packed into the shared passive
+/// cluster like `✎` / `]N` / `⤓main`, so a PR's price is legible across the
+/// whole sidebar rather than only on the focused row.
 fn cell_metered(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    if !ctx.metered {
+    if ctx.cost_micros == 0 {
         return Cell::empty();
     }
     let style = if ctx.is_cursor {
@@ -1319,7 +1320,8 @@ fn cell_metered(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             .fg(ctx.theme.accent)
             .add_modifier(Modifier::BOLD)
     };
-    Cell::from_span(Span::styled(" $ ".to_string(), style))
+    let cost = lazybox_tui_core::usage::format_cost_micros(ctx.cost_micros);
+    Cell::from_span(Span::styled(format!(" {cost} "), style))
 }
 
 /// The compact `🔧` auto-fix glyph (iconized #1046). Packs into the shared
@@ -1600,6 +1602,7 @@ mod tests {
             track_main: false,
             track_main_behind: false,
             metered: false,
+            cost_micros: 0,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
@@ -2032,6 +2035,7 @@ mod tests {
             track_main: false,
             track_main_behind: false,
             metered: false,
+            cost_micros: 0,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
@@ -2600,6 +2604,7 @@ mod tests {
             track_main: false,
             track_main_behind: false,
             metered: false,
+            cost_micros: 0,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
@@ -2901,32 +2906,37 @@ mod tests {
         );
     }
 
-    /// The shared auto-fix column stays compact even on the cursor row.
-    /// #1488: a metered workspace carries a durable `$` on its row. Before
-    /// this the only per-workspace cue was a header pill drawn from the
-    /// focused row, so you couldn't tell which workspaces were metered
-    /// without visiting each one.
+    /// #1488: a workspace with metered spend carries its running price on
+    /// its row. The cue is the *figure*, not the armed flag: metering is on
+    /// by default for new workspaces, so an "armed" glyph would light nearly
+    /// every row — and a metered row with nothing priced yet shows nothing,
+    /// never `$0.00`.
     #[test]
-    fn cell_metered_marks_a_metered_workspace() {
+    fn cell_metered_shows_the_rows_accrued_cost() {
         let task = make_task("owner/repo#1", "x");
-        let mut ws = Workspace::from_task(task.clone(), fixed_time());
+        let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
 
-        // Not metered → nothing, so the column collapses for a sidebar
-        // where no row is metered.
-        let ctx = ctx_for(&ws, &task, &theme);
-        assert_eq!(cell_metered(&ctx).width(), 0);
-
-        ws.metered = true;
+        // Metered (the new-workspace default) but nothing priced → nothing,
+        // so the column collapses for a sidebar with no spend yet.
+        assert!(ws.metered, "new workspaces meter by default");
         let mut ctx = ctx_for(&ws, &task, &theme);
         ctx.metered = true;
+        assert_eq!(cell_metered(&ctx).width(), 0);
+
+        ctx.cost_micros = 420_000;
         let cell = cell_metered(&ctx);
-        assert_eq!(cell_text(&cell), " $ ");
+        assert_eq!(cell_text(&cell), " $0.42 ");
         assert_eq!(
             cell.spans[0].style.fg,
             Some(theme.accent),
             "metering observes; it doesn't act on the PR the way FIX/ARM do",
         );
+
+        // Cost renders even if the flag was later turned off (`x $`): spend
+        // already accrued is still this PR's price.
+        ctx.metered = false;
+        assert_eq!(cell_text(&cell_metered(&ctx)), " $0.42 ");
 
         // On the cursor row the badge inherits the row highlight so the
         // fill stays legible — same rule every other badge follows.
@@ -2942,12 +2952,12 @@ mod tests {
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
-        ctx.metered = true;
+        ctx.cost_micros = 1_230_000;
         ctx.has_notes = true;
         ctx.auto_fix_ci_armed = true;
 
         let text = cell_text(&cell_badges(&ctx));
-        assert!(text.contains('$'), "metered badge missing: {text:?}");
+        assert!(text.contains("$1.23"), "cost badge missing: {text:?}");
         assert!(text.contains('✎'), "notes badge missing: {text:?}");
 
         // Ordering (#813 doctrine, least → most consequential): metering is
@@ -4027,6 +4037,7 @@ mod tests {
             track_main: false,
             track_main_behind: false,
             metered: false,
+            cost_micros: 0,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,

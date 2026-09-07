@@ -658,18 +658,19 @@ impl Sidebar {
         // metering proxy (`$ meter`), so show it plus its accrued per-session
         // cost the moment any priced usage lands. `$ METER` alone until the
         // first response is priced (proxy off / unknown model → no cost).
+        // Metering is on by default for new workspaces, so a bare "armed"
+        // pill would sit on nearly every focused row and say nothing; the
+        // pill carries the figure and appears once something is priced.
         let focused_meter = focused_workspace.and_then(|workspace| {
             if !workspace.metered {
                 return None;
             }
             let cost = self.usage.cost_micros_for_session(workspace.key.as_str());
-            Some(if cost > 0 {
+            (cost > 0).then(|| {
                 format!(
                     " $ METER · {} ",
                     lazybox_tui_core::usage::format_cost_micros(cost)
                 )
-            } else {
-                " $ METER ".to_string()
             })
         });
 
@@ -1000,8 +1001,14 @@ impl Sidebar {
                     // trailed by the Space's accrued cost once any priced usage
                     // lands (#1389) — the legible per-Space figure, summed over
                     // its workspaces and durable across restarts.
-                    if self.metered_spaces.contains(name) {
-                        let cost = self.space_cost_micros(name);
+                    // The cost shows whenever the Space has accrued any —
+                    // with metering on by default for new workspaces, most
+                    // spend lands without the Space-tier toggle, and the
+                    // figure is the point. A bare `$` marks a Space-metered
+                    // Space that hasn't spent yet.
+                    let cost = self.space_cost_micros(name);
+                    let space_metered = self.metered_spaces.contains(name);
+                    if cost > 0 || space_metered {
                         let badge = if cost > 0 {
                             format!(" $ {}", lazybox_tui_core::usage::format_cost_micros(cost))
                         } else {
@@ -1959,6 +1966,8 @@ impl Sidebar {
                 track_main: workspace.is_some_and(|w| w.track_main),
                 track_main_behind: workspace.is_some_and(|w| w.track_main && w.track_main_behind),
                 metered: workspace.is_some_and(|w| w.metered),
+                cost_micros: workspace
+                    .map_or(0, |w| self.usage.cost_micros_for_session(w.key.as_str())),
                 has_notes: workspace.is_some_and(|w| w.has_notes()),
                 sent_snippet_count: workspace.map_or(0, |w| w.sent_snippets.total()),
                 // Source-attention ladder (#scale): a row in a Quiet /

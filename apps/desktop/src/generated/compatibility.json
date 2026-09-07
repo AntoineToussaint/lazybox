@@ -227,7 +227,7 @@
             "linear_issues": [],
             "linked_checkout": null,
             "local": false,
-            "metered": false,
+            "metered": true,
             "name": "PR o/r#42",
             "notes": "",
             "policies": {
@@ -313,7 +313,7 @@
         "linear_issues": [],
         "linked_checkout": null,
         "local": false,
-        "metered": false,
+        "metered": true,
         "name": "PR o/r#42",
         "notes": "",
         "policies": {
@@ -550,6 +550,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 869708021,
+  "protocol_fingerprint": 3192458771,
   "protocol_version": 4
 }

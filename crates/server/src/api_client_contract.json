@@ -182,7 +182,7 @@
           "linear_issues": [],
           "linked_checkout": null,
           "local": false,
-          "metered": false,
+          "metered": true,
           "name": "PR o/r#42",
           "notes": "",
           "policies": {

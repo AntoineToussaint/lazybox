@@ -1,7 +1,7 @@
 use crate::{polling, terminal_io};
 use lazybox_core::{SessionId, SessionKey};
 use lazybox_ipc::{AgentCreditRecoveryStage, AgentRunAccess, AgentState, TerminalId, TerminalKind};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::{Mutex, Notify};
@@ -1462,8 +1462,13 @@ impl PollState {
 pub struct SpawnCoordinator {
     /// Lets an inject task verify submit via the structured hook and retry Enter once.
     pub(crate) prompt_submit_signals: Arc<Mutex<HashMap<TerminalId, Arc<Notify>>>>,
-    /// Enforces one readiness-gated injection per terminal.
-    pub(crate) pending_prompt_injections: Arc<parking_lot::Mutex<HashSet<TerminalId>>>,
+    /// One readiness-gated injection per terminal, keyed to the cancel
+    /// handle of the task holding it. A newer injection for the same
+    /// terminal supersedes the held one (latest wins) instead of being
+    /// refused — the user re-sending is the signal that the first one is
+    /// stale, and refusing it left the agent unreachable for as long as the
+    /// first sat behind a prompt.
+    pub(crate) pending_prompt_injections: Arc<parking_lot::Mutex<HashMap<TerminalId, Arc<Notify>>>>,
     /// Holds keyboard→PTY writes for a terminal whose spawn-time context
     /// injection has not yet been submitted, so the injected brief is
     /// guaranteed to reach the agent before any racing user keystroke (#1444).

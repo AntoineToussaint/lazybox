@@ -859,6 +859,28 @@ pub mod builtins {
             detect::claude_state_chunked(recent_output, last_chunk_start)
         }
 
+        /// `InputNeeded` carries its interaction shape: an `AskUserQuestion`
+        /// chooser (`N. Type something.`) or the interrupted-turn prompt
+        /// takes typed text, so a pasted snippet is its answer and the
+        /// injector delivers immediately; a permission / Y-N dialog owns
+        /// input and the injector waits. Without this every PTY-detected
+        /// `?` was presumed a chooser and held snippets and `w w` for the
+        /// full input deadline — including on prompts that were literally
+        /// asking for text.
+        fn detect_observation_chunked(
+            &self,
+            recent_output: &[u8],
+            last_chunk_start: usize,
+        ) -> Option<AgentObservation> {
+            let state = detect::claude_state_chunked(recent_output, last_chunk_start)?;
+            Some(match state {
+                AgentState::InputNeeded => {
+                    AgentObservation::input_needed(detect::claude_prompt_shape(recent_output))
+                }
+                other => AgentObservation::from_state(other),
+            })
+        }
+
         /// Stale-hook demotion evidence — see
         /// [`crate::detect::claude_working_supersedes_dialog`].
         fn working_reading_supersedes_dialog(&self, recent_output: &[u8]) -> bool {

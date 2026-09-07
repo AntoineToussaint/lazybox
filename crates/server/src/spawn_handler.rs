@@ -7926,29 +7926,58 @@ async fn poll_input_resolution(
 /// Owns the single in-flight readiness-gated prompt injection for a terminal.
 ///
 /// The guard is moved into the background task so every completion path —
-/// success, rejection, terminal exit, timeout, or task cancellation — releases
-/// the reservation synchronously in `Drop`.
+/// success, rejection, terminal exit, timeout, supersession, or task
+/// cancellation — releases the reservation synchronously in `Drop`. Latest
+/// wins: claiming while another injection is held behind a prompt cancels
+/// that one (its task sees `cancel` and reports itself superseded) and takes
+/// the slot, so a re-sent snippet / `w w` is never refused.
 struct PendingInjectionGuard {
     terminal_id: TerminalId,
-    pending: std::sync::Arc<parking_lot::Mutex<std::collections::HashSet<TerminalId>>>,
+    /// This injection's own cancel handle; the map entry is removed on drop
+    /// only while it still points at this handle (a superseding claim will
+    /// have replaced it).
+    cancel: std::sync::Arc<tokio::sync::Notify>,
+    pending: std::sync::Arc<
+        parking_lot::Mutex<
+            std::collections::HashMap<TerminalId, std::sync::Arc<tokio::sync::Notify>>,
+        >,
+    >,
 }
 
 impl PendingInjectionGuard {
-    fn claim(coordinator: &SpawnCoordinator, terminal_id: TerminalId) -> Option<Self> {
+    /// Claim the terminal's injection slot, superseding any held injection.
+    /// Returns the guard and whether a prior injection was displaced.
+    fn claim(coordinator: &SpawnCoordinator, terminal_id: TerminalId) -> (Self, bool) {
         let pending = coordinator.pending_prompt_injections.clone();
-        if !pending.lock().insert(terminal_id) {
-            return None;
-        }
-        Some(Self {
-            terminal_id,
-            pending,
-        })
+        let cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+        let displaced = {
+            let mut map = pending.lock();
+            let previous = map.insert(terminal_id, cancel.clone());
+            if let Some(previous) = &previous {
+                previous.notify_one();
+            }
+            previous.is_some()
+        };
+        (
+            Self {
+                terminal_id,
+                cancel,
+                pending,
+            },
+            displaced,
+        )
     }
 }
 
 impl Drop for PendingInjectionGuard {
     fn drop(&mut self) {
-        self.pending.lock().remove(&self.terminal_id);
+        let mut map = self.pending.lock();
+        if map
+            .get(&self.terminal_id)
+            .is_some_and(|current| std::sync::Arc::ptr_eq(current, &self.cancel))
+        {
+            map.remove(&self.terminal_id);
+        }
     }
 }
 
@@ -8380,16 +8409,18 @@ async fn handle_inject_prompt_inner(
 
     // An InputNeeded gate may hold the waiter below for 30 seconds. Without a
     // per-terminal reservation every repeated `w` press spawned another
-    // waiter, and all of them pasted once the gate cleared. Reject duplicates
-    // explicitly instead of growing background work and duplicating input.
-    let Some(pending_injection) = PendingInjectionGuard::claim(&config.spawn, terminal_id) else {
-        let _ = config.bus.send(Event::TerminalInputRejected {
-            terminal_id,
-            message: "a prompt injection is already waiting for this agent — answer its prompt before retrying"
-                .into(),
-        });
-        return;
-    };
+    // waiter, and all of them pasted once the gate cleared. Latest wins: a
+    // newer injection displaces the held one (its task reports itself
+    // superseded) rather than being refused — refusing left the agent
+    // unreachable for as long as the first injection sat behind a prompt,
+    // and the user re-sending is the signal that the first is stale.
+    let (pending_injection, displaced) = PendingInjectionGuard::claim(&config.spawn, terminal_id);
+    if displaced {
+        tracing::info!(
+            ?terminal_id,
+            "inject_prompt: a newer prompt supersedes the injection held behind this agent's prompt"
+        );
+    }
 
     // Readiness gate (issue #32, refined by #725). If the agent is parked
     // on a permission gate / chooser / Y-N prompt, that dialog owns input —
@@ -8423,6 +8454,7 @@ async fn handle_inject_prompt_inner(
     // the Write that answers the permission/chooser gate.
     let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
+        let cancel = pending_injection.cancel.clone();
         let _pending_injection = pending_injection;
         let deadline = tokio::time::Instant::now() + INJECT_INPUT_DEADLINE;
         let mut events = events;
@@ -8430,6 +8462,18 @@ async fn handle_inject_prompt_inner(
         let mut registered_tx = Some(registered_tx);
         if blocked && let Some(tx) = registered_tx.take() {
             let _ = tx.send(());
+        }
+        if blocked {
+            // Say so NOW, not only when the deadline drops it: from the
+            // user's seat a held injection is indistinguishable from a lost
+            // one, and "blocked" was the complaint. The same footer notice
+            // the drop uses; the message says it is held, not dropped.
+            let _ = bus.send(Event::TerminalInputRejected {
+                terminal_id: id,
+                message: "held: the agent is on a permission prompt — the prompt sends once \
+                          it is answered (a newer prompt replaces this one)"
+                    .into(),
+            });
         }
         while blocked {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -8458,7 +8502,21 @@ async fn handle_inject_prompt_inner(
             // never emits, so the injection sat until an inbound keystroke.
             config_for_confirm.terminal.request_reclassify(id).await;
             let step = INJECT_RECLASSIFY_POLL.min(remaining);
-            match poll_input_resolution(&mut events, id, &terminals, step).await {
+            let poll = tokio::select! {
+                biased;
+                // A newer injection for this terminal took the slot: this
+                // one is stale by the user's own action. Leave without
+                // touching the PTY; the newer task owns delivery.
+                _ = cancel.notified() => {
+                    tracing::info!(
+                        terminal_id = ?id,
+                        "inject_prompt: held injection superseded by a newer prompt"
+                    );
+                    return;
+                }
+                poll = poll_input_resolution(&mut events, id, &terminals, step) => poll,
+            };
+            match poll {
                 // The terminal exited; fall through to `acquire_live`, which
                 // recognizes the gone terminal and returns quietly.
                 InputPoll::Exited => break,
@@ -14273,7 +14331,101 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_blocked_prompt_injection_is_rejected_and_never_queued() {
+    async fn newer_prompt_supersedes_an_injection_held_behind_a_chooser() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "superseded-injection")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(712);
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            SessionKey::new("superseded-injection"),
+            "claude",
+            Some(lazybox_ipc::AgentState::InputNeeded),
+            Some(lazybox_agents::PromptShape::Chooser),
+        )
+        .await;
+        let mut events = config.bus.subscribe();
+
+        // Held behind the chooser — and the user is told so at once, not
+        // only when the deadline drops it.
+        handle_inject_prompt(&config, id, "first", None, false).await;
+        assert!(matches!(
+            events.try_recv().expect("held notice"),
+            Event::TerminalInputRejected { terminal_id, message }
+                if terminal_id == id && message.starts_with("held:")
+        ));
+        assert_eq!(config.spawn.pending_prompt_injections.lock().len(), 1);
+
+        // A second send is not refused: it takes the slot (latest wins) and
+        // the first task leaves without touching the PTY.
+        handle_inject_prompt(&config, id, "second", None, false).await;
+        assert_eq!(
+            config.spawn.pending_prompt_injections.lock().len(),
+            1,
+            "one held injection per terminal — the newer one"
+        );
+        let mut saw_second_held = false;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                Event::TerminalInputRejected {
+                    terminal_id,
+                    message,
+                } if terminal_id == id && message.starts_with("held:") => {
+                    saw_second_held = true;
+                }
+                Event::TerminalInputRejected { message, .. } => {
+                    panic!("no refusal for a re-send: {message}")
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_second_held,
+            "the superseding injection announces itself held too"
+        );
+        assert!(
+            mock.writes_for(&backend_key).await.is_empty(),
+            "neither prompt may be written into the live input gate"
+        );
+
+        // The gate clears: exactly the NEWER prompt is delivered.
+        config
+            .terminal
+            .record_agent_state(id, lazybox_ipc::AgentState::Working)
+            .await;
+        config
+            .bus
+            .send(Event::AgentState {
+                session_key: SessionKey::new("superseded-injection"),
+                terminal_id: id,
+                state: lazybox_ipc::AgentState::Working,
+            })
+            .expect("state event");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let written =
+                    String::from_utf8_lossy(&mock.writes_for(&backend_key).await.concat())
+                        .to_string();
+                if written.contains("second") {
+                    assert!(
+                        !written.contains("first"),
+                        "the superseded prompt must not land: {written}"
+                    );
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the newer prompt is delivered once the gate clears");
+    }
+
+    #[tokio::test]
+    async fn terminal_exit_releases_an_injection_held_behind_a_chooser() {
         let (config, mock) = ServerConfig::in_memory_with_mock();
         let backend_key = mock
             .spawn(&[], None, &[], "blocked-injection")
@@ -14298,20 +14450,9 @@ mod tests {
         // that answers this prompt.
         handle_inject_prompt(&config, id, "first", None, false).await;
         assert_eq!(config.spawn.pending_prompt_injections.lock().len(), 1);
-
-        let mut events = config.bus.subscribe();
-        handle_inject_prompt(&config, id, "duplicate", None, false).await;
-        assert!(matches!(
-            events.try_recv().expect("duplicate rejection"),
-            Event::TerminalInputRejected {
-                terminal_id,
-                message,
-            } if terminal_id == id && message.contains("already waiting")
-        ));
-        assert_eq!(config.spawn.pending_prompt_injections.lock().len(), 1);
         assert!(
             mock.writes_for(&backend_key).await.is_empty(),
-            "neither prompt may be written into the live input gate"
+            "the prompt may not be written into the live input gate"
         );
 
         // Terminal exit cancels the sole waiter and releases its reservation;

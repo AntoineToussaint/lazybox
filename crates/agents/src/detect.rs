@@ -331,6 +331,44 @@ fn limit_banner_with_reset_pos(compact: &str) -> Option<usize> {
     best
 }
 
+/// Option rows Claude renders on a prompt that ALSO takes typed text: the
+/// `AskUserQuestion` chooser ends with `N. Type something.` and `N+1. Chat
+/// about this`, and typing at it composes a free-text answer (the digits
+/// pick a row). The "Interrupted · What should Claude do instead?" screen
+/// is a plain composer. Compacted (space-free, lowercased) forms.
+const CLAUDE_FREE_TEXT_PROMPT_MARKERS: &[&str] = &[
+    "typesomething",
+    "chataboutthis",
+    "whatshouldclaudedoinstead",
+];
+
+/// The interaction shape of the `InputNeeded` prompt on screen — what a
+/// pasted prompt would do to it. A permission dialog (`Do you want to
+/// proceed? 1. Yes 2. No`) or a bare Y/N gate owns input: a paste is eaten,
+/// so the injector must wait for the answer (`Chooser`). An
+/// `AskUserQuestion` chooser or the interrupted-turn prompt accepts typed
+/// text as the answer (`FreeText`), so a paste delivers immediately — the
+/// snippet IS the answer, and holding it would deadlock on a prompt that is
+/// waiting for exactly that input.
+///
+/// Decided from the tail of the screen (the last 14 non-empty lines, where
+/// the live prompt sits), never from scrollback: a stale `Type something`
+/// row from an already-answered question above a fresh permission dialog
+/// must not unlock the dialog.
+pub fn claude_prompt_shape(recent_output: &[u8]) -> PromptShape {
+    let s = strip_ansi_lossy(recent_output);
+    let compact = compact_lower(&s);
+    let tail = last_nonempty_lines(&compact, 14);
+    if CLAUDE_FREE_TEXT_PROMPT_MARKERS
+        .iter()
+        .any(|marker| tail.contains(marker))
+    {
+        PromptShape::FreeText
+    } else {
+        PromptShape::Chooser
+    }
+}
+
 /// Month abbreviations a date-style reset leads with (`resets Aug 30 at
 /// 2pm`), which the compacted buffer delivers as `resetsaug30at2pm`.
 const MONTH_ABBREVS: &[&str] = &[
@@ -2783,6 +2821,52 @@ mod tests {
         assert_eq!(
             claude_state(chooser.as_bytes()),
             Some(AgentState::LimitReached),
+        );
+    }
+
+    /// The shape a paste would meet on an `InputNeeded` screen. Claude's
+    /// `AskUserQuestion` chooser and the interrupted-turn prompt take typed
+    /// text, so a snippet delivers immediately; a permission / Y-N dialog
+    /// owns input, so the injector waits. Every PTY-detected `?` used to be
+    /// presumed a chooser, which held snippets and `w w` on prompts that
+    /// were literally asking for text.
+    #[test]
+    fn claude_prompt_shape_splits_free_text_prompts_from_permission_dialogs() {
+        // Verbatim AskUserQuestion chooser (lodestar-208).
+        let ask = "  4. Just report, do nothing yet\n\
+             Hold all changes. You want to route the slicing/ordering across repos yourself first.\n\
+             5. Type something.\n\
+             ────────────────────────────────────────\n\
+             6. Chat about this\n\
+             Enter to select · ↑/↓ to navigate · Esc to cancel";
+        assert_eq!(claude_prompt_shape(ask.as_bytes()), PromptShape::FreeText);
+
+        // The interrupted-turn prompt is a plain composer.
+        let interrupted = "⎿  Interrupted · What should Claude do instead?\n\
+             ❯\n\
+             ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents";
+        assert_eq!(
+            claude_prompt_shape(interrupted.as_bytes()),
+            PromptShape::FreeText
+        );
+
+        // A permission dialog owns input (verbatim infra-base-697).
+        let permission = " Dangerous rm operation on possibly-empty variable path: \"$SP\"/*.png\n\
+             Do you want to proceed?\n\
+             ❯ 1. Yes\n\
+               2. No\n\
+             Esc to cancel · Tab to amend";
+        assert_eq!(
+            claude_prompt_shape(permission.as_bytes()),
+            PromptShape::Chooser
+        );
+
+        // A stale `Type something` from an answered question higher up must
+        // not unlock a fresh permission dialog below it.
+        let stale_then_permission = format!("{ask}\n{}\n{permission}", "x\n".repeat(20));
+        assert_eq!(
+            claude_prompt_shape(stale_then_permission.as_bytes()),
+            PromptShape::Chooser
         );
     }
 

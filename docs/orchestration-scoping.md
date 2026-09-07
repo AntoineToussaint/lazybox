@@ -342,7 +342,7 @@ relations so the epic renders as an epic in lazybox once P0 ships.
 
 | Phase | Delivers | New state | Answers |
 |---|---|---|---|
-| **P0 — edges in the inbox** | GitHub provider fills `Task.parent` from sub-issues and reads dependencies + `Blocked by:` markers; Linear reads `blocks`; rows get `⛔ blocked by N` / `▶ ready`; `ready` / `blocked` filters; `Shift-E` jump | none (Task fields) | "what can I start right now" |
+| **P0 — edges in the inbox** | GitHub provider fills `Task.parent` from sub-issues and reads dependencies + `Blocked by:` markers; Linear reads `blocks`; rows get `⛔ blocked by N` / `▶ ready`; `ready` / `blocked` filters; `E j` jump | none (Task fields) | "what can I start right now" |
 | **P1 — Epic + live status** | Epic record (kv), sidebar tier from a tracker parent, header status line, overview pane, `EpicResolver` + `Event::EpicStatus`, epic events in the inbox, MCP `epic_status` / `epic_ready`, coordinator briefing, `epic:*` + status labels (§4j) | `epic:<key>` | **"give me status"** without a model |
 | **P2 — roles** | `Workspace.role`, badges, role prompt preambles, `E r`, `spawn_worker` MCP tool for Coordinators, Planner spawn with machine-readable-graph instruction, `role:*` labels | `role` field | who does what, enforced |
 | **P3 — graph + merge order** | full-screen DAG, `MergeAfter` edges, merge-order readout, merge-on-green hold | edge kinds | landing order across repos |

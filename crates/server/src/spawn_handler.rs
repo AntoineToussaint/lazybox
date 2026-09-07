@@ -8562,19 +8562,25 @@ async fn handle_inject_prompt_inner(
         )
         .await
         {
-            // `Ok(_)` means the paste LANDED in the agent's composer and the
-            // submit Enter was sent (with the resend ladder behind it). The
-            // bool only says whether the agent acknowledged the submit
-            // (`UserPromptSubmit` hook / a `Working` transition) inside the
-            // confirmation window. That acknowledgement is the agent's
-            // business; what lazybox sent is not conditional on it. The
-            // delivery is therefore recorded either way — the row's `]N`
-            // count, the Recent MRU and the "sent snippet" notice reflect
-            // what was written — and an unconfirmed submit is reported as
-            // such (the resend loop already raised its own loud give-up)
-            // instead of vanishing: before, `Ok(false)` recorded nothing and
-            // said nothing, so a snippet whose hook arrived late looked like
-            // it was never sent at all.
+            // `Ok(_)` means the paste LANDED in the agent's composer; for a
+            // submit, the initial Enter was sent. The bool is whether the
+            // agent ACKNOWLEDGED that submit (`UserPromptSubmit` hook / a
+            // `Working` transition) inside the confirmation window. It is
+            // `false` across three shapes, only one of which is a merely-late
+            // hook: (a) the resend ladder exhausted its retries; (b) a
+            // permission chooser appeared and the ladder deliberately stopped
+            // resending (firing Enter into a chooser would pick an option);
+            // (c) the composer just looks parked, unsubmitted. So "Enter kept
+            // being resent" is NOT true in case (b) — do not narrate it that
+            // way. What is true in every `false` case: the paste is real, and
+            // the ladder has ALREADY posted its own `TerminalInputRejected`
+            // give-up notice. We therefore record the delivery either way
+            // (the row's `]N` count, Recent MRU, recall/history reflect what
+            // was written — before, `Ok(false)` recorded nothing, so a
+            // late-hook send looked like it never happened) but pass
+            // `confirmed` through so the client updates that durable state
+            // WITHOUT flashing a fresh "sent snippet" toast that would stomp
+            // the give-up notice sitting in the footer.
             Ok(confirmed) => {
                 if let Some(snippet) = snippet_for_confirm {
                     let prompt = UserPrompt {
@@ -8589,8 +8595,9 @@ async fn handle_inject_prompt_inner(
                         tracing::warn!(
                             terminal_id = ?id,
                             snippet = %snippet.snippet_key,
-                            "inject_prompt: snippet pasted and Enter sent, but the agent never \
-                             acknowledged the submit — recording the delivery anyway"
+                            "inject_prompt: snippet pasted but the submit went unacknowledged \
+                             (late hook, parked composer, or a permission chooser) — recording \
+                             the delivery, leaving the ladder's give-up notice in place"
                         );
                     }
                     record_confirmed_snippet(
@@ -8599,6 +8606,7 @@ async fn handle_inject_prompt_inner(
                         snippet.session_key,
                         snippet.snippet_key,
                         Some(prompt),
+                        confirmed,
                     )
                     .await;
                 }
@@ -8675,7 +8683,10 @@ pub async fn handle_deliver_snippet(
             .await
                 && submit
             {
-                record_confirmed_snippet(config, terminal_id, session_key, snippet_key, None).await;
+                // A shell write that returned Ok landed its bytes; there is
+                // no submit to acknowledge, so the delivery is confirmed.
+                record_confirmed_snippet(config, terminal_id, session_key, snippet_key, None, true)
+                    .await;
             }
         }
         TerminalKind::LogTail { .. } => {
@@ -8698,23 +8709,37 @@ async fn record_spawn_snippet(
     snippet: Option<&lazybox_ipc::SnippetRef>,
 ) {
     if let Some(snippet) = snippet {
+        // The snippet IS the spawn's initial prompt — delivered by
+        // construction, with no separate submit to acknowledge.
         record_confirmed_snippet(
             config,
             terminal_id,
             session_key.clone(),
             snippet.key.clone(),
             None,
+            true,
         )
         .await;
     }
 }
 
+/// Record a snippet delivery and announce it. `confirmed` says whether the
+/// *submit* was acknowledged, NOT whether the delivery happened — the
+/// delivery always did (the paste landed and, for a submit, Enter was sent),
+/// which is why this is called at all. It rides through to
+/// [`Event::SnippetDelivered`] so a consumer can update its durable state
+/// (Recent, recall, history) unconditionally while withholding a fresh
+/// "sent" toast on an unconfirmed submit — where the resend ladder has
+/// already posted its own give-up notice that the toast would otherwise
+/// stomp. Shell writes and spawn-as-initial-prompt pass `true` (they have no
+/// submit to acknowledge); only the agent inject path passes a real value.
 async fn record_confirmed_snippet(
     config: &ServerConfig,
     terminal_id: TerminalId,
     session_key: SessionKey,
     snippet_key: String,
     prompt: Option<UserPrompt>,
+    confirmed: bool,
 ) {
     // Authoritative first: apply and PERSIST the per-workspace delivery
     // transition (honest count + MRU, one owner) BEFORE announcing
@@ -8737,6 +8762,7 @@ async fn record_confirmed_snippet(
         session_key,
         snippet_key,
         prompt,
+        confirmed,
     });
 }
 

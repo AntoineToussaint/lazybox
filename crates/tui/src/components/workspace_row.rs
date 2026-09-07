@@ -136,20 +136,24 @@ pub struct WorkspaceRowCtx<'a> {
     /// `⤓` glyph to its warn color so a stuck (dirty/diverged) worktree
     /// reads at a glance. Only meaningful when `track_main`.
     pub track_main_behind: bool,
-    /// This workspace routes its agent spawns through the metering proxy
-    /// (`Workspace::metered`, `x $`). Informational only on the row now that
-    /// metering is on by default for new workspaces: the row cue is the
-    /// accrued figure (`cost_micros`), not the armed flag — a bare `$` on
-    /// nearly every row would say nothing. The focused row's header pill
-    /// (` $ METER `) still reflects this flag.
+    /// This workspace has the per-workspace meter *armed* (`Workspace::metered`,
+    /// toggled with `x $`): while set, its agent spawns route through lazybox's
+    /// local metering proxy — effective only when `agent.metering_proxy` is on
+    /// and the proxy is running, otherwise inert (#1488). Renders an accent
+    /// `$` in the passive badge cluster — the *durable* cue that the meter is
+    /// armed, matching (and gated on the same field as) the sidebar header's
+    /// ` $ METER ` pill. On by default for new workspaces, but `x $` is a live
+    /// toggle, so the armed/off state must stay legible per row. Reflects the
+    /// per-workspace flag only: Space-tier (`agent.metered_spaces`) and blanket
+    /// (`meter_all`) metering don't light it — exactly as they don't light the
+    /// header pill, so the two surfaces can't drift.
     pub metered: bool,
     /// This workspace's accrued metered cost in micro-USD
-    /// (`UsageTracker::cost_micros_for_session`, #1488 → per-row figure).
-    /// Renders ` $0.42 ` in the passive badge cluster once anything priced
-    /// has landed; `0` renders nothing, never a misleading `$0.00`. Summed
-    /// across the workspace's sessions and durable across restarts, so a
-    /// PR's running price is legible across the whole sidebar without
-    /// visiting each row.
+    /// (`UsageTracker::cost_micros_for_session`). Once anything priced has
+    /// landed the `$` badge carries the figure — ` $0.42 ` — accent while
+    /// armed, dim once toggled off (spend already made is still this PR's
+    /// price). `0` adds nothing, never a misleading `$0.00`. Summed across
+    /// the workspace's sessions and durable across restarts.
     pub cost_micros: u64,
     /// This workspace carries a non-empty local note
     /// (`Workspace::has_notes` — issue #458). Renders a small ` ✎ ` pill
@@ -1300,28 +1304,38 @@ fn cell_arm(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     ))
 }
 
-/// The ` $0.42 ` cost badge (#1488): this workspace's accrued metered spend,
-/// once anything priced has landed. Confirmed billing, not the armed flag —
-/// with metering on by default a bare "armed" glyph would light nearly every
-/// row and say nothing, while the figure is the row's running price.
+/// The ` $ ` metering badge (#1488): armed (`Workspace::metered`, `x $`) →
+/// an accent `$`, carrying the accrued figure (` $0.42 `) once anything
+/// priced has landed. Toggled off but already spent → the figure stays,
+/// dimmed: the spend is still this PR's price, but the row is no longer
+/// metering. Off with no spend → nothing, so the column collapses.
 ///
 /// Accent, not warn — metering is *observation*, not an automation that will
 /// act on the PR (`FIX` / `ARM` earn warn). Packed into the shared passive
-/// cluster like `✎` / `]N` / `⤓main`, so a PR's price is legible across the
-/// whole sidebar rather than only on the focused row.
+/// cluster like `✎` / `]N` / `⤓main`, so armed state and price are legible
+/// across the whole sidebar rather than only on the focused row.
 fn cell_metered(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    if ctx.cost_micros == 0 {
+    if !ctx.metered && ctx.cost_micros == 0 {
         return Cell::empty();
     }
     let style = if ctx.is_cursor {
         ctx.row_style()
-    } else {
+    } else if ctx.metered {
         Style::default()
             .fg(ctx.theme.accent)
             .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(ctx.theme.text_dim)
     };
-    let cost = lazybox_tui_core::usage::format_cost_micros(ctx.cost_micros);
-    Cell::from_span(Span::styled(format!(" {cost} "), style))
+    let text = if ctx.cost_micros > 0 {
+        format!(
+            " {} ",
+            lazybox_tui_core::usage::format_cost_micros(ctx.cost_micros)
+        )
+    } else {
+        " $ ".to_string()
+    };
+    Cell::from_span(Span::styled(text, style))
 }
 
 /// The compact `🔧` auto-fix glyph (iconized #1046). Packs into the shared
@@ -2906,40 +2920,48 @@ mod tests {
         );
     }
 
-    /// #1488: a workspace with metered spend carries its running price on
-    /// its row. The cue is the *figure*, not the armed flag: metering is on
-    /// by default for new workspaces, so an "armed" glyph would light nearly
-    /// every row — and a metered row with nothing priced yet shows nothing,
-    /// never `$0.00`.
+    /// #1488: an armed workspace carries a durable `$` on its row, and the
+    /// figure once it has spent. `x $` is a live toggle even though new
+    /// workspaces arm by default, so armed vs. off must stay legible: off
+    /// with spend keeps the price but dims it; off with nothing → nothing.
     #[test]
-    fn cell_metered_shows_the_rows_accrued_cost() {
+    fn cell_metered_marks_armed_state_and_carries_the_cost() {
         let task = make_task("owner/repo#1", "x");
         let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
-
-        // Metered (the new-workspace default) but nothing priced → nothing,
-        // so the column collapses for a sidebar with no spend yet.
         assert!(ws.metered, "new workspaces meter by default");
+
+        // Off, nothing priced → nothing, so the column collapses.
         let mut ctx = ctx_for(&ws, &task, &theme);
-        ctx.metered = true;
+        ctx.metered = false;
         assert_eq!(cell_metered(&ctx).width(), 0);
 
-        ctx.cost_micros = 420_000;
+        // Armed, nothing priced yet → the bare armed cue, accent.
+        ctx.metered = true;
         let cell = cell_metered(&ctx);
-        assert_eq!(cell_text(&cell), " $0.42 ");
+        assert_eq!(cell_text(&cell), " $ ");
         assert_eq!(
             cell.spans[0].style.fg,
             Some(theme.accent),
             "metering observes; it doesn't act on the PR the way FIX/ARM do",
         );
 
-        // Cost renders even if the flag was later turned off (`x $`): spend
-        // already accrued is still this PR's price.
+        // Armed with spend → the figure replaces the bare glyph, still accent.
+        ctx.cost_micros = 420_000;
+        let cell = cell_metered(&ctx);
+        assert_eq!(cell_text(&cell), " $0.42 ");
+        assert_eq!(cell.spans[0].style.fg, Some(theme.accent));
+
+        // Toggled off after spending → the price stays (it's this PR's), but
+        // dim, so "off" is distinguishable from "armed" at a glance.
         ctx.metered = false;
-        assert_eq!(cell_text(&cell_metered(&ctx)), " $0.42 ");
+        let cell = cell_metered(&ctx);
+        assert_eq!(cell_text(&cell), " $0.42 ");
+        assert_eq!(cell.spans[0].style.fg, Some(theme.text_dim));
 
         // On the cursor row the badge inherits the row highlight so the
         // fill stays legible — same rule every other badge follows.
+        ctx.metered = true;
         ctx.is_cursor = true;
         assert_eq!(cell_metered(&ctx).spans[0].style, ctx.row_style());
     }

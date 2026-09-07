@@ -658,19 +658,21 @@ impl Sidebar {
         // metering proxy (`$ meter`), so show it plus its accrued per-session
         // cost the moment any priced usage lands. `$ METER` alone until the
         // first response is priced (proxy off / unknown model → no cost).
-        // Metering is on by default for new workspaces, so a bare "armed"
-        // pill would sit on nearly every focused row and say nothing; the
-        // pill carries the figure and appears once something is priced.
+        // New workspaces arm by default, but `x $` is a live toggle, so the
+        // pill keeps showing the armed state on the focused row — bare
+        // `$ METER` until the first priced response, then with the figure.
         let focused_meter = focused_workspace.and_then(|workspace| {
             if !workspace.metered {
                 return None;
             }
             let cost = self.usage.cost_micros_for_session(workspace.key.as_str());
-            (cost > 0).then(|| {
+            Some(if cost > 0 {
                 format!(
                     " $ METER · {} ",
                     lazybox_tui_core::usage::format_cost_micros(cost)
                 )
+            } else {
+                " $ METER ".to_string()
             })
         });
 

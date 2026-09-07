@@ -4507,6 +4507,43 @@ snippets:
         );
     }
 
+    /// Agents parked on Claude's auto-continue wait (💤 `AwaitingReset`) are
+    /// rate-limited too, but a "continue" typed into that composer cancels
+    /// the wait and only hits the limit again — so `Shift-K` still injects
+    /// nothing into them. It must not claim "no rate-limited agents" while
+    /// their badges are on screen: it names them and points at `a R`, the
+    /// action that does apply to them.
+    #[test]
+    fn resume_rate_limited_names_parked_agents_instead_of_denying_them() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent()]);
+        for (i, state) in [AgentState::AwaitingReset, AgentState::AwaitingReset]
+            .into_iter()
+            .enumerate()
+        {
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: keys[i].clone(),
+                terminal_id: TerminalId(i as u64 + 1),
+                state,
+            });
+        }
+        let cmds = m.dispatch_action(&Action::ResumeRateLimited);
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, IpcCommand::InjectPrompt { .. })),
+            "a parked agent must not receive a wait-cancelling continue: {cmds:?}",
+        );
+        let notice = m.status.notice.as_ref().expect("a hint is shown");
+        assert!(
+            notice.message.contains("2 agents parked") && notice.message.contains("a R"),
+            "the hint names the parked agents and the restart action: {}",
+            notice.message
+        );
+    }
+
     /// `a R` restarts every agent in the usage-limit block — the alerting
     /// `LimitReached` AND the parked `AwaitingReset` (a "continue" typed
     /// into an auto-continue composer would only cancel the wait, but a

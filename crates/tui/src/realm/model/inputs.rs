@@ -271,7 +271,22 @@ impl<T: TerminalAdapter> Model<T> {
     pub(super) fn resume_rate_limited_agents(&mut self) -> Vec<IpcCommand> {
         let terminals = self.sidebar.limit_reached_terminals();
         if terminals.is_empty() {
-            self.flash_hint("no rate-limited agents to resume");
+            // The 💤 agents are rate-limited too — parked on Claude's
+            // auto-continue wait — but a "continue" typed into that
+            // composer CANCELS the wait and only hits the limit again, so
+            // resume-all leaves them alone by design. Saying "no rate-limited
+            // agents" while their badges are on screen reads as a lie; name
+            // them and point at the action that does apply to them.
+            let parked = self.sidebar.limited_terminals().len();
+            if parked == 0 {
+                self.flash_hint("no rate-limited agents to resume");
+            } else {
+                let plural = if parked == 1 { "" } else { "s" };
+                self.flash_hint(format!(
+                    "{parked} agent{plural} parked on the auto-continue wait — they resume by \
+                     themselves at the reset; a R restarts them now with fresh credentials"
+                ));
+            }
             return Vec::new();
         }
         let mut cmds = Vec::new();

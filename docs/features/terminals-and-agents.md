@@ -486,6 +486,84 @@ so the brief lands when the target agent is ready for input.
 
 ---
 
+## Cross-agent coordination (MCP bus)
+
+**Status:** shipped (Claude only — the only built-in agent that accepts an
+injected `--mcp-config`)
+**Crate(s):** `server` (`src/mcp.rs`), `agents` (`session_context.rs`,
+`Agent::supports_mcp_config`)
+**Config / flags:** — (automatic; `agent.strict_mcp` composes with it — under
+strict mode the lazybox server is the *only* MCP server the agent loads)
+**Key bindings:** —
+
+### What it does
+Turns the fleet into a two-way bus (#1420, #1433). Every Claude session
+lazybox spawns is connected to a daemon-hosted MCP server whose identity is
+implicit: the connection *is* the session, so no tool asks "who am I".
+
+| Tool | Purpose |
+|---|---|
+| `whoami` | Your session key, workspace, repo, agent state. |
+| `list_sessions(filter?)` | Sibling sessions across all repos — workspace, repo, agent state, last prompt. |
+| `read_session(workspace, tail?)` | Tail of another session's recent terminal output (the "right now" fallback). |
+| `post_note(text, scope?, tags?)` | Publish distilled context to the shared blackboard. Default scope = your own session; `global` reaches everyone. |
+| `read_notes(scope?, tags?, since?)` | Pull the blackboard, newest first. Default = `global` + your own scope. |
+| `notify_session(workspace, text, submit?)` | Push an instruction into a sibling's agent (the same settle-gated inject `x s` uses). |
+
+The *notes blackboard* is the primary medium — persistent (kv-backed, it
+outlives the authoring session), low-noise, cross-repo by construction. The
+output tap is the escape hatch for "what is A doing right now", and
+`notify_session` is the push half, so pull + push together close the loop
+that `x s` / `Shift-B` (push-only, human-driven) leave open. Full design and
+trade-offs: [`../mcp-coordination.md`](../mcp-coordination.md).
+
+### How to use it
+Nothing to set up. Every spawned Claude session is told about the bus in its
+`SessionStart` briefing (`lazybox_session_context`), so an agent can be asked
+in plain language: "check the blackboard before you start", "post the API
+contract you settled on as a global note", "tell the `web` session the auth
+endpoint moved". You can also run any tool yourself from inside a session's
+terminal (`/mcp` lists the `lazybox` server).
+
+Contracts to know:
+
+- `notify_session` reports a **handoff, not a delivery** — a target parked at
+  a permission prompt drops the injection silently. Verify with
+  `read_session`. A self-notify is rejected (it would loop into the caller's
+  own composer).
+- Notes are **other-agent text**. `read_notes` says so in its description:
+  treat them as untrusted-ish context and never let one silently drive a
+  destructive action.
+- Retention: 50 notes per scope (oldest pruned on post), 16 KB per note, and
+  the same cap on a notification's text.
+
+### How it works (brief)
+`mcp::start` binds a loopback port at daemon boot (reused across restarts,
+persisted as `mcp:port`). At spawn, `provision_for_spawn` mints a per-session
+bearer, registers it in the `TokenRegistry` (`token → SessionKey`), writes a
+`0600` `.mcp.json` under a `0700` runtime dir, and appends `--mcp-config`.
+The bearer is revoked when the session's last agent terminal ends
+(`deprovision_session` from `finish_terminal`) and persisted as `mcp:tokens`
+so a tmux-surviving agent keeps working after a daemon restart. Tools are
+`rmcp` handlers over things the daemon already owns: the agent output
+snapshot, the kv store (`lazybox:note:<scope>:<seq>`), and
+`handle_inject_prompt`.
+
+**Trust boundary.** Loopback-only, bearer-gated, single user. Deliberately,
+any spawned agent can read *every* sibling's scrollback and notes across all
+repos — coordination is the point — but that is a real widening of what one
+prompt-injected agent can reach, and per-session *authorization* is required
+before any multi-user or remote exposure (design doc §7b).
+
+### Test checklist
+- [ ] A spawned Claude session's `/mcp` lists a `lazybox` server with six tools.
+- [ ] `whoami` returns the spawning workspace's key; `list_sessions` shows siblings across repos.
+- [ ] `post_note` from one repo's session is visible to `read_notes` in another (default scope).
+- [ ] `notify_session` lands in the target's composer; a self-notify is rejected.
+- [ ] Ending the session's last agent terminal revokes its bearer (a stale token gets 401).
+
+---
+
 ## Terminal interaction model
 
 **Status:** stable

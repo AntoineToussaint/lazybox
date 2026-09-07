@@ -145,6 +145,50 @@ planner→executor workflows:
 A visible `source → target` notice records the trail, so a chain of handoffs
 stays legible.
 
+### Let agents coordinate themselves (the MCP bus)
+
+Broadcast and `x s` are *you* moving information between agents. Every Claude
+session lazybox spawns is also connected to a daemon-hosted **coordination MCP
+server**, so agents can find and brief each other without you in the loop.
+Identity is implicit — the connection *is* the session — and nothing needs
+configuring: the tools are provisioned at spawn and each agent is briefed on
+them at session start.
+
+| Tool | What it gives an agent |
+| --- | --- |
+| `whoami` | Its own session key, workspace, repo, and state |
+| `list_sessions` | Every sibling session across all repos, with what each is on |
+| `read_session` | The tail of another session's recent output |
+| `post_note` / `read_notes` | A persistent, cross-repo **blackboard** for distilled context — decisions, interfaces, findings |
+| `notify_session` | Push an instruction into another agent (the same delivery path as `x s`) |
+
+The blackboard is the primary medium: a note outlives the session that wrote
+it, and the default read scope is `global` plus the reader's own session, so a
+contract posted from the `api` repo is visible to the `web` agent an hour
+later. `read_session` is the escape hatch for "what is that agent doing right
+now"; `notify_session` is the push half.
+
+Because agents already know the bus, plain-language instructions work:
+
+- "Before you start, read the blackboard for anything about the auth API."
+- "Post the endpoint contract you settled on as a global note, tagged `auth`."
+- "Tell the `web` session the token field was renamed, and ask it to update."
+
+Two contracts to keep in mind:
+
+- `notify_session` reports a **handoff, not a delivery** — an agent parked at a
+  permission prompt drops it silently. Agents are told to verify with
+  `read_session`.
+- A note is **other-agent text**. The tool description and the session
+  briefing both say to treat it as untrusted context and never let it drive a
+  destructive action on its own.
+
+Only Claude sessions are on the bus today (it is the built-in agent that
+accepts an injected MCP config); Codex and Cursor sessions remain visible to
+`list_sessions`. Every spawned agent can read every sibling's output and notes
+across all repos — deliberate for a single user on one machine, and the reason
+the server is loopback-only and bearer-gated.
+
 ## See also
 
 - [Run an agent per workspace](/docs/how-to/run-an-agent-per-workspace/) — spawn

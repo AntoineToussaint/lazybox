@@ -5737,10 +5737,10 @@ impl TerminalStack {
             )),
             // A provider usage / rate-limit block (#847) — the agent is
             // parked waiting on the user just like `InputNeeded`, so it
-            // gets the same attention treatment, with the `⏳` glyph the
+            // gets the same attention treatment, with the `⧗` glyph the
             // sidebar pill already uses for it.
             AgentState::LimitReached => Some((
-                "⏳ limited",
+                "⧗ limited",
                 Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
             )),
             AgentState::CreditExhausted => Some((
@@ -5749,9 +5749,9 @@ impl TerminalStack {
             )),
             // The calm sibling of `LimitReached`: auto-wait pressed Wait and
             // the agent is parked until reset — handled, nothing for you to
-            // do — so it gets a quiet 💤 in the dim text color, NOT the
+            // do — so it gets a quiet ◌ in the dim text color, NOT the
             // alerting bold `warn` the two blocks above use.
-            AgentState::AwaitingReset => Some(("💤 waiting", Style::default().fg(theme.text_dim))),
+            AgentState::AwaitingReset => Some(("◌ waiting", Style::default().fg(theme.text_dim))),
             // Idle has nothing to act on; `Exited` is surfaced by the
             // `exited` flag above (the process-ended pill lives on the
             // slot, not the live state).
@@ -12459,11 +12459,11 @@ mod zoom_and_tile_header_tests {
                 Some("· working")
             );
             assert_eq!(label(AgentState::Done, false, compact), Some("✓ done"));
-            // A rate-limited agent needs you too — it shows the `⏳` pill
+            // A rate-limited agent needs you too — it shows the `⧗` pill
             // on both surfaces, not a blank slot.
             assert_eq!(
                 label(AgentState::LimitReached, false, compact),
-                Some("⏳ limited")
+                Some("⧗ limited")
             );
             assert_eq!(
                 label(AgentState::CreditExhausted, false, compact),
@@ -12487,7 +12487,7 @@ mod zoom_and_tile_header_tests {
         let theme = crate::theme::current();
 
         // A background rate-limited tile pulls attention just like an
-        // asking one: whole bar warn+bold, with the `⏳ limited` chip.
+        // asking one: whole bar warn+bold, with the `⧗ limited` chip.
         let bg = stack.tile_header_line(TerminalId(2), false, false, 40);
         assert!(
             bg.spans

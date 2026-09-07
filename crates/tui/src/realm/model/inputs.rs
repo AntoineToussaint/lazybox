@@ -270,7 +270,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// means), so none fall through to the spawn / skip cases.
     pub(super) fn resume_rate_limited_agents(&mut self) -> Vec<IpcCommand> {
         let terminals = self.sidebar.limit_reached_terminals();
-        // The 💤 agents are rate-limited too — parked on Claude's
+        // The ◌ agents are rate-limited too — parked on Claude's
         // auto-continue wait — but a "continue" typed into that composer
         // CANCELS the wait and only hits the limit again, so resume-all
         // leaves them alone by design. Whether or not any alerting agent

@@ -1,6 +1,6 @@
 //! Always-visible per-provider usage accounting (#1059).
 //!
-//! The reactive layer (`⏳ N limited` + the escalating alert, #1024)
+//! The reactive layer (`⧗ N limited` + the escalating alert, #1024)
 //! only surfaces *once* an agent hits its provider limit. This module is
 //! the proactive baseline that layer escalates from: a running token
 //! total per agent, rendered as a compact `Claude ▓▓▓░░ 62% · 76k left`

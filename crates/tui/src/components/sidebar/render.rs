@@ -474,7 +474,7 @@ impl Sidebar {
         let counters_spec: [(&str, usize, &str, ratatui::style::Color); 5] = [
             ("●", unread, "new", theme.hover),
             ("?", input_pending, "input", theme.warn),
-            ("⏳", limited, "limited", theme.warn),
+            ("⧗", limited, "limited", theme.warn),
             ("✗", ci_failing, "CI", theme.error),
             ("◔", review_pending, "review", theme.accent),
         ];
@@ -1116,9 +1116,11 @@ impl Sidebar {
                     } else {
                         crate::components::workspace_row::CURSOR_BAR
                     };
+                    // Issues are not a hot color: red / magenta is for
+                    // things that are wrong, and an issue is just work.
                     let color = match kind {
                         WorkspaceKind::Pr => theme.success,
-                        WorkspaceKind::Issue => theme.hover,
+                        WorkspaceKind::Issue => theme.text_strong,
                         WorkspaceKind::Other => theme.text_dim,
                     };
                     let marker = kind.header_marker();
@@ -1238,13 +1240,13 @@ impl Sidebar {
             // While the bar is capturing keystrokes, fill it with a solid
             // block so it reads unmistakably as a search field — not just
             // another list row you can keep typing "into" (#1099). The
-            // `🔍` glyph + `/` prefix give it the vim `/pattern` shape.
+            // `⌕` glyph + `/` prefix give it the vim `/pattern` shape.
             let field = s.editing;
             let with_field_bg = |st: Style| if field { st.bg(theme.fill) } else { st };
             if field {
                 frame.render_widget(Block::default().style(Style::default().bg(theme.fill)), bar);
             }
-            let prefix = if global { "🔍 ⌕ " } else { "🔍 /" };
+            let prefix = if global { "⌕ " } else { "⌕ /" };
             let mut spans = vec![
                 Span::styled(
                     prefix,

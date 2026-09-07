@@ -1423,7 +1423,7 @@ pub struct UiSection {
     /// usage limit (#1012): a transient notice the moment the first agent
     /// is rate-limited, escalating to a sticky banner naming the resume
     /// action while any agent stays blocked, retracted once they all
-    /// recover. The `⏳ N limited` header count and the per-row `⏳` pill
+    /// recover. The `⧗ N limited` header count and the per-row `⧗` pill
     /// are always shown; this only gates the footer escalation. Opt-out —
     /// set `false` to keep the block to the passive header/pill signals.
     /// Defaults to `true`.
@@ -1432,7 +1432,7 @@ pub struct UiSection {
     /// Show the always-visible per-provider usage summary in the sidebar
     /// header (#1059): a compact `Claude ▓▓▓░░ 62% · 76k left` widget per
     /// agent with a live terminal, visible before any limit is hit. It is
-    /// the proactive baseline the reactive `⏳ N limited` count escalates
+    /// the proactive baseline the reactive `⧗ N limited` count escalates
     /// from. Opt-out — set `false` to hide the row. Defaults to `true`.
     #[serde(default = "default_true")]
     pub usage_summary: bool,

@@ -4507,7 +4507,7 @@ snippets:
         );
     }
 
-    /// Agents parked on Claude's auto-continue wait (💤 `AwaitingReset`) are
+    /// Agents parked on Claude's auto-continue wait (◌ `AwaitingReset`) are
     /// rate-limited too, but a "continue" typed into that composer cancels
     /// the wait and only hits the limit again — so `Shift-K` still injects
     /// nothing into them. It must not claim "no rate-limited agents" while
@@ -4637,7 +4637,7 @@ snippets:
     /// The persistent usage-limit banner is the one surface that survives a
     /// resume, so when parked (`AwaitingReset`) agents coexist with blocked
     /// (`LimitReached`) ones it must name them and the restart chord that
-    /// applies — otherwise the 💤 badges outlive a `Shift-K` with no on-screen
+    /// applies — otherwise the ◌ badges outlive a `Shift-K` with no on-screen
     /// reason. Regression guard for the banner counting only the blocked set
     /// and hardcoding `Shift-K` (both would have hidden the parked agents /
     /// gone stale under a remap). A parked-only block raises NO banner: the
@@ -4979,7 +4979,7 @@ snippets:
     }
 
     /// #1012: `ui.usage_limit_alerts = false` suppresses the escalating
-    /// sticky banner, but the passive `⏳ N limited` header count still
+    /// sticky banner, but the passive `⧗ N limited` header count still
     /// tracks the blocked set. The opt-out only silences the escalation —
     /// the transient #847 rising-edge hint ("hit its usage limit —
     /// Shift-L/Shift-K") still fires, so the assertion targets the sticky

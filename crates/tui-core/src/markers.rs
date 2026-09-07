@@ -179,7 +179,7 @@ fn agent_state_doc(state: &AgentState) -> MarkerDoc {
             "Shows after the agent's process terminated.",
         ),
         AgentState::LimitReached => doc(
-            "⏳ LimitReached",
+            "⧗ LimitReached",
             "The agent hit its provider usage/rate limit and is paused until you resume it.",
             "Shows while the agent is parked on a usage-limit prompt.",
         ),
@@ -189,7 +189,7 @@ fn agent_state_doc(state: &AgentState) -> MarkerDoc {
             "Shows until Wait for credit and the continuation prompt both succeed.",
         ),
         AgentState::AwaitingReset => doc(
-            "💤 AwaitingReset",
+            "◌ AwaitingReset",
             "The agent hit its usage limit and lazybox auto-pressed Wait — it's now parked, sleeping until the limit resets, then picks the work back up on its own. Nothing for you to do.",
             "Shows while auto-wait holds a rate-limited agent through its reset.",
         ),
@@ -231,7 +231,7 @@ const ROW_BADGES: &[MarkerDoc] = &[
         when: "Shows when auto-merge is enabled on the PR on GitHub.",
     },
     MarkerDoc {
-        label: "🔧",
+        label: "⚙\u{FE0E}",
         meaning: "FIX — auto-fix is armed; lazybox spawns an agent to fix failing CI and/or merge conflicts on this PR.",
         when: "Shows once you arm auto-fix for this workspace (`g p`).",
     },

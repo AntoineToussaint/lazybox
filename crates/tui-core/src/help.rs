@@ -645,7 +645,7 @@ fallback shouldn't resurrect it)",
         );
         assert!(ctx.contains("## Row badges"));
         assert!(ctx.contains("`⚡`"));
-        assert!(ctx.contains("`🔧`"));
+        assert!(ctx.contains("`⚙\u{FE0E}`"));
     }
 
     /// Every status pill and agent state reaches the generated context —

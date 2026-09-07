@@ -1009,8 +1009,8 @@ fn wake_poll_for_terminal_kind(config: &ServerConfig, kind: &TerminalKind) {
 
 /// Relabel a `LimitReached` block to the calm `AwaitingReset` after the
 /// auto-wait policy has pressed "Wait" on the agent's behalf, so the
-/// sidebar/tab surface a quiet 💤 "parked, will resume" badge instead of
-/// the alerting `⏳` (which reads as "needs you"). Daemon-asserted — the
+/// sidebar/tab surface a quiet ◌ "parked, will resume" badge instead of
+/// the alerting `⧗` (which reads as "needs you"). Daemon-asserted — the
 /// screen scraper never produces `AwaitingReset`, and the state machine
 /// holds it against the lingering limit banner (see
 /// `AgentStateMachine::on_reading`). A no-op unless the terminal is still

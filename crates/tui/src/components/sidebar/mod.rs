@@ -2240,7 +2240,7 @@ impl Sidebar {
     }
 
     /// Number of distinct workspaces with at least one agent terminal in
-    /// `LimitReached` — the `⏳ N limited` header count and the size the
+    /// `LimitReached` — the `⧗ N limited` header count and the size the
     /// escalating usage-limit alert (#1012) reports. Counts workspaces,
     /// not terminals: two blocked agents in one workspace are one row's
     /// worth of "act externally" signal.
@@ -2304,7 +2304,7 @@ impl Sidebar {
     /// Move the cursor onto the next blocked workspace, starting AFTER the
     /// current row and wrapping — the `E j` epic jump (#1521). A workspace
     /// is blocked when it declares a `Blocked on:` reason or carries a
-    /// dependency edge; membership is the same predicate the `⛔` row
+    /// dependency edge; membership is the same predicate the `⊘` row
     /// badge and the `blocked` filter read, so the jump lands where the
     /// glyph is. Declared-blocker rows sweep before edge-only rows: a
     /// human-written "waiting on X" is a stronger signal than an inferred

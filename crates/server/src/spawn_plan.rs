@@ -216,9 +216,7 @@ pub(crate) fn build_spawn_plan(
             .as_deref()
             .is_some_and(|agent| agent.supports_mcp_config());
     let mut argv = argv;
-    if mcp_wired
-        && let Some(path) = mcp_config_path.as_ref()
-    {
+    if mcp_wired && let Some(path) = mcp_config_path.as_ref() {
         argv.push("--mcp-config".into());
         argv.push(path.to_string_lossy().into_owned());
     }
@@ -706,8 +704,7 @@ mod tests {
         // argv carries `--mcp-config`.
         let mut wired = input(TerminalKind::Agent("claude".into()));
         wired.mcp_config_path = Some(PathBuf::from("/run/lazybox/mcp-42.json"));
-        let plan =
-            build_spawn_plan(wired, &cfg, &Registry::default_builtins()).expect("plan");
+        let plan = build_spawn_plan(wired, &cfg, &Registry::default_builtins()).expect("plan");
         assert!(plan.flags.mcp_wired, "a provisioned Default spawn is wired");
         assert!(
             plan.argv.iter().any(|a| a == "--mcp-config"),
@@ -722,8 +719,7 @@ mod tests {
         let mut readonly = input(TerminalKind::Agent("claude".into()));
         readonly.access = AgentRunAccess::ReadOnly;
         readonly.mcp_config_path = Some(PathBuf::from("/run/lazybox/mcp-42.json"));
-        let plan =
-            build_spawn_plan(readonly, &cfg, &Registry::default_builtins()).expect("plan");
+        let plan = build_spawn_plan(readonly, &cfg, &Registry::default_builtins()).expect("plan");
         assert!(
             !plan.flags.mcp_wired,
             "a ReadOnly spawn is not on the bus even with a config path"

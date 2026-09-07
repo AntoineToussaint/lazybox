@@ -171,8 +171,7 @@ mod tests {
         // over the blurb, so a reword that drops "handoff, not delivery" must
         // still trip this.
         assert!(
-            text.contains("reports a handoff, not")
-                && text.contains("delivery"),
+            text.contains("reports a handoff, not") && text.contains("delivery"),
             "must say notify reports a handoff, not delivery: {text}"
         );
     }

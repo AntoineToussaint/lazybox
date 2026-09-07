@@ -5325,14 +5325,26 @@ impl TerminalStack {
                 grid,
                 offset: None,
             });
+            // A slot that has rendered before drains its hidden-period
+            // backlog at the grid it was produced for — its last rendered
+            // size, which is still the PTY's size because the daemon only
+            // learns of a change through the resize queued below. Parsing
+            // an Ink repaint (cursor walked up over the previous frame,
+            // then rewritten) into a shorter grid clamps the cursor at row
+            // 0 and scrolls a stale copy of the frame's top line into
+            // scrollback per repaint — the one-line-repeated-K-times
+            // artifact of #1547 when the pane it reappears in is shorter.
+            if slot.last_rendered_size.is_some() {
+                slot.flush_pending();
+            }
             slot.vt.ensure_size(grid.width, grid.height);
-            // Only now drain whatever arrived while this slot was hidden.
-            // Feeding before the resize would parse those bytes at the
-            // VT's default width and then reflow them to the real one —
-            // and reflow is not a faithful substitute for having wrapped
-            // at the right width to begin with. A reattaching client
-            // (whose entire replay arrives buffered) would land on a
-            // different grid than a live one fed the same bytes. See
+            // A fresh slot drains only now. Feeding before the resize
+            // would parse those bytes at the VT's default width and then
+            // reflow them to the real one — and reflow is not a faithful
+            // substitute for having wrapped at the right width to begin
+            // with. A reattaching client (whose entire replay arrives
+            // buffered) would land on a different grid than a live one
+            // fed the same bytes. See
             // `fresh_and_reattach_reach_identical_scroll_state`.
             slot.flush_pending();
             // Record the viewport offset of the frame we're painting AFTER
@@ -9369,6 +9381,126 @@ mod hidden_feed_tests {
         assert_eq!(row0(&mut stack), "hello");
         stack.set_active_session(Some(sk_b));
         assert_eq!(row0(&mut stack), "hello");
+    }
+
+    /// Render the pane at an explicit size and return the trimmed rows.
+    fn screen_rows_at(stack: &mut TerminalStack, w: u16, h: u16) -> Vec<String> {
+        let backend = TestBackend::new(w, h);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| stack.render(Rect::new(0, 0, w, h), f, true))
+            .unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// Ink-style repaint of a multi-line frame: erase the previous paint
+    /// line by line walking the cursor up, then rewrite every line. The
+    /// cursor rests at the end of the last line between paints, so a
+    /// frame of `n` lines is erased with `n - 1` cursor-ups.
+    fn ink_repaint(lines: &[String]) -> Vec<u8> {
+        let mut out = String::new();
+        for _ in 1..lines.len() {
+            out.push_str("\x1b[2K\x1b[1A");
+        }
+        out.push_str("\x1b[2K\x1b[G");
+        out.push_str(&lines.join("\r\n"));
+        out.into_bytes()
+    }
+
+    /// Count the rows equal to `needle` across the whole scrollback of
+    /// the focused terminal, paging from the top of history to the live
+    /// bottom at the given pane size.
+    fn count_rows_in_history(stack: &mut TerminalStack, w: u16, h: u16, needle: &str) -> usize {
+        let _ = stack.scroll_to_top();
+        let mut count = 0;
+        for _ in 0..1_000 {
+            let rows = screen_rows_at(stack, w, h);
+            count += rows.iter().filter(|r| r.contains(needle)).count();
+            let page = stack.terminals[&stack.focused_terminal_id().unwrap()]
+                .vt
+                .rows as isize;
+            if !matches!(stack.scroll_active(page), ScrollOutcome::Moved { .. }) {
+                break;
+            }
+        }
+        let _ = stack.scroll_to_bottom();
+        count
+    }
+
+    /// #1547 regression: output an agent produced while its terminal was
+    /// hidden must be parsed at the grid it was produced for — the size
+    /// the pane last rendered at, which is the size the PTY still has —
+    /// and only then resized to the pane it reappears in. Ink (Claude
+    /// Code) repaints its frame by walking the cursor up over the previous
+    /// paint; parsed into a shorter grid the cursor-up clamps at row 0 and
+    /// every repaint scrolls a stale copy of the frame's top line into
+    /// scrollback, so scrolling up showed one line repeated K times.
+    #[test]
+    fn hidden_backlog_parses_at_its_producing_size_before_the_pane_shrinks() {
+        const TALL: u16 = 40;
+        const SHORT: u16 = 24;
+        let sk_a = SessionKey::new("a");
+        let sk_b = SessionKey::new("b");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        spawn(&mut stack, TerminalId(1), &sk_a);
+        spawn(&mut stack, TerminalId(2), &sk_b);
+
+        // B renders once in a tall pane: its VT and (via the queued
+        // resize) its PTY are that tall.
+        stack.set_active_session(Some(sk_b.clone()));
+        let _ = screen_rows_at(&mut stack, W, TALL);
+        let tall_grid_rows = stack.terminals[&TerminalId(2)].vt.rows;
+
+        // Hide B behind A.
+        stack.set_active_session(Some(sk_a));
+        let _ = screen_rows_at(&mut stack, W, TALL);
+        assert!(!stack.terminals[&TerminalId(2)].displayed);
+
+        // While hidden, B's agent paints a frame that fits its tall grid
+        // and repaints it in place K times.
+        let marker = "… +17 lines (ctrl+o to expand)";
+        let frame: Vec<String> = std::iter::once(marker.to_string())
+            .chain((1..tall_grid_rows - 1).map(|i| format!("body line {i}")))
+            .collect();
+        feed(&mut stack, TerminalId(2), frame.join("\r\n").as_bytes(), 1);
+        const K: usize = 27;
+        for seq in 0..K {
+            feed(
+                &mut stack,
+                TerminalId(2),
+                &ink_repaint(&frame),
+                2 + seq as u64,
+            );
+        }
+        assert!(!stack.terminals[&TerminalId(2)].pending_feed.is_empty());
+
+        // B reappears in a pane too short for that frame.
+        stack.set_active_session(Some(sk_b));
+        let rows = screen_rows_at(&mut stack, W, SHORT);
+        assert!(stack.terminals[&TerminalId(2)].pending_feed.is_empty());
+        assert!(
+            stack.terminals[&TerminalId(2)].vt.rows < frame.len() as u16,
+            "fixture: the short pane must not fit the frame"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.contains(frame.last().unwrap().as_str())),
+            "live bottom shows the frame's last line: {rows:?}"
+        );
+
+        assert_eq!(
+            count_rows_in_history(&mut stack, W, SHORT, marker),
+            1,
+            "the repainted top line must exist once in scrollback, not once per repaint"
+        );
     }
 
     /// A hidden buffer crossing `PENDING_FEED_CAP` flushes its complete

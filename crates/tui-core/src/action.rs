@@ -1479,7 +1479,7 @@ impl ActionDef {
                 kind: ActionKind::ToggleMetering,
                 default_keys: "x $",
                 label: "meter",
-                describe: "Toggle metering ($ meter) for this workspace: route its agent spawns through lazybox's local metering proxy so cost, tokens, and rate-limit headroom accrue per session — a safe canary you can turn on for one workspace without affecting any other. Requires agent.metering_proxy enabled.",
+                describe: "Toggle metering ($ meter) for this workspace: route its agent spawns through lazybox's local metering proxy so cost, tokens, and rate-limit headroom accrue per session. On by default for new workspaces — use this to turn one off (or back on) without affecting any other. Requires agent.metering_proxy enabled.",
                 section: Section::Workspace,
             },
             ActionKind::ManagePolicies => &Self {

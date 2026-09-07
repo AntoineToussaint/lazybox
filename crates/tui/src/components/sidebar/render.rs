@@ -326,8 +326,11 @@ impl Sidebar {
         // metering proxy (`$ meter`), so show it plus its accrued per-session
         // cost the moment any priced usage lands. `$ METER` alone until the
         // first response is priced (proxy off / unknown model → no cost).
+        // Keys on *effective* metering (flag ∨ `meter_all` ∨ metered Space),
+        // not the bare flag, so blanket metering doesn't leave every focused
+        // row reading "off".
         let focused_meter = focused_workspace.and_then(|workspace| {
-            if !workspace.metered {
+            if !self.workspace_is_metered(workspace) {
                 return None;
             }
             let cost = self.usage.cost_micros_for_session(workspace.key.as_str());
@@ -948,8 +951,13 @@ impl Sidebar {
                     // trailed by the Space's accrued cost once any priced usage
                     // lands (#1389) — the legible per-Space figure, summed over
                     // its workspaces and durable across restarts.
-                    if self.metered_spaces.contains(name) {
-                        let cost = self.space_cost_micros(name);
+                    // The cost shows whenever the Space has accrued any —
+                    // with metering on by default (new workspaces) and
+                    // `meter_all`, most spend lands without the Space-tier
+                    // toggle, and the figure is the point. A bare `$` marks
+                    // a Space-toggled Space that hasn't spent yet.
+                    let cost = self.space_cost_micros(name);
+                    if cost > 0 || self.metered_spaces.contains(name) {
                         let badge = if cost > 0 {
                             format!(" $ {}", lazybox_tui_core::usage::format_cost_micros(cost))
                         } else {
@@ -1902,7 +1910,9 @@ impl Sidebar {
                 }),
                 track_main: workspace.is_some_and(|w| w.track_main),
                 track_main_behind: workspace.is_some_and(|w| w.track_main && w.track_main_behind),
-                metered: workspace.is_some_and(|w| w.metered),
+                metered: workspace.is_some_and(|w| self.workspace_is_metered(w)),
+                cost_micros: workspace
+                    .map_or(0, |w| self.usage.cost_micros_for_session(w.key.as_str())),
                 origin_issue: workspace.and_then(crate::components::task_label::originating_issue),
                 has_notes: workspace.is_some_and(|w| w.has_notes()),
                 sent_snippet_count: workspace.map_or(0, |w| w.sent_snippets.total()),

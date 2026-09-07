@@ -136,19 +136,23 @@ pub struct WorkspaceRowCtx<'a> {
     /// `⤓` glyph to its warn color so a stuck (dirty/diverged) worktree
     /// reads at a glance. Only meaningful when `track_main`.
     pub track_main_behind: bool,
-    /// This workspace has the per-workspace meter *armed* (`Workspace::metered`,
-    /// toggled with `x $`): while set, its agent spawns route through lazybox's
-    /// local metering proxy — effective only when `agent.metering_proxy` is on
-    /// and the proxy is running, otherwise inert (#1488). Renders a `$` in the
-    /// passive badge cluster — the *durable* cue that the canary is armed,
-    /// matching (and gated on the same field as) the sidebar header's
-    /// ` $ METER ` pill. Before this, that per-workspace signal lived only in
-    /// the header, drawn from the focused row alone, so you couldn't see which
-    /// rows were armed without visiting each one. Reflects the per-workspace
-    /// opt-in only: Space-tier (`agent.metered_spaces`) and blanket
-    /// (`meter_all`) metering don't light it — exactly as they don't light the
-    /// header pill, so the two surfaces can't drift.
+    /// This workspace's agent spawns are *effectively* routed through
+    /// lazybox's local metering proxy (`Sidebar::workspace_is_metered`: the
+    /// per-row `x $` flag, OR blanket `agent.meter_all`, OR a metered Space
+    /// — the same OR the daemon applies at spawn; inert until the proxy is
+    /// running). Renders an accent `$` in the passive badge cluster — the
+    /// durable armed cue, matching (and computed like) the sidebar header's
+    /// ` $ METER ` pill, so the two surfaces can't drift (#1488). New
+    /// workspaces arm by default, but `x $` is a live toggle, so armed / off
+    /// must stay legible per row.
     pub metered: bool,
+    /// This workspace's accrued metered cost in micro-USD
+    /// (`UsageTracker::cost_micros_for_session`). Once anything priced has
+    /// landed the `$` badge carries the figure — ` $0.42 ` — accent while
+    /// armed, dim once toggled off (spend already made is still this PR's
+    /// price). `0` adds nothing, never a misleading `$0.00`. Summed across
+    /// the workspace's sessions and durable across restarts.
+    pub cost_micros: u64,
     /// The issue this PR was opened from, as `(identifier, extra)` —
     /// `("298", 0)` / `("ENG-12", 2)` (#1528). Renders a `←298` chip so a
     /// collapsed issue→PR row still says where it came from; the collapse
@@ -1347,18 +1351,38 @@ fn cell_origin_issue(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     Cell::from_span(Span::styled(label, style))
 }
 
+/// The ` $ ` metering badge (#1488): armed (effectively metered) → an accent
+/// `$`, carrying the accrued figure (` $0.42 `) once anything priced has
+/// landed. Toggled off but already spent → the figure stays, dimmed: the
+/// spend is still this PR's price, but the row is no longer metering. Off
+/// with no spend → nothing, so the column collapses.
+///
+/// Accent, not warn — metering is *observation*, not an automation that will
+/// act on the PR (`FIX` / `ARM` earn warn). Packed into the shared passive
+/// cluster like `✎` / `]N` / `⤓main`, so armed state and price are legible
+/// across the whole sidebar rather than only on the focused row.
 fn cell_metered(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    if !ctx.metered {
+    if !ctx.metered && ctx.cost_micros == 0 {
         return Cell::empty();
     }
     let style = if ctx.is_cursor {
         ctx.row_style()
-    } else {
+    } else if ctx.metered {
         Style::default()
             .fg(ctx.theme.accent)
             .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(ctx.theme.text_dim)
     };
-    Cell::from_span(Span::styled(" $ ".to_string(), style))
+    let text = if ctx.cost_micros > 0 {
+        format!(
+            " {} ",
+            lazybox_tui_core::usage::format_cost_micros(ctx.cost_micros)
+        )
+    } else {
+        " $ ".to_string()
+    };
+    Cell::from_span(Span::styled(text, style))
 }
 
 /// The compact `🔧` auto-fix glyph (iconized #1046). Packs into the shared
@@ -1639,6 +1663,7 @@ mod tests {
             track_main: false,
             track_main_behind: false,
             metered: false,
+            cost_micros: 0,
             origin_issue: None,
             has_notes: false,
             sent_snippet_count: 0,
@@ -2153,6 +2178,7 @@ mod tests {
             track_main: false,
             track_main_behind: false,
             metered: false,
+            cost_micros: 0,
             origin_issue: None,
             has_notes: false,
             sent_snippet_count: 0,
@@ -2722,6 +2748,7 @@ mod tests {
             track_main: false,
             track_main_behind: false,
             metered: false,
+            cost_micros: 0,
             origin_issue: None,
             has_notes: false,
             sent_snippet_count: 0,
@@ -3081,19 +3108,23 @@ mod tests {
         assert!(text.contains('✎'), "notes badge missing: {text:?}");
     }
 
+    /// #1488: an armed workspace carries a durable `$` on its row, and the
+    /// figure once it has spent. `x $` is a live toggle even though new
+    /// workspaces arm by default, so armed vs. off must stay legible: off
+    /// with spend keeps the price but dims it; off with nothing → nothing.
     #[test]
-    fn cell_metered_marks_a_metered_workspace() {
+    fn cell_metered_marks_armed_state_and_carries_the_cost() {
         let task = make_task("owner/repo#1", "x");
-        let mut ws = Workspace::from_task(task.clone(), fixed_time());
+        let ws = Workspace::from_task(task.clone(), fixed_time());
         let theme = theme();
+        assert!(ws.metered, "new workspaces meter by default");
 
-        // Not metered → nothing, so the column collapses for a sidebar
-        // where no row is metered.
-        let ctx = ctx_for(&ws, &task, &theme);
+        // Off, nothing priced → nothing, so the column collapses.
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.metered = false;
         assert_eq!(cell_metered(&ctx).width(), 0);
 
-        ws.metered = true;
-        let mut ctx = ctx_for(&ws, &task, &theme);
+        // Armed, nothing priced yet → the bare armed cue, accent.
         ctx.metered = true;
         let cell = cell_metered(&ctx);
         assert_eq!(cell_text(&cell), " $ ");
@@ -3103,8 +3134,22 @@ mod tests {
             "metering observes; it doesn't act on the PR the way FIX/ARM do",
         );
 
+        // Armed with spend → the figure replaces the bare glyph, still accent.
+        ctx.cost_micros = 420_000;
+        let cell = cell_metered(&ctx);
+        assert_eq!(cell_text(&cell), " $0.42 ");
+        assert_eq!(cell.spans[0].style.fg, Some(theme.accent));
+
+        // Toggled off after spending → the price stays (it's this PR's), but
+        // dim, so "off" is distinguishable from "armed" at a glance.
+        ctx.metered = false;
+        let cell = cell_metered(&ctx);
+        assert_eq!(cell_text(&cell), " $0.42 ");
+        assert_eq!(cell.spans[0].style.fg, Some(theme.text_dim));
+
         // On the cursor row the badge inherits the row highlight so the
         // fill stays legible — same rule every other badge follows.
+        ctx.metered = true;
         ctx.is_cursor = true;
         assert_eq!(cell_metered(&ctx).spans[0].style, ctx.row_style());
     }
@@ -3118,11 +3163,12 @@ mod tests {
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
         ctx.metered = true;
+        ctx.cost_micros = 1_230_000;
         ctx.has_notes = true;
         ctx.auto_fix_ci_armed = true;
 
         let text = cell_text(&cell_badges(&ctx));
-        assert!(text.contains('$'), "metered badge missing: {text:?}");
+        assert!(text.contains("$1.23"), "cost badge missing: {text:?}");
         assert!(text.contains('✎'), "notes badge missing: {text:?}");
 
         // Ordering (#813 doctrine, least → most consequential): metering is
@@ -4202,6 +4248,7 @@ mod tests {
             track_main: false,
             track_main_behind: false,
             metered: false,
+            cost_micros: 0,
             origin_issue: None,
             has_notes: false,
             sent_snippet_count: 0,

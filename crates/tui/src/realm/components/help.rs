@@ -18,6 +18,15 @@ use tuirealm::ratatui::prelude::*;
 use tuirealm::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use tuirealm::state::State;
 
+/// One binding row in the Keys screen, plus whether the user has
+/// exercised it. `used` is read from the mastery ledger (#1502) — a
+/// dim `✓` marks a shortcut you've invoked at least once (through any
+/// channel), so the eye is drawn to the ones still worth learning.
+pub struct HelpBinding {
+    pub binding: Binding,
+    pub used: bool,
+}
+
 /// One section of the help panel — title + bindings under it.
 pub struct HelpSection {
     /// Section title, rendered as a heading above the section's grid —
@@ -25,7 +34,7 @@ pub struct HelpSection {
     pub title: &'static str,
     /// Bindings for this section. Owned so we can carry user-override
     /// keys without leaking a `&'static` slice per render.
-    pub bindings: Vec<Binding>,
+    pub bindings: Vec<HelpBinding>,
 }
 
 /// A leader-key menu advertised in the compact menu index. The detailed
@@ -38,6 +47,11 @@ pub struct LeaderGroup {
     leader: String,
     /// Registry label shared with the footer and which-key popup.
     label: &'static str,
+    /// True when any chord in this group has been invoked, per the
+    /// mastery ledger (#1502). The compact index shows the group, not
+    /// its members, so a used group carries the `✓` if the user has
+    /// reached into it at all.
+    used: bool,
     /// One row per in-group chord, retained in unit-test builds so the
     /// compact index is checked against every live which-key continuation.
     #[cfg(test)]
@@ -80,7 +94,10 @@ impl LeaderGroup {
     /// block lists every continuation's `<leader> <key>` display and
     /// its catalog label. Mirrors the live which-key popup, which keys
     /// off the same `Chord::Seq` data.
-    fn all_from_catalog(catalog: &[CatalogEntry]) -> Vec<Self> {
+    fn all_from_catalog(
+        catalog: &[CatalogEntry],
+        used: &std::collections::HashSet<String>,
+    ) -> Vec<Self> {
         // First-appearance order of leaders, with their continuations.
         let mut leaders: Vec<KeyStroke> = Vec::new();
         let mut members: Vec<Vec<(KeyStroke, &CatalogEntry)>> = Vec::new();
@@ -130,9 +147,13 @@ impl LeaderGroup {
                     .iter()
                     .find_map(|(_, entry)| action::leader_group_label(entry.kind))
                     .unwrap_or("commands");
+                let group_used = group
+                    .iter()
+                    .any(|(_, entry)| used.contains(entry.kind.name()));
                 Self {
                     leader: leader_disp,
                     label,
+                    used: group_used,
                     #[cfg(test)]
                     chords,
                 }
@@ -174,10 +195,18 @@ impl Help {
     /// is rendered from the char doubled here rather than the catalog's
     /// hardcoded `]]` default — otherwise a user who remaps the escape
     /// char sees `}}` in the footer but `]]` in `?` help (#188).
-    pub fn from_catalog(catalog: &[CatalogEntry], escape_char: char) -> Self {
+    ///
+    /// `used` is the set of `ActionKind::name()`s the mastery ledger
+    /// (#1502) records at least one invocation of; matching rows render
+    /// a dim `✓` so the unexercised shortcuts stand out.
+    pub fn from_catalog(
+        catalog: &[CatalogEntry],
+        escape_char: char,
+        used: &std::collections::HashSet<String>,
+    ) -> Self {
         use lazybox_tui_core::action::ActionKind;
         let leader = format!("{escape_char}{escape_char}");
-        let mut by_section: std::collections::BTreeMap<u8, (&'static str, Vec<Binding>)> =
+        let mut by_section: std::collections::BTreeMap<u8, (&'static str, Vec<HelpBinding>)> =
             std::collections::BTreeMap::new();
         for entry in catalog {
             // An agent with no default binding and no remap has nothing
@@ -209,9 +238,12 @@ impl Help {
                 .entry(entry.section.order())
                 .or_insert_with(|| (entry.section.title(), Vec::new()))
                 .1
-                .push(Binding {
-                    keys,
-                    label: entry.label.clone(),
+                .push(HelpBinding {
+                    binding: Binding {
+                        keys,
+                        label: entry.label.clone(),
+                    },
+                    used: used.contains(entry.kind.name()),
                 });
         }
         // The terminal namespace isn't a catalog Action: its runtime menu
@@ -229,23 +261,31 @@ impl Help {
             let sidebar = by_section
                 .entry(Section::Sidebar.order())
                 .or_insert_with(|| (Section::Sidebar.title(), Vec::new()));
-            sidebar.1.push(Binding {
-                keys: std::borrow::Cow::Owned(leader.clone()),
-                label: std::borrow::Cow::Borrowed("send to workspace agent (snippets, skills…)"),
+            sidebar.1.push(HelpBinding {
+                binding: Binding {
+                    keys: std::borrow::Cow::Owned(leader.clone()),
+                    label: std::borrow::Cow::Borrowed(
+                        "send to workspace agent (snippets, skills…)",
+                    ),
+                },
+                used: false,
             });
             let terminal = by_section
                 .entry(Section::Terminal.order())
                 .or_insert_with(|| (Section::Terminal.title(), Vec::new()));
-            terminal.1.push(Binding {
-                keys: std::borrow::Cow::Owned(leader),
-                label: std::borrow::Cow::Borrowed("terminal commands"),
+            terminal.1.push(HelpBinding {
+                binding: Binding {
+                    keys: std::borrow::Cow::Owned(leader),
+                    label: std::borrow::Cow::Borrowed("terminal commands"),
+                },
+                used: false,
             });
         }
         let sections: Vec<HelpSection> = by_section
             .into_iter()
             .map(|(_, (title, bindings))| HelpSection { title, bindings })
             .collect();
-        let leaders = LeaderGroup::all_from_catalog(catalog);
+        let leaders = LeaderGroup::all_from_catalog(catalog, used);
         Self {
             leaders,
             sections,
@@ -280,7 +320,7 @@ impl Help {
         2 + leader_rows + sep_rows + section_rows + legend_rows
     }
 
-    fn flat(&self) -> Vec<&Binding> {
+    fn flat(&self) -> Vec<&HelpBinding> {
         self.sections
             .iter()
             .flat_map(|s| s.bindings.iter())
@@ -313,6 +353,10 @@ impl Component for Help {
         if bindings.is_empty() || available_w < 24 || available_h < 6 {
             return;
         }
+        // Whether anything carries the mastery `✓` (#1502) — computed
+        // here off the already-collected rows, before the `self.scroll`
+        // mutation below reborrows `self` mutably.
+        let any_used = bindings.iter().any(|b| b.used) || self.leaders.iter().any(|g| g.used);
 
         let modal_w = MAX_MODAL_WIDTH.min(available_w);
         let cols_count = grid_columns(modal_w.saturating_sub(2));
@@ -377,8 +421,11 @@ impl Component for Help {
 
         // Draw a binding grid at logical row `start_lrow`; returns the
         // logical row just past it. Rows outside the window are skipped.
-        let draw_grid = |frame: &mut Frame, items: &[&Binding], start_lrow: u16| -> u16 {
-            for (idx, b) in items.iter().enumerate() {
+        // A used binding (`used == true`, per the mastery ledger #1502)
+        // trails a dim `✓` so the eye lands on the shortcuts not yet
+        // exercised.
+        let draw_grid = |frame: &mut Frame, items: &[(&Binding, bool)], start_lrow: u16| -> u16 {
+            for (idx, (b, used)) in items.iter().enumerate() {
                 let lrow = start_lrow + (idx / cols_count) as u16;
                 let Some(sy) = screen_y(lrow) else { continue };
                 let col = cols[idx % cols_count];
@@ -399,13 +446,19 @@ impl Component for Help {
                     .add_modifier(Modifier::BOLD);
                 let sep_style = Style::default().bg(theme.surface).fg(theme.text_dim);
                 let label_style = Style::default().bg(theme.surface).fg(theme.text_strong);
-                let line = Line::from(vec![
+                let mut spans = vec![
                     Span::styled(" ", panel_bg),
                     Span::styled(key, key_style),
                     Span::styled("  ", sep_style),
                     Span::styled(b.label.clone(), label_style),
-                ]);
-                frame.render_widget(Paragraph::new(line), cell);
+                ];
+                if *used {
+                    spans.push(Span::styled(
+                        " ✓",
+                        Style::default().bg(theme.surface).fg(theme.text_dim),
+                    ));
+                }
+                frame.render_widget(Paragraph::new(Line::from(spans)), cell);
             }
             start_lrow + items.len().div_ceil(cols_count) as u16
         };
@@ -444,9 +497,17 @@ impl Component for Help {
             );
         }
         lrow += 1;
+        // Name the mastery `✓` so it isn't a mystery glyph — but only
+        // once the user has actually earned one, so a fresh install
+        // doesn't advertise a marker nothing carries yet (#1502).
+        let subtitle = if any_used {
+            "Press ? to switch back to the assistant  ·  ✓ shortcuts you've used"
+        } else {
+            "Press ? to switch back to the assistant"
+        };
         full_line(
             frame,
-            "Press ? to switch back to the assistant",
+            subtitle,
             lrow,
             Style::default()
                 .bg(theme.surface)
@@ -466,15 +527,21 @@ impl Component for Help {
                     .add_modifier(Modifier::BOLD),
             );
             lrow += 1;
-            let leader_bindings: Vec<Binding> = self
+            let leader_bindings: Vec<(Binding, bool)> = self
                 .leaders
                 .iter()
-                .map(|group| Binding {
-                    keys: std::borrow::Cow::Owned(group.leader.clone()),
-                    label: std::borrow::Cow::Borrowed(group.label),
+                .map(|group| {
+                    (
+                        Binding {
+                            keys: std::borrow::Cow::Owned(group.leader.clone()),
+                            label: std::borrow::Cow::Borrowed(group.label),
+                        },
+                        group.used,
+                    )
                 })
                 .collect();
-            let leaders: Vec<&Binding> = leader_bindings.iter().collect();
+            let leaders: Vec<(&Binding, bool)> =
+                leader_bindings.iter().map(|(b, used)| (b, *used)).collect();
             lrow = draw_grid(frame, &leaders, lrow);
             lrow += 1;
         }
@@ -491,7 +558,11 @@ impl Component for Help {
             }
             full_line(frame, section.title, lrow, section_title_style);
             lrow += 1;
-            let items: Vec<&Binding> = section.bindings.iter().collect();
+            let items: Vec<(&Binding, bool)> = section
+                .bindings
+                .iter()
+                .map(|hb| (&hb.binding, hb.used))
+                .collect();
             lrow = draw_grid(frame, &items, lrow);
         }
 
@@ -681,7 +752,7 @@ mod tests {
             .sections
             .iter()
             .flat_map(|s| s.bindings.iter())
-            .map(|b| (b.keys.to_string(), b.label.to_string()));
+            .map(|b| (b.binding.keys.to_string(), b.binding.label.to_string()));
         let grouped = help
             .leaders
             .iter()
@@ -702,7 +773,7 @@ mod tests {
             &["claude".to_string(), "codex".to_string()],
             &std::collections::BTreeMap::new(),
         );
-        let help = Help::from_catalog(&catalog, ']');
+        let help = Help::from_catalog(&catalog, ']', &Default::default());
         let rows = all_help_rows(&help);
         assert!(
             rows.iter().any(|(k, l)| k == "a c" && l == "spawn claude"),
@@ -728,7 +799,7 @@ mod tests {
         use lazybox_tui_core::action::{ActionDef, keymap_preset};
         let overrides = keymap_preset("vim").unwrap();
         let catalog = ActionDef::catalog(&[], &overrides);
-        let help = Help::from_catalog(&catalog, ']');
+        let help = Help::from_catalog(&catalog, ']', &Default::default());
         let grouped_merge = help
             .leaders
             .iter()
@@ -742,7 +813,7 @@ mod tests {
                 .sections
                 .iter()
                 .flat_map(|s| s.bindings.iter())
-                .any(|b| b.label == "merge PR"),
+                .any(|b| b.binding.label == "merge PR"),
             "merge PR leaked into the flat grid — leader chords render once",
         );
     }
@@ -754,7 +825,7 @@ mod tests {
         overrides.insert("recover_agent_credit".into(), "F6".into());
         overrides.insert("recover_all_agent_credit".into(), "Shift-F6".into());
         let catalog = ActionDef::catalog(&[], &overrides);
-        let rows = all_help_rows(&Help::from_catalog(&catalog, ']'));
+        let rows = all_help_rows(&Help::from_catalog(&catalog, ']', &Default::default()));
         assert!(
             rows.iter()
                 .any(|(keys, label)| keys == "F6" && label == "recover credit")
@@ -779,13 +850,13 @@ mod tests {
             "cursor".to_string(),
         ];
         let catalog = ActionDef::catalog(&agents, &std::collections::BTreeMap::new());
-        let help = Help::from_catalog(&catalog, ']');
+        let help = Help::from_catalog(&catalog, ']', &Default::default());
 
         let flat_keys: Vec<String> = help
             .sections
             .iter()
             .flat_map(|s| s.bindings.iter())
-            .map(|b| b.keys.to_string())
+            .map(|b| b.binding.keys.to_string())
             .collect();
         // No leader menu (`g m`, `a c`, …) leaks into the flat grid — a
         // multi-token key is only allowed when its two strokes are equal
@@ -839,13 +910,13 @@ mod tests {
         let mut overrides = std::collections::BTreeMap::new();
         overrides.insert("merge_pr".to_string(), "Shift-M".to_string());
         let catalog = ActionDef::catalog(&[], &overrides);
-        let help = Help::from_catalog(&catalog, ']');
+        let help = Help::from_catalog(&catalog, ']', &Default::default());
 
         assert!(
             help.sections
                 .iter()
                 .flat_map(|s| s.bindings.iter())
-                .any(|b| b.keys == "Shift-M" && b.label == "merge PR"),
+                .any(|b| b.binding.keys == "Shift-M" && b.binding.label == "merge PR"),
             "a single-key merge remap must show in the flat grid",
         );
         // …and it must NOT also render in a leader block.
@@ -867,12 +938,12 @@ mod tests {
     fn from_catalog_lists_repo_group_collapse() {
         use lazybox_tui_core::action::ActionDef;
         let catalog = ActionDef::catalog(&[], &std::collections::BTreeMap::new());
-        let help = Help::from_catalog(&catalog, ']');
+        let help = Help::from_catalog(&catalog, ']', &Default::default());
         let flat: Vec<(String, String)> = help
             .sections
             .iter()
             .flat_map(|s| s.bindings.iter())
-            .map(|b| (b.keys.to_string(), b.label.to_string()))
+            .map(|b| (b.binding.keys.to_string(), b.binding.label.to_string()))
             .collect();
         assert!(
             flat.iter()
@@ -888,13 +959,13 @@ mod tests {
     fn terminal_section_advertises_one_live_command_menu() {
         use lazybox_tui_core::action::ActionDef;
         let catalog = ActionDef::catalog(&[], &std::collections::BTreeMap::new());
-        let help = Help::from_catalog(&catalog, ']');
+        let help = Help::from_catalog(&catalog, ']', &Default::default());
         let terminal: Vec<(String, String)> = help
             .sections
             .iter()
             .filter(|s| s.title == "Terminal")
             .flat_map(|s| s.bindings.iter())
-            .map(|b| (b.keys.to_string(), b.label.to_string()))
+            .map(|b| (b.binding.keys.to_string(), b.binding.label.to_string()))
             .collect();
         assert!(
             terminal
@@ -908,14 +979,14 @@ mod tests {
         );
         assert!(!terminal.iter().any(|(_, l)| l == "split right"));
         // A remapped escape char re-renders the rows from the live char.
-        let remapped = Help::from_catalog(&catalog, '}');
+        let remapped = Help::from_catalog(&catalog, '}', &Default::default());
         assert!(
             remapped
                 .sections
                 .iter()
                 .filter(|s| s.title == "Terminal")
                 .flat_map(|s| s.bindings.iter())
-                .any(|b| b.keys == "}}" && b.label == "terminal commands"),
+                .any(|b| b.binding.keys == "}}" && b.binding.label == "terminal commands"),
             "terminal menu row must render from the configured escape char",
         );
     }
@@ -927,13 +998,13 @@ mod tests {
     fn global_section_lists_the_mouse_capture_toggle() {
         use lazybox_tui_core::action::ActionDef;
         let catalog = ActionDef::catalog(&[], &std::collections::BTreeMap::new());
-        let help = Help::from_catalog(&catalog, ']');
+        let help = Help::from_catalog(&catalog, ']', &Default::default());
         let global: Vec<(String, String)> = help
             .sections
             .iter()
             .filter(|s| s.title == "Global")
             .flat_map(|s| s.bindings.iter())
-            .map(|b| (b.keys.to_string(), b.label.to_string()))
+            .map(|b| (b.binding.keys.to_string(), b.binding.label.to_string()))
             .collect();
         assert!(
             global
@@ -952,7 +1023,7 @@ mod tests {
         use tuirealm::component::AppComponent;
         use tuirealm::event::{Event, Key, KeyEvent, KeyModifiers};
         let catalog = ActionDef::catalog(&[], &std::collections::BTreeMap::new());
-        let mut help = Help::from_catalog(&catalog, ']');
+        let mut help = Help::from_catalog(&catalog, ']', &Default::default());
         let press = |code| Event::Keyboard(KeyEvent::new(code, KeyModifiers::NONE));
 
         assert_eq!(help.scroll, 0);
@@ -1006,7 +1077,7 @@ mod tests {
 
         // Tall: the whole panel fits — no scroll hint, bottom row shown,
         // and an over-scroll is clamped back to 0.
-        let mut tall = Help::from_catalog(&catalog, ']');
+        let mut tall = Help::from_catalog(&catalog, ']', &Default::default());
         tall.scroll = 50;
         let out = render(&mut tall, 140, 60);
         assert!(
@@ -1018,7 +1089,7 @@ mod tests {
 
         // Short: overflows. At the top the hint shows and the Terminal
         // row is clipped; scrolling to the end reveals it.
-        let mut short = Help::from_catalog(&catalog, ']');
+        let mut short = Help::from_catalog(&catalog, ']', &Default::default());
         let top = render(&mut short, 110, 16);
         assert!(top.contains("↑↓"), "overflow must show the scroll hint");
         assert!(top.contains('↓'), "overflow must show rows below");
@@ -1047,7 +1118,7 @@ mod tests {
     fn leader_section_lists_the_github_chords_from_the_catalog() {
         use lazybox_tui_core::action::ActionDef;
         let catalog = ActionDef::catalog(&[], &std::collections::BTreeMap::new());
-        let help = Help::from_catalog(&catalog, ']');
+        let help = Help::from_catalog(&catalog, ']', &Default::default());
         let g = help
             .leaders
             .iter()
@@ -1089,7 +1160,7 @@ mod tests {
             "cursor".to_string(),
         ];
         let catalog = ActionDef::catalog(&agents, &std::collections::BTreeMap::new());
-        let help = Help::from_catalog(&catalog, ']');
+        let help = Help::from_catalog(&catalog, ']', &Default::default());
         let w = help
             .leaders
             .iter()
@@ -1118,7 +1189,7 @@ mod tests {
     fn leader_index_carries_compact_group_metadata() {
         use lazybox_tui_core::action::ActionDef;
         let catalog = ActionDef::catalog(&[], &std::collections::BTreeMap::new());
-        let help = Help::from_catalog(&catalog, ']');
+        let help = Help::from_catalog(&catalog, ']', &Default::default());
         let g = help
             .leaders
             .iter()
@@ -1137,7 +1208,7 @@ mod tests {
         use lazybox_tui_core::action::ActionDef;
         let agents = ["claude".to_string(), "codex".to_string()];
         let catalog = ActionDef::catalog(&agents, &std::collections::BTreeMap::new());
-        let help = Help::from_catalog(&catalog, ']');
+        let help = Help::from_catalog(&catalog, ']', &Default::default());
         assert_eq!(
             help.leaders
                 .iter()
@@ -1158,7 +1229,7 @@ mod tests {
             "cursor".to_string(),
         ];
         let catalog = ActionDef::catalog(&agents, &std::collections::BTreeMap::new());
-        let help = Help::from_catalog(&catalog, ']');
+        let help = Help::from_catalog(&catalog, ']', &Default::default());
         let a = help
             .leaders
             .iter()
@@ -1180,6 +1251,88 @@ mod tests {
                 "a leader block missing {chord} → {label}; got {rows:?}",
             );
         }
+    }
+
+    /// The mastery ledger (#1502) marks exercised shortcuts: a used
+    /// action id flags its flat row, and a leader group flags used when
+    /// any member has been reached — while untouched rows/groups stay
+    /// unmarked so the eye lands on what's left to learn.
+    #[test]
+    fn used_action_ids_mark_flat_rows_and_leader_groups() {
+        use lazybox_tui_core::action::ActionDef;
+        let catalog = ActionDef::catalog(&["claude".to_string()], &Default::default());
+        // `quit` is a flat `q q` Global row; `merge_pr` lives under the
+        // `g` github leader; nothing in the `a` agent group is used.
+        let used: std::collections::HashSet<String> =
+            ["quit".to_string(), "merge_pr".to_string()].into_iter().collect();
+        let help = Help::from_catalog(&catalog, ']', &used);
+
+        let quit = help
+            .sections
+            .iter()
+            .flat_map(|s| s.bindings.iter())
+            .find(|b| b.binding.keys == "q q")
+            .expect("q q quit row");
+        assert!(quit.used, "used quit must be marked");
+
+        let github = help
+            .leaders
+            .iter()
+            .find(|lg| lg.label == "github")
+            .expect("github leader group");
+        assert!(github.used, "a used member marks the leader group");
+        let agent = help
+            .leaders
+            .iter()
+            .find(|lg| lg.label == "agent")
+            .expect("agent leader group");
+        assert!(!agent.used, "an untouched group stays unmarked");
+
+        // An unused flat row is not marked.
+        let unused_flat = help
+            .sections
+            .iter()
+            .flat_map(|s| s.bindings.iter())
+            .any(|b| !b.used);
+        assert!(unused_flat, "unexercised rows must remain unmarked");
+    }
+
+    /// The `✓` glyph and its legend render only once the ledger has
+    /// something to mark; a fresh install shows neither (#1502).
+    #[test]
+    fn used_marks_render_and_legend_is_gated() {
+        use lazybox_tui_core::action::ActionDef;
+        use tuirealm::component::Component;
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+
+        let catalog = ActionDef::catalog(&[], &Default::default());
+        let render = |help: &mut Help| -> String {
+            let mut term = Terminal::new(TestBackend::new(140, 60)).unwrap();
+            term.draw(|f| help.view(f, f.area())).unwrap();
+            format!("{:?}", term.backend().buffer())
+        };
+
+        let mut fresh = Help::from_catalog(&catalog, ']', &Default::default());
+        let fresh_out = render(&mut fresh);
+        assert!(
+            !fresh_out.contains("shortcuts you've used"),
+            "no legend before anything is used",
+        );
+
+        let used: std::collections::HashSet<String> = ["quit".to_string()].into_iter().collect();
+        let mut marked = Help::from_catalog(&catalog, ']', &used);
+        let marked_out = render(&mut marked);
+        assert!(
+            marked_out.contains("shortcuts you've used"),
+            "legend appears once a shortcut is used",
+        );
+        // The sidebar-icon legend paints its own `✓`, so compare counts:
+        // marking a row adds exactly the one extra checkmark.
+        assert!(
+            marked_out.matches('✓').count() > fresh_out.matches('✓').count(),
+            "the used row adds a checkmark beyond the icon legend",
+        );
     }
 
     #[test]

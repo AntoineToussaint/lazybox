@@ -4000,6 +4000,17 @@ impl<T: TerminalAdapter> Model<T> {
             .unwrap_or(0)
     }
 
+    /// Every action id the mastery ledger (#1502) records at least one
+    /// invocation of — the "shortcuts you've used" set the Keys screen
+    /// marks with a `✓`. A replayed all-zero entry doesn't count.
+    pub(crate) fn used_action_ids(&self) -> std::collections::HashSet<String> {
+        self.mastery
+            .iter()
+            .filter(|(_, by_via)| by_via.values().sum::<u32>() > 0)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     /// Dispatch a catalog `action` invoked through `via`, recording it in
     /// the mastery ledger (#1502) before delegating to
     /// [`Self::dispatch_action`]. Every real user entry point (keyboard,

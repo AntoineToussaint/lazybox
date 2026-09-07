@@ -3837,6 +3837,176 @@ mod broadcast_select_tests {
         assert!(wide.contains("works offline"), "{wide:?}");
     }
 
+    /// #1535: the header must not change height as the cursor moves. The
+    /// automation strip used to be reserved from the *focused* row, so
+    /// every `j`/`k` across an armed workspace grew or shrank the header
+    /// and shoved the whole list down a row and back — content moving
+    /// under a moving cursor, exactly while the user is reading it.
+    #[test]
+    fn header_height_is_stable_while_the_cursor_moves() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        // One armed workspace among plain ones — the mixed case where the
+        // old reservation flip-flopped. Distinct task keys, or the two
+        // fold into a single row and there is nothing to move between.
+        let ws = |num: u64, armed: bool| {
+            let mut t = base_task();
+            t.id.key = format!("o/r#{num}");
+            t.url = format!("https://github.com/o/r/pull/{num}");
+            let mut w = Workspace::from_task(t, chrono::Utc::now());
+            w.name = format!("Alpha {num}");
+            w.auto_merge_on_green = armed;
+            w
+        };
+        for w in [ws(1, true), ws(2, false)] {
+            sb.workspaces.insert(SessionKey::from(&w.key), w);
+        }
+        sb.recompute_visible();
+
+        let area = Rect::new(0, 0, 60, 20);
+        let selectable: Vec<usize> = sb
+            .visible
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| matches!(row, VisibleRow::Workspace(_)))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            selectable.len() >= 2,
+            "need both rows selectable: {selectable:?}"
+        );
+
+        let baseline = sb.header_height(area);
+        for i in selectable {
+            sb.cursor = i;
+            assert_eq!(
+                sb.header_height(area),
+                baseline,
+                "header height moved when the cursor landed on visible row {i}",
+            );
+        }
+        assert_eq!(
+            sb.stats_row_height(area),
+            1,
+            "an inbox containing an armed row reserves the strip",
+        );
+    }
+
+    /// The row is still reclaimed when nothing in the inbox is armed —
+    /// the reservation is over the visible set, not unconditional. Clear
+    /// `metered` explicitly: since #1538 a new workspace defaults to
+    /// metered, and the `$ METER` canary would otherwise reserve the strip
+    /// on its own — a different reservation than the arming this test is
+    /// about. An unarmed, unmetered row has nothing to show, so it reclaims.
+    #[test]
+    fn automation_strip_is_reclaimed_when_nothing_is_armed() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let mut plain = pr_ws("https://github.com/o/r/pull/1");
+        plain.metered = false;
+        sb.workspaces.insert(SessionKey::from(&plain.key), plain);
+        sb.recompute_visible();
+        assert_eq!(sb.stats_row_height(Rect::new(0, 0, 60, 20)), 0);
+    }
+
+    /// #1535, in the *rendered* output. The sibling test above exercises
+    /// only `header_height()`, which the mouse hit-test consults but the
+    /// layout in `render()` does not — `render()` reserved the strip from
+    /// the *focused* row instead. That left two bugs the helper-only test
+    /// could not see: the list still shifted a row on every `j`/`k` across
+    /// an armed workspace, and render disagreed with `header_height()` so a
+    /// click mapped to the wrong workspace. This renders a mixed inbox with
+    /// the cursor on each visible row and asserts (a) the divider and list
+    /// rows never move, and (b) the divider sits exactly at
+    /// `header_height() - 1` every time, so render and the click mapping
+    /// can never diverge.
+    #[test]
+    fn rendered_header_and_list_stay_put_as_the_cursor_moves() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        // One armed workspace among plain ones — the mixed case where the
+        // focused-row reservation flip-flopped. Distinct titles so each
+        // row is findable in the rendered buffer.
+        let ws = |num: u64, armed: bool| {
+            let mut t = base_task();
+            t.id.key = format!("o/r#{num}");
+            t.url = format!("https://github.com/o/r/pull/{num}");
+            t.title = format!("Zeta {num}");
+            let mut w = Workspace::from_task(t, chrono::Utc::now());
+            w.name = format!("Zeta {num}");
+            w.auto_merge_on_green = armed;
+            w
+        };
+        let mut sb = Sidebar::new(PaneId::new(1));
+        for w in [ws(1, true), ws(2, false)] {
+            sb.workspaces.insert(SessionKey::from(&w.key), w);
+        }
+        sb.recompute_visible();
+
+        let area = Rect::new(0, 0, 60, 20);
+        let selectable: Vec<usize> = sb
+            .visible
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| matches!(row, VisibleRow::Workspace(_)))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(selectable.len() >= 2, "need both rows: {selectable:?}");
+
+        // Render at the current cursor and read the buffer back as rows.
+        let render_rows = |sb: &mut Sidebar| -> Vec<String> {
+            let backend = TestBackend::new(area.width, area.height);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| sb.render(area, frame, true))
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect()
+        };
+        // The header divider is the first (and only) chrome line drawn with
+        // the box-drawing rule; the list starts on the line below it.
+        let divider_y = |rows: &[String]| {
+            rows.iter()
+                .position(|r| r.contains('─'))
+                .expect("header divider rendered") as u16
+        };
+        let row_y = |rows: &[String], needle: &str| {
+            rows.iter()
+                .position(|r| r.contains(needle))
+                .unwrap_or_else(|| panic!("row {needle:?} rendered")) as u16
+        };
+
+        let mut baseline: Option<(u16, u16)> = None;
+        for i in selectable {
+            sb.cursor = i;
+            let rows = render_rows(&mut sb);
+            let divider = divider_y(&rows);
+            let alpha2 = row_y(&rows, "Zeta 2");
+
+            // The divider is the last chrome line, so it must land at
+            // `header_height() - 1`. If render reserved the strip from the
+            // focused row while `header_height()` reserved it from the
+            // visible set, these disagree and the click mapping is off.
+            assert_eq!(
+                divider + 1,
+                sb.header_height(area),
+                "rendered divider disagrees with header_height() on row {i}",
+            );
+            match baseline {
+                None => baseline = Some((divider, alpha2)),
+                Some((base_divider, base_alpha2)) => {
+                    assert_eq!(divider, base_divider, "divider moved on row {i}");
+                    assert_eq!(alpha2, base_alpha2, "list row moved on row {i}");
+                }
+            }
+        }
+    }
+
     /// #794 regression, re-homed by #1502: the merge label lives on the
     /// conditional automation row, the CI tally on row 0. Under width
     /// pressure the label drops whole (its row is omitted) while the tally

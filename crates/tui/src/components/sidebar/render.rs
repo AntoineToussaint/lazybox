@@ -1934,6 +1934,12 @@ impl Sidebar {
                 }),
                 ticket_tree: self.ticket_tree.get(key).copied(),
                 stack: self.stacks.get(key),
+                // Dependency edges (#1521): the count of declared blockers
+                // across this workspace's tasks, and whether any task
+                // carries a free-text `Blocked on:` reason. P0 renders the
+                // declared edges; it does not resolve whether they're open.
+                blocked_by: workspace.map_or(0, |w| w.hierarchy_blocked_by().count()),
+                blocked_on: workspace.is_some_and(|w| w.declared_blocker().is_some()),
                 model_shorts: &self.model_shorts,
                 highlight_query,
                 // Focused rows are lifted out of their repo group, so name

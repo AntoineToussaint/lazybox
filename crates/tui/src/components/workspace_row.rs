@@ -149,6 +149,11 @@ pub struct WorkspaceRowCtx<'a> {
     /// (`meter_all`) metering don't light it — exactly as they don't light the
     /// header pill, so the two surfaces can't drift.
     pub metered: bool,
+    /// The issue this PR was opened from, as `(identifier, extra)` —
+    /// `("298", 0)` / `("ENG-12", 2)` (#1528). Renders a `←298` chip so a
+    /// collapsed issue→PR row still says where it came from; the collapse
+    /// otherwise hides the issue entirely outside the activity pane.
+    pub origin_issue: Option<(String, usize)>,
     /// This workspace carries a non-empty local note
     /// (`Workspace::has_notes` — issue #458). Renders a small ` ✎ ` pill
     /// so the user can see, at a glance, which rows have a scratchpad.
@@ -1130,6 +1135,7 @@ fn cell_badges(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         cell_track_main(ctx),
         cell_metered(ctx),
         cell_fix(ctx),
+        cell_origin_issue(ctx),
     ])
 }
 
@@ -1312,6 +1318,35 @@ fn cell_arm(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 /// act on the PR (`FIX` / `ARM` earn warn). One glyph, packed into the shared
 /// passive cluster like `✎` / `]N` / `⤓main`, so an armed canary is legible
 /// across the whole sidebar rather than only on the focused row.
+/// The ` ←298 ` originating-issue chip (#1528): this PR closes that
+/// issue, and the issue→PR collapse folded them into this one row.
+///
+/// Without it the row shows only the PR, and the issue it came from is
+/// invisible in the sidebar — you have to open the activity pane to learn
+/// that a PR is "the fix for #298", which is exactly the association you
+/// want while scanning. `+N` when the PR closes more than one.
+///
+/// Coloured like an issue glyph (`theme.hover`), not like the PR, so the
+/// eye reads it as a reference *out* to something else rather than more
+/// PR metadata.
+fn cell_origin_issue(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    let Some((id, extra)) = ctx.origin_issue.as_ref() else {
+        return Cell::empty();
+    };
+    let arrow = if ctx.ascii_glyphs { "<-" } else { "←" };
+    let label = if *extra > 0 {
+        format!(" {arrow}{id}+{extra} ")
+    } else {
+        format!(" {arrow}{id} ")
+    };
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default().fg(ctx.theme.hover)
+    };
+    Cell::from_span(Span::styled(label, style))
+}
+
 fn cell_metered(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     if !ctx.metered {
         return Cell::empty();
@@ -1604,6 +1639,7 @@ mod tests {
             track_main: false,
             track_main_behind: false,
             metered: false,
+            origin_issue: None,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
@@ -2117,6 +2153,7 @@ mod tests {
             track_main: false,
             track_main_behind: false,
             metered: false,
+            origin_issue: None,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
@@ -2685,6 +2722,7 @@ mod tests {
             track_main: false,
             track_main_behind: false,
             metered: false,
+            origin_issue: None,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
@@ -2991,6 +3029,58 @@ mod tests {
     /// this the only per-workspace cue was a header pill drawn from the
     /// focused row, so you couldn't tell which workspaces were metered
     /// without visiting each one.
+    /// #1528: the issue→PR collapse folds an issue and its PR into one
+    /// row, and the row then shows only the PR — the issue it came from
+    /// disappears from the sidebar entirely. The chip puts it back.
+    #[test]
+    fn cell_origin_issue_names_the_issue_a_pr_closes() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+
+        // A PR that closes nothing renders nothing, so the column
+        // collapses for a sidebar with no linked rows.
+        assert_eq!(cell_origin_issue(&ctx).width(), 0);
+
+        ctx.origin_issue = Some(("298".to_string(), 0));
+        let cell = cell_origin_issue(&ctx);
+        assert_eq!(cell_text(&cell), " ←298 ");
+        assert_eq!(
+            cell.spans[0].style.fg,
+            Some(theme.hover),
+            "coloured as an issue reference, not as more PR metadata",
+        );
+
+        // More than one closed issue: name the first, count the rest.
+        ctx.origin_issue = Some(("298".to_string(), 2));
+        assert_eq!(cell_text(&cell_origin_issue(&ctx)), " ←298+2 ");
+
+        // A Linear ticket carries its tracker key, not a bare number.
+        ctx.origin_issue = Some(("ENG-12".to_string(), 0));
+        assert_eq!(cell_text(&cell_origin_issue(&ctx)), " ←ENG-12 ");
+
+        // `display.ascii_glyphs` keeps it readable without a Nerd Font.
+        ctx.ascii_glyphs = true;
+        assert_eq!(cell_text(&cell_origin_issue(&ctx)), " <-ENG-12 ");
+    }
+
+    /// It rides the shared passive cluster, so it packs with the other
+    /// decorations instead of reserving its own column.
+    #[test]
+    fn origin_issue_badge_packs_into_the_passive_cluster() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.origin_issue = Some(("298".to_string(), 0));
+        ctx.has_notes = true;
+
+        let text = cell_text(&cell_badges(&ctx));
+        assert!(text.contains("←298"), "origin chip missing: {text:?}");
+        assert!(text.contains('✎'), "notes badge missing: {text:?}");
+    }
+
     #[test]
     fn cell_metered_marks_a_metered_workspace() {
         let task = make_task("owner/repo#1", "x");
@@ -4112,6 +4202,7 @@ mod tests {
             track_main: false,
             track_main_behind: false,
             metered: false,
+            origin_issue: None,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,

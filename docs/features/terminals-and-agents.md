@@ -518,12 +518,16 @@ that `x s` / `Shift-B` (push-only, human-driven) leave open. Full design and
 trade-offs: [`../mcp-coordination.md`](../mcp-coordination.md).
 
 ### How to use it
-Nothing to set up. Every spawned Claude session is told about the bus in its
-`SessionStart` briefing (`lazybox_session_context`), so an agent can be asked
-in plain language: "check the blackboard before you start", "post the API
-contract you settled on as a global note", "tell the `web` session the auth
-endpoint moved". You can also run any tool yourself from inside a session's
-terminal (`/mcp` lists the `lazybox` server).
+Nothing to set up. Every Claude session lazybox *wires to the bus* is told
+about it in its `SessionStart` briefing (`lazybox_session_context` +
+`lazybox_mcp_coordination_context`), so an agent can be asked in plain
+language: "check the blackboard before you start", "post the API contract you
+settled on as a global note", "tell the `web` session the auth endpoint moved".
+The coordination half of the briefing is gated on the session actually being
+provisioned (`--emit-mcp-context`): a read-only "Ask lazybox" launch is not on
+the bus, so it gets the base mechanics briefing without being told about tools
+it cannot call. You can also run any tool yourself from inside a wired
+session's terminal (`/mcp` lists the `lazybox` server).
 
 Contracts to know:
 

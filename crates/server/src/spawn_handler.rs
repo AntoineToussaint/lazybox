@@ -324,16 +324,24 @@ fn hook_command_keyfile(exe: &Path, key_path: &Path) -> String {
 /// the daemon (tmux): after a restart the surviving session's hooks
 /// must still resolve, and the backend key is the identity that
 /// survives while terminal ids are reallocated.
-fn hook_command(exe: &Path, backend_key: &str) -> String {
+fn hook_command(exe: &Path, backend_key: &str, mcp_wired: bool) -> String {
     // `--emit-session-context` opts this agent's hook into printing the
     // lazybox capability blurb on `SessionStart` (Claude adds a hook's stdout
     // to its context). Only the settings-file path — Claude — carries it;
     // Codex's argv `hook_command_keyfile` omits it, since it is unverified
     // whether Codex surfaces a hook's stdout as context. TODO(codex): once
     // confirmed, seed the same text through the CODEX_HOME lazybox already owns.
+    //
+    // `--emit-mcp-context` is added ONLY when this spawn is wired to the
+    // coordination MCP bus (`SpawnFlags::mcp_wired`). The base blurb rides on
+    // every Claude spawn — including ReadOnly "Ask lazybox" launches that are
+    // never provisioned — so the bus half must be gated separately: telling an
+    // unprovisioned session the MCP server is connected would advertise six
+    // tools it cannot call.
+    let mcp = if mcp_wired { " --emit-mcp-context" } else { "" };
     guarded_hook_command(
         exe,
-        &format!(" --backend-key \"{backend_key}\" --emit-session-context"),
+        &format!(" --backend-key \"{backend_key}\" --emit-session-context{mcp}"),
         &lazybox_core::paths::hook_log_path(),
     )
 }
@@ -17706,7 +17714,7 @@ mod tests {
         assert!(exe.is_absolute(), "current_exe must be absolute: {exe:?}");
         let quoted = format!("\"{}\"", exe.display());
 
-        let claude = hook_command(&exe, "lzb-sess-7");
+        let claude = hook_command(&exe, "lzb-sess-7", false);
         assert!(claude.contains(&quoted), "bare/relative exe in: {claude}");
 
         let codex = hook_command_keyfile(&exe, Path::new("/run/lzb/backend-key-7"));
@@ -17715,7 +17723,7 @@ mod tests {
 
     #[test]
     fn hook_command_quotes_exe_and_bakes_backend_key() {
-        let cmd = hook_command(Path::new("/opt/lazy box/lazybox"), "lzb-sess-7");
+        let cmd = hook_command(Path::new("/opt/lazy box/lazybox"), "lzb-sess-7", false);
         assert!(
             cmd.contains("\"/opt/lazy box/lazybox\" hook-ingest --backend-key \"lzb-sess-7\""),
             "exec missing or unquoted: {cmd}"
@@ -17731,7 +17739,7 @@ mod tests {
         // Claude's settings-file hook carries the marker that turns
         // `SessionStart` into the lazybox capability blurb; Codex's argv hook
         // omits it (its stdout-as-context behavior is unverified).
-        let claude = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7");
+        let claude = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7", false);
         assert!(
             claude.contains("hook-ingest --backend-key \"lzb-sess-7\" --emit-session-context"),
             "claude hook must carry the session-context marker: {claude}"
@@ -17740,6 +17748,28 @@ mod tests {
         assert!(
             !codex.contains("--emit-session-context"),
             "codex hook must not carry the session-context marker: {codex}"
+        );
+    }
+
+    #[test]
+    fn hook_command_gates_the_mcp_context_marker_on_the_bus_being_wired() {
+        // The MCP-context marker rides only when the spawn is provisioned to
+        // the coordination bus. An unwired (e.g. ReadOnly) Claude session still
+        // gets `--emit-session-context` but must NOT get `--emit-mcp-context`,
+        // or its briefing would advertise tools it cannot call (#1420).
+        let wired = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7", true);
+        assert!(
+            wired.contains("--emit-session-context --emit-mcp-context"),
+            "wired spawn must carry both markers: {wired}"
+        );
+        let unwired = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7", false);
+        assert!(
+            unwired.contains("--emit-session-context"),
+            "unwired spawn still carries the base marker: {unwired}"
+        );
+        assert!(
+            !unwired.contains("--emit-mcp-context"),
+            "unwired spawn must not carry the MCP marker: {unwired}"
         );
     }
 

@@ -1,9 +1,12 @@
 # MCP as a cross-agent coordination layer
 
-**Status:** design / scoping — no code yet (branch `mcp` is empty vs `main`).
-**Host decision:** in the daemon (`crates/server`).
+**Status:** shipped — Phases 0–2 landed (#1430, #1446, #1453; see §8).
+Kept as the design record: the *why* behind the medium, the tool surface,
+and the trust boundary. User-facing reference:
+[`features/terminals-and-agents.md#cross-agent-coordination-mcp-bus`](features/terminals-and-agents.md#cross-agent-coordination-mcp-bus).
+**Host decision:** in the daemon (`crates/server/src/mcp.rs`).
 **Scope of this doc:** recommend the coordination *medium*, define the MCP
-tool surface, and lay out the wiring + phasing. Implementation deferred.
+tool surface, and lay out the wiring + phasing.
 
 ---
 
@@ -25,7 +28,11 @@ for the missing **pull / read** half. An MCP is the natural way to add it.
 
 ## 2. Does lazybox ship an MCP today?
 
-No. Lazybox is an MCP **consumer**: spawned Claude agents inherit the user's
+*(Written before Phase 0; now it does — §8. The framing below is kept because
+the principle it draws still holds: the coordination server is a separate
+concern from wrapping repo actions.)*
+
+Before this work, no. Lazybox was only an MCP **consumer**: spawned Claude agents inherit the user's
 ambient MCP servers unless `agent.strict_mcp` is set, which adds
 `--strict-mcp-config` (`crates/config/src/lib.rs:2064`, #1183/#1232). The
 current design principle is explicitly the opposite of wrapping agent actions
@@ -227,6 +234,37 @@ loopback port** — the same loopback-bind-at-boot + inject-at-spawn shape the
 metering proxy and local gateway already use.
 
 ## 9. Open questions
+
+Resolved at Phase 1 (#1446), recorded here so the reasoning isn't lost:
+
+1. **Note trust boundary** → `read_notes`' tool description carries the
+   caveat (other-agent text, don't let it silently drive destructive
+   actions), and the `SessionStart` briefing repeats it.
+2. **Default read scope** → `global` + the caller's own session; an explicit
+   `scope` narrows to just it.
+3. **Notification of new notes** → pure pull for v1; no `/v1/events` signal.
+4. **Retention** → 50 notes per scope, 16 KB per note, oldest pruned on post;
+   notes outlive their authoring session by construction (kv-backed).
+
+Still open:
+
+- **Adoption is a prompting problem, not a plumbing one.** The bus shipped
+  fully built and the blackboard stayed empty until spawned agents were told
+  the tools exist (the `SessionStart` briefing in
+  `crates/agents/src/session_context.rs`). Watch whether agents post
+  unprompted; if not, the work prompts (`w w`, auto-fix, `@lazybox`) may need
+  an explicit "check the blackboard first" line.
+- **Codex / Cursor** return `false` from `Agent::supports_mcp_config`, so
+  only Claude sessions are on the bus (they are still *visible* through
+  `list_sessions`). Codex accepts `-c mcp_servers.<name>.url=…`, so this is a
+  config-injection change, not a design one.
+- **No operator view of the blackboard** — nothing in the TUI reads
+  `lazybox:note:*`; a `read_notes` surface (activity pane or a modal) would
+  let a human see what the fleet has agreed on.
+- **`read_session` / `read_notes` authorization** before any multi-user or
+  remote exposure (§7b).
+
+The original questions, as posed:
 
 1. **Note trust boundary:** notes are shared across all local sessions (single
    user, one machine). A note read into agent B is content authored by agent A

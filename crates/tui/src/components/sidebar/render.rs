@@ -241,74 +241,31 @@ impl Sidebar {
         today_line_spans(&stats, inner_width, theme)
     }
 
-    /// Total header rows above the content: the fixed 5 (brand, filter,
-    /// stats, divider, blank) plus the two optional strips. The click
-    /// hit-tests read this so a click resolves to the row actually drawn
-    /// once the usage / today rows shift content down.
+    /// Total header rows above the content: three fixed rows (brand,
+    /// filter chips, divider) plus the optional per-provider usage row.
+    /// The automation strip no longer costs a row of its own — it rides
+    /// the chip row now (#1535) — so the height turns only on whether the
+    /// usage row renders, never on the cursor. The click hit-tests read
+    /// this so a click resolves to the row actually drawn once the usage
+    /// row shifts content down.
     pub fn header_height(&self, area: Rect) -> u16 {
-        3 + self.stats_row_height(area) + self.usage_row_height(area)
+        3 + self.usage_row_height(area)
     }
 
-    /// Height of the automation strip (row 2): `1` when *any visible row*
-    /// would render something into it at this width, `0` otherwise.
-    ///
-    /// Reserved from the visible set rather than from the cursor (#1535).
-    /// #1502 omitted the row whenever the *focused* row had nothing to
-    /// say, which reclaims a line — but it also meant every `j`/`k` across
-    /// an armed workspace grew or shrank the header, shoving the whole
-    /// list down a row and back while the user was reading it. Content
-    /// moving under a moving cursor is worse than a row spent, and it
-    /// fires exactly when you are navigating.
-    ///
-    /// Reserving on the visible set keeps every property that mattered:
-    /// an inbox with nothing armed still gets the line back, #794's
-    /// drop-the-label-whole behaviour survives (the probe runs at this
-    /// width, so a label that cannot fit reserves nothing), and an inbox
-    /// that does have armed rows holds a stable header while you move
-    /// through it. The strip renders blank on cursors with nothing to say.
-    pub(super) fn stats_row_height(&self, area: Rect) -> u16 {
-        let inner_width = area.width.saturating_sub(2) as usize;
-        let theme = crate::theme::current();
-        // Probing each visible workspace through the same builder the
-        // render uses is what keeps the reservation exact: a fourth group
-        // added to the strip is reserved for automatically, instead of
-        // rendering into an unreserved row and being clipped away.
-        // `any` short-circuits on the first row that fills it.
-        u16::from(self.visible.iter().any(|row| match row {
-            VisibleRow::Workspace(key) => self.workspaces.get(key).is_some_and(|workspace| {
-                !self
-                    .stats_row_spans_for(Some(workspace), inner_width, theme)
-                    .is_empty()
-            }),
-            _ => false,
-        }))
-    }
-
-    /// The focused row's automation strip (row 2): merge automation
-    /// spelled out (#794), an armed auto-fix, and the metering canary —
-    /// each appended only when it fits `inner_width` whole. Empty when
-    /// the cursor row carries none, which omits the row entirely.
+    /// The focused row's automation strip: the merge automation spelled
+    /// out (#794) and an armed auto-fix. Rides the
+    /// chip row (row 1) since #1535, so it no longer backs a header-height
+    /// reservation — there is only ever the cursor row to describe, and the
+    /// render right-aligns whatever of it fits after the filter chips.
     fn stats_row_spans(
         &self,
         inner_width: usize,
         theme: &crate::theme::Theme,
     ) -> Vec<Span<'static>> {
-        let focused = self.visible.get(self.cursor).and_then(|row| match row {
+        let focused_workspace = self.visible.get(self.cursor).and_then(|row| match row {
             VisibleRow::Workspace(key) => self.workspaces.get(key),
             _ => None,
         });
-        self.stats_row_spans_for(focused, inner_width, theme)
-    }
-
-    /// [`stats_row_spans`] for an explicit workspace, so the height
-    /// reservation can probe every visible row through the same builder
-    /// the render uses and the two can never disagree.
-    fn stats_row_spans_for(
-        &self,
-        focused_workspace: Option<&lazybox_core::Workspace>,
-        inner_width: usize,
-        theme: &crate::theme::Theme,
-    ) -> Vec<Span<'static>> {
         // Assembled
         // width-aware (like the row-0 summary): each group is appended only
         // if it fits whole in the header, so a lower-priority group drops
@@ -316,9 +273,9 @@ impl Sidebar {
         // matters most for the merge-automation phrase (#794) — a truncated
         // " AUTO-MERGE · GitHub, works offli…" would drop exactly the
         // durability word that is the point of the label. Priority, highest
-        // first: merge automation, then armed auto-fix, then the metering
-        // canary — all three describe the focused row. The CI / review
-        // tallies this comment once listed moved to row 0 (#1502).
+        // first: merge automation, then armed auto-fix — both describe the
+        // focused row. The CI / review tallies this comment once listed moved
+        // to row 0 (#1502).
         // Spell out the focused row's merge automation in words — the
         // compact ` ARM ` / ` AUTO ` pills look alike but guarantee
         // different things (#794). GitHub-native auto-merge wins when both
@@ -332,9 +289,17 @@ impl Sidebar {
                 .as_ref()
                 .is_some_and(|pr| pr.auto_merge_enabled)
             {
-                Some((" AUTO-MERGE · GitHub, works offline ", theme.accent))
+                Some((
+                    "AUTO-MERGE · GitHub, works offline",
+                    "◆ auto-merge (GitHub)",
+                    theme.accent,
+                ))
             } else if workspace.auto_merge_on_green {
-                Some((" MERGE ON GREEN · lazybox only ", theme.success))
+                Some((
+                    "MERGE ON GREEN · lazybox only",
+                    "⚡ on-green (lazybox)",
+                    theme.success,
+                ))
             } else {
                 None
             }
@@ -347,9 +312,9 @@ impl Sidebar {
                 .arm(lazybox_core::AutoFixKind::MergeConflict)
                 == lazybox_core::PolicyArm::Arm;
             match (ci, conflict) {
-                (true, true) => Some(" AUTO-FIX ON · CI+CONFLICT "),
-                (true, false) => Some(" AUTO-FIX ON · CI FAIL "),
-                (false, true) => Some(" AUTO-FIX ON · CONFLICT "),
+                (true, true) => Some(("AUTO-FIX ON · CI+CONFLICT", "FIX ci+conflict")),
+                (true, false) => Some(("AUTO-FIX ON · CI FAIL", "FIX ci")),
+                (false, true) => Some(("AUTO-FIX ON · CONFLICT", "FIX conflict")),
                 (false, false) => None,
             }
         });
@@ -385,32 +350,47 @@ impl Sidebar {
         let mut stats_spans: Vec<Span> = Vec::new();
         let mut used = 0usize;
         let budget = inner_width;
-        if let Some((label, bg)) = focused_merge {
-            try_append(
+        // Full phrasing first, then a compact form, then drop — the same
+        // ladder the attention counters use (`● 6 new` → `●6` → gone).
+        // Coloured text rather than a filled block (#1535): these describe
+        // the row under the cursor, and a solid bar gave transient,
+        // per-row state the heaviest weight on the screen. The compact
+        // forms keep #794's distinction — which system will do the merge,
+        // `(GitHub)` or `(lazybox)` — because that, not the wording, is
+        // what the label exists to convey.
+        let styled = |text: String, color| {
+            vec![Span::styled(
+                text,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )]
+        };
+        let append_either = |dst: &mut Vec<Span<'static>>,
+                             used: &mut usize,
+                             full: String,
+                             compact: String,
+                             color| {
+            let before = dst.len();
+            try_append(dst, used, budget, styled(full, color));
+            if dst.len() == before {
+                try_append(dst, used, budget, styled(compact, color));
+            }
+        };
+        if let Some((full, compact, color)) = focused_merge {
+            append_either(
                 &mut stats_spans,
                 &mut used,
-                budget,
-                vec![Span::styled(
-                    label,
-                    Style::default()
-                        .bg(bg)
-                        .fg(ratatui::style::Color::Black)
-                        .add_modifier(Modifier::BOLD),
-                )],
+                full.to_string(),
+                compact.to_string(),
+                color,
             );
         }
-        if let Some(label) = focused_auto_fix {
-            try_append(
+        if let Some((full, compact)) = focused_auto_fix {
+            append_either(
                 &mut stats_spans,
                 &mut used,
-                budget,
-                vec![Span::styled(
-                    label,
-                    Style::default()
-                        .bg(theme.warn)
-                        .fg(ratatui::style::Color::Black)
-                        .add_modifier(Modifier::BOLD),
-                )],
+                full.to_string(),
+                compact.to_string(),
+                theme.warn,
             );
         }
         stats_spans
@@ -422,9 +402,11 @@ impl Sidebar {
         // wraps onto a stranded line):
         //   row 0: LAZYBOX vX.Y.Z  ● N new  ? N input  ✗ N CI  ◔ N review   N items · 7d
         //          (counters compact to `●N ?N ✗N` before dropping)
-        //   row 1: f filter  o recent  # find            N sessions · N merged · $N
-        //   row 2 (only when present): <focused merge/auto-fix/meter automation>
-        //   row 3 (only when present): per-provider usage bars
+        //   row 1: f filter  o recent  # find   <focused merge/auto-fix> N sessions · N merged · $N
+        //          (the focused row's automation and today's tally ride the
+        //          right of this row (#1535); neither costs a header row that
+        //          would shift as the cursor moves)
+        //   row 2 (only when present): per-provider usage bars
         //   then: ── divider ──── and content
         let theme = crate::theme::current();
         let now = self.now();
@@ -733,17 +715,44 @@ impl Sidebar {
                 self.search_chip_rect = None;
             }
 
-            // Today's tally rides the chip row, right-aligned (#1502): the
-            // strip no longer spends a header row of its own. Groups drop
-            // lowest-priority-first to fit whatever the chips leave.
+            // The focused row's automation and today's tally both ride the
+            // chip row, right-aligned (#1535). Neither spends a header row
+            // of its own any more: a conditional row changed the header's
+            // height as the cursor moved, shoving the whole list down and
+            // back. Automation outranks the tally — it is the context for
+            // the row under the cursor — and each group drops whole rather
+            // than clipping, so the header is a fixed two rows at every
+            // width and every cursor position.
             let chips_width = spans_visual_width(&spans);
-            let room = (inner_width as usize).saturating_sub(chips_width + 2);
-            let today = self.today_spans(room, theme);
+            let mut trailer: Vec<Span> = Vec::new();
+            let mut trailer_used = 0usize;
+            let trailer_budget = (inner_width as usize).saturating_sub(chips_width + 2);
+            let automation = self.stats_row_spans(trailer_budget, theme);
+            if !automation.is_empty() {
+                trailer_used += spans_visual_width(&automation);
+                trailer.extend(automation);
+            }
+            // Reserve the 2-cell separator only when automation actually
+            // precedes the tally; with an empty trailer the tally starts the
+            // group and needs none. Matches the conditional separator in the
+            // append just below — reserving it unconditionally cost the
+            // today-only case 2 cells it should have had (main's budget was
+            // `inner_width - chips - 2`).
+            let today_sep = if trailer.is_empty() { 0 } else { 2 };
+            let today_room = trailer_budget.saturating_sub(trailer_used + today_sep);
+            let today = self.today_spans(today_room, theme);
             if !today.is_empty() {
-                let today_width = spans_visual_width(&today);
-                let gap = (inner_width as usize).saturating_sub(chips_width + today_width);
+                if !trailer.is_empty() {
+                    trailer.push(Span::raw("  "));
+                    trailer_used += 2;
+                }
+                trailer_used += spans_visual_width(&today);
+                trailer.extend(today);
+            }
+            if !trailer.is_empty() {
+                let gap = (inner_width as usize).saturating_sub(chips_width + trailer_used);
                 spans.push(Span::raw(" ".repeat(gap)));
-                spans.extend(today);
+                spans.extend(trailer);
             }
 
             frame.render_widget(Paragraph::new(Line::from(spans)), row1);
@@ -753,36 +762,24 @@ impl Sidebar {
             self.search_chip_rect = None;
         }
 
-        // Row 2 (only when present) — the focused row's automation,
-        // spelled out (#794). CI / review tallies moved to row 0 (#1502).
-        //
-        // Reserve the row from the *visible set* (#1535), not the focused
-        // row: `stats_row_height` returns 1 whenever any visible row would
-        // fill the strip, so the header keeps a fixed height as the cursor
-        // moves and the list never shifts under it. The strip still renders
-        // the *focused* row's automation — blank on a cursor with nothing
-        // to say. Layout and `header_height()` (mouse hit-testing) must
-        // reserve through the same probe, or a click maps to the wrong row.
-        let stats_h: u16 = self.stats_row_height(area);
-        if stats_h == 1 && area.height >= 3 {
-            let stats_spans = self.stats_row_spans(inner_width as usize, theme);
-            if !stats_spans.is_empty() {
-                let row2 = Rect::new(area.x + l_pad, area.y + 2, inner_width, 1);
-                frame.render_widget(Paragraph::new(Line::from(stats_spans)), row2);
-            }
-        }
+        // The focused row's automation strip is gone as a row (#1535) — it
+        // rides row 1 now. That was the row whose presence tracked the
+        // *cursor*, so removing it is what makes the header a fixed height
+        // while navigating.
+        let stats_h: u16 = 0;
 
-        // Row 3 (when present) — the always-visible per-provider usage
-        // summary (#1059). One compact `Claude ▓▓▓░░ 62% · 76k left`
-        // widget per agent with a live terminal, width-gated the same way
-        // as the stats row: a provider that can't fit whole is dropped
-        // rather than sliced. Sits above the divider so it reads as header
-        // chrome, not a list row; absent (no agents, or `ui.usage_summary`
-        // off) it takes no space and the layout is unchanged.
+        // The per-provider usage summary keeps its own row (#1059): one
+        // `Claude ▓▓▓░░ 62% · 76k left` widget per agent with a live
+        // terminal. It stays a row rather than joining row 0 because at a
+        // real sidebar width (~50-60 cells) it does not fit beside the
+        // brand, counters and item summary — folding it in there dropped
+        // the quota silently, which is the opposite of useful. Its
+        // presence tracks which agents are running, never the cursor, so
+        // it cannot cause the header to move as you navigate.
         let usage_spans = usage_line_spans(&self.usage_summaries(), inner_width as usize, theme);
         let usage_h: u16 = if usage_spans.is_empty() { 0 } else { 1 };
-        if usage_h == 1 && area.height >= 3 + stats_h {
-            let usage_area = Rect::new(area.x + l_pad, area.y + 2 + stats_h, inner_width, 1);
+        if usage_h == 1 && area.height >= 3 {
+            let usage_area = Rect::new(area.x + l_pad, area.y + 2, inner_width, 1);
             frame.render_widget(Paragraph::new(Line::from(usage_spans)), usage_area);
         }
 

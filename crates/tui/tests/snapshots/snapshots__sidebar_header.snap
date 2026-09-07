@@ -1,0 +1,9 @@
+---
+source: crates/tui/tests/snapshots.rs
+expression: "head.join(\"\\n\")"
+---
+ LAZYBOX vX.Y.Z-dev  ● 1 new  ✗ 1 CI              3 items · 7d
+ f filter  o split  # find                8 sessions · 7 merged
+ ──────────────────────────────────────────────────────────────
+ ▾  owner/repo  ● 2
+  I Issues

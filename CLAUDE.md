@@ -304,7 +304,16 @@ they extend the multi-select instead — #932), `F8` /
 selection), mouse-click any pane to focus it, mouse-drag splitters to
 resize.
 
-**Sidebar**: the cursor row is a full-row band (theme `fill`) with a
+**Sidebar**: the header is three fixed rows (#1502): brand + dim
+version + every attention counter (`● new`, `? input`, `⏳ limited`,
+`✗ CI`, `◔ review` — compacting to `●6 ?1 ✗3` and shedding the version
+before any counter drops, never wrapping) with the item count right;
+the filter / sort / find chips with today's tally right-aligned (no
+`$0.00`); then a divider with the list directly under it. The focused
+row's automation phrase (`AUTO-MERGE · GitHub`, `AUTO-FIX ON`, `$ METER`)
+and the per-provider usage bars each take a row only when present.
+Keep-awake (`☼ awake`) is daemon status and lives in the footer's
+status slot. The cursor row is a full-row band (theme `fill`) with a
 `▎` accent bar in the gutter, kept — unbolded — while another pane has
 focus so the open workspace stays obvious; multi-selected rows share the
 band behind their `✓` (#1502). `j/k` or arrows navigate, `PgUp`/`PgDn` a

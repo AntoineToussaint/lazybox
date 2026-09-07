@@ -268,6 +268,17 @@ impl Sidebar {
         self.inner.set_keep_awake_status(active, on_battery);
     }
 
+    /// See `Sidebar::keep_awake_status` (#1502).
+    pub fn keep_awake_status(&self) -> Option<bool> {
+        self.inner.keep_awake_status()
+    }
+
+    /// Rows of header chrome above the first list row for a pane of
+    /// this size — the offset every click hit-test uses (#1502).
+    pub fn header_height(&self, area: Rect) -> u16 {
+        self.inner.header_height(area)
+    }
+
     /// Record whether `ui.auto_wait_on_limit` is on so the rising-edge
     /// rate-limit alert stays quiet for a block the daemon auto-handles.
     pub fn set_auto_wait_on_limit(&mut self, auto_wait_on_limit: bool) {

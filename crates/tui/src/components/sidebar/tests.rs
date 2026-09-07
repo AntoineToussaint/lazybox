@@ -2381,9 +2381,11 @@ mod search_tests {
             .draw(|frame| sb.render(frame.area(), frame, true))
             .expect("draw");
         let buffer = terminal.backend().buffer();
-        // The usage summary sits at row 3, just above the divider.
+        // The usage summary sits under the (conditional) automation row,
+        // just above the divider (#1502).
+        let y = 2 + sb.stats_row_height(Rect::new(0, 0, 60, 14));
         (0..buffer.area.width)
-            .map(|x| buffer[(x, 3)].symbol())
+            .map(|x| buffer[(x, y)].symbol())
             .collect()
     }
 
@@ -2740,9 +2742,8 @@ mod search_tests {
         assert!(!usage_row(&mut sb).contains("Claude"));
     }
 
-    /// The "today" strip (#1344) sits just below the usage row (or row 2
-    /// when there is none) — render at `width` and read whichever row it
-    /// lands on for this sidebar's header layout.
+    /// The "today" strip (#1344) rides the chip row (row 1), right-aligned
+    /// (#1502) — render at `width` and read that row.
     fn today_row(sb: &mut Sidebar, width: u16) -> String {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -2753,10 +2754,28 @@ mod search_tests {
             .draw(|frame| sb.render(area, frame, true))
             .expect("draw");
         let buffer = terminal.backend().buffer();
-        let y = 3 + sb.usage_row_height(area);
         (0..buffer.area.width)
-            .map(|x| buffer[(x, y)].symbol())
+            .map(|x| buffer[(x, 1)].symbol())
             .collect()
+    }
+
+    /// Width of the chip cluster (`f filter  o recent  # find`) on row 1,
+    /// so the today-strip width tests can size the pane by the room the
+    /// strip is actually given (`inner - chips - 2`) rather than by a
+    /// hardcoded chip width.
+    fn chips_width(sb: &mut Sidebar) -> usize {
+        // Measure the chips alone: hide the strip for the measurement so a
+        // fixture that already has today's buckets doesn't inflate it.
+        sb.set_today_summary(false);
+        let row = today_row(sb, 120);
+        sb.set_today_summary(true);
+        row.trim_end().chars().count()
+    }
+
+    /// Pane width that leaves exactly `room` cells for the today strip
+    /// after the chips: 2 pads + chips + 2-cell gap + room.
+    fn pane_width_for_room(sb: &mut Sidebar, room: usize) -> u16 {
+        (2 + chips_width(sb) + 2 + room) as u16
     }
 
     /// Pin the sidebar clock and feed a rollup whose buckets are stamped
@@ -2785,44 +2804,60 @@ mod search_tests {
         ]);
     }
 
-    /// A landed stats snapshot paints the terse today strip: sessions,
-    /// merged, and cost of the day's persisted rollup (#1344).
+    /// A landed stats snapshot paints the terse today strip on the chip
+    /// row: sessions, merged, and cost of the day's persisted rollup
+    /// (#1344), right-aligned, without a `today` heading (#1502).
     #[test]
     fn header_renders_today_strip() {
         let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
         set_today(&mut sb, 3, 4, 2_140_000);
-
-        let area = Rect::new(0, 0, 60, 14);
-        assert_eq!(sb.today_row_height(area), 1);
-        let row = today_row(&mut sb, 60);
-        assert!(row.contains("today"), "{row:?}");
+        let row = today_row(&mut sb, 80);
         assert!(row.contains("3 sessions"), "{row:?}");
         assert!(row.contains("4 merged"), "{row:?}");
         assert!(row.contains("$2.14"), "{row:?}");
+        assert!(
+            !row.contains("today"),
+            "no heading on the chip row: {row:?}"
+        );
+        assert!(row.contains("filter"), "chips share the row: {row:?}");
+        assert!(
+            row.trim_end().ends_with("$2.14"),
+            "strip is right-aligned: {row:?}"
+        );
+        assert_eq!(
+            sb.header_height(Rect::new(0, 0, 80, 14)),
+            3,
+            "the strip no longer costs a header row"
+        );
+    }
+
+    /// A zero cost is noise, not information — it is dropped (#1502).
+    #[test]
+    fn today_strip_omits_a_zero_cost() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        set_today(&mut sb, 3, 4, 0);
+        let row = today_row(&mut sb, 80);
+        assert!(row.contains("4 merged"), "{row:?}");
+        assert!(!row.contains('$'), "zero cost must not render: {row:?}");
     }
 
     /// Before the first `Event::Stats` lands the strip stays hidden rather
-    /// than flashing zeros, and reclaims its line.
+    /// than flashing zeros.
     #[test]
     fn today_strip_hidden_until_a_snapshot_lands() {
         let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
-        let area = Rect::new(0, 0, 60, 14);
-        assert_eq!(sb.today_row_height(area), 0);
-        assert!(!today_row(&mut sb, 60).contains("today"), "no strip yet");
+        assert!(!today_row(&mut sb, 80).contains("sessions"), "no strip yet");
     }
 
-    /// `ui.today_summary = false` hides the strip entirely and reclaims its
-    /// line even after a snapshot has landed.
+    /// `ui.today_summary = false` hides the strip entirely even after a
+    /// snapshot has landed.
     #[test]
     fn today_strip_can_be_disabled() {
         let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
         set_today(&mut sb, 3, 4, 2_140_000);
-        let area = Rect::new(0, 0, 60, 14);
-        assert_eq!(sb.today_row_height(area), 1);
-
+        assert!(today_row(&mut sb, 80).contains("3 sessions"));
         sb.set_today_summary(false);
-        assert_eq!(sb.today_row_height(area), 0);
-        assert!(!today_row(&mut sb, 60).contains("today"));
+        assert!(!today_row(&mut sb, 80).contains("sessions"));
     }
 
     /// A narrow sidebar sheds whole groups lowest-priority-first — cost
@@ -2832,27 +2867,28 @@ mod search_tests {
     fn today_strip_drops_cost_before_the_counts_when_narrow() {
         let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
         set_today(&mut sb, 3, 4, 2_140_000);
-
-        // Wide enough for `today  3 sessions · 4 merged` (28 cells) but not
-        // the trailing ` · $2.14` (+8) — inner width 30, pane width 32.
-        let row = today_row(&mut sb, 32);
+        // Room for `3 sessions · 4 merged` (21 cells) but not the trailing
+        // ` · $2.14` (+8).
+        let width = pane_width_for_room(&mut sb, 24);
+        let row = today_row(&mut sb, width);
         assert!(row.contains("3 sessions"), "{row:?}");
         assert!(row.contains("4 merged"), "{row:?}");
         assert!(!row.contains("$2.14"), "{row:?}");
     }
 
     /// Priority is contiguous: once a higher-priority group doesn't fit,
-    /// nothing lower is smuggled in behind it. At pane width 27 (inner 25)
-    /// `merged` (needs 28) doesn't fit after `sessions`, so the narrower
-    /// `cost` must NOT appear in its place — the `continue`-style gate this
-    /// replaced rendered `today  3 sessions · $2.14`, inverting the stated
-    /// sessions > merged > cost priority.
+    /// nothing lower is smuggled in behind it. With room for `sessions`
+    /// plus the narrower `cost` but not `merged`, cost must NOT appear in
+    /// merged's place — that would invert the stated sessions > merged >
+    /// cost priority.
     #[test]
     fn today_strip_never_smuggles_cost_past_a_dropped_count() {
         let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
         set_today(&mut sb, 3, 4, 2_140_000);
-
-        let row = today_row(&mut sb, 27);
+        // `3 sessions` = 10, `3 sessions · 4 merged` = 21, `3 sessions ·
+        // $2.14` = 18: room 19 fits sessions and would fit cost, not merged.
+        let width = pane_width_for_room(&mut sb, 19);
+        let row = today_row(&mut sb, width);
         assert!(
             row.contains("3 sessions"),
             "keeps the headline count: {row:?}"
@@ -3752,9 +3788,11 @@ mod broadcast_select_tests {
         assert!(wide.contains("works offline"), "{wide:?}");
     }
 
-    /// #794 regression: dropping the (higher-priority) merge label under
-    /// width pressure must leave the lower-priority global tally intact and
-    /// whole — a group yields cleanly instead of a clip mangling the line.
+    /// #794 regression, re-homed by #1502: the merge label lives on the
+    /// conditional automation row, the CI tally on row 0. Under width
+    /// pressure the label drops whole (its row is omitted) while the tally
+    /// survives — compacting to `✗1` and shedding the version before it
+    /// disappears.
     #[test]
     fn narrow_header_drops_merge_label_but_keeps_ci_tally() {
         let mut sb = Sidebar::new(PaneId::new(1));
@@ -3766,51 +3804,46 @@ mod broadcast_select_tests {
         assert_eq!(sb.ci_failing_count(), 1, "the failing PR is counted");
 
         // 24 cells (inner 22) can't hold the 31-cell " MERGE ON GREEN ·
-        // lazybox only " label, but easily holds the "1 CI" tally.
-        let header = header_at(&mut sb, 24);
+        // lazybox only " label; the row is omitted rather than clipped.
+        assert_eq!(
+            sb.stats_row_height(Rect::new(0, 0, 24, 12)),
+            0,
+            "merge label must drop whole when it can't fit"
+        );
+        let row0 = header_row(&mut sb, 24);
         assert!(
-            !header.contains("MERGE ON GREEN"),
-            "merge label must drop whole when it can't fit: {header:?}"
+            row0.contains("✗1"),
+            "the CI tally survives in compact form on row 0: {row0:?}"
         );
         assert!(
-            header.contains("CI"),
-            "the global CI tally survives the merge label being dropped: {header:?}"
+            !row0.contains(concat!("v", env!("CARGO_PKG_VERSION"))),
+            "the version is shed before an attention counter: {row0:?}"
         );
     }
 
-    /// #794: the width-gating applies to the pre-existing global tally
-    /// too, not just the merge label — a tally that can't fit whole behind
-    /// a higher-priority group drops entirely rather than clipping to a
-    /// fragment like `1 C`. The old row-2 code pushed every group and let
-    /// the `Paragraph` hard-clip, so this is the regression guard for the
-    /// generalized behavior.
+    /// Row 0's counters compact before they drop (#1502): wide shows
+    /// `✗ 1 CI`, a tight row shows `✗1`, and the summary stays whole.
     #[test]
-    fn global_tally_drops_whole_behind_a_wider_merge_label() {
+    fn header_counters_compact_before_dropping() {
         let mut sb = Sidebar::new(PaneId::new(1));
         let mut ws = pr_ws("https://github.com/o/r/pull/1");
-        ws.auto_merge_on_green = true;
         ws.pr.as_mut().expect("pr").ci = lazybox_core::CiStatus::Failure;
         sb.workspaces.insert(SessionKey::from(&ws.key), ws);
         sb.recompute_visible();
-        assert_eq!(sb.ci_failing_count(), 1, "the failing PR is counted");
 
-        // Wide: the 31-cell " MERGE ON GREEN · lazybox only " label and the
-        // "1 CI" tally both render.
-        let wide = header_at(&mut sb, 60);
-        assert!(wide.contains("lazybox only"), "{wide:?}");
+        let wide = header_row(&mut sb, 60);
         assert!(wide.contains("1 CI"), "{wide:?}");
+        assert!(wide.contains("7d"), "{wide:?}");
 
-        // width 38 → inner 36: the label fits, but label + 2-cell separator
-        // + 4-cell tally (37) does not. The tally drops whole; the old clip
-        // would have sliced it to "1 C" trailing the label.
-        let tight = header_at(&mut sb, 38);
+        // 24 cells (inner 22): even without the version, `LAZYBOX  ✗ 1 CI
+        // 1 · 7d` (23) doesn't fit, so the counter compacts to `✗1`.
+        let tight = header_row(&mut sb, 24);
+        assert!(!tight.contains("1 CI"), "full form must not fit: {tight:?}");
+        assert!(tight.contains("✗1"), "compact form survives: {tight:?}");
+        assert!(tight.contains("7d"), "summary stays whole: {tight:?}");
         assert!(
-            tight.contains("lazybox only"),
-            "label still whole: {tight:?}"
-        );
-        assert!(
-            tight.trim_end().ends_with("only"),
-            "the tally must drop whole, not clip to a fragment: {tight:?}"
+            crate::util::visual_width(&tight) <= 24,
+            "row must never overflow: {tight:?}"
         );
     }
 
@@ -3941,22 +3974,21 @@ mod broadcast_select_tests {
 
     /// Issue #786: the live selection count is the highest-priority
     /// header signal. On a narrow sidebar it outranks the passive badges
-    /// (here `☼ awake`) instead of the whole strip dropping as an
+    /// (here `? 1 input`) instead of the whole strip dropping as an
     /// all-or-nothing block — so there is a width band where the count
     /// shows but the passive badge is dropped, and never the reverse.
     #[test]
     fn selection_count_outranks_passive_badges_when_space_is_tight() {
         let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
         sb.toggle_broadcast_select();
-        sb.set_keep_awake_status(true, false);
         let key = sb.selected_session_key().expect("cursor row").clone();
-        sb.agents.insert(key, lazybox_ipc::AgentState::Working);
+        sb.agents.insert(key, lazybox_ipc::AgentState::InputNeeded);
 
         let mut saw_count_without_badge = false;
         for width in 24..=110u16 {
             let header = header_row(&mut sb, width);
             let has_count = header.contains("selected");
-            let has_badge = header.contains("awake");
+            let has_badge = header.contains("input") || header.contains("?1");
             assert!(
                 !(has_badge && !has_count),
                 "passive badge shown without the selection count at width {width}: {header:?}",
@@ -3974,7 +4006,7 @@ mod broadcast_select_tests {
         // the passive badge, it just wins when space is scarce.
         let wide = header_row(&mut sb, 110);
         assert!(
-            wide.contains("selected") && wide.contains("awake"),
+            wide.contains("selected") && wide.contains("1 input"),
             "{wide:?}"
         );
     }
@@ -4083,9 +4115,9 @@ mod broadcast_select_tests {
 
         // Cursor on the first workspace, Shift-click the last row.
         assert!(sb.focus_workspace_key(&order[0]));
-        // Mirror `click_to_select`'s row math (HEADER_HEIGHT = 5).
+        // Mirror `click_to_select`'s row math (the header's live height).
         let area = Rect::new(0, 0, 40, 40);
-        let click_row = area.y + 5 + last_ws_idx as u16;
+        let click_row = area.y + sb.header_height(area) + last_ws_idx as u16;
         assert!(sb.extend_selection_to(area, click_row));
         assert_eq!(
             sb.selected_broadcast_keys(),
@@ -6104,36 +6136,29 @@ mod keep_awake_badge_tests {
         (0..80).map(|x| buf[(x, 0)].symbol()).collect::<String>()
     }
 
-    /// The badge is daemon-driven: it paints exactly when the daemon
-    /// reports it's holding (`Event::KeepAwakeStatus.active`), independent
-    /// of the client's own config or agent map (#1485).
+    /// The badge is daemon-driven (`Event::KeepAwakeStatus.active`) and
+    /// now lives in the footer's status slot (#1502): the sidebar exposes
+    /// the state and keeps it OUT of the attention header.
     #[test]
-    fn awake_badge_follows_daemon_active_flag() {
+    fn keep_awake_state_is_exposed_and_kept_out_of_the_header() {
         let mut sb = Sidebar::new(PaneId::new(1));
+        assert_eq!(sb.keep_awake_status(), None);
         assert!(!header_row(&mut sb).contains("awake"));
 
         sb.set_keep_awake_status(true, false);
-        assert!(header_row(&mut sb).contains("awake"));
+        assert_eq!(sb.keep_awake_status(), Some(false));
+        assert!(
+            !header_row(&mut sb).contains("awake"),
+            "keep-awake is footer status, not header attention"
+        );
+
+        // On battery the state says so, rather than implying a protection
+        // the macOS lid/battery rules don't give (#1485).
+        sb.set_keep_awake_status(true, true);
+        assert_eq!(sb.keep_awake_status(), Some(true));
 
         sb.set_keep_awake_status(false, false);
-        assert!(!header_row(&mut sb).contains("awake"));
-    }
-
-    /// On battery the badge says so, rather than implying a protection the
-    /// macOS lid/battery rules don't give (#1485).
-    #[test]
-    fn awake_badge_admits_ac_only_on_battery() {
-        let mut sb = Sidebar::new(PaneId::new(1));
-        sb.set_keep_awake_status(true, false);
-        assert!(header_row(&mut sb).contains("awake"));
-        assert!(!header_row(&mut sb).contains("AC only"));
-
-        sb.set_keep_awake_status(true, true);
-        assert!(header_row(&mut sb).contains("AC only"));
-
-        sb.set_keep_awake_status(true, false);
-        assert!(header_row(&mut sb).contains("awake"));
-        assert!(!header_row(&mut sb).contains("AC only"));
+        assert_eq!(sb.keep_awake_status(), None);
     }
 }
 

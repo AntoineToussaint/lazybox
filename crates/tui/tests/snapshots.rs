@@ -582,3 +582,58 @@ fn sidebar_cursor_band_snapshot() {
         .collect();
     insta::assert_snapshot!("sidebar_cursor_band", body.join("\n"));
 }
+
+/// Golden look of the three-row sidebar header (#1502): brand + dim
+/// version, every attention counter on row 0 (unread, input, CI), the
+/// item summary right; chips + today's tally on row 1 (no `today`
+/// heading, no `$0.00`); then the divider with content directly under
+/// it. Keep-awake is footer status and must not appear. The version is
+/// masked so a release bump doesn't churn the fixture.
+#[test]
+fn sidebar_header_snapshot() {
+    let mut s = sidebar();
+    let mut failing = make_task("owner/repo#12", 3);
+    failing.ci = CiStatus::Failure;
+    let mut unread = make_task("owner/repo#7", 90);
+    unread.recent_activity.push(lazybox_core::Activity {
+        author: "reviewer".into(),
+        body: "please rebase".into(),
+        created_at: fixed_time(),
+        kind: lazybox_core::ActivityKind::Comment,
+        node_id: None,
+        path: None,
+        line: None,
+        diff_hunk: None,
+        thread_id: None,
+    });
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![
+            Workspace::from_task(failing, fixed_time()),
+            Workspace::from_task(unread, fixed_time()),
+            Workspace::from_task(make_task("owner/repo#3", 600), fixed_time()),
+        ],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    s.set_keep_awake_status(true, false);
+    let day = fixed_time()
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d")
+        .to_string();
+    let bucket = |metric: &str, value: i64| lazybox_ipc::StatBucket {
+        day: day.clone(),
+        metric: metric.into(),
+        value,
+    };
+    s.set_today_buckets(vec![
+        bucket(lazybox_ipc::stats::SESSIONS, 8),
+        bucket(lazybox_ipc::stats::MERGED, 7),
+        bucket(lazybox_ipc::stats::COST_MICROS, 0),
+    ]);
+    let rendered = render_to_string(&mut s, 64, 8, true)
+        .replace(concat!("v", env!("CARGO_PKG_VERSION")), "vX.Y.Z");
+    let head: Vec<&str> = rendered.lines().take(5).collect();
+    insta::assert_snapshot!("sidebar_header", head.join("\n"));
+}

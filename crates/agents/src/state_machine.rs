@@ -1113,6 +1113,31 @@ mod tests {
 
     // ── AwaitingReset: the calm, auto-waiting sibling of LimitReached ─
 
+    /// The detector itself now emits `AwaitingReset` for Claude's
+    /// auto-continue banner (no daemon relabel involved), from whatever
+    /// state the agent was in when the limit hit: mid-turn (`Working`) or
+    /// after a hook-settled `Done`. Both must commit, and a byte-silent
+    /// reading passes the hooks-primary gate like every blocked state.
+    #[test]
+    fn detector_sourced_awaiting_reset_commits_from_working_and_done() {
+        let mut m = machine();
+        assert_eq!(
+            m.on_reading(Some(Working), clear(AgentState::AwaitingReset)),
+            Outcome::Committed(AgentState::AwaitingReset),
+        );
+        let mut m = machine();
+        assert_eq!(
+            m.on_reading(Some(AgentState::Done), clear(AgentState::AwaitingReset)),
+            Outcome::Committed(AgentState::AwaitingReset),
+        );
+        let mut m = machine();
+        let parked = pty(AgentState::AwaitingReset, true, Liveness::Silent, false);
+        assert_eq!(
+            m.on_pty_reading(Some(Working), parked, Some(FRESH), || false),
+            Outcome::Committed(AgentState::AwaitingReset),
+        );
+    }
+
     #[test]
     fn awaiting_reset_holds_against_a_lingering_limit_banner() {
         // After auto-wait presses Wait we've moved to AwaitingReset, but the

@@ -4537,10 +4537,154 @@ snippets:
             "a parked agent must not receive a wait-cancelling continue: {cmds:?}",
         );
         let notice = m.status.notice.as_ref().expect("a hint is shown");
+        // The restart key is resolved from the catalog, not hardcoded, so
+        // assert against the effective chord rather than a literal.
+        let restart_keys = lazybox_tui_core::action::ActionDef::for_kind(
+            lazybox_tui_core::action::ActionKind::RestartRateLimited,
+        )
+        .effective_keys_display(&Default::default());
         assert!(
-            notice.message.contains("2 agents parked") && notice.message.contains("a R"),
-            "the hint names the parked agents and the restart action: {}",
+            notice.message.contains("2 agents parked")
+                && notice.message.contains(restart_keys.as_ref()),
+            "the hint names the parked agents and the restart action ({restart_keys}): {}",
             notice.message
+        );
+    }
+
+    /// The parked-agents hint must name the *effective* restart chord, not
+    /// the catalog default: with `restart_rate_limited` remapped, the hint
+    /// points at the user's key. This is the regression guard for the hint
+    /// having hardcoded `a R`, which would have gone stale under a remap.
+    #[test]
+    fn resume_rate_limited_parked_hint_follows_the_restart_remap() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent()]);
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("restart_rate_limited".to_string(), "a Y".to_string());
+        m.apply_action_key_overrides(overrides);
+        m.handle_daemon_event(IpcEvent::AgentState {
+            session_key: keys[0].clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::AwaitingReset,
+        });
+        m.dispatch_action(&Action::ResumeRateLimited);
+        let notice = m.status.notice.as_ref().expect("a hint is shown");
+        assert!(
+            notice.message.contains("a Y") && !notice.message.contains("a R"),
+            "the hint names the remapped restart chord, not the default: {}",
+            notice.message
+        );
+    }
+
+    /// Mixed block: some agents alerting (`LimitReached`), some parked
+    /// (`AwaitingReset`). `Shift-K` resumes the alerting ones AND names the
+    /// parked ones it deliberately skipped — the same "don't let untouched
+    /// badges look like a bug" contract as the all-parked case, and the
+    /// parked count must be the `AwaitingReset` count alone (1), not the
+    /// whole limited set (2).
+    ///
+    /// The escalating banner is opted out here (`usage_limit_alerts = false`)
+    /// so the resume *result* notice is the surface under test: with the
+    /// sticky banner up (the default), a non-sticky result flash is routed to
+    /// the messages log instead of the footer, and the banner itself carries
+    /// the parked call-to-action — that path is covered by
+    /// `usage_limit_banner_names_parked_agents_alongside_the_blocked`.
+    #[test]
+    fn resume_rate_limited_mixed_resumes_alerting_and_names_parked() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent()]);
+        m.ui_defaults.usage_limit_alerts = false;
+        for (i, state) in [AgentState::LimitReached, AgentState::AwaitingReset]
+            .into_iter()
+            .enumerate()
+        {
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: keys[i].clone(),
+                terminal_id: TerminalId(i as u64 + 1),
+                state,
+            });
+        }
+        let cmds = m.dispatch_action(&Action::ResumeRateLimited);
+        let injected: Vec<u64> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::InjectPrompt {
+                    terminal_id,
+                    submit: true,
+                    ..
+                } => Some(terminal_id.0),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            injected,
+            vec![1],
+            "only the alerting agent is resumed; the parked one is left alone: {cmds:?}",
+        );
+        let notice = m.status.notice.as_ref().expect("a notice is shown");
+        assert!(
+            notice.message.contains("resuming 1 rate-limited agent")
+                && notice.message.contains("1 agent parked"),
+            "the notice reports the resume AND names the single parked agent: {}",
+            notice.message
+        );
+    }
+
+    /// The persistent usage-limit banner is the one surface that survives a
+    /// resume, so when parked (`AwaitingReset`) agents coexist with blocked
+    /// (`LimitReached`) ones it must name them and the restart chord that
+    /// applies — otherwise the 💤 badges outlive a `Shift-K` with no on-screen
+    /// reason. Regression guard for the banner counting only the blocked set
+    /// and hardcoding `Shift-K` (both would have hidden the parked agents /
+    /// gone stale under a remap). A parked-only block raises NO banner: the
+    /// wait self-resolves, so it never escalates to a sticky notice alone.
+    #[test]
+    fn usage_limit_banner_names_parked_agents_alongside_the_blocked() {
+        use crate::realm::components::footer::NoticeSeverity;
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        let restart_keys = lazybox_tui_core::action::ActionDef::for_kind(
+            lazybox_tui_core::action::ActionKind::RestartRateLimited,
+        )
+        .effective_keys_display(&Default::default());
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent()]);
+
+        // A parked agent alone raises no sticky banner — the wait resolves
+        // itself, so escalating to a Permanent notice would be noise.
+        m.handle_daemon_event(IpcEvent::AgentState {
+            session_key: keys[1].clone(),
+            terminal_id: TerminalId(2),
+            state: AgentState::AwaitingReset,
+        });
+        assert!(
+            !m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.severity == NoticeSeverity::Permanent),
+            "a parked-only block must not raise the sticky banner: {:?}",
+            m.status.notice,
+        );
+
+        // A blocked agent joins it → the banner escalates AND names the
+        // parked sibling plus the restart chord.
+        m.handle_daemon_event(IpcEvent::AgentState {
+            session_key: keys[0].clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::LimitReached,
+        });
+        let n = m.status.notice.as_ref().expect("banner raised");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(
+            n.message.contains("1 agent rate-limited")
+                && n.message.contains("1 parked")
+                && n.message.contains(restart_keys.as_ref()),
+            "the banner names the blocked count, the parked count, and the \
+             restart chord ({restart_keys}): {}",
+            n.message,
         );
     }
 

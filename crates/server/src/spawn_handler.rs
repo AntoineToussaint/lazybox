@@ -1489,7 +1489,18 @@ async fn handle_spawn_inner(
             // pointer indirection to keep the futures finitely sized.
             // (This call passes no fallback, so it can't actually recurse.)
             Box::pin(handle_inject_prompt(config, existing, prompt, None, true)).await;
-            record_spawn_snippet(config, existing, &session_key, initial_snippet.as_ref()).await;
+            // `confirmed: true` here: `handle_inject_prompt` runs its
+            // paste+submit ladder in a detached task and returns at
+            // ordering-registration, BEFORE that ladder can post a give-up
+            // notice — so this delivery toast lands first and any later
+            // Retryable displaces it (the give-up wins the footer), which is
+            // the opposite of masking. The real acknowledgement isn't
+            // synchronously knowable at this point, and `true` is correct in
+            // the common confirmed case. (A future refinement could route the
+            // collapse path through the inner confirm to thread the real bool
+            // and add a `]]h` history entry; out of scope for the masking fix.)
+            record_spawn_snippet(config, existing, &session_key, initial_snippet.as_ref(), true)
+                .await;
         }
         let _ = config.bus.send(Event::TerminalFocusRequested {
             terminal_id: existing,
@@ -1605,8 +1616,18 @@ async fn handle_spawn_inner(
                     return None;
                 }
                 Box::pin(handle_inject_prompt(config, existing, prompt, None, true)).await;
-                record_spawn_snippet(config, existing, &session_key, initial_snippet.as_ref())
-                    .await;
+                // `confirmed: true`: same detached-ladder ordering as the
+                // collapse path above — the delivery toast precedes any
+                // background give-up notice, so it can't mask one, and the
+                // real acknowledgement isn't synchronously knowable here.
+                record_spawn_snippet(
+                    config,
+                    existing,
+                    &session_key,
+                    initial_snippet.as_ref(),
+                    true,
+                )
+                .await;
             }
             let _ = config.bus.send(Event::TerminalFocusRequested {
                 terminal_id: existing,
@@ -2513,12 +2534,22 @@ async fn handle_spawn_inner(
             // history a live-terminal delivery records — once the body
             // actually landed (Failed already emitted a visible
             // rejection and records nothing, so a retry re-records).
+            //
+            // #1544: thread the real acknowledgement. Here `outcome` is
+            // awaited in this same task, so unlike the collapse paths we
+            // KNOW whether the submit confirmed. On `NeedsHuman` the ladder
+            // has already posted its Retryable give-up notice inline just
+            // above; recording `confirmed: true` would make the client flash
+            // a non-sticky "sent snippet" toast that replaces that notice —
+            // the exact masking #1544 fixed on the inject path. Pass the real
+            // bool so only a genuinely-`Submitted` delivery flashes the toast.
             if !matches!(outcome, InjectOutcome::Failed) {
                 record_spawn_snippet(
                     &config_for_inject,
                     id,
                     &session_key_for_inject,
                     snippet_for_inject.as_ref(),
+                    matches!(outcome, InjectOutcome::Submitted),
                 )
                 .await;
             }
@@ -8699,25 +8730,37 @@ pub async fn handle_deliver_snippet(
 }
 
 /// Record a snippet delivered as a spawn's `initial_prompt` (#1215):
-/// same MRU + per-workspace sent history + `SnippetDelivered` event as
+/// same MRU + per-workspace delivery count + `SnippetDelivered` event as
 /// the inject path, so "Recent" doesn't depend on the transport. No-op
 /// without a snippet identity (plain `w`-style prompts).
+///
+/// `confirmed` says whether the spawn-time submit was ACKNOWLEDGED — it is
+/// NOT "delivered by construction". A spawn's initial prompt is pasted and
+/// submitted through the very same resend ladder a live inject uses
+/// (`run_spawn_inject` → `write_prompt_sequence`), so its submit can go
+/// unacknowledged (`InjectOutcome::NeedsHuman`) exactly like an inline
+/// inject's can. Passing a hardcoded `true` here was the #1544 masking bug
+/// on the spawn path: on `NeedsHuman` the ladder has already posted its
+/// Retryable give-up notice, and a `confirmed: true` delivery makes the
+/// client flash a non-sticky "sent snippet" Info toast that immediately
+/// replaces it — hiding from the user that the work never actually started.
+/// The delivery is still recorded either way (honest `]N` count + Recent
+/// MRU); only the toast is gated, by threading the real acknowledgement.
 async fn record_spawn_snippet(
     config: &ServerConfig,
     terminal_id: TerminalId,
     session_key: &SessionKey,
     snippet: Option<&lazybox_ipc::SnippetRef>,
+    confirmed: bool,
 ) {
     if let Some(snippet) = snippet {
-        // The snippet IS the spawn's initial prompt — delivered by
-        // construction, with no separate submit to acknowledge.
         record_confirmed_snippet(
             config,
             terminal_id,
             session_key.clone(),
             snippet.key.clone(),
             None,
-            true,
+            confirmed,
         )
         .await;
     }
@@ -16838,6 +16881,136 @@ mod tests {
         assert!(
             written.contains("review this"),
             "the body landed: {written}"
+        );
+    }
+
+    /// #1544 on the spawn transport: a spawn's `initial_prompt` is pasted
+    /// and submitted through the very same resend ladder a live inject uses
+    /// (`run_spawn_inject` → `write_prompt_sequence`), so its submit can go
+    /// unacknowledged and yield `InjectOutcome::NeedsHuman` — at which point
+    /// the ladder has already posted its Retryable give-up notice. Recording
+    /// that delivery with a hardcoded `confirmed: true` (the pre-fix spawn
+    /// path) makes the client flash a non-sticky "sent snippet" Info toast
+    /// that immediately replaces the give-up notice — the exact masking #1544
+    /// fixed inline. The delivery must still be recorded (honest count +
+    /// Recent MRU), but with `confirmed: false` so the toast is suppressed and
+    /// the give-up survives. This asserts the outcome→confirmed mapping call
+    /// site C uses. (Paused time: the ladder's bounded waits auto-advance.)
+    #[tokio::test(start_paused = true)]
+    async fn spawn_time_unconfirmed_submit_records_delivery_unconfirmed() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let session_key = SessionKey::new("spawn-unconfirmed");
+        let workspace = Workspace::empty(
+            WorkspaceKey::new(session_key.as_str().to_string()),
+            "main",
+            Utc::now(),
+        );
+        config
+            .store
+            .save_workspace(&WorkspaceRecord {
+                key: workspace.key.as_str().into(),
+                created_at: workspace.created_at,
+                workspace_json: Some(
+                    serde_json::to_string(&workspace).expect("serialize workspace"),
+                ),
+            })
+            .expect("save workspace");
+        let backend_key = mock
+            .spawn(&["claude".into()], None, &[], "spawn-unconfirmed")
+            .await
+            .expect("spawn mock terminal");
+        let id = TerminalId(4247);
+        register_test_agent(
+            &config.terminal,
+            id,
+            &backend_key,
+            session_key.clone(),
+            "claude",
+            Some(lazybox_ipc::AgentState::Idle),
+            None,
+        )
+        .await;
+
+        let agent = lazybox_agents::registry()
+            .get("claude")
+            .expect("claude built-in");
+        let requires_ready = agent.pty_protocol().requires_ready();
+        let encoded =
+            agent.encode_prompt("review this PR", lazybox_agents::PromptIntent::Submit);
+        let ready = std::sync::Arc::new(tokio::sync::Notify::new());
+        let first_output = std::sync::Arc::new(tokio::sync::Notify::new());
+        // Release the inject window immediately; the agent then never paints a
+        // Working line nor fires a hook, so every submit resend goes
+        // unacknowledged and the ladder gives up.
+        ready.notify_one();
+
+        let outcome = run_spawn_inject(
+            &config,
+            id,
+            &backend_key,
+            requires_ready,
+            encoded,
+            &ready,
+            &first_output,
+            std::time::Instant::now(),
+        )
+        .await;
+        assert_eq!(
+            outcome,
+            InjectOutcome::NeedsHuman,
+            "an exhausted submit ladder on the spawn path is unconfirmed, not Submitted"
+        );
+
+        let mut events = config.bus.subscribe();
+        // Mirror call site C exactly: the real outcome decides `confirmed`.
+        record_spawn_snippet(
+            &config,
+            id,
+            &session_key,
+            Some(&lazybox_ipc::SnippetRef {
+                key: "rev".into(),
+                category: "review".into(),
+            }),
+            matches!(outcome, InjectOutcome::Submitted),
+        )
+        .await;
+
+        let confirmed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match events.recv().await {
+                    Ok(Event::SnippetDelivered {
+                        terminal_id,
+                        snippet_key,
+                        confirmed,
+                        ..
+                    }) if terminal_id == id => {
+                        assert_eq!(snippet_key, "rev");
+                        return confirmed;
+                    }
+                    Ok(_) => {}
+                    Err(error) => panic!("bus closed: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("the spawn delivery is still announced");
+        assert!(
+            !confirmed,
+            "an unconfirmed spawn submit must record confirmed:false so the \
+             client suppresses the toast and the give-up notice survives"
+        );
+
+        let stored = config
+            .store
+            .get_workspace(&workspace.key)
+            .expect("read workspace")
+            .and_then(|record| record.workspace_json)
+            .map(|json| serde_json::from_str::<Workspace>(&json).expect("decode workspace"))
+            .expect("workspace row");
+        assert_eq!(
+            stored.sent_snippets.total(),
+            1,
+            "the delivery is recorded even though the submit went unconfirmed"
         );
     }
 

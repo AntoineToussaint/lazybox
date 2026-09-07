@@ -3574,9 +3574,9 @@ pub struct GqlIssue {
     #[serde(default)]
     pub reactions: Option<GqlReactionView>,
     /// GitHub sub-issue parent, when this issue is a sub-issue. The edge
-    /// is native and authoritative — the child names the parent by number
-    /// + repo. `default` so a host or query that omits `parent` (older
-    /// GHES, PR search) deserializes fine as `None`.
+    /// is native and authoritative — the child names the parent by
+    /// number and repo. `default` so a host or query that omits `parent`
+    /// (older GHES, PR search) deserializes fine as `None`.
     #[serde(default)]
     pub parent: Option<GqlIssueParent>,
 }

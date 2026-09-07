@@ -163,6 +163,8 @@ fn make_issue(
         }),
         attachments: None,
         comments: None,
+        // No dependency edges in this fixture (#1521).
+        inverse_relations: None,
     }
 }
 

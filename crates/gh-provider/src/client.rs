@@ -1155,6 +1155,14 @@ const _: () = assert!(
     "concurrency gate too high for GitHub's secondary (abuse) limiter"
 );
 
+/// Cached native `blocked_by` edges keyed by the blocked issue's
+/// [`TaskId`], each paired with its fetch instant so a stale entry is
+/// refetched past the TTL. Behind an `Arc<Mutex<…>>` so it's shared
+/// across `GhClient` clones (see `issue_deps_cache`).
+type IssueDepsCache = std::sync::Arc<
+    parking_lot::Mutex<std::collections::HashMap<TaskId, (Vec<TaskId>, std::time::Instant)>>,
+>;
+
 #[derive(Clone)]
 pub struct GhClient {
     inner: Octocrab,
@@ -1236,9 +1244,7 @@ pub struct GhClient {
     /// `repo_refresh_interval`. The cached value carries its fetch instant
     /// so an entry older than the TTL is refetched. Shared across clones
     /// (one dependency view per credential); cleared by `force_full_sweep`.
-    issue_deps_cache: std::sync::Arc<
-        parking_lot::Mutex<std::collections::HashMap<TaskId, (Vec<TaskId>, std::time::Instant)>>,
-    >,
+    issue_deps_cache: IssueDepsCache,
 }
 
 /// Per-branch cost breakdown for one branch of a PR fetch, emitted

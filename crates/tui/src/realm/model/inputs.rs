@@ -295,6 +295,39 @@ impl<T: TerminalAdapter> Model<T> {
         cmds
     }
 
+    /// `a R` — restart every limited agent so it picks up fresh credentials
+    /// (stop, respawn the same conversation with `--resume`, continue). One
+    /// `RestartAgentAndContinue` per terminal; the daemon owns the swap and
+    /// the settle-gated continuation. Unlike the plain resume this also
+    /// takes the *parked* `AwaitingReset` agents (auto-Wait pressed, or
+    /// Claude's own auto-continue): a "continue" typed into those would
+    /// only cancel the wait, but a respawn on the new account gets them
+    /// working now instead of at the reset.
+    pub(super) fn restart_rate_limited_agents(&mut self) -> Vec<IpcCommand> {
+        let terminals = self.sidebar.limited_terminals();
+        if terminals.is_empty() {
+            self.flash_hint("no rate-limited agents to restart");
+            return Vec::new();
+        }
+        let cmds: Vec<IpcCommand> = terminals
+            .iter()
+            .map(|terminal_id| IpcCommand::RestartAgentAndContinue {
+                terminal_id: *terminal_id,
+            })
+            .collect();
+        let restarted = terminals.len();
+        let plural = if restarted == 1 { "" } else { "s" };
+        // "up to": the daemon rejects a pane with no launch metadata or one
+        // mid re-authentication (`CommandRejected`), so the client cannot
+        // promise all N will restart — this is a kill+respawn, and claiming a
+        // destructive action happened when it was refused is the worse error.
+        self.flash_info(format!(
+            "restarting up to {restarted} rate-limited agent{plural} with fresh credentials"
+        ));
+        self.redraw = true;
+        cmds
+    }
+
     pub(super) fn recover_agent_credit(&mut self, bulk: bool) -> Vec<IpcCommand> {
         let targets = if bulk {
             self.sidebar.credit_exhausted_terminals()

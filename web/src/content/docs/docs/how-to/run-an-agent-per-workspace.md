@@ -225,7 +225,8 @@ each terminal:
 | Chord | Does |
 | --- | --- |
 | `Ctrl-k` | Recover the focused blocked agent from a provider **credit** chooser: select its "Wait for credit" option, wait for the composer, and submit the configured continuation prompt (`ui.credit_recovery_prompt`). Chooser detection is Codex-style today. |
-| `Shift-K` | **Resume every** workspace blocked on a usage / **rate** limit at once — a settle-gated "continue" injected into each limit-blocked agent. Use it after switching Claude account / API key so you don't reopen each terminal. |
+| `Shift-K` | **Resume every** workspace blocked on a usage / **rate** limit at once — a settle-gated "continue" injected into each limit-blocked agent. For when the limit has reset. |
+| `a R` | **Restart every** limited agent (blocked `⏳` or parked `💤`) **with fresh credentials**: lazybox stops its process, respawns the same conversation in the same pane (`--resume`), then submits the continuation prompt (`ui.credit_recovery_prompt`). Use it after switching Claude account / API key externally — a running process never re-reads its credentials, so a plain "continue" would only hit the limit again. |
 | `x w` | **Reset** the focused agent's conversation context in place (injects the agent's own clear command — `/clear` for Claude, `/new` for Codex). Session, worktree, and prompt history survive; only the model's context resets. Confirmed first. |
 
 Set `ui.auto_wait_on_limit: true` to auto-press "Wait" the moment a Claude agent

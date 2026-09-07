@@ -1135,6 +1135,9 @@ impl Server {
                         lazybox_ipc::Command::GetResourcePosture => "GetResourcePosture",
                         lazybox_ipc::Command::GetStats => "GetStats",
                         lazybox_ipc::Command::RecordAction { .. } => "RecordAction",
+                        lazybox_ipc::Command::RestartAgentAndContinue { .. } => {
+                            "RestartAgentAndContinue"
+                        }
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` and `RecordComposingBuffer` fire on every
@@ -1487,6 +1490,7 @@ fn command_lane(cmd: &lazybox_ipc::Command) -> CommandLane {
         | Command::DeliverSnippet { .. }
         | Command::RecoverAgentCredit { .. }
         | Command::ResumeAgent { .. }
+        | Command::RestartAgentAndContinue { .. }
         | Command::ReauthenticateAgent { .. }
         | Command::CancelAgentReauthentication { .. } => CommandLane::TerminalIo,
         Command::RecordUserMessage { .. } | Command::RecordComposingBuffer { .. } => {
@@ -2120,6 +2124,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::ResumeAgent { terminal_id } => {
             agent_auth::resume_agent(config, terminal_id).await;
+        }
+        lazybox_ipc::Command::RestartAgentAndContinue { terminal_id } => {
+            agent_auth::restart_agent_and_continue(config, terminal_id).await;
         }
         lazybox_ipc::Command::ReauthenticateAgent {
             terminal_id,

@@ -19,6 +19,15 @@ use lazybox_tui::realm::model::{Id, PaneFocus, Preselect};
 use tuirealm::event::{Key, KeyEvent, KeyModifiers};
 use tuirealm::ratatui::layout::{Rect, Size};
 
+// Dispatching workspace actions here persists `ui.*` view state, which
+// resolves through `LAZYBOX_HOME`. This binary doesn't share the lib's
+// `#[cfg(test)]` sandbox, so it installs the same before-main redirect to
+// keep those writes off the developer's real config (#1539).
+#[ctor::ctor]
+unsafe fn redirect_config_home() {
+    lazybox_tui::__sandbox_config_home_for_tests();
+}
+
 fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
     let (client, _server) = channel::pair();
     Model::new_for_test(client, Size::new(120, 40)).expect("model init")

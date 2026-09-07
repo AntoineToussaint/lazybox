@@ -19,6 +19,11 @@ path = "src/lib.rs"
 # intentional render changes; otherwise CI catches regressions.
 insta = { version = "1", features = ["yaml"] }
 tempfile = "3"
+# Before-main hook each test binary uses to redirect `LAZYBOX_HOME` into
+# a throwaway dir — see `__sandbox_config_home_for_tests` in `src/lib.rs`.
+# Without it, tests that persist `ui.*` state rewrite the developer's real
+# `~/.lazybox/config.yaml` (#1539).
+ctor = "0.8"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]

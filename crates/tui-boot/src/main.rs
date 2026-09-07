@@ -2128,17 +2128,14 @@ async fn run_embedded_realm(
 /// Linear ships without a scope-discovery API so the wizard skips it.
 async fn build_scope_sources() -> Vec<Box<dyn lazybox_core::ScopeSource>> {
     let mut sources: Vec<Box<dyn lazybox_core::ScopeSource>> = Vec::new();
-    if let Ok(cred) = lazybox_gh::credential_chain()
-        .resolve(lazybox_gh::SOURCE)
+    let host = lazybox_config::Config::load()
+        .unwrap_or_default()
+        .github_host();
+    if let Ok(cred) = lazybox_gh::credential_chain(host.as_deref())
+        .resolve(&lazybox_gh::credential_scope(host.as_deref()))
         .await
-        && let Ok(client) = lazybox_gh::GhClient::from_credential_with_host(
-            cred,
-            lazybox_config::Config::load()
-                .unwrap_or_default()
-                .github_host()
-                .as_deref(),
-        )
-        .await
+        && let Ok(client) =
+            lazybox_gh::GhClient::from_credential_with_host(cred, host.as_deref()).await
     {
         sources.push(Box::new(lazybox_gh::GhScopes::new(std::sync::Arc::new(
             client,

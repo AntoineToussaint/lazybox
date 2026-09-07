@@ -6869,7 +6869,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires a real GitHub token (gh auth)"]
     async fn accessible_scopes_lists_owned_member_and_collaborator_repos() {
-        let cred = crate::credential_chain()
+        let cred = crate::credential_chain(None)
             .resolve(crate::SOURCE)
             .await
             .expect("a GitHub token must resolve");

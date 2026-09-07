@@ -1787,7 +1787,7 @@ impl NdjsonDecoder {
 async fn authenticated_github_client() -> Result<lazybox_gh::GhClient, String> {
     let credential = tokio::time::timeout(
         Duration::from_secs(5),
-        lazybox_gh::credential_chain().resolve(lazybox_gh::SOURCE),
+        lazybox_gh::credential_chain(None).resolve(&lazybox_gh::credential_scope(None)),
     )
     .await
     .map_err(|_| "GitHub credential lookup timed out".to_string())?

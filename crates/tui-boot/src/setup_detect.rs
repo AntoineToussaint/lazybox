@@ -145,9 +145,17 @@ async fn detect_github() -> ToolStatus {
         _ => false,
     };
 
+    // Loaded before resolving so `gh auth token` is asked for the same
+    // host the client below is built against — otherwise a user logged
+    // into both a configured Enterprise host and github.com gets `gh`'s
+    // default-host token, which the enterprise API then rejects.
+    let host = lazybox_config::Config::load()
+        .unwrap_or_default()
+        .github_host();
     let cred = match tokio::time::timeout(
         Duration::from_secs(3),
-        lazybox_gh::credential_chain().resolve(lazybox_gh::SOURCE),
+        lazybox_gh::credential_chain(host.as_deref())
+            .resolve(&lazybox_gh::credential_scope(host.as_deref())),
     )
     .await
     {
@@ -180,9 +188,6 @@ async fn detect_github() -> ToolStatus {
     // Capture the source before `cred` is moved: the fix a rejected token
     // needs depends on where it came from.
     let cred_source = cred.source.clone();
-    let host = lazybox_config::Config::load()
-        .unwrap_or_default()
-        .github_host();
     match tokio::time::timeout(
         Duration::from_secs(5),
         lazybox_gh::GhClient::from_credential_with_host(cred, host.as_deref()),

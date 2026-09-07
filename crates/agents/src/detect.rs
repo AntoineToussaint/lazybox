@@ -311,9 +311,18 @@ fn limit_banner_with_reset_pos(compact: &str) -> Option<usize> {
             // (`limit · resets 3:20pm` → `limit·resets3:20pm`); require it
             // so a line that merely mentions a limit and, separately, a
             // reset time is not mistaken for the machine-rendered block.
+            // A wrapped banner puts the middot at the END of the previous
+            // screen line and starts the next with `your session limit
+            // resets 7:50pm (America/New_York)` — no middot on the line that
+            // carries the time. That exact machine wording (the phrase run
+            // straight into the clock) is accepted too; prose separates the
+            // two ("it resets 3pm") and still does not qualify.
             let names_reset = line
                 .match_indices("·resets")
-                .any(|(i, kw)| reset_token(&line[i + kw.len()..]).is_some());
+                .any(|(i, kw)| reset_token(&line[i + kw.len()..]).is_some())
+                || line
+                    .match_indices("sessionlimitresets")
+                    .any(|(i, kw)| reset_token(&line[i + kw.len()..]).is_some());
             if names_reset {
                 best = Some(best.map_or(pos, |b| b.max(pos)));
             }
@@ -792,9 +801,17 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
     // chooser form so the shared "usage limit reached" prefix never
     // classifies this banner as `LimitReached` (which would fire the
     // opt-in auto-Wait keystroke into the cancel-on-keypress composer).
-    let auto_continue_pos =
-        last_compact_match_pos(compact, CLAUDE_USAGE_LIMIT_AUTO_CONTINUE_PHRASES);
-    if marker_at_least_as_recent(auto_continue_pos, work_anchor_against(auto_continue_pos)) {
+    //
+    // Newer builds ALSO paint the banner into the footer, as a `⚠` line
+    // directly above the `⏵⏵` mode line, and keep the mode line's
+    // `esc to interrupt` hint while parked (the frozen counter line above
+    // it stops ticking). That hint is therefore not a working anchor for
+    // this shape — trusting it read a parked agent as `Working`. The footer
+    // banner is live exactly while it sits adjacent to the LAST mode line
+    // (each repaint paints the two together; a cancel or the reset repaints
+    // the mode line without it), which is also how a stale banner in
+    // scrollback is told apart from a live one. See `auto_continue_parked`.
+    if auto_continue_parked(compact, work_anchor_against).is_some() {
         d.state = AgentState::AwaitingReset;
         d.trigger = Some(Trigger::UsageLimitAutoContinue);
         return d;
@@ -1412,11 +1429,22 @@ fn idle_box_pos(compact: &str) -> Option<usize> {
         compact.rfind("tabtoamend"),
         compact.rfind("?forshortcuts"),
         compact.rfind("shift+tabtocycle"),
+        compact.rfind(MODE_LINE_MARKER),
     ]
     .into_iter()
     .flatten()
     .max()
 }
+
+/// The `⏵⏵` glyph pair that leads Claude Code's mode line (`⏵⏵ bypass
+/// permissions on (shift+tab to cycle) · ← for agents`). Newer builds drop
+/// the `(shift+tab to cycle)` suffix once the line carries other segments
+/// (`⏵⏵ auto mode on · 1 shell · ← for agents · ↓ to manage`), so the
+/// glyphs are the one stable footer anchor. A live dialog / chooser
+/// replaces the mode line, so it is as reliable an end-of-turn marker as
+/// `? for shortcuts`. Working still wins positionally: the mode line's own
+/// `esc to interrupt` hint sits AFTER the glyphs on the same line.
+const MODE_LINE_MARKER: &str = "⏵⏵";
 
 /// Byte offset of the most recent RELIABLE end-of-turn footer in
 /// `compact` — `? for shortcuts` (default) or the bypass-mode
@@ -1438,10 +1466,81 @@ fn resting_composer_pos(compact: &str) -> Option<usize> {
     [
         compact.rfind("?forshortcuts"),
         compact.rfind("shift+tabtocycle"),
+        compact.rfind(MODE_LINE_MARKER),
     ]
     .into_iter()
     .flatten()
     .max()
+}
+
+/// Whether the screen shows Claude parked on the auto-continue usage-limit
+/// wait, returning the banner's offset.
+///
+/// Two shapes, most specific first:
+///
+/// 1. **Footer banner** (newer builds): a `⚠ Usage limit reached ·
+///    continuing automatically at 7:50pm · esc to cancel` line (optionally
+///    followed by `⚠ /usage-credits to continue now`) painted directly
+///    above the `⏵⏵` mode line. Live exactly while it is adjacent to the
+///    LAST mode line: every footer repaint paints the pair together, and
+///    the cancel / the reset repaint the mode line without it — so the
+///    check is positional, and the `esc to interrupt` hint the mode line
+///    keeps while parked is deliberately NOT consulted (it reads a parked
+///    agent as `Working`).
+/// 2. **Inline banner** with no mode line after it in the window (the
+///    older `⏺ Usage limit reached · continuing automatically …` line, or a
+///    footer that hasn't been painted yet): the phrase anywhere, cleared
+///    only by a live working anchor painted after it.
+///
+/// When a mode line follows the phrase but the banner is NOT adjacent to
+/// the last one, the banner is stale scrollback: not parked.
+fn auto_continue_parked(
+    compact: &str,
+    work_anchor_against: impl Fn(Option<usize>) -> Option<usize>,
+) -> Option<usize> {
+    let phrase_pos = last_compact_match_pos(compact, CLAUDE_USAGE_LIMIT_AUTO_CONTINUE_PHRASES)?;
+    let Some(mode_pos) = compact.rfind(MODE_LINE_MARKER) else {
+        // Shape 2: no footer in the window at all.
+        return marker_at_least_as_recent(Some(phrase_pos), work_anchor_against(Some(phrase_pos)))
+            .then_some(phrase_pos);
+    };
+    if phrase_pos > mode_pos {
+        // The phrase appears after the last mode line — only possible while
+        // the footer is mid-repaint (banner painted, mode line not yet).
+        // Treat as live.
+        return Some(phrase_pos);
+    }
+    // Shape 1: the banner must sit within the two non-blank lines directly
+    // above the last mode line.
+    let above = &compact[..mode_pos];
+    let mut lines_seen = 0usize;
+    for line in above.rsplit('\n') {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if CLAUDE_USAGE_LIMIT_AUTO_CONTINUE_PHRASES
+            .iter()
+            .any(|p| line.contains(compacted(p).as_str()))
+        {
+            return Some(phrase_pos);
+        }
+        lines_seen += 1;
+        if lines_seen >= 2 {
+            break;
+        }
+    }
+    None
+}
+
+/// A phrase-table entry compacted the way `compact_lower` compacts the
+/// screen: spaces stripped, lowercased.
+fn compacted(phrase: &str) -> String {
+    phrase
+        .chars()
+        .filter(|c| *c != ' ')
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// A live "N shells still running" status line — Claude paints it while
@@ -2602,8 +2701,80 @@ mod tests {
 
         // The reset happened and Claude resumed: a live working line
         // painted after the banner clears it.
-        let resumed = format!("{parked}\n✻ Working (3s · esc to interrupt)");
+        let resumed = format!("{parked}\n✻ Working (3s · ↑ 12 tokens · esc to interrupt)");
         assert_eq!(claude_state(resumed.as_bytes()), Some(AgentState::Working),);
+
+        // Newer builds paint the banner into the FOOTER, right above the
+        // `⏵⏵` mode line, and keep `esc to interrupt` on that mode line
+        // while parked — with the counter line above it frozen. Verbatim
+        // from a real session: this read as `Working`.
+        let footer_mid_turn = "     ! [rejected]        HEAD -> issue-708-feat-policy\n\
+             … +6 lines (ctrl+o to expand)\n\
+             ✻ Deciphering… (45s · ↓ 2.0k tokens)\n\
+             ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's current work\n\
+             ────────────────────────────────────────────────\n\
+             ❯\n\
+             ────────────────────────────────────────────────\n\
+             ⚠ Usage limit reached · continuing automatically at 7:50pm · esc to cancel\n\
+             ⚠ /usage-credits to continue now\n\
+             ⏵⏵ bypass permissions on · PR #712 · 2 shells · esc to interrupt · ← for agents · ↓ to manage\n\
+             ✘ Auto-update failed · Run claude doctor";
+        assert_eq!(
+            claude_state(footer_mid_turn.as_bytes()),
+            Some(AgentState::AwaitingReset),
+            "the mode line's esc-to-interrupt hint is not a working anchor while the footer banner is live",
+        );
+
+        // Same footer after the turn ended (the ⎿ result block carries the
+        // banner too, Claude printed its summary and rests). Verbatim.
+        let footer_at_rest = "  automatic-continue setting no longer ends this wait (esc or /rate-limit-options still can)\n\
+             ⎿  You've hit your individual spend limit · run /usage-credits to ask your admin for a higher limit ·\n\
+             your session limit resets 7:50pm (America/New_York)\n\
+             Continuing automatically at 7:50pm · esc to cancel\n\
+             ✻ Sautéed for 6m 9s · done 3:28 PM\n\
+             ────────────────────────────────────────────────\n\
+             ❯\n\
+             ────────────────────────────────────────────────\n\
+             ⚠ Usage limit reached · continuing automatically at 7:50pm · esc to cancel\n\
+             ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents\n\
+             ✘ Auto-update failed · Run claude doctor";
+        assert_eq!(
+            claude_state(footer_at_rest.as_bytes()),
+            Some(AgentState::AwaitingReset),
+        );
+        assert_eq!(
+            parse_usage_limit_reset(footer_at_rest.as_bytes()),
+            Some("7:50pm".into()),
+        );
+
+        // The wait was cancelled (Esc): Claude repaints the footer WITHOUT
+        // the banner, so the stale banner above the OLD mode line no longer
+        // reads as parked — the last mode line stands alone. The account is
+        // still limited until the reset, though, and the `⎿` banner names
+        // that reset, so this is the alerting `LimitReached` (Shift-K /
+        // `a R` apply), not a calm park and not a finished turn.
+        let cancelled = format!(
+            "{footer_at_rest}\n\
+             ────────────────────────────────────────────────\n\
+             ❯\n\
+             ────────────────────────────────────────────────\n\
+             ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+        );
+        assert_eq!(
+            claude_state(cancelled.as_bytes()),
+            Some(AgentState::LimitReached)
+        );
+
+        // The reset landed and Claude resumed on its own: a live counter
+        // painted after everything clears the block.
+        let resumed_after_footer = format!(
+            "{cancelled}\n✶ Spelunking… (32s · ↓ 1.2k tokens)\n\
+             ⏵⏵ bypass permissions on · esc to interrupt · ← for agents"
+        );
+        assert_eq!(
+            claude_state(resumed_after_footer.as_bytes()),
+            Some(AgentState::Working)
+        );
 
         // The spend-limit wording on its own (an older build that still
         // parks on the chooser) is the alerting block.

@@ -1257,8 +1257,10 @@ mod tests {
 
         // Page through the whole history from the top: every frame
         // matches a fresh full walk, and the marker shows up once total.
+        // Rows are keyed by absolute history index so the clamped final
+        // page can't count its overlap with the previous one twice.
         h.terminal.scroll_viewport(ScrollViewport::Top);
-        let mut total = 0;
+        let mut seen = std::collections::HashSet::new();
         loop {
             let frame = h.render(area);
             let fresh = h.render_via_fresh_state(area);
@@ -1266,15 +1268,18 @@ mod tests {
                 frame, fresh,
                 "scrolled frame diverged from a fresh full walk"
             );
-            total += count_marker(&frame);
             let before = h.terminal.scrollbar().unwrap().offset;
+            for y in (0..5u16).filter(|&y| row_text(&frame, area, y) == marker) {
+                seen.insert(before + y as u64);
+            }
             h.terminal.scroll_viewport(ScrollViewport::Delta(5));
             if h.terminal.scrollbar().unwrap().offset == before {
                 break;
             }
         }
         assert_eq!(
-            total, 1,
+            seen.len(),
+            1,
             "the in-place repainted row must appear once in history"
         );
 

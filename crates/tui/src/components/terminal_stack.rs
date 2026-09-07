@@ -9415,24 +9415,33 @@ mod hidden_feed_tests {
         out.into_bytes()
     }
 
-    /// Count the rows equal to `needle` across the whole scrollback of
-    /// the focused terminal, paging from the top of history to the live
-    /// bottom at the given pane size.
+    /// Count the history rows containing `needle` across the whole
+    /// scrollback of the focused terminal, paging from the top of history
+    /// to the live bottom at the given pane size. Rows are keyed by their
+    /// absolute history index (frame offset + grid row, read back from
+    /// the recorded `TerminalHit`), so the clamped final page can't count
+    /// its overlap with the previous one twice.
     fn count_rows_in_history(stack: &mut TerminalStack, w: u16, h: u16, needle: &str) -> usize {
         let _ = stack.scroll_to_top();
-        let mut count = 0;
+        let mut seen = std::collections::HashSet::new();
         for _ in 0..1_000 {
             let rows = screen_rows_at(stack, w, h);
-            count += rows.iter().filter(|r| r.contains(needle)).count();
-            let page = stack.terminals[&stack.focused_terminal_id().unwrap()]
-                .vt
-                .rows as isize;
-            if !matches!(stack.scroll_active(page), ScrollOutcome::Moved { .. }) {
+            let hit = stack.tile_hits.last().expect("rendered tile");
+            let (grid, offset) = (hit.grid, hit.offset.expect("scrollbar"));
+            for gy in 0..grid.height {
+                if rows[(grid.y + gy) as usize].contains(needle) {
+                    seen.insert(offset + gy as u64);
+                }
+            }
+            if !matches!(
+                stack.scroll_active(grid.height as isize),
+                ScrollOutcome::Moved { .. }
+            ) {
                 break;
             }
         }
         let _ = stack.scroll_to_bottom();
-        count
+        seen.len()
     }
 
     /// #1547 regression: output an agent produced while its terminal was

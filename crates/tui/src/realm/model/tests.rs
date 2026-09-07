@@ -12600,9 +12600,7 @@ mod merge_focus_follow_tests {
         m.modal_stack.push(Id::SidebarContext);
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(0)]);
         assert!(
-            !cmds
-                .iter()
-                .any(|c| matches!(c, IpcCommand::MergePr { .. })),
+            !cmds.iter().any(|c| matches!(c, IpcCommand::MergePr { .. })),
             "merge gates on confirm",
         );
 
@@ -16778,9 +16776,7 @@ mod destructive_confirm_tests {
         // The gesture is recorded (mastery ledger, #1502), but the
         // destructive Kill must still gate on the confirm modal.
         assert!(
-            !cmds
-                .iter()
-                .any(|c| matches!(c, IpcCommand::Kill { .. })),
+            !cmds.iter().any(|c| matches!(c, IpcCommand::Kill { .. })),
             "Archive picked from the context menu must not emit Kill directly: {cmds:?}",
         );
         assert_eq!(
@@ -16814,9 +16810,7 @@ mod destructive_confirm_tests {
         // The gesture is recorded (mastery ledger, #1502), but the
         // destructive MergePr must still gate on the confirm modal.
         assert!(
-            !cmds
-                .iter()
-                .any(|c| matches!(c, IpcCommand::MergePr { .. })),
+            !cmds.iter().any(|c| matches!(c, IpcCommand::MergePr { .. })),
             "MergePr picked from the context menu must not emit MergePr directly: {cmds:?}",
         );
         assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
@@ -28411,6 +28405,10 @@ mod mastery_ledger_tests {
         );
 
         m.seed_mastery_from_snapshot(vec![("cycle_sort".into(), ActionVia::Kbd, 3)]);
-        assert_eq!(m.action_uses("cycle_sort"), 3, "higher authoritative count adopted");
+        assert_eq!(
+            m.action_uses("cycle_sort"),
+            3,
+            "higher authoritative count adopted"
+        );
     }
 }

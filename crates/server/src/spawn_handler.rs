@@ -1499,8 +1499,14 @@ async fn handle_spawn_inner(
             // the common confirmed case. (A future refinement could route the
             // collapse path through the inner confirm to thread the real bool
             // and add a `]]h` history entry; out of scope for the masking fix.)
-            record_spawn_snippet(config, existing, &session_key, initial_snippet.as_ref(), true)
-                .await;
+            record_spawn_snippet(
+                config,
+                existing,
+                &session_key,
+                initial_snippet.as_ref(),
+                true,
+            )
+            .await;
         }
         let _ = config.bus.send(Event::TerminalFocusRequested {
             terminal_id: existing,
@@ -16935,8 +16941,7 @@ mod tests {
             .get("claude")
             .expect("claude built-in");
         let requires_ready = agent.pty_protocol().requires_ready();
-        let encoded =
-            agent.encode_prompt("review this PR", lazybox_agents::PromptIntent::Submit);
+        let encoded = agent.encode_prompt("review this PR", lazybox_agents::PromptIntent::Submit);
         let ready = std::sync::Arc::new(tokio::sync::Notify::new());
         let first_output = std::sync::Arc::new(tokio::sync::Notify::new());
         // Release the inject window immediately; the agent then never paints a

@@ -54,10 +54,21 @@ pub fn extract(body: &str) -> Vec<IssueLink> {
 /// Keywords that introduce a *blocking* reference. Multi-word entries work
 /// because the matcher is a plain substring compare on the lowercased body,
 /// and the separator check already admits `Blocked by: owner/repo#7`.
+///
+/// The `blocked on` forms are here too, even though they primarily introduce
+/// a free-text reason (see [`BLOCKED_ON_KEYWORDS`]): a `Blocked on: #5`
+/// names a *task*, and [`extract_blocked_on`] hands such link-shaped
+/// occurrences off to this parser. If `blocked on` were absent here that
+/// hand-off would land nowhere and the reference would be lost — so both
+/// parsers must recognize the keyword and each keeps only the shape it owns
+/// (this one keeps links; `extract_blocked_on` keeps prose).
 const BLOCKED_KEYWORDS: &[&str] = &[
     "blocked by",
     "blocked-by",
     "blockedby",
+    "blocked on",
+    "blocked-on",
+    "blockedon",
     "depends on",
     "depends-on",
     "dependson",
@@ -490,6 +501,35 @@ mod tests {
         // reason extractor yields nothing so it doesn't shadow the edge.
         assert_eq!(extract_blocked_on("Blocked on #12"), None);
         assert_eq!(extract_blocked_on("Blocked on owner/repo#12"), None);
+    }
+
+    #[test]
+    fn blocked_on_link_is_captured_as_an_edge_not_dropped() {
+        // Regression: `Blocked on: #5` is a task edge. The reason extractor
+        // defers it (returns None), so the edge extractor MUST claim it —
+        // otherwise the reference is silently lost. This only works because
+        // `blocked on` is in BLOCKED_KEYWORDS as well as BLOCKED_ON_KEYWORDS.
+        assert_eq!(extract_blocked_on("Blocked on: #5"), None);
+        assert_eq!(
+            extract_blocked_by("Blocked on: #5"),
+            vec![IssueLink::GitHub {
+                repo: None,
+                number: 5
+            }],
+        );
+        assert_eq!(
+            extract_blocked_by("Blocked on owner/repo#12"),
+            vec![IssueLink::GitHub {
+                repo: Some("owner/repo".into()),
+                number: 12
+            }],
+        );
+        // A prose reason under the same keyword stays a reason, not an edge.
+        assert_eq!(
+            extract_blocked_on("Blocked on: waiting on legal").as_deref(),
+            Some("waiting on legal")
+        );
+        assert!(extract_blocked_by("Blocked on: waiting on legal").is_empty());
     }
 
     #[test]

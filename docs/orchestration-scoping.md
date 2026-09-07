@@ -321,6 +321,39 @@ hint, never an input to the status resolver** — otherwise a stale label from
 a dead daemon would freeze status. And label writes go through add/remove,
 never replace, because the `working` claim labels live on the same issues.
 
+### 4k. Blockers are first-class, not just edges
+
+"Give me status" is usually "what is blocked, on what, on whom, since when".
+The structural sources above (an open dependency, an external task, an
+agent asking, a held merge, a cycle) cover only the blockers lazybox can
+infer. The one it cannot infer is the **declared** blocker — "blocked on a
+decision about token expiry", "needs the Stripe key" — which is exactly the
+one a human must act on. So a blocker is its own record on every member:
+
+```
+Blocker { kind: Dependency | External | Decision | Credential | Review |
+                MergeOrder | Contract | Cycle | Other,
+          reason: String, owner: Operator | Agent(key) | External(name),
+          since: unix-ms (stable across recomputes and restarts),
+          holds: u32 (transitive dependents it holds) }
+```
+
+Three ways to declare one, all cheap: an MCP `report_blocker(reason, kind?)`
+/ `clear_blocker` for agents (identity from the bearer, so a worker reports
+its own wall instead of idling — the session briefing says so); a
+`Blocked on: <text>` body-marker line for humans and planners, parsed by the
+same module as `Blocked by:`; and a `blocked:<kind>` label as the visible
+projection (§4j rules apply).
+
+Blockers lead everywhere: first in the epic header line (`⛔ 2 blocked!`
+when the operator owns one), the first section of the overview (sorted by
+how much work each holds, then by age, operator-owned rows bold), first in
+the `E j` sweep, `BlockerAdded` / `BlockerCleared` in the status delta and
+the activity feed, and a one-shot desktop notification when an
+operator-owned blocker is older than `epics.blocker_alert_after` (default
+4 h). Linear's native Blocked workflow state and GitHub's label are the
+mirrors.
+
 ## 5. Tooling we can use with lazybox
 
 | Tool | Use |
@@ -342,8 +375,8 @@ relations so the epic renders as an epic in lazybox once P0 ships.
 
 | Phase | Delivers | New state | Answers |
 |---|---|---|---|
-| **P0 — edges in the inbox** | GitHub provider fills `Task.parent` from sub-issues and reads dependencies + `Blocked by:` markers; Linear reads `blocks`; rows get `⛔ blocked by N` / `▶ ready`; `ready` / `blocked` filters; `E j` jump | none (Task fields) | "what can I start right now" |
-| **P1 — Epic + live status** | Epic record (kv), sidebar tier from a tracker parent, header status line, overview pane, `EpicResolver` + `Event::EpicStatus`, epic events in the inbox, MCP `epic_status` / `epic_ready`, coordinator briefing, `epic:*` + status labels (§4j) | `epic:<key>` | **"give me status"** without a model |
+| **P0 — edges in the inbox** | GitHub provider fills `Task.parent` from sub-issues and reads dependencies + `Blocked by:` markers; Linear reads `blocks`; `Blocked on:` declared blockers; rows get `⛔ blocked by N` / `▶ ready`; `ready` / `blocked` filters; `E j` jump | none (Task fields) | "what can I start right now" |
+| **P1 — Epic + live status** | Epic record (kv), sidebar tier from a tracker parent, header status line, overview pane, `EpicResolver` + `Event::EpicStatus`, epic events in the inbox, MCP `epic_status` / `epic_ready`, coordinator briefing, blockers as records + `report_blocker` (§4k), `epic:*` + status labels (§4j) | `epic:<key>` | **"give me status"** without a model |
 | **P2 — roles** | `Workspace.role`, badges, role prompt preambles, `E r`, `spawn_worker` MCP tool for Coordinators, Planner spawn with machine-readable-graph instruction, `role:*` labels | `role` field | who does what, enforced |
 | **P3 — graph + merge order** | full-screen DAG, `MergeAfter` edges, merge-order readout, merge-on-green hold | edge kinds | landing order across repos |
 | **P4 — autonomy dial** | `AUTO` latch (assisted dispatch on ready), Reviewer stage, held-merge auto-release | policy latch | the fleet runs the plan; you triage |

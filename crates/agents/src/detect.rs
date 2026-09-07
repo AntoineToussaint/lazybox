@@ -270,13 +270,28 @@ pub fn parse_usage_limit_reset(recent_output: &[u8]) -> Option<String> {
 }
 
 /// Byte offset of the most recent limit-phrase hit whose compacted LINE
-/// also names a reset (`… · resets 3:20pm`, `… resets Aug 30 at 2pm`) —
-/// the machine-rendered banner shape, as opposed to the agent's own prose
-/// about a limit. Every phrase occurrence is examined, not just the latest
-/// hit overall: the banner's `/usage-credits …` follow-up line is itself a
-/// phrase and sits BELOW the line carrying the reset, so anchoring on the
-/// single most-recent hit would always look at the wrong line. `None` when
-/// no phrase shares a line with a parseable reset.
+/// carries the machine-rendered banner separator `· resets <time>`
+/// (`… · resets 3:20pm`, `… · resets Aug 30 at 2pm`) — the exact shape
+/// Claude prints for a real limit banner (session and weekly alike join
+/// the phrase to the countdown with a ` · ` middot).
+///
+/// The `·` is load-bearing: this branch is the ONE limit path NOT gated on
+/// the resting composer (a real banner that ended the turn legitimately
+/// rests above `? for shortcuts`), so it is the only path that a mere
+/// MENTION of a limit could reach. Requiring the middot separator — not a
+/// bare `resets <time>` anywhere on the line — is what keeps ordinary prose,
+/// logs and comments ("you've hit your session limit; it resets 3pm") from
+/// reading as a live block: they join the words with punctuation or a space,
+/// never the banner's ` · `. Erring toward this false-negative (missing an
+/// unusually-separated banner) over a false-positive matches the rest of
+/// this module — a spurious block can fire the auto-`Wait` keystroke, a
+/// missed one the user can still act on manually.
+///
+/// Every phrase occurrence is examined, not just the latest hit overall:
+/// the banner's `/usage-credits …` follow-up line is itself a phrase and
+/// sits BELOW the line carrying the reset, so anchoring on the single
+/// most-recent hit would always look at the wrong line. `None` when no
+/// phrase shares a line with a `· resets <time>`.
 fn limit_banner_with_reset_pos(compact: &str) -> Option<usize> {
     let mut needle = String::new();
     let mut best: Option<usize> = None;
@@ -292,8 +307,12 @@ fn limit_banner_with_reset_pos(compact: &str) -> Option<usize> {
             let start = compact[..pos].rfind('\n').map_or(0, |i| i + 1);
             let end = compact[pos..].find('\n').map_or(compact.len(), |i| pos + i);
             let line = &compact[start..end];
+            // The banner joins its countdown with the ` · ` middot
+            // (`limit · resets 3:20pm` → `limit·resets3:20pm`); require it
+            // so a line that merely mentions a limit and, separately, a
+            // reset time is not mistaken for the machine-rendered block.
             let names_reset = line
-                .match_indices("resets")
+                .match_indices("·resets")
                 .any(|(i, kw)| reset_token(&line[i + kw.len()..]).is_some());
             if names_reset {
                 best = Some(best.map_or(pos, |b| b.max(pos)));
@@ -795,13 +814,18 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
     // stale — it is the shape of this block — yet the `resting_pos` gate
     // above discards it, so these sessions read Idle, quiet-settled to
     // `Done`, and `Shift-K` found nothing to resume while every agent on
-    // the account sat limited. Accept the shape when the banner line itself
-    // names a reset time (`… · resets 3:20pm`): that line is machine-
-    // rendered, and the agent's own prose about limits ("you've reached
-    // your usage limit before …") carries no `resets <time>` on the same
-    // line. Only a live working anchor painted after it clears it — the
-    // reset happened and the agent is running again.
-    let banner_pos = limit_banner_with_reset_pos(compact);
+    // the account sat limited. Accept the shape when the banner line carries
+    // the machine-rendered ` · resets <time>` separator (`… · resets
+    // 3:20pm`): the agent's own prose about limits ("you've reached your
+    // usage limit before …", "it resets 3pm tomorrow") joins the words with
+    // punctuation or a space, never the banner's ` · `. Only a live working
+    // anchor painted after it clears it — the reset happened and the agent
+    // is running again.
+    //
+    // Skip the multi-phrase line scan entirely when no limit phrase is
+    // present at all (`limit_pos` is `None`) — the common case on this
+    // per-chunk hot path, where the scan would only ever find nothing.
+    let banner_pos = limit_pos.and_then(|_| limit_banner_with_reset_pos(compact));
     if marker_at_least_as_recent(banner_pos, work_anchor_against(banner_pos)) {
         d.state = AgentState::LimitReached;
         d.trigger = Some(Trigger::UsageLimitAtRest);
@@ -2654,6 +2678,25 @@ mod tests {
              ❯ \n\
              ? for shortcuts";
         assert_eq!(claude_state(prose.as_bytes()), Some(AgentState::Idle));
+
+        // The sharper false positive: prose that mentions the limit AND a
+        // real reset CLOCK time on one line — but joined by ordinary
+        // punctuation, not the banner's ` · ` middot. This is the shape an
+        // agent's own summary ("you've hit your session limit; it resets
+        // 3pm") or a quoted log takes, and it reaches this ungated branch
+        // because it rests above `? for shortcuts` just like the real
+        // banner. Without the middot requirement it read `LimitReached`,
+        // which — because `UsageLimitAtRest` is deliberately injectable —
+        // put a healthy idle agent into the `Shift-K` resume-all set with a
+        // false ⏳ pill. Must stay Idle (a plain, correctly-injectable idle
+        // composer), NOT `LimitReached`.
+        let prose_with_time = "you've hit your session limit; it resets 3pm today.\n\n\
+             ❯ \n\
+             ? for shortcuts";
+        assert_eq!(
+            claude_state(prose_with_time.as_bytes()),
+            Some(AgentState::Idle)
+        );
 
         // The account-changed notice mentions `/login` but is not an auth
         // failure — it must not route the session into the re-auth flow.

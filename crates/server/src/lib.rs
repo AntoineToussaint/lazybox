@@ -399,6 +399,21 @@ pub struct ServerConfig {
     /// set insert; without this lock two concurrent deletes can each load the
     /// old set and overwrite the other's tombstone.
     pub archive_updates: Arc<parking_lot::Mutex<()>>,
+    /// Serializes the per-session `meter-cost:` read-modify-write cycle. The
+    /// metering subscriber is no longer the only writer — the issue→PR cost
+    /// fold (`client_kv::move_session_cost`) also read-modify-writes the same
+    /// keys from a different task — so without this lock the two can interleave
+    /// and lose an update (the fold's folded total or a concurrent proxy
+    /// delta). Both writers take it inside their blocking section, mirroring
+    /// `archive_updates`.
+    pub(crate) session_cost_lock: Arc<parking_lot::Mutex<()>>,
+    /// Serializes the mastery-ledger read-modify-write (#1502).
+    /// `client_kv::record_action` loads a per-action channel-count map,
+    /// increments one entry, and stores it back — two concurrent invocations
+    /// for the same action would otherwise both read the same base count and
+    /// lose an increment. Both callers take it inside their blocking section,
+    /// mirroring `session_cost_lock`.
+    pub(crate) mastery_lock: Arc<parking_lot::Mutex<()>>,
     /// Serializes workspace-key allocation through the matching durable
     /// insert. Allocation is a check-then-save loop; without this boundary,
     /// concurrent creates with the same display name can both observe the
@@ -574,6 +589,8 @@ impl ServerConfig {
             working_claim_error_reports: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             deleted_workspaces: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             archive_updates: Arc::new(parking_lot::Mutex::new(())),
+            session_cost_lock: Arc::new(parking_lot::Mutex::new(())),
+            mastery_lock: Arc::new(parking_lot::Mutex::new(())),
             workspace_creations: Arc::new(parking_lot::Mutex::new(())),
             undecodable_row_reports: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             event_metrics: Arc::new(metrics::EventMetrics::default()),
@@ -630,8 +647,11 @@ impl ServerConfig {
         lazybox_git_ops::WorktreeManager::new(self.worktree_root.path.clone())
             .with_github_token(Arc::new(|| {
                 Box::pin(async {
-                    lazybox_gh::credential_chain()
-                        .resolve(lazybox_gh::SOURCE)
+                    let host = lazybox_config::Config::load()
+                        .unwrap_or_default()
+                        .github_host();
+                    lazybox_gh::credential_chain(host.as_deref())
+                        .resolve(&lazybox_gh::credential_scope(host.as_deref()))
                         .await
                         .ok()
                         .map(|c| c.into_token())
@@ -1114,6 +1134,10 @@ impl Server {
                         lazybox_ipc::Command::DeleteError { .. } => "DeleteError",
                         lazybox_ipc::Command::GetResourcePosture => "GetResourcePosture",
                         lazybox_ipc::Command::GetStats => "GetStats",
+                        lazybox_ipc::Command::RecordAction { .. } => "RecordAction",
+                        lazybox_ipc::Command::RestartAgentAndContinue { .. } => {
+                            "RestartAgentAndContinue"
+                        }
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` and `RecordComposingBuffer` fire on every
@@ -1466,6 +1490,7 @@ fn command_lane(cmd: &lazybox_ipc::Command) -> CommandLane {
         | Command::DeliverSnippet { .. }
         | Command::RecoverAgentCredit { .. }
         | Command::ResumeAgent { .. }
+        | Command::RestartAgentAndContinue { .. }
         | Command::ReauthenticateAgent { .. }
         | Command::CancelAgentReauthentication { .. } => CommandLane::TerminalIo,
         Command::RecordUserMessage { .. } | Command::RecordComposingBuffer { .. } => {
@@ -1605,6 +1630,7 @@ pub async fn dispatch_command(
             };
             let snippet_keepmine = client_kv.snippet_keepmine;
             let session_costs = client_kv.session_costs;
+            let mastery = client_kv.mastery;
             let _ = tx.send(Event::Snapshot {
                 workspaces: workspaces.values,
                 terminals,
@@ -1715,6 +1741,11 @@ pub async fn dispatch_command(
             let _ = tx.send(Event::SessionCosts {
                 costs: session_costs,
             });
+            // Durable per-action usage counts (#1502): replayed as the same
+            // post-snapshot scaffolding so onboarding chrome seeds its
+            // mastery view on connect. Kept before AutoFixPolicyConfig so
+            // that stays the end-of-replay marker.
+            let _ = tx.send(Event::MasteryLedger { counts: mastery });
             // Keep the auto-fix policy as the last post-subscribe push so
             // existing consumers can use it as the end-of-replay marker.
             let _ = tx.send(Event::AutoFixPolicyConfig {
@@ -2094,6 +2125,9 @@ pub async fn dispatch_command(
         lazybox_ipc::Command::ResumeAgent { terminal_id } => {
             agent_auth::resume_agent(config, terminal_id).await;
         }
+        lazybox_ipc::Command::RestartAgentAndContinue { terminal_id } => {
+            agent_auth::restart_agent_and_continue(config, terminal_id).await;
+        }
         lazybox_ipc::Command::ReauthenticateAgent {
             terminal_id,
             switch_account,
@@ -2172,10 +2206,16 @@ pub async fn dispatch_command(
             polling::handle_collapse_into_pr(config, key).await;
         }
         lazybox_ipc::Command::Refresh => {
-            // Manual poll trigger. Force a full sweep so a just-created
-            // issue appears now instead of next scheduled sweep (issue
-            // #180), then wake the long-lived poll loop — the single
-            // source of truth for ticks.
+            // Manual poll trigger (`Shift-R`): "sweep every scoped repo
+            // now". Force a reconcile — repo-first, an unwindowed pass over
+            // the whole roster; without scopes, the unwindowed global
+            // `involves:` sweep — so a just-created issue appears now
+            // instead of next scheduled sweep (issue #180), then wake the
+            // long-lived poll loop — the single source of truth for ticks.
+            // The forced flag is satisfied by the sweep's DISCOVERY
+            // succeeding; a failed best-effort companion (merged sweep,
+            // watched repo) no longer pins it and re-runs the sweep every
+            // tick.
             //
             // An explicit refresh also clears the command-credential
             // cache: a user who just ran `gh auth login` and hit
@@ -2341,6 +2381,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::GetStats => {
             stats_accumulator::handle_get(config).await;
+        }
+        lazybox_ipc::Command::RecordAction { action_id, via } => {
+            client_kv::record_action(config, action_id, via).await;
         }
         lazybox_ipc::Command::Shutdown => {
             unreachable!("Shutdown is loop control, intercepted by the serve loop")

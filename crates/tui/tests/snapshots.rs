@@ -133,10 +133,10 @@ fn render_to_string(component: &mut Sidebar, w: u16, h: u16, focused: bool) -> S
 
 /// Display columns of every line on which `marker` appears, top to
 /// bottom. Char-based, not byte-based: `render_to_string` emits one
-/// entry per terminal cell, and the cursor prefix (`▶` vs a space) is a
+/// entry per terminal cell, and the cursor prefix (`▎` vs a space) is a
 /// single cell either way, so the returned column is stable no matter
 /// which row the cursor rests on — a byte offset would shift by the
-/// multi-byte `▶` and make the assertion depend on cursor placement.
+/// multi-byte `▎` and make the assertion depend on cursor placement.
 fn title_columns(rendered: &str, marker: &str) -> Vec<usize> {
     rendered
         .lines()
@@ -427,7 +427,7 @@ fn focused_group_sizes_columns_per_provider() {
 
 /// Regression for issue #231: at a small terminal size the row's
 /// horizontal budget goes to content, not to empty gutters. The
-/// selection marker is a single shared column (lpad + `▶`), so the
+/// selection marker is a single shared column (lpad + `▎`), so the
 /// type glyph starts at column 2 — not pushed in by a 2-col marker —
 /// and a long title fills the row right up to the lone scrollbar
 /// gutter instead of leaving dead margin on either side.
@@ -447,13 +447,13 @@ fn sidebar_tight_gutters_leave_room_for_content_at_small_width() {
     let rendered = render_to_string(&mut s, w, 10, true);
     let row = rendered
         .lines()
-        .find(|l| l.trim_start().starts_with('▶'))
+        .find(|l| l.trim_start().starts_with('▎'))
         .expect("a cursor workspace row");
     let chars: Vec<char> = row.chars().collect();
     // Left gutter: lpad(1) + 1-col marker, then the type glyph — no
     // 2-col-per-depth marker padding ahead of it.
     assert_eq!(chars[0], ' ', "row: {row:?}");
-    assert_eq!(chars[1], '▶', "row: {row:?}");
+    assert_eq!(chars[1], '▎', "row: {row:?}");
     assert_ne!(
         chars[2], ' ',
         "type glyph should sit right after the single marker: {row:?}"
@@ -553,4 +553,87 @@ fn which_key_github_group_golden_render() {
         .collect::<Vec<_>>()
         .join("\n");
     insta::assert_snapshot!("which_key_github_group", rendered);
+}
+
+/// Golden look of the sidebar cursor: a full-row band with the `▎`
+/// accent bar in the gutter, no arrow (#1502). Glyph layer only; the
+/// band's colors are asserted in `tests/sidebar.rs`.
+#[test]
+fn sidebar_cursor_band_snapshot() {
+    let mut s = sidebar();
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![
+            Workspace::from_task(make_task("owner/repo#12", 3), fixed_time()),
+            Workspace::from_task(make_task("owner/repo#7", 90), fixed_time()),
+            Workspace::from_task(make_task("owner/repo#3", 600), fixed_time()),
+        ],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    // Drop the header (it embeds the build version — see the module
+    // doc) and pin the list body only.
+    let rendered = render_to_string(&mut s, 44, 12, true);
+    let body: Vec<&str> = rendered
+        .lines()
+        .skip_while(|l| !l.trim_start().starts_with('─'))
+        .skip(1)
+        .collect();
+    insta::assert_snapshot!("sidebar_cursor_band", body.join("\n"));
+}
+
+/// Golden look of the three-row sidebar header (#1502): brand + dim
+/// version, every attention counter on row 0 (unread, input, CI), the
+/// item summary right; chips + today's tally on row 1 (no `today`
+/// heading, no `$0.00`); then the divider with content directly under
+/// it. Keep-awake is footer status and must not appear. The version is
+/// masked so a release bump doesn't churn the fixture.
+#[test]
+fn sidebar_header_snapshot() {
+    let mut s = sidebar();
+    let mut failing = make_task("owner/repo#12", 3);
+    failing.ci = CiStatus::Failure;
+    let mut unread = make_task("owner/repo#7", 90);
+    unread.recent_activity.push(lazybox_core::Activity {
+        author: "reviewer".into(),
+        body: "please rebase".into(),
+        created_at: fixed_time(),
+        kind: lazybox_core::ActivityKind::Comment,
+        node_id: None,
+        path: None,
+        line: None,
+        diff_hunk: None,
+        thread_id: None,
+    });
+    s.on_event(&Event::Snapshot {
+        workspaces: vec![
+            Workspace::from_task(failing, fixed_time()),
+            Workspace::from_task(unread, fixed_time()),
+            Workspace::from_task(make_task("owner/repo#3", 600), fixed_time()),
+        ],
+        terminals: vec![],
+        projects: vec![],
+        recent_snippets: Vec::new(),
+        dismissed_updates: Vec::new(),
+    });
+    s.set_keep_awake_status(true, false);
+    let day = fixed_time()
+        .with_timezone(&chrono::Local)
+        .format("%Y-%m-%d")
+        .to_string();
+    let bucket = |metric: &str, value: i64| lazybox_ipc::StatBucket {
+        day: day.clone(),
+        metric: metric.into(),
+        value,
+    };
+    s.set_today_buckets(vec![
+        bucket(lazybox_ipc::stats::SESSIONS, 8),
+        bucket(lazybox_ipc::stats::MERGED, 7),
+        bucket(lazybox_ipc::stats::COST_MICROS, 0),
+    ]);
+    let rendered = render_to_string(&mut s, 64, 8, true)
+        .replace(concat!("v", env!("CARGO_PKG_VERSION")), "vX.Y.Z");
+    let head: Vec<&str> = rendered.lines().take(5).collect();
+    insta::assert_snapshot!("sidebar_header", head.join("\n"));
 }

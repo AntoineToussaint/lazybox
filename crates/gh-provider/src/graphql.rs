@@ -787,6 +787,56 @@ pub fn merged_sweep_query(
     build_query(&quals)
 }
 
+/// Search qualifier addressing one repo-first roster member. A member
+/// with a `/` is a repository (`repo:owner/name`); a bare owner is an
+/// organization scope (`org:name`). GitHub's search accepts either as a
+/// single qualifier, so an org scope costs one query, not one per repo.
+pub fn roster_member_qualifier(member: &str) -> String {
+    if member.contains('/') {
+        format!("repo:{member}")
+    } else {
+        format!("org:{member}")
+    }
+}
+
+/// PR search for one roster member of the repo-first sweep.
+///
+/// Unwindowed (`since == None`) → every OPEN PR in the member: the
+/// exhaustive set a reconcile needs so rescope can retire rows that left
+/// the repo. Windowed → every PR *touched* since `since`, open or not.
+/// A merge or close bumps `updatedAt`, so dropping `is:open` is what lets
+/// a steady rotation observe state transitions without a separate global
+/// merged sweep, and the window keeps the steady-state page near-empty.
+pub fn repo_sweep_pr_query(member: &str, since: Option<DateTime<Utc>>) -> String {
+    let mut quals = Vec::with_capacity(5);
+    if since.is_none() {
+        quals.push("is:open".to_string());
+    }
+    quals.push("is:pr".to_string());
+    quals.push("archived:false".to_string());
+    quals.push(roster_member_qualifier(member));
+    if let Some(since) = since {
+        quals.push(updated_since_qualifier(since));
+    }
+    build_query(&quals)
+}
+
+/// Issue counterpart of [`repo_sweep_pr_query`]: same window semantics,
+/// `is:issue` instead of `is:pr`.
+pub fn repo_sweep_issue_query(member: &str, since: Option<DateTime<Utc>>) -> String {
+    let mut quals = Vec::with_capacity(5);
+    if since.is_none() {
+        quals.push("is:open".to_string());
+    }
+    quals.push("is:issue".to_string());
+    quals.push("archived:false".to_string());
+    quals.push(roster_member_qualifier(member));
+    if let Some(since) = since {
+        quals.push(updated_since_qualifier(since));
+    }
+    build_issues_query(&quals)
+}
+
 /// Per-page size for the PR search. Was 100 (GraphQL's maximum)
 /// but with the heavy SEARCH_QUERY payload, GitHub's GraphQL
 /// gateway timed out (HTTP 502 / 504 "We couldn't respond to your
@@ -3984,6 +4034,38 @@ mod tests {
         assert!(q.contains("archived:false"));
         assert!(q.contains("merged:>=2026-06-01"));
         assert!(q.contains("involves:dave"));
+    }
+
+    #[test]
+    fn roster_member_qualifier_distinguishes_repo_from_org() {
+        assert_eq!(roster_member_qualifier("acme/widgets"), "repo:acme/widgets");
+        assert_eq!(roster_member_qualifier("acme"), "org:acme");
+    }
+
+    /// Repo-first sweep queries: an unwindowed pass is the exhaustive
+    /// OPEN set; a windowed pass drops `is:open` so merges/closes since
+    /// the floor come back with their new state.
+    #[test]
+    fn repo_sweep_queries_window_without_is_open() {
+        let since = DateTime::parse_from_rfc3339("2026-09-05T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            repo_sweep_pr_query("acme/widgets", None),
+            "is:open is:pr archived:false repo:acme/widgets"
+        );
+        assert_eq!(
+            repo_sweep_pr_query("acme/widgets", Some(since)),
+            "is:pr archived:false repo:acme/widgets updated:>=2026-09-05T12:00:00+00:00"
+        );
+        assert_eq!(
+            repo_sweep_issue_query("acme", None),
+            "is:open is:issue archived:false org:acme"
+        );
+        assert_eq!(
+            repo_sweep_issue_query("acme", Some(since)),
+            "is:issue archived:false org:acme updated:>=2026-09-05T12:00:00+00:00"
+        );
     }
 
     #[test]

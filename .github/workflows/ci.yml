@@ -248,11 +248,13 @@ jobs:
   desktop-check:
     name: desktop shell compiles (macos-14)
     needs: changes
-    # Desktop CI temporarily disabled (matches the `desktop` MVP job
-    # below): the desktop shell isn't a release blocker right now and we
-    # don't want the macOS compile gating unrelated PRs. Re-enable by
-    # dropping `false &&` once the desktop app is actively maintained.
-    if: false && needs.changes.outputs.desktop == 'true'
+    # A change to a shared type (`ComputeInputs`, IPC DTOs, the inbox
+    # builder) has broken the desktop shell silently more than once,
+    # because `cargo build/clippy/test --workspace` never touches its
+    # separate Cargo workspace (#1515). The paths filter scopes this to
+    # PRs that can actually break it, so the macOS compile cost only
+    # lands on those.
+    if: needs.changes.outputs.desktop == 'true'
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v7

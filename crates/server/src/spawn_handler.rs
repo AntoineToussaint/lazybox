@@ -324,16 +324,24 @@ fn hook_command_keyfile(exe: &Path, key_path: &Path) -> String {
 /// the daemon (tmux): after a restart the surviving session's hooks
 /// must still resolve, and the backend key is the identity that
 /// survives while terminal ids are reallocated.
-fn hook_command(exe: &Path, backend_key: &str) -> String {
+fn hook_command(exe: &Path, backend_key: &str, mcp_wired: bool) -> String {
     // `--emit-session-context` opts this agent's hook into printing the
     // lazybox capability blurb on `SessionStart` (Claude adds a hook's stdout
     // to its context). Only the settings-file path — Claude — carries it;
     // Codex's argv `hook_command_keyfile` omits it, since it is unverified
     // whether Codex surfaces a hook's stdout as context. TODO(codex): once
     // confirmed, seed the same text through the CODEX_HOME lazybox already owns.
+    //
+    // `--emit-mcp-context` is added ONLY when this spawn is wired to the
+    // coordination MCP bus (`SpawnFlags::mcp_wired`). The base blurb rides on
+    // every Claude spawn — including ReadOnly "Ask lazybox" launches that are
+    // never provisioned — so the bus half must be gated separately: telling an
+    // unprovisioned session the MCP server is connected would advertise six
+    // tools it cannot call.
+    let mcp = if mcp_wired { " --emit-mcp-context" } else { "" };
     guarded_hook_command(
         exe,
-        &format!(" --backend-key \"{backend_key}\" --emit-session-context"),
+        &format!(" --backend-key \"{backend_key}\" --emit-session-context{mcp}"),
         &lazybox_core::paths::hook_log_path(),
     )
 }
@@ -2898,8 +2906,17 @@ async fn resolve_or_create_session(
         // directory that masqueraded as the shared main checkout —
         // the terminal opened in a non-git folder and the agent's
         // first `git` command was the only thing that noticed.
-        if let Err(e) =
-            provision_worktree(config, &workspace, &path, session_key, true, None, origin).await
+        if let Err(e) = provision_worktree(
+            config,
+            &workspace,
+            &path,
+            session_key,
+            true,
+            None,
+            origin,
+            false,
+        )
+        .await
         {
             tracing::warn!("main-checkout worktree provisioning failed: {e}");
             // Land the ✗ on the checklist row that actually aborted
@@ -2988,8 +3005,20 @@ async fn resolve_or_create_session(
     drop(ownership_guard);
 
     let prov_start = std::time::Instant::now();
-    let provisioned =
-        provision_worktree(config, &workspace, &path, session_key, false, None, origin).await;
+    // This spawn holds `_provisioning_claim` on `path`; tell the reclaim
+    // so it discounts our own claim (and only ours) when the branch
+    // holder is our own intended path.
+    let provisioned = provision_worktree(
+        config,
+        &workspace,
+        &path,
+        session_key,
+        false,
+        None,
+        origin,
+        true,
+    )
+    .await;
     tracing::info!(
         elapsed_ms = prov_start.elapsed().as_millis(),
         ok = provisioned.is_ok(),
@@ -3349,6 +3378,21 @@ pub(crate) fn provisioning_worktree_is_claimed(config: &ServerConfig, candidate:
         .any(|path| paths_match(path, candidate))
 }
 
+/// How many concurrent spawns are provisioning `candidate` right now.
+/// Sums the refcounts of every claim key that resolves to the same real
+/// path (a `/var` vs `/private/var` spelling difference registers as two
+/// keys), so the reclaim decision can tell *its own* single claim apart
+/// from a second spawn racing the same path.
+pub(crate) fn provisioning_worktree_claim_count(config: &ServerConfig, candidate: &Path) -> usize {
+    config
+        .provisioning_worktree_claims
+        .lock()
+        .iter()
+        .filter(|(path, _)| paths_match(path, candidate))
+        .map(|(_, count)| *count)
+        .sum()
+}
+
 async fn reclaim_non_live_managed_holder(
     config: &ServerConfig,
     mgr: &lazybox_git_ops::WorktreeManager,
@@ -3357,9 +3401,19 @@ async fn reclaim_non_live_managed_holder(
     branch: &str,
     holder: &Path,
     intended_path: &Path,
+    own_claim_on_target: bool,
 ) -> BranchHolderReclaim {
-    reclaim_non_live_managed_holder_locked(config, mgr, owner, repo, branch, holder, intended_path)
-        .await
+    reclaim_non_live_managed_holder_locked(
+        config,
+        mgr,
+        owner,
+        repo,
+        branch,
+        holder,
+        intended_path,
+        own_claim_on_target,
+    )
+    .await
 }
 
 async fn reclaim_non_live_managed_holder_locked(
@@ -3370,14 +3424,29 @@ async fn reclaim_non_live_managed_holder_locked(
     branch: &str,
     holder: &Path,
     intended_path: &Path,
+    own_claim_on_target: bool,
 ) -> BranchHolderReclaim {
     // Hold lock only for the critical section: ownership checks. Release
     // immediately before the expensive reclaim operation (which may involve
     // filesystem I/O and git operations).
     {
         let _ownership_guard = config.worktree_ownership_lock.lock().await;
+        // Tell *this* spawn's own provisioning claim apart from another
+        // spawn's in-flight checkout. A holder at our intended path is
+        // usually a stale registration lazybox left behind (an interrupted
+        // `worktree add`), and counting our own claim as a live owner
+        // dead-ended the spawn. But path identity alone is too coarse:
+        // if a second spawn ever races the same path (SpawnCoordinator
+        // dedup bypassed), that path carries *two* claims and treating
+        // both as "ours" would reclaim its worktree out from under it.
+        // Subtract only our own single contribution — anything beyond it
+        // is another spawn's claim and must be preserved.
+        let own_contribution =
+            usize::from(own_claim_on_target && paths_match(holder, intended_path));
+        let claimed_by_another =
+            provisioning_worktree_claim_count(config, holder) > own_contribution;
         if managed_worktree_has_live_session_owner(config, holder)
-            || provisioning_worktree_is_claimed(config, holder)
+            || claimed_by_another
             || managed_worktree_has_live_main_owner(config, holder).await
         {
             return BranchHolderReclaim::Preserved;
@@ -3867,6 +3936,12 @@ async fn provision_worktree(
     on_main: bool,
     existing_branch: Option<&str>,
     origin: lazybox_ipc::SpawnOrigin,
+    // Whether the caller holds a `ProvisioningWorktreeClaim` on `target`.
+    // Threaded into the branch-holder reclaim so it can discount this
+    // spawn's own claim without mistaking a concurrent same-path spawn's
+    // claim for it. Only the isolated per-session spawn path claims its
+    // target; on-main and session-recovery re-provisions pass `false`.
+    own_claim_on_target: bool,
 ) -> Result<String, crate::ServerError> {
     use crate::ServerError;
     use lazybox_git_ops::CheckoutPhase;
@@ -3988,7 +4063,14 @@ async fn provision_worktree(
                         Err(lazybox_git_ops::GitError::BranchHeldLive { holder, .. }) => Some((
                             holder.clone(),
                             reclaim_non_live_managed_holder(
-                                config, &mgr, owner, name, branch, holder, target,
+                                config,
+                                &mgr,
+                                owner,
+                                name,
+                                branch,
+                                holder,
+                                target,
+                                own_claim_on_target,
                             )
                             .await,
                         )),
@@ -4103,6 +4185,7 @@ async fn provision_worktree(
                                         &new_branch,
                                         holder,
                                         target,
+                                        own_claim_on_target,
                                     )
                                     .await,
                                 ))
@@ -4694,6 +4777,9 @@ async fn ensure_worktree_present(
         false,
         expected_branch,
         origin,
+        // This recovery path holds no provisioning claim of its own, so
+        // any claim on the holder belongs to another spawn — preserve it.
+        false,
     )
     .await
     {
@@ -6899,13 +6985,25 @@ async fn commit_pty_reading(
     }
     // A fresh entry into the usage-limit block: mine the reset countdown
     // from the same detect window and broadcast it as the proactive
-    // "time-to-reset" (#1012). `Committed(LimitReached)` is already a
-    // change into the block, so this fires once per episode (mirroring
-    // `detect_and_broadcast_model`'s broadcast-on-change). Emitted only
-    // when a hint parses — the block itself rode `Event::AgentState`
-    // above; clients fold this countdown in where the banner named one,
-    // and degrade to the bare block where it didn't.
-    if let lazybox_agents::Outcome::Committed(lazybox_ipc::AgentState::LimitReached) = outcome
+    // "time-to-reset" (#1012). Fires on each committed TRANSITION into a
+    // limit state (mirroring `detect_and_broadcast_model`'s
+    // broadcast-on-change). Emitted only when a hint parses — the block
+    // itself rode `Event::AgentState` above; clients fold this countdown in
+    // where the banner named one, and degrade to the bare block where it
+    // didn't.
+    // `AwaitingReset` counts too: the detector classifies Claude's
+    // auto-continue banner (`continuing automatically at 1:10pm`) straight
+    // to the calm state, and that banner's time is the reset the badge
+    // should show. Note this makes the auto-`Wait` path
+    // (`LimitReached → AwaitingReset`) broadcast twice per episode — once on
+    // each transition. That is harmless: both re-parse the same lingering
+    // banner and the client handler only stashes the hint (an idempotent
+    // set), and the second fire also recovers a hint the `LimitReached`
+    // reading couldn't yet parse. The pure auto-continue path commits
+    // `AwaitingReset` directly, so it fires exactly once.
+    if let lazybox_agents::Outcome::Committed(
+        lazybox_ipc::AgentState::LimitReached | lazybox_ipc::AgentState::AwaitingReset,
+    ) = outcome
         && let Some(reset_hint) = lazybox_agents::detect::parse_usage_limit_reset(detect_window)
     {
         let session_key = terminals
@@ -13656,17 +13754,21 @@ mod tests {
         // (meter = false) keeps direct routing even though the proxy is
         // running — so turning the proxy on never redirects a session that
         // didn't ask, and a structured run isn't counted twice (#1109).
+        // `port()` is a process-global `OnceLock` (first setter wins), so an
+        // earlier test that started a real proxy may already own the port and
+        // make this `set_port` a no-op (#1507). Read back whatever port is
+        // actually published and assert against that — the routing behavior,
+        // not a fixed number, is what this test is about.
         crate::proxy::set_port(45999);
+        let port = crate::proxy::port().expect("a proxy port is published");
+        let expected_url = format!("http://127.0.0.1:{port}/anthropic/claude/github-acme-widget-7");
         let mut cfg = lazybox_config::Config::default();
         cfg.agent.metering_proxy = true;
         let claude = lazybox_agents::agent::builtins::Claude;
 
         assert_eq!(
             gateway_env_for_agent(&cfg, Some(&claude), true, false, "github-acme-widget-7"),
-            vec![(
-                "ANTHROPIC_BASE_URL".to_string(),
-                "http://127.0.0.1:45999/anthropic/claude/github-acme-widget-7".to_string()
-            )]
+            vec![("ANTHROPIC_BASE_URL".to_string(), expected_url.clone())]
         );
         // Opted out: no proxy URL, and no gateway configured.
         assert!(
@@ -13678,10 +13780,7 @@ mod tests {
         cfg.agent.meter_all = true;
         assert_eq!(
             gateway_env_for_agent(&cfg, Some(&claude), false, false, "github-acme-widget-7"),
-            vec![(
-                "ANTHROPIC_BASE_URL".to_string(),
-                "http://127.0.0.1:45999/anthropic/claude/github-acme-widget-7".to_string()
-            )]
+            vec![("ANTHROPIC_BASE_URL".to_string(), expected_url.clone())]
         );
         // …but a remote workspace is never routed even under `meter_all`:
         // the proxy URL is this host's loopback, unreachable from the box.
@@ -17627,7 +17726,7 @@ mod tests {
         assert!(exe.is_absolute(), "current_exe must be absolute: {exe:?}");
         let quoted = format!("\"{}\"", exe.display());
 
-        let claude = hook_command(&exe, "lzb-sess-7");
+        let claude = hook_command(&exe, "lzb-sess-7", false);
         assert!(claude.contains(&quoted), "bare/relative exe in: {claude}");
 
         let codex = hook_command_keyfile(&exe, Path::new("/run/lzb/backend-key-7"));
@@ -17636,7 +17735,7 @@ mod tests {
 
     #[test]
     fn hook_command_quotes_exe_and_bakes_backend_key() {
-        let cmd = hook_command(Path::new("/opt/lazy box/lazybox"), "lzb-sess-7");
+        let cmd = hook_command(Path::new("/opt/lazy box/lazybox"), "lzb-sess-7", false);
         assert!(
             cmd.contains("\"/opt/lazy box/lazybox\" hook-ingest --backend-key \"lzb-sess-7\""),
             "exec missing or unquoted: {cmd}"
@@ -17652,7 +17751,7 @@ mod tests {
         // Claude's settings-file hook carries the marker that turns
         // `SessionStart` into the lazybox capability blurb; Codex's argv hook
         // omits it (its stdout-as-context behavior is unverified).
-        let claude = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7");
+        let claude = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7", false);
         assert!(
             claude.contains("hook-ingest --backend-key \"lzb-sess-7\" --emit-session-context"),
             "claude hook must carry the session-context marker: {claude}"
@@ -17661,6 +17760,28 @@ mod tests {
         assert!(
             !codex.contains("--emit-session-context"),
             "codex hook must not carry the session-context marker: {codex}"
+        );
+    }
+
+    #[test]
+    fn hook_command_gates_the_mcp_context_marker_on_the_bus_being_wired() {
+        // The MCP-context marker rides only when the spawn is provisioned to
+        // the coordination bus. An unwired (e.g. ReadOnly) Claude session still
+        // gets `--emit-session-context` but must NOT get `--emit-mcp-context`,
+        // or its briefing would advertise tools it cannot call (#1420).
+        let wired = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7", true);
+        assert!(
+            wired.contains("--emit-session-context --emit-mcp-context"),
+            "wired spawn must carry both markers: {wired}"
+        );
+        let unwired = hook_command(Path::new("/opt/lazybox"), "lzb-sess-7", false);
+        assert!(
+            unwired.contains("--emit-session-context"),
+            "unwired spawn still carries the base marker: {unwired}"
+        );
+        assert!(
+            !unwired.contains("--emit-mcp-context"),
+            "unwired spawn must not carry the MCP marker: {unwired}"
         );
     }
 
@@ -18622,6 +18743,7 @@ mod tests {
                 "feature",
                 &holder,
                 &root.path().join("worktrees").join("other"),
+                true,
             )
             .await,
             BranchHolderReclaim::Preserved,
@@ -18639,11 +18761,195 @@ mod tests {
                 "feature",
                 &holder,
                 &root.path().join("worktrees").join("other"),
+                true,
             )
             .await,
             BranchHolderReclaim::Reclaimed
         );
         assert!(!holder.exists());
+    }
+
+    /// The spawn's *own* provisioning claim must not count as a live
+    /// owner of the holder when the holder IS the intended path: that
+    /// shape is lazybox's own stale registration (an interrupted
+    /// `worktree add`), and treating it as "another live worktree"
+    /// dead-ended every re-spawn of the workspace in the recovery modal.
+    #[tokio::test]
+    async fn own_claim_on_the_intended_path_does_not_preserve_the_holder() {
+        fn git(cwd: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let upstream = tempfile::tempdir().unwrap();
+        git(upstream.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
+        git(upstream.path(), &["add", "."]);
+        git(upstream.path(), &["commit", "-q", "-m", "base"]);
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let manager = config.worktree_manager();
+        let bare = manager.bare_path("acme", "core");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(
+            root.path(),
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &upstream.path().to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+        git(&bare, &["branch", "feature", "main"]);
+        let holder = root.path().join("worktrees").join("self");
+        std::fs::create_dir_all(holder.parent().unwrap()).unwrap();
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                "feature",
+                &holder.to_string_lossy(),
+                "refs/heads/feature",
+            ],
+        );
+
+        // This spawn claims the path it is provisioning — the holder.
+        let own_claim = ProvisioningWorktreeClaim::new(&config, holder.clone());
+        assert_eq!(
+            reclaim_non_live_managed_holder(
+                &config, &manager, "acme", "core", "feature", &holder, &holder, true,
+            )
+            .await,
+            BranchHolderReclaim::Reclaimed,
+            "our own claim on the target is not another spawn's live checkout"
+        );
+        drop(own_claim);
+
+        // A claim by a spawn targeting a *different* path still preserves.
+        let other = root.path().join("worktrees").join("other");
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                "feature",
+                &holder.to_string_lossy(),
+                "refs/heads/feature",
+            ],
+        );
+        let _other_claim = ProvisioningWorktreeClaim::new(&config, holder.clone());
+        assert_eq!(
+            reclaim_non_live_managed_holder(
+                &config, &manager, "acme", "core", "feature", &holder, &other, true,
+            )
+            .await,
+            BranchHolderReclaim::Preserved,
+        );
+    }
+
+    /// Finding-1 regression: two spawns race the *same* intended path
+    /// (SpawnCoordinator dedup bypassed). Path identity alone treated
+    /// both claims as "ours" and reclaimed the racing spawn's in-flight
+    /// checkout. With claim *counting*, our own single contribution is
+    /// discounted but the second spawn's claim still preserves the holder.
+    #[tokio::test]
+    async fn a_second_spawn_racing_the_same_path_is_not_reclaimed() {
+        fn git(cwd: &Path, args: &[&str]) {
+            let output = std::process::Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let upstream = tempfile::tempdir().unwrap();
+        git(upstream.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
+        git(upstream.path(), &["add", "."]);
+        git(upstream.path(), &["commit", "-q", "-m", "base"]);
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let manager = config.worktree_manager();
+        let bare = manager.bare_path("acme", "core");
+        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
+        git(
+            root.path(),
+            &[
+                "clone",
+                "--bare",
+                "-q",
+                &upstream.path().to_string_lossy(),
+                &bare.to_string_lossy(),
+            ],
+        );
+        git(&bare, &["branch", "feature", "main"]);
+        let holder = root.path().join("worktrees").join("self");
+        std::fs::create_dir_all(holder.parent().unwrap()).unwrap();
+        git(
+            &bare,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-B",
+                "feature",
+                &holder.to_string_lossy(),
+                "refs/heads/feature",
+            ],
+        );
+
+        // Our own claim on the intended path (== holder), plus a SECOND
+        // spawn that raced onto the very same path.
+        let _own_claim = ProvisioningWorktreeClaim::new(&config, holder.clone());
+        let _racer_claim = ProvisioningWorktreeClaim::new(&config, holder.clone());
+        assert_eq!(
+            reclaim_non_live_managed_holder(
+                &config, &manager, "acme", "core", "feature", &holder, &holder, true,
+            )
+            .await,
+            BranchHolderReclaim::Preserved,
+            "a concurrent spawn's claim on the same path must survive our own reclaim"
+        );
+        assert!(holder.exists(), "the racing spawn's checkout is untouched");
     }
 
     /// A linked (no-worktree) workspace resolves every spawn straight to
@@ -18724,6 +19030,7 @@ mod tests {
             false,
             None,
             lazybox_ipc::SpawnOrigin::Autonomous(lazybox_ipc::AutonomousTrigger::Mention),
+            false,
         )
         .await
         .unwrap();
@@ -18838,6 +19145,7 @@ mod tests {
             false,
             None,
             lazybox_ipc::SpawnOrigin::Interactive,
+            false,
         )
         .await
         .expect("first provision");
@@ -18860,6 +19168,7 @@ mod tests {
             false,
             None,
             lazybox_ipc::SpawnOrigin::Interactive,
+            false,
         )
         .await
         .expect("second provision must not BranchMismatch against its own worktree");
@@ -19079,6 +19388,7 @@ mod tests {
             true,
             None,
             lazybox_ipc::SpawnOrigin::Interactive,
+            false,
         )
         .await
         .expect_err("an unresolved GitHub project must abort provisioning");

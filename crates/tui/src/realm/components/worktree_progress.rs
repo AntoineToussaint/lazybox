@@ -384,6 +384,37 @@ impl WorktreeProgress {
     }
 }
 
+/// Rows a line occupies under ratatui's word wrap at `width` columns.
+/// A plain `ceil(width / cols)` under-counts: word wrapping breaks at
+/// spaces and leaves the tail of each row unused, so a long remediation
+/// sentence took one row more than the estimate and its last line was
+/// clipped. Greedy on whitespace, hard-splitting a word wider than the
+/// row, and never less than the character-count bound.
+fn wrapped_rows(text: &str, width: u16) -> u16 {
+    let display_width = |s: &str| Span::raw(s).width();
+    let width = usize::from(width.max(1));
+    let mut rows: usize = 1;
+    let mut col: usize = 0;
+    for (i, word) in text.split(' ').enumerate() {
+        let mut w = display_width(word);
+        // The separating space rides with the following word.
+        let lead = usize::from(i > 0);
+        if col + lead + w > width && col > 0 {
+            rows += 1;
+            col = 0;
+        } else {
+            col += lead;
+        }
+        while w > width {
+            rows += 1;
+            w -= width;
+        }
+        col += w;
+    }
+    let ceil = display_width(text).div_ceil(width).max(1);
+    u16::try_from(rows.max(ceil)).unwrap_or(u16::MAX)
+}
+
 impl Component for WorktreeProgress {
     fn view(&mut self, frame: &mut Frame, area: Rect) {
         let theme = crate::theme::current();
@@ -425,7 +456,12 @@ impl Component for WorktreeProgress {
             }
         }
         lines.push(Line::raw(""));
-        if let Some(err) = &self.error {
+        // The key hints live in a footer row rendered *separately* from
+        // the wrapped body: an error naming a long managed path (twice)
+        // plus its remediation can exceed the modal's height, and when
+        // they flowed through one paragraph the last line — the only one
+        // telling the user what keys do anything — was the one clipped.
+        let footer: &str = if let Some(err) = &self.error {
             lines.push(Line::from(Span::styled(
                 format!("  {err}"),
                 Style::default().fg(theme.error),
@@ -442,7 +478,7 @@ impl Component for WorktreeProgress {
             // classes and recreates the ones lazybox can safely rebuild
             // (preserve the conflicting checkout aside, re-provision); `g`
             // jumps to the live session holding a branch we can't take.
-            let affordance = if self.retryable {
+            if self.retryable {
                 "  r retry · Esc dismiss"
             } else if self.recreatable {
                 "  r recreate · Esc dismiss"
@@ -452,8 +488,7 @@ impl Component for WorktreeProgress {
                 "  r pick repo · Esc dismiss"
             } else {
                 "  Esc dismiss"
-            };
-            lines.push(Line::from(Span::styled(affordance, theme.hint())));
+            }
         } else if let Some(warn) = &self.warning {
             // Provisioning succeeded but degraded: show the stale-base
             // note in amber and hold for acknowledgement (Esc), so the
@@ -462,22 +497,25 @@ impl Component for WorktreeProgress {
                 format!("  ⚠ {warn}"),
                 Style::default().fg(theme.warn),
             )));
-            lines.push(Line::from(Span::styled("  Esc dismiss", theme.hint())));
+            "  Esc dismiss"
         } else {
-            lines.push(Line::from(Span::styled("  Esc cancel", theme.hint())));
-        }
+            "  Esc cancel"
+        };
 
         let modal_w = 60u16.min(area.width.saturating_sub(4));
         // Size the modal to the *wrapped* height, not the logical line
         // count — a long stale-base note or error message wraps inside
-        // the fixed-width modal and would otherwise push the footer
-        // ("Esc dismiss") off the bottom.
+        // the fixed-width modal.
         let inner_w = modal_w.saturating_sub(2).max(1);
-        let visual_rows: u16 = lines
+        let body_rows: u16 = lines
             .iter()
-            .map(|l| (l.width() as u16).div_ceil(inner_w).max(1))
+            .map(|l| {
+                let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                wrapped_rows(&text, inner_w)
+            })
             .sum();
-        let modal_h = (visual_rows + 2).min(area.height);
+        // body + footer row + borders, capped at the screen.
+        let modal_h = (body_rows + 1 + 2).min(area.height);
         let x = area.x + area.width.saturating_sub(modal_w) / 2;
         let y = area.y + area.height.saturating_sub(modal_h) / 2;
         let modal = Rect::new(x, y, modal_w, modal_h);
@@ -490,7 +528,21 @@ impl Component for WorktreeProgress {
             .border_style(theme.modal_border());
         let inner = block.inner(modal);
         frame.render_widget(block, modal);
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+        // Reserve the last inner row for the footer no matter how much
+        // the body wraps; the body is what gets clipped, never the keys.
+        let footer_h = 1u16.min(inner.height);
+        let body_area = Rect::new(
+            inner.x,
+            inner.y,
+            inner.width,
+            inner.height.saturating_sub(footer_h),
+        );
+        let footer_area = Rect::new(inner.x, inner.y + body_area.height, inner.width, footer_h);
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), body_area);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(footer, theme.hint()))),
+            footer_area,
+        );
     }
 
     fn query(&self, _: Attribute) -> Option<QueryResult<'_>> {
@@ -572,6 +624,17 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The rendered body as one line: borders stripped, wrapped rows
+    /// re-joined on a space. Lets a test assert on a whole remediation
+    /// command regardless of where the 60-column modal word-wraps it.
+    fn flatten(out: &str) -> String {
+        out.lines()
+            .map(|l| l.trim_matches(|c| c == '│' || c == ' '))
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     fn state() -> WorktreeProgressState {
@@ -893,9 +956,15 @@ mod tests {
         assert_eq!(st.recovery(), Some(WorktreeRecovery::BranchHeldLive));
         let out = render(&mut WorktreeProgress::from_state(&st), 70, 20);
         assert!(out.contains('✗'), "{out}");
-        assert!(out.contains("Shift-A"), "Lazybox transfer guidance: {out}");
-        assert!(out.contains("git -C '/tmp/other' status"), "{out}");
-        assert!(out.contains("switch --detach"), "{out}");
+        assert!(out.contains("press g"), "jump guidance: {out}");
+        assert!(
+            !out.contains("Shift-A"),
+            "Shift-A toggles auto-fix now: {out}"
+        );
+        assert!(
+            flatten(&out).contains("(cd '/tmp/other' && git status && git switch --detach)"),
+            "{out}"
+        );
         assert!(!out.contains("x a"), "adopt cannot release a branch: {out}");
         assert!(!out.contains("r retry"), "invalid retry affordance: {out}");
         assert!(out.contains("Esc dismiss"), "{out}");
@@ -924,8 +993,10 @@ mod tests {
         let out = render(&mut WorktreeProgress::from_state(&st), 70, 20);
         assert!(out.contains("ignored local files"), "{out}");
         assert!(out.contains("Managed checkout"), "{out}");
-        assert!(out.contains("git -C '/tmp/other' status"), "{out}");
-        assert!(out.contains("switch --detach"), "{out}");
+        assert!(
+            flatten(&out).contains("(cd '/tmp/other' && git status && git switch --detach)"),
+            "{out}"
+        );
         assert!(!out.contains("join the live session"), "{out}");
         assert!(!out.contains("r retry"), "{out}");
     }
@@ -988,6 +1059,64 @@ mod tests {
             comp.on(&Event::Keyboard(KeyEvent::from(Key::Char('r'))))
                 .is_none(),
             "r must not recreate a live holder"
+        );
+    }
+
+    /// The row estimate matches word wrapping, not a bare character
+    /// count: a sentence whose words straddle the row boundary needs an
+    /// extra row, and a token wider than the row is hard-split.
+    #[test]
+    fn wrapped_rows_counts_word_wrap_boundaries() {
+        assert_eq!(wrapped_rows("", 10), 1);
+        assert_eq!(wrapped_rows("short", 10), 1);
+        // 12 chars would be ceil(12/10) = 2 by characters, and the word
+        // boundary makes it 2 as well.
+        assert_eq!(wrapped_rows("hello world!", 10), 2);
+        // "aaaa bbbb cccc" — 14 chars: ceil = 2, but words of 4 with a
+        // space ahead wrap as "aaaa bbbb" / "cccc" → 2; at width 9 the
+        // first row holds "aaaa bbbb" exactly.
+        assert_eq!(wrapped_rows("aaaa bbbb cccc", 9), 2);
+        // Width 8 can't hold "aaaa bbbb": one word per row → 3, while
+        // the character bound says 2.
+        assert_eq!(wrapped_rows("aaaa bbbb cccc", 8), 3);
+        // A single token wider than the row is hard-split.
+        assert_eq!(wrapped_rows("/a/very/long/path/without/spaces", 10), 4);
+        assert!(wrapped_rows("x", 0) >= 1);
+    }
+
+    /// The key hints survive a body taller than the screen. A real
+    /// `BranchHeldLive` error names a ~100-char managed path in both the
+    /// error and the remediation; in a 60-col modal on a short terminal
+    /// that wrapped past the bottom and the `g go to holder · Esc
+    /// dismiss` line — the only actionable one — was the line clipped,
+    /// leaving a modal the user couldn't act on.
+    #[test]
+    fn key_hints_stay_visible_when_the_error_overflows_the_modal() {
+        let holder = "/Users/someone/.lazybox/v2/github-acme-lodestar/\
+                      issue-202-audit-query-parity-and-permission-model-across-both";
+        let mut st = state();
+        st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
+        st.apply(
+            WorktreeStep::WorktreeAdd,
+            WorktreeStepStatus::Failed(format!(
+                "worktree: checkout_new_branch_at: branch \
+                 'issue-202-audit-query-parity-and-permission-model-across-both' is \
+                 already checked out at {holder} — refusing to take it from another \
+                 live worktree; join the live session that owns that checkout, or \
+                 free an external checkout before retrying"
+            )),
+        );
+        assert_eq!(st.recovery(), Some(WorktreeRecovery::BranchHeldLive));
+        // 16 rows: shorter than the wrapped body.
+        let out = render(&mut WorktreeProgress::from_state(&st), 80, 16);
+        assert!(
+            out.contains("go to holder"),
+            "jump affordance clipped: {out}"
+        );
+        assert!(out.contains("Esc dismiss"), "dismiss hint clipped: {out}");
+        assert!(
+            out.contains("Creating worktree"),
+            "checklist clipped: {out}"
         );
     }
 

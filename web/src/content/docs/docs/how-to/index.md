@@ -20,7 +20,8 @@ completion. Pick the one that matches what you need to do.
   and context into the closing PR.
 - **[Orchestrate multiple agents](/docs/how-to/orchestrate-multiple-agents/)** —
   multi-select, broadcast one instruction to many workspaces, bulk-update
-  branches, and hand work from one agent to another.
+  branches, hand work from one agent to another, and let agents find and
+  brief each other over the built-in coordination MCP bus.
 - **[Manage automation policies](/docs/how-to/manage-automation-policies/)** —
   inspect and toggle merge-on-green and per-workspace auto-fix behavior from
   the unified `g p` menu.

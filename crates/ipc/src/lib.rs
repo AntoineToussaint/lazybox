@@ -750,6 +750,52 @@ fn default_true() -> bool {
     true
 }
 
+/// The surface a catalog action was invoked through, recorded with each
+/// [`Command::RecordAction`] so the mastery ledger (#1502) can tell a
+/// keyboard-driven action apart from a mouse/menu one — the signal a
+/// later "you keep clicking this; the key is `g m`" nudge reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum ActionVia {
+    /// A key chord (direct or leader), the primary path.
+    Kbd,
+    /// A direct pointer click on a rendered affordance.
+    Mouse,
+    /// The right-click context menu or a choice modal.
+    Menu,
+    /// The Ask Lazybox command palette executing a row.
+    Palette,
+    /// The onboarding coach driving the action on the user's behalf.
+    Coach,
+}
+
+impl ActionVia {
+    /// Stable wire token used as the per-channel key inside a persisted
+    /// ledger row. Kept snake-free and lowercase so the JSON stays terse.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ActionVia::Kbd => "kbd",
+            ActionVia::Mouse => "mouse",
+            ActionVia::Menu => "menu",
+            ActionVia::Palette => "palette",
+            ActionVia::Coach => "coach",
+        }
+    }
+
+    /// Parse a persisted token back to a channel, or `None` for an
+    /// unrecognized one (a forward-compat row is skipped, never fatal).
+    pub fn from_wire(token: &str) -> Option<Self> {
+        Some(match token {
+            "kbd" => ActionVia::Kbd,
+            "mouse" => ActionVia::Mouse,
+            "menu" => ActionVia::Menu,
+            "palette" => ActionVia::Palette,
+            "coach" => ActionVia::Coach,
+            _ => return None,
+        })
+    }
+}
+
 /// TUI → daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
@@ -1661,6 +1707,31 @@ pub enum Command {
         workspace_key: lazybox_core::WorkspaceKey,
         canceled: bool,
     },
+    /// Record one invocation of a catalog action for the mastery ledger
+    /// (#1502): the daemon owns the durable per-action usage counts (like
+    /// the snippet MRU, #548), so a `--connect` client and the in-process
+    /// TUI share one view. `action_id` is the action's stable
+    /// `ActionKind::name()`; `via` is the surface it was invoked through.
+    /// Fire-and-forget telemetry — a dropped write just under-counts.
+    /// Appended last (bincode is ordinal-sensitive).
+    RecordAction {
+        action_id: String,
+        via: ActionVia,
+    },
+    /// Restart one usage-limit-blocked agent so it picks up fresh
+    /// credentials, then continue its interrupted work: the daemon stops
+    /// the running process, respawns the exact conversation in the same
+    /// pane through the provider's `--resume` builder (as [`Self::ResumeAgent`]
+    /// does for an exited pane), and hands the configured continuation
+    /// prompt (`ui.credit_recovery_prompt`) to the spawn-time injector. The
+    /// bulk `a R` (restart rate-limited) action sends one per limited
+    /// terminal after the user has switched Claude account / API key
+    /// externally — a plain `Shift-K` "continue" cannot make a running
+    /// process re-read its credentials. Appended last (bincode is
+    /// ordinal-sensitive).
+    RestartAgentAndContinue {
+        terminal_id: TerminalId,
+    },
 }
 
 impl Command {
@@ -2361,6 +2432,14 @@ pub enum Event {
         remaining: u32,
         limit: u32,
         reset_at: chrono::DateTime<chrono::Utc>,
+        /// `true` when the wait is lazybox's OWN pacing (local request
+        /// bucket / background allowance spent) rather than a limit GitHub
+        /// imposed. The budget is healthy in that case — `remaining` says
+        /// so — and clients must not label it "GitHub rate-limited": a
+        /// user reading that after a `g m` rejection concluded GitHub
+        /// blocked the merge when GitHub had answered normally.
+        #[serde(default)]
+        self_throttle: bool,
     },
     /// Emitted at the end of every successful poll cycle, even when
     /// no tasks matched. The TUI uses this to distinguish "polling
@@ -2852,6 +2931,17 @@ pub enum Event {
     KeepAwakeStatus {
         active: bool,
         on_battery: bool,
+    },
+    /// The persisted mastery ledger (#1502): one `(action_id, via, count)`
+    /// triple per channel a catalog action has been invoked through,
+    /// replayed once right after [`Event::Snapshot`] on subscribe like
+    /// [`Event::SessionCosts`] so a reconnecting client seeds its usage
+    /// view without a round-trip. An empty vec is valid (nothing recorded
+    /// yet). Its own event rather than a `Snapshot` field so the ~150
+    /// snapshot construction sites stay untouched. Appended last (bincode
+    /// is ordinal-sensitive).
+    MasteryLedger {
+        counts: Vec<(String, ActionVia, u32)>,
     },
 }
 
@@ -3409,7 +3499,7 @@ impl WorktreeRecovery {
         match self {
             Self::Transient => "Looks transient — press r to retry.",
             Self::BranchHeldLive => {
-                "Lazybox holder: select it, press Shift-A, and choose this PR. External \
+                "Lazybox holder: press g to jump to the session that owns it. External \
                  holder: inspect it, then detach it from the branch."
             }
             Self::BranchHeldManaged => {
@@ -3478,7 +3568,7 @@ impl WorktreeRecovery {
             Self::BranchHeldLive => branch_holder_commands(
                 message,
                 "already checked out at ",
-                "Lazybox: select its workspace, Shift-A, choose this PR.",
+                "Lazybox holder: press g to jump to its session. External:",
                 self.hint(),
             ),
             Self::BranchHeldManaged => branch_holder_commands(
@@ -3501,8 +3591,11 @@ fn branch_holder_commands(message: &str, marker: &str, prefix: &str, fallback: &
     else {
         return fallback.to_string();
     };
+    // Name the path once: the error line above already spells it out,
+    // and a long managed path repeated three times wraps into a wall
+    // that pushes the modal's key hints off-screen.
     let quoted = shell_quote(path);
-    format!("{prefix} External: git -C {quoted} status; then git -C {quoted} switch --detach.")
+    format!("{prefix} (cd {quoted} && git status && git switch --detach)")
 }
 
 fn shell_quote(value: &str) -> String {
@@ -4295,7 +4388,12 @@ mod worktree_recovery_tests {
         ] {
             assert!(c.retryable(), "{c:?} is retryable on its own");
         }
-        assert!(WorktreeRecovery::BranchHeldLive.hint().contains("Shift-A"));
+        // The hint names the modal's actual affordance (`g` jumps to the
+        // holder's session). `Shift-A` used to be quoted here but now
+        // toggles auto-fix, and `x a` (adopt sessions) cannot release a
+        // branch checkout — neither may be advertised.
+        assert!(WorktreeRecovery::BranchHeldLive.hint().contains("press g"));
+        assert!(!WorktreeRecovery::BranchHeldLive.hint().contains("Shift-A"));
         assert!(
             !WorktreeRecovery::BranchHeldLive.hint().contains("x a"),
             "session adoption cannot release a branch checkout"
@@ -4303,11 +4401,17 @@ mod worktree_recovery_tests {
         let remediation = WorktreeRecovery::BranchHeldLive.remediation(
             "branch 'feat' is already checked out at /tmp/path with spaces — refusing to take it",
         );
+        assert!(remediation.contains("press g"), "{remediation}");
         assert!(
-            remediation.contains("git -C '/tmp/path with spaces' status"),
+            remediation.contains("cd '/tmp/path with spaces' && git status"),
             "{remediation}"
         );
         assert!(remediation.contains("switch --detach"), "{remediation}");
+        assert_eq!(
+            remediation.matches("/tmp/path with spaces").count(),
+            1,
+            "the path is spelled once — it already heads the error line: {remediation}"
+        );
     }
 
     /// Issue #787: the non-retryable classes split into ones lazybox can

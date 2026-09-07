@@ -1,7 +1,8 @@
 //! `lazybox` — TUI client. Single binary, multiple modes:
 //!
 //!   lazybox                         default: in-process daemon + TUI
-//!   lazybox --fresh                 wipe ~/.lazybox/v2/state.db + force
+//!   lazybox --fresh                 wipe ~/.lazybox/v2/state.db, forget the
+//!                                  wizard answers in config.yaml + force
 //!                                  the setup screen (testing first-run)
 //!   lazybox --test                  throwaway tempdir repo + one fake
 //!                                  workspace, no setup, no polling —
@@ -383,7 +384,8 @@ Remote & services:
                               --socket <path> targets a non-default daemon)
 
 Advanced:
-  lazybox --fresh             wipe ~/.lazybox/v2/state.db and re-run setup (destructive)
+  lazybox --fresh             wipe ~/.lazybox/v2/state.db, forget the wizard answers in
+                              config.yaml and re-run setup + the coach (destructive)
 
 Credentials come from `gh auth token` or `lazybox auth login github` (native
 OAuth, no `gh` needed); set LINEAR_API_KEY for Linear.
@@ -485,6 +487,7 @@ async fn main() -> anyhow::Result<()> {
     });
     if fresh {
         wipe_state_db();
+        clear_persisted_setup();
     }
     if demo_mode {
         return run_demo(preselect).await;
@@ -1437,8 +1440,22 @@ fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
     }
 }
 
-/// `--fresh`: clear `~/.lazybox/v2/state.db`. Wipes the entire DB,
-/// which means the saved setup config in the kv table goes with it.
+/// `--fresh`: forget the wizard answers + onboarding markers in
+/// `~/.lazybox/config.yaml` so setup and the coach replay (#1502). Setup
+/// persistence moved out of the state DB, so wiping the DB alone no
+/// longer re-ran the wizard despite the help text saying it would.
+fn clear_persisted_setup() {
+    let path = lazybox_tui::setup_flow::config_yaml_path();
+    match lazybox_tui::setup_flow::clear_persisted_yaml(&path) {
+        Ok(true) => eprintln!("forgot setup + onboarding in {}", path.display()),
+        Ok(false) => {}
+        Err(e) => eprintln!("--fresh: couldn't clear setup in {}: {e:#}", path.display()),
+    }
+}
+
+/// `--fresh`: clear `~/.lazybox/v2/state.db`. Wipes the entire DB
+/// (sessions, read state, snoozes); the wizard answers live in
+/// `config.yaml` and are cleared by `clear_persisted_setup`.
 fn wipe_state_db() {
     let path = lazybox_server::state_db_path();
     match std::fs::remove_file(&path) {
@@ -2111,17 +2128,14 @@ async fn run_embedded_realm(
 /// Linear ships without a scope-discovery API so the wizard skips it.
 async fn build_scope_sources() -> Vec<Box<dyn lazybox_core::ScopeSource>> {
     let mut sources: Vec<Box<dyn lazybox_core::ScopeSource>> = Vec::new();
-    if let Ok(cred) = lazybox_gh::credential_chain()
-        .resolve(lazybox_gh::SOURCE)
+    let host = lazybox_config::Config::load()
+        .unwrap_or_default()
+        .github_host();
+    if let Ok(cred) = lazybox_gh::credential_chain(host.as_deref())
+        .resolve(&lazybox_gh::credential_scope(host.as_deref()))
         .await
-        && let Ok(client) = lazybox_gh::GhClient::from_credential_with_host(
-            cred,
-            lazybox_config::Config::load()
-                .unwrap_or_default()
-                .github_host()
-                .as_deref(),
-        )
-        .await
+        && let Ok(client) =
+            lazybox_gh::GhClient::from_credential_with_host(cred, host.as_deref()).await
     {
         sources.push(Box::new(lazybox_gh::GhScopes::new(std::sync::Arc::new(
             client,

@@ -130,6 +130,7 @@ impl Polling {
                 remaining,
                 limit,
                 reset_at,
+                self_throttle,
             } => {
                 self.rate_limited = true;
                 self.last_progress = Some((
@@ -138,6 +139,7 @@ impl Polling {
                         *remaining,
                         *limit,
                         *reset_at,
+                        *self_throttle,
                         chrono::Utc::now(),
                     ),
                 ));
@@ -324,6 +326,7 @@ mod tests {
             remaining: 98,
             limit: 5000,
             reset_at: Utc.with_ymd_and_hms(2026, 7, 30, 7, 23, 22).unwrap(),
+            self_throttle: false,
         });
 
         assert!(polling.status_label().starts_with("GitHub rate-limited"));

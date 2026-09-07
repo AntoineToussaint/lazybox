@@ -62,8 +62,10 @@ pub(super) enum LeaderCmd {
     /// `]]z` — tmux-style zoom: maximize the focused tile across the whole
     /// pane and back. Only meaningful in a multi-tile Splits grid.
     ZoomTile,
-    /// `]]t` — flip the new-terminal layout preference (split ⇄ tabs)
-    /// and persist it. Affects the *next* spawn, not open terminals.
+    /// `]]t` — switch this session's terminals between tabs and tiles
+    /// (#1508) and set how the next one opens, persisting
+    /// `ui.terminal_new_layout`. On an empty pane it flips the
+    /// preference alone.
     ToggleNewLayout,
     /// `]]v` — cycle the focus-mode layout (#1258): Single → SplitV →
     /// SplitH → Grid → Single, persisting `ui.focus_layout`. Only
@@ -197,8 +199,8 @@ const FIXED_COMMANDS: &[FixedCommandSpec] = &[
     FixedCommandSpec {
         key: 't',
         command: LeaderCmd::ToggleNewLayout,
-        menu_label: "new shells",
-        reference: "Toggle whether the next terminal opens as a split or a tab; persists `ui.terminal_new_layout`",
+        menu_label: "tabs / splits",
+        reference: "Switch this session's terminals between tabs and side-by-side tiles, and set how the next one opens (persists `ui.terminal_new_layout`)",
         sidebar: false,
     },
 ];
@@ -297,9 +299,12 @@ impl LeaderCmd {
             }
             let label = match spec.key {
                 // Show the current default so these double as status rows.
+                // Names what pressing it switches *to*, not the current
+                // state — a status row here read as "already split" and
+                // made the key look inert (#1508).
                 't' => match new_layout {
-                    NewTerminalLayout::Split => "new shells: split".to_string(),
-                    NewTerminalLayout::Tabs => "new shells: tabs".to_string(),
+                    NewTerminalLayout::Split => "switch to tabs".to_string(),
+                    NewTerminalLayout::Tabs => "switch to splits".to_string(),
                 },
                 'v' => match focus_layout {
                     Some(l) => format!("layout: {}", l.label()),
@@ -547,21 +552,23 @@ mod tests {
         );
     }
 
-    /// The `]]t` row always shows and reflects the current default;
-    /// its key resolves like every other command row.
+    /// The `]]t` row names the layout it switches *to*, not the one
+    /// already in effect (#1508) — a status row there read as "already
+    /// split" and made the key look inert. Its key resolves like every
+    /// other command row.
     #[test]
-    fn layout_toggle_row_reflects_current_preference() {
+    fn layout_toggle_row_names_the_layout_it_switches_to() {
         let split = LeaderCmd::menu_rows(false, 1, NewTerminalLayout::Split, None);
         assert!(
-            split
-                .iter()
-                .any(|(k, l)| k == "t" && l == "new shells: split")
+            split.iter().any(|(k, l)| k == "t" && l == "switch to tabs"),
+            "on splits the row must offer tabs: {split:?}",
         );
 
         let tabs = LeaderCmd::menu_rows(false, 1, NewTerminalLayout::Tabs, None);
         assert!(
             tabs.iter()
-                .any(|(k, l)| k == "t" && l == "new shells: tabs")
+                .any(|(k, l)| k == "t" && l == "switch to splits"),
+            "on tabs the row must offer splits: {tabs:?}",
         );
 
         assert!(matches!(

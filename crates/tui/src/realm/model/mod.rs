@@ -211,11 +211,16 @@ pub enum Id {
     /// [`ChoicePayload::Workspace`] that `Msg::ChoicePicked` resolves
     /// to the target and dispatches `Command::AdoptSessions`.
     AdoptTarget,
-    /// Project picker for the global "start agent" (`Shift-W`) flow.
-    /// Each row carries a [`ChoicePayload::Project`]; `Msg::ChoicePicked`
-    /// resolves the project, then funnels into the new-workspace name
-    /// input (which auto-spawns the default agent on submit). Skipped
-    /// when only one project exists.
+    /// The `Shift-W` Start sheet (#1502): Chat (scratch workspace, no
+    /// repo) / Repository… / Workspace here / Project…. Always mounts,
+    /// even on an empty install — the one entry point that never
+    /// bounces the user to another key.
+    StartSheet,
+    /// Project picker behind the Start sheet's Project… row (and the
+    /// old `Shift-W` picker). Each row carries a
+    /// [`ChoicePayload::Project`]; `Msg::ChoicePicked` resolves the
+    /// project, then funnels into the new-workspace name input (which
+    /// auto-spawns the default agent on submit).
     StartAgentProject,
     /// Single-line input prompt for the reviewer-login(s) to add to
     /// the focused workspace's PR. Submit →
@@ -1436,7 +1441,42 @@ pub enum PaneFocus {
     Terminals,
 }
 
+/// `badge_letter → label` of every agent's default tier: the YAML
+/// `agents.<id>.models.default` alias when set, else the built-in default
+/// alias, resolved against the agent's declared tiers (falling back to the
+/// built-in tier list). Agents with no resolvable default are absent, so
+/// their runs always badge (#1502).
+pub(crate) fn default_model_labels(
+    models: &std::collections::BTreeMap<String, lazybox_core::AgentModels>,
+) -> std::collections::HashMap<char, String> {
+    let registry = lazybox_tui_core::agents::registry();
+    models
+        .iter()
+        .filter_map(|(agent_id, m)| {
+            let builtin = lazybox_core::AgentModels::builtin(agent_id);
+            let alias = m
+                .default
+                .clone()
+                .or_else(|| builtin.as_ref().and_then(|b| b.default.clone()))?;
+            let label = m
+                .tier(&alias)
+                .or_else(|| builtin.as_ref().and_then(|b| b.tier(&alias)))
+                .map(|t| t.label.clone())?;
+            Some((registry.badge_for(agent_id), label))
+        })
+        .collect()
+}
+
 impl PaneFocus {
+    /// Human name used by the help surfaces ("keys in the sidebar").
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            PaneFocus::Sidebar => "sidebar",
+            PaneFocus::Right => "activity pane",
+            PaneFocus::Terminals => "terminal",
+        }
+    }
+
     fn next(self) -> Self {
         match self {
             PaneFocus::Sidebar => PaneFocus::Right,
@@ -1696,11 +1736,16 @@ pub struct Model<T: TerminalAdapter> {
     /// toggles expand/collapse on the card. Crossterm doesn't
     /// report double-clicks natively — we synthesize them here.
     last_click: Option<(u16, u16, std::time::Instant)>,
-    /// Screen rect of the footer's `… +N ? all` overflow cell, set on
-    /// every render (`None` when the hint bar fits). A left-click inside
-    /// it opens `?` so the hidden hints are reachable instead of the
-    /// count being a dead end (#805).
-    footer_overflow_rect: Option<Rect>,
+    /// The footer's `… +N more` overflow cell from the last render —
+    /// its screen rect plus the hints it hides (`None` when the hint bar
+    /// fits). A left-click inside it pops those hints so the count is
+    /// not a dead end (#805, #1502).
+    footer_overflow: Option<crate::realm::components::footer::FooterOverflow>,
+    /// The `+N more` popup's rows while it is open (#1502): the hints the
+    /// footer could not fit, drawn with the which-key chrome. Purely
+    /// informational — the next key or click closes it and is then
+    /// processed normally, so nothing is swallowed.
+    footer_more_popup: Option<Vec<(String, String)>>,
     /// Last frame's widget-build cost (walking the tree into the back
     /// buffer — CPU), split out from the flush by `view()` so the
     /// watchdog can tell an expensive render from a blocked terminal
@@ -2116,6 +2161,10 @@ pub struct Model<T: TerminalAdapter> {
     /// user has no clear next step. An event-to-event handoff, not a
     /// mounted-modal continuation, so it stays out of [`ModalFlow`].
     deferred_focus_project: Option<String>,
+    /// Start sheet → Chat while the `scratch` project does not exist
+    /// yet (#1502): the `ProjectUpserted` hand-off creates the chat
+    /// workspace directly instead of mounting the name input.
+    deferred_chat: bool,
     /// Issue workspace the user was viewing when it was removed by a
     /// merge. Set in the `WorkspaceRemoved` handler (before the sidebar
     /// moves the cursor off the gone row) and consumed by the matching
@@ -2176,6 +2225,16 @@ pub struct Model<T: TerminalAdapter> {
     /// AND is shared across in-process and `--connect` clients. This local
     /// copy is the pruned-against-catalog view the pickers render.
     pub(crate) recent_snippets: Vec<String>,
+    /// Per-action usage counts keyed by the action's stable
+    /// `ActionKind::name()`, each broken down by the channel it was invoked
+    /// through — the mastery ledger (#1502). The daemon owns the durable
+    /// counts (like the snippet MRU, #548): each dispatch fires a
+    /// `Command::RecordAction`, and the persisted ledger replays in
+    /// `Event::MasteryLedger` on connect. This local copy is bumped
+    /// optimistically on dispatch so onboarding chrome can read live usage
+    /// without a round-trip.
+    pub(crate) mastery:
+        std::collections::HashMap<String, std::collections::HashMap<lazybox_ipc::ActionVia, u32>>,
     /// Skill names triggered this session, most-recent first (capped at
     /// `RECENT_SNIPPETS_MAX`). Feeds the skills picker's "Recent" group so
     /// a repeated skill is one `]]k` + `Enter` away, mirroring
@@ -2542,7 +2601,8 @@ impl<T: TerminalAdapter> Model<T> {
             terminal_leader_highlight: None,
             leader_target: None,
             last_click: None,
-            footer_overflow_rect: None,
+            footer_overflow: None,
+            footer_more_popup: None,
             last_render_build: std::time::Duration::ZERO,
             last_render_flush: std::time::Duration::ZERO,
             render_pending: None,
@@ -2618,6 +2678,7 @@ impl<T: TerminalAdapter> Model<T> {
                 &std::collections::BTreeMap::new(),
             ),
             deferred_focus_project: None,
+            deferred_chat: false,
             merge_follow_from: None,
             spawn_follow_to: None,
             pending_workspace_creates: std::collections::HashMap::new(),
@@ -2627,6 +2688,7 @@ impl<T: TerminalAdapter> Model<T> {
             deferred_focus_terminal: None,
             snippets: lazybox_config::Snippets::default(),
             recent_snippets: Vec::new(),
+            mastery: std::collections::HashMap::new(),
             recent_skills: Vec::new(),
             dismissed_updates: Vec::new(),
             snippet_keepmine: Vec::new(),
@@ -3046,7 +3108,10 @@ impl<T: TerminalAdapter> Model<T> {
         let scope_providers = scope_provider_ids(&sources);
         self.setup.inputs = Some((report.clone(), sources));
         self.setup.runner = Some(crate::setup_flow::SetupRunner::new(report, scope_providers));
-        self.mount_modal(Id::Splash, Splash::new());
+        self.mount_modal(
+            Id::Splash,
+            Splash::new().with_overrides(self.action_key_overrides.clone()),
+        );
     }
 
     /// Pre-populate the cached setup inputs without launching the
@@ -3931,6 +3996,87 @@ impl<T: TerminalAdapter> Model<T> {
         self.recent_snippets = recent;
     }
 
+    /// Record one invocation of `action` through `via` for the mastery
+    /// ledger (#1502): bump the local per-channel count optimistically and
+    /// return the `Command::RecordAction` that persists it daemon-side. The
+    /// caller flushes the returned command with the action's own effects.
+    /// Keyed by the action's stable `ActionKind::name()` — generated
+    /// per-agent rows fold into their kind.
+    pub(crate) fn record_action_mastery(
+        &mut self,
+        action: &lazybox_tui_core::action::Action,
+        via: lazybox_ipc::ActionVia,
+    ) -> IpcCommand {
+        let action_id = action.kind().name().to_string();
+        *self
+            .mastery
+            .entry(action_id.clone())
+            .or_default()
+            .entry(via)
+            .or_insert(0) += 1;
+        IpcCommand::RecordAction { action_id, via }
+    }
+
+    /// Total times `action_id` (a stable `ActionKind::name()`) has been
+    /// invoked across every channel, per the local mastery ledger (#1502).
+    pub fn action_uses(&self, action_id: &str) -> u32 {
+        self.mastery
+            .get(action_id)
+            .map(|by_via| by_via.values().sum())
+            .unwrap_or(0)
+    }
+
+    /// Every action id the mastery ledger (#1502) records at least one
+    /// invocation of — the "shortcuts you've used" set the Keys screen
+    /// marks with a `✓`. A replayed all-zero entry doesn't count.
+    pub(crate) fn used_action_ids(&self) -> std::collections::HashSet<String> {
+        self.mastery
+            .iter()
+            .filter(|(_, by_via)| by_via.values().sum::<u32>() > 0)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Dispatch a catalog `action` invoked through `via`, recording it in
+    /// the mastery ledger (#1502) before delegating to
+    /// [`Self::dispatch_action`]. Every real user entry point (keyboard,
+    /// context menu, palette) goes through here; internal continuations
+    /// (e.g. a hopper action resumed after its project is assigned) call
+    /// `dispatch_action` directly so a single gesture is counted once.
+    pub(crate) fn dispatch_action_via(
+        &mut self,
+        action: &lazybox_tui_core::action::Action,
+        via: lazybox_ipc::ActionVia,
+    ) -> Vec<IpcCommand> {
+        let mut cmds = vec![self.record_action_mastery(action, via)];
+        cmds.extend(self.dispatch_action(action));
+        cmds
+    }
+
+    /// Seed the local mastery ledger from the daemon's persisted counts,
+    /// replayed in `Event::MasteryLedger` on connect (#1502). Merges by
+    /// taking the max of each `(action_id, via)` count rather than clearing
+    /// and replacing: counts are monotonic (`record_action` only ever
+    /// increments), so the daemon's total is normally ≥ the local view and
+    /// wins — but a dispatch may have bumped the local count optimistically
+    /// before its `RecordAction` committed daemon-side, and a clear-then-
+    /// replace would drop that in-flight `+1` until the next replay. Max
+    /// keeps it (and can never regress a real count, since none decrease).
+    pub(crate) fn seed_mastery_from_snapshot(
+        &mut self,
+        counts: Vec<(String, lazybox_ipc::ActionVia, u32)>,
+    ) {
+        for (action_id, via, count) in counts {
+            let entry = self
+                .mastery
+                .entry(action_id)
+                .or_default()
+                .entry(via)
+                .or_insert(0);
+            *entry = (*entry).max(count);
+        }
+    }
+
     /// Mount the read-only snippets browser (`]`, or the Settings
     /// palette). Lists the whole merged library — key, origin,
     /// description, body — so a user can discover what's available
@@ -4335,6 +4481,8 @@ impl<T: TerminalAdapter> Model<T> {
         overrides: std::collections::BTreeMap<String, String>,
     ) {
         self.action_key_overrides = overrides;
+        self.sidebar
+            .set_action_key_overrides(self.action_key_overrides.clone());
         self.rebuild_catalog();
     }
 
@@ -4386,6 +4534,10 @@ impl<T: TerminalAdapter> Model<T> {
             })
             .collect();
         self.sidebar.set_model_shorts(shorts);
+        // The badge marks a deviation from the agent's default tier, so
+        // hand the sidebar each agent's default label (#1502).
+        self.sidebar
+            .set_default_model_labels(default_model_labels(&models));
         self.agent_models = models;
         self.rebuild_catalog();
     }
@@ -6303,7 +6455,24 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Render the current frame.
+    /// Recompute every agent tab's live spend/headroom badge (#1490) from the
+    /// sidebar's usage tracker. The tracker (cost per session, quota per agent)
+    /// lives on the sidebar; the terminal stack owns the tabs — so the badge is
+    /// resolved here, joining the two disjoint field borrows.
+    fn refresh_terminal_usage_badges(&mut self) {
+        let sidebar = &self.sidebar;
+        self.terminals
+            .refresh_usage_badges(|session_key, agent_id| {
+                sidebar.terminal_usage_badge(session_key.as_str(), agent_id)
+            });
+    }
+
     pub fn view(&mut self) {
+        // Refresh the agent tabs' live spend/headroom badges (#1490) from the
+        // usage tracker before drawing, so the figure tracks live usage and a
+        // plan window drops the instant its reset passes. Done here (not in the
+        // draw closure) because the closure holds `&mut self.terminals`.
+        self.refresh_terminal_usage_badges();
         // Pull state out before the closure so the borrow checker is
         // happy — `terminal.draw` takes `&mut self.terminal` while we
         // also need `&mut self.app` etc. inside.
@@ -6355,8 +6524,25 @@ impl<T: TerminalAdapter> Model<T> {
                 Some(box_status)
             } else if let Some(bg) = self.status.bg_poll.as_ref() {
                 Some((bg.spinner_glyph(), bg.label()))
+            } else if let Some(steady) = self.status.remote_status_steady() {
+                Some(steady)
             } else {
-                self.status.remote_status_steady()
+                // Keep-awake is daemon status, not inbox attention, so it
+                // sits in the footer's status slot as the lowest-priority
+                // fallback instead of crowding the sidebar header (#1502).
+                // On battery the OS honours neither system sleep nor a
+                // closed lid, so say what the assertion actually protects
+                // (#1485).
+                self.sidebar.keep_awake_status().map(|on_battery| {
+                    (
+                        "☼",
+                        if on_battery {
+                            "awake (AC only)".to_string()
+                        } else {
+                            "awake".to_string()
+                        },
+                    )
+                })
             };
         // Resolve the focused pane's CONTEXTUAL bindings for the
         // footer hint bar. Contextual = state-aware short list
@@ -6364,27 +6550,7 @@ impl<T: TerminalAdapter> Model<T> {
         // CI is failing, etc.) so the user always sees what's
         // actionable right now, not a generic alphabet. The full
         // keymap stays in `?` help.
-        let keymap: Vec<crate::pane::Binding> = match self.focus {
-            PaneFocus::Sidebar => {
-                let mut bindings = self.sidebar.contextual_bindings(&self.catalog, self.remote);
-                // The `]]` leader also arms from the sidebar (#871),
-                // addressing the cursor workspace's agent. It's not a
-                // catalog action, so append its gateway hint here — the
-                // popup carries the individual `]]s`/`]]l`/… commands.
-                if self.sidebar.selected_workspace().is_some() {
-                    let esc = self.ui_defaults.terminal_escape_char;
-                    bindings.push(crate::pane::Binding {
-                        keys: std::borrow::Cow::Owned(format!("{esc}{esc}")),
-                        label: std::borrow::Cow::Borrowed("send"),
-                    });
-                }
-                bindings
-            }
-            PaneFocus::Right => self.right.contextual_bindings(&self.action_key_overrides),
-            PaneFocus::Terminals => self
-                .terminals
-                .contextual_bindings(self.ui_defaults.terminal_escape_char),
-        };
+        let keymap: Vec<crate::pane::Binding> = self.focused_pane_bindings();
         // Universal hints appended to panes where their shortcuts are
         // available. A live terminal owns its keys, so its command
         // leader above is the only steady-state gateway hint.
@@ -6422,13 +6588,6 @@ impl<T: TerminalAdapter> Model<T> {
                 .map(|def| make_hint(def))
                 .collect()
         };
-        // Effective help key for the overflow cell's "press <key> for
-        // all" label — resolved here so a remap of `OpenHelp` is honored
-        // (#805).
-        let help_key = lazybox_tui_core::action::ActionDef::for_kind(
-            lazybox_tui_core::action::ActionKind::OpenHelp,
-        )
-        .effective_keys_display(&self.action_key_overrides);
         // While a sticky error is pinned, advertise how to inspect its
         // full text and dismiss it right in the hint bar (#453). Inserted
         // just before `quit` so #100's quit guarantee survives narrow
@@ -6612,7 +6771,8 @@ impl<T: TerminalAdapter> Model<T> {
                 Vec::new()
             };
         let mut captured_area = Rect::default();
-        let mut footer_overflow: Option<Rect> = None;
+        let mut footer_overflow: Option<crate::realm::components::footer::FooterOverflow> = None;
+        let footer_more_rows = self.footer_more_popup.clone();
         // The coach rail (#1460) is carved out of the pane area inside
         // the draw closure so it never occludes a pane. Resolve its
         // active/spotlight state out here (immutable borrow) so the
@@ -6778,9 +6938,9 @@ impl<T: TerminalAdapter> Model<T> {
             }
 
             // Footer: keymap + globals + polling status + notice. The
-            // returned rect (if any) is the `… +N ? all` overflow cell,
-            // stashed so a click on it opens `?` — the hidden hints
-            // (#805).
+            // returned overflow (if any) is the `… +N more` cell + the
+            // hints it hides, stashed so a click on it pops exactly those
+            // (#805, #1502).
             footer_overflow = crate::realm::components::footer::render(
                 f,
                 footer_area,
@@ -6788,10 +6948,14 @@ impl<T: TerminalAdapter> Model<T> {
                 &keymap,
                 &globals,
                 &evergreen,
-                help_key.as_ref(),
                 polling_status.as_ref().map(|(s, l)| (*s, l.as_str())),
                 notice.as_ref(),
             );
+            // The `+N more` popup (#1502): the hidden footer hints, in
+            // which-key chrome, until the next key or click.
+            if let Some(rows) = footer_more_rows.as_deref() {
+                crate::realm::components::which_key::render_more(f, area, rows);
+            }
 
             // Which-key popup for an armed leader chord (#126, #102).
             // Drawn above the footer but below any modal — in practice
@@ -6864,7 +7028,7 @@ impl<T: TerminalAdapter> Model<T> {
         self.last_render_build = render_build;
         self.last_render_flush = render_flush;
         self.layout.last_area = captured_area;
-        self.footer_overflow_rect = footer_overflow;
+        self.footer_overflow = footer_overflow;
         // Resize commands are queued by the terminal stack's render
         // path each time a slot's rect changes. Drain + ship them so
         // libghostty's PTY learns the new size — without this,

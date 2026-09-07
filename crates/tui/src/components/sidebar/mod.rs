@@ -318,6 +318,12 @@ pub struct Sidebar {
     /// so two agents sharing a tier label keep distinct shorts. Refreshed
     /// whenever the model menus reload (`set_model_shorts`).
     model_shorts: HashMap<(char, String), String>,
+    /// `badge_letter → label` of each agent's DEFAULT model tier
+    /// (`agents.<id>.models.default`, else the built-in default). A row
+    /// whose single agent runs its default tier shows no `◆` badge — the
+    /// badge marks a deliberate deviation, so `◆Op` on thirty rows stops
+    /// being wallpaper (#1502). Fed by `set_default_model_labels`.
+    default_model_labels: HashMap<char, String>,
     /// Built-in agent registry, consulted so an agent's display badge
     /// (`C` / `X` / `U`) comes from the agent itself rather than a
     /// hardcoded match here — a new agent declares its own letter and
@@ -358,6 +364,11 @@ pub struct Sidebar {
     /// `~/.lazybox/config.yaml::display.ascii_glyphs` — the escape
     /// hatch for fonts that don't render the glyphs as a single cell.
     ascii_glyphs: bool,
+    /// `ui.action_keys` overrides, so surfaces the sidebar paints
+    /// without the runtime catalog in hand (the empty-inbox doctor)
+    /// still show the user's EFFECTIVE keys rather than defaults
+    /// (#1502).
+    action_key_overrides: std::collections::BTreeMap<String, String>,
     /// Notifications queued in response to "any agent → Asking"
     /// transitions. The library NEVER fires an OS-level
     /// `osascript` / `notify-send` itself — that would break tests
@@ -630,6 +641,7 @@ impl Sidebar {
             running_terminals: HashMap::new(),
             terminal_models: HashMap::new(),
             model_shorts: HashMap::new(),
+            default_model_labels: HashMap::new(),
             agent_registry: lazybox_tui_core::agents::registry(),
             attention: lazybox_config::AttentionConfig::default(),
             inbox_health: InboxHealth::default(),
@@ -638,6 +650,7 @@ impl Sidebar {
             conventions: lazybox_core::Conventions::default(),
             show_inactive_in_inbox: false,
             ascii_glyphs: false,
+            action_key_overrides: std::collections::BTreeMap::new(),
             pending_notifications: Vec::new(),
             pending_asking_notices: Vec::new(),
             agents: std::collections::HashMap::new(),
@@ -697,6 +710,13 @@ impl Sidebar {
         self.keep_awake_on_battery = on_battery;
     }
 
+    /// The daemon's keep-awake state for the footer's status slot
+    /// (#1502): `Some(on_battery)` while the inhibitor is held, `None`
+    /// otherwise.
+    pub fn keep_awake_status(&self) -> Option<bool> {
+        self.keep_awake_active.then_some(self.keep_awake_on_battery)
+    }
+
     /// Record whether `ui.auto_wait_on_limit` is on. When set, the rising-edge
     /// rate-limit alert (desktop notification + footer notice) is suppressed:
     /// the daemon parks the block to the calm `AwaitingReset`, so a handled
@@ -716,6 +736,20 @@ impl Sidebar {
     /// menu whenever the menus reload (#1068).
     pub fn set_model_shorts(&mut self, shorts: HashMap<(char, String), String>) {
         self.model_shorts = shorts;
+    }
+
+    /// Replace the `badge_letter → default tier label` map that hides the
+    /// model badge on rows running their agent's default tier (#1502).
+    pub fn set_default_model_labels(&mut self, defaults: HashMap<char, String>) {
+        self.default_model_labels = defaults;
+    }
+
+    /// Whether `model` is `letter`'s default tier — the badge is for
+    /// deviations, so a default-tier run shows none (#1502).
+    fn is_default_model(&self, letter: char, model: &str) -> bool {
+        self.default_model_labels
+            .get(&letter)
+            .is_some_and(|default| default == model)
     }
 
     /// Record whether `ui.usage_summary` is on — gates the always-visible
@@ -814,6 +848,34 @@ impl Sidebar {
         self.usage.note_quota(agent_id, quota);
     }
 
+    /// The live spend/headroom badge for an agent terminal (#1490): the
+    /// binding plan-quota window's remaining headroom when one is known — the
+    /// number that changes behaviour mid-task on a subscription — else the
+    /// session's metered dollar cost, the real signal for API-key users.
+    /// `None` when neither is known, so the tab shows nothing rather than a
+    /// misleading `$0.00`.
+    pub fn terminal_usage_badge(
+        &self,
+        session_key: &str,
+        agent_id: &str,
+    ) -> Option<crate::components::terminal_stack::UsageBadge> {
+        use crate::components::terminal_stack::UsageBadge;
+        let now_unix = self.now().timestamp();
+        // Plan headroom and this session's metered cost are independent
+        // signals — a subscription user still wants to know what the
+        // workspace cost — so both render when both are known rather than
+        // headroom preempting dollars.
+        let headroom = self
+            .usage
+            .quota_for(agent_id)
+            .and_then(|quota| lazybox_tui_core::usage::quota_headroom(&quota, now_unix))
+            .map(|(label, left)| format!("{label} {left}% left"));
+        let cost_micros = self.usage.cost_micros_for_session(session_key);
+        let cost =
+            (cost_micros > 0).then(|| lazybox_tui_core::usage::format_cost_micros(cost_micros));
+        (headroom.is_some() || cost.is_some()).then_some(UsageBadge { headroom, cost })
+    }
+
     /// Attribute a usage-limit reset hint to the terminal's agent, so the
     /// summary can show ` · resets 3pm` while that provider is limited
     /// (`AgentUsageLimit`). A hint for a terminal we don't track is
@@ -832,15 +894,19 @@ impl Sidebar {
         }
     }
 
-    /// True while any of `agent_id`'s live terminals sits in the
-    /// `LimitReached` block — the window in which its stored reset hint is
-    /// still meaningful.
+    /// True while any of `agent_id`'s live terminals sits in the usage-limit
+    /// block — the alerting `LimitReached` or its calm, parked sibling
+    /// `AwaitingReset` (auto-Wait pressed, or Claude's own auto-continue
+    /// banner) — the window in which its stored reset hint is still
+    /// meaningful.
     fn agent_is_limited(&self, agent_id: &str) -> bool {
         self.agent_terminal_states
             .iter()
             .any(|(terminal_id, (_, state))| {
-                *state == lazybox_ipc::AgentState::LimitReached
-                    && self.terminal_agent_id(*terminal_id).as_deref() == Some(agent_id)
+                matches!(
+                    state,
+                    lazybox_ipc::AgentState::LimitReached | lazybox_ipc::AgentState::AwaitingReset
+                ) && self.terminal_agent_id(*terminal_id).as_deref() == Some(agent_id)
             })
     }
 
@@ -1238,6 +1304,23 @@ impl Sidebar {
 
     /// Live-update the default agent (Settings → "Change default
     /// agent"). Mirrors `with_default_agent` for the in-session path.
+    /// Install the user's `ui.action_keys` overrides so the doctor
+    /// panel's hints render effective keys (#1502).
+    pub fn set_action_key_overrides(
+        &mut self,
+        overrides: std::collections::BTreeMap<String, String>,
+    ) {
+        self.action_key_overrides = overrides;
+    }
+
+    /// The compact effective key for `kind` (`⇧W`, `x p`, `,`), for
+    /// the doctor panel's hint rows (#1502).
+    pub(crate) fn key_hint(&self, kind: lazybox_tui_core::action::ActionKind) -> String {
+        let keys = lazybox_tui_core::action::ActionDef::for_kind(kind)
+            .effective_keys_display(&self.action_key_overrides);
+        crate::realm::components::footer::compact_key(&keys).into_owned()
+    }
+
     pub fn set_default_agent(&mut self, agent: impl Into<String>) {
         self.default_agent = agent.into();
     }
@@ -1972,6 +2055,90 @@ impl Sidebar {
         self.focus_workspace_key(&target)
     }
 
+    /// Move the cursor onto the next workspace with unread activity,
+    /// starting AFTER the current row and wrapping (`Shift-N`, #1502) —
+    /// the unread analog of [`Self::focus_next_asking_workspace`].
+    pub fn focus_next_unread_workspace(&mut self) -> bool {
+        let keys_order = self.visible_workspace_keys();
+        if keys_order.is_empty() {
+            return false;
+        }
+        let start = self
+            .selected_session_key()
+            .and_then(|cur| keys_order.iter().position(|k| k == cur))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let target = (0..keys_order.len())
+            .map(|i| &keys_order[(start + i) % keys_order.len()])
+            .find(|k| {
+                self.workspaces
+                    .get(*k)
+                    .is_some_and(|w| w.unread_count() > 0)
+            })
+            .cloned();
+        match target {
+            Some(key) => self.focus_workspace_key(&key),
+            None => false,
+        }
+    }
+
+    /// Move the cursor a page (`PgUp` / `PgDn`) or half a page
+    /// (`Ctrl-u` / `Ctrl-d`) of visible rows, clamped at the ends
+    /// (#1502). The page is the last rendered viewport height; before
+    /// the first frame it falls back to a single step.
+    pub fn move_cursor_page(&mut self, forward: bool, half: bool) {
+        let page = self.last_viewport.max(1);
+        let step = if half { (page / 2).max(1) } else { page } as isize;
+        self.move_cursor_by(if forward { step } else { -step });
+    }
+
+    /// `Home` / `End`: the first / last visible row (#1502).
+    pub fn move_cursor_to_edge(&mut self, end: bool) {
+        if self.visible.is_empty() {
+            return;
+        }
+        let idx = if end { self.visible.len() - 1 } else { 0 };
+        self.set_cursor(idx);
+    }
+
+    /// `{` / `}`: the previous / next group header (Space, repo,
+    /// Focused, Hopper — the tiers a long inbox is crossed by), clamped
+    /// at the ends (#1502). Returns whether the cursor moved.
+    pub fn move_cursor_to_group(&mut self, forward: bool) -> bool {
+        let is_group_header = |row: &VisibleRow| {
+            matches!(
+                row,
+                VisibleRow::RepoHeader(_)
+                    | VisibleRow::SpaceHeader(_)
+                    | VisibleRow::FocusedHeader
+                    | VisibleRow::HopperHeader
+            )
+        };
+        let target = if forward {
+            self.visible
+                .iter()
+                .enumerate()
+                .skip(self.cursor + 1)
+                .find(|(_, row)| is_group_header(row))
+                .map(|(i, _)| i)
+        } else {
+            self.visible
+                .iter()
+                .enumerate()
+                .take(self.cursor)
+                .rev()
+                .find(|(_, row)| is_group_header(row))
+                .map(|(i, _)| i)
+        };
+        match target {
+            Some(idx) => {
+                self.set_cursor(idx);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Move the cursor onto the next workspace whose agent is blocked on
     /// a usage / rate limit, starting AFTER the current row and wrapping
     /// (`Shift-L`, #847) — the rate-limited analog of
@@ -2003,6 +2170,26 @@ impl Sidebar {
             .agent_terminal_states
             .iter()
             .filter(|(_, (_, state))| *state == lazybox_ipc::AgentState::LimitReached)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_by_key(|id| id.0);
+        ids
+    }
+
+    /// Every agent terminal in the usage-limit block, alerting
+    /// (`LimitReached`) or parked (`AwaitingReset`) — the set a restart
+    /// with fresh credentials (`a R`) applies to. Sorted like
+    /// [`Self::limit_reached_terminals`].
+    pub fn limited_terminals(&self) -> Vec<TerminalId> {
+        let mut ids: Vec<TerminalId> = self
+            .agent_terminal_states
+            .iter()
+            .filter(|(_, (_, state))| {
+                matches!(
+                    state,
+                    lazybox_ipc::AgentState::LimitReached | lazybox_ipc::AgentState::AwaitingReset
+                )
+            })
             .map(|(id, _)| *id)
             .collect();
         ids.sort_by_key(|id| id.0);
@@ -2886,8 +3073,11 @@ impl Sidebar {
     /// extend the query, `Backspace` trims it, `Enter` keeps the query
     /// applied while closing the editor, `Esc` clears + closes. Each
     /// query mutation rebuilds the visible list so filtering is live.
-    pub fn handle_search_key(&mut self, key: KeyEvent) {
+    /// Returns `true` when `Enter` committed a non-empty query — the
+    /// caller then opens the top match (#1502).
+    pub fn handle_search_key(&mut self, key: KeyEvent) -> bool {
         let mut query_changed = false;
+        let mut open_match = false;
         match key.code {
             KeyCode::Esc => {
                 if self.search.is_some() {
@@ -2904,6 +3094,7 @@ impl Sidebar {
                     query_changed = true;
                 } else if let Some(s) = self.search.as_mut() {
                     s.editing = false;
+                    open_match = true;
                 }
             }
             KeyCode::Backspace => {
@@ -2930,6 +3121,7 @@ impl Sidebar {
             self.scroll_detached = false;
             self.recompute_visible();
         }
+        open_match
     }
 
     /// Look up the display label of a project by key. Used by the
@@ -3130,7 +3322,9 @@ impl Sidebar {
         per_letter
             .into_iter()
             .filter_map(|(letter, (count, model))| match model {
-                Some(model) if count == 1 => Some((letter, model)),
+                Some(model) if count == 1 && !self.is_default_model(letter, &model) => {
+                    Some((letter, model))
+                }
                 _ => None,
             })
             .collect()
@@ -3193,7 +3387,9 @@ impl Sidebar {
                 let labels = per_letter
                     .into_iter()
                     .filter_map(|(letter, (count, model))| match model {
-                        Some(model) if count == 1 => Some((letter, model)),
+                        Some(model) if count == 1 && !self.is_default_model(letter, &model) => {
+                            Some((letter, model))
+                        }
                         _ => None,
                     })
                     .collect();

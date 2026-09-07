@@ -72,6 +72,12 @@ workspace you already run — **not** *"lazybox became an orchestrator."* The
 control surface stays the thesis; a coordinator session is garnish on top of
 it.
 
+The in-thesis version of that idea is scoped in
+[`orchestration-scoping.md`](orchestration-scoping.md) (epic #1517): a
+cross-repo **epic** with a dependency graph read from the tracker, workspace
+**roles**, and a **live status derived from daemon state** — the map and the
+memory, with the human still deciding what runs and what lands.
+
 ## Why this is defensible
 
 - **Already shipped.** This isn't a roadmap item — it's what lazybox is today.

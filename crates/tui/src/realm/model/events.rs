@@ -489,6 +489,12 @@ impl<T: TerminalAdapter> Model<T> {
             IpcEvent::SessionCosts { costs } => {
                 self.sidebar.hydrate_session_costs(costs);
             }
+            // Durable per-action usage counts replayed on connect (#1502):
+            // seed the local mastery ledger so onboarding chrome reflects
+            // what the user has already learned instead of resetting.
+            IpcEvent::MasteryLedger { counts } => {
+                self.seed_mastery_from_snapshot(counts.clone());
+            }
             IpcEvent::AgentProviderQuota {
                 agent_id,
                 session_key,
@@ -1297,6 +1303,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::SessionCosts { .. }
                 | IpcEvent::RepoMergeHistory { .. }
                 | IpcEvent::KeepAwakeStatus { .. }
+                | IpcEvent::MasteryLedger { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -1445,7 +1452,27 @@ impl<T: TerminalAdapter> Model<T> {
             if self.deferred_focus_project.as_deref() == Some(project.name.as_str()) {
                 self.deferred_focus_project = None;
                 let project_key = project.key;
-                if self.sidebar.focus_project_header(&project_key) {
+                // Only the `scratch` project's upsert may finish a
+                // deferred chat. `deferred_chat` is process-lifetime
+                // state cleared solely here, so a `CreateProject
+                // { scratch }` whose store write fails (no
+                // `ProjectUpserted` emitted — see `create_local_project`)
+                // would otherwise leave the flag stuck `true` and let it
+                // ride the NEXT `x p` upsert, silently spawning a chat
+                // workspace in the wrong project instead of the name
+                // input. Gating the take on the scratch key means a
+                // leaked flag can only ever fire for a scratch upsert,
+                // which is exactly the chat flow (#1502).
+                let is_scratch =
+                    project_key == lazybox_core::ProjectKey::local(Self::SCRATCH_PROJECT);
+                if is_scratch && std::mem::take(&mut self.deferred_chat) {
+                    // Start sheet → Chat (#1502): the scratch project
+                    // just landed; create the chat workspace straight
+                    // away, no name to type.
+                    let name = self.next_chat_name(&project_key);
+                    let cmds = self.create_workspace_cmds(project_key, name);
+                    self.dispatch_cmds(cmds);
+                } else if self.sidebar.focus_project_header(&project_key) {
                     self.mount_new_workspace_input(project_key);
                 }
             }
@@ -2172,10 +2199,11 @@ impl<T: TerminalAdapter> Model<T> {
             remaining,
             limit,
             reset_at,
+            self_throttle,
         } = &event
         {
             self.status
-                .note_github_rate_limit_wait(*remaining, *limit, *reset_at);
+                .note_github_rate_limit_wait(*remaining, *limit, *reset_at, *self_throttle);
             self.pending_refresh_ack = false;
             self.redraw = true;
             false
@@ -2205,10 +2233,11 @@ impl<T: TerminalAdapter> Model<T> {
                 remaining,
                 limit,
                 reset_at,
+                self_throttle,
             } => {
                 self.status
                     .sync
-                    .note_rate_limited(*remaining, *limit, *reset_at);
+                    .note_rate_limited(*remaining, *limit, *reset_at, *self_throttle);
             }
             IpcEvent::ProviderError {
                 source,
@@ -2323,6 +2352,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::GithubDiscoveryBehind { .. }
             | IpcEvent::RepoMergeHistory { .. }
             | IpcEvent::KeepAwakeStatus { .. }
+            | IpcEvent::MasteryLedger { .. }
             | IpcEvent::ResourcePosture(..) => {}
         }
         // Keep the empty-inbox doctor's sync facts (polled-ok /
@@ -2657,6 +2687,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::SessionCosts { .. }
                 | IpcEvent::RepoMergeHistory { .. }
                 | IpcEvent::KeepAwakeStatus { .. }
+                | IpcEvent::MasteryLedger { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -2888,13 +2919,14 @@ impl<T: TerminalAdapter> Model<T> {
                 .any(|id| *id != Id::WorktreeProgress);
             if requested_here && !interactive_modal_up && !self.sidebar.search_editing() {
                 // The jump is involuntary, and `Esc` belongs to the PTY
-                // once we land — so a live multi-select would be
-                // stranded: its `✓` marks stay visible in the sidebar
-                // with no way to clear them from where the user now is
-                // (#1482; #1449 made the selection outlive the bulk action that
-                // spawned these agents). An involuntary move takes the
-                // selection with it; a voluntary `Tab` into the terminal
-                // does not, because the user can Tab back.
+                // once we land — so a live multi-select would be stranded:
+                // its `✓` marks stay visible in the sidebar with no way to
+                // clear them from where the user now is (#1482). A bulk
+                // action now consumes its own selection (#1498), so this is
+                // normally a no-op; it stays as the backstop for any spawn
+                // that pulls focus while marks are live. An involuntary move
+                // takes the selection with it; a voluntary `Tab` into the
+                // terminal does not, because the user can Tab back.
                 self.sidebar.clear_broadcast_selection();
                 self.set_focus(PaneFocus::Terminals);
             }

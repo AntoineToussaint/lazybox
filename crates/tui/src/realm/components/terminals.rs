@@ -54,9 +54,20 @@ impl Terminals {
     }
 
     /// `]]t` — flip the new-terminal layout preference, returning the
-    /// new value so the caller can persist + flash it.
+    /// new value so the caller can persist + flash it. Used only when the
+    /// pane is empty; otherwise `]]t` rearranges what's open via
+    /// [`toggle_session_layout`](Self::toggle_session_layout).
     pub fn toggle_terminal_new_layout(&mut self) -> lazybox_config::NewTerminalLayout {
         self.inner.toggle_terminal_new_layout()
+    }
+
+    /// See `TerminalStack::toggle_session_layout` — convert the active
+    /// session between tabs and tiles in place (#1508).
+    pub fn toggle_session_layout(
+        &mut self,
+        cmds: &mut Vec<IpcCommand>,
+    ) -> Option<lazybox_config::NewTerminalLayout> {
+        self.inner.toggle_session_layout(cmds)
     }
 
     /// Drain queued IPC commands (writes / resizes / etc).
@@ -212,6 +223,15 @@ impl Terminals {
     /// the daemon's authoritative replay replaces the client grid.
     pub fn mark_visible_desynced(&mut self) {
         self.inner.mark_visible_desynced();
+    }
+
+    /// Recompute each agent tab's live spend/headroom badge (#1490) from a
+    /// lookup over the usage tracker. Called once per frame before render.
+    pub fn refresh_usage_badges(
+        &mut self,
+        lookup: impl Fn(&SessionKey, &str) -> Option<crate::components::terminal_stack::UsageBadge>,
+    ) {
+        self.inner.refresh_usage_badges(lookup);
     }
 
     /// Direct render entry point.

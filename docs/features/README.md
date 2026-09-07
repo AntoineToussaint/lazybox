@@ -46,7 +46,7 @@ Every feature is documented as a section with the same shape:
 | [Inbox & sync](inbox-and-sync.md) | The reactive inbox, polling loop, refresh, sync status, filters, sort, read/unread, snooze |
 | [Providers](providers.md) | `TaskProvider`/`ScopeSource` traits, GitHub, Linear, Slack mirror |
 | [Workspaces & worktrees](workspaces-and-worktrees.md) | Workspace model, worktree manager, new/merge/archive/adopt/collapse, editors, per-repo overrides, persistence |
-| [Terminals & agents](terminals-and-agents.md) | Embedded terminal, agent spawn, Work command, autonomous sessions, state detection, structured runtime, LLM gateway, snippets |
+| [Terminals & agents](terminals-and-agents.md) | Embedded terminal, agent spawn, Work command, autonomous sessions, state detection, structured runtime, LLM gateway, snippets, agent handoff, cross-agent MCP bus |
 | [TUI & UX](tui-and-ux.md) | Three-pane layout, key/chord system, help, settings wizard, activity feed, reply, mouse, modals, notifications |
 | [Daemon, deployment & build](daemon-and-deployment.md) | Client/daemon split, standalone daemon, remote connect, JSON API, run modes, auth chain, config reference, build |
 
@@ -106,6 +106,7 @@ Status is best-effort as of this catalog's first pass; correct it as you audit.
 | [LLM gateway](terminals-and-agents.md#llm-gateway) | shipped | `server`, `agents`, `config` |
 | [Snippet workflows](terminals-and-agents.md#snippet-workflows) | stable | `config`, `tui` |
 | [Agent-to-agent handoff](terminals-and-agents.md#agent-to-agent-handoff-x-s-send-to-session) | stable | `tui-core`, `tui`, `server` |
+| [Cross-agent coordination (MCP bus)](terminals-and-agents.md#cross-agent-coordination-mcp-bus) | shipped | `server`, `agents` |
 | [Terminal interaction model](terminals-and-agents.md#terminal-interaction-model) | stable | `tui` |
 
 ### TUI & UX
@@ -115,7 +116,7 @@ Status is best-effort as of this catalog's first pass; correct it as you audit.
 | [Key-binding system & chords](tui-and-ux.md#key-binding-system--chords) | stable | `tui-core`, `tui` |
 | [Ask Lazybox & shortcut index](tui-and-ux.md#ask-lazybox--shortcut-index) | stable | `tui` |
 | [Settings palette & setup wizard](tui-and-ux.md#settings-palette--setup-wizard) | stable | `tui`, `config` |
-| [Guided tour](tui-and-ux.md#guided-tour) | beta | `tui` |
+| [Onboarding coach](tui-and-ux.md#onboarding-coach) | stable | `tui` |
 | [Activity feed](tui-and-ux.md#activity-feed) | stable | `tui` |
 | [Reply](tui-and-ux.md#reply) | stable | `tui`, providers |
 | [Mouse handling](tui-and-ux.md#mouse-handling) | stable | `tui` |

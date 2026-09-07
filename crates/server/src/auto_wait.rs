@@ -164,7 +164,7 @@ async fn auth_pending(config: ServerConfig, terminal_id: TerminalId) -> bool {
 /// `ui.credit_recovery_prompt` (blank falls back to its default via
 /// `resolved_ui`); an unreadable config falls back to the same default
 /// text so the resume never silently pastes nothing.
-fn resume_prompt() -> String {
+pub(crate) fn resume_prompt() -> String {
     lazybox_config::Config::load()
         .map(|c| c.resolved_ui().credit_recovery_prompt)
         .unwrap_or_else(|_| "Continue the work you were doing.".to_string())

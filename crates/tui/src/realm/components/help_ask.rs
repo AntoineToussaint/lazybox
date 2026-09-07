@@ -119,6 +119,11 @@ pub struct HelpAsk {
     /// the bottom so a streaming answer auto-follows.
     scroll_up: usize,
     spinner_idx: usize,
+    /// The focused pane's name + contextual bindings at mount, listed
+    /// on the empty prompt so `?` shows every footer hint — including
+    /// the ones the bar could not fit (#1502). `None` in the bare
+    /// constructor (tests, callers without a pane).
+    pane_keys: Option<(&'static str, Vec<crate::pane::Binding>)>,
 }
 
 impl HelpAsk {
@@ -144,7 +149,15 @@ impl HelpAsk {
             matches: Vec::new(),
             scroll_up: 0,
             spinner_idx: 0,
+            pane_keys: None,
         }
+    }
+
+    /// Attach the focused pane's contextual bindings so the empty
+    /// prompt lists them (#1502).
+    pub fn with_pane_keys(mut self, pane: &'static str, keys: Vec<crate::pane::Binding>) -> Self {
+        self.pane_keys = Some((pane, keys));
+        self
     }
 
     fn convo(&self) -> MutexGuard<'_, HelpConvo> {
@@ -273,21 +286,40 @@ impl HelpAsk {
         let convo = self.convo();
         let mut out: Vec<Line<'static>> = Vec::new();
         if convo.turns.is_empty() && convo.notice.is_none() {
+            // The focused pane's keys first (#1502): every footer hint,
+            // including the ones a narrow bar elided, so `?` is the
+            // keyboard path to "what can I press here".
+            if let Some((pane, keys)) = &self.pane_keys
+                && !keys.is_empty()
+            {
+                out.push(Line::from(Span::styled(
+                    format!("  Keys in the {pane}"),
+                    Style::default().fg(theme.text_strong).bold(),
+                )));
+                const KEY_PAD: usize = 12;
+                for b in keys {
+                    let mut k = b.keys.to_string();
+                    let n = k.chars().count();
+                    if n < KEY_PAD {
+                        k.push_str(&" ".repeat(KEY_PAD - n));
+                    }
+                    out.push(Line::from(vec![
+                        Span::styled(format!("   {k}"), Style::default().fg(theme.accent).bold()),
+                        Span::styled(
+                            format!(" {}", b.label),
+                            Style::default().fg(theme.text_strong),
+                        ),
+                    ]));
+                }
+                out.push(Line::default());
+            }
             out.push(Line::from(Span::styled(
-                "  Ask about workflows, shortcuts, agents, providers—anything in lazybox.",
-                Style::default().fg(theme.text_strong).bold(),
-            )));
-            out.push(Line::from(Span::styled(
-                "  Typing searches your live keymap instantly; Enter asks in plain language.",
+                "  Type to search every key · Enter asks in plain language · ? for the full index",
                 Style::default().fg(theme.text_dim),
             )));
             out.push(Line::default());
             out.push(Line::from(Span::styled(
                 "  Try “how do I send one prompt to several workspaces?”",
-                Style::default().fg(theme.text_dim).italic(),
-            )));
-            out.push(Line::from(Span::styled(
-                "      “what can I do while a terminal is focused?”",
                 Style::default().fg(theme.text_dim).italic(),
             )));
             out.push(Line::from(Span::styled(
@@ -661,6 +693,58 @@ mod tests {
         assert!(c.on_key(&key(Key::Enter)).is_none());
         let _ = c.on_key(&ke(' '));
         assert!(c.on_key(&key(Key::Enter)).is_none());
+    }
+
+    /// The empty prompt lists the focused pane's contextual keys —
+    /// every footer hint, including ones the bar elided — so `?` is
+    /// the keyboard path to the hidden hints (#1502).
+    #[test]
+    fn empty_prompt_lists_the_pane_keys() {
+        use std::borrow::Cow;
+        let keys = vec![
+            crate::pane::Binding {
+                keys: Cow::Borrowed("w w"),
+                label: Cow::Borrowed("work on this"),
+            },
+            crate::pane::Binding {
+                keys: Cow::Borrowed("x n"),
+                label: Cow::Borrowed("new workspace"),
+            },
+        ];
+        let c = component().with_pane_keys("sidebar", keys);
+        let text: Vec<String> = c
+            .body_lines(80)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            text.iter().any(|l| l.contains("Keys in the sidebar")),
+            "pane heading missing: {text:?}"
+        );
+        for (k, label) in [("w w", "work on this"), ("x n", "new workspace")] {
+            assert!(
+                text.iter().any(|l| l.contains(k) && l.contains(label)),
+                "{k} {label} missing: {text:?}"
+            );
+        }
+        // Without pane keys the prompt still explains itself.
+        let bare: Vec<String> = component()
+            .body_lines(80)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(!bare.iter().any(|l| l.contains("Keys in the")));
+        assert!(bare.iter().any(|l| l.contains("Type to search")));
     }
 
     #[test]

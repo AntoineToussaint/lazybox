@@ -74,7 +74,7 @@ fn fmt_cost_micros(micros: i64) -> String {
 }
 
 /// Style + width-gate the always-visible "today" stats strip (#1344): a
-/// terse `today  3 sessions · 4 merged · $2.14` of the persisted daily
+/// terse `3 sessions · 4 merged · $2.14` of the persisted daily
 /// rollup. Like [`usage_line_spans`], whole groups drop rather than clip
 /// when the sidebar is narrow — priority high→low is sessions, merged,
 /// cost, so a tight header keeps the headline accomplishment count and
@@ -87,7 +87,10 @@ fn today_line_spans(
 ) -> Vec<Span<'static>> {
     let dim = Style::default().fg(theme.text_dim);
     let figure = Style::default().add_modifier(Modifier::BOLD);
-    let groups: [Vec<Span<'static>>; 3] = [
+    // No `today` heading and no `$0.00` (#1502): the strip rides the
+    // chip row now, so it has to earn every cell — the day is implied
+    // and a zero cost is noise.
+    let mut groups: Vec<Vec<Span<'static>>> = vec![
         vec![
             Span::styled(stats.sessions.to_string(), figure),
             Span::styled(" sessions", dim),
@@ -96,15 +99,19 @@ fn today_line_spans(
             Span::styled(stats.merged.to_string(), figure),
             Span::styled(" merged", dim),
         ],
-        vec![Span::styled(fmt_cost_micros(stats.cost_micros), figure)],
     ];
-    let mut out: Vec<Span<'static>> = vec![Span::styled("today", dim)];
-    let mut used = spans_visual_width(&out);
+    if stats.cost_micros > 0 {
+        groups.push(vec![Span::styled(
+            fmt_cost_micros(stats.cost_micros),
+            figure,
+        )]);
+    }
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut used = 0usize;
     let mut any = false;
     for group in groups {
-        // Two spaces after the label so it reads as a heading; a dim
-        // ` · ` between groups.
-        let sep = if any { 3 } else { 2 };
+        // A dim ` · ` between groups.
+        let sep = if any { 3 } else { 0 };
         let group_width = spans_visual_width(&group);
         // The groups are priority-ordered, so stop at the first that
         // doesn't fit rather than skipping it for a narrower lower-priority
@@ -113,11 +120,9 @@ fn today_line_spans(
         if used + sep + group_width > inner_width {
             break;
         }
-        out.push(if any {
-            Span::styled(" · ", dim)
-        } else {
-            Span::raw("  ")
-        });
+        if any {
+            out.push(Span::styled(" · ", dim));
+        }
         out.extend(group);
         used += sep + group_width;
         any = true;
@@ -236,37 +241,188 @@ impl Sidebar {
         today_line_spans(&stats, inner_width, theme)
     }
 
-    /// Height the always-visible "today" strip adds to the header for a
-    /// pane of this width — `1` when it renders, `0` otherwise (#1344).
-    /// The click hit-tests fold this into their header offset, alongside
-    /// the usage row, so a click still lands on the row actually drawn.
-    pub(super) fn today_row_height(&self, area: Rect) -> u16 {
+    /// Total header rows above the content: the fixed 5 (brand, filter,
+    /// stats, divider, blank) plus the two optional strips. The click
+    /// hit-tests read this so a click resolves to the row actually drawn
+    /// once the usage / today rows shift content down.
+    pub fn header_height(&self, area: Rect) -> u16 {
+        3 + self.stats_row_height(area) + self.usage_row_height(area)
+    }
+
+    /// Height of the focused-row automation strip (row 2): `1` when the
+    /// cursor row carries merge automation, an auto-fix arm, or metering
+    /// worth spelling out, `0` otherwise — the row is omitted rather than
+    /// left blank so the list starts two rows higher for most cursors
+    /// (#1502 readability pass).
+    pub(super) fn stats_row_height(&self, area: Rect) -> u16 {
         let inner_width = area.width.saturating_sub(2) as usize;
         let theme = crate::theme::current();
-        if self.today_spans(inner_width, theme).is_empty() {
+        if self.stats_row_spans(inner_width, theme).is_empty() {
             0
         } else {
             1
         }
     }
 
-    /// Total header rows above the content: the fixed 5 (brand, filter,
-    /// stats, divider, blank) plus the two optional strips. The click
-    /// hit-tests read this so a click resolves to the row actually drawn
-    /// once the usage / today rows shift content down.
-    pub(super) fn header_height(&self, area: Rect) -> u16 {
-        5 + self.usage_row_height(area) + self.today_row_height(area)
+    /// The focused row's automation strip (row 2): merge automation
+    /// spelled out (#794), an armed auto-fix, and the metering canary —
+    /// each appended only when it fits `inner_width` whole. Empty when
+    /// the cursor row carries none, which omits the row entirely.
+    fn stats_row_spans(
+        &self,
+        inner_width: usize,
+        theme: &crate::theme::Theme,
+    ) -> Vec<Span<'static>> {
+        // Assembled
+        // width-aware (like the row-0 summary): each group is appended only
+        // if it fits whole in the header, so a lower-priority group drops
+        // cleanly rather than a hard clip slicing a label mid-word. That
+        // matters most for the merge-automation phrase (#794) — a truncated
+        // " AUTO-MERGE · GitHub, works offli…" would drop exactly the
+        // durability word that is the point of the label. Priority, highest
+        // first: focused merge automation, then armed auto-fix, then the
+        // global CI / review tallies. The focused row's own automation
+        // outranks the global tallies deliberately — it is the context for
+        // the row under the cursor, not an inbox-wide count.
+        let focused_workspace = self.visible.get(self.cursor).and_then(|row| match row {
+            VisibleRow::Workspace(key) => self.workspaces.get(key),
+            _ => None,
+        });
+        // Spell out the focused row's merge automation in words — the
+        // compact ` ARM ` / ` AUTO ` pills look alike but guarantee
+        // different things (#794). GitHub-native auto-merge wins when both
+        // are set (it merges server-side, even with lazybox closed), so it
+        // takes the label; otherwise the lazybox arm names its while-running
+        // limit. Colored to match each pill: accent for GitHub, green for
+        // the lazybox arm.
+        let focused_merge = focused_workspace.and_then(|workspace| {
+            if workspace
+                .pr
+                .as_ref()
+                .is_some_and(|pr| pr.auto_merge_enabled)
+            {
+                Some((" AUTO-MERGE · GitHub, works offline ", theme.accent))
+            } else if workspace.auto_merge_on_green {
+                Some((" MERGE ON GREEN · lazybox only ", theme.success))
+            } else {
+                None
+            }
+        });
+        let focused_auto_fix = focused_workspace.and_then(|workspace| {
+            let ci = workspace.policies.arm(lazybox_core::AutoFixKind::CiFailure)
+                == lazybox_core::PolicyArm::Arm;
+            let conflict = workspace
+                .policies
+                .arm(lazybox_core::AutoFixKind::MergeConflict)
+                == lazybox_core::PolicyArm::Arm;
+            match (ci, conflict) {
+                (true, true) => Some(" AUTO-FIX ON · CI+CONFLICT "),
+                (true, false) => Some(" AUTO-FIX ON · CI FAIL "),
+                (false, true) => Some(" AUTO-FIX ON · CONFLICT "),
+                (false, false) => None,
+            }
+        });
+        // Metering canary: the focused workspace is routed through the
+        // metering proxy (`$ meter`), so show it plus its accrued per-session
+        // cost the moment any priced usage lands. `$ METER` alone until the
+        // first response is priced (proxy off / unknown model → no cost).
+        let focused_meter = focused_workspace.and_then(|workspace| {
+            if !workspace.metered {
+                return None;
+            }
+            let cost = self.usage.cost_micros_for_session(workspace.key.as_str());
+            Some(if cost > 0 {
+                format!(
+                    " $ METER · {} ",
+                    lazybox_tui_core::usage::format_cost_micros(cost)
+                )
+            } else {
+                " $ METER ".to_string()
+            })
+        });
+
+        // Append `group` (with a 2-cell separator once the line is
+        // non-empty) only when the whole group still fits `budget`, so a
+        // group never renders as a mid-content fragment.
+        fn try_append<'a>(
+            dst: &mut Vec<Span<'a>>,
+            used: &mut usize,
+            budget: usize,
+            group: Vec<Span<'a>>,
+        ) {
+            let sep = if dst.is_empty() { 0 } else { 2 };
+            let width: usize = group
+                .iter()
+                .map(|span| visual_width(span.content.as_ref()))
+                .sum();
+            if *used + sep + width > budget {
+                return;
+            }
+            if sep > 0 {
+                dst.push(Span::raw("  "));
+            }
+            dst.extend(group);
+            *used += sep + width;
+        }
+
+        let mut stats_spans: Vec<Span> = Vec::new();
+        let mut used = 0usize;
+        let budget = inner_width;
+        if let Some((label, bg)) = focused_merge {
+            try_append(
+                &mut stats_spans,
+                &mut used,
+                budget,
+                vec![Span::styled(
+                    label,
+                    Style::default()
+                        .bg(bg)
+                        .fg(ratatui::style::Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                )],
+            );
+        }
+        if let Some(label) = focused_auto_fix {
+            try_append(
+                &mut stats_spans,
+                &mut used,
+                budget,
+                vec![Span::styled(
+                    label,
+                    Style::default()
+                        .bg(theme.warn)
+                        .fg(ratatui::style::Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                )],
+            );
+        }
+        if let Some(label) = focused_meter {
+            try_append(
+                &mut stats_spans,
+                &mut used,
+                budget,
+                vec![Span::styled(
+                    label,
+                    Style::default()
+                        .bg(theme.accent)
+                        .fg(ratatui::style::Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                )],
+            );
+        }
+        stats_spans
     }
 
     pub fn render(&mut self, area: Rect, frame: &mut Frame, focused: bool) {
-        // V1-style header strip:
-        //   row 0: LAZYBOX vX.Y.Z  ● N new  ? N input        N items  7d
-        //   row 1: s  filter (needs:reply ci:failed ...)
-        //   row 2: <focused merge/auto-fix automation>  N CI  N review
-        //          (each group width-gated; omitted when it can't fit)
-        //   row 3: ── divider ────────────────
-        //   row 4: blank
-        //   row 5+: content
+        // Header strip (#1502 readability pass — three fixed rows, no
+        // blank spacer, every attention counter on row 0 so nothing ever
+        // wraps onto a stranded line):
+        //   row 0: LAZYBOX vX.Y.Z  ● N new  ? N input  ✗ N CI  ◔ N review   N items · 7d
+        //          (counters compact to `●N ?N ✗N` before dropping)
+        //   row 1: f filter  o recent  # find            N sessions · N merged · $N
+        //   row 2 (only when present): <focused merge/auto-fix/meter automation>
+        //   row 3 (only when present): per-provider usage bars
+        //   then: ── divider ──── and content
         let theme = crate::theme::current();
         let now = self.now();
         let mailbox_label = match self.mailbox {
@@ -295,15 +451,17 @@ impl Sidebar {
 
         // Row 0 — brand/mailbox on the left, attention badges in the
         // middle, item/window summary right-aligned when there is room.
-        let mut header_left: Vec<Span> = Vec::with_capacity(4);
-        header_left.push(Span::styled(mailbox_label, theme.title(focused)));
+        let brand_span = Span::styled(mailbox_label, theme.title(focused));
         // Brand-tied build version, so a running instance is identifiable
         // at a glance (e.g. confirming a fix actually shipped). Only on
         // the Inbox view, where the title is the app name rather than a
-        // mailbox label.
+        // mailbox label. Dim, and the FIRST thing the row sheds when the
+        // attention counters would not fit otherwise (#1502) — the
+        // version is also in `lazybox --version` and the update modal.
+        let mut version_spans: Vec<Span> = Vec::with_capacity(3);
         if matches!(self.mailbox, Mailbox::Inbox) {
-            header_left.push(Span::raw(" "));
-            header_left.push(Span::styled(
+            version_spans.push(Span::raw(" "));
+            version_spans.push(Span::styled(
                 concat!("v", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(theme.text_dim),
             ));
@@ -311,7 +469,7 @@ impl Sidebar {
             // the binary as one rebuilt from its source checkout rather
             // than replaced by an installer.
             if !crate::build_guard::is_release_build() {
-                header_left.push(Span::styled(" (dev)", Style::default().fg(theme.text_dim)));
+                version_spans.push(Span::styled("-dev", Style::default().fg(theme.text_dim)));
             }
         }
         // Broadcast multi-select count — only the *visible* marks, so the
@@ -320,76 +478,34 @@ impl Sidebar {
         // badges below and fitted on its own (see the header assembly), so
         // the live mode indicator survives a narrow sidebar.
         let selected = counters.selected;
-        let mut signal_spans: Vec<Span> = Vec::with_capacity(8);
-        if unread > 0 {
-            signal_spans.push(Span::styled(
-                "● ",
-                Style::default()
-                    .fg(theme.hover)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            signal_spans.push(Span::styled(
-                format!("{unread} new"),
-                Style::default()
-                    .fg(theme.hover)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        if input_pending > 0 {
-            if !signal_spans.is_empty() {
-                signal_spans.push(Span::raw("  "));
-            }
-            signal_spans.push(Span::styled(
-                "? ",
-                Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
-            ));
-            signal_spans.push(Span::styled(
-                format!("{input_pending} input"),
-                Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
-            ));
-        }
-        // Sleep-inhibition badge: painted exactly while the daemon reports
-        // it holds its assertion (`Event::KeepAwakeStatus.active`) — the
-        // daemon's own truth, so the badge can't disagree with what it's
-        // actually doing (matters over `--connect`, where the client's
-        // config differs).
-        // `☼` (U+263C) rather than an emoji: like the header's `●`
-        // it's an ambiguous-width BMP symbol every terminal font
-        // renders one cell wide, so the right-aligned summary can't
-        // drift on fonts that draw emoji narrow.
-        if self.keep_awake_active {
-            if !signal_spans.is_empty() {
-                signal_spans.push(Span::raw("  "));
-            }
-            // On battery the OS honours neither system sleep nor a closed
-            // lid, so the held assertion is not a guarantee — say so
-            // rather than implying protection the OS isn't giving (#1485).
-            if self.keep_awake_on_battery {
-                signal_spans.push(Span::styled(
-                    "☼ awake (AC only)",
-                    Style::default().fg(theme.warn),
-                ));
-            } else {
-                signal_spans.push(Span::styled("☼ awake", Style::default().fg(theme.text_dim)));
-            }
-        }
-        // Usage-limit indicator (#1012): the count of workspaces whose
-        // agent is blocked on its provider usage limit, so the proactive
-        // "act before more hit the wall" signal reads at a glance next to
-        // the `?` input count. Same `⏳` glyph as the per-row pill.
+        // Attention counters, in fixed order: unread, input, limited, CI,
+        // review. Each has a full form (`● 6 new`) and a compact form
+        // (`●6`); the strip tries full, then compact, then drops — it
+        // never wraps onto its own row (#1502). Keep-awake is daemon
+        // status, not attention, and lives in the footer now.
         let limited = counters.limited;
-        if limited > 0 {
+        let bold =
+            |color: ratatui::style::Color| Style::default().fg(color).add_modifier(Modifier::BOLD);
+        let counters_spec: [(&str, usize, &str, ratatui::style::Color); 5] = [
+            ("●", unread, "new", theme.hover),
+            ("?", input_pending, "input", theme.warn),
+            ("⏳", limited, "limited", theme.warn),
+            ("✗", ci_failing, "CI", theme.error),
+            ("◔", review_pending, "review", theme.accent),
+        ];
+        let mut signal_spans: Vec<Span> = Vec::with_capacity(16);
+        let mut compact_spans: Vec<Span> = Vec::with_capacity(8);
+        for (glyph, n, word, color) in counters_spec {
+            if n == 0 {
+                continue;
+            }
             if !signal_spans.is_empty() {
                 signal_spans.push(Span::raw("  "));
+                compact_spans.push(Span::raw(" "));
             }
-            signal_spans.push(Span::styled(
-                "⏳ ",
-                Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
-            ));
-            signal_spans.push(Span::styled(
-                format!("{limited} limited"),
-                Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
-            ));
+            signal_spans.push(Span::styled(format!("{glyph} "), bold(color)));
+            signal_spans.push(Span::styled(format!("{n} {word}"), bold(color)));
+            compact_spans.push(Span::styled(format!("{glyph}{n}"), bold(color)));
         }
 
         let mut summary_spans: Vec<Span> = Vec::with_capacity(4);
@@ -403,57 +519,73 @@ impl Sidebar {
                 Style::default().fg(theme.text_dim),
             ));
         }
-        summary_spans.push(Span::styled("  7d", Style::default().fg(theme.text_dim)));
+        summary_spans.push(Span::styled(" · 7d", Style::default().fg(theme.text_dim)));
 
-        let mut header_spans = header_left;
         let summary_width = spans_visual_width(&summary_spans);
-
-        // The live multi-select count is the highest-priority signal —
-        // it's the mode you're actively in — so it's placed first and
-        // fitted on its own budget. That way it survives even when the
-        // passive badges below don't, instead of the whole signal strip
-        // dropping as an all-or-nothing block (issue #786).
-        let mut chip_placed = false;
-        if selected > 0 {
-            let chip = Span::styled(
-                format!("✓ {selected} selected"),
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            );
-            let chip_width = spans_visual_width(std::slice::from_ref(&chip));
-            let left_width = spans_visual_width(&header_spans);
-            if inner_width as usize >= left_width + 2 + chip_width + 2 + summary_width {
-                header_spans.push(Span::raw("  "));
-                header_spans.push(chip);
-                chip_placed = true;
+        // Assemble row 0 for a given left cluster. Returns the spans and
+        // whether the attention counters made it on (so the caller can
+        // retry without the version when they did not).
+        let assemble = |left: Vec<Span<'static>>| -> (Vec<Span<'static>>, bool) {
+            let mut header_spans = left;
+            // The live multi-select count is the highest-priority signal —
+            // it's the mode you're actively in — so it's placed first and
+            // fitted on its own budget. That way it survives even when the
+            // passive badges below don't, instead of the whole signal strip
+            // dropping as an all-or-nothing block (issue #786).
+            let mut chip_placed = false;
+            if selected > 0 {
+                let chip = Span::styled(
+                    format!("✓ {selected} selected"),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                );
+                let chip_width = spans_visual_width(std::slice::from_ref(&chip));
+                let left_width = spans_visual_width(&header_spans);
+                if inner_width as usize >= left_width + 2 + chip_width + 2 + summary_width {
+                    header_spans.push(Span::raw("  "));
+                    header_spans.push(chip);
+                    chip_placed = true;
+                }
             }
-        }
-
-        // Passive badges (`● new`, `? input`, `☼ awake`) are lower
-        // priority than the selection count. When a selection is active
-        // but its count didn't fit, suppress them too: a shorter badge
-        // must never take the count's place, which would read as "nothing
-        // selected" while marks are live (issue #786).
-        let show_passive = selected == 0 || chip_placed;
-        let signal_width = spans_visual_width(&signal_spans);
-        let current_width = spans_visual_width(&header_spans);
-        if show_passive
-            && !signal_spans.is_empty()
-            && inner_width as usize >= current_width + 2 + signal_width + 2 + summary_width
-        {
-            header_spans.push(Span::raw("  "));
-            header_spans.extend(signal_spans);
-        }
-        let current_width = spans_visual_width(&header_spans);
-        if inner_width as usize > current_width + summary_width {
-            let gap = inner_width as usize - current_width - summary_width;
-            header_spans.push(Span::raw(" ".repeat(gap)));
-            header_spans.extend(summary_spans);
-        } else if inner_width as usize >= current_width + 2 {
-            header_spans.push(Span::raw("  "));
-            header_spans.push(Span::styled("[7d]", Style::default().fg(theme.text_dim)));
-        }
+            // Passive counters are lower priority than the selection
+            // count. When a selection is active but its count didn't fit,
+            // suppress them too: a shorter badge must never take the
+            // count's place, which would read as "nothing selected" while
+            // marks are live (issue #786). Full form first, compact second.
+            let show_passive = selected == 0 || chip_placed;
+            let mut counters_placed = signal_spans.is_empty();
+            if show_passive && !signal_spans.is_empty() {
+                let current_width = spans_visual_width(&header_spans);
+                let fits =
+                    |w: usize| inner_width as usize >= current_width + 2 + w + 2 + summary_width;
+                if fits(spans_visual_width(&signal_spans)) {
+                    header_spans.push(Span::raw("  "));
+                    header_spans.extend(signal_spans.iter().cloned());
+                    counters_placed = true;
+                } else if fits(spans_visual_width(&compact_spans)) {
+                    header_spans.push(Span::raw("  "));
+                    header_spans.extend(compact_spans.iter().cloned());
+                    counters_placed = true;
+                }
+            }
+            let current_width = spans_visual_width(&header_spans);
+            if inner_width as usize > current_width + summary_width {
+                let gap = inner_width as usize - current_width - summary_width;
+                header_spans.push(Span::raw(" ".repeat(gap)));
+                header_spans.extend(summary_spans.iter().cloned());
+            }
+            (header_spans, counters_placed)
+        };
+        let mut with_version = vec![brand_span.clone()];
+        with_version.extend(version_spans);
+        let (header_spans, placed) = assemble(with_version);
+        let header_spans = if placed {
+            header_spans
+        } else {
+            // Shed the version before losing an attention counter.
+            assemble(vec![brand_span]).0
+        };
 
         let row0 = Rect::new(area.x + l_pad, area.y, inner_width, 1.min(area.height));
         frame.render_widget(Paragraph::new(Line::from(header_spans)), row0);
@@ -598,6 +730,19 @@ impl Sidebar {
                 self.search_chip_rect = None;
             }
 
+            // Today's tally rides the chip row, right-aligned (#1502): the
+            // strip no longer spends a header row of its own. Groups drop
+            // lowest-priority-first to fit whatever the chips leave.
+            let chips_width = spans_visual_width(&spans);
+            let room = (inner_width as usize).saturating_sub(chips_width + 2);
+            let today = self.today_spans(room, theme);
+            if !today.is_empty() {
+                let today_width = spans_visual_width(&today);
+                let gap = (inner_width as usize).saturating_sub(chips_width + today_width);
+                spans.push(Span::raw(" ".repeat(gap)));
+                spans.extend(today);
+            }
+
             frame.render_widget(Paragraph::new(Line::from(spans)), row1);
         } else {
             self.filter_chip_rect = None;
@@ -605,176 +750,11 @@ impl Sidebar {
             self.search_chip_rect = None;
         }
 
-        // Row 2 — focused automation plus stats summary. Assembled
-        // width-aware (like the row-0 summary): each group is appended only
-        // if it fits whole in the header, so a lower-priority group drops
-        // cleanly rather than a hard clip slicing a label mid-word. That
-        // matters most for the merge-automation phrase (#794) — a truncated
-        // " AUTO-MERGE · GitHub, works offli…" would drop exactly the
-        // durability word that is the point of the label. Priority, highest
-        // first: focused merge automation, then armed auto-fix, then the
-        // global CI / review tallies. The focused row's own automation
-        // outranks the global tallies deliberately — it is the context for
-        // the row under the cursor, not an inbox-wide count.
-        let focused_workspace = self.visible.get(self.cursor).and_then(|row| match row {
-            VisibleRow::Workspace(key) => self.workspaces.get(key),
-            _ => None,
-        });
-        // Spell out the focused row's merge automation in words — the
-        // compact ` ARM ` / ` AUTO ` pills look alike but guarantee
-        // different things (#794). GitHub-native auto-merge wins when both
-        // are set (it merges server-side, even with lazybox closed), so it
-        // takes the label; otherwise the lazybox arm names its while-running
-        // limit. Colored to match each pill: accent for GitHub, green for
-        // the lazybox arm.
-        let focused_merge = focused_workspace.and_then(|workspace| {
-            if workspace
-                .pr
-                .as_ref()
-                .is_some_and(|pr| pr.auto_merge_enabled)
-            {
-                Some((" AUTO-MERGE · GitHub, works offline ", theme.accent))
-            } else if workspace.auto_merge_on_green {
-                Some((" MERGE ON GREEN · lazybox only ", theme.success))
-            } else {
-                None
-            }
-        });
-        let focused_auto_fix = focused_workspace.and_then(|workspace| {
-            let ci = workspace.policies.arm(lazybox_core::AutoFixKind::CiFailure)
-                == lazybox_core::PolicyArm::Arm;
-            let conflict = workspace
-                .policies
-                .arm(lazybox_core::AutoFixKind::MergeConflict)
-                == lazybox_core::PolicyArm::Arm;
-            match (ci, conflict) {
-                (true, true) => Some(" AUTO-FIX ON · CI+CONFLICT "),
-                (true, false) => Some(" AUTO-FIX ON · CI FAIL "),
-                (false, true) => Some(" AUTO-FIX ON · CONFLICT "),
-                (false, false) => None,
-            }
-        });
-        // Metering canary: the focused workspace is routed through the
-        // metering proxy (`$ meter`), so show it plus its accrued per-session
-        // cost the moment any priced usage lands. `$ METER` alone until the
-        // first response is priced (proxy off / unknown model → no cost).
-        let focused_meter = focused_workspace.and_then(|workspace| {
-            if !workspace.metered {
-                return None;
-            }
-            let cost = self.usage.cost_micros_for_session(workspace.key.as_str());
-            Some(if cost > 0 {
-                format!(
-                    " $ METER · {} ",
-                    lazybox_tui_core::usage::format_cost_micros(cost)
-                )
-            } else {
-                " $ METER ".to_string()
-            })
-        });
-
-        // Append `group` (with a 2-cell separator once the line is
-        // non-empty) only when the whole group still fits `budget`, so a
-        // group never renders as a mid-content fragment.
-        fn try_append<'a>(
-            dst: &mut Vec<Span<'a>>,
-            used: &mut usize,
-            budget: usize,
-            group: Vec<Span<'a>>,
-        ) {
-            let sep = if dst.is_empty() { 0 } else { 2 };
-            let width: usize = group
-                .iter()
-                .map(|span| visual_width(span.content.as_ref()))
-                .sum();
-            if *used + sep + width > budget {
-                return;
-            }
-            if sep > 0 {
-                dst.push(Span::raw("  "));
-            }
-            dst.extend(group);
-            *used += sep + width;
-        }
-
-        let mut stats_spans: Vec<Span> = Vec::new();
-        let mut used = 0usize;
-        let budget = inner_width as usize;
-        if let Some((label, bg)) = focused_merge {
-            try_append(
-                &mut stats_spans,
-                &mut used,
-                budget,
-                vec![Span::styled(
-                    label,
-                    Style::default()
-                        .bg(bg)
-                        .fg(ratatui::style::Color::Black)
-                        .add_modifier(Modifier::BOLD),
-                )],
-            );
-        }
-        if let Some(label) = focused_auto_fix {
-            try_append(
-                &mut stats_spans,
-                &mut used,
-                budget,
-                vec![Span::styled(
-                    label,
-                    Style::default()
-                        .bg(theme.warn)
-                        .fg(ratatui::style::Color::Black)
-                        .add_modifier(Modifier::BOLD),
-                )],
-            );
-        }
-        if let Some(label) = focused_meter {
-            try_append(
-                &mut stats_spans,
-                &mut used,
-                budget,
-                vec![Span::styled(
-                    label,
-                    Style::default()
-                        .bg(theme.accent)
-                        .fg(ratatui::style::Color::Black)
-                        .add_modifier(Modifier::BOLD),
-                )],
-            );
-        }
-        if ci_failing > 0 {
-            try_append(
-                &mut stats_spans,
-                &mut used,
-                budget,
-                vec![
-                    Span::styled(
-                        ci_failing.to_string(),
-                        Style::default()
-                            .fg(theme.error)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" CI", Style::default().fg(theme.text_dim)),
-                ],
-            );
-        }
-        if review_pending > 0 {
-            try_append(
-                &mut stats_spans,
-                &mut used,
-                budget,
-                vec![
-                    Span::styled(
-                        review_pending.to_string(),
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" review", Style::default().fg(theme.text_dim)),
-                ],
-            );
-        }
-        if !stats_spans.is_empty() && area.height >= 3 {
+        // Row 2 (only when present) — the focused row's automation,
+        // spelled out (#794). CI / review tallies moved to row 0 (#1502).
+        let stats_spans = self.stats_row_spans(inner_width as usize, theme);
+        let stats_h: u16 = if stats_spans.is_empty() { 0 } else { 1 };
+        if stats_h == 1 && area.height >= 3 {
             let row2 = Rect::new(area.x + l_pad, area.y + 2, inner_width, 1);
             frame.render_widget(Paragraph::new(Line::from(stats_spans)), row2);
         }
@@ -788,30 +768,16 @@ impl Sidebar {
         // off) it takes no space and the layout is unchanged.
         let usage_spans = usage_line_spans(&self.usage_summaries(), inner_width as usize, theme);
         let usage_h: u16 = if usage_spans.is_empty() { 0 } else { 1 };
-        if usage_h == 1 && area.height >= 4 {
-            let usage_area = Rect::new(area.x + l_pad, area.y + 3, inner_width, 1);
+        if usage_h == 1 && area.height >= 3 + stats_h {
+            let usage_area = Rect::new(area.x + l_pad, area.y + 2 + stats_h, inner_width, 1);
             frame.render_widget(Paragraph::new(Line::from(usage_spans)), usage_area);
-        }
-
-        // Row 4 (when present) — the always-visible "today" stats strip
-        // (#1344). A terse `today  3 sessions · 4 merged · $2.14` of the
-        // persisted daily rollup (#1339), width-gated the same way as the
-        // usage row: a group that can't fit whole is dropped rather than
-        // sliced. Sits just below the usage row (or row 2 when there is
-        // none) and above the divider, so it reads as header chrome; absent
-        // (`ui.today_summary` off, or no snapshot yet) it takes no space.
-        let today_spans = self.today_spans(inner_width as usize, theme);
-        let today_h: u16 = if today_spans.is_empty() { 0 } else { 1 };
-        if today_h == 1 && area.height >= 4 + usage_h {
-            let today_area = Rect::new(area.x + l_pad, area.y + 3 + usage_h, inner_width, 1);
-            frame.render_widget(Paragraph::new(Line::from(today_spans)), today_area);
         }
 
         // Divider — thin, accent-tinted while this pane has focus so the
         // active pane reads at a glance (#286). Sits just under the usage /
         // today rows (or row 2 when there is neither).
-        let divider_y = 3 + usage_h + today_h;
-        if area.height >= 4 + usage_h + today_h {
+        let divider_y = 2 + stats_h + usage_h;
+        if area.height >= 3 + stats_h + usage_h {
             let div_area = Rect::new(area.x + l_pad, area.y + divider_y, inner_width, 1);
             let divider = "─".repeat(div_area.width as usize);
             frame.render_widget(
@@ -823,12 +789,12 @@ impl Sidebar {
             );
         }
 
-        // Content starts one blank row below the divider (breathing room
-        // above the first item). When the `/` search bar is open it claims
+        // Content starts right under the divider — the divider is the
+        // breathing room (#1502). When the `/` search bar is open it claims
         // the bottom row, so the list loses one line — the bar is pinned to
         // the bottom (fzf-style) so the repo tree doesn't shift as the user
         // types.
-        let header_height: u16 = 5 + usage_h + today_h;
+        let header_height: u16 = 3 + stats_h + usage_h;
         let search_bar = self.search.is_some() && area.height > header_height;
         let inner = Rect {
             x: area.x + l_pad,
@@ -891,13 +857,7 @@ impl Sidebar {
                 VisibleRow::FocusedHeader => {
                     use crate::components::icons;
                     let is_cursor = i == self.cursor;
-                    let row_bg = if is_cursor && focused {
-                        Some(theme.row_focused())
-                    } else if is_cursor {
-                        Some(theme.row_unfocused())
-                    } else {
-                        None
-                    };
+                    let row_bg = theme.row_band(is_cursor, focused, false);
                     // Synthetic top group. No disclosure glyph (it never
                     // collapses) — a star in the gutter, then the label,
                     // both in the accent tone so the shortlist reads as a
@@ -926,13 +886,7 @@ impl Sidebar {
                 VisibleRow::HopperHeader => {
                     use crate::components::icons;
                     let is_cursor = i == self.cursor;
-                    let row_bg = if is_cursor && focused {
-                        Some(theme.row_focused())
-                    } else if is_cursor {
-                        Some(theme.row_unfocused())
-                    } else {
-                        None
-                    };
+                    let row_bg = theme.row_band(is_cursor, focused, false);
                     let count = self
                         .workspaces
                         .values()
@@ -974,13 +928,7 @@ impl Sidebar {
                     let collapsed = self.collapsed_spaces.contains(name);
                     let glyph = if collapsed { "▸" } else { "▾" };
                     let is_cursor = i == self.cursor;
-                    let row_bg = if is_cursor && focused {
-                        Some(theme.row_focused())
-                    } else if is_cursor {
-                        Some(theme.row_unfocused())
-                    } else {
-                        None
-                    };
+                    let row_bg = theme.row_band(is_cursor, focused, false);
                     let glyph_style = match row_bg {
                         Some(bg) => bg,
                         None => Style::default().fg(theme.text_dim),
@@ -1022,13 +970,7 @@ impl Sidebar {
                     let collapsed = self.collapsed_repos.contains(name);
                     let glyph = if collapsed { "▸" } else { "▾" };
                     let is_cursor = i == self.cursor;
-                    let row_bg = if is_cursor && focused {
-                        Some(theme.row_focused())
-                    } else if is_cursor {
-                        Some(theme.row_unfocused())
-                    } else {
-                        None
-                    };
+                    let row_bg = theme.row_band(is_cursor, focused, false);
                     // Root of the tree, so it carries no selection
                     // caret: the disclosure glyph sits in the shared
                     // left gutter and the cursor is shown by the
@@ -1151,14 +1093,14 @@ impl Sidebar {
                     // pills and sits at the same inset as the workspace
                     // type glyph so the eye lines them up.
                     let is_cursor = i == self.cursor;
-                    let row_bg = if is_cursor && focused {
-                        Some(theme.row_focused())
-                    } else if is_cursor {
-                        Some(theme.row_unfocused())
+                    let row_bg = theme.row_band(is_cursor, focused, false);
+                    let caret = if !is_cursor {
+                        " "
+                    } else if self.ascii_glyphs {
+                        ">"
                     } else {
-                        None
+                        crate::components::workspace_row::CURSOR_BAR
                     };
-                    let caret = if is_cursor { "▸" } else { " " };
                     let color = match kind {
                         WorkspaceKind::Pr => theme.success,
                         WorkspaceKind::Issue => theme.hover,
@@ -1206,14 +1148,16 @@ impl Sidebar {
                         .map(|s| s.name.as_str())
                         .unwrap_or("?");
                     let is_cursor = i == self.cursor;
-                    let style = if is_cursor && focused {
-                        theme.row_focused()
-                    } else if is_cursor {
-                        theme.row_unfocused()
+                    let style = theme
+                        .row_band(is_cursor, focused, false)
+                        .unwrap_or_else(|| Style::default().fg(theme.text_dim));
+                    let prefix = if !is_cursor {
+                        "   "
+                    } else if self.ascii_glyphs {
+                        ">  "
                     } else {
-                        Style::default().fg(theme.text_dim)
+                        "\u{258e}  "
                     };
-                    let prefix = if is_cursor { "▸  " } else { "   " };
                     let name_budget = row_budget.saturating_sub(visual_width(prefix));
                     let name_text = truncate_ellipsis(name, name_budget);
                     let mut spans =
@@ -1371,32 +1315,33 @@ impl Sidebar {
         let head = |style: Style, text: &str| Line::from(Span::styled(format!(" {text}"), style));
         let say = |text: &str| Line::from(Span::styled(format!(" {text}"), prose));
 
+        // Every key below is the user's EFFECTIVE binding, resolved
+        // from the catalog — the panel must not drift from a remap or
+        // the vim preset (#1502). Only keys that actually work with an
+        // empty inbox are offered: the ones that need a row under the
+        // cursor (`w w`, `a c`, `s`, `e`) would just flash a notice.
+        use lazybox_tui_core::action::ActionKind as K;
+        let k = |kind: K| self.key_hint(kind);
         let lines: Vec<Line<'static>> = match diag {
-            // First run / no provider: the worktree flow needs no GitHub,
-            // so lead with it (issue #100) and offer the wizard as the way
-            // to wire up a provider once they've felt a session.
+            // First run / no provider: the Start sheet needs no GitHub,
+            // so lead with it (issue #100, #1502) and offer the wizard as
+            // the way to wire up a provider once they've felt a session.
             InboxDiagnosis::FirstRun => vec![
                 Line::raw(""),
                 head(heading, "Nothing configured yet"),
                 Line::raw(""),
-                say("lazybox manages your git"),
-                say("worktrees — point it at a"),
-                say("folder and start an agent:"),
+                say("start a chat, or point"),
+                say("lazybox at a repo — it"),
+                say("manages the worktrees:"),
                 Line::raw(""),
-                hint("⇧W", "start work"),
-                hint("x p", "new project"),
-                hint("x n", "new workspace"),
-                Line::raw(""),
-                say("or open a tool yourself:"),
-                hint("a c", "claude"),
-                hint("s", "shell"),
-                hint("e", "editor"),
+                hint(&k(K::StartAgent), "start · chat / repo"),
+                hint(&k(K::NewProject), "new project"),
                 Line::raw(""),
                 say("connect GitHub / Linear when"),
                 say("you're ready:"),
-                hint(",", "setup"),
-                hint("?", "Ask Lazybox"),
-                hint("⇧T", "coach"),
+                hint(&k(K::OpenSettings), "setup"),
+                hint(&k(K::OpenHelp), "Ask Lazybox"),
+                hint(&k(K::OpenTour), "coach"),
             ],
             // Credentials failed — the empty inbox is a sign-in problem.
             InboxDiagnosis::CredentialFailure { provider } => {
@@ -1409,9 +1354,9 @@ impl Sidebar {
                     say(&format!("{named} tasks — the token")),
                     say("was rejected. Re-connect it:"),
                     Line::raw(""),
-                    hint(",", "setup / re-auth"),
-                    hint("⇧D", "sync details"),
-                    hint("⇧R", "retry sync"),
+                    hint(&k(K::OpenSettings), "setup / re-auth"),
+                    hint(&k(K::OpenSyncStatus), "sync details"),
+                    hint(&k(K::Refresh), "retry sync"),
                 ]
             }
             // A user-applied view filter is hiding rows we hold.
@@ -1425,9 +1370,9 @@ impl Sidebar {
                     say("out of this view. Widen or"),
                     say("clear the filter to see them:"),
                     Line::raw(""),
-                    hint("f", "edit filters"),
+                    hint(&k(K::OpenFilterMenu), "edit filters"),
                     hint("esc", "clear filters"),
-                    hint("⇧S", "switch mailbox"),
+                    hint(&k(K::CycleMailbox), "switch mailbox"),
                 ]
             }
             // Providers enabled but no successful poll yet.
@@ -1438,11 +1383,11 @@ impl Sidebar {
                 say("lazybox is polling your"),
                 say("providers for the first time."),
                 Line::raw(""),
-                hint("⇧D", "sync status"),
-                hint("⇧R", "refresh now"),
+                hint(&k(K::OpenSyncStatus), "sync status"),
+                hint(&k(K::Refresh), "refresh now"),
             ],
             // Everything is configured and polling succeeded — genuinely
-            // nothing open. Say so and pivot to the worktree path.
+            // nothing open. Say so and pivot to the Start sheet.
             InboxDiagnosis::NothingOpen => vec![
                 Line::raw(""),
                 head(heading, "Nothing's waiting on you"),
@@ -1451,13 +1396,12 @@ impl Sidebar {
                 say("attention right now. Want to"),
                 say("start something?"),
                 Line::raw(""),
-                hint("⇧W", "start work"),
-                hint("a c", "claude"),
-                hint("s", "shell"),
+                hint(&k(K::StartAgent), "start · chat / repo"),
+                hint(&k(K::NewProject), "new project"),
                 Line::raw(""),
                 say("or check back later:"),
-                hint("⇧R", "refresh inbox"),
-                hint("⇧D", "sync status"),
+                hint(&k(K::Refresh), "refresh inbox"),
+                hint(&k(K::OpenSyncStatus), "sync status"),
             ],
         };
         frame.render_widget(Paragraph::new(lines), inner);
@@ -1959,6 +1903,7 @@ impl Sidebar {
                 track_main: workspace.is_some_and(|w| w.track_main),
                 track_main_behind: workspace.is_some_and(|w| w.track_main && w.track_main_behind),
                 metered: workspace.is_some_and(|w| w.metered),
+                origin_issue: workspace.and_then(crate::components::task_label::originating_issue),
                 has_notes: workspace.is_some_and(|w| w.has_notes()),
                 sent_snippet_count: workspace.map_or(0, |w| w.sent_snippets.total()),
                 // Source-attention ladder (#scale): a row in a Quiet /

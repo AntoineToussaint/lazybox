@@ -373,7 +373,9 @@ impl ProviderError {
                 }
             }
             Self::Auth { source, .. } => {
-                format!("{source} auth failed — rotate token then `lazybox --fresh`")
+                format!(
+                    "{source} auth failed — rotate the token, then `,` setup (or `lazybox --fresh`)"
+                )
             }
             Self::Permanent { source, detail } => {
                 let summary = detail.lines().next().unwrap_or(detail);

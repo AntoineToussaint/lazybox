@@ -854,6 +854,12 @@ mod tests {
         })
     }
 
+    /// A key carrying a modifier — the mode split dropped every Ctrl
+    /// binding, so this exists to prove the dropped ones stay inert.
+    fn modified(code: Key, modifiers: KeyModifiers) -> Event<UserEvent> {
+        Event::Keyboard(KeyEvent { code, modifiers })
+    }
+
     fn render(editor: &mut HopperEditor, width: u16, height: u16) -> String {
         use tuirealm::ratatui::Terminal;
         use tuirealm::ratatui::backend::TestBackend;
@@ -986,6 +992,44 @@ mod tests {
         );
         assert!(editor.history.is_empty());
         assert_eq!(editor.rows.len(), 1);
+    }
+
+    /// #1422's guard, carried across the #1423 mode split. Ctrl-K is
+    /// readline kill-to-EOL — a harmless edit — and must never reap a
+    /// workspace. The mode split removed the Ctrl bindings entirely
+    /// (destruction is bare `x` in navigate mode), so this now pins that
+    /// Ctrl-K is *inert* in both modes rather than merely rebound: the
+    /// original bug was a keystroke people press by reflex deleting
+    /// their work, and nothing else would catch it coming back.
+    #[test]
+    fn ctrl_k_never_reaps_a_workspace_in_either_mode() {
+        let existing = item("First");
+        let existing_key = existing.key.clone();
+        let mut editor = HopperEditor::new(vec![existing]);
+
+        // Navigate mode, sitting on the saved item — where `x` deletes.
+        editor.on(&key(Key::Up));
+        assert_eq!(
+            editor.on(&modified(Key::Char('k'), KeyModifiers::CONTROL)),
+            None,
+            "Ctrl-K must not act in navigate mode",
+        );
+        assert!(editor.history.is_empty());
+        assert_eq!(editor.rows.len(), 2, "the row survives");
+
+        // Capture mode: Ctrl-K must not type a `k` either — a modified
+        // key is a command, not text.
+        editor.on(&key(Key::Char('i')));
+        let before = editor.current().name.clone();
+        assert_eq!(
+            editor.on(&modified(Key::Char('k'), KeyModifiers::CONTROL)),
+            None,
+            "Ctrl-K must not act in capture mode",
+        );
+        assert_eq!(editor.current().name, before, "and must not insert text");
+        assert!(editor.history.is_empty());
+        let drafts = editor.drafts().expect("valid drafts");
+        assert_eq!(drafts[0].workspace_key, Some(existing_key));
     }
 
     #[test]

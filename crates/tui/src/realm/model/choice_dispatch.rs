@@ -123,6 +123,7 @@ impl<T: TerminalAdapter> Model<T> {
                 active: matches!(self.modal_flow, Some(ModalFlow::ConvertSession { .. })),
             },
             Id::StartAgentProject => PickFlow::StartAgentProject,
+            Id::StartSheet => PickFlow::StartSheet,
             Id::NewWorkspaceRepo => PickFlow::NewWorkspaceRepo,
             Id::HopperProject => match &self.modal_flow {
                 Some(ModalFlow::HopperProject { workspace, action }) => PickFlow::HopperProject {
@@ -479,7 +480,7 @@ impl<T: TerminalAdapter> Model<T> {
                     if super::dispatch::is_bulk_destructive(&action) {
                         self.sidebar.clear_broadcast_selection();
                     }
-                    cmds.extend(self.dispatch_action(&action));
+                    cmds.extend(self.dispatch_action_via(&action, lazybox_ipc::ActionVia::Menu));
                 } else {
                     self.flash_info("workspace is gone — action dropped");
                 }
@@ -501,7 +502,7 @@ impl<T: TerminalAdapter> Model<T> {
             PickOutcome::DispatchCursorAction { action } => {
                 // The right-click already parked the cursor on the
                 // header; the action reads the cursor row directly.
-                cmds.extend(self.dispatch_action(&action));
+                cmds.extend(self.dispatch_action_via(&action, lazybox_ipc::ActionVia::Menu));
                 self.redraw = true;
             }
             PickOutcome::MountHandoffComposer { target } => {
@@ -555,6 +556,12 @@ impl<T: TerminalAdapter> Model<T> {
                 self.mount_new_workspace_input(project_key);
             }
             PickOutcome::MountNewProject => self.mount_new_project_input(),
+            PickOutcome::StartChat => cmds.extend(self.start_chat_cmds()),
+            PickOutcome::MountNewWorkspaceRepoPicker => self.mount_new_workspace_repo_picker(),
+            PickOutcome::MountStartAgentPicker => {
+                let projects = self.sidebar.projects_for_picker();
+                self.mount_start_agent_picker(projects);
+            }
             PickOutcome::AssignSpace { source, space } => {
                 let resolved = self
                     .sidebar

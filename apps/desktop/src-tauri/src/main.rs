@@ -292,6 +292,9 @@ impl InboxModel {
         // No Spaces collapse UI on the desktop yet; an empty set keeps
         // every Space expanded (#860).
         let collapsed_spaces = BTreeSet::new();
+        // No per-source attention UI on the desktop yet; an empty ladder
+        // leaves every source at its default attention (#scale).
+        let source_attention = BTreeMap::new();
         let outcome = inbox::compute_visible(ComputeInputs {
             workspaces: &self.workspaces,
             mailbox: self.mailbox,
@@ -311,6 +314,7 @@ impl InboxModel {
             // tier only when a caller supplies ≥2 distinct Spaces (#860).
             spaces: &[],
             collapsed_spaces: &collapsed_spaces,
+            source_attention: &source_attention,
             // No ticket-collapse UI on the desktop yet; an empty set keeps
             // every ticket's children expanded (#1189).
             collapsed_tickets: &std::collections::HashSet::new(),
@@ -337,12 +341,15 @@ fn aggregate_agent_state(states: impl Iterator<Item = AgentState>) -> Option<Age
     states.max_by_key(|state| match state {
         // Credit exhaustion outranks everything — nothing moves until
         // the account is topped up or the agent is recovered (#1179).
-        AgentState::CreditExhausted => 7,
+        AgentState::CreditExhausted => 8,
         // A usage-limit block outranks even `InputNeeded` — the most
         // urgent "act externally before this moves" state (#847).
-        AgentState::LimitReached => 6,
-        AgentState::InputNeeded => 5,
-        AgentState::Working => 4,
+        AgentState::LimitReached => 7,
+        AgentState::InputNeeded => 6,
+        AgentState::Working => 5,
+        // The calm auto-waiting block surfaces over a resting `Done`, but
+        // yields to an actively `Working` sibling (#847 auto-wait).
+        AgentState::AwaitingReset => 4,
         AgentState::Done => 3,
         AgentState::Exited { .. } => 2,
         AgentState::Idle => 1,
@@ -1787,7 +1794,7 @@ impl NdjsonDecoder {
 async fn authenticated_github_client() -> Result<lazybox_gh::GhClient, String> {
     let credential = tokio::time::timeout(
         Duration::from_secs(5),
-        lazybox_gh::credential_chain().resolve(lazybox_gh::SOURCE),
+        lazybox_gh::credential_chain(None).resolve(&lazybox_gh::credential_scope(None)),
     )
     .await
     .map_err(|_| "GitHub credential lookup timed out".to_string())?
@@ -4106,6 +4113,16 @@ mod tests {
         );
         assert_eq!(
             aggregate_agent_state([AgentState::Done, AgentState::Working].into_iter()),
+            Some(AgentState::Working)
+        );
+        // The calm auto-wait block surfaces over a resting `Done`, but
+        // yields to an actively `Working` sibling (mirrors the TUI, #847).
+        assert_eq!(
+            aggregate_agent_state([AgentState::Done, AgentState::AwaitingReset].into_iter()),
+            Some(AgentState::AwaitingReset)
+        );
+        assert_eq!(
+            aggregate_agent_state([AgentState::AwaitingReset, AgentState::Working].into_iter()),
             Some(AgentState::Working)
         );
         assert_eq!(aggregate_agent_state(std::iter::empty()), None);

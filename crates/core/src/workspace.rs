@@ -1799,6 +1799,48 @@ impl TileTree {
 
     /// Path through the tree to the leaf carrying `terminal_id`.
     /// Returns the steps as 0/1 (left-or-top vs. right-or-bottom).
+    /// Build a balanced tile tree over `ids`, in order.
+    ///
+    /// The inverse of [`leaves`](Self::leaves), used to convert a tabbed
+    /// session into tiles (#1508). Halves the slice recursively and
+    /// alternates `HSplit`/`VSplit` by depth, so N terminals land in a
+    /// grid rather than a row of slivers: 2 → side-by-side, 3 → one
+    /// beside a stacked pair, 4 → a 2×2.
+    ///
+    /// `None` for an empty slice — a session with no terminals has no
+    /// tree, and the caller stays in Tabs.
+    pub fn balanced(ids: &[u64]) -> Option<Self> {
+        Self::balanced_at(ids, 0)
+    }
+
+    fn balanced_at(ids: &[u64], depth: usize) -> Option<Self> {
+        match ids {
+            [] => None,
+            [only] => Some(Self::Leaf { terminal_id: *only }),
+            _ => {
+                // Left/top takes the extra tile on an odd count, so the
+                // first tab keeps the larger share — it's the one the
+                // user was most likely looking at.
+                let mid = ids.len().div_ceil(2);
+                let first = Box::new(Self::balanced_at(&ids[..mid], depth + 1)?);
+                let second = Box::new(Self::balanced_at(&ids[mid..], depth + 1)?);
+                Some(if depth.is_multiple_of(2) {
+                    Self::HSplit {
+                        left: first,
+                        right: second,
+                        ratio: 50,
+                    }
+                } else {
+                    Self::VSplit {
+                        top: first,
+                        bottom: second,
+                        ratio: 50,
+                    }
+                })
+            }
+        }
+    }
+
     pub fn path_to(&self, terminal_id: u64) -> Option<Vec<u8>> {
         let mut path = Vec::new();
         if self.find_path(terminal_id, &mut path) {
@@ -2068,6 +2110,45 @@ fn default_name_for(kind: &SessionKind) -> String {
 #[cfg(test)]
 mod tile_tree_tests {
     use super::*;
+
+    /// #1508: `balanced` is the inverse of `leaves` — it must preserve
+    /// order and every id, and grid rather than strip so N terminals stay
+    /// usable.
+    #[test]
+    fn balanced_round_trips_through_leaves() {
+        for n in 1..=9u64 {
+            let ids: Vec<u64> = (1..=n).collect();
+            let tree = TileTree::balanced(&ids).expect("non-empty");
+            assert_eq!(tree.leaves(), ids, "order preserved for n={n}");
+            for id in &ids {
+                assert!(tree.path_to(*id).is_some(), "id {id} reachable for n={n}");
+            }
+        }
+        assert!(TileTree::balanced(&[]).is_none(), "no tiles, no tree");
+    }
+
+    /// Two tiles sit side by side; four form a 2×2 rather than four
+    /// slivers in a row — the alternation is what makes the conversion
+    /// usable on a wide pane.
+    #[test]
+    fn balanced_alternates_split_direction_by_depth() {
+        assert!(matches!(
+            TileTree::balanced(&[1, 2]),
+            Some(TileTree::HSplit { .. })
+        ));
+        let quad = TileTree::balanced(&[1, 2, 3, 4]).expect("tree");
+        let TileTree::HSplit { left, right, .. } = quad else {
+            panic!("outer split should be horizontal, got {quad:?}");
+        };
+        assert!(
+            matches!(*left, TileTree::VSplit { .. }),
+            "left column stacks"
+        );
+        assert!(
+            matches!(*right, TileTree::VSplit { .. }),
+            "right column stacks"
+        );
+    }
 
     fn leaf(id: u64) -> TileTree {
         TileTree::Leaf { terminal_id: id }

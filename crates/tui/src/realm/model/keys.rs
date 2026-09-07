@@ -1213,7 +1213,7 @@ impl<T: TerminalAdapter> Model<T> {
             LeaderCmd::CloseTerminal => self.terminals.close_focused_tile(cmds),
             LeaderCmd::ZoomTile if self.focus_multi_pane_active() => self.toggle_focus_pane_zoom(),
             LeaderCmd::ZoomTile => self.toggle_terminal_zoom(),
-            LeaderCmd::ToggleNewLayout => self.toggle_terminal_new_layout(),
+            LeaderCmd::ToggleNewLayout => self.toggle_terminal_new_layout(cmds),
             LeaderCmd::CycleFocusLayout => self.cycle_focus_layout(),
         }
     }
@@ -1345,15 +1345,30 @@ impl<T: TerminalAdapter> Model<T> {
     /// runtime flip lands first (it can't fail); a write error only
     /// costs persistence, which we surface but don't roll back — the
     /// user's explicit toggle still holds for this session.
-    fn toggle_terminal_new_layout(&mut self) {
-        let now = self.terminals.toggle_terminal_new_layout();
+    fn toggle_terminal_new_layout(&mut self, cmds: &mut Vec<IpcCommand>) {
+        // Rearrange the terminals that are already open, when there are
+        // any (#1508), and fall back to flipping the preference alone on
+        // an empty pane. Before this, `]]t` only ever governed the *next*
+        // spawn — and because `auto_split_on_spawn` keeps an already-split
+        // session splitting regardless of the preference, a workspace that
+        // had split once could never be talked back into tabs. Pressing
+        // the key there did nothing visible.
+        let (now, rearranged) = match self.terminals.toggle_session_layout(cmds) {
+            Some(now) => (now, true),
+            None => (self.terminals.toggle_terminal_new_layout(), false),
+        };
         let word = match now {
             lazybox_config::NewTerminalLayout::Split => "split",
             lazybox_config::NewTerminalLayout::Tabs => "tabs",
         };
+        let what = if rearranged {
+            format!("terminals: {word} (new ones too)")
+        } else {
+            format!("new terminals open as {word}")
+        };
         match lazybox_config::Config::save_with(|c| c.ui.terminal_new_layout = now) {
-            Ok(()) => self.flash_info(format!("new terminals open as {word}")),
-            Err(e) => self.flash_info(format!("new terminals open as {word} (couldn't save: {e})")),
+            Ok(()) => self.flash_info(what),
+            Err(e) => self.flash_info(format!("{what} (couldn't save: {e})")),
         }
         self.redraw = true;
     }

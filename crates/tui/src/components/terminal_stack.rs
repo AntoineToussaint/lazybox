@@ -674,6 +674,18 @@ pub struct TerminalStack {
     /// event (see the method docs). Reset on session switch: equality
     /// against another session's layout means nothing.
     synced_layout: Option<lazybox_core::SessionLayout>,
+    /// The tile tree stashed the last time `]]t` collapsed a split into
+    /// tabs (#1508), so the inverse toggle can restore the user's own
+    /// arrangement — hand-tuned split directions and `Shift-arrow`
+    /// ratios — instead of re-balancing from scratch. Only reapplied
+    /// when its leaf set exactly matches the terminals now open (a
+    /// spawn/close in tabs mode falls back to `balanced`); terminal ids
+    /// are globally unique, so the set guard also keeps a stash from one
+    /// session from ever landing on another's terminals. A single slot,
+    /// so interleaving two sessions' toggles loses the older
+    /// arrangement — that falls back to `balanced`, never to a wrong
+    /// tree.
+    stashed_splits_tree: Option<lazybox_core::TileTree>,
     /// Resizes recorded during render and waiting to be drained by
     /// the App loop. Each entry is `(terminal_id, cols, rows)` — the
     /// App turns them into `Command::Resize` and ships them at the
@@ -915,6 +927,21 @@ fn subtree_at_path<'a>(
         };
     }
     Some(node)
+}
+
+/// Whether two id lists name the same terminals, ignoring order. Used to
+/// decide whether a stashed split arrangement still covers exactly the
+/// terminals now open before restoring it (#1508) — a spawn or close in
+/// tabs mode makes the sets differ and forces a fresh balanced grid.
+fn same_terminal_set(a: &[u64], b: &[u64]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut a: Vec<u64> = a.to_vec();
+    let mut b: Vec<u64> = b.to_vec();
+    a.sort_unstable();
+    b.sort_unstable();
+    a == b
 }
 
 /// First retry delay after a `TerminalResyncUnavailable` reply (#1254
@@ -1490,6 +1517,7 @@ impl TerminalStack {
             pending_split: None,
             zoomed: false,
             synced_layout: None,
+            stashed_splits_tree: None,
             pending_resizes: Vec::new(),
             pending_resync_requests: Vec::new(),
             tab_strip_hits: Vec::new(),
@@ -5049,6 +5077,91 @@ impl TerminalStack {
         }
     }
 
+    /// Convert the active session between Tabs and Splits, in place
+    /// (#1508). The missing inverse of the Tabs → Splits promotion an
+    /// explicit `]]|` already performs.
+    ///
+    /// `ui.terminal_new_layout` only ever governed the *next* spawn, and
+    /// `auto_split_on_spawn` keeps an already-split session splitting no
+    /// matter what the preference says — so a workspace that split once
+    /// could never be talked back into tabs, and flipping the preference
+    /// there looked like a no-op. This does the conversion the user
+    /// meant.
+    ///
+    /// Terminals and their order are preserved in both directions, and
+    /// the focused terminal stays focused (read from the split's `focused`
+    /// path, not the stale `active_tab_idx`). A hand-arranged split —
+    /// custom directions and `Shift-arrow` ratios — is stashed on the way
+    /// to tabs and restored on the way back when the same terminals are
+    /// still open; a spawn/close in tabs mode makes the sets differ and
+    /// the return falls back to a fresh balanced grid. Returns the layout
+    /// now in effect so the caller can name it, or `None` when the session
+    /// has no terminals to arrange.
+    pub fn toggle_session_layout(
+        &mut self,
+        cmds: &mut Vec<Command>,
+    ) -> Option<lazybox_config::NewTerminalLayout> {
+        let visible = self.visible_terminals();
+        if visible.is_empty() {
+            return None;
+        }
+        // Layout-aware focus: in Splits mode the focused *tile* lives in
+        // the tree's `focused` path, and `active_tab_idx` (what
+        // `active_terminal_id` reads) is left stale by tile navigation and
+        // split-spawns — so `active_terminal_id` would name the wrong
+        // terminal here and drop focus onto it after the conversion
+        // (#1508). `focused_terminal_id` delegates to `active_terminal_id`
+        // in Tabs mode, so it is correct in both directions.
+        let focused = self.focused_terminal_id();
+        let now = match &self.layout {
+            lazybox_core::SessionLayout::Splits { tree, .. } => {
+                // Collapse to tabs in the tree's own leaf order, so the
+                // tab strip reads left-to-right the way the tiles did.
+                let order = tree.leaves();
+                let active = focused
+                    .and_then(|id| order.iter().position(|leaf| *leaf == id.0))
+                    .unwrap_or(0);
+                // Stash the arrangement so an immediate toggle back can
+                // restore the user's own splits rather than a fresh
+                // balanced grid (#1508).
+                self.stashed_splits_tree = Some(tree.clone());
+                self.layout = lazybox_core::SessionLayout::Tabs { active };
+                lazybox_config::NewTerminalLayout::Tabs
+            }
+            lazybox_core::SessionLayout::Tabs { .. } => {
+                let ids: Vec<u64> = visible.iter().map(|id| id.0).collect();
+                // Restore the stashed arrangement when it covers exactly
+                // the terminals now open; otherwise (a spawn/close in tabs
+                // mode changed the set, or nothing was stashed) build a
+                // balanced grid. Consume the stash either way.
+                let tree = match self.stashed_splits_tree.take() {
+                    Some(stashed) if same_terminal_set(&stashed.leaves(), &ids) => stashed,
+                    _ => lazybox_core::TileTree::balanced(&ids)?,
+                };
+                let focused_path = focused
+                    .and_then(|id| tree.path_to(id.0))
+                    .unwrap_or_default();
+                self.layout = lazybox_core::SessionLayout::Splits {
+                    tree,
+                    focused: focused_path,
+                };
+                lazybox_config::NewTerminalLayout::Split
+            }
+        };
+        // Keep the spawn preference in step with what the user just
+        // chose: having pressed the key, the next terminal here opening
+        // the *other* way would be the same surprise all over again.
+        self.terminal_new_layout = now;
+        if let Some(id) = focused {
+            let _ = self.set_terminal_focus(id);
+        }
+        self.persist_layout(cmds);
+        // No `invalidate_visible` here: the visible set is a function of
+        // slot membership + kind, not of the tabs/splits *mode*, so
+        // toggling it leaves the memo correct.
+        Some(now)
+    }
+
     /// Push a `Command::SetSessionLayout` for the currently-active
     /// session if we know which one we're on. The daemon writes the
     /// new layout to the workspace record + rebroadcasts.
@@ -6915,6 +7028,244 @@ mod selection_offset_tests {
         stack.insert_slot_for_test(TerminalId(1), slot);
         stack.set_active_session(Some(sk));
         stack
+    }
+
+    /// Build a stack holding `n` shells in one session, all in Tabs mode.
+    fn stack_with_n_shells(n: u64) -> TerminalStack {
+        let sk = SessionKey::new("session");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        for id in 1..=n {
+            let slot = TerminalStack::make_slot(
+                sk.clone(),
+                TerminalKind::Shell,
+                0,
+                false,
+                false,
+                None,
+                typed_history(None),
+                String::new(),
+            );
+            stack.insert_slot_for_test(TerminalId(id), slot);
+        }
+        stack.set_active_session(Some(sk));
+        stack.set_layout(lazybox_core::SessionLayout::Tabs { active: 0 });
+        stack
+    }
+
+    /// #1508: `]]t` converts what's already open. Tabs → tiles → tabs
+    /// keeps every terminal, in order, with the focused one still focused
+    /// — the round trip a user does when they change their mind.
+    #[test]
+    fn toggle_session_layout_round_trips_tabs_and_splits() {
+        let mut stack = stack_with_n_shells(3);
+        let mut cmds = Vec::new();
+        assert!(stack.focus_terminal(TerminalId(2)), "focus the middle one");
+
+        let now = stack
+            .toggle_session_layout(&mut cmds)
+            .expect("three terminals to arrange");
+        assert_eq!(now, lazybox_config::NewTerminalLayout::Split);
+        let lazybox_core::SessionLayout::Splits { tree, .. } = &stack.layout else {
+            panic!("expected Splits, got {:?}", stack.layout);
+        };
+        assert_eq!(tree.leaves(), vec![1, 2, 3], "tab order becomes tile order");
+        assert_eq!(
+            stack.active_terminal_id(),
+            Some(TerminalId(2)),
+            "focus follows the conversion",
+        );
+
+        let back = stack
+            .toggle_session_layout(&mut cmds)
+            .expect("still three terminals");
+        assert_eq!(back, lazybox_config::NewTerminalLayout::Tabs);
+        assert!(
+            matches!(stack.layout, lazybox_core::SessionLayout::Tabs { .. }),
+            "back to tabs, got {:?}",
+            stack.layout,
+        );
+        assert_eq!(
+            stack.active_terminal_id(),
+            Some(TerminalId(2)),
+            "and focus survives the trip back",
+        );
+    }
+
+    /// The preference moves with the conversion, so the *next* spawn in
+    /// this session doesn't immediately undo what the user just chose —
+    /// the whole reason `]]t` looked inert before (#1508).
+    #[test]
+    fn toggle_session_layout_carries_the_new_terminal_preference() {
+        let mut stack = stack_with_n_shells(2);
+        let mut cmds = Vec::new();
+        stack.terminal_new_layout = lazybox_config::NewTerminalLayout::Tabs;
+
+        stack.toggle_session_layout(&mut cmds).expect("two shells");
+        assert_eq!(
+            stack.terminal_new_layout(),
+            lazybox_config::NewTerminalLayout::Split,
+        );
+
+        stack.toggle_session_layout(&mut cmds).expect("two shells");
+        assert_eq!(
+            stack.terminal_new_layout(),
+            lazybox_config::NewTerminalLayout::Tabs,
+        );
+    }
+
+    /// The conversion persists, or a restart would silently undo it.
+    #[test]
+    fn toggle_session_layout_persists_the_new_layout() {
+        let mut stack = stack_with_n_shells(2);
+        let mut cmds = Vec::new();
+        stack.toggle_session_layout(&mut cmds).expect("two shells");
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, Command::SetSessionLayout { .. })),
+            "expected a SetSessionLayout, got {cmds:?}",
+        );
+    }
+
+    /// Nothing open, nothing to arrange — the caller falls back to
+    /// flipping the preference alone rather than fabricating a layout.
+    #[test]
+    fn toggle_session_layout_is_none_on_an_empty_pane() {
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        let mut cmds = Vec::new();
+        assert!(stack.toggle_session_layout(&mut cmds).is_none());
+        assert!(cmds.is_empty());
+    }
+
+    /// #1508 regression: in Splits mode `active_tab_idx` is left stale by
+    /// keyboard tile navigation (`]]<arrow>`) and split-spawns — only the
+    /// tree's `focused` path tracks the real tile. Collapsing to tabs must
+    /// read the layout-aware focus, not `active_terminal_id` (which is
+    /// `active_tab_idx`-based), or it drops focus onto the wrong terminal.
+    /// Before the fix this landed on terminal 1.
+    #[test]
+    fn toggle_session_layout_focus_follows_the_focused_tile_not_the_stale_tab_idx() {
+        let mut stack = stack_with_n_shells(2);
+        let mut cmds = Vec::new();
+
+        // Into splits: tree = HSplit(1, 2), focus + tab idx both on 1.
+        stack
+            .toggle_session_layout(&mut cmds)
+            .expect("two terminals to arrange");
+        assert_eq!(stack.active_terminal_id(), Some(TerminalId(1)));
+
+        // Keyboard tile-move to the right tile. This updates the tree's
+        // `focused` path but deliberately leaves `active_tab_idx` at 0 —
+        // the exact desync `move_tile_focus` / `commit_pending_split`
+        // produce in real use.
+        stack.move_tile_focus(lazybox_core::TileDirection::Right, &mut cmds);
+        assert_eq!(
+            stack.focused_terminal_id(),
+            Some(TerminalId(2)),
+            "the split's focused tile is terminal 2",
+        );
+        assert_eq!(
+            stack.active_terminal_id(),
+            Some(TerminalId(1)),
+            "but active_tab_idx is stale on terminal 1 — the bug condition",
+        );
+
+        // Collapse to tabs: focus must land on the tile we were in (2),
+        // not the stale tab index (1).
+        stack
+            .toggle_session_layout(&mut cmds)
+            .expect("still two terminals");
+        assert_eq!(
+            stack.active_terminal_id(),
+            Some(TerminalId(2)),
+            "focus follows the split's focused tile, not the stale tab idx",
+        );
+    }
+
+    /// #1508: a hand-arranged split — custom directions and ratios —
+    /// survives a peek at tabs and back, rather than being flattened into
+    /// a fresh balanced grid. `]]t` stashes the tree on the way to tabs
+    /// and restores it on the way back when the same terminals are open.
+    #[test]
+    fn toggle_session_layout_restores_the_stashed_arrangement_on_round_trip() {
+        let mut stack = stack_with_n_shells(3);
+        let mut cmds = Vec::new();
+        // A deliberately non-balanced arrangement with tuned ratios —
+        // `balanced([1,2,3])` has an HSplit root, so this VSplit root is
+        // provably not what a rebuild would produce.
+        let custom = lazybox_core::TileTree::VSplit {
+            top: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 1 }),
+            bottom: Box::new(lazybox_core::TileTree::HSplit {
+                left: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 2 }),
+                right: Box::new(lazybox_core::TileTree::Leaf { terminal_id: 3 }),
+                ratio: 70,
+            }),
+            ratio: 30,
+        };
+        stack.set_layout(lazybox_core::SessionLayout::Splits {
+            tree: custom.clone(),
+            focused: vec![0],
+        });
+
+        // Peek at tabs...
+        stack
+            .toggle_session_layout(&mut cmds)
+            .expect("collapse to tabs");
+        assert!(matches!(
+            stack.layout,
+            lazybox_core::SessionLayout::Tabs { .. }
+        ));
+
+        // ...and back: the exact arrangement returns, not a balanced grid.
+        stack
+            .toggle_session_layout(&mut cmds)
+            .expect("restore splits");
+        let lazybox_core::SessionLayout::Splits { tree, .. } = &stack.layout else {
+            panic!("expected Splits, got {:?}", stack.layout);
+        };
+        assert_eq!(*tree, custom, "the user's own arrangement is restored");
+    }
+
+    /// #1508: when a terminal is spawned or closed while tabbed, the
+    /// stashed arrangement no longer covers the open set, so `]]t` rebuilds
+    /// a balanced grid — it must never restore a stale tree that omits a
+    /// new terminal (or names a gone one).
+    #[test]
+    fn toggle_session_layout_rebalances_when_the_terminal_set_changed() {
+        let mut stack = stack_with_n_shells(3);
+        let mut cmds = Vec::new();
+        // Splits, then back to tabs — the collapse stashes the [1,2,3] tree.
+        stack.toggle_session_layout(&mut cmds).expect("to splits");
+        stack
+            .toggle_session_layout(&mut cmds)
+            .expect("to tabs, stashing the tree");
+
+        // A 4th shell arrives in the same session while tabbed.
+        let sk = SessionKey::new("session");
+        let slot = TerminalStack::make_slot(
+            sk,
+            TerminalKind::Shell,
+            0,
+            false,
+            false,
+            None,
+            typed_history(None),
+            String::new(),
+        );
+        stack.insert_slot_for_test(TerminalId(4), slot);
+
+        // Toggling to splits must include the new terminal, not restore
+        // the stale [1,2,3] stash.
+        stack
+            .toggle_session_layout(&mut cmds)
+            .expect("to splits with the new set");
+        let lazybox_core::SessionLayout::Splits { tree, .. } = &stack.layout else {
+            panic!("expected Splits, got {:?}", stack.layout);
+        };
+        assert_eq!(
+            tree.leaves(),
+            vec![1, 2, 3, 4],
+            "the new terminal is included — no stale stash restored",
+        );
     }
 
     #[test]

@@ -143,7 +143,7 @@ A focused terminal forwards every key to the PTY; only the chords below are inte
 | `]]x` | Close the focused terminal (tile or active tab) |
 | `]]H` | Open the personal Hopper editor |
 | `]]z` | Toggle tmux-style zoom of the focused tile (maximize / restore); Splits grid only |
-| `]]t` | Toggle whether the next terminal opens as a split or a tab; persists `ui.terminal_new_layout` |
+| `]]t` | Switch this session's terminals between tabs and side-by-side tiles, and set how the next one opens (persists `ui.terminal_new_layout`) |
 
 ### Scrollback
 

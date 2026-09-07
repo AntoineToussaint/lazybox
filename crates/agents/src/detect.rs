@@ -184,6 +184,23 @@ pub const CLAUDE_USAGE_LIMIT_PHRASES: &[&str] = &[
     "/usage-credits",
 ];
 
+/// The subset of [`CLAUDE_USAGE_LIMIT_PHRASES`] that appears ONLY inside the
+/// `⎿` result banner of the session window that ENDS the turn — the phrase
+/// itself (`You've hit your session limit …`) and its `/usage-credits`
+/// follow-up line — never in a live Wait/Exit chooser. They are load-bearing
+/// for the `⎿`-gated at-rest path ([`limit_banner_with_reset_pos`]) and for
+/// reset mining, so they stay in the full list. But the PLAIN chooser path
+/// must NOT scan for them: there they can only match text an agent PRINTED
+/// itself — its own summary, a quoted log, a diff of this very file (the
+/// self-hosting fleet renders both verbatim) — with no composer footer or
+/// working anchor beneath it yet, which the plain path would read as a live
+/// `LimitReached` and (with the policy on) fire a stray auto-`Wait`
+/// keystroke into a healthy composer. The genuine banner rests ABOVE a
+/// footer, so the plain path never needed these two to catch it — the
+/// `⎿`-gated path does. Excluded from the plain scan via
+/// [`last_compact_match_pos_excluding`].
+const CLAUDE_LIMIT_BANNER_ONLY_PHRASES: &[&str] = &["hit your session limit", "/usage-credits"];
+
 /// The auto-continue form of the usage-limit block: instead of parking on
 /// a Wait/Exit chooser, newer Claude Code builds print
 /// `Usage limit reached · continuing automatically at 1:10pm · esc or type
@@ -271,9 +288,10 @@ pub fn parse_usage_limit_reset(recent_output: &[u8]) -> Option<String> {
 
 /// Byte offset of the most recent limit-phrase hit whose compacted LINE
 /// carries the machine-rendered banner separator `· resets <time>`
-/// (`… · resets 3:20pm`, `… · resets Aug 30 at 2pm`) — the exact shape
+/// (`… · resets 3:20pm`, `… · resets Aug 30 at 2pm`) AND whose result
+/// block carries the tool-RESULT glyph `⎿` — together the exact shape
 /// Claude prints for a real limit banner (session and weekly alike join
-/// the phrase to the countdown with a ` · ` middot).
+/// the phrase to the countdown with a ` · ` middot, inside a `⎿` result).
 ///
 /// The `·` is load-bearing: this branch is the ONE limit path NOT gated on
 /// the resting composer (a real banner that ended the turn legitimately
@@ -291,7 +309,7 @@ pub fn parse_usage_limit_reset(recent_output: &[u8]) -> Option<String> {
 /// the banner's `/usage-credits …` follow-up line is itself a phrase and
 /// sits BELOW the line carrying the reset, so anchoring on the single
 /// most-recent hit would always look at the wrong line. `None` when no
-/// phrase shares a line with a `· resets <time>`.
+/// phrase shares a line with a `· resets <time>` inside a `⎿` block.
 fn limit_banner_with_reset_pos(compact: &str) -> Option<usize> {
     let mut needle = String::new();
     let mut best: Option<usize> = None;
@@ -323,7 +341,22 @@ fn limit_banner_with_reset_pos(compact: &str) -> Option<usize> {
                 || line
                     .match_indices("sessionlimitresets")
                     .any(|(i, kw)| reset_token(&line[i + kw.len()..]).is_some());
-            if names_reset {
+            // The middot alone checks the banner's SHAPE, not that it was
+            // actually rendered by the client: an agent's own summary, a
+            // quoted log, a diff of this file's own fixtures — anything that
+            // reproduces `… limit · resets <time>` verbatim — reads as a live
+            // limit and (because `UsageLimitAtRest` is deliberately
+            // injectable) drops a healthy idle agent into the resume-all set
+            // with a false ⏳ pill. Also require the tool-RESULT glyph `⎿` in
+            // the same block: Claude prefixes the failing call's result with
+            // it, and it survives compaction, so only the machine-rendered
+            // banner qualifies. A wrapped banner puts the glyph on the block's
+            // first physical line and wraps the reset onto a later one, so
+            // scan the whole block (back to the last blank line), not just the
+            // matched line.
+            let block_start = compact[..start].rfind("\n\n").map_or(0, |i| i + 2);
+            let has_result_glyph = compact[block_start..end].contains('⎿');
+            if names_reset && has_result_glyph {
                 best = Some(best.map_or(pos, |b| b.max(pos)));
             }
         }
@@ -818,7 +851,21 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
     }
 
     let limit_pos = last_compact_match_pos(compact, CLAUDE_USAGE_LIMIT_PHRASES);
-    if marker_at_least_as_recent(limit_pos, resting_pos.max(work_anchor_against(limit_pos))) {
+    // The plain (chooser / older-build) path scans every limit phrase EXCEPT
+    // the banner-only ones: `hit your session limit` / `/usage-credits` name
+    // the session-window block that ENDS the turn, which rests ABOVE its
+    // footer and is caught by the `⎿`-gated at-rest path below — never a live
+    // chooser. On this path, with nothing beneath them, they'd only ever
+    // match text an agent printed itself (a summary, a log, a diff of this
+    // file), firing a false `LimitReached` and its stray auto-`Wait`
+    // keystroke. `limit_pos` above keeps the full list so the at-rest gate
+    // still sees the banner.
+    let chooser_limit_pos =
+        last_compact_match_pos_excluding(compact, CLAUDE_USAGE_LIMIT_PHRASES, CLAUDE_LIMIT_BANNER_ONLY_PHRASES);
+    if marker_at_least_as_recent(
+        chooser_limit_pos,
+        resting_pos.max(work_anchor_against(chooser_limit_pos)),
+    ) {
         d.state = AgentState::LimitReached;
         d.trigger = Some(Trigger::UsageLimit);
         return d;
@@ -833,11 +880,13 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
     // `Done`, and `Shift-K` found nothing to resume while every agent on
     // the account sat limited. Accept the shape when the banner line carries
     // the machine-rendered ` · resets <time>` separator (`… · resets
-    // 3:20pm`): the agent's own prose about limits ("you've reached your
-    // usage limit before …", "it resets 3pm tomorrow") joins the words with
-    // punctuation or a space, never the banner's ` · `. Only a live working
-    // anchor painted after it clears it — the reset happened and the agent
-    // is running again.
+    // 3:20pm`) AND the block carries the `⎿` result glyph: the agent's own
+    // prose about limits ("you've reached your usage limit before …", "it
+    // resets 3pm tomorrow") joins the words with punctuation or a space,
+    // never the banner's ` · `, and a mere reproduction of the banner
+    // wording — a summary, a quoted log, a diff of this file's fixtures —
+    // carries no result glyph. Only a live working anchor painted after it
+    // clears it — the reset happened and the agent is running again.
     //
     // Skip the multi-phrase line scan entirely when no limit phrase is
     // present at all (`limit_pos` is `None`) — the common case on this
@@ -1150,6 +1199,27 @@ fn compact_lower_marked(s: &str, mark: usize) -> (String, usize) {
 /// hot path.
 fn last_compact_match_pos(compact: &str, patterns: &[&str]) -> Option<usize> {
     last_compact_match(compact, patterns).map(|(pos, _)| pos)
+}
+
+/// Like [`last_compact_match_pos`] but skips any pattern listed in
+/// `exclude`. Lets the plain limit path scan every phrase EXCEPT the
+/// banner-only ones ([`CLAUDE_LIMIT_BANNER_ONLY_PHRASES`]) while the full
+/// list still gates the `⎿`-checked at-rest path and reset mining.
+fn last_compact_match_pos_excluding(
+    compact: &str,
+    patterns: &[&str],
+    exclude: &[&str],
+) -> Option<usize> {
+    let mut needle = String::new();
+    patterns
+        .iter()
+        .filter(|p| !exclude.contains(*p))
+        .filter_map(|p| {
+            needle.clear();
+            needle.extend(p.chars().filter(|c| *c != ' ').flat_map(char::to_lowercase));
+            compact.rfind(needle.as_str())
+        })
+        .max()
 }
 
 /// Like [`last_compact_match_pos`] but also returns WHICH pattern carried
@@ -1581,11 +1651,23 @@ fn is_spinner_status_line(line: &str) -> bool {
 /// `? for shortcuts` below the now-stale line — `≥2 after` settles it, while
 /// a live frame carries only its own footer (`≤1 after`). Excludes
 /// `Tab to amend`, which a live command-approval dialog also renders.
+///
+/// Counts the bypass mode line by its `⏵⏵` glyph, not only its
+/// `shift+tab to cycle` suffix: newer builds drop that suffix once the line
+/// carries other segments (`⏵⏵ bypass permissions on · ← for agents`), so a
+/// shells run that drained straight to rest under such a footer would stack a
+/// second, uncounted composer and stay pinned `Working` until it scrolled out
+/// of the window. `⏵⏵` is the same stable anchor [`resting_composer_pos`] and
+/// [`idle_box_pos`] already key on.
 fn resting_footers_after(compact: &str, pos: usize) -> usize {
     let mut count = 0;
     let mut offset = 0;
     for line in compact.split_inclusive('\n') {
-        if offset > pos && (line.contains("?forshortcuts") || line.contains("shift+tabtocycle")) {
+        if offset > pos
+            && (line.contains("?forshortcuts")
+                || line.contains("shift+tabtocycle")
+                || line.contains(MODE_LINE_MARKER))
+        {
             count += 1;
         }
         offset += line.len();
@@ -2534,6 +2616,11 @@ mod tests {
         // Bypass-mode footer instead of `? for shortcuts`.
         let bypass = "✻ Crunched for 30s · 2 shells still running\nbypass permissions on (shift+tab to cycle)";
         assert_eq!(claude_state(bypass.as_bytes()), Some(AgentState::Working));
+
+        // Newer bypass footer carrying only the `⏵⏵` glyph (no
+        // `shift+tab to cycle`): a single such footer is still one live frame.
+        let bypass_glyph = "✻ Crunched for 30s · 2 shells still running\n⏵⏵ bypass permissions on · ← for agents";
+        assert_eq!(claude_state(bypass_glyph.as_bytes()), Some(AgentState::Working));
     }
 
     #[test]
@@ -2544,6 +2631,17 @@ mod tests {
         // Idle so the quiet timer can settle it to Done.
         let stale = "✻ Crunched for 2m 44s · 4 shells still running\n? for shortcuts\n✓ all shells finished — summary below\n? for shortcuts";
         assert_eq!(claude_state(stale.as_bytes()), Some(AgentState::Idle));
+
+        // Same drain, but the composer redraws with the newer bypass footer
+        // that carries ONLY the `⏵⏵` glyph (no `shift+tab to cycle` suffix).
+        // The footer counter skipped `⏵⏵`, so the second composer went
+        // uncounted and the stale shells line stayed pinned Working until it
+        // scrolled out of the window. Counting `⏵⏵` settles it to Idle.
+        let stale_bypass = "✻ Crunched for 2m 44s · 4 shells still running\n\
+             ⏵⏵ bypass permissions on · ← for agents\n\
+             ✓ all shells finished — summary below\n\
+             ⏵⏵ bypass permissions on · ← for agents";
+        assert_eq!(claude_state(stale_bypass.as_bytes()), Some(AgentState::Idle));
     }
 
     #[test]
@@ -2869,9 +2967,108 @@ mod tests {
             Some(AgentState::Idle)
         );
 
+        // The sharpest false positive of all: the banner wording reproduced
+        // with the REAL ` · resets <time>` middot — the exact shape an agent
+        // catting this file's fixtures, a `git log`, or a summary quoting the
+        // banner produces — but WITHOUT the `⎿` tool-result glyph, resting
+        // above `? for shortcuts` just like the genuine block. The middot
+        // guard alone let it through and put a healthy idle agent into the
+        // resume-all set with a false ⏳ pill. The result-glyph requirement
+        // keeps it Idle; the identical text under a `⎿` (below) still fires.
+        let banner_text_no_glyph = "You've hit your session limit · resets 3:20pm (America/New_York)\n\n\
+             ❯ \n\
+             ? for shortcuts";
+        assert_eq!(
+            claude_state(banner_text_no_glyph.as_bytes()),
+            Some(AgentState::Idle),
+            "banner wording with the middot but no ⎿ result glyph is a quote, not a live block",
+        );
+        let banner_text_with_glyph = "⎿  You've hit your session limit · resets 3:20pm (America/New_York)\n\n\
+             ❯ \n\
+             ? for shortcuts";
+        assert_eq!(
+            claude_state(banner_text_with_glyph.as_bytes()),
+            Some(AgentState::LimitReached),
+            "the same wording inside a ⎿ result block is the genuine at-rest banner",
+        );
+
         // The account-changed notice mentions `/login` but is not an auth
         // failure — it must not route the session into the re-auth flow.
         assert!(claude_auth_failure(with_notice.as_bytes()).is_none());
+    }
+
+    #[test]
+    fn banner_only_phrases_do_not_trip_the_plain_limit_path() {
+        // `hit your session limit` and `/usage-credits` were added ONLY to
+        // catch the `⎿` session-window banner that ends the turn. On the
+        // plain (chooser) path, with nothing beneath them, they match only
+        // text an agent PRINTED itself — a summary, a quoted log, a diff of
+        // this very file — which the self-hosting fleet emits constantly.
+        // Before the exclusion this read a live `LimitReached` and (policy
+        // on) fired a stray auto-`Wait` keystroke into a healthy composer.
+        //
+        // The agent narrating rate-limit handling, mid-stream, no footer or
+        // working anchor beneath the phrase yet — the transient chunk the
+        // plain path used to misfire on. Must NOT read `LimitReached`.
+        let narrating = "Next I'll add `/usage-credits` to the phrase list so we\n\
+             detect when you hit your session limit.";
+        assert_ne!(
+            claude_state(narrating.as_bytes()),
+            Some(AgentState::LimitReached),
+            "an agent printing the banner-only phrases is not itself rate-limited",
+        );
+
+        // A bare `/usage-credits` mention with no chooser and no footer —
+        // the sharpest form, where only that one excluded phrase matches.
+        // Falls through to the default resting classification (Idle).
+        let bare = "Run /usage-credits to see your remaining balance.";
+        assert_eq!(
+            claude_state(bare.as_bytes()),
+            Some(AgentState::Idle),
+            "a lone /usage-credits mention is prose, not a live limit chooser",
+        );
+
+        // The genuine chooser form is UNAFFECTED: the spend-limit banner
+        // (matched by the still-included `hit your individual spend limit`)
+        // above a live Wait/Exit chooser is a real `LimitReached`.
+        let chooser = "You've hit your individual spend limit · resets 1:10pm\n\
+             ❯ 1. Wait until it resets\n  2. Exit";
+        assert_eq!(
+            claude_state(chooser.as_bytes()),
+            Some(AgentState::LimitReached),
+            "the excluded phrases don't gate this — the spend-limit phrase does",
+        );
+
+        // And the genuine at-rest `⎿` banner — whose ONLY matching phrase is
+        // the excluded `hit your session limit` — still fires via the full
+        // list feeding the `⎿`-gated at-rest path, not the plain path.
+        let at_rest = "⎿  You've hit your session limit · resets 3:20pm (America/New_York)\n\
+             /usage-credits to finish what you're working on.\n\n\
+             ✻ Cooked for 37m 30s · done 12:36 PM\n\n\
+             ❯ \n\
+             ? for shortcuts";
+        assert_eq!(
+            claude_state(at_rest.as_bytes()),
+            Some(AgentState::LimitReached),
+            "excluding the phrase from the PLAIN path must not disarm the ⎿ at-rest path",
+        );
+
+        // Invariant: every banner-only phrase is actually in the full list
+        // (so the at-rest path and reset mining still see it), and the plain
+        // scan really drops them.
+        for p in CLAUDE_LIMIT_BANNER_ONLY_PHRASES {
+            assert!(
+                CLAUDE_USAGE_LIMIT_PHRASES.contains(p),
+                "banner-only phrase {p:?} must remain in the full list",
+            );
+        }
+        let full = last_compact_match_pos(&compact_lower("run /usage-credits now"), CLAUDE_USAGE_LIMIT_PHRASES);
+        let plain = last_compact_match_pos_excluding(
+            &compact_lower("run /usage-credits now"),
+            CLAUDE_USAGE_LIMIT_PHRASES,
+            CLAUDE_LIMIT_BANNER_ONLY_PHRASES,
+        );
+        assert!(full.is_some() && plain.is_none(), "the plain scan drops banner-only phrases");
     }
 
     #[test]
@@ -2956,18 +3153,22 @@ mod tests {
         let bypass =
             "earlier you reached your usage limit\nbypass permissions on (shift+tab to cycle)";
         assert_eq!(claude_state(bypass.as_bytes()), Some(AgentState::Idle));
-        // A banner that NAMES A RESET on the same line is the machine-
-        // rendered block, and a resting composer beneath it is the shape of
-        // a limit that ended the turn (the 5-hour session window; a
-        // "Stop and wait" pick on the #1337 weekly chooser) — NOT proof it
-        // cleared. That reads `LimitReached` so `Shift-K` can resume it;
-        // only a live working line painted after it clears the block.
-        let at_rest = "You've hit your weekly limit · resets Aug 30 at 2pm\n? for shortcuts";
+        // A banner that names a reset on the same line AND rides the `⎿`
+        // result glyph is the machine-rendered block, and a resting composer
+        // beneath it is the shape of a limit that ended the turn (the 5-hour
+        // session window; a "Stop and wait" pick on the #1337 weekly
+        // chooser) — NOT proof it cleared. That reads `LimitReached` so
+        // `Shift-K` can resume it; only a live working line painted after it
+        // clears the block. The middot alone is not enough (see
+        // `banner_text_no_glyph` in the turn-ending test): an agent's own
+        // summary or a `git log` reproduces `· resets <time>` verbatim but
+        // never inside a live `⎿` result block.
+        let at_rest = "⎿  You've hit your weekly limit · resets Aug 30 at 2pm\n? for shortcuts";
         assert_eq!(
             claude_state(at_rest.as_bytes()),
             Some(AgentState::LimitReached)
         );
-        let resumed = "You've hit your weekly limit · resets Aug 30 at 2pm\n\
+        let resumed = "⎿  You've hit your weekly limit · resets Aug 30 at 2pm\n\
              ✻ Working (3s · esc to interrupt)";
         assert_eq!(claude_state(resumed.as_bytes()), Some(AgentState::Working));
         // #1452: the spend-limit wording in the agent's own prose — no

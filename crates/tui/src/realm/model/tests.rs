@@ -8917,6 +8917,36 @@ mod modal_input_responsiveness_tests {
     /// the aliases + target agent for the pick. Esc releases both
     /// without changing anything. Disk-free: mounting only reads the
     /// in-memory tier menus.
+    /// `default_model_labels` resolves each agent's default tier to the
+    /// label the sidebar badge compares against (#1502): the YAML default
+    /// alias wins, the built-in default is the fallback, and an alias no
+    /// tier declares yields no entry (so that agent always badges).
+    #[test]
+    fn default_model_labels_resolve_yaml_then_builtin_default() {
+        use super::super::default_model_labels;
+        let mut pinned = lazybox_core::AgentModels::builtin("claude").unwrap();
+        pinned.default = Some("L".into());
+        let expected = pinned.tier("L").unwrap().label.clone();
+        let labels = default_model_labels(&[("claude".to_string(), pinned)].into());
+        assert_eq!(labels.get(&'C'), Some(&expected));
+
+        let mut builtin = lazybox_core::AgentModels::builtin("claude").unwrap();
+        builtin.default = None;
+        let fallback = lazybox_core::AgentModels::builtin("claude")
+            .and_then(|b| b.default)
+            .and_then(|a| builtin.tier(&a).map(|t| t.label.clone()));
+        let labels = default_model_labels(&[("claude".to_string(), builtin)].into());
+        assert_eq!(labels.get(&'C'), fallback.as_ref());
+
+        let mut unknown = lazybox_core::AgentModels::builtin("claude").unwrap();
+        unknown.default = Some("nope".into());
+        let labels = default_model_labels(&[("claude".to_string(), unknown)].into());
+        assert!(
+            labels.get(&'C').is_none(),
+            "an undeclared alias has no label"
+        );
+    }
+
     #[test]
     fn default_model_picker_offers_tiers_and_cancels_clean() {
         let mut m = build_model();

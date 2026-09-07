@@ -313,7 +313,10 @@ the filter / sort / find chips with today's tally right-aligned (no
 row's automation phrase (`AUTO-MERGE · GitHub`, `AUTO-FIX ON`, `$ METER`)
 and the per-provider usage bars each take a row only when present.
 Keep-awake (`☼ awake`) is daemon status and lives in the footer's
-status slot. The cursor row is a full-row band (theme `fill`) with a
+status slot. A row's `◆` model badge marks a deviation only: a single
+agent running its default tier (`agents.<id>.models.default`, else the
+built-in default) shows no badge, a Sonnet run beside an Opus default
+shows `◆S`. The cursor row is a full-row band (theme `fill`) with a
 `▎` accent bar in the gutter, kept — unbolded — while another pane has
 focus so the open workspace stays obvious; multi-selected rows share the
 band behind their `✓` (#1502). `j/k` or arrows navigate, `PgUp`/`PgDn` a

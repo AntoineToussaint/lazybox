@@ -447,6 +447,13 @@ pub enum Action {
     /// `Shift-B` broadcast delivery. The bulk companion to re-authing with
     /// another account — no visiting each terminal.
     ResumeRateLimited,
+    /// Restart every usage-limit-blocked agent so it picks up fresh
+    /// credentials (stop the process, respawn the same conversation with
+    /// `--resume`, then continue). The companion to `ResumeRateLimited` for
+    /// after the user switched Claude account / API key externally — a
+    /// running process never re-reads its credentials, so a plain
+    /// "continue" just hits the limit again.
+    RestartRateLimited,
     /// Recover the focused agent from a provider credit chooser and continue
     /// its interrupted turn.
     RecoverAgentCredit,
@@ -643,6 +650,7 @@ pub enum ActionKind {
     JumpPrevGroup,
     JumpNextGroup,
     ResumeRateLimited,
+    RestartRateLimited,
     RecoverAgentCredit,
     RecoverAllAgentCredit,
     ToggleFocusMode,
@@ -694,6 +702,7 @@ impl ActionKind {
         Self::StartAgent,
         Self::ConnectBox,
         Self::ResumeRateLimited,
+        Self::RestartRateLimited,
         Self::RecoverAgentCredit,
         Self::RecoverAllAgentCredit,
         Self::ToggleActivityPane,
@@ -940,6 +949,7 @@ impl Action {
             Action::JumpPrevGroup => ActionKind::JumpPrevGroup,
             Action::JumpNextGroup => ActionKind::JumpNextGroup,
             Action::ResumeRateLimited => ActionKind::ResumeRateLimited,
+            Action::RestartRateLimited => ActionKind::RestartRateLimited,
             Action::RecoverAgentCredit => ActionKind::RecoverAgentCredit,
             Action::RecoverAllAgentCredit => ActionKind::RecoverAllAgentCredit,
             Action::ToggleFocusMode => ActionKind::ToggleFocusMode,
@@ -1154,7 +1164,16 @@ impl ActionDef {
                 kind: ActionKind::ResumeRateLimited,
                 default_keys: "Shift-K",
                 label: "resume rate-limited",
-                describe: "Resume every workspace currently blocked on a usage / rate limit at once — a settle-gated 'continue' injected into each limit-blocked agent. Use after switching Claude account / API key externally so you don't visit each terminal.",
+                describe: "Resume every workspace currently blocked on a usage / rate limit at once — a settle-gated 'continue' injected into each limit-blocked agent, for when the limit has reset. If you switched Claude account / API key instead, use `a R` (restart rate-limited): a running process never re-reads its credentials.",
+                section: Section::Global,
+            },
+            ActionKind::RestartRateLimited => &Self {
+                kind: ActionKind::RestartRateLimited,
+                // Under the agent leader like `a K`: a direct modifier chord
+                // would need the kitty keyboard protocol most emulators lack.
+                default_keys: "a R",
+                label: "restart rate-limited",
+                describe: "Restart every agent currently blocked or parked on a usage / rate limit so it picks up fresh credentials: stop its process, respawn the same conversation in the same pane (--resume), then submit the configured continuation prompt. Use after switching Claude account / API key externally; a plain 'continue' (Shift-K) would only hit the limit again.",
                 section: Section::Global,
             },
             ActionKind::RecoverAgentCredit => &Self {
@@ -2379,6 +2398,7 @@ impl ActionKind {
             ActionKind::JumpPrevGroup => "jump_prev_group",
             ActionKind::JumpNextGroup => "jump_next_group",
             ActionKind::ResumeRateLimited => "resume_rate_limited",
+            ActionKind::RestartRateLimited => "restart_rate_limited",
             ActionKind::RecoverAgentCredit => "recover_agent_credit",
             ActionKind::RecoverAllAgentCredit => "recover_all_agent_credit",
             ActionKind::ToggleFocusMode => "toggle_focus_mode",
@@ -2585,7 +2605,9 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::ConvertToDraft
         | ActionKind::MarkReady
         | ActionKind::ViewDiff => Some("github"),
-        ActionKind::SpawnAgent | ActionKind::RecoverAllAgentCredit => Some("agent"),
+        ActionKind::SpawnAgent
+        | ActionKind::RecoverAllAgentCredit
+        | ActionKind::RestartRateLimited => Some("agent"),
         ActionKind::SpawnAgentRemote => Some("remote"),
         ActionKind::Work | ActionKind::WorkWith => Some("work"),
         ActionKind::SpawnAgentOnMain | ActionKind::SpawnShellOnMain => Some("main branch"),
@@ -3400,6 +3422,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::JumpPrevGroup
         | ActionKind::JumpNextGroup
         | ActionKind::ResumeRateLimited
+        | ActionKind::RestartRateLimited
         | ActionKind::RecoverAgentCredit
         | ActionKind::RecoverAllAgentCredit
         | ActionKind::ConnectBox

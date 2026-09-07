@@ -539,6 +539,9 @@ fn all_commands() -> Vec<Command> {
             action_id: "merge_pr".into(),
             via: ActionVia::Kbd,
         },
+        Command::RestartAgentAndContinue {
+            terminal_id: TerminalId(41),
+        },
         Command::Shutdown,
     ]
 }
@@ -1321,6 +1324,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::GetStats => "GetStats",
         Command::SetHopperCanceled { .. } => "SetHopperCanceled",
         Command::RecordAction { .. } => "RecordAction",
+        Command::RestartAgentAndContinue { .. } => "RestartAgentAndContinue",
     }
 }
 
@@ -1443,7 +1447,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        92,
+        93,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(

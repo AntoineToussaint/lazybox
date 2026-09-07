@@ -2148,6 +2148,26 @@ impl Sidebar {
         ids
     }
 
+    /// Every agent terminal in the usage-limit block, alerting
+    /// (`LimitReached`) or parked (`AwaitingReset`) — the set a restart
+    /// with fresh credentials (`a R`) applies to. Sorted like
+    /// [`Self::limit_reached_terminals`].
+    pub fn limited_terminals(&self) -> Vec<TerminalId> {
+        let mut ids: Vec<TerminalId> = self
+            .agent_terminal_states
+            .iter()
+            .filter(|(_, (_, state))| {
+                matches!(
+                    state,
+                    lazybox_ipc::AgentState::LimitReached | lazybox_ipc::AgentState::AwaitingReset
+                )
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_by_key(|id| id.0);
+        ids
+    }
+
     pub fn credit_exhausted_terminals(&self) -> Vec<TerminalId> {
         let mut ids: Vec<TerminalId> = self
             .agent_terminal_states

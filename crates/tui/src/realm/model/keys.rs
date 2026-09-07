@@ -2993,6 +2993,7 @@ pub(super) fn action_from_kind(
         ActionKind::JumpPrevGroup => Action::JumpPrevGroup,
         ActionKind::JumpNextGroup => Action::JumpNextGroup,
         ActionKind::ResumeRateLimited => Action::ResumeRateLimited,
+        ActionKind::RestartRateLimited => Action::RestartRateLimited,
         ActionKind::RecoverAgentCredit => Action::RecoverAgentCredit,
         ActionKind::RecoverAllAgentCredit => Action::RecoverAllAgentCredit,
         ActionKind::StartAgent => Action::StartAgent,

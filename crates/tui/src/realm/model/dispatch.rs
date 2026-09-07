@@ -2282,6 +2282,9 @@ impl<T: TerminalAdapter> Model<T> {
             Action::ResumeRateLimited => {
                 cmds.extend(self.resume_rate_limited_agents());
             }
+            Action::RestartRateLimited => {
+                cmds.extend(self.restart_rate_limited_agents());
+            }
             Action::RecoverAgentCredit => {
                 cmds.extend(self.recover_agent_credit(false));
             }

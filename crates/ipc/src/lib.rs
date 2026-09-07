@@ -1718,6 +1718,20 @@ pub enum Command {
         action_id: String,
         via: ActionVia,
     },
+    /// Restart one usage-limit-blocked agent so it picks up fresh
+    /// credentials, then continue its interrupted work: the daemon stops
+    /// the running process, respawns the exact conversation in the same
+    /// pane through the provider's `--resume` builder (as [`Self::ResumeAgent`]
+    /// does for an exited pane), and hands the configured continuation
+    /// prompt (`ui.credit_recovery_prompt`) to the spawn-time injector. The
+    /// bulk `a R` (restart rate-limited) action sends one per limited
+    /// terminal after the user has switched Claude account / API key
+    /// externally — a plain `Shift-K` "continue" cannot make a running
+    /// process re-read its credentials. Appended last (bincode is
+    /// ordinal-sensitive).
+    RestartAgentAndContinue {
+        terminal_id: TerminalId,
+    },
 }
 
 impl Command {

@@ -4507,6 +4507,72 @@ snippets:
         );
     }
 
+    /// `a R` restarts every agent in the usage-limit block — the alerting
+    /// `LimitReached` AND the parked `AwaitingReset` (a "continue" typed
+    /// into an auto-continue composer would only cancel the wait, but a
+    /// respawn on the new account gets it working now) — with one daemon
+    /// `RestartAgentAndContinue` each, and never touches a working
+    /// sibling. It does not inject anything itself: the daemon owns the
+    /// stop → `--resume` → continuation sequence.
+    #[test]
+    fn restart_rate_limited_targets_blocked_and_parked_agents_only() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent(), agent(), agent()]);
+        for (i, state) in [
+            AgentState::LimitReached,
+            AgentState::Working,
+            AgentState::AwaitingReset,
+            AgentState::Done,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: keys[i].clone(),
+                terminal_id: TerminalId(i as u64 + 1),
+                state,
+            });
+        }
+
+        let cmds = m.dispatch_action(&Action::RestartRateLimited);
+        let mut restarted: Vec<u64> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::RestartAgentAndContinue { terminal_id } => Some(terminal_id.0),
+                _ => None,
+            })
+            .collect();
+        restarted.sort();
+        assert_eq!(
+            restarted,
+            vec![1, 3],
+            "the blocked and the parked agent restart; working / done ones don't: {cmds:?}",
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, IpcCommand::InjectPrompt { .. })),
+            "the continuation is the daemon's job after the respawn, not a client inject: {cmds:?}",
+        );
+    }
+
+    /// With nothing limited, `a R` restarts nothing and says so.
+    #[test]
+    fn restart_rate_limited_with_no_targets_is_a_no_op_hint() {
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, _keys) = model_with_broadcast_targets(&[agent()]);
+        let cmds = m.dispatch_action(&Action::RestartRateLimited);
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, IpcCommand::RestartAgentAndContinue { .. })),
+            "no agent is rate-limited, so nothing restarts: {cmds:?}",
+        );
+    }
+
     /// #847 (review finding): a workspace with two agents where only the
     /// HIGHER-id one is rate-limited must resume THAT terminal, not the
     /// lower-id working sibling. Targeting the workspace and routing

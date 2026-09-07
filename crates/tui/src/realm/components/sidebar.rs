@@ -805,6 +805,11 @@ impl Sidebar {
         self.inner.limit_reached_terminals()
     }
 
+    /// See `Sidebar::limited_terminals`.
+    pub fn limited_terminals(&self) -> Vec<lazybox_ipc::TerminalId> {
+        self.inner.limited_terminals()
+    }
+
     /// See `Sidebar::limit_reached_workspace_count`.
     pub fn limit_reached_workspace_count(&self) -> usize {
         self.inner.limit_reached_workspace_count()

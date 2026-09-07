@@ -451,7 +451,16 @@ declared per agent under `agents.<id>.models` in YAML (an ordered
 Claude ships a built-in Haiku/Sonnet/Opus menu, other agents define
 their own. The alias is agent-agnostic at the chord — the daemon maps
 it to whatever agent the spawn targets — and the picked tier's label
-rides a `◆ Opus` tab badge. `g` is a leader that
+rides a `◆ Opus` tab badge. The `a` leader also carries the bulk
+**rate-limit recovery** chord `a R` (restart rate-limited): for every
+agent blocked (`⏳ LimitReached`) or parked (`💤 AwaitingReset`) on a
+usage limit, the daemon stops its process, respawns the same
+conversation in the same pane (`--resume`), and submits the configured
+continuation prompt — the way to pick up fresh credentials after
+switching Claude account / API key externally, since a running process
+never re-reads them. `Shift-K` (resume rate-limited) stays the
+lightweight sibling for when the limit has simply reset: it injects a
+settle-gated `continue` into each `LimitReached` agent. `g` is a leader that
 opens the **github** group the same way: `g m` merge, `g u` update
 branch (the "Update branch" button — merge base into head; only on a
 PR behind its base, #484), `g g` toggle

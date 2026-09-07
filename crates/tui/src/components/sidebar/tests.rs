@@ -2137,6 +2137,48 @@ mod search_tests {
         assert_eq!(sb.space_cost_micros("nonexistent"), 0);
     }
 
+    /// The row `$` / header pill key on *effective* metering — the per-row
+    /// flag OR `agent.meter_all` OR a metered Space — the same OR the daemon
+    /// applies at spawn. With blanket metering on, every pre-existing
+    /// workspace still carries `metered: false`, so keying on the bare flag
+    /// would read "off" across a fully-metered sidebar.
+    #[test]
+    fn workspace_is_metered_ors_flag_meter_all_and_metered_space() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let mut a = issue_ws_in_repo("obin-ai/platform", "1", "one");
+        let mut other = issue_ws_in_repo("acme/widget", "3", "three");
+        a.metered = false;
+        other.metered = false;
+        let a_key = SessionKey::from(&a.key);
+        let other_key = SessionKey::from(&other.key);
+        sb.workspaces.insert(a_key.clone(), a);
+        sb.workspaces.insert(other_key.clone(), other);
+        sb.recompute_visible();
+
+        let ws = |sb: &Sidebar, key: &SessionKey| sb.workspaces.get(key).cloned().unwrap();
+
+        // Nothing on → nothing metered.
+        assert!(!sb.workspace_is_metered(&ws(&sb, &a_key)));
+        assert!(!sb.workspace_is_metered(&ws(&sb, &other_key)));
+
+        // The per-row flag alone.
+        sb.workspaces.get_mut(&a_key).unwrap().metered = true;
+        assert!(sb.workspace_is_metered(&ws(&sb, &a_key)));
+        assert!(!sb.workspace_is_metered(&ws(&sb, &other_key)));
+        sb.workspaces.get_mut(&a_key).unwrap().metered = false;
+
+        // A metered Space covers exactly its members (obin-ai auto-seeds).
+        sb.metered_spaces.insert("obin-ai".into());
+        assert!(sb.workspace_is_metered(&ws(&sb, &a_key)));
+        assert!(!sb.workspace_is_metered(&ws(&sb, &other_key)));
+        sb.metered_spaces.clear();
+
+        // Blanket metering covers everything.
+        sb.set_meter_all(true);
+        assert!(sb.workspace_is_metered(&ws(&sb, &a_key)));
+        assert!(sb.workspace_is_metered(&ws(&sb, &other_key)));
+    }
+
     /// Frame-budget regression gate (#1090, acceptance #4): the sidebar's
     /// per-frame widget build must stay cheap at scale.
     /// `prebuild_workspace_lines` rebuilds every visible row every frame
@@ -2810,6 +2852,11 @@ mod search_tests {
     #[test]
     fn header_renders_today_strip() {
         let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        // New workspaces meter by default; the focused row's ` $ METER `
+        // pill would claim the automation row this test measures.
+        for ws in sb.workspaces.values_mut() {
+            ws.metered = false;
+        }
         set_today(&mut sb, 3, 4, 2_140_000);
         let row = today_row(&mut sb, 80);
         assert!(row.contains("3 sessions"), "{row:?}");
@@ -3798,6 +3845,9 @@ mod broadcast_select_tests {
         let mut sb = Sidebar::new(PaneId::new(1));
         let mut ws = pr_ws("https://github.com/o/r/pull/1");
         ws.auto_merge_on_green = true;
+        // New workspaces meter by default; the ` $ METER ` pill fits where
+        // the merge label doesn't and would keep the row alive.
+        ws.metered = false;
         ws.pr.as_mut().expect("pr").ci = lazybox_core::CiStatus::Failure;
         sb.workspaces.insert(SessionKey::from(&ws.key), ws);
         sb.recompute_visible();

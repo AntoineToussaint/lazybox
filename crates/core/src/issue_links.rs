@@ -75,6 +75,17 @@ pub fn extract_blocked_by(body: &str) -> Vec<IssueLink> {
     out.into_iter().collect()
 }
 
+/// Whether `body` mentions any blocking keyword at all — a cheap
+/// substring pre-check, not a parse. Callers use it to decide whether an
+/// issue is plausibly in a dependency graph before spending a network
+/// round-trip (GitHub's issue-dependencies REST API): a body with no
+/// `Blocked by:` / `Depends on:` token can be skipped. Keeps the keyword
+/// list single-sourced with [`extract_blocked_by`].
+pub fn body_mentions_blocker(body: &str) -> bool {
+    let lower = body.to_lowercase();
+    BLOCKED_KEYWORDS.iter().any(|kw| lower.contains(kw))
+}
+
 /// Keywords that introduce a *declared* (free-text) blocker.
 const BLOCKED_ON_KEYWORDS: &[&str] = &["blocked on", "blocked-on", "blockedon"];
 
@@ -414,6 +425,17 @@ mod tests {
     fn blocked_by_ignores_closes_keywords() {
         // A closing keyword is not a blocking keyword.
         assert!(extract_blocked_by("Closes #3").is_empty());
+    }
+
+    #[test]
+    fn body_mentions_blocker_detects_keywords_without_a_link() {
+        // The pre-check fires on the keyword alone, before any parse.
+        assert!(body_mentions_blocker("Blocked by: TBD, need infra"));
+        assert!(body_mentions_blocker("This depends on the migration"));
+        assert!(body_mentions_blocker("blockedby whatever"));
+        // Closing keywords and plain prose do not.
+        assert!(!body_mentions_blocker("Closes #3\n\nregular description"));
+        assert!(!body_mentions_blocker(""));
     }
 
     #[test]

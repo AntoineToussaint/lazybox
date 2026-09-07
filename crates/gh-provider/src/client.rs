@@ -1227,6 +1227,18 @@ pub struct GhClient {
     /// never disables the probe for good; `force_full_sweep` resets it
     /// too so an explicit refresh re-tries the batch.
     hot_batch_graphql_failures: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Native `blocked_by` edges learned from GitHub's issue-dependencies
+    /// REST API (`GET …/issues/{n}/dependencies/blocked_by`, GA 2025-08),
+    /// keyed by the blocked issue's own [`TaskId`]. GitHub does not return
+    /// these in the PR/issue GraphQL, so we enrich task-by-task — but only
+    /// for issues that warrant a round-trip (a body that mentions a blocker
+    /// keyword, or a sub-issue with a parent), and at most once per
+    /// `repo_refresh_interval`. The cached value carries its fetch instant
+    /// so an entry older than the TTL is refetched. Shared across clones
+    /// (one dependency view per credential); cleared by `force_full_sweep`.
+    issue_deps_cache: std::sync::Arc<
+        parking_lot::Mutex<std::collections::HashMap<TaskId, (Vec<TaskId>, std::time::Instant)>>,
+    >,
 }
 
 /// Per-branch cost breakdown for one branch of a PR fetch, emitted
@@ -1358,6 +1370,9 @@ impl GhClient {
                 std::collections::HashMap::new(),
             )),
             hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            issue_deps_cache: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         })
     }
 
@@ -1396,6 +1411,9 @@ impl GhClient {
                 std::collections::HashMap::new(),
             )),
             hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            issue_deps_cache: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         })
     }
 
@@ -2588,6 +2606,13 @@ impl GhClient {
     /// watched-repo count.
     pub const ISSUE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(90);
 
+    /// How long a learned native `blocked_by` edge set stays fresh before
+    /// [`issue_blocked_by`](Self::issue_blocked_by) is asked again. Sized to
+    /// the default `repo_refresh_interval` (5 min) so, at steady state, an
+    /// eligible issue costs at most one extra dependencies REST call per
+    /// repo-refresh cycle; a `force_full_sweep` clears the cache outright.
+    pub const ISSUE_DEPS_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
     /// Should the next sync cycle run a heavy full sweep, or is the
     /// notifications-driven incremental path safe to use? Returns true
     /// when no sweep has run yet (first tick after daemon start) or
@@ -2725,6 +2750,8 @@ impl GhClient {
         // And give the batched hot query another chance on this server.
         self.hot_batch_graphql_failures
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        // Re-learn native dependency edges from scratch too.
+        self.issue_deps_cache.lock().clear();
     }
 
     pub fn manual_refresh_pending(&self) -> bool {
@@ -3285,6 +3312,21 @@ impl GhClient {
                 .retain(|id, _| requested.contains(id));
         }
 
+        // Native dependency edges (#1521): enrich freshly-fetched issue
+        // tasks here, AFTER every `hot_freshness` lock has been released —
+        // holding a `parking_lot::Mutex` across the `.await` in
+        // `enrich_task_blocked_by` would be a bug. Doing it on the hot path
+        // (rather than only on the 5-min sweep) means a hot re-poll of a
+        // blocked issue keeps its `⛔` badge instead of dropping it for a
+        // tick and re-adding it (flicker); the per-issue TTL cache keeps the
+        // steady-state cost to at most one dependencies call per issue per
+        // `ISSUE_DEPS_TTL`.
+        for slot in &mut out {
+            if let HotFetch::Fresh(task) = slot {
+                self.enrich_task_blocked_by(task).await;
+            }
+        }
+
         metrics.prs = out
             .iter()
             .filter_map(|slot| match slot {
@@ -3463,7 +3505,12 @@ impl GhClient {
             return Ok(None);
         };
         let issue = data.repository.and_then(|r| r.issue);
-        Ok(issue.map(|i| graphql::issue_to_task(&i, &self.user)))
+        let Some(issue) = issue else {
+            return Ok(None);
+        };
+        let mut task = graphql::issue_to_task(&issue, &self.user);
+        self.enrich_task_blocked_by(&mut task).await;
+        Ok(Some(task))
     }
 
     /// Cheap discovery probe for PRs the authenticated user AUTHORED that
@@ -3538,6 +3585,7 @@ impl GhClient {
                 tasks.push(graphql::issue_to_task(issue, &self.user));
             }
         }
+        self.merge_native_blocked_by(&mut tasks).await;
         Ok(tasks)
     }
 
@@ -4291,6 +4339,7 @@ impl GhClient {
                 tasks.push(graphql::issue_to_task(issue, &self.user));
             }
         }
+        self.merge_native_blocked_by(&mut tasks).await;
         Ok(tasks)
     }
 
@@ -4537,6 +4586,7 @@ impl GhClient {
             );
             return Err(incomplete_pagination_error(op, tasks.len(), reason));
         }
+        self.merge_native_blocked_by(&mut tasks).await;
         Ok((tasks, mentions))
     }
 
@@ -4625,6 +4675,7 @@ impl GhClient {
                 }
             }
         }
+        self.merge_native_blocked_by(&mut tasks).await;
         Ok((tasks, mentions))
     }
 
@@ -4744,6 +4795,10 @@ impl GhClient {
                 reason,
             ));
         }
+        // Enrich the `involves:`-query issues with native dependency edges.
+        // The watched-repo fan-out below enriches its own tasks inside
+        // `fetch_watched_repo_issues`, so it isn't re-scanned here.
+        self.merge_native_blocked_by(&mut tasks).await;
 
         // Watched repos: the main query above is `involves:you`-scoped, so a
         // watched repo's issues that DON'T involve you never appear (before
@@ -5860,6 +5915,120 @@ impl GhClient {
             }
         }
         names
+    }
+
+    /// Native `blocked_by` edges for one issue, from GitHub's issue
+    /// dependencies REST API
+    /// (`GET /repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by`,
+    /// GA 2025-08). Returns the blocking issues as [`TaskId`]s keyed the
+    /// lazybox way (`owner/repo#N`). Same-repo only — that is all the API
+    /// reports; a cross-repo dependency declared in the body is picked up
+    /// separately by the marker parse. Best-effort: any error (older host,
+    /// missing scope, network) yields an empty list, exactly like
+    /// [`branch_rule_names`](Self::branch_rule_names), so a task simply
+    /// carries no native edges rather than failing the poll.
+    pub(crate) async fn issue_blocked_by(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Vec<TaskId> {
+        #[derive(serde::Deserialize)]
+        struct Dep {
+            number: u64,
+        }
+        let route = format!("/repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by");
+        let deps: Vec<Dep> = match self.inner.get(&route, None::<&()>).await {
+            Ok(deps) => deps,
+            Err(e) => {
+                tracing::debug!(
+                    "blocked_by lookup for {owner}/{repo}#{number} failed: {e}"
+                );
+                return Vec::new();
+            }
+        };
+        deps.into_iter()
+            .map(|d| TaskId {
+                source: "github".into(),
+                key: format!("{owner}/{repo}#{}", d.number),
+            })
+            .collect()
+    }
+
+    /// Merge GitHub's native `blocked_by` edges into a freshly built issue
+    /// task, in place. Cheap by construction: only issues that already look
+    /// like they participate in a dependency (a body mentioning a blocker
+    /// keyword, or a sub-issue with a parent) trigger the REST round-trip,
+    /// and the result is cached per issue for [`ISSUE_DEPS_TTL`] so a hot
+    /// re-poll of the same issue reuses it. Edges the body marker already
+    /// produced are preserved; native edges are unioned in and the set is
+    /// de-duplicated so the two sources can't double-count the same blocker.
+    ///
+    /// [`ISSUE_DEPS_TTL`]: Self::ISSUE_DEPS_TTL
+    async fn enrich_task_blocked_by(&self, task: &mut Task) {
+        // Dependencies are an issue-only concept on GitHub; PRs never carry
+        // them and must never spend a request probing.
+        if task.kind != Some(TaskKind::Issue) {
+            return;
+        }
+        // Budget gate: skip issues that show no sign of a dependency. The
+        // body pre-check is a cheap substring scan; a set parent means the
+        // issue is a sub-issue and worth checking for cross-links.
+        let warrants_probe = task.parent.is_some()
+            || task
+                .body
+                .as_deref()
+                .is_some_and(lazybox_core::issue_links::body_mentions_blocker);
+        if !warrants_probe {
+            return;
+        }
+        // Parse `owner/repo#N` out of the task key.
+        let Some((repo_path, num)) = task.id.key.rsplit_once('#') else {
+            return;
+        };
+        let Some((owner, repo)) = repo_path.split_once('/') else {
+            return;
+        };
+        let Ok(number) = num.parse::<u64>() else {
+            return;
+        };
+
+        // Serve from cache while fresh, otherwise fetch and record.
+        let cached = {
+            let cache = self.issue_deps_cache.lock();
+            cache.get(&task.id).and_then(|(edges, at)| {
+                (at.elapsed() < Self::ISSUE_DEPS_TTL).then(|| edges.clone())
+            })
+        };
+        let native = match cached {
+            Some(edges) => edges,
+            None => {
+                let edges = self.issue_blocked_by(owner, repo, number).await;
+                self.issue_deps_cache
+                    .lock()
+                    .insert(task.id.clone(), (edges.clone(), std::time::Instant::now()));
+                edges
+            }
+        };
+
+        // Union native edges with whatever the body marker found, dropping
+        // duplicates while preserving the existing order.
+        for edge in native {
+            if !task.blocked_by.contains(&edge) {
+                task.blocked_by.push(edge);
+            }
+        }
+    }
+
+    /// Apply [`enrich_task_blocked_by`](Self::enrich_task_blocked_by) to a
+    /// batch of freshly built tasks. Called from the discovery and
+    /// single-issue paths after `issue_to_task` has run, and from the hot
+    /// path *after* its freshness lock is released — so a hot re-poll never
+    /// drops a native edge and re-adds it a tick later (badge flicker).
+    async fn merge_native_blocked_by(&self, tasks: &mut [Task]) {
+        for task in tasks.iter_mut() {
+            self.enrich_task_blocked_by(task).await;
+        }
     }
 
     pub async fn close_issue_node(&self, issue_node_id: &str) -> Result<(), GhError> {
@@ -8180,6 +8349,9 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            issue_deps_cache: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 
@@ -9836,6 +10008,117 @@ mod tests {
             mutation.is_retryable(),
             "a timed-out mutation is re-drivable, not permanently rejected",
         );
+    }
+
+    /// An issue whose body warrants a probe gets its native `blocked_by`
+    /// edges from the dependencies REST API, mapped to lazybox-keyed
+    /// `TaskId`s (`owner/repo#N`) and unioned with the body-marker edges.
+    #[tokio::test(flavor = "current_thread")]
+    async fn issue_blocked_by_maps_dep_numbers_to_task_ids() {
+        const BODY: &str = r#"[{"number":3},{"number":9}]"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        let edges = client.issue_blocked_by("acme", "widget", 7).await;
+        assert_eq!(
+            edges,
+            vec![
+                TaskId { source: "github".into(), key: "acme/widget#3".into() },
+                TaskId { source: "github".into(), key: "acme/widget#9".into() },
+            ]
+        );
+    }
+
+    /// A failing dependencies lookup (older host, missing scope, 404) is
+    /// best-effort: the issue simply carries no native edges.
+    #[tokio::test(flavor = "current_thread")]
+    async fn issue_blocked_by_is_empty_on_error() {
+        let base_uri =
+            spawn_canned_response_server("404 Not Found", "application/json", "{}").await;
+        let client = make_client(&base_uri);
+        assert!(client.issue_blocked_by("acme", "widget", 7).await.is_empty());
+    }
+
+    /// `enrich_task_blocked_by` only probes issues that look like they
+    /// have a dependency, caches the result for `ISSUE_DEPS_TTL`, and
+    /// merges native edges without double-counting the body-marker ones.
+    #[tokio::test(flavor = "current_thread")]
+    async fn enrich_blocked_by_probes_caches_and_unions() {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // `#3` is already known from the body marker; the API also
+        // reports `#3` (dup) and `#9` (new).
+        const BODY: &str = r#"[{"number":3},{"number":9}]"#;
+        let base_uri = spawn_counting_response_server(
+            "200 OK",
+            "application/json",
+            "",
+            BODY,
+            hits.clone(),
+        )
+        .await;
+        let client = make_client(&base_uri);
+
+        let mut issue = task_without_node_id(TaskKind::Issue);
+        issue.id.key = "acme/widget#7".to_string();
+        issue.repo = Some("acme/widget".to_string());
+        issue.body = Some("Blocked by #3, needs the infra rollout".to_string());
+        issue.blocked_by = vec![TaskId {
+            source: "github".into(),
+            key: "acme/widget#3".into(),
+        }];
+
+        client.enrich_task_blocked_by(&mut issue).await;
+        assert_eq!(
+            issue.blocked_by,
+            vec![
+                TaskId { source: "github".into(), key: "acme/widget#3".into() },
+                TaskId { source: "github".into(), key: "acme/widget#9".into() },
+            ],
+            "native `#9` is added; the shared `#3` is not duplicated"
+        );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // A second enrichment of the same issue is served from cache — no
+        // new request.
+        let mut again = task_without_node_id(TaskKind::Issue);
+        again.id.key = "acme/widget#7".to_string();
+        again.repo = Some("acme/widget".to_string());
+        again.body = Some("Blocked by #3".to_string());
+        client.enrich_task_blocked_by(&mut again).await;
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "cached edges are reused within the TTL"
+        );
+    }
+
+    /// A PR, or an issue with no dependency signal, never spends a request.
+    #[tokio::test(flavor = "current_thread")]
+    async fn enrich_blocked_by_skips_when_no_signal() {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let base_uri = spawn_counting_response_server(
+            "200 OK",
+            "application/json",
+            "",
+            "[]",
+            hits.clone(),
+        )
+        .await;
+        let client = make_client(&base_uri);
+
+        // A PR is never probed, even with a blocker-looking body.
+        let mut pr = task_without_node_id(TaskKind::Pr);
+        pr.body = Some("Blocked by #3".to_string());
+        client.enrich_task_blocked_by(&mut pr).await;
+
+        // An issue with no parent and a plain body is never probed.
+        let mut issue = task_without_node_id(TaskKind::Issue);
+        issue.id.key = "acme/widget#7".to_string();
+        issue.body = Some("just a normal description".to_string());
+        client.enrich_task_blocked_by(&mut issue).await;
+
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(pr.blocked_by.is_empty());
+        assert!(issue.blocked_by.is_empty());
     }
 }
 

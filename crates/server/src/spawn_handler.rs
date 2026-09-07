@@ -6076,6 +6076,65 @@ pub(crate) async fn detach_killed_terminal(
     }
 }
 
+/// Reclaim a killed terminal whose normal teardown could not join within the
+/// removal bound because its `terminal_io` guard is wedged.
+///
+/// `detach_killed_terminal` / `teardown_exited_terminal` both take
+/// `lock_terminal_io(backend_key)` as their FIRST step (`finish_terminal`), so
+/// a guard held forever parks the user-driven detach AND the output pump alike:
+/// "the pump owns the teardown" is false while the guard is wedged, and every
+/// resource the teardown would free — the registry entry, the live-key map, the
+/// backend slot (PTY fds, writer thread, replay ring), the working claim, and
+/// the persisted kv rows — leaks for the life of the daemon.
+///
+/// This is the out-of-band reclaim for that case. Every step below takes a lock
+/// OTHER than the wedged `terminal_io` lock (or no lock), so none can deadlock
+/// behind the holder: `claim_teardown` / `finish_teardown` touch only `entries`
+/// plus the `live_backend_keys` RwLock and atomically claim the terminal, so a
+/// pump that later wakes finds it already finished and no-ops; `backend.release`
+/// operates on the backend's own session map, `release_pty` on the
+/// working-claim lock, and the kv sweep on the store. The kill already stopped
+/// the child, so a late write from a holder that eventually wakes hits an
+/// absent session and is harmless. Per-terminal lifecycle events
+/// (`TerminalExited` / `AgentState::Exited`) are intentionally skipped: the
+/// caller broadcasts `WorkspaceRemoved`, which drops the whole workspace and
+/// its terminals client-side, so a per-terminal exit event would be redundant.
+pub(crate) async fn reclaim_wedged_terminal(
+    config: &ServerConfig,
+    terminal_id: TerminalId,
+    backend_key: &str,
+) {
+    match config.terminal.claim_teardown(terminal_id, backend_key).await {
+        Ok(Some(claim)) => {
+            // We own the entry — complete the registry removal + kv sweep the
+            // wedged teardown never reached.
+            config.terminal.finish_teardown(terminal_id).await;
+            sweep_terminal_persisted_fields(config, backend_key, claim.agent_state_generation)
+                .await;
+        }
+        // Already finished (a pump that slipped through, or a prior reclaim).
+        // The entry is gone; the idempotent releases below still run.
+        Ok(None) => {}
+        Err(registered) => {
+            // The id now maps to a different backend_key — not ours to sweep.
+            // Leave the entry alone and only reclaim our own backend_key's
+            // resources below (keyed by backend_key, so unambiguously ours).
+            tracing::error!(
+                ?terminal_id,
+                expected = backend_key,
+                registered,
+                "reclaim_wedged_terminal: terminal key mismatch — refusing to sweep the wrong entry",
+            );
+        }
+    }
+    config
+        .terminal
+        .forget_terminal_persistence_lock(backend_key);
+    config.terminal.forget_terminal_io_lock(backend_key);
+    config.backend.release(backend_key).await;
+    crate::working_claims::release_pty(config, backend_key).await;
+}
+
 async fn finish_terminal(
     config: &ServerConfig,
     terminal_id: TerminalId,

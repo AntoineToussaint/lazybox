@@ -73,25 +73,36 @@ pub(crate) enum TerminalIoFailure {
 /// contract, drift can only cost a slow-path lookup or a momentarily stale
 /// admit — never a wrong reject — so a fast-path miss falls back to the
 /// authoritative mutex before refusing.
-pub(crate) async fn acquire_live(
-    config: &ServerConfig,
+/// Not `async fn`: `#[track_caller]` needs a synchronous prologue to capture
+/// the true caller, so the holder location is snapshotted here and forwarded to
+/// [`TerminalRegistry::lock_terminal_io_tracked`], attributing a wedge to the
+/// producer that called `acquire_live` rather than to this wrapper.
+#[track_caller]
+pub(crate) fn acquire_live<'a>(
+    config: &'a ServerConfig,
     terminal_id: TerminalId,
-    backend_key: &str,
-) -> Option<tokio::sync::OwnedMutexGuard<()>> {
-    let guard = config.terminal.lock_terminal_io(backend_key).await;
-    if config.terminal.live_backend_key(terminal_id).as_deref() == Some(backend_key) {
-        return Some(guard);
-    }
-    if config
-        .terminal
-        .backend_key_for(terminal_id)
-        .await
-        .as_deref()
-        == Some(backend_key)
-    {
-        Some(guard)
-    } else {
-        None
+    backend_key: &'a str,
+) -> impl std::future::Future<Output = Option<tokio::sync::OwnedMutexGuard<()>>> + 'a {
+    let location = std::panic::Location::caller();
+    async move {
+        let guard = config
+            .terminal
+            .lock_terminal_io_tracked(backend_key, location)
+            .await;
+        if config.terminal.live_backend_key(terminal_id).as_deref() == Some(backend_key) {
+            return Some(guard);
+        }
+        if config
+            .terminal
+            .backend_key_for(terminal_id)
+            .await
+            .as_deref()
+            == Some(backend_key)
+        {
+            Some(guard)
+        } else {
+            None
+        }
     }
 }
 

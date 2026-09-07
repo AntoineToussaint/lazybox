@@ -2416,6 +2416,30 @@ mod tombstone_tests {
     }
 }
 
+/// How long a removal waits to join a terminal's interaction guard — before
+/// the kill, and for the detach after it — before proceeding without it. The
+/// guard's normal hold is milliseconds (a write, a resize, a paste settling);
+/// anything past this is a wedged holder, and a user-confirmed removal must
+/// not park behind it forever while holding the workspace lock.
+const DETACH_AFTER_KILL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A removal slower than this gets a warning breadcrumb with its duration and
+/// outcome — the user is looking at a modal, and a removal that never wrote a
+/// line was undiagnosable from the log.
+const SLOW_REMOVAL_WARN_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Render the current holder of a terminal's I/O lock for a wedge warning:
+/// its source location and how long it has held the guard. When a removal
+/// times out joining the guard the lock is necessarily held, so the recorded
+/// last-acquirer is the culprit — this turns "held past the bound" from a
+/// dead end into a self-diagnosing breadcrumb pointing at the code path to fix.
+fn io_lock_holder_fields(config: &ServerConfig, backend_key: &str) -> (String, u64) {
+    match config.terminal.io_lock_holder(backend_key) {
+        Some(hold) => (hold.location.to_string(), hold.since.elapsed().as_millis() as u64),
+        None => ("<unrecorded>".to_string(), 0),
+    }
+}
+
 /// Delete a workspace, returning the worktree space reclaimed on success
 /// or `None` when the row was preserved (a prerequisite failed). The
 /// caller surfaces the reclaimed total via `notify_reclaimed`.
@@ -2430,18 +2454,6 @@ pub async fn delete_workspace(config: &ServerConfig, key: &WorkspaceKey) -> Opti
 /// instead of being passed as an unlabelled boolean at each destructive call
 /// site. Every trigger still receives the same fresh terminal/worktree safety
 /// sequence from [`WorkspaceLifecycle`] (#1167).
-/// How long a removal waits to join a terminal's interaction guard — before
-/// the kill, and for the detach after it — before proceeding without it. The
-/// guard's normal hold is milliseconds (a write, a resize, a paste settling);
-/// anything past this is a wedged holder, and a user-confirmed removal must
-/// not park behind it forever while holding the workspace lock.
-const DETACH_AFTER_KILL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// A removal slower than this gets a warning breadcrumb with its duration and
-/// outcome — the user is looking at a modal, and a removal that never wrote a
-/// line was undiagnosable from the log.
-const SLOW_REMOVAL_WARN_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceRemovalReason {
     UserArchive,
@@ -2480,7 +2492,10 @@ impl<'a> WorkspaceLifecycle<'a> {
         key: &WorkspaceKey,
         reason: WorkspaceRemovalReason,
     ) -> Option<Reclaimed> {
-        let started = std::time::Instant::now();
+        // Measure on the tokio clock, the same one the detach bounds below use,
+        // so the slow-removal breadcrumb is consistent with them and a paused
+        // test clock advances this timing in lockstep with the bounded waits.
+        let started = tokio::time::Instant::now();
         let outcome = self.remove_timed(key, reason).await;
         // A removal is a user action with a modal behind it; one that takes
         // seconds is worth a breadcrumb, and one that never finished used to
@@ -2694,11 +2709,14 @@ impl<'a> WorkspaceLifecycle<'a> {
                     // snapshotted. There is no live session left to signal.
                     Ok(None) => continue,
                     Err(_) => {
+                        let (holder, held_ms) = io_lock_holder_fields(config, &backend_key);
                         tracing::warn!(
                             workspace = %key,
                             terminal_id = ?tid,
                             %backend_key,
                             timeout_secs = DETACH_AFTER_KILL_TIMEOUT.as_secs(),
+                            io_lock_holder = %holder,
+                            io_lock_held_ms = held_ms,
                             "delete_workspace: terminal interaction guard held past the bound — \
                              stopping the terminal without it",
                         );
@@ -2737,9 +2755,7 @@ impl<'a> WorkspaceLifecycle<'a> {
                 // already dead (the kill above landed), the row survived, no
                 // `WorkspaceRemoved` ever went out, hooks and poll upserts for
                 // the key queued behind the lock, and the next daemon restart
-                // resurrected the agent from the still-present row. The pump
-                // that observed the real exit owns the teardown regardless,
-                // so after the bound the removal proceeds and says so.
+                // resurrected the agent from the still-present row.
                 match tokio::time::timeout(
                     DETACH_AFTER_KILL_TIMEOUT,
                     crate::spawn_handler::detach_killed_terminal(config, tid, &backend_key),
@@ -2747,14 +2763,36 @@ impl<'a> WorkspaceLifecycle<'a> {
                 .await
                 {
                     Ok(()) => {}
-                    Err(_) => tracing::warn!(
-                        workspace = %key,
-                        terminal_id = ?tid,
-                        %backend_key,
-                        timeout_secs = DETACH_AFTER_KILL_TIMEOUT.as_secs(),
-                        "delete_workspace: terminal teardown did not join within the bound after \
-                         the kill — continuing the removal; the output pump owns the teardown",
-                    ),
+                    Err(_) => {
+                        // The teardown did not join within the bound. It is not
+                        // enough to walk away: the same wedged io guard that
+                        // parked *this* detach also parks the output pump — its
+                        // teardown (`teardown_exited_terminal` → `finish_terminal`)
+                        // takes the very same `lock_terminal_io(backend_key)`
+                        // before it can free anything, so "the pump owns the
+                        // teardown" is false while the guard is held, and the
+                        // registry entry, backend slot (fds/writer thread/replay
+                        // ring), working claim, and persisted kv rows would all
+                        // leak for the life of the daemon. Reclaim them out of
+                        // band through the guard-free path (it takes only the
+                        // entries/working-claim/store locks, never the wedged io
+                        // lock), which is idempotent against the pump completing
+                        // later.
+                        let (holder, held_ms) = io_lock_holder_fields(config, &backend_key);
+                        tracing::warn!(
+                            workspace = %key,
+                            terminal_id = ?tid,
+                            %backend_key,
+                            timeout_secs = DETACH_AFTER_KILL_TIMEOUT.as_secs(),
+                            io_lock_holder = %holder,
+                            io_lock_held_ms = held_ms,
+                            "delete_workspace: terminal teardown did not join within the bound \
+                             after the kill — reclaiming the terminal out of band, since the \
+                             wedged guard also parks the output pump",
+                        );
+                        crate::spawn_handler::reclaim_wedged_terminal(config, tid, &backend_key)
+                            .await;
+                    }
                 }
             }
         }
@@ -3885,7 +3923,7 @@ mod orphan_backend_session_tests {
     /// bound, delete the row, and broadcast.
     #[tokio::test(start_paused = true)]
     async fn delete_workspace_completes_when_a_terminal_io_guard_is_never_released() {
-        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
         let key = WorkspaceKey::new("github:o/r#wedged");
         let ws = Workspace::empty(key.clone(), "main", Utc::now());
         config
@@ -3919,12 +3957,21 @@ mod orphan_backend_session_tests {
         // kill, and the detach after it) must give up on it within the bound.
         let _wedge = config.terminal.lock_terminal_io(&backend_key).await;
 
+        let started = tokio::time::Instant::now();
         let removed = tokio::time::timeout(
             2 * DETACH_AFTER_KILL_TIMEOUT + std::time::Duration::from_secs(20),
             delete_workspace(&config, &key),
         )
         .await
         .expect("the removal must complete within its bound instead of hanging");
+        // The wedge path was actually taken, not some fast exit: both bounded
+        // joins (the pre-kill acquire and the post-kill detach) had to expire,
+        // so at least two full bounds of virtual time must have elapsed.
+        assert!(
+            started.elapsed() >= 2 * DETACH_AFTER_KILL_TIMEOUT,
+            "both bounded joins must have run to their deadline (elapsed {:?})",
+            started.elapsed(),
+        );
         assert!(removed.is_some(), "the workspace is removed");
         assert!(
             config
@@ -3934,6 +3981,24 @@ mod orphan_backend_session_tests {
                 .is_none(),
             "the row is gone"
         );
+        // The detach could not free anything (the pump's teardown is parked on
+        // the same wedged guard), so the out-of-band reclaim must have released
+        // the backend slot itself — otherwise the fds/writer thread/replay ring
+        // leak for the life of the daemon. `list()` hides the killed session
+        // regardless of release, so assert the release call directly.
+        assert!(
+            mock.released_keys().await.contains(&backend_key),
+            "the wedged terminal's backend slot must be reclaimed out of band"
+        );
+        // The removal committed, so the session must be tombstoned: this is the
+        // exact guard against the field bug's tail, a surviving row respawning
+        // the agent on the next daemon restart.
+        assert!(
+            load_session_tombstones_strict(&config)
+                .expect("read session tombstones")
+                .contains(key.as_str()),
+            "the removed workspace's session must be tombstoned against restart-respawn"
+        );
         let mut saw_removed = false;
         while let Ok(event) = events.try_recv() {
             if matches!(&event, Event::WorkspaceRemoved(k) if k == &key) {
@@ -3941,6 +4006,39 @@ mod orphan_backend_session_tests {
             }
         }
         assert!(saw_removed, "WorkspaceRemoved must be broadcast");
+    }
+
+    /// The wedge warning is only actionable if it can name who holds the guard.
+    /// `lock_terminal_io` must record the acquiring call site so a removal that
+    /// times out joining the guard can fingerprint the holder in its log —
+    /// turning "held past the bound" from a dead end into a pointer at the code
+    /// path to fix (#1533, finding #2).
+    #[tokio::test]
+    async fn lock_terminal_io_records_its_holder() {
+        let (config, _mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = "lazybox-o-agent-1-1";
+        assert!(
+            config.terminal.io_lock_holder(backend_key).is_none(),
+            "no holder before the lock is taken"
+        );
+        let guard = config.terminal.lock_terminal_io(backend_key).await;
+        let hold = config
+            .terminal
+            .io_lock_holder(backend_key)
+            .expect("the holder must be recorded while the guard is held");
+        assert_eq!(
+            hold.location.file(),
+            file!(),
+            "the recorded call site is the acquirer, not an internal frame"
+        );
+        drop(guard);
+        // Forgetting the lock (the reclaim path's final step) clears the
+        // breadcrumb so it stays bounded to live terminals.
+        config.terminal.forget_terminal_io_lock(backend_key);
+        assert!(
+            config.terminal.io_lock_holder(backend_key).is_none(),
+            "forgetting the lock clears its holder"
+        );
     }
 
     // Fails `delete_workspace`, and — once a delete has been attempted — also

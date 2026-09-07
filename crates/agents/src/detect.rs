@@ -287,6 +287,14 @@ pub fn parse_usage_limit_reset(recent_output: &[u8]) -> Option<String> {
 /// this module — a spurious block can fire the auto-`Wait` keystroke, a
 /// missed one the user can still act on manually.
 ///
+/// A verbatim quote of the middot form — an agent pasting a transcript, or
+/// rendering this module's own doc/test examples — is the residual false
+/// positive this cannot exclude: it is byte-for-byte identical to the real
+/// weekly-limit banner left at rest by the #1337 "Stop and wait" pick (also
+/// a plain `· resets` line with no `⎿` tool-result chrome above a resting
+/// composer), so no local screen signal separates them. The trade is
+/// deliberate — see `a_usage_limit_phrase_above_a_resting_composer_is_stale_scrollback`.
+///
 /// Every phrase occurrence is examined, not just the latest hit overall:
 /// the banner's `/usage-credits …` follow-up line is itself a phrase and
 /// sits BELOW the line carrying the reset, so anchoring on the single
@@ -354,18 +362,34 @@ const CLAUDE_FREE_TEXT_PROMPT_MARKERS: &[&str] = &[
 /// Decided from the tail of the screen (the last 14 non-empty lines, where
 /// the live prompt sits), never from scrollback: a stale `Type something`
 /// row from an already-answered question above a fresh permission dialog
-/// must not unlock the dialog.
+/// must not unlock the dialog. Presence in the tail is not enough — the
+/// free-text marker must be the BOTTOM-MOST prompt. Both an answered
+/// AskUserQuestion (its `Type something` row) and a fresh permission dialog
+/// can sit within the same 14-line window, and a bare presence check read
+/// that as `FreeText`, delivering the paste straight into a Y/N dialog that
+/// eats it. So a permission dialog appearing BELOW the last free-text marker
+/// (a `do you want to …` consent phrase or a `1. Yes` / `(y/n)` choice gate,
+/// which the free-text AskUserQuestion / interrupted-turn shapes never
+/// render) wins: the live prompt is the `Chooser`.
 pub fn claude_prompt_shape(recent_output: &[u8]) -> PromptShape {
     let s = strip_ansi_lossy(recent_output);
     let compact = compact_lower(&s);
     let tail = last_nonempty_lines(&compact, 14);
-    if CLAUDE_FREE_TEXT_PROMPT_MARKERS
+    let free_text_pos = CLAUDE_FREE_TEXT_PROMPT_MARKERS
         .iter()
-        .any(|marker| tail.contains(marker))
-    {
-        PromptShape::FreeText
-    } else {
-        PromptShape::Chooser
+        .filter_map(|marker| tail.rfind(marker))
+        .max();
+    let Some(free_text_pos) = free_text_pos else {
+        return PromptShape::Chooser;
+    };
+    // A Y/N permission dialog rendered below the free-text marker owns input.
+    let dialog_pos = last_compact_match_pos(&tail, CLAUDE_STANDALONE_PROMPT_PHRASES)
+        .into_iter()
+        .chain(last_compact_match_pos(&tail, CLAUDE_CHOICE_MARKERS))
+        .max();
+    match dialog_pos {
+        Some(dialog_pos) if dialog_pos > free_text_pos => PromptShape::Chooser,
+        _ => PromptShape::FreeText,
     }
 }
 
@@ -2867,6 +2891,28 @@ mod tests {
         assert_eq!(
             claude_prompt_shape(stale_then_permission.as_bytes()),
             PromptShape::Chooser
+        );
+
+        // The bug the 20-line gap masked: with only a SMALL gap, the stale
+        // free-text marker and the fresh permission dialog both fall inside
+        // the 14-line tail. A bare presence check saw `Type something` and
+        // returned `FreeText`, delivering the paste into the Y/N dialog that
+        // eats it. The dialog is BELOW the marker, so it owns input →
+        // `Chooser`.
+        let close_stale_then_permission = format!("{ask}\ncontinuing\n{permission}");
+        assert_eq!(
+            claude_prompt_shape(close_stale_then_permission.as_bytes()),
+            PromptShape::Chooser
+        );
+
+        // The converse must still hold: a live free-text prompt BELOW an
+        // already-answered permission dialog reads `FreeText` (the bottom-most
+        // prompt wins in both directions, not a blanket "any dialog →
+        // Chooser").
+        let permission_then_free_text = format!("{permission}\napproved\n{ask}");
+        assert_eq!(
+            claude_prompt_shape(permission_then_free_text.as_bytes()),
+            PromptShape::FreeText
         );
     }
 

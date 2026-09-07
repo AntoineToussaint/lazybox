@@ -3835,6 +3835,71 @@ mod broadcast_select_tests {
         assert!(wide.contains("works offline"), "{wide:?}");
     }
 
+    /// #1535: the header must not change height as the cursor moves. The
+    /// automation strip used to be reserved from the *focused* row, so
+    /// every `j`/`k` across an armed workspace grew or shrank the header
+    /// and shoved the whole list down a row and back — content moving
+    /// under a moving cursor, exactly while the user is reading it.
+    #[test]
+    fn header_height_is_stable_while_the_cursor_moves() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        // One armed workspace among plain ones — the mixed case where the
+        // old reservation flip-flopped. Distinct task keys, or the two
+        // fold into a single row and there is nothing to move between.
+        let ws = |num: u64, armed: bool| {
+            let mut t = base_task();
+            t.id.key = format!("o/r#{num}");
+            t.url = format!("https://github.com/o/r/pull/{num}");
+            let mut w = Workspace::from_task(t, chrono::Utc::now());
+            w.name = format!("Alpha {num}");
+            w.auto_merge_on_green = armed;
+            w
+        };
+        for w in [ws(1, true), ws(2, false)] {
+            sb.workspaces.insert(SessionKey::from(&w.key), w);
+        }
+        sb.recompute_visible();
+
+        let area = Rect::new(0, 0, 60, 20);
+        let selectable: Vec<usize> = sb
+            .visible
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| matches!(row, VisibleRow::Workspace(_)))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            selectable.len() >= 2,
+            "need both rows selectable: {selectable:?}"
+        );
+
+        let baseline = sb.header_height(area);
+        for i in selectable {
+            sb.cursor = i;
+            assert_eq!(
+                sb.header_height(area),
+                baseline,
+                "header height moved when the cursor landed on visible row {i}",
+            );
+        }
+        assert_eq!(
+            sb.stats_row_height(area),
+            1,
+            "an inbox containing an armed row reserves the strip",
+        );
+    }
+
+    /// The row is still reclaimed when nothing in the inbox is armed —
+    /// the reservation is over the visible set, not unconditional.
+    #[test]
+    fn automation_strip_is_reclaimed_when_nothing_is_armed() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let plain = pr_ws("https://github.com/o/r/pull/1");
+        sb.workspaces.insert(SessionKey::from(&plain.key), plain);
+        sb.recompute_visible();
+        assert_eq!(sb.stats_row_height(Rect::new(0, 0, 60, 20)), 0);
+    }
+
     /// #794 regression, re-homed by #1502: the merge label lives on the
     /// conditional automation row, the CI tally on row 0. Under width
     /// pressure the label drops whole (its row is omitted) while the tally

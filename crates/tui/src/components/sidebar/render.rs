@@ -249,19 +249,39 @@ impl Sidebar {
         3 + self.stats_row_height(area) + self.usage_row_height(area)
     }
 
-    /// Height of the focused-row automation strip (row 2): `1` when the
-    /// cursor row carries merge automation, an auto-fix arm, or metering
-    /// worth spelling out, `0` otherwise — the row is omitted rather than
-    /// left blank so the list starts two rows higher for most cursors
-    /// (#1502 readability pass).
+    /// Height of the automation strip (row 2): `1` when *any visible row*
+    /// would render something into it at this width, `0` otherwise.
+    ///
+    /// Reserved from the visible set rather than from the cursor (#1535).
+    /// #1502 omitted the row whenever the *focused* row had nothing to
+    /// say, which reclaims a line — but it also meant every `j`/`k` across
+    /// an armed workspace grew or shrank the header, shoving the whole
+    /// list down a row and back while the user was reading it. Content
+    /// moving under a moving cursor is worse than a row spent, and it
+    /// fires exactly when you are navigating.
+    ///
+    /// Reserving on the visible set keeps every property that mattered:
+    /// an inbox with nothing armed still gets the line back, #794's
+    /// drop-the-label-whole behaviour survives (the probe runs at this
+    /// width, so a label that cannot fit reserves nothing), and an inbox
+    /// that does have armed rows holds a stable header while you move
+    /// through it. The strip renders blank on cursors with nothing to say.
     pub(super) fn stats_row_height(&self, area: Rect) -> u16 {
         let inner_width = area.width.saturating_sub(2) as usize;
         let theme = crate::theme::current();
-        if self.stats_row_spans(inner_width, theme).is_empty() {
-            0
-        } else {
-            1
-        }
+        // Probing each visible workspace through the same builder the
+        // render uses is what keeps the reservation exact: a fourth group
+        // added to the strip is reserved for automatically, instead of
+        // rendering into an unreserved row and being clipped away.
+        // `any` short-circuits on the first row that fills it.
+        u16::from(self.visible.iter().any(|row| match row {
+            VisibleRow::Workspace(key) => self.workspaces.get(key).is_some_and(|workspace| {
+                !self
+                    .stats_row_spans_for(Some(workspace), inner_width, theme)
+                    .is_empty()
+            }),
+            _ => false,
+        }))
     }
 
     /// The focused row's automation strip (row 2): merge automation
@@ -270,6 +290,22 @@ impl Sidebar {
     /// the cursor row carries none, which omits the row entirely.
     fn stats_row_spans(
         &self,
+        inner_width: usize,
+        theme: &crate::theme::Theme,
+    ) -> Vec<Span<'static>> {
+        let focused = self.visible.get(self.cursor).and_then(|row| match row {
+            VisibleRow::Workspace(key) => self.workspaces.get(key),
+            _ => None,
+        });
+        self.stats_row_spans_for(focused, inner_width, theme)
+    }
+
+    /// [`stats_row_spans`] for an explicit workspace, so the height
+    /// reservation can probe every visible row through the same builder
+    /// the render uses and the two can never disagree.
+    fn stats_row_spans_for(
+        &self,
+        focused_workspace: Option<&lazybox_core::Workspace>,
         inner_width: usize,
         theme: &crate::theme::Theme,
     ) -> Vec<Span<'static>> {
@@ -284,10 +320,6 @@ impl Sidebar {
         // global CI / review tallies. The focused row's own automation
         // outranks the global tallies deliberately — it is the context for
         // the row under the cursor, not an inbox-wide count.
-        let focused_workspace = self.visible.get(self.cursor).and_then(|row| match row {
-            VisibleRow::Workspace(key) => self.workspaces.get(key),
-            _ => None,
-        });
         // Spell out the focused row's merge automation in words — the
         // compact ` ARM ` / ` AUTO ` pills look alike but guarantee
         // different things (#794). GitHub-native auto-merge wins when both

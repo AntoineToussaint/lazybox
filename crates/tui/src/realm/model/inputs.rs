@@ -317,8 +317,12 @@ impl<T: TerminalAdapter> Model<T> {
             .collect();
         let restarted = terminals.len();
         let plural = if restarted == 1 { "" } else { "s" };
+        // "up to": the daemon rejects a pane with no launch metadata or one
+        // mid re-authentication (`CommandRejected`), so the client cannot
+        // promise all N will restart — this is a kill+respawn, and claiming a
+        // destructive action happened when it was refused is the worse error.
         self.flash_info(format!(
-            "restarting {restarted} rate-limited agent{plural} with fresh credentials"
+            "restarting up to {restarted} rate-limited agent{plural} with fresh credentials"
         ));
         self.redraw = true;
         cmds

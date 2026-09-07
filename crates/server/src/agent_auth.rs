@@ -520,6 +520,22 @@ pub(crate) async fn restart_agent_and_continue(config: &ServerConfig, terminal_i
         ));
         return;
     };
+    // Bail if a re-auth flow is mid-flight for this terminal so a kill+respawn
+    // can't stomp an in-progress interactive login. We read `active()` but
+    // deliberately do NOT register ourselves as active. Two invariants make
+    // that safe, and both are load-bearing:
+    //   1. This runs fully inline on the per-terminal FIFO I/O lane
+    //      (`run_io_lane`, keyed by `terminal_id`) — no `tokio::spawn`, no lane
+    //      release — so a second command for THIS terminal (another restart, a
+    //      re-auth) queues behind this call and cannot interleave. The guard
+    //      only has to catch a re-auth *background task* started earlier, which
+    //      registered itself via `begin()` and outlives the lane hop.
+    //   2. We must not call `begin()` here: it claims a global lock keyed by
+    //      `agent_id`, so a concurrent bulk `a R` of two panes running the same
+    //      agent (each on its own terminal lane) would have all but the first
+    //      rejected. Registering would break the headline bulk-restart path.
+    // If either invariant changes (this path spawns, or the lane stops being
+    // per-terminal), two restarts could double-kill/double-spawn — revisit then.
     if config.agent_recovery.active(terminal_id).await {
         let _ = config.bus.send(reject(
             "a re-authentication is already running for this agent".into(),

@@ -1352,6 +1352,16 @@ struct TerminalVt {
     /// paint, the grid literally cannot differ — skipping the full
     /// per-cell FFI walk is sound (2026-08-19 audit, U1).
     content_rev: u64,
+    /// Whether this grid has been sized to a pane — the size the PTY was
+    /// (or is about to be) told — rather than still sitting at the
+    /// constructor default. Decides the order of a deferred flush against
+    /// a resize in `render_one_terminal`: a sized grid parses its backlog
+    /// at the size the bytes were produced for and resizes after; an
+    /// unsized one resizes first so the bytes never parse at the default
+    /// width (#1405). Owned here, not inferred from the slot's
+    /// `last_rendered_size`, because the parser is swapped wholesale on a
+    /// crash freeze and on a reconnect while the slot's record survives.
+    sized: bool,
     /// Deterministic fault injection for the resync retry contract.
     #[cfg(test)]
     fail_next_reset: bool,
@@ -1380,6 +1390,7 @@ impl TerminalVt {
             shadow: None,
             last_visible_cursor: None,
             content_rev: 0,
+            sized: false,
             #[cfg(test)]
             fail_next_reset: false,
             _not_send: std::marker::PhantomData,
@@ -1469,6 +1480,7 @@ impl TerminalVt {
     }
 
     fn ensure_size(&mut self, cols: u16, rows: u16) {
+        self.sized = true;
         if cols == self.cols && rows == self.rows {
             return;
         }
@@ -1497,6 +1509,7 @@ impl TerminalVt {
             return false;
         };
         fresh.ensure_size(cols, rows);
+        fresh.sized = self.sized;
         *self = *fresh;
         true
     }
@@ -3896,6 +3909,20 @@ impl TerminalStack {
                     );
                     slot.agent_state = snap.agent_state.unwrap_or(lazybox_ipc::AgentState::Idle);
                     slot.authenticating = snap.authenticating;
+                    // The ring replay was produced at the size this client
+                    // last told the PTY. Size the fresh grid to it now so
+                    // the deferred flush parses the replay there and only
+                    // then resizes to the pane it first shows in — the
+                    // same order a merely hidden slot gets — instead of
+                    // parsing at whatever pane it happens to reappear in.
+                    // A never-rendered terminal keeps the default grid and
+                    // the size-then-flush order.
+                    if let Some((cols, rows)) = previous
+                        .get(&snap.terminal_id)
+                        .and_then(|prev| prev.last_rendered_size)
+                    {
+                        slot.vt.ensure_size(cols, rows);
+                    }
                     if !snap.replay_available {
                         // Total snapshot budgeting and transient backend
                         // failures omit whole replays. Ask for this one
@@ -5325,20 +5352,20 @@ impl TerminalStack {
                 grid,
                 offset: None,
             });
-            // A slot that has rendered before drains its hidden-period
-            // backlog at the grid it was produced for — its last rendered
-            // size, which is still the PTY's size because the daemon only
-            // learns of a change through the resize queued below. Parsing
-            // an Ink repaint (cursor walked up over the previous frame,
-            // then rewritten) into a shorter grid clamps the cursor at row
-            // 0 and scrolls a stale copy of the frame's top line into
-            // scrollback per repaint — the one-line-repeated-K-times
-            // artifact of #1547 when the pane it reappears in is shorter.
-            if slot.last_rendered_size.is_some() {
+            // A grid already sized to a pane drains its hidden-period
+            // backlog at that size — the size the PTY still has, because
+            // the daemon only learns of a change through the resize queued
+            // below — and resizes after. Parsing an Ink repaint (cursor
+            // walked up over the previous frame, then rewritten) into a
+            // shorter grid clamps the cursor at row 0 and scrolls a stale
+            // copy of the frame's top line into scrollback per repaint —
+            // the one-line-repeated-K-times artifact of #1547 when the
+            // pane it reappears in is shorter.
+            if slot.vt.sized {
                 slot.flush_pending();
             }
             slot.vt.ensure_size(grid.width, grid.height);
-            // A fresh slot drains only now. Feeding before the resize
+            // An unsized grid drains only now. Feeding before the resize
             // would parse those bytes at the VT's default width and then
             // reflow them to the real one — and reflow is not a faithful
             // substitute for having wrapped at the right width to begin
@@ -9509,6 +9536,144 @@ mod hidden_feed_tests {
             count_rows_in_history(&mut stack, W, SHORT, marker),
             1,
             "the repainted top line must exist once in scrollback, not once per repaint"
+        );
+    }
+
+    /// `sized` is the grid's own record of having been sized to a pane:
+    /// set by any `ensure_size` (even one that lands on the default
+    /// dimensions), carried across a resync `reset`, and false on a
+    /// never-sized parser — including the fresh one a resync builds for a
+    /// slot that never rendered.
+    #[test]
+    fn terminal_vt_sized_tracks_pane_sizing_across_reset() {
+        let mut vt = TerminalVt::new().unwrap();
+        assert!(!vt.sized, "a fresh parser is unsized");
+        vt.ensure_size(DEFAULT_COLS, DEFAULT_ROWS);
+        assert!(vt.sized, "sizing to the default dimensions still counts");
+        assert!(vt.reset());
+        assert!(
+            vt.sized,
+            "a resync's replacement parser inherits the sizing"
+        );
+
+        let mut never_sized = TerminalVt::new().unwrap();
+        assert!(never_sized.reset());
+        assert!(
+            !never_sized.sized,
+            "resetting an unsized parser keeps it unsized"
+        );
+    }
+
+    /// A crash freeze swaps the dead parser for a fresh default-size one
+    /// while the slot's `last_rendered_size` survives. The flush-order
+    /// gate must read the parser, not the slot: the replacement is
+    /// unsized, so anything fed into it resizes first.
+    #[test]
+    fn crash_freeze_leaves_the_replacement_grid_unsized() {
+        let sk = SessionKey::new("a");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.on_event(&Event::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+        });
+        stack.set_active_session(Some(sk));
+        render(&mut stack);
+        assert!(stack.terminals[&TerminalId(1)].vt.sized);
+
+        stack.on_event(&Event::TerminalExited {
+            terminal_id: TerminalId(1),
+            exit_code: Some(2),
+            last_output: None,
+        });
+        let slot = &stack.terminals[&TerminalId(1)];
+        assert!(slot.exited.is_some());
+        assert!(
+            slot.last_rendered_size.is_some(),
+            "fixture: the slot still remembers its pane"
+        );
+        assert!(
+            !slot.vt.sized,
+            "the freeze's replacement parser must not claim the old sizing"
+        );
+    }
+
+    /// A reconnect `Snapshot` rebuilds every slot with a fresh parser and
+    /// hands it the daemon's ring replay. That replay was produced at the
+    /// size this client last told the PTY, so a hidden terminal's fresh
+    /// grid must be sized to that before its deferred flush — otherwise
+    /// the replay parses at whatever pane the terminal first reappears
+    /// in, and a shorter one multiplies every Ink repaint's top line
+    /// (#1547's shape on the reconnect path).
+    #[test]
+    fn reconnect_replay_parses_at_the_size_this_client_last_gave_the_pty() {
+        const TALL: u16 = 40;
+        const SHORT: u16 = 24;
+        let sk_a = SessionKey::new("a");
+        let sk_b = SessionKey::new("b");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        spawn(&mut stack, TerminalId(1), &sk_a);
+        spawn(&mut stack, TerminalId(2), &sk_b);
+
+        // B rendered once in a tall pane; A is in front when the
+        // reconnect lands.
+        stack.set_active_session(Some(sk_b.clone()));
+        let _ = screen_rows_at(&mut stack, W, TALL);
+        let tall_grid_rows = stack.terminals[&TerminalId(2)].vt.rows;
+        stack.set_active_session(Some(sk_a.clone()));
+        let _ = screen_rows_at(&mut stack, W, TALL);
+
+        // B's ring: a frame that fits the tall grid, repainted K times.
+        let marker = "… +17 lines (ctrl+o to expand)";
+        let frame: Vec<String> = std::iter::once(marker.to_string())
+            .chain((1..tall_grid_rows - 1).map(|i| format!("body line {i}")))
+            .collect();
+        let mut replay = frame.join("\r\n").into_bytes();
+        for _ in 0..27 {
+            replay.extend_from_slice(&ink_repaint(&frame));
+        }
+
+        let snap = |id: u64, sk: &SessionKey, replay: Vec<u8>| lazybox_ipc::TerminalSnapshot {
+            terminal_id: TerminalId(id),
+            session_key: sk.clone(),
+            kind: TerminalKind::Shell,
+            replay,
+            last_seq: 1,
+            replay_available: true,
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            prompt_history: Vec::new(),
+            composing_buffer: None,
+            agent_state: None,
+            authenticating: false,
+        };
+        stack.on_event(&Event::Snapshot {
+            workspaces: vec![],
+            terminals: vec![
+                snap(1, &sk_a, b"visible\r\n".to_vec()),
+                snap(2, &sk_b, replay),
+            ],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        assert!(
+            !stack.terminals[&TerminalId(2)].pending_feed.is_empty(),
+            "fixture: the hidden terminal's replay stays deferred"
+        );
+
+        // B first reappears in a pane too short for the frame.
+        stack.set_active_session(Some(sk_b));
+        let _ = screen_rows_at(&mut stack, W, SHORT);
+        assert!(stack.terminals[&TerminalId(2)].vt.rows < frame.len() as u16);
+        assert_eq!(
+            count_rows_in_history(&mut stack, W, SHORT, marker),
+            1,
+            "the reconnect replay must parse at the PTY's size, not the reappearing pane's"
         );
     }
 

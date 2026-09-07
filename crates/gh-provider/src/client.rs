@@ -1245,6 +1245,14 @@ pub struct GhClient {
     /// so an entry older than the TTL is refetched. Shared across clones
     /// (one dependency view per credential); cleared by `force_full_sweep`.
     issue_deps_cache: IssueDepsCache,
+    /// Freshness bound for [`issue_deps_cache`](Self::issue_deps_cache):
+    /// an entry older than this is refetched. Set from the configured
+    /// `repo_refresh_interval` (via
+    /// [`with_repo_refresh_interval`](Self::with_repo_refresh_interval)) so
+    /// native edges refresh on the same cadence as the rest of the row —
+    /// tightening the refresh tightens edge freshness. Defaults to
+    /// [`ISSUE_DEPS_TTL`](Self::ISSUE_DEPS_TTL) when never set.
+    deps_ttl: std::time::Duration,
 }
 
 /// Per-branch cost breakdown for one branch of a PR fetch, emitted
@@ -1379,6 +1387,7 @@ impl GhClient {
             issue_deps_cache: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            deps_ttl: Self::ISSUE_DEPS_TTL,
         })
     }
 
@@ -1420,6 +1429,7 @@ impl GhClient {
             issue_deps_cache: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            deps_ttl: Self::ISSUE_DEPS_TTL,
         })
     }
 
@@ -2255,6 +2265,17 @@ impl GhClient {
         self
     }
 
+    /// Tie the native-dependency cache freshness ([`deps_ttl`](Self::deps_ttl))
+    /// to the configured `repo_refresh_interval`, so native `blocked_by`
+    /// edges refresh on the same cadence as the rest of a row: tightening the
+    /// refresh interval also tightens how stale an edge set can get, rather
+    /// than leaving it pinned at the [`ISSUE_DEPS_TTL`](Self::ISSUE_DEPS_TTL)
+    /// default.
+    pub fn with_repo_refresh_interval(mut self, interval: std::time::Duration) -> Self {
+        self.deps_ttl = interval;
+        self
+    }
+
     /// Hydrate the user's GitHub namespace as a list of org scopes:
     /// every org they belong to, plus their personal-repo "org"
     /// (their login). Repos under each org are NOT enumerated here
@@ -2612,11 +2633,15 @@ impl GhClient {
     /// watched-repo count.
     pub const ISSUE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(90);
 
-    /// How long a learned native `blocked_by` edge set stays fresh before
-    /// [`issue_blocked_by`](Self::issue_blocked_by) is asked again. Sized to
-    /// the default `repo_refresh_interval` (5 min) so, at steady state, an
-    /// eligible issue costs at most one extra dependencies REST call per
-    /// repo-refresh cycle; a `force_full_sweep` clears the cache outright.
+    /// Default freshness bound for a learned native `blocked_by` edge set
+    /// before [`issue_blocked_by`](Self::issue_blocked_by) is asked again —
+    /// the fallback for [`deps_ttl`](Self::deps_ttl) when the configured
+    /// `repo_refresh_interval` was never wired in
+    /// ([`with_repo_refresh_interval`](Self::with_repo_refresh_interval)).
+    /// Matches the *default* `repo_refresh_interval` (5 min) so, at steady
+    /// state, an eligible issue costs at most one extra dependencies REST
+    /// call per repo-refresh cycle; a `force_full_sweep` clears the cache
+    /// outright.
     pub const ISSUE_DEPS_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
     /// Should the next sync cycle run a heavy full sweep, or is the
@@ -3326,7 +3351,7 @@ impl GhClient {
         // blocked issue keeps its `⛔` badge instead of dropping it for a
         // tick and re-adding it (flicker); the per-issue TTL cache keeps the
         // steady-state cost to at most one dependencies call per issue per
-        // `ISSUE_DEPS_TTL`.
+        // `deps_ttl` window.
         for slot in &mut out {
             if let HotFetch::Fresh(task) = slot {
                 self.enrich_task_blocked_by(task).await;
@@ -5960,30 +5985,34 @@ impl GhClient {
     }
 
     /// Merge GitHub's native `blocked_by` edges into a freshly built issue
-    /// task, in place. Cheap by construction: only issues that already look
-    /// like they participate in a dependency (a body mentioning a blocker
-    /// keyword, or a sub-issue with a parent) trigger the REST round-trip,
-    /// and the result is cached per issue for [`ISSUE_DEPS_TTL`] so a hot
-    /// re-poll of the same issue reuses it. Edges the body marker already
-    /// produced are preserved; native edges are unioned in and the set is
-    /// de-duplicated so the two sources can't double-count the same blocker.
+    /// task, in place. Bounded by construction: only *open* issues trigger
+    /// the REST round-trip (a closed or merged issue is done and never
+    /// probed), and the result is cached per issue for [`deps_ttl`] so
+    /// a hot re-poll of the same issue reuses it — the cost is one request
+    /// per open issue per refresh cycle, not one per poll. The probe is
+    /// deliberately *not* gated on the body text: a dependency set through
+    /// GitHub's web UI carries no body keyword, so a body proxy would drop
+    /// exactly the native edges this call exists to fetch. Edges the body
+    /// marker already produced are preserved; native edges are unioned in
+    /// and the set is de-duplicated so the two sources can't double-count
+    /// the same blocker.
     ///
-    /// [`ISSUE_DEPS_TTL`]: Self::ISSUE_DEPS_TTL
+    /// [`deps_ttl`]: Self::deps_ttl
     async fn enrich_task_blocked_by(&self, task: &mut Task) {
         // Dependencies are an issue-only concept on GitHub; PRs never carry
         // them and must never spend a request probing.
         if task.kind != Some(TaskKind::Issue) {
             return;
         }
-        // Budget gate: skip issues that show no sign of a dependency. The
-        // body pre-check is a cheap substring scan; a set parent means the
-        // issue is a sub-issue and worth checking for cross-links.
-        let warrants_probe = task.parent.is_some()
-            || task
-                .body
-                .as_deref()
-                .is_some_and(lazybox_core::issue_links::body_mentions_blocker);
-        if !warrants_probe {
+        // Budget gate: dependencies only matter while an issue is still in
+        // play, so a closed or merged one never spends a request. Every
+        // *open* issue is probed, though — a dependency set through GitHub's
+        // web UI leaves no keyword in the body and no parent link, so a
+        // body-text proxy has false negatives for exactly the UI-set edges
+        // the native API exists to surface; gating on it silently drops
+        // them. The per-issue `deps_ttl` cache bounds the cost to one
+        // request per open issue per refresh cycle, not one per poll.
+        if matches!(task.state, TaskState::Closed | TaskState::Merged) {
             return;
         }
         // Parse `owner/repo#N` out of the task key.
@@ -6000,9 +6029,9 @@ impl GhClient {
         // Serve from cache while fresh, otherwise fetch and record.
         let cached = {
             let cache = self.issue_deps_cache.lock();
-            cache.get(&task.id).and_then(|(edges, at)| {
-                (at.elapsed() < Self::ISSUE_DEPS_TTL).then(|| edges.clone())
-            })
+            cache
+                .get(&task.id)
+                .and_then(|(edges, at)| (at.elapsed() < self.deps_ttl).then(|| edges.clone()))
         };
         let native = match cached {
             Some(edges) => edges,
@@ -8356,6 +8385,7 @@ mod tests {
             issue_deps_cache: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            deps_ttl: GhClient::ISSUE_DEPS_TTL,
         }
     }
 
@@ -8576,14 +8606,23 @@ mod tests {
             "rateLimit": {"cost": 2, "limit": 5000, "remaining": 4998, "resetAt": "2026-07-25T11:00:00Z"}
           }
         }"#;
+        // A fresh open issue is enriched with native deps right after its
+        // full fetch (#1521); the per-issue TTL cache means only the *first*
+        // sight and the post-`force_full_sweep` sight (cache cleared) spend
+        // a dependencies request — the unchanged and cached-moved ticks
+        // don't. `[]` = no native edges.
+        const DEPS: &str = "[]";
         let base_uri = spawn_sequenced_response_server(vec![
             LEAN,         // call 1: probe (first sight → mover)
             FULL_ONE,     //         full detail for I_one
-            LEAN,         // call 2: probe unchanged → NO full request
+            DEPS,         //         enrich I_one native deps (uncached)
+            LEAN,         // call 2: probe unchanged → NO full, NO enrich
             LEAN_CHANGED, // call 3: probe moved
             FULL_ONE,     //         full detail again
-            LEAN,         // call 4 (after force_full_sweep): probe
-            FULL_ONE,     //         cache cleared → full again
+            //               enrich reuses the cached deps → NO request
+            LEAN,     // call 4 (after force_full_sweep): probe
+            FULL_ONE, //         cache cleared → full again
+            DEPS,     //         enrich re-probes (deps cache cleared too)
         ])
         .await;
         let client = make_client(&base_uri);
@@ -10107,12 +10146,18 @@ mod tests {
         );
     }
 
-    /// A PR, or an issue with no dependency signal, never spends a request.
+    /// A PR, or a closed/merged issue, never spends a request — but an
+    /// *open* issue is always probed, even with a plain body and no parent,
+    /// because a dependency set through GitHub's web UI leaves no body
+    /// keyword to gate on. Regression for the body-proxy gate that silently
+    /// dropped UI-set native edges.
     #[tokio::test(flavor = "current_thread")]
-    async fn enrich_blocked_by_skips_when_no_signal() {
+    async fn enrich_blocked_by_probes_every_open_issue_but_skips_terminal() {
         let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // The native API reports a dependency the body never mentions.
+        const BODY: &str = r#"[{"number":42}]"#;
         let base_uri =
-            spawn_counting_response_server("200 OK", "application/json", "", "[]", hits.clone())
+            spawn_counting_response_server("200 OK", "application/json", "", BODY, hits.clone())
                 .await;
         let client = make_client(&base_uri);
 
@@ -10120,16 +10165,78 @@ mod tests {
         let mut pr = task_without_node_id(TaskKind::Pr);
         pr.body = Some("Blocked by #3".to_string());
         client.enrich_task_blocked_by(&mut pr).await;
+        assert!(pr.blocked_by.is_empty());
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
 
-        // An issue with no parent and a plain body is never probed.
+        // A closed issue is done — never probed, even body-keyworded.
+        let mut closed = task_without_node_id(TaskKind::Issue);
+        closed.id.key = "acme/widget#8".to_string();
+        closed.repo = Some("acme/widget".to_string());
+        closed.state = TaskState::Closed;
+        closed.body = Some("Blocked by #3".to_string());
+        client.enrich_task_blocked_by(&mut closed).await;
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // An OPEN issue with a plain body and no parent IS probed, and the
+        // UI-set native edge — invisible to any body scan — is discovered.
         let mut issue = task_without_node_id(TaskKind::Issue);
         issue.id.key = "acme/widget#7".to_string();
+        issue.repo = Some("acme/widget".to_string());
         issue.body = Some("just a normal description".to_string());
         client.enrich_task_blocked_by(&mut issue).await;
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            issue.blocked_by,
+            vec![TaskId {
+                source: "github".into(),
+                key: "acme/widget#42".into(),
+            }],
+            "the native edge is discovered without any body keyword"
+        );
+    }
 
-        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
-        assert!(pr.blocked_by.is_empty());
-        assert!(issue.blocked_by.is_empty());
+    /// The deps-cache TTL is driven by the configured `repo_refresh_interval`
+    /// (via `with_repo_refresh_interval`), not a hardcoded 5-minute constant.
+    /// With the interval set to zero, every entry reads as stale, so a second
+    /// enrichment of the same open issue re-probes instead of serving the
+    /// cache — proving the cache honors `deps_ttl` rather than
+    /// `ISSUE_DEPS_TTL`. Regression for the TTL being decoupled from config.
+    #[tokio::test(flavor = "current_thread")]
+    async fn deps_cache_ttl_follows_the_configured_repo_refresh_interval() {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        const BODY: &str = r#"[{"number":42}]"#;
+        let base_uri =
+            spawn_counting_response_server("200 OK", "application/json", "", BODY, hits.clone())
+                .await;
+        // A zero refresh interval means the cache is never fresh.
+        let client = make_client(&base_uri).with_repo_refresh_interval(std::time::Duration::ZERO);
+        assert_eq!(
+            client.deps_ttl,
+            std::time::Duration::ZERO,
+            "the builder wires the interval into the cache TTL"
+        );
+
+        let mut issue = task_without_node_id(TaskKind::Issue);
+        issue.id.key = "acme/widget#7".to_string();
+        issue.repo = Some("acme/widget".to_string());
+        issue.body = Some("just a normal description".to_string());
+
+        client.enrich_task_blocked_by(&mut issue).await;
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Same issue again: with a hardcoded 5-min TTL this would be served
+        // from cache (hits == 1). Because the TTL is the configured zero, the
+        // entry is stale and the native endpoint is hit a second time.
+        let mut again = task_without_node_id(TaskKind::Issue);
+        again.id.key = "acme/widget#7".to_string();
+        again.repo = Some("acme/widget".to_string());
+        again.body = Some("just a normal description".to_string());
+        client.enrich_task_blocked_by(&mut again).await;
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a zero TTL re-probes rather than reusing a stale cache entry"
+        );
     }
 }
 

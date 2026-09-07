@@ -4006,7 +4006,10 @@ async fn push_github_source(
         .with_background_share(background_budget_share)
         .with_filters(pr_qualifiers, issue_qualifiers)
         .with_watch_repos(watch_repos.iter().cloned().collect())
-        .with_needs_reply(detect_needs_reply);
+        .with_needs_reply(detect_needs_reply)
+        // Native `blocked_by` edges refresh on the same cadence as the row:
+        // tie their cache TTL to the configured repo-refresh interval.
+        .with_repo_refresh_interval(repo_refresh_interval);
     if restore_sync_cursors && let Some(store) = cursor_store.clone() {
         let key = format!("github:sync-cursors:v1:{}", client.username());
         match tokio::task::spawn_blocking(move || store.get_kv(&key)).await {

@@ -32,6 +32,17 @@ Use dedicated test resources and revoke temporary credentials afterward.
 
 - [ ] Bump `[workspace.package].version` and move changelog entries out of
       `Unreleased`.
+- [ ] Bump the version in the three places outside the workspace manifest that
+      pin it independently, or CI fails after the tag is cut:
+      - `crates/tui-boot/lazybox-tui-installer.sh` (`release_version=`),
+      - `apps/desktop/src-tauri/Cargo.lock` — the desktop is its own cargo
+        workspace, and `desktop-check` runs `cargo check --locked`, so a
+        lockfile still pinning the old `lazybox-*` versions fails before it
+        compiles a line. (The 0.1.14 bump missed this and went unnoticed only
+        because `desktop-check` was disabled at the time.)
+      - `apps/desktop/src/generated/` via `make desktop-contract` — the
+        protocol fingerprint hashes the workspace lockfile, so any version
+        bump moves it.
 - [ ] Confirm README/docs platform claims match the cargo-dist target matrix.
 - [ ] Inspect archive contents, checksums, installer, and Homebrew formula.
 - [ ] Install and uninstall through both the shell installer and Homebrew.

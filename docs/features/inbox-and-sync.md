@@ -215,10 +215,10 @@ the latest state per provider. (`OpenSyncStatus` in
 ### What it does
 Opens a multi-select **filter menu** over three predicate axes — state
 (with-agent, CI-failing, conflict, unread, asking, review-requested,
-auto-merge), role (author / reviewer / assignee / mentioned), and kind
-(PR / issue) — each shown with a live match count. Filters combine
-AND-across-axes / OR-within-axis and render as removable chips in the sidebar
-header.
+auto-merge, **blocked**, **ready**), role (author / reviewer / assignee /
+mentioned), and kind (PR / issue) — each shown with a live match count.
+Filters combine AND-across-axes / OR-within-axis and render as removable chips
+in the sidebar header. `blocked` / `ready` key off the dependency edges below.
 
 ### How to use it
 Press `f`, toggle the predicates you want, confirm. Active filters show as
@@ -239,6 +239,60 @@ fetch filters).
 
 ### Known sharp edges
 - Role is provider-assigned; if a provider can't classify a task's role, role predicates won't match it.
+
+---
+
+## Dependencies
+
+**Status:** stable
+**Crate(s):** `core` (`Task.blocked_by` / `blocked_on` / `parent`, `Workspace` helpers), `gh-provider` + `linear-provider` (native edges), `tui` (badge, right-pane line, `E j`), `tui-core` (`Filter::Blocked` / `Filter::Ready`, `JumpToBlocked`)
+**Config / flags:** —
+**Key bindings:** `f` (blocked / ready predicates), `E j` (jump to next blocked)
+
+### What it does
+Surfaces **dependency edges** already declared upstream — no new lazybox
+concept, no epic record. Every task carries `blocked_by` (blocker task ids)
+and an optional `blocked_on` reason; GitHub tasks additionally carry a
+`parent` derived from the native sub-issue relationship. Blocked rows show a
+red `⛔` badge (`⛔N` for N edge blockers, `⛔!` for a declared `Blocked on:`
+reason), the right pane header adds a `Blocked on:` line, the filter menu gains
+`blocked` / `ready` predicates, and `E j` jumps the cursor to the next blocked
+workspace.
+
+### Where the edges come from
+- **GitHub, native:** the issue-dependencies REST API (`blocked_by`) and the
+  sub-issue relationship (`parent`). REST was chosen over GraphQL because the
+  dependency + sub-issue fields are exposed on stable REST endpoints without a
+  preview-schema GraphQL dependency.
+- **GitHub, body marker:** a `Blocked by: #123` / `Blocked on: <reason>` line
+  in the issue body, parsed by `issue_to_task`, as a fallback for repos not
+  using the native API.
+- **Linear, native:** inverse `blocks` relations become `blocked_by` edges.
+- lazybox never **writes** edges upstream — this is a read-only projection.
+
+### How to use it
+Blocked rows are visible at a glance (`⛔`). Press `f` and toggle `blocked` or
+`ready` to narrow the inbox to just those. Press `E j` to walk the blocked
+rows: workspaces that declare a `Blocked on:` reason come first, then
+edge-blocked rows, wrapping at the end.
+
+### How it works (brief)
+`Workspace::hierarchy_blocked_by()` counts the blockers across the workspace's
+PR + issues, and `declared_blocker()` returns any `Blocked on:` reason. The
+sidebar row context reads both for its badge; `Filter::Blocked` / `Filter::Ready`
+(on the State axis) filter off them; `JumpToBlocked` (`focus_next_blocked_workspace`)
+sweeps `visible_workspace_keys()` in that declared-then-edge order.
+
+### Test checklist
+- [ ] An issue with a native `blocked_by` edge shows `⛔1` in the sidebar.
+- [ ] A `Blocked on: waiting for design` body marker shows `⛔!` and a right-pane `Blocked on:` line.
+- [ ] `f` → `blocked` narrows to blocked rows; `ready` to the rest.
+- [ ] `E j` jumps to the next blocked row, declared-blockers first, and wraps.
+- [ ] `E j` with no blocked rows flashes "no blocked tasks".
+
+### Known sharp edges
+- Edges are a read-only projection: resolving a blocker upstream clears the badge only on the next sync, not instantly.
+- The `parent` field is captured but not yet rendered as a hierarchy tree — that lands with later `#1517` sub-issues.
 
 ---
 

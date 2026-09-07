@@ -183,6 +183,15 @@ pub struct WorkspaceRowCtx<'a> {
     /// badge so a chain of stacked PRs reads as an ordered stack at a
     /// glance rather than unrelated rows. `None` for standalone PRs.
     pub stack: Option<&'a lazybox_core::StackPosition>,
+    /// Number of dependency blockers on this workspace's tasks (#1521; P0
+    /// does not resolve whether they are still open). Renders a ` ⛔N `
+    /// badge in the passive cluster; nothing when zero.
+    pub blocked_by: usize,
+    /// A declared `Blocked on:` reason exists on some task. Renders ` ⛔! `
+    /// when there are no dependency blockers, else folds into the count
+    /// badge (the count already says "blocked"). The reason text itself is
+    /// shown in the right pane, not the row.
+    pub blocked_on: bool,
     /// Tier `(badge_letter, label) → short` map for the model badge
     /// (`('C', "Opus") → "O"`), aggregated from every agent's model menu.
     /// The badge reads a declared short here and falls back to the label's
@@ -1133,6 +1142,7 @@ fn cell_badges(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     pack_badges([
         cell_remote(ctx),
         cell_stack(ctx),
+        cell_blocked(ctx),
         cell_linked(ctx),
         cell_notes(ctx),
         cell_snippet(ctx),
@@ -1183,6 +1193,32 @@ fn cell_stack(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         format!(" ⇗{}/{} ", stack.position, stack.depth),
         style,
     ))
+}
+
+/// The ` ⛔N ` dependency badge (#1521): this workspace's tasks declare `N`
+/// blockers (a native GitHub/Linear relation or a `Blocked by:` / `Depends
+/// on:` body marker). A free-text `Blocked on:` reason with no dependency
+/// edge renders ` ⛔! ` instead — still blocked, but the count is meaning-
+/// less, so `!` stands in. Uses `theme.error` bold because "waiting on
+/// something else" is the one passive-cluster badge that gates starting
+/// work. P0 does not resolve whether the blockers are still open; the
+/// number is the declared edge count. Packs into the shared cluster (#813).
+fn cell_blocked(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    let label = if ctx.blocked_by > 0 {
+        format!(" ⛔{} ", ctx.blocked_by)
+    } else if ctx.blocked_on {
+        " ⛔! ".to_string()
+    } else {
+        return Cell::empty();
+    };
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default()
+            .fg(ctx.theme.error)
+            .add_modifier(Modifier::BOLD)
+    };
+    Cell::from_span(Span::styled(label, style))
 }
 
 /// The merge-arm badge cluster (#813): `⚡` (lazybox client-side
@@ -1614,6 +1650,8 @@ mod tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -1669,6 +1707,8 @@ mod tests {
             sent_snippet_count: 0,
             ticket_tree: None,
             stack: None,
+            blocked_by: 0,
+            blocked_on: false,
             model_shorts: empty_shorts(),
             highlight_query: None,
             repo_prefix: None,
@@ -2184,6 +2224,8 @@ mod tests {
             sent_snippet_count: 0,
             ticket_tree: None,
             stack: None,
+            blocked_by: 0,
+            blocked_on: false,
             model_shorts: empty_shorts(),
             highlight_query: None,
             repo_prefix: None,
@@ -2754,6 +2796,8 @@ mod tests {
             sent_snippet_count: 0,
             ticket_tree: None,
             stack: None,
+            blocked_by: 0,
+            blocked_on: false,
             model_shorts: empty_shorts(),
             highlight_query: None,
             repo_prefix: None,
@@ -3310,6 +3354,40 @@ mod tests {
         ctx.stack = Some(&stack);
         let cell = cell_stack(&ctx);
         assert_eq!(cell.spans[0].content.as_ref(), " ⇗2/3 ");
+    }
+
+    /// The dependency badge shows a count when the workspace declares
+    /// blockers, and folds to ` ⛔! ` when only a free-text `Blocked on:`
+    /// reason exists with no counted edges (#1521).
+    #[test]
+    fn cell_blocked_shows_count_badge() {
+        let task = make_task("owner/repo#2", "child");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(cell_blocked(&ctx).width(), 0, "no blockers, no badge");
+        ctx.blocked_by = 2;
+        let cell = cell_blocked(&ctx);
+        assert_eq!(cell.spans[0].content.as_ref(), " ⛔2 ");
+        ctx.blocked_by = 0;
+        ctx.blocked_on = true;
+        let cell = cell_blocked(&ctx);
+        assert_eq!(
+            cell.spans[0].content.as_ref(),
+            " ⛔! ",
+            "a bare declared reason shows the sentinel, not a count"
+        );
+    }
+
+    /// With neither a counted edge nor a declared reason, the badge slot
+    /// is empty (#1521).
+    #[test]
+    fn cell_blocked_is_empty_without_blockers() {
+        let task = make_task("owner/repo#2", "child");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(cell_blocked(&ctx).width(), 0);
     }
 
     /// A workspace that's been sent snippets surfaces a ` ]N ` badge
@@ -4254,6 +4332,8 @@ mod tests {
             sent_snippet_count: 0,
             ticket_tree: None,
             stack: None,
+            blocked_by: 0,
+            blocked_on: false,
             model_shorts: empty_shorts(),
             highlight_query: None,
             repo_prefix: None,

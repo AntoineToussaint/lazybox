@@ -151,6 +151,8 @@ fn github_task(
         parent: None,
         priority: None,
         state_label: None,
+        blocked_by: vec![],
+        blocked_on: None,
     }
 }
 

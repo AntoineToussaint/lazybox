@@ -127,6 +127,19 @@ pub enum Filter {
     /// filter is active — with their wake time, so reverting a snooze
     /// is `f` → snoozed → `z`, not a mailbox expedition.
     Snoozed,
+    /// The primary task has at least one unmet dependency — a
+    /// `blocked_by` edge (native GitHub/Linear relation or the
+    /// `Blocked by:` / `Depends on:` body marker) or a declared
+    /// `Blocked on:` reason. This is the same signal the `⛔` row badge
+    /// reads; "what is waiting on something else" is one toggle.
+    Blocked,
+    /// An issue that can be started right now: it is an issue (not a PR),
+    /// carries no dependency edge or declared blocker, has no agent
+    /// session yet, and is not snoozed (a snoozed issue was deliberately
+    /// deferred, so it is not something to pick up now). The direct
+    /// complement of "what's blocked" — "what can I pick up" without
+    /// reading every row.
+    Ready,
     // ── Role ───────────────────────────────────────────────────────
     Author,
     Reviewer,
@@ -146,7 +159,7 @@ impl Filter {
     /// Every fixed filter, in menu order (State, Role, Kind, Priority).
     /// Value-driven axes (Label, Linear state) are enumerated separately
     /// from the candidate set — see [`FilterSet`] and `Sidebar`.
-    pub const ALL: [Filter; 27] = [
+    pub const ALL: [Filter; 29] = [
         Filter::WithAgent,
         Filter::AgentWorking,
         Filter::Claimed,
@@ -164,6 +177,8 @@ impl Filter {
         Filter::BehindBase,
         Filter::BigDiff,
         Filter::Snoozed,
+        Filter::Blocked,
+        Filter::Ready,
         Filter::Author,
         Filter::Reviewer,
         Filter::Assignee,
@@ -194,7 +209,9 @@ impl Filter {
             | Filter::NeedsReply
             | Filter::BehindBase
             | Filter::BigDiff
-            | Filter::Snoozed => FilterAxis::State,
+            | Filter::Snoozed
+            | Filter::Blocked
+            | Filter::Ready => FilterAxis::State,
             Filter::Author | Filter::Reviewer | Filter::Assignee | Filter::Mentioned => {
                 FilterAxis::Role
             }
@@ -237,6 +254,8 @@ impl Filter {
             Filter::BehindBase => "behind-base",
             Filter::BigDiff => "big-diff",
             Filter::Snoozed => "snoozed",
+            Filter::Blocked => "blocked",
+            Filter::Ready => "ready",
             Filter::Author => "author",
             Filter::Reviewer => "reviewer",
             Filter::Assignee => "assignee",
@@ -288,6 +307,28 @@ impl Filter {
             Filter::BehindBase => task.is_some_and(|t| t.is_behind_base),
             Filter::BigDiff => task.is_some_and(|t| t.additions + t.deletions >= BIG_DIFF_LINES),
             Filter::Snoozed => w.is_snoozed(ctx.now),
+            // Blocked / Ready read the workspace-level dependency helpers
+            // (not just `primary_task`) so a ticket that has acquired a PR
+            // keeps its edges — the same reason `hierarchy_blocked_by`
+            // exists. `Blocked` counts a declared `Blocked on:` reason too.
+            Filter::Blocked => {
+                w.hierarchy_blocked_by().next().is_some() || w.declared_blocker().is_some()
+            }
+            Filter::Ready => {
+                w.hierarchy_blocked_by().next().is_none()
+                    && w.declared_blocker().is_none()
+                    && task.is_some_and(|t| matches!(t.kind, Some(lazybox_core::TaskKind::Issue)))
+                    && !w
+                        .sessions
+                        .iter()
+                        .any(|s| matches!(s.kind, lazybox_core::SessionKind::Agent { .. }))
+                    // A snoozed issue was deliberately deferred: it lives in
+                    // the Snoozed mailbox, not the working set, so it is not
+                    // "ready to pick up now" even when unblocked and
+                    // agent-less. Without this, `ready` and `snoozed`
+                    // overlap and a deferred ticket keeps resurfacing.
+                    && !w.is_snoozed(ctx.now)
+            }
             Filter::Author => task.is_some_and(|t| t.role == TaskRole::Author),
             Filter::Reviewer => task.is_some_and(|t| t.role == TaskRole::Reviewer),
             Filter::Assignee => task.is_some_and(|t| t.role == TaskRole::Assignee),
@@ -696,6 +737,8 @@ mod tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
         let mut ws = Workspace::from_task(task, now());
         ws.key = WorkspaceKey(key.into());
@@ -749,6 +792,8 @@ mod tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
         tweak(&mut task);
         let mut ws = Workspace::from_task(task, now());
@@ -1048,6 +1093,130 @@ mod tests {
         }
     }
 
+    /// The `blocked` predicate reads the workspace-level dependency
+    /// helpers, so it fires on a native / body-marker `blocked_by` edge
+    /// and on a declared `Blocked on:` reason alike — the same signal the
+    /// `⛔` row badge shows.
+    #[test]
+    fn blocked_filter_matches_edges_and_declared_reasons() {
+        let agents = HashMap::new();
+        let matches = |ws: &Workspace, f: Filter| {
+            f.matches(&FilterCtx {
+                w: ws,
+                agents: &agents,
+                now: now(),
+            })
+        };
+
+        // A task-edge blocker.
+        let edge = workspace_with("a", |t| {
+            t.kind = Some(TaskKind::Issue);
+            t.blocked_by = vec![TaskId {
+                source: "github".into(),
+                key: "owner/r#7".into(),
+            }];
+        });
+        assert!(matches(&edge, Filter::Blocked));
+        assert!(
+            !matches(&edge, Filter::Ready),
+            "a blocked issue is not ready"
+        );
+
+        // A declared free-text blocker (no edge) still counts as blocked.
+        let declared = workspace_with("b", |t| {
+            t.kind = Some(TaskKind::Issue);
+            t.blocked_on = Some("waiting on legal".into());
+        });
+        assert!(matches(&declared, Filter::Blocked));
+        assert!(!matches(&declared, Filter::Ready));
+
+        // No blockers at all → not blocked.
+        let clear = workspace_with("c", |t| t.kind = Some(TaskKind::Issue));
+        assert!(!matches(&clear, Filter::Blocked));
+
+        assert_eq!(Filter::Blocked.axis(), FilterAxis::State);
+        assert_eq!(Filter::Blocked.label(), "blocked");
+    }
+
+    /// `ready` = an issue with no dependency edge, no declared blocker,
+    /// and no agent session yet: "what can I pick up right now". A PR, a
+    /// blocked issue, or an issue already under an agent all fail it.
+    #[test]
+    fn ready_filter_matches_only_startable_issues() {
+        use std::path::PathBuf;
+        let agents = HashMap::new();
+        let matches = |ws: &Workspace, f: Filter| {
+            f.matches(&FilterCtx {
+                w: ws,
+                agents: &agents,
+                now: now(),
+            })
+        };
+
+        // A clean issue with nothing in its way.
+        let ready = workspace_with("a", |t| t.kind = Some(TaskKind::Issue));
+        assert!(matches(&ready, Filter::Ready));
+        assert!(!matches(&ready, Filter::Blocked));
+
+        // A PR is never "ready" — the predicate is issue-only.
+        let pr = workspace_with("b", |t| t.kind = Some(TaskKind::Pr));
+        assert!(!matches(&pr, Filter::Ready));
+
+        // An issue already carrying an agent session is under way, not
+        // waiting to be picked up.
+        let mut working = workspace_with("c", |t| t.kind = Some(TaskKind::Issue));
+        working.sessions.push(lazybox_core::WorkspaceSession::new(
+            working.key.clone(),
+            lazybox_core::SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            PathBuf::from("/tmp/wt"),
+            now(),
+        ));
+        assert!(!matches(&working, Filter::Ready));
+
+        assert_eq!(Filter::Ready.axis(), FilterAxis::State);
+        assert_eq!(Filter::Ready.label(), "ready");
+    }
+
+    /// A snoozed issue was deliberately deferred into the Snoozed mailbox,
+    /// so it must not read as "ready to pick up now" even when it is
+    /// otherwise startable (an issue, no blockers, no agent). Without the
+    /// `!is_snoozed` guard, `ready` and `snoozed` overlapped and a
+    /// deferred ticket kept resurfacing in the ready set.
+    #[test]
+    fn ready_filter_excludes_a_snoozed_issue() {
+        let agents = HashMap::new();
+        let clock = now();
+        let matches = |ws: &Workspace, f: Filter| {
+            f.matches(&FilterCtx {
+                w: ws,
+                agents: &agents,
+                now: clock,
+            })
+        };
+
+        // Startable but snoozed a few hours out → not ready, and snoozed.
+        let mut snoozed = workspace_with("a", |t| t.kind = Some(TaskKind::Issue));
+        snoozed.snoozed_until = Some(clock + chrono::Duration::hours(5));
+        assert!(matches(&snoozed, Filter::Snoozed));
+        assert!(
+            !matches(&snoozed, Filter::Ready),
+            "a snoozed issue is deferred, not ready to pick up"
+        );
+
+        // An EXPIRED snooze reads as awake, so the same issue is ready
+        // again once its deadline has passed (stale timestamps are never
+        // cleared in the store, so the predicate must gate on the clock).
+        let mut woke = workspace_with("b", |t| t.kind = Some(TaskKind::Issue));
+        woke.snoozed_until = Some(clock - chrono::Duration::hours(1));
+        assert!(!matches(&woke, Filter::Snoozed));
+        assert!(
+            matches(&woke, Filter::Ready),
+            "an expired snooze is awake, so the issue is ready again"
+        );
+    }
+
     #[test]
     fn menu_lists_every_filter_in_axis_order_with_counts() {
         let agents = HashMap::new();
@@ -1056,7 +1225,7 @@ mod tests {
         let candidates = vec![&a, &b];
         let menu = Filter::menu(&candidates, &agents, &FilterSet::new());
 
-        // All 14, in ALL order, none active.
+        // Every fixed filter, in ALL order, none active.
         assert_eq!(menu.len(), Filter::ALL.len());
         assert!(menu.iter().all(|item| !item.active));
         assert_eq!(menu.first().map(|i| i.filter), Some(Filter::WithAgent));

@@ -274,7 +274,10 @@ then falls to the pane (committed-search clear),
 `` ` ``
 open the fuzzy jump-to-workspace picker (all repos; from inside an
 agent use `]]` then `` ` ``), `!` jump to agent-asking workspace,
-`Shift-F` jump to failing CI, `Shift-P` cycle
+`Shift-F` jump to failing CI, `E j` jump to the next blocked
+workspace (the `E` epic leader — one that declares a `Blocked on:`
+reason or carries a dependency edge; declared blockers first, then
+edge-blocked rows, wrapping; #1521), `Shift-P` cycle
 the activity pane full → summary (a slim one-line count of new activity /
 failing CI) → hidden → full, remembered per workspace with a
 `ui.activity_pane_default` starting mode (auto-hidden when the workspace

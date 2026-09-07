@@ -196,6 +196,8 @@
             "author": "",
             "auto_merge_enabled": false,
             "base_branch": null,
+            "blocked_by": [],
+            "blocked_on": null,
             "body": null,
             "branch": null,
             "changed_files": 0,

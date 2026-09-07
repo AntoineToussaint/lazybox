@@ -816,6 +816,13 @@ impl Sidebar {
         self.inner.focus_next_unread_workspace()
     }
 
+    /// Move the cursor onto the next blocked workspace (declared reason or
+    /// dependency edge), wrapping around. Backs the `E j` global key
+    /// (#1521).
+    pub fn focus_next_blocked_workspace(&mut self) -> bool {
+        self.inner.focus_next_blocked_workspace()
+    }
+
     /// Move the cursor to the previous / next group header. Backs the
     /// `{` / `}` sidebar keys (#1502).
     pub fn move_cursor_to_group(&mut self, forward: bool) -> bool {

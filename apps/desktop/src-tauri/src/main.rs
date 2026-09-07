@@ -3944,6 +3944,8 @@ mod tests {
             closes_issues: vec![],
             linked_tasks: vec![],
             parent: None,
+            blocked_by: vec![],
+            blocked_on: None,
             priority: None,
             state_label: None,
         }

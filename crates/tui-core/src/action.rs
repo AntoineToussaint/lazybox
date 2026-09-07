@@ -435,6 +435,11 @@ pub enum Action {
     /// Jump the sidebar cursor to the next workspace with unread
     /// activity (`Shift-N`, #1502). Wraps around.
     JumpToUnread,
+    /// Jump the sidebar cursor to the next blocked workspace (`E j`,
+    /// #1521): one that declares a `Blocked on:` reason or carries a
+    /// dependency edge. Declared blockers sweep first, then edges. Wraps
+    /// around.
+    JumpToBlocked,
     /// Move the sidebar cursor to the previous group header (`{`,
     /// #1502). Clamps at the first.
     JumpPrevGroup,
@@ -647,6 +652,7 @@ pub enum ActionKind {
     JumpToFailingCi,
     JumpToLimited,
     JumpToUnread,
+    JumpToBlocked,
     JumpPrevGroup,
     JumpNextGroup,
     ResumeRateLimited,
@@ -698,6 +704,7 @@ impl ActionKind {
         Self::JumpToFailingCi,
         Self::JumpToLimited,
         Self::JumpToUnread,
+        Self::JumpToBlocked,
         Self::ToggleFocusMode,
         Self::StartAgent,
         Self::ConnectBox,
@@ -946,6 +953,7 @@ impl Action {
             Action::JumpToFailingCi => ActionKind::JumpToFailingCi,
             Action::JumpToLimited => ActionKind::JumpToLimited,
             Action::JumpToUnread => ActionKind::JumpToUnread,
+            Action::JumpToBlocked => ActionKind::JumpToBlocked,
             Action::JumpPrevGroup => ActionKind::JumpPrevGroup,
             Action::JumpNextGroup => ActionKind::JumpNextGroup,
             Action::ResumeRateLimited => ActionKind::ResumeRateLimited,
@@ -1144,6 +1152,13 @@ impl ActionDef {
                 default_keys: "Shift-N",
                 label: "next unread",
                 describe: "Jump the cursor to the next workspace with unread activity, wrapping around (#1502). The keyboard answer to the `●N` badge — no filter mode needed.",
+                section: Section::Global,
+            },
+            ActionKind::JumpToBlocked => &Self {
+                kind: ActionKind::JumpToBlocked,
+                default_keys: "E j",
+                label: "next blocked",
+                describe: "Jump the cursor to the next blocked workspace — one that declares a `Blocked on:` reason or carries a dependency edge (#1521). Declared blockers come first, then edge-blocked rows. Wraps around.",
                 section: Section::Global,
             },
             ActionKind::JumpPrevGroup => &Self {
@@ -2395,6 +2410,7 @@ impl ActionKind {
             ActionKind::JumpToFailingCi => "jump_to_failing_ci",
             ActionKind::JumpToLimited => "jump_to_limited",
             ActionKind::JumpToUnread => "jump_to_unread",
+            ActionKind::JumpToBlocked => "jump_to_blocked",
             ActionKind::JumpPrevGroup => "jump_prev_group",
             ActionKind::JumpNextGroup => "jump_next_group",
             ActionKind::ResumeRateLimited => "resume_rate_limited",
@@ -2636,15 +2652,20 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::ResetAgentContext
         | ActionKind::ToggleMetering
         | ActionKind::CollapseIntoPr => Some("workspace"),
+        // The `E` epic leader (#1521): dependency-graph navigation. `E j`
+        // jumps to the next blocked workspace; the group grows as later
+        // epic slices land. `Shift-E` is the Error Inbox and `e` the
+        // editor, so the epic leader takes bare `E`.
+        ActionKind::JumpToBlocked => Some("epic"),
         _ => None,
     }
 }
 
-/// Deliberate reading order for the five non-terminal command families.
+/// Deliberate reading order for the non-terminal command families.
 /// Consumers use this instead of catalog insertion order, so the footer,
 /// compact index, generated docs, and help-agent context all teach the same
 /// mental model: do work, choose an agent, use main deliberately, operate on
-/// GitHub, then manage the workspace itself.
+/// GitHub, manage the workspace itself, then navigate epic/dependency edges.
 pub const LEADER_GROUP_ORDER: &[&str] = &[
     "work",
     "agent",
@@ -2652,6 +2673,7 @@ pub const LEADER_GROUP_ORDER: &[&str] = &[
     "main branch",
     "github",
     "workspace",
+    "epic",
 ];
 
 pub fn leader_group_rank(label: &str) -> usize {
@@ -3419,6 +3441,7 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::JumpToFailingCi
         | ActionKind::JumpToLimited
         | ActionKind::JumpToUnread
+        | ActionKind::JumpToBlocked
         | ActionKind::JumpPrevGroup
         | ActionKind::JumpNextGroup
         | ActionKind::ResumeRateLimited
@@ -3826,13 +3849,20 @@ mod tests {
 
         assert_eq!(
             groups.keys().cloned().collect::<Vec<_>>(),
-            ["a", "b", "g", "w", "x"],
+            ["E", "a", "b", "g", "w", "x"],
             "a new leader must be an intentional addition to the keymap grammar",
         );
+        // `E` is the epic namespace (#1517): reserved as a leader now and
+        // seeded by #1521 with its first member (`E j`, next blocked). It
+        // grows across the epic (dependency roles, derived status
+        // navigation), so it is the one intentional single-item menu — a
+        // leader from the start rather than a direct key that later has to
+        // be demoted once its siblings land.
+        const RESERVED_GROWING_LEADERS: &[&str] = &["E"];
         for (leader, (labels, continuations)) in groups {
             assert_eq!(labels.len(), 1, "{leader} has conflicting group names");
             assert!(
-                continuations.len() >= 2,
+                continuations.len() >= 2 || RESERVED_GROWING_LEADERS.contains(&leader.as_str()),
                 "{leader} should be a direct key, not a one-item menu",
             );
         }
@@ -4096,6 +4126,8 @@ mod tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
 
         // No workspace → not offered.
@@ -4185,6 +4217,8 @@ mod tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
 
         // No workspace → not offered.
@@ -4302,6 +4336,8 @@ mod tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
 
         // No workspace → not offered.
@@ -4382,6 +4418,8 @@ mod tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
         let ws_with_pr = |state: TaskState| {
             let mut ws = Workspace::empty(
@@ -4502,6 +4540,8 @@ mod tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
 
         // Up-to-date PR → not offered.

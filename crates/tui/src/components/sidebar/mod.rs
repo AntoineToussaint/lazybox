@@ -2289,6 +2289,52 @@ impl Sidebar {
         self.focus_workspace_key(&target)
     }
 
+    /// Move the cursor onto the next blocked workspace, starting AFTER the
+    /// current row and wrapping — the `E j` epic jump (#1521). A workspace
+    /// is blocked when it declares a `Blocked on:` reason or carries a
+    /// dependency edge; membership is the same predicate the `⛔` row
+    /// badge and the `blocked` filter read, so the jump lands where the
+    /// glyph is. Declared-blocker rows sweep before edge-only rows: a
+    /// human-written "waiting on X" is a stronger signal than an inferred
+    /// edge, so it earns the earlier stop in the cycle. Returns true when
+    /// a target was found.
+    pub fn focus_next_blocked_workspace(&mut self) -> bool {
+        let sidebar_order = self.visible_workspace_keys();
+        // Two passes over sidebar order — declared first, then edge-only —
+        // concatenated into one cycle so `E j` visits every declared
+        // blocker before any purely-inferred one, yet still reaches them.
+        let declared: Vec<SessionKey> = sidebar_order
+            .iter()
+            .filter(|k| {
+                self.workspaces
+                    .get(*k)
+                    .is_some_and(|w| w.declared_blocker().is_some())
+            })
+            .cloned()
+            .collect();
+        let edge_only: Vec<SessionKey> = sidebar_order
+            .iter()
+            .filter(|k| {
+                self.workspaces.get(*k).is_some_and(|w| {
+                    w.declared_blocker().is_none() && w.hierarchy_blocked_by().next().is_some()
+                })
+            })
+            .cloned()
+            .collect();
+        let cycle: Vec<SessionKey> = declared.into_iter().chain(edge_only).collect();
+        if cycle.is_empty() {
+            return false;
+        }
+        let current = self.selected_session_key().cloned();
+        let start = current
+            .as_ref()
+            .and_then(|c| cycle.iter().position(|k| k == c))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let target = cycle[start % cycle.len()].clone();
+        self.focus_workspace_key(&target)
+    }
+
     /// The visible workspaces that have a coding-agent session, in
     /// sidebar (top-down) order. The 1-based index into this list is
     /// the number shown on the row's jump badge and dialed by the

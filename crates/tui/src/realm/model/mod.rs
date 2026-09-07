@@ -3530,7 +3530,10 @@ impl<T: TerminalAdapter> Model<T> {
         };
         if matches!(
             action,
-            Action::JumpToAsking | Action::JumpToFailingCi | Action::JumpToWorkspace
+            Action::JumpToAsking
+                | Action::JumpToFailingCi
+                | Action::JumpToWorkspace
+                | Action::JumpToBlocked
         ) {
             coach.note_jump();
         }

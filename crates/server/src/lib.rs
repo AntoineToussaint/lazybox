@@ -407,6 +407,13 @@ pub struct ServerConfig {
     /// delta). Both writers take it inside their blocking section, mirroring
     /// `archive_updates`.
     pub(crate) session_cost_lock: Arc<parking_lot::Mutex<()>>,
+    /// Serializes the mastery-ledger read-modify-write (#1502).
+    /// `client_kv::record_action` loads a per-action channel-count map,
+    /// increments one entry, and stores it back — two concurrent invocations
+    /// for the same action would otherwise both read the same base count and
+    /// lose an increment. Both callers take it inside their blocking section,
+    /// mirroring `session_cost_lock`.
+    pub(crate) mastery_lock: Arc<parking_lot::Mutex<()>>,
     /// Serializes workspace-key allocation through the matching durable
     /// insert. Allocation is a check-then-save loop; without this boundary,
     /// concurrent creates with the same display name can both observe the
@@ -583,6 +590,7 @@ impl ServerConfig {
             deleted_workspaces: Arc::new(parking_lot::Mutex::new(HashSet::new())),
             archive_updates: Arc::new(parking_lot::Mutex::new(())),
             session_cost_lock: Arc::new(parking_lot::Mutex::new(())),
+            mastery_lock: Arc::new(parking_lot::Mutex::new(())),
             workspace_creations: Arc::new(parking_lot::Mutex::new(())),
             undecodable_row_reports: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             event_metrics: Arc::new(metrics::EventMetrics::default()),
@@ -1123,6 +1131,7 @@ impl Server {
                         lazybox_ipc::Command::DeleteError { .. } => "DeleteError",
                         lazybox_ipc::Command::GetResourcePosture => "GetResourcePosture",
                         lazybox_ipc::Command::GetStats => "GetStats",
+                        lazybox_ipc::Command::RecordAction { .. } => "RecordAction",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` and `RecordComposingBuffer` fire on every
@@ -1614,6 +1623,7 @@ pub async fn dispatch_command(
             };
             let snippet_keepmine = client_kv.snippet_keepmine;
             let session_costs = client_kv.session_costs;
+            let mastery = client_kv.mastery;
             let _ = tx.send(Event::Snapshot {
                 workspaces: workspaces.values,
                 terminals,
@@ -1724,6 +1734,11 @@ pub async fn dispatch_command(
             let _ = tx.send(Event::SessionCosts {
                 costs: session_costs,
             });
+            // Durable per-action usage counts (#1502): replayed as the same
+            // post-snapshot scaffolding so onboarding chrome seeds its
+            // mastery view on connect. Kept before AutoFixPolicyConfig so
+            // that stays the end-of-replay marker.
+            let _ = tx.send(Event::MasteryLedger { counts: mastery });
             // Keep the auto-fix policy as the last post-subscribe push so
             // existing consumers can use it as the end-of-replay marker.
             let _ = tx.send(Event::AutoFixPolicyConfig {
@@ -2356,6 +2371,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::GetStats => {
             stats_accumulator::handle_get(config).await;
+        }
+        lazybox_ipc::Command::RecordAction { action_id, via } => {
+            client_kv::record_action(config, action_id, via).await;
         }
         lazybox_ipc::Command::Shutdown => {
             unreachable!("Shutdown is loop control, intercepted by the serve loop")

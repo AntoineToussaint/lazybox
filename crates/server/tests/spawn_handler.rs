@@ -144,6 +144,14 @@ async fn drain_auto_fix_config(client: &mut lazybox_ipc::Client) {
         matches!(costs, Event::SessionCosts { .. }),
         "expected SessionCosts, got {costs:?}"
     );
+    let mastery = timeout(Duration::from_secs(1), client.recv())
+        .await
+        .expect("mastery ledger deadline")
+        .expect("mastery ledger event");
+    assert!(
+        matches!(mastery, Event::MasteryLedger { .. }),
+        "expected MasteryLedger, got {mastery:?}"
+    );
     let cfg = timeout(Duration::from_secs(1), client.recv())
         .await
         .expect("auto-fix policy config deadline")

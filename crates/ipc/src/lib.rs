@@ -750,6 +750,52 @@ fn default_true() -> bool {
     true
 }
 
+/// The surface a catalog action was invoked through, recorded with each
+/// [`Command::RecordAction`] so the mastery ledger (#1502) can tell a
+/// keyboard-driven action apart from a mouse/menu one — the signal a
+/// later "you keep clicking this; the key is `g m`" nudge reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum ActionVia {
+    /// A key chord (direct or leader), the primary path.
+    Kbd,
+    /// A direct pointer click on a rendered affordance.
+    Mouse,
+    /// The right-click context menu or a choice modal.
+    Menu,
+    /// The Ask Lazybox command palette executing a row.
+    Palette,
+    /// The onboarding coach driving the action on the user's behalf.
+    Coach,
+}
+
+impl ActionVia {
+    /// Stable wire token used as the per-channel key inside a persisted
+    /// ledger row. Kept snake-free and lowercase so the JSON stays terse.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ActionVia::Kbd => "kbd",
+            ActionVia::Mouse => "mouse",
+            ActionVia::Menu => "menu",
+            ActionVia::Palette => "palette",
+            ActionVia::Coach => "coach",
+        }
+    }
+
+    /// Parse a persisted token back to a channel, or `None` for an
+    /// unrecognized one (a forward-compat row is skipped, never fatal).
+    pub fn from_wire(token: &str) -> Option<Self> {
+        Some(match token {
+            "kbd" => ActionVia::Kbd,
+            "mouse" => ActionVia::Mouse,
+            "menu" => ActionVia::Menu,
+            "palette" => ActionVia::Palette,
+            "coach" => ActionVia::Coach,
+            _ => return None,
+        })
+    }
+}
+
 /// TUI → daemon.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
@@ -1660,6 +1706,17 @@ pub enum Command {
     SetHopperCanceled {
         workspace_key: lazybox_core::WorkspaceKey,
         canceled: bool,
+    },
+    /// Record one invocation of a catalog action for the mastery ledger
+    /// (#1502): the daemon owns the durable per-action usage counts (like
+    /// the snippet MRU, #548), so a `--connect` client and the in-process
+    /// TUI share one view. `action_id` is the action's stable
+    /// `ActionKind::name()`; `via` is the surface it was invoked through.
+    /// Fire-and-forget telemetry — a dropped write just under-counts.
+    /// Appended last (bincode is ordinal-sensitive).
+    RecordAction {
+        action_id: String,
+        via: ActionVia,
     },
 }
 
@@ -2860,6 +2917,17 @@ pub enum Event {
     KeepAwakeStatus {
         active: bool,
         on_battery: bool,
+    },
+    /// The persisted mastery ledger (#1502): one `(action_id, via, count)`
+    /// triple per channel a catalog action has been invoked through,
+    /// replayed once right after [`Event::Snapshot`] on subscribe like
+    /// [`Event::SessionCosts`] so a reconnecting client seeds its usage
+    /// view without a round-trip. An empty vec is valid (nothing recorded
+    /// yet). Its own event rather than a `Snapshot` field so the ~150
+    /// snapshot construction sites stay untouched. Appended last (bincode
+    /// is ordinal-sensitive).
+    MasteryLedger {
+        counts: Vec<(String, ActionVia, u32)>,
     },
 }
 

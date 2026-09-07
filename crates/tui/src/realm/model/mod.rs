@@ -2199,6 +2199,16 @@ pub struct Model<T: TerminalAdapter> {
     /// AND is shared across in-process and `--connect` clients. This local
     /// copy is the pruned-against-catalog view the pickers render.
     pub(crate) recent_snippets: Vec<String>,
+    /// Per-action usage counts keyed by the action's stable
+    /// `ActionKind::name()`, each broken down by the channel it was invoked
+    /// through — the mastery ledger (#1502). The daemon owns the durable
+    /// counts (like the snippet MRU, #548): each dispatch fires a
+    /// `Command::RecordAction`, and the persisted ledger replays in
+    /// `Event::MasteryLedger` on connect. This local copy is bumped
+    /// optimistically on dispatch so onboarding chrome can read live usage
+    /// without a round-trip.
+    pub(crate) mastery:
+        std::collections::HashMap<String, std::collections::HashMap<lazybox_ipc::ActionVia, u32>>,
     /// Skill names triggered this session, most-recent first (capped at
     /// `RECENT_SNIPPETS_MAX`). Feeds the skills picker's "Recent" group so
     /// a repeated skill is one `]]k` + `Enter` away, mirroring
@@ -2652,6 +2662,7 @@ impl<T: TerminalAdapter> Model<T> {
             deferred_focus_terminal: None,
             snippets: lazybox_config::Snippets::default(),
             recent_snippets: Vec::new(),
+            mastery: std::collections::HashMap::new(),
             recent_skills: Vec::new(),
             dismissed_updates: Vec::new(),
             snippet_keepmine: Vec::new(),
@@ -3957,6 +3968,76 @@ impl<T: TerminalAdapter> Model<T> {
         }
         recent.truncate(RECENT_SNIPPETS_MAX);
         self.recent_snippets = recent;
+    }
+
+    /// Record one invocation of `action` through `via` for the mastery
+    /// ledger (#1502): bump the local per-channel count optimistically and
+    /// return the `Command::RecordAction` that persists it daemon-side. The
+    /// caller flushes the returned command with the action's own effects.
+    /// Keyed by the action's stable `ActionKind::name()` — generated
+    /// per-agent rows fold into their kind.
+    pub(crate) fn record_action_mastery(
+        &mut self,
+        action: &lazybox_tui_core::action::Action,
+        via: lazybox_ipc::ActionVia,
+    ) -> IpcCommand {
+        let action_id = action.kind().name().to_string();
+        *self
+            .mastery
+            .entry(action_id.clone())
+            .or_default()
+            .entry(via)
+            .or_insert(0) += 1;
+        IpcCommand::RecordAction { action_id, via }
+    }
+
+    /// Total times `action_id` (a stable `ActionKind::name()`) has been
+    /// invoked across every channel, per the local mastery ledger (#1502).
+    pub fn action_uses(&self, action_id: &str) -> u32 {
+        self.mastery
+            .get(action_id)
+            .map(|by_via| by_via.values().sum())
+            .unwrap_or(0)
+    }
+
+    /// Dispatch a catalog `action` invoked through `via`, recording it in
+    /// the mastery ledger (#1502) before delegating to
+    /// [`Self::dispatch_action`]. Every real user entry point (keyboard,
+    /// context menu, palette) goes through here; internal continuations
+    /// (e.g. a hopper action resumed after its project is assigned) call
+    /// `dispatch_action` directly so a single gesture is counted once.
+    pub(crate) fn dispatch_action_via(
+        &mut self,
+        action: &lazybox_tui_core::action::Action,
+        via: lazybox_ipc::ActionVia,
+    ) -> Vec<IpcCommand> {
+        let mut cmds = vec![self.record_action_mastery(action, via)];
+        cmds.extend(self.dispatch_action(action));
+        cmds
+    }
+
+    /// Seed the local mastery ledger from the daemon's persisted counts,
+    /// replayed in `Event::MasteryLedger` on connect (#1502). Merges by
+    /// taking the max of each `(action_id, via)` count rather than clearing
+    /// and replacing: counts are monotonic (`record_action` only ever
+    /// increments), so the daemon's total is normally ≥ the local view and
+    /// wins — but a dispatch may have bumped the local count optimistically
+    /// before its `RecordAction` committed daemon-side, and a clear-then-
+    /// replace would drop that in-flight `+1` until the next replay. Max
+    /// keeps it (and can never regress a real count, since none decrease).
+    pub(crate) fn seed_mastery_from_snapshot(
+        &mut self,
+        counts: Vec<(String, lazybox_ipc::ActionVia, u32)>,
+    ) {
+        for (action_id, via, count) in counts {
+            let entry = self
+                .mastery
+                .entry(action_id)
+                .or_default()
+                .entry(via)
+                .or_insert(0);
+            *entry = (*entry).max(count);
+        }
     }
 
     /// Mount the read-only snippets browser (`]`, or the Settings

@@ -7,9 +7,9 @@
 //! a v0.2 client can't talk to a v0.3 daemon.
 
 use lazybox_ipc::{
-    AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunId, AgentRunRequestId,
-    AgentRuntimeMode, AgentState, AgentUsage, Command, Event, HookEvent, HookEventKind,
-    HopperEntryDraft, PrincipalId, PromptSource, ProviderCredentialInput,
+    ActionVia, AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunId,
+    AgentRunRequestId, AgentRuntimeMode, AgentState, AgentUsage, Command, Event, HookEvent,
+    HookEventKind, HopperEntryDraft, PrincipalId, PromptSource, ProviderCredentialInput,
     ProviderCredentialMetadata, ProviderQuota, QuotaWindow, RemovableTerminalState, SpawnFallback,
     TerminalId, TerminalInputIntent, TerminalKind, TerminalSnapshot, UserPrompt, WorktreeStep,
     WorktreeStepStatus,
@@ -534,6 +534,10 @@ fn all_commands() -> Vec<Command> {
         Command::SetHopperCanceled {
             workspace_key: lazybox_core::WorkspaceKey::new("morning-plan"),
             canceled: true,
+        },
+        Command::RecordAction {
+            action_id: "merge_pr".into(),
+            via: ActionVia::Kbd,
         },
         Command::Shutdown,
     ]
@@ -1211,6 +1215,12 @@ fn all_events() -> Vec<Event> {
             active: true,
             on_battery: true,
         },
+        Event::MasteryLedger {
+            counts: vec![
+                ("merge_pr".into(), ActionVia::Kbd, 3),
+                ("archive".into(), ActionVia::Menu, 1),
+            ],
+        },
     ]
 }
 
@@ -1310,6 +1320,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::SetSnippetKeepMine { .. } => "SetSnippetKeepMine",
         Command::GetStats => "GetStats",
         Command::SetHopperCanceled { .. } => "SetHopperCanceled",
+        Command::RecordAction { .. } => "RecordAction",
     }
 }
 
@@ -1420,6 +1431,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::AgentSessionStarted { .. } => "AgentSessionStarted",
         Event::GithubDiscoveryBehind { .. } => "GithubDiscoveryBehind",
         Event::KeepAwakeStatus { .. } => "KeepAwakeStatus",
+        Event::MasteryLedger { .. } => "MasteryLedger",
     }
 }
 
@@ -1431,12 +1443,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        91,
+        92,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        100,
+        101,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

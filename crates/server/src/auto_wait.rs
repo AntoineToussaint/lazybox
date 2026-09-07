@@ -179,12 +179,20 @@ fn resume_prompt() -> String {
 /// reading is in fact *rejected* from a blocked state, see
 /// `AgentStateMachine::on_reading`). So gating on `Done` alone — the
 /// original bug — never fired for the exact case the resume exists to
-/// handle. `Done` is kept for the one path that still produces it: a
-/// hook-driven settle from `AwaitingReset` (a `Stop` hook delivered after
-/// the reset). A clear to `Working` means the agent auto-resumed (re-auth /
-/// auto-continue) and is dropped before it ever settles here, so nudging
-/// would only ever inject a stray prompt mid-turn; every other clear (a
-/// fresh permission prompt, a new credit block, an exit) is left alone.
+/// handle, and `Idle` is the branch that actually carries the real clear.
+///
+/// `Done` is no longer reachable from a parked wait: the `Stop` hook that
+/// once settled `AwaitingReset` to `Done` is now swallowed while the agent
+/// is parked (`hook::hook_to_state`, the `AwaitingReset` guard), and the PTY
+/// detector reads the cleared composer as `Idle`. It is kept here purely as
+/// a defensive net — this loop is agnostic to *where* a settled reading came
+/// from, and a genuinely `Done` resting screen would equally want the nudge
+/// (see the `awaiting_reset_relabel_keeps_tracking_until_the_real_clear`
+/// test, which drives a synthetic `Done` clear). A clear to `Working` means
+/// the agent auto-resumed (re-auth / auto-continue) and is dropped before it
+/// ever settles here, so nudging would only ever inject a stray prompt
+/// mid-turn; every other clear (a fresh permission prompt, a new credit
+/// block, an exit) is left alone.
 fn wants_resume_nudge(state: &AgentState) -> bool {
     matches!(state, AgentState::Idle | AgentState::Done)
 }

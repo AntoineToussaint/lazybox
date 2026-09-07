@@ -124,6 +124,20 @@ pub fn hook_to_state(event: &HookEvent, current: Option<AgentState>) -> Option<A
             Some(AgentState::Working) => AgentState::Working,
             _ => return None,
         },
+        // An agent parked on Claude's auto-continue usage-limit wait DOES
+        // fire `Stop` (it ends the turn to wait) and can fire the idle
+        // nudge while it sits there. Neither is a finished turn or a ready
+        // composer: the screen still shows the banner and the agent will
+        // resume by itself at the reset. Letting `Stop` map to `Done` here
+        // clobbered the detector's `AwaitingReset` and the row read as
+        // finished while it was rate-limited (the shape Shift-K/`a R` must
+        // find). The PTY detector — which sees the banner leave — owns the
+        // exit from this state.
+        HookEventKind::Notification | HookEventKind::Stop
+            if current == Some(AgentState::AwaitingReset) =>
+        {
+            return None;
+        }
         HookEventKind::Notification => {
             return notification_state(event.notification.as_deref(), current);
         }
@@ -259,6 +273,34 @@ mod tests {
             assert_eq!(ev.kind, HookEventKind::Other, "{name} should be Other");
             assert_eq!(hook_to_state(&ev, None), None, "{name} should be a no-op");
         }
+    }
+
+    /// An agent parked on the auto-continue usage-limit wait fires `Stop`
+    /// (it ended the turn to wait) and can fire the idle nudge. Neither may
+    /// pull it off `AwaitingReset`: the row read as `Done` while the account
+    /// was rate-limited, and Shift-K / `a R` found nothing. From any other
+    /// state the hooks keep their meaning.
+    #[test]
+    fn stop_and_idle_nudge_hold_a_parked_awaiting_reset() {
+        let stop = parse(r#"{"hook_event_name":"Stop"}"#);
+        assert_eq!(
+            hook_to_state(&stop, Some(AgentState::AwaitingReset)),
+            None,
+            "Stop while parked is not a finished turn"
+        );
+        let nudge = parse(
+            r#"{"hook_event_name":"Notification","message":"Claude is waiting for your input"}"#,
+        );
+        assert_eq!(
+            hook_to_state(&nudge, Some(AgentState::AwaitingReset)),
+            None,
+            "the idle nudge while parked is not a ready composer"
+        );
+        assert_eq!(
+            hook_to_state(&stop, Some(AgentState::Working)),
+            Some(AgentState::Done),
+            "Stop from Working still settles the turn"
+        );
     }
 
     #[test]

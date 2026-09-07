@@ -56,6 +56,59 @@ pub fn port() -> Option<u16> {
     PROXY_PORT.get().copied()
 }
 
+/// kv key holding the last loopback port, reused on restart so a metered
+/// agent that survived the restart keeps resolving its baked
+/// `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`.
+const PORT_KV_KEY: &str = "proxy:port";
+
+/// Bind the proxy's loopback listener, **reusing the port persisted by the
+/// previous daemon** when it is free (falling back to an ephemeral one with a
+/// warning), and persist whatever was bound for the next restart.
+///
+/// The port is baked into every metered agent's `*_BASE_URL` environment at
+/// spawn, and a lazybox restart keeps those agent processes alive (session
+/// recovery) — so an ephemeral port per daemon left every surviving metered
+/// agent dialing a dead port: "connection refused", retry loop, session
+/// stuck until respawn. Mirrors the MCP endpoint, which bakes its URL the
+/// same way and solved this the same way (#1420).
+pub(crate) async fn bind_listener(config: &crate::ServerConfig) -> Option<(TcpListener, u16)> {
+    let prior = restore_port(config).await;
+    let listener = match crate::mcp::bind_loopback(prior) {
+        Ok(listener) => listener,
+        Err(error) => {
+            tracing::warn!("metering proxy failed to bind: {error}");
+            return None;
+        }
+    };
+    let port = match listener.local_addr() {
+        Ok(addr) => addr.port(),
+        Err(error) => {
+            tracing::warn!("metering proxy local_addr failed: {error}");
+            return None;
+        }
+    };
+    persist_port(config, port).await;
+    Some((listener, port))
+}
+
+async fn persist_port(config: &crate::ServerConfig, port: u16) {
+    let value = port.to_string();
+    if let Err(error) = crate::store_blocking(&config.store, move |store| {
+        store.set_kv(PORT_KV_KEY, &value)
+    })
+    .await
+    {
+        tracing::warn!("metering proxy: persist port: {error}");
+    }
+}
+
+async fn restore_port(config: &crate::ServerConfig) -> Option<u16> {
+    match crate::store_blocking(&config.store, |store| store.get_kv(PORT_KV_KEY)).await {
+        Ok(Some(raw)) => raw.trim().parse().ok(),
+        _ => None,
+    }
+}
+
 /// Callback invoked once per upstream response that carried usage, with the
 /// agent id and session key parsed from the request path (session is `""`
 /// when the spawn opted in without a resolvable key).
@@ -147,20 +200,7 @@ pub async fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHand
         return None;
     }
 
-    let listener = match TcpListener::bind(("127.0.0.1", 0)).await {
-        Ok(listener) => listener,
-        Err(error) => {
-            tracing::warn!("metering proxy failed to bind: {error}");
-            return None;
-        }
-    };
-    let port = match listener.local_addr() {
-        Ok(addr) => addr.port(),
-        Err(error) => {
-            tracing::warn!("metering proxy local_addr failed: {error}");
-            return None;
-        }
-    };
+    let (listener, port) = bind_listener(config).await?;
     set_port(port);
 
     // Chain through a configured gateway when one is set, so the proxy
@@ -434,6 +474,32 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The restart case: the proxy's port is persisted, and a fresh daemon
+    /// (fresh listener, same store) binds the SAME port back — so a metered
+    /// agent that survived the restart with `…BASE_URL=http://127.0.0.1:PORT`
+    /// baked in keeps reaching the proxy instead of "connection refused".
+    /// When the port is genuinely taken, it falls back to a fresh one and
+    /// persists that instead, so the next restart converges again.
+    #[tokio::test]
+    async fn bind_listener_reuses_the_persisted_port_across_a_restart() {
+        let config = crate::ServerConfig::in_memory();
+
+        // First daemon: nothing persisted → ephemeral port, now persisted.
+        let (first, port) = bind_listener(&config).await.expect("first bind");
+        assert_eq!(restore_port(&config).await, Some(port));
+        drop(first);
+
+        // Second daemon on the same store: same port comes back.
+        let (second, reused) = bind_listener(&config).await.expect("rebind");
+        assert_eq!(reused, port, "the persisted port is reused after a restart");
+
+        // Port still held (daemon didn't release it) → fresh port, persisted.
+        let (_third, fallback) = bind_listener(&config).await.expect("fallback bind");
+        assert_ne!(fallback, port, "a held port falls back to a fresh one");
+        assert_eq!(restore_port(&config).await, Some(fallback));
+        drop(second);
+    }
 
     #[test]
     fn split_path_extracts_provider_agent_session_and_tail() {

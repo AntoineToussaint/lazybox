@@ -1123,6 +1123,7 @@ impl Server {
                         lazybox_ipc::Command::DeleteError { .. } => "DeleteError",
                         lazybox_ipc::Command::GetResourcePosture => "GetResourcePosture",
                         lazybox_ipc::Command::GetStats => "GetStats",
+                        lazybox_ipc::Command::RecordAction { .. } => "RecordAction",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` and `RecordComposingBuffer` fire on every
@@ -1614,6 +1615,7 @@ pub async fn dispatch_command(
             };
             let snippet_keepmine = client_kv.snippet_keepmine;
             let session_costs = client_kv.session_costs;
+            let mastery = client_kv.mastery;
             let _ = tx.send(Event::Snapshot {
                 workspaces: workspaces.values,
                 terminals,
@@ -1724,6 +1726,11 @@ pub async fn dispatch_command(
             let _ = tx.send(Event::SessionCosts {
                 costs: session_costs,
             });
+            // Durable per-action usage counts (#1502): replayed as the same
+            // post-snapshot scaffolding so onboarding chrome seeds its
+            // mastery view on connect. Kept before AutoFixPolicyConfig so
+            // that stays the end-of-replay marker.
+            let _ = tx.send(Event::MasteryLedger { counts: mastery });
             // Keep the auto-fix policy as the last post-subscribe push so
             // existing consumers can use it as the end-of-replay marker.
             let _ = tx.send(Event::AutoFixPolicyConfig {
@@ -2356,6 +2363,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::GetStats => {
             stats_accumulator::handle_get(config).await;
+        }
+        lazybox_ipc::Command::RecordAction { action_id, via } => {
+            client_kv::record_action(config, action_id, via).await;
         }
         lazybox_ipc::Command::Shutdown => {
             unreachable!("Shutdown is loop control, intercepted by the serve loop")

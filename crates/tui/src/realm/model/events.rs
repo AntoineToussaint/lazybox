@@ -489,6 +489,12 @@ impl<T: TerminalAdapter> Model<T> {
             IpcEvent::SessionCosts { costs } => {
                 self.sidebar.hydrate_session_costs(costs);
             }
+            // Durable per-action usage counts replayed on connect (#1502):
+            // seed the local mastery ledger so onboarding chrome reflects
+            // what the user has already learned instead of resetting.
+            IpcEvent::MasteryLedger { counts } => {
+                self.seed_mastery_from_snapshot(counts.clone());
+            }
             IpcEvent::AgentProviderQuota {
                 agent_id,
                 session_key,
@@ -1297,6 +1303,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::SessionCosts { .. }
                 | IpcEvent::RepoMergeHistory { .. }
                 | IpcEvent::KeepAwakeStatus { .. }
+                | IpcEvent::MasteryLedger { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -2345,6 +2352,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::GithubDiscoveryBehind { .. }
             | IpcEvent::RepoMergeHistory { .. }
             | IpcEvent::KeepAwakeStatus { .. }
+            | IpcEvent::MasteryLedger { .. }
             | IpcEvent::ResourcePosture(..) => {}
         }
         // Keep the empty-inbox doctor's sync facts (polled-ok /
@@ -2679,6 +2687,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::SessionCosts { .. }
                 | IpcEvent::RepoMergeHistory { .. }
                 | IpcEvent::KeepAwakeStatus { .. }
+                | IpcEvent::MasteryLedger { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }

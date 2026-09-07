@@ -480,7 +480,7 @@ impl<T: TerminalAdapter> Model<T> {
                     if super::dispatch::is_bulk_destructive(&action) {
                         self.sidebar.clear_broadcast_selection();
                     }
-                    cmds.extend(self.dispatch_action(&action));
+                    cmds.extend(self.dispatch_action_via(&action, lazybox_ipc::ActionVia::Menu));
                 } else {
                     self.flash_info("workspace is gone — action dropped");
                 }
@@ -502,7 +502,7 @@ impl<T: TerminalAdapter> Model<T> {
             PickOutcome::DispatchCursorAction { action } => {
                 // The right-click already parked the cursor on the
                 // header; the action reads the cursor row directly.
-                cmds.extend(self.dispatch_action(&action));
+                cmds.extend(self.dispatch_action_via(&action, lazybox_ipc::ActionVia::Menu));
                 self.redraw = true;
             }
             PickOutcome::MountHandoffComposer { target } => {

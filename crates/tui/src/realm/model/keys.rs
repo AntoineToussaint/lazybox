@@ -172,7 +172,7 @@ impl<T: TerminalAdapter> Model<T> {
                 self.leader.take();
                 self.leader_highlight = None;
                 self.q_latch.disarm();
-                let cmds = self.dispatch_action(&action);
+                let cmds = self.dispatch_action_via(&action, lazybox_ipc::ActionVia::Kbd);
                 self.flush_dispatched_cmds(cmds);
                 self.sync_panes();
                 return;
@@ -205,7 +205,7 @@ impl<T: TerminalAdapter> Model<T> {
                     self.leader_highlight = None;
                     self.leader_fallback = None;
                     self.q_latch.disarm();
-                    let cmds = self.dispatch_action(&action);
+                    let cmds = self.dispatch_action_via(&action, lazybox_ipc::ActionVia::Kbd);
                     self.flush_dispatched_cmds(cmds);
                     self.sync_panes();
                     return;
@@ -221,7 +221,7 @@ impl<T: TerminalAdapter> Model<T> {
             self.leader_fallback = None;
             if let Some(action) = direct {
                 self.q_latch.disarm();
-                let cmds = self.dispatch_action(&action);
+                let cmds = self.dispatch_action_via(&action, lazybox_ipc::ActionVia::Kbd);
                 self.flush_dispatched_cmds(cmds);
                 self.sync_panes();
                 return;
@@ -859,7 +859,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // Any catalog dispatch counts as "non-quit key" so
                 // the q q chord resets.
                 self.q_latch.disarm();
-                let dispatched = self.dispatch_action(&action);
+                let dispatched = self.dispatch_action_via(&action, lazybox_ipc::ActionVia::Kbd);
                 // Drain queued cmds + early return — the catalog
                 // handled the key, the pane shouldn't see it.
                 self.flush_dispatched_cmds(dispatched);

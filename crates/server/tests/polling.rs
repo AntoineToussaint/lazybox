@@ -152,6 +152,7 @@ async fn recv_workspace_upsert(client: &mut lazybox_ipc::Client) -> Event {
                 | Event::KeepAwakeStatus { .. }
                 | Event::SnippetKeepMine { .. }
                 | Event::SessionCosts { .. }
+                | Event::MasteryLedger { .. }
         ) {
             return evt;
         }

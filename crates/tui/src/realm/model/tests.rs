@@ -12599,7 +12599,12 @@ mod merge_focus_follow_tests {
         });
         m.modal_stack.push(Id::SidebarContext);
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(0)]);
-        assert!(cmds.is_empty(), "merge gates on confirm");
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, IpcCommand::MergePr { .. })),
+            "merge gates on confirm",
+        );
 
         // Single-target confirm for the clicked row — not a bulk set.
         match &m.modal_flow {
@@ -16770,8 +16775,12 @@ mod destructive_confirm_tests {
 
         // Row 1 is Archive in the stashed action list.
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(1)]);
+        // The gesture is recorded (mastery ledger, #1502), but the
+        // destructive Kill must still gate on the confirm modal.
         assert!(
-            cmds.is_empty(),
+            !cmds
+                .iter()
+                .any(|c| matches!(c, IpcCommand::Kill { .. })),
             "Archive picked from the context menu must not emit Kill directly: {cmds:?}",
         );
         assert_eq!(
@@ -16802,8 +16811,12 @@ mod destructive_confirm_tests {
 
         // Row 0 is MergePr in the stashed action list.
         let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(0)]);
+        // The gesture is recorded (mastery ledger, #1502), but the
+        // destructive MergePr must still gate on the confirm modal.
         assert!(
-            cmds.is_empty(),
+            !cmds
+                .iter()
+                .any(|c| matches!(c, IpcCommand::MergePr { .. })),
             "MergePr picked from the context menu must not emit MergePr directly: {cmds:?}",
         );
         assert_eq!(m.modal_stack.last(), Some(&Id::ActionConfirm));
@@ -28303,5 +28316,77 @@ mod pr_details_debounce_tests {
             !detail_fetches(&mut cmd_rx).contains(&keys[1].to_string()),
             "no fetch may fire for a removed workspace"
         );
+    }
+}
+
+mod mastery_ledger_tests {
+    //! The mastery ledger (#1502): every catalog dispatch records one
+    //! invocation with its `via` channel, both bumped locally for live
+    //! reads and emitted as a `Command::RecordAction` for the daemon to
+    //! persist; a reconnect seeds the local counts from the daemon's
+    //! replayed `Event::MasteryLedger`.
+    use super::super::Model;
+    use lazybox_ipc::{ActionVia, Client, Command as IpcCommand, EVENT_CHANNEL_CAPACITY};
+    use lazybox_tui_core::action::Action;
+    use tokio::sync::mpsc;
+    use tuirealm::ratatui::layout::Size;
+
+    fn model_with_cmd_rx() -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        mpsc::UnboundedReceiver<IpcCommand>,
+    ) {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (_evt_tx, evt_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let client = Client::from_channels(cmd_tx, evt_rx);
+        let model = Model::<tuirealm::terminal::TestTerminalAdapter>::new_for_test(
+            client,
+            Size::new(120, 40),
+        )
+        .expect("model init");
+        (model, cmd_rx)
+    }
+
+    #[test]
+    fn dispatch_via_bumps_local_count_and_returns_record_command() {
+        let (mut m, _rx) = model_with_cmd_rx();
+        assert_eq!(m.action_uses("cycle_sort"), 0);
+
+        let cmds = m.dispatch_action_via(&Action::CycleSort, ActionVia::Kbd);
+
+        assert_eq!(m.action_uses("cycle_sort"), 1, "local count bumped");
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::RecordAction { action_id, via }
+                    if action_id == "cycle_sort" && *via == ActionVia::Kbd
+            )),
+            "the RecordAction command rides the dispatched effects",
+        );
+    }
+
+    #[test]
+    fn counts_accumulate_across_channels() {
+        let (mut m, _rx) = model_with_cmd_rx();
+        m.dispatch_action_via(&Action::CycleSort, ActionVia::Kbd);
+        m.dispatch_action_via(&Action::CycleSort, ActionVia::Kbd);
+        m.dispatch_action_via(&Action::CycleSort, ActionVia::Menu);
+
+        // `action_uses` totals every channel for the action.
+        assert_eq!(m.action_uses("cycle_sort"), 3);
+    }
+
+    #[test]
+    fn seed_from_snapshot_replaces_local_ledger() {
+        let (mut m, _rx) = model_with_cmd_rx();
+        m.dispatch_action_via(&Action::CycleSort, ActionVia::Kbd);
+
+        m.seed_mastery_from_snapshot(vec![
+            ("merge_pr".into(), ActionVia::Kbd, 4),
+            ("merge_pr".into(), ActionVia::Menu, 1),
+        ]);
+
+        // The daemon is the authority: the pre-seed local bump is dropped.
+        assert_eq!(m.action_uses("cycle_sort"), 0);
+        assert_eq!(m.action_uses("merge_pr"), 5);
     }
 }

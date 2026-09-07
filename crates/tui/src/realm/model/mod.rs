@@ -3251,9 +3251,6 @@ impl<T: TerminalAdapter> Model<T> {
             &ui_defaults,
             user_config.conventions.clone(),
         );
-        // Blanket metering feeds the row/header `$` cues alongside the
-        // per-row flag and metered Spaces (`Sidebar::workspace_is_metered`).
-        self.sidebar.set_meter_all(user_config.agent.meter_all);
         // Re-apply the lens (filters / sort / mailbox) the user was
         // working in when they last quit (#scale) — must follow
         // `apply_sidebar_config`, which flips the seed gate that lets

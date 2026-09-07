@@ -644,12 +644,6 @@ impl Sidebar {
         self.inner.github_repos_ranked_for_linear_team(team)
     }
 
-    /// Record `agent.meter_all` so the row `$` / header pill key on effective
-    /// metering (`Sidebar::workspace_is_metered`).
-    pub fn set_meter_all(&mut self, meter_all: bool) {
-        self.inner.set_meter_all(meter_all);
-    }
-
     /// Apply `~/.lazybox/config.yaml` overrides to the inner pane in
     /// place. Used by `Model::apply_sidebar_config` once at startup.
     #[allow(clippy::too_many_arguments)]

@@ -424,11 +424,12 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Mount the ordered personal Hopper editor.
     pub(super) fn mount_hopper(&mut self) {
-        use crate::realm::components::hopper::{HopperEditor, HopperItem};
+        use crate::realm::components::hopper::{HopperEditor, HopperItem, HopperKeys};
 
         if matches!(self.modal_stack.last(), Some(Id::Hopper)) {
             return;
         }
+        let keys = HopperKeys::from_catalog(&self.catalog);
         let mut rows: Vec<_> = self
             .sidebar
             .workspace_iter()
@@ -450,7 +451,7 @@ impl<T: TerminalAdapter> Model<T> {
         rows.sort_by_key(|(position, item)| (*position, item.key.as_str().to_string()));
         self.mount_modal(
             Id::Hopper,
-            HopperEditor::new(rows.into_iter().map(|(_, item)| item).collect()),
+            HopperEditor::new(rows.into_iter().map(|(_, item)| item).collect(), keys),
         );
     }
 

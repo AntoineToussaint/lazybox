@@ -153,6 +153,18 @@ A focused terminal forwards every key to the PTY; only the chords below are inte
 | `Shift-Home` / `Shift-End` | Jump to the top / bottom |
 | `Ctrl-c` | Forwarded to the program as an interrupt |
 
+## Hopper
+
+Active only while the personal Hopper editor (`Shift-H`) is open. Text editing (arrows, Backspace, plain characters) stays local; these lifecycle chords are remappable and collision-checked like every other binding.
+
+| Key | Action | What it does |
+| --- | --- | --- |
+| `Ctrl-s` | save | Persist the Hopper's active items (one line per workspace) and keep the editor open. |
+| `Ctrl-d` | done | Mark the item under the cursor complete: it moves into the dated History tab in place. |
+| `Ctrl-x \| Shift-Delete \| Shift-Backspace` | cancel | Cancel the item under the cursor: it moves into the dated History tab as canceled. |
+| `Ctrl-k \| Ctrl-Delete \| Ctrl-Backspace` | delete line | Delete the item under the cursor outright (no History entry) — for a line captured by mistake. |
+| `r` | reopen item | In the History tab, reopen the selected completed/canceled item back into the active list. |
+
 ## Leader menus
 
 Press the leader key, then the second key. Every menu shows a which-key popup while it waits.

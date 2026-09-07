@@ -3064,6 +3064,35 @@ pub(super) const PANE_NATIVE_KINDS: &[(lazybox_tui_core::action::ActionKind, &st
             "the terminal `]]` escape latch (keys.rs; chord comes from terminal.escape_char)",
             false,
         ),
+        // The Hopper lifecycle chords are dispatched by the modal
+        // itself (HopperEditor::on reads the resolved catalog rows),
+        // not through `dispatch_action` — but overrides DO take effect
+        // there, so they're marked effective (#1421).
+        (
+            K::HopperSave,
+            "the Hopper modal (components/hopper.rs) — override honored",
+            true,
+        ),
+        (
+            K::HopperDone,
+            "the Hopper modal (components/hopper.rs) — override honored",
+            true,
+        ),
+        (
+            K::HopperCancel,
+            "the Hopper modal (components/hopper.rs) — override honored",
+            true,
+        ),
+        (
+            K::HopperDelete,
+            "the Hopper modal (components/hopper.rs) — override honored",
+            true,
+        ),
+        (
+            K::HopperReopen,
+            "the Hopper modal (components/hopper.rs) — override honored",
+            true,
+        ),
     ]
 };
 

@@ -26,7 +26,7 @@ mod activity_pane;
 mod choice_dispatch;
 mod dispatch;
 mod events;
-mod helpers;
+pub(crate) mod helpers;
 mod host_terminal;
 mod inputs;
 mod keys;

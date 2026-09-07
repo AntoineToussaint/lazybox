@@ -47,11 +47,13 @@ pub struct LeaderGroup {
     leader: String,
     /// Registry label shared with the footer and which-key popup.
     label: &'static str,
-    /// True when any chord in this group has been invoked, per the
-    /// mastery ledger (#1502). The compact index shows the group, not
-    /// its members, so a used group carries the `✓` if the user has
-    /// reached into it at all.
-    used: bool,
+    /// How many of this group's chords the mastery ledger (#1502) has
+    /// recorded, and how many it has. The compact index shows the group,
+    /// not its members, so a partly-explored group renders `✓ used/total`
+    /// — honest about what's left to learn — while a fully-used one reads
+    /// a bare `✓` like a flat row. `used_members == 0` means no mark.
+    used_members: usize,
+    member_count: usize,
     /// One row per in-group chord, retained in unit-test builds so the
     /// compact index is checked against every live which-key continuation.
     #[cfg(test)]
@@ -147,13 +149,15 @@ impl LeaderGroup {
                     .iter()
                     .find_map(|(_, entry)| action::leader_group_label(entry.kind))
                     .unwrap_or("commands");
-                let group_used = group
+                let used_members = group
                     .iter()
-                    .any(|(_, entry)| used.contains(entry.kind.name()));
+                    .filter(|(_, entry)| used.contains(entry.kind.name()))
+                    .count();
                 Self {
                     leader: leader_disp,
                     label,
-                    used: group_used,
+                    used_members,
+                    member_count: group.len(),
                     #[cfg(test)]
                     chords,
                 }
@@ -356,7 +360,8 @@ impl Component for Help {
         // Whether anything carries the mastery `✓` (#1502) — computed
         // here off the already-collected rows, before the `self.scroll`
         // mutation below reborrows `self` mutably.
-        let any_used = bindings.iter().any(|b| b.used) || self.leaders.iter().any(|g| g.used);
+        let any_used =
+            bindings.iter().any(|b| b.used) || self.leaders.iter().any(|g| g.used_members > 0);
 
         let modal_w = MAX_MODAL_WIDTH.min(available_w);
         let cols_count = grid_columns(modal_w.saturating_sub(2));
@@ -421,47 +426,48 @@ impl Component for Help {
 
         // Draw a binding grid at logical row `start_lrow`; returns the
         // logical row just past it. Rows outside the window are skipped.
-        // A used binding (`used == true`, per the mastery ledger #1502)
-        // trails a dim `✓` so the eye lands on the shortcuts not yet
-        // exercised.
-        let draw_grid = |frame: &mut Frame, items: &[(&Binding, bool)], start_lrow: u16| -> u16 {
-            for (idx, (b, used)) in items.iter().enumerate() {
-                let lrow = start_lrow + (idx / cols_count) as u16;
-                let Some(sy) = screen_y(lrow) else { continue };
-                let col = cols[idx % cols_count];
-                let cell = Rect {
-                    x: col.x,
-                    y: sy,
-                    width: col.width,
-                    height: 1,
-                };
-                let key_pad = if col.width >= 38 { 14 } else { 10 };
-                let mut key = compact_keys_for_reference(&b.keys);
-                if key.chars().count() < key_pad {
-                    key.push_str(&" ".repeat(key_pad - key.chars().count()));
+        // A row with a mastery marker (`Some`, per the ledger #1502) —
+        // `✓` for a used flat binding, `✓ used/total` for a partly-used
+        // leader group — trails it dim, so the eye lands on what's left.
+        let draw_grid =
+            |frame: &mut Frame, items: &[(&Binding, Option<&str>)], start_lrow: u16| -> u16 {
+                for (idx, (b, marker)) in items.iter().enumerate() {
+                    let lrow = start_lrow + (idx / cols_count) as u16;
+                    let Some(sy) = screen_y(lrow) else { continue };
+                    let col = cols[idx % cols_count];
+                    let cell = Rect {
+                        x: col.x,
+                        y: sy,
+                        width: col.width,
+                        height: 1,
+                    };
+                    let key_pad = if col.width >= 38 { 14 } else { 10 };
+                    let mut key = compact_keys_for_reference(&b.keys);
+                    if key.chars().count() < key_pad {
+                        key.push_str(&" ".repeat(key_pad - key.chars().count()));
+                    }
+                    let key_style = Style::default()
+                        .bg(theme.surface)
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD);
+                    let sep_style = Style::default().bg(theme.surface).fg(theme.text_dim);
+                    let label_style = Style::default().bg(theme.surface).fg(theme.text_strong);
+                    let mut spans = vec![
+                        Span::styled(" ", panel_bg),
+                        Span::styled(key, key_style),
+                        Span::styled("  ", sep_style),
+                        Span::styled(b.label.clone(), label_style),
+                    ];
+                    if let Some(marker) = marker {
+                        spans.push(Span::styled(
+                            format!(" {marker}"),
+                            Style::default().bg(theme.surface).fg(theme.text_dim),
+                        ));
+                    }
+                    frame.render_widget(Paragraph::new(Line::from(spans)), cell);
                 }
-                let key_style = Style::default()
-                    .bg(theme.surface)
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD);
-                let sep_style = Style::default().bg(theme.surface).fg(theme.text_dim);
-                let label_style = Style::default().bg(theme.surface).fg(theme.text_strong);
-                let mut spans = vec![
-                    Span::styled(" ", panel_bg),
-                    Span::styled(key, key_style),
-                    Span::styled("  ", sep_style),
-                    Span::styled(b.label.clone(), label_style),
-                ];
-                if *used {
-                    spans.push(Span::styled(
-                        " ✓",
-                        Style::default().bg(theme.surface).fg(theme.text_dim),
-                    ));
-                }
-                frame.render_widget(Paragraph::new(Line::from(spans)), cell);
-            }
-            start_lrow + items.len().div_ceil(cols_count) as u16
-        };
+                start_lrow + items.len().div_ceil(cols_count) as u16
+            };
 
         let full_line = |frame: &mut Frame, text: &str, lrow: u16, style: Style| {
             let Some(sy) = screen_y(lrow) else { return };
@@ -527,21 +533,28 @@ impl Component for Help {
                     .add_modifier(Modifier::BOLD),
             );
             lrow += 1;
-            let leader_bindings: Vec<(Binding, bool)> = self
+            let leader_bindings: Vec<(Binding, Option<String>)> = self
                 .leaders
                 .iter()
                 .map(|group| {
+                    let badge = match group.used_members {
+                        0 => None,
+                        n if n >= group.member_count => Some("✓".to_string()),
+                        n => Some(format!("✓ {n}/{}", group.member_count)),
+                    };
                     (
                         Binding {
                             keys: std::borrow::Cow::Owned(group.leader.clone()),
                             label: std::borrow::Cow::Borrowed(group.label),
                         },
-                        group.used,
+                        badge,
                     )
                 })
                 .collect();
-            let leaders: Vec<(&Binding, bool)> =
-                leader_bindings.iter().map(|(b, used)| (b, *used)).collect();
+            let leaders: Vec<(&Binding, Option<&str>)> = leader_bindings
+                .iter()
+                .map(|(b, badge)| (b, badge.as_deref()))
+                .collect();
             lrow = draw_grid(frame, &leaders, lrow);
             lrow += 1;
         }
@@ -558,10 +571,10 @@ impl Component for Help {
             }
             full_line(frame, section.title, lrow, section_title_style);
             lrow += 1;
-            let items: Vec<(&Binding, bool)> = section
+            let items: Vec<(&Binding, Option<&str>)> = section
                 .bindings
                 .iter()
-                .map(|hb| (&hb.binding, hb.used))
+                .map(|hb| (&hb.binding, hb.used.then_some("✓")))
                 .collect();
             lrow = draw_grid(frame, &items, lrow);
         }
@@ -1254,17 +1267,21 @@ mod tests {
     }
 
     /// The mastery ledger (#1502) marks exercised shortcuts: a used
-    /// action id flags its flat row, and a leader group flags used when
-    /// any member has been reached — while untouched rows/groups stay
-    /// unmarked so the eye lands on what's left to learn.
+    /// action id flags its flat row, and a leader group counts how many
+    /// of its chords have been reached — a partly-used group stays honest
+    /// about the rest (`used_members < member_count`) instead of ticking
+    /// whole on the first touch. Untouched rows/groups carry no mark, so
+    /// the eye lands on what's left to learn.
     #[test]
-    fn used_action_ids_mark_flat_rows_and_leader_groups() {
+    fn used_action_ids_mark_flat_rows_and_count_leader_group_progress() {
         use lazybox_tui_core::action::ActionDef;
         let catalog = ActionDef::catalog(&["claude".to_string()], &Default::default());
-        // `quit` is a flat `q q` Global row; `merge_pr` lives under the
-        // `g` github leader; nothing in the `a` agent group is used.
-        let used: std::collections::HashSet<String> =
-            ["quit".to_string(), "merge_pr".to_string()].into_iter().collect();
+        // `quit` is a flat `q q` Global row; `merge_pr` is ONE chord of
+        // the multi-member `g` github leader; nothing in the `a` agent
+        // group is used.
+        let used: std::collections::HashSet<String> = ["quit".to_string(), "merge_pr".to_string()]
+            .into_iter()
+            .collect();
         let help = Help::from_catalog(&catalog, ']', &used);
 
         let quit = help
@@ -1280,13 +1297,17 @@ mod tests {
             .iter()
             .find(|lg| lg.label == "github")
             .expect("github leader group");
-        assert!(github.used, "a used member marks the leader group");
+        assert_eq!(github.used_members, 1, "only merge_pr was used");
+        assert!(
+            github.member_count > 1,
+            "github has several chords, so one use must not tick the whole group",
+        );
         let agent = help
             .leaders
             .iter()
             .find(|lg| lg.label == "agent")
             .expect("agent leader group");
-        assert!(!agent.used, "an untouched group stays unmarked");
+        assert_eq!(agent.used_members, 0, "an untouched group stays unmarked");
 
         // An unused flat row is not marked.
         let unused_flat = help
@@ -1320,7 +1341,12 @@ mod tests {
             "no legend before anything is used",
         );
 
-        let used: std::collections::HashSet<String> = ["quit".to_string()].into_iter().collect();
+        // `quit` marks a flat row (bare `✓`); `merge_pr` marks ONE chord
+        // of the multi-member `g` github group, which must render as a
+        // progress fraction, not a whole-group tick.
+        let used: std::collections::HashSet<String> = ["quit".to_string(), "merge_pr".to_string()]
+            .into_iter()
+            .collect();
         let mut marked = Help::from_catalog(&catalog, ']', &used);
         let marked_out = render(&mut marked);
         assert!(
@@ -1328,10 +1354,14 @@ mod tests {
             "legend appears once a shortcut is used",
         );
         // The sidebar-icon legend paints its own `✓`, so compare counts:
-        // marking a row adds exactly the one extra checkmark.
+        // the marked rows add checkmarks beyond the icon legend.
         assert!(
             marked_out.matches('✓').count() > fresh_out.matches('✓').count(),
-            "the used row adds a checkmark beyond the icon legend",
+            "the used rows add checkmarks beyond the icon legend",
+        );
+        assert!(
+            marked_out.contains("✓ 1/"),
+            "a partly-used leader group renders its used/total progress: {marked_out}",
         );
     }
 

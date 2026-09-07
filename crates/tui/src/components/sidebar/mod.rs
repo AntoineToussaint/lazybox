@@ -164,12 +164,6 @@ pub struct Sidebar {
     /// header render for the `$` badge. The daemon derives the same set at
     /// spawn (`Config::source_is_metered`) — this copy only drives the UI.
     metered_spaces: BTreeSet<String>,
-    /// `agent.meter_all`: every spawn routes through the proxy regardless
-    /// of the per-workspace flag. Read by [`Self::workspace_is_metered`] so
-    /// the row `$` and header pill reflect what is *actually* metered —
-    /// with blanket metering on, the per-row flag is `false` on every
-    /// pre-existing workspace and the cues would otherwise all read "off".
-    meter_all: bool,
     /// Space name → the session keys of every workspace under it, rebuilt
     /// once per `recompute_visible` (#1389). The per-Space meter figure sums
     /// live per-session cost over these keys — keeping the `group_label` +
@@ -618,7 +612,6 @@ impl Sidebar {
             spaces: Vec::new(),
             collapsed_spaces: BTreeSet::new(),
             metered_spaces: BTreeSet::new(),
-            meter_all: false,
             space_members: BTreeMap::new(),
             source_attention: BTreeMap::new(),
             config_seeded: false,
@@ -3608,35 +3601,6 @@ impl Sidebar {
 
     /// True when the Space is metered (`agent.metered_spaces`) — drives the
     /// `$` badge on its header row.
-    /// Record `agent.meter_all` (client config, applied at boot beside
-    /// `metered_spaces`).
-    pub fn set_meter_all(&mut self, meter_all: bool) {
-        self.meter_all = meter_all;
-    }
-
-    /// Whether `workspace`'s spawns are *effectively* routed through the
-    /// metering proxy: its own `x $` flag, OR blanket `agent.meter_all`, OR
-    /// a metered Space it sits under — the same three inputs the daemon's
-    /// spawn path ORs together. This is what the row `$` and the header
-    /// `$ METER` pill key on, so "is this session being metered?" reads the
-    /// same in the sidebar as it is decided at spawn. (Whether the proxy is
-    /// actually running is a daemon-side gate; the cue records routing
-    /// intent, like the flag it grew from.)
-    pub fn workspace_is_metered(&self, workspace: &Workspace) -> bool {
-        if workspace.metered || self.meter_all {
-            return true;
-        }
-        if self.metered_spaces.is_empty() {
-            return false;
-        }
-        let key = SessionKey::from(&workspace.key);
-        self.metered_spaces.iter().any(|space| {
-            self.space_members
-                .get(space)
-                .is_some_and(|members| members.contains(&key))
-        })
-    }
-
     pub fn is_space_metered(&self, name: &str) -> bool {
         self.metered_spaces.contains(name)
     }

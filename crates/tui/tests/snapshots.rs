@@ -562,19 +562,11 @@ fn which_key_github_group_golden_render() {
 fn sidebar_cursor_band_snapshot() {
     let mut s = sidebar();
     s.on_event(&Event::Snapshot {
-        // New workspaces meter by default; this golden pins the cursor
-        // band, not the ` $ ` badge, so keep the rows un-metered.
         workspaces: vec![
             Workspace::from_task(make_task("owner/repo#12", 3), fixed_time()),
             Workspace::from_task(make_task("owner/repo#7", 90), fixed_time()),
             Workspace::from_task(make_task("owner/repo#3", 600), fixed_time()),
-        ]
-        .into_iter()
-        .map(|mut ws| {
-            ws.metered = false;
-            ws
-        })
-        .collect(),
+        ],
         terminals: vec![],
         projects: vec![],
         recent_snippets: Vec::new(),
@@ -615,19 +607,11 @@ fn sidebar_header_snapshot() {
         thread_id: None,
     });
     s.on_event(&Event::Snapshot {
-        // New workspaces meter by default; this golden pins the header
-        // rows, and the focused row's ` $ METER ` pill would add one.
         workspaces: vec![
             Workspace::from_task(failing, fixed_time()),
             Workspace::from_task(unread, fixed_time()),
             Workspace::from_task(make_task("owner/repo#3", 600), fixed_time()),
-        ]
-        .into_iter()
-        .map(|mut ws| {
-            ws.metered = false;
-            ws
-        })
-        .collect(),
+        ],
         terminals: vec![],
         projects: vec![],
         recent_snippets: Vec::new(),

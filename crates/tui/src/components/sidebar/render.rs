@@ -322,27 +322,10 @@ impl Sidebar {
                 (false, false) => None,
             }
         });
-        // Metering canary: the focused workspace is routed through the
-        // metering proxy (`$ meter`), so show it plus its accrued per-session
-        // cost the moment any priced usage lands. `$ METER` alone until the
-        // first response is priced (proxy off / unknown model → no cost).
-        // Keys on *effective* metering (flag ∨ `meter_all` ∨ metered Space),
-        // not the bare flag, so blanket metering doesn't leave every focused
-        // row reading "off".
-        let focused_meter = focused_workspace.and_then(|workspace| {
-            if !self.workspace_is_metered(workspace) {
-                return None;
-            }
-            let cost = self.usage.cost_micros_for_session(workspace.key.as_str());
-            Some(if cost > 0 {
-                format!(
-                    " $ METER · {} ",
-                    lazybox_tui_core::usage::format_cost_micros(cost)
-                )
-            } else {
-                " $ METER ".to_string()
-            })
-        });
+        // No per-workspace metering pill here: with metering on by default
+        // it would sit on nearly every focused row. The per-workspace figure
+        // lives in the right panel's workspace header (the agent terminal's
+        // `◔ 5h 32% left · $7.24`), aggregates on the Space header.
 
         // Append `group` (with a 2-cell separator once the line is
         // non-empty) only when the whole group still fits `budget`, so a
@@ -394,20 +377,6 @@ impl Sidebar {
                     label,
                     Style::default()
                         .bg(theme.warn)
-                        .fg(ratatui::style::Color::Black)
-                        .add_modifier(Modifier::BOLD),
-                )],
-            );
-        }
-        if let Some(label) = focused_meter {
-            try_append(
-                &mut stats_spans,
-                &mut used,
-                budget,
-                vec![Span::styled(
-                    label,
-                    Style::default()
-                        .bg(theme.accent)
                         .fg(ratatui::style::Color::Black)
                         .add_modifier(Modifier::BOLD),
                 )],
@@ -1910,9 +1879,6 @@ impl Sidebar {
                 }),
                 track_main: workspace.is_some_and(|w| w.track_main),
                 track_main_behind: workspace.is_some_and(|w| w.track_main && w.track_main_behind),
-                metered: workspace.is_some_and(|w| self.workspace_is_metered(w)),
-                cost_micros: workspace
-                    .map_or(0, |w| self.usage.cost_micros_for_session(w.key.as_str())),
                 origin_issue: workspace.and_then(crate::components::task_label::originating_issue),
                 has_notes: workspace.is_some_and(|w| w.has_notes()),
                 sent_snippet_count: workspace.map_or(0, |w| w.sent_snippets.total()),

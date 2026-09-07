@@ -316,10 +316,9 @@ impl Sidebar {
         // matters most for the merge-automation phrase (#794) — a truncated
         // " AUTO-MERGE · GitHub, works offli…" would drop exactly the
         // durability word that is the point of the label. Priority, highest
-        // first: focused merge automation, then armed auto-fix, then the
-        // global CI / review tallies. The focused row's own automation
-        // outranks the global tallies deliberately — it is the context for
-        // the row under the cursor, not an inbox-wide count.
+        // first: merge automation, then armed auto-fix, then the metering
+        // canary — all three describe the focused row. The CI / review
+        // tallies this comment once listed moved to row 0 (#1502).
         // Spell out the focused row's merge automation in words — the
         // compact ` ARM ` / ` AUTO ` pills look alike but guarantee
         // different things (#794). GitHub-native auto-merge wins when both
@@ -787,11 +786,21 @@ impl Sidebar {
 
         // Row 2 (only when present) — the focused row's automation,
         // spelled out (#794). CI / review tallies moved to row 0 (#1502).
-        let stats_spans = self.stats_row_spans(inner_width as usize, theme);
-        let stats_h: u16 = if stats_spans.is_empty() { 0 } else { 1 };
+        //
+        // Reserve the row from the *visible set* (#1535), not the focused
+        // row: `stats_row_height` returns 1 whenever any visible row would
+        // fill the strip, so the header keeps a fixed height as the cursor
+        // moves and the list never shifts under it. The strip still renders
+        // the *focused* row's automation — blank on a cursor with nothing
+        // to say. Layout and `header_height()` (mouse hit-testing) must
+        // reserve through the same probe, or a click maps to the wrong row.
+        let stats_h: u16 = self.stats_row_height(area);
         if stats_h == 1 && area.height >= 3 {
-            let row2 = Rect::new(area.x + l_pad, area.y + 2, inner_width, 1);
-            frame.render_widget(Paragraph::new(Line::from(stats_spans)), row2);
+            let stats_spans = self.stats_row_spans(inner_width as usize, theme);
+            if !stats_spans.is_empty() {
+                let row2 = Rect::new(area.x + l_pad, area.y + 2, inner_width, 1);
+                frame.render_widget(Paragraph::new(Line::from(stats_spans)), row2);
+            }
         }
 
         // Row 3 (when present) — the always-visible per-provider usage

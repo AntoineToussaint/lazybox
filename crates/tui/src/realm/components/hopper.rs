@@ -204,7 +204,8 @@ impl HopperEditor {
             return;
         }
         if self.current().key.is_some() {
-            self.error = Some("Use Ctrl-X to cancel or Ctrl-Delete to delete this item".into());
+            self.error =
+                Some("Use Ctrl-X to cancel, or Ctrl-Delete (or the sidebar’s delete) to remove it".into());
             return;
         }
         let removed = self.rows.remove(self.row);
@@ -717,10 +718,13 @@ impl AppComponent<Msg, UserEvent> for HopperEditor {
             }
             return None;
         }
-        // Save has two chords because Ctrl-S is terminal flow-control
-        // (XOFF) on many setups and can be swallowed or freeze the pane;
-        // Ctrl-Enter is the fallback (matching the reply Textarea's submit
-        // idiom). Enter alone stays "next item" here.
+        // Save primary is Ctrl-S. lazybox runs the terminal in crossterm
+        // raw mode, which clears IXON, so Ctrl-S arrives as a key rather
+        // than XOFF flow-control — the reply Textarea relies on exactly this
+        // as its terminal-agnostic submit (textarea.rs). Ctrl-Enter is the
+        // enhanced-keyboard alias (Kitty / modifyOtherKeys report it
+        // distinctly), matching that Textarea idiom; Enter alone stays
+        // "next item" here.
         if ctrl && matches!(key.code, Key::Char('s') | Key::Enter) {
             return self.drafts().map(Msg::HopperSubmitted);
         }
@@ -734,18 +738,20 @@ impl AppComponent<Msg, UserEvent> for HopperEditor {
         // canceled glyph in History); a misfire only files the item into
         // History, undoable with `r`.
         //
-        // Deletion is destructive and does NOT sit on a Ctrl+letter: on
-        // readline (and lazybox's own reply Textarea) Ctrl-K is
-        // kill-to-EOL, a harmless edit — reusing it to reap a workspace is
-        // the exact muscle-memory footgun #1422 removes. Delete lives only
-        // on the Delete keys (Ctrl-Delete / Ctrl-Backspace, confirm-gated
-        // downstream); where an emulator can't report the modifier they
-        // degrade to a harmless character edit rather than a silent kill,
-        // and the sidebar's own delete stays available.
+        // Deletion is destructive and does NOT sit on any editing chord.
+        // In lazybox's own reply Textarea (textarea.rs) Ctrl-K is
+        // kill-to-EOL and Ctrl-Backspace is kill-word-back — both harmless
+        // edits — so reusing either to reap a workspace is the exact
+        // muscle-memory footgun #1422 removes. Delete lives only on
+        // Ctrl-Delete (confirm-gated downstream); where an emulator can't
+        // report the modifier it degrades to a harmless character edit
+        // rather than a silent kill, and the sidebar's own delete stays
+        // available as the always-reachable fallback (named in the row's
+        // Backspace hint).
         if ctrl && matches!(key.code, Key::Char('x')) {
             return self.move_current_to_history(Outcome::Canceled);
         }
-        if ctrl && matches!(key.code, Key::Delete | Key::Backspace) {
+        if ctrl && matches!(key.code, Key::Delete) {
             return self.delete_current_line();
         }
         if shift && matches!(key.code, Key::Delete | Key::Backspace) {
@@ -898,8 +904,8 @@ mod tests {
     #[test]
     fn ctrl_k_no_longer_reaps_a_workspace() {
         // #1422: Ctrl-K is readline kill-to-EOL, a harmless edit. It must
-        // not delete a workspace — the destructive path moved onto the
-        // Delete keys.
+        // not delete a workspace — the destructive path moved onto
+        // Ctrl-Delete.
         let existing = item("First");
         let existing_key = existing.key.clone();
         let mut editor = HopperEditor::new(vec![existing]);
@@ -915,9 +921,11 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_enter_saves_when_ctrl_s_is_swallowed() {
-        // #1422: Ctrl-S is XOFF on many terminals; Ctrl-Enter is the
-        // fallback save path. Enter alone stays "next item".
+    fn ctrl_enter_is_an_enhanced_keyboard_save_alias() {
+        // #1422: Ctrl-S is the portable submit (raw mode clears IXON, so it
+        // is never XOFF here — the reply Textarea relies on the same). This
+        // covers the Ctrl-Enter alias that Kitty/modifyOtherKeys terminals
+        // report distinctly; Enter alone stays "next item".
         let mut editor = HopperEditor::new(vec![item("First")]);
         editor.on(&key(Key::Up));
         editor.on(&key(Key::End));
@@ -931,19 +939,51 @@ mod tests {
     }
 
     #[test]
-    fn controlled_delete_and_backspace_remove_whole_lines_not_history() {
-        for code in [Key::Delete, Key::Backspace] {
-            let existing = item("First");
-            let existing_key = existing.key.clone();
-            let mut editor = HopperEditor::new(vec![existing]);
-            editor.on(&key(Key::Up));
-            assert_eq!(
-                editor.on(&modified(code, KeyModifiers::CONTROL)),
-                Some(Msg::HopperDeleteRequested(existing_key))
-            );
-            assert!(editor.history.is_empty());
-            assert_eq!(editor.rows.len(), 1);
-        }
+    fn ctrl_delete_removes_a_whole_line() {
+        let existing = item("First");
+        let existing_key = existing.key.clone();
+        let mut editor = HopperEditor::new(vec![existing]);
+        editor.on(&key(Key::Up));
+        assert_eq!(
+            editor.on(&modified(Key::Delete, KeyModifiers::CONTROL)),
+            Some(Msg::HopperDeleteRequested(existing_key))
+        );
+        assert!(editor.history.is_empty());
+        assert_eq!(editor.rows.len(), 1);
+    }
+
+    #[test]
+    fn ctrl_backspace_is_a_harmless_edit_not_a_reap() {
+        // #1422 follow-up: Ctrl-Backspace is kill-word-back in the reply
+        // Textarea (textarea.rs). It must not reap a workspace here — the
+        // destructive path is Ctrl-Delete only, so Ctrl-Backspace falls
+        // through to an ordinary character edit.
+        let existing = item("First");
+        let existing_key = existing.key.clone();
+        let mut editor = HopperEditor::new(vec![existing]);
+        editor.on(&key(Key::Up));
+        editor.on(&key(Key::End));
+        assert_eq!(
+            editor.on(&modified(Key::Backspace, KeyModifiers::CONTROL)),
+            None
+        );
+        assert!(editor.history.is_empty());
+        let drafts = editor.drafts().expect("valid drafts");
+        assert_eq!(drafts[0].workspace_key, Some(existing_key));
+        assert_eq!(drafts[0].name, "Firs");
+    }
+
+    #[test]
+    fn saved_item_backspace_hint_offers_the_sidebar_fallback() {
+        // #1422 follow-up: delete lives on Ctrl-Delete, which some emulators
+        // cannot report. When a user backspaces into a saved item's title,
+        // the hint must name a path that always works — the sidebar's own
+        // delete — not only the modifier chord.
+        let mut editor = HopperEditor::new(vec![item("First"), item("Second")]);
+        editor.on(&key(Key::Up)); // onto "Second" at column 0
+        assert_eq!(editor.on(&key(Key::Backspace)), None);
+        let hint = editor.error.clone().expect("hint is set");
+        assert!(hint.contains("sidebar"), "{hint}");
     }
 
     #[test]

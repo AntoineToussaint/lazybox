@@ -2383,9 +2383,9 @@ mod search_tests {
             .draw(|frame| sb.render(frame.area(), frame, true))
             .expect("draw");
         let buffer = terminal.backend().buffer();
-        // The usage summary sits under the (conditional) automation row,
-        // just above the divider (#1502).
-        let y = 2 + sb.stats_row_height(Rect::new(0, 0, 60, 14));
+        // The usage summary keeps its own row; since #1535 removed the
+        // conditional automation strip above it, that row is always 2.
+        let y = 2;
         (0..buffer.area.width)
             .map(|x| buffer[(x, y)].symbol())
             .collect()
@@ -3682,42 +3682,57 @@ mod broadcast_select_tests {
             lazybox_core::PolicyArm::Arm,
         );
 
-        let backend = TestBackend::new(40, 12);
+        // 50 cells: the chips leave just enough for the compact label.
+        // Below that it drops whole rather than clipping (#794).
+        let backend = TestBackend::new(50, 12);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| sb.render(frame.area(), frame, true))
             .expect("draw");
         let buffer = terminal.backend().buffer();
+        // The automation rides the chip row (row 1) since #1535.
         let header: String = (0..buffer.area.width)
-            .map(|x| buffer[(x, 2)].symbol())
+            .map(|x| buffer[(x, 1)].symbol())
             .collect();
         let screen: String = (0..buffer.area.height)
             .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol()))
             .collect();
 
-        assert!(header.contains("AUTO-FIX ON · CI+CONFLICT"), "{header:?}");
+        // 40 cells leaves the chips little room, so the label takes its
+        // compact form — which still names both armed kinds.
+        assert!(header.contains("FIX ci+conflict"), "{header:?}");
         assert!(
             screen.contains(crate::components::sidebar::FIX_GLYPH),
             "compact auto-fix row glyph is still visible"
         );
     }
 
-    /// #794: the focused row's merge automation is spelled out in the
-    /// header so the durability difference the ` ARM ` / ` AUTO ` pills
-    /// can't show is legible. lazybox's client-side arm names its
-    /// while-running limit; GitHub-native auto-merge names that it works
-    /// offline, and wins the header when both are set.
+    /// #794: the focused row's merge automation is named in the header so
+    /// the durability difference the ` ARM ` / ` AUTO ` pills can't show
+    /// is legible — which system will do the merge, and therefore whether
+    /// it survives lazybox being closed. GitHub-native auto-merge wins the
+    /// label when both are set.
+    ///
+    /// Since #1535 the label rides the chip row, and shortens rather than
+    /// vanishing when the chips leave it little room. The shortening keeps
+    /// the part that carries the meaning — `(GitHub)` vs `(lazybox)`.
     #[test]
     fn focused_merge_automation_is_explained_in_the_sidebar_header() {
-        // lazybox client-side arm.
+        // lazybox client-side arm. Wide: the full phrasing.
         let mut sb = Sidebar::new(PaneId::new(1));
         let mut armed = pr_ws("https://github.com/o/r/pull/1");
         armed.auto_merge_on_green = true;
         sb.workspaces.insert(SessionKey::from(&armed.key), armed);
         sb.recompute_visible();
-        let header = header_at(&mut sb, 60);
-        assert!(header.contains("MERGE ON GREEN"), "{header:?}");
-        assert!(header.contains("lazybox only"), "{header:?}");
+        let wide = header_at(&mut sb, 90);
+        assert!(wide.contains("MERGE ON GREEN"), "{wide:?}");
+        assert!(wide.contains("lazybox only"), "{wide:?}");
+        // Tighter: the compact form, still naming lazybox as the actor.
+        // (The two labels have different lengths, so they cross over at
+        // different widths — 50 is below both.)
+        let narrow = header_at(&mut sb, 50);
+        assert!(narrow.contains("on-green"), "{narrow:?}");
+        assert!(narrow.contains("(lazybox)"), "{narrow:?}");
 
         // GitHub-native auto-merge takes precedence in the label.
         let mut sb = Sidebar::new(PaneId::new(1));
@@ -3726,9 +3741,15 @@ mod broadcast_select_tests {
         both.pr.as_mut().expect("pr").auto_merge_enabled = true;
         sb.workspaces.insert(SessionKey::from(&both.key), both);
         sb.recompute_visible();
-        let header = header_at(&mut sb, 60);
-        assert!(header.contains("AUTO-MERGE · GitHub"), "{header:?}");
-        assert!(header.contains("works offline"), "{header:?}");
+        let wide = header_at(&mut sb, 90);
+        assert!(wide.contains("AUTO-MERGE · GitHub"), "{wide:?}");
+        assert!(wide.contains("works offline"), "{wide:?}");
+        let narrow = header_at(&mut sb, 60);
+        assert!(narrow.contains("auto-merge"), "{narrow:?}");
+        assert!(
+            narrow.contains("(GitHub)"),
+            "the compact form must still name GitHub as the actor: {narrow:?}",
+        );
     }
 
     /// Render the header (row 2) at an arbitrary width.
@@ -3741,8 +3762,10 @@ mod broadcast_select_tests {
             .draw(|frame| sb.render(frame.area(), frame, true))
             .expect("draw");
         let buffer = terminal.backend().buffer();
+        // The focused row's automation rides the chip row (row 1) since
+        // #1535 — it no longer spends a header row of its own.
         (0..buffer.area.width)
-            .map(|x| buffer[(x, 2)].symbol())
+            .map(|x| buffer[(x, 1)].symbol())
             .collect()
     }
 
@@ -3779,13 +3802,15 @@ mod broadcast_select_tests {
                 );
             }
         }
-        // Too narrow to fit the label at all → it is fully absent, not a stub.
+        // Too narrow for even the compact form → fully absent, not a stub.
+        let tiny = header_at(&mut sb, 22);
+        assert!(!tiny.contains("AUTO-MERGE"), "{tiny:?}");
         assert!(
-            !header_at(&mut sb, 22).contains("AUTO-MERGE"),
-            "a label that can't fit must drop whole"
+            !tiny.contains("auto-merge"),
+            "a label that can't fit must drop whole, compact form included: {tiny:?}"
         );
         // Generous width → present whole.
-        let wide = header_at(&mut sb, 60);
+        let wide = header_at(&mut sb, 90);
         assert!(wide.contains("AUTO-MERGE · GitHub"), "{wide:?}");
         assert!(wide.contains("works offline"), "{wide:?}");
     }
@@ -3838,26 +3863,9 @@ mod broadcast_select_tests {
             );
         }
         assert_eq!(
-            sb.stats_row_height(area),
-            1,
-            "an inbox containing an armed row reserves the strip",
+            baseline, 3,
+            "two content rows plus the divider — no conditional strip",
         );
-    }
-
-    /// The row is still reclaimed when nothing in the inbox is armed —
-    /// the reservation is over the visible set, not unconditional. Clear
-    /// `metered` explicitly: since #1538 a new workspace defaults to
-    /// metered, and the `$ METER` canary would otherwise reserve the strip
-    /// on its own — a different reservation than the arming this test is
-    /// about. An unarmed, unmetered row has nothing to show, so it reclaims.
-    #[test]
-    fn automation_strip_is_reclaimed_when_nothing_is_armed() {
-        let mut sb = Sidebar::new(PaneId::new(1));
-        let mut plain = pr_ws("https://github.com/o/r/pull/1");
-        plain.metered = false;
-        sb.workspaces.insert(SessionKey::from(&plain.key), plain);
-        sb.recompute_visible();
-        assert_eq!(sb.stats_row_height(Rect::new(0, 0, 60, 20)), 0);
     }
 
     /// #1535, in the *rendered* output. The sibling test above exercises
@@ -3975,12 +3983,19 @@ mod broadcast_select_tests {
         sb.recompute_visible();
         assert_eq!(sb.ci_failing_count(), 1, "the failing PR is counted");
 
-        // 24 cells (inner 22) can't hold the 31-cell " MERGE ON GREEN ·
-        // lazybox only " label; the row is omitted rather than clipped.
+        // 24 cells can hold neither the full label nor its compact form,
+        // so it drops whole rather than clipping — and since #1535 the
+        // label rides the chip row, so dropping it costs no header row
+        // either way.
+        let narrow = header_at(&mut sb, 24);
+        assert!(!narrow.contains("MERGE ON GREEN"), "{narrow:?}");
+        assert!(!narrow.contains("on-green"), "{narrow:?}");
+        // And the header keeps its height either way: the strip is not a
+        // row any more, so nothing about it can move the list (#1535).
         assert_eq!(
-            sb.stats_row_height(Rect::new(0, 0, 24, 12)),
-            0,
-            "merge label must drop whole when it can't fit"
+            sb.header_height(Rect::new(0, 0, 24, 12)),
+            sb.header_height(Rect::new(0, 0, 90, 12)),
+            "header height must not depend on whether the label fits",
         );
         let row0 = header_row(&mut sb, 24);
         assert!(

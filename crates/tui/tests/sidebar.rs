@@ -2776,8 +2776,11 @@ impl ConfigHome {
     /// Flush the async persist queue, then load the YAML back — the
     /// same file the next launch would read.
     fn reload(&self) -> lazybox_config::Config {
+        // 30s, not 5s: this box runs many agents at once and can sit at
+        // 100% CPU, so a tight bound flakes; a genuinely stuck worker still
+        // fails. Matches the sandbox guard's bound (#1539 review).
         assert!(
-            lazybox_config::Config::flush_pending_saves(std::time::Duration::from_secs(5)),
+            lazybox_config::Config::flush_pending_saves(std::time::Duration::from_secs(30)),
             "pending config saves must flush within the bound"
         );
         lazybox_config::Config::load_from(&lazybox_config::Config::default_path())

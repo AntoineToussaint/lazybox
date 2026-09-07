@@ -1903,6 +1903,7 @@ impl Sidebar {
                 track_main: workspace.is_some_and(|w| w.track_main),
                 track_main_behind: workspace.is_some_and(|w| w.track_main && w.track_main_behind),
                 metered: workspace.is_some_and(|w| w.metered),
+                origin_issue: workspace.and_then(crate::components::task_label::originating_issue),
                 has_notes: workspace.is_some_and(|w| w.has_notes()),
                 sent_snippet_count: workspace.map_or(0, |w| w.sent_snippets.total()),
                 // Source-attention ladder (#scale): a row in a Quiet /

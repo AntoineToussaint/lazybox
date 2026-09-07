@@ -134,9 +134,11 @@ pub enum Filter {
     /// reads; "what is waiting on something else" is one toggle.
     Blocked,
     /// An issue that can be started right now: it is an issue (not a PR),
-    /// carries no dependency edge or declared blocker, and has no agent
-    /// session yet. The direct complement of "what's blocked" — "what
-    /// can I pick up" without reading every row.
+    /// carries no dependency edge or declared blocker, has no agent
+    /// session yet, and is not snoozed (a snoozed issue was deliberately
+    /// deferred, so it is not something to pick up now). The direct
+    /// complement of "what's blocked" — "what can I pick up" without
+    /// reading every row.
     Ready,
     // ── Role ───────────────────────────────────────────────────────
     Author,
@@ -320,6 +322,12 @@ impl Filter {
                         .sessions
                         .iter()
                         .any(|s| matches!(s.kind, lazybox_core::SessionKind::Agent { .. }))
+                    // A snoozed issue was deliberately deferred: it lives in
+                    // the Snoozed mailbox, not the working set, so it is not
+                    // "ready to pick up now" even when unblocked and
+                    // agent-less. Without this, `ready` and `snoozed`
+                    // overlap and a deferred ticket keeps resurfacing.
+                    && !w.is_snoozed(ctx.now)
             }
             Filter::Author => task.is_some_and(|t| t.role == TaskRole::Author),
             Filter::Reviewer => task.is_some_and(|t| t.role == TaskRole::Reviewer),
@@ -1169,6 +1177,44 @@ mod tests {
 
         assert_eq!(Filter::Ready.axis(), FilterAxis::State);
         assert_eq!(Filter::Ready.label(), "ready");
+    }
+
+    /// A snoozed issue was deliberately deferred into the Snoozed mailbox,
+    /// so it must not read as "ready to pick up now" even when it is
+    /// otherwise startable (an issue, no blockers, no agent). Without the
+    /// `!is_snoozed` guard, `ready` and `snoozed` overlapped and a
+    /// deferred ticket kept resurfacing in the ready set.
+    #[test]
+    fn ready_filter_excludes_a_snoozed_issue() {
+        let agents = HashMap::new();
+        let clock = now();
+        let matches = |ws: &Workspace, f: Filter| {
+            f.matches(&FilterCtx {
+                w: ws,
+                agents: &agents,
+                now: clock,
+            })
+        };
+
+        // Startable but snoozed a few hours out → not ready, and snoozed.
+        let mut snoozed = workspace_with("a", |t| t.kind = Some(TaskKind::Issue));
+        snoozed.snoozed_until = Some(clock + chrono::Duration::hours(5));
+        assert!(matches(&snoozed, Filter::Snoozed));
+        assert!(
+            !matches(&snoozed, Filter::Ready),
+            "a snoozed issue is deferred, not ready to pick up"
+        );
+
+        // An EXPIRED snooze reads as awake, so the same issue is ready
+        // again once its deadline has passed (stale timestamps are never
+        // cleared in the store, so the predicate must gate on the clock).
+        let mut woke = workspace_with("b", |t| t.kind = Some(TaskKind::Issue));
+        woke.snoozed_until = Some(clock - chrono::Duration::hours(1));
+        assert!(!matches(&woke, Filter::Snoozed));
+        assert!(
+            matches(&woke, Filter::Ready),
+            "an expired snooze is awake, so the issue is ready again"
+        );
     }
 
     #[test]

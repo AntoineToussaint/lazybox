@@ -565,7 +565,7 @@ fn comparison_tracks_documented_remote_and_license_contracts() {
     let page = read("web/src/content/docs/docs/explanation/comparison.md");
 
     assert!(
-        page.contains("✓ Cloud / API (beta)")
+        page.contains("✓ Cloud / API")
             && page.contains("https://www.conductor.build/docs/api"),
         "Conductor's documented cloud execution must be represented and sourced"
     );

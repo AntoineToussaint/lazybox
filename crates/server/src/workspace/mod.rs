@@ -2435,7 +2435,10 @@ const SLOW_REMOVAL_WARN_AFTER: std::time::Duration = std::time::Duration::from_s
 /// dead end into a self-diagnosing breadcrumb pointing at the code path to fix.
 fn io_lock_holder_fields(config: &ServerConfig, backend_key: &str) -> (String, u64) {
     match config.terminal.io_lock_holder(backend_key) {
-        Some(hold) => (hold.location.to_string(), hold.since.elapsed().as_millis() as u64),
+        Some(hold) => (
+            hold.location.to_string(),
+            hold.since.elapsed().as_millis() as u64,
+        ),
         None => ("<unrecorded>".to_string(), 0),
     }
 }

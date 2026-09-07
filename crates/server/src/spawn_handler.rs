@@ -6104,7 +6104,11 @@ pub(crate) async fn reclaim_wedged_terminal(
     terminal_id: TerminalId,
     backend_key: &str,
 ) {
-    match config.terminal.claim_teardown(terminal_id, backend_key).await {
+    match config
+        .terminal
+        .claim_teardown(terminal_id, backend_key)
+        .await
+    {
         Ok(Some(claim)) => {
             // We own the entry — complete the registry removal + kv sweep the
             // wedged teardown never reached.

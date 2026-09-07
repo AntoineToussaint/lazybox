@@ -1213,15 +1213,22 @@ impl Workspace {
             .find_map(|task| task.parent.as_ref())
     }
 
-    /// Every blocker any task in this workspace declares. Looks past the PR
-    /// headline task for the same reason `hierarchy_parent` does: a ticket
-    /// that has acquired a PR must not lose its dependency edges.
+    /// Every *distinct* blocker any task in this workspace declares, in
+    /// first-seen order. Looks past the PR headline task for the same reason
+    /// `hierarchy_parent` does: a ticket that has acquired a PR must not lose
+    /// its dependency edges. The edges are de-duplicated across tasks — a
+    /// single blocking task referenced by two of this workspace's tasks (a
+    /// gh issue and its PR, or two sibling sub-issues) is one blocker of the
+    /// workspace, not two, so the `⛔N` badge and the "N blockers" line count
+    /// it once.
     pub fn hierarchy_blocked_by(&self) -> impl Iterator<Item = &TaskId> {
+        let mut seen = std::collections::HashSet::new();
         self.pr
             .iter()
             .chain(self.gh_issues.iter())
             .chain(self.linear_issues.iter())
             .flat_map(|task| task.blocked_by.iter())
+            .filter(move |id| seen.insert(*id))
     }
 
     /// The declared `Blocked on:` reason, if any task in this workspace
@@ -2353,6 +2360,38 @@ mod tests {
         let blockers: Vec<_> = ws.hierarchy_blocked_by().collect();
         assert_eq!(blockers.len(), 1);
         assert_eq!(blockers[0].key, "o/r#3");
+    }
+
+    #[test]
+    fn hierarchy_blocked_by_dedups_a_blocker_shared_across_tasks() {
+        // The workspace's PR and its attached gh issue both list `o/r#3`
+        // as a blocker. It's one blocker of the workspace, so the count
+        // surfaces (badge, right-pane line) must not double it.
+        let shared = TaskId {
+            source: "github".into(),
+            key: "o/r#3".into(),
+        };
+        let mut headline = pr("o/r#1");
+        headline.blocked_by = vec![shared.clone()];
+        let mut ws = Workspace::from_task(headline, now());
+        let mut gh = issue("github", "o/r#2");
+        gh.blocked_by = vec![
+            shared.clone(),
+            TaskId {
+                source: "github".into(),
+                key: "o/r#4".into(),
+            },
+        ];
+        ws.gh_issues.push(gh);
+
+        let blockers: Vec<_> = ws.hierarchy_blocked_by().collect();
+        assert_eq!(
+            blockers.len(),
+            2,
+            "shared `o/r#3` counted once, plus the distinct `o/r#4`"
+        );
+        assert_eq!(blockers[0].key, "o/r#3", "first-seen order preserved");
+        assert_eq!(blockers[1].key, "o/r#4");
     }
 
     #[test]

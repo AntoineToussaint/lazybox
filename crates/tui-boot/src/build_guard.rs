@@ -164,7 +164,7 @@ async fn fetch_latest_release_tag() -> Option<String> {
     // never the user's configured (possibly Enterprise) GitHub host.
     let credential = tokio::time::timeout(
         CREDENTIAL_TIMEOUT,
-        lazybox_gh::credential_chain(None).resolve(lazybox_gh::SOURCE),
+        lazybox_gh::credential_chain(None).resolve(&lazybox_gh::credential_scope(None)),
     )
     .await
     .ok()

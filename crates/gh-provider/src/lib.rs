@@ -188,6 +188,11 @@ mod tests {
     /// above) both because `CommandProvider`/`CredentialChain` cache
     /// process-globally and because it swaps `PATH` to point `gh` at a
     /// fake script that just echoes its argv back as the "token".
+    // The fake `gh` is a `#!/bin/sh` script made executable through
+    // unix permissions. lazybox ships macOS + Linux only; the guard keeps
+    // a non-unix build from failing to compile the test rather than
+    // silently skipping a real gap.
+    #[cfg(unix)]
     #[test]
     fn credential_chain_passes_configured_host_to_gh_auth_token() {
         const CHILD: &str = "LAZYBOX_CREDENTIAL_CHAIN_HOSTNAME_TEST_CHILD";
@@ -238,13 +243,44 @@ mod tests {
             .expect("fake gh resolves a credential");
         assert_eq!(credential.token(), "auth token --hostname ghe.example.com");
 
+        // A *different* configured host must resolve independently too —
+        // the Enterprise-beside-Enterprise case, and the one that proves
+        // the cache key carries the host's value and not merely a
+        // "some host was set" marker.
+        let other = Some("ghe.internal.example");
+        let credential = runtime
+            .block_on(credential_chain(other).resolve(&credential_scope(other)))
+            .expect("fake gh resolves a credential");
+        assert_eq!(
+            credential.token(),
+            "auth token --hostname ghe.internal.example"
+        );
+
         // No host configured: must NOT pass `--hostname` at all, so `gh`
         // keeps resolving its own default host as before — and must NOT
-        // reuse the other host's cached chain resolution above.
+        // reuse either configured host's cached chain resolution above.
         let credential = runtime
             .block_on(credential_chain(None).resolve(&credential_scope(None)))
             .expect("fake gh resolves a credential");
         assert_eq!(credential.token(), "auth token");
+    }
+
+    /// The scope is a cache key, so two hosts must never collapse onto
+    /// one string — and the un-hosted scope must stay byte-identical to
+    /// the bare `SOURCE` it replaced, so an existing cache entry (and any
+    /// call site still passing `SOURCE`) keeps hitting the same slot.
+    #[test]
+    fn credential_scope_separates_hosts_and_preserves_the_bare_source() {
+        assert_eq!(credential_scope(None), SOURCE);
+        assert_ne!(credential_scope(Some("a.example")), SOURCE);
+        assert_ne!(
+            credential_scope(Some("a.example")),
+            credential_scope(Some("b.example")),
+        );
+        assert!(
+            credential_scope(Some("a.example")).contains("a.example"),
+            "the host must be recoverable from the key for debugging",
+        );
     }
 
     /// The stored OAuth token is a last resort: it must sit *behind*

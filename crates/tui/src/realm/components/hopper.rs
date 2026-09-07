@@ -55,6 +55,17 @@ enum HopperTab {
     History,
 }
 
+/// Interaction mode for the Active tab, mirroring a modal editor.
+///
+/// Capture types text into the current row; Navigate turns bare letters
+/// into lifecycle actions (`d`/`c`/`x`), so the Hopper speaks the same
+/// bare-letter idiom as the rest of lazybox instead of leaning on `Ctrl`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Capture,
+    Navigate,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HistoryTarget {
     Day(NaiveDate),
@@ -66,6 +77,7 @@ pub struct HopperEditor {
     rows: Vec<Row>,
     history: Vec<HistoryItem>,
     tab: HopperTab,
+    mode: Mode,
     row: usize,
     cursor: usize,
     history_cursor: usize,
@@ -107,6 +119,7 @@ impl HopperEditor {
             rows,
             history,
             tab: HopperTab::Active,
+            mode: Mode::Capture,
             row,
             cursor: 0,
             history_cursor: 0,
@@ -129,6 +142,23 @@ impl HopperEditor {
 
     fn current_mut(&mut self) -> &mut Row {
         &mut self.rows[self.row]
+    }
+
+    /// A saved row (it owns a workspace key) lands in Navigate mode; the
+    /// trailing blank row and any still-unsaved row stay in Capture so
+    /// typing keeps flowing. Called whenever the cursor changes rows.
+    fn sync_mode(&mut self) {
+        self.mode = if self.current().key.is_some() {
+            Mode::Navigate
+        } else {
+            Mode::Capture
+        };
+    }
+
+    fn enter_capture(&mut self) {
+        self.mode = Mode::Capture;
+        self.cursor = self.current().name.len();
+        self.error = None;
     }
 
     fn move_left(&mut self) {
@@ -161,6 +191,7 @@ impl HopperEditor {
             .min(self.rows.len().saturating_sub(1));
         self.cursor = char_column_to_byte(&self.current().name, column);
         self.error = None;
+        self.sync_mode();
     }
 
     fn insert_char(&mut self, ch: char) {
@@ -204,10 +235,7 @@ impl HopperEditor {
             return;
         }
         if self.current().key.is_some() {
-            self.error = Some(
-                "Use Ctrl-X to cancel, or Ctrl-Delete (or the sidebar’s delete) to remove it"
-                    .into(),
-            );
+            self.error = Some("Press Esc to navigate, then c to cancel or x to delete".into());
             return;
         }
         let removed = self.rows.remove(self.row);
@@ -243,6 +271,7 @@ impl HopperEditor {
         self.row = self.row.min(self.rows.len().saturating_sub(1));
         self.cursor = self.current().name.len();
         self.error = None;
+        self.sync_mode();
         removed.key.map(Msg::HopperDeleteRequested)
     }
 
@@ -267,6 +296,7 @@ impl HopperEditor {
             outcome,
         });
         self.error = None;
+        self.sync_mode();
         Some(match outcome {
             Outcome::Done => Msg::HopperCompletionRequested {
                 workspace_key: key,
@@ -413,7 +443,7 @@ impl HopperEditor {
                 } else {
                     Style::default().fg(theme.text_strong)
                 };
-                if selected {
+                if selected && self.mode == Mode::Capture {
                     let (before, after) = cursor_window(&row.name, self.cursor, text_width);
                     Line::from(vec![
                         Span::styled(pointer, style),
@@ -567,7 +597,7 @@ impl Component for HopperEditor {
             .iter()
             .filter(|row| row.key.is_some() || !row.name.trim().is_empty())
             .count();
-        let tabs = Line::from(vec![
+        let mut tabs = Line::from(vec![
             Span::styled(
                 format!(" Active {active_count} "),
                 if self.tab == HopperTab::Active {
@@ -587,6 +617,14 @@ impl Component for HopperEditor {
             ),
             Span::styled("    Tab switch", Style::default().fg(theme.text_dim)),
         ]);
+        if self.tab == HopperTab::Active {
+            let (label, tint) = match self.mode {
+                Mode::Capture => ("  ● CAPTURE", theme.accent),
+                Mode::Navigate => ("  ● NAVIGATE", theme.success),
+            };
+            tabs.spans
+                .push(Span::styled(label, Style::default().fg(tint).bold()));
+        }
         frame.render_widget(
             Paragraph::new(tabs),
             Rect::new(inner.x, inner.y, inner.width, 1),
@@ -605,32 +643,50 @@ impl Component for HopperEditor {
         }
 
         let mut help = match self.tab {
-            HopperTab::Active => vec![
-                Line::from(vec![
-                    Span::styled("Ctrl-D", Style::default().fg(theme.success).bold()),
-                    Span::raw(" done  "),
-                    Span::styled("Ctrl-X", Style::default().fg(theme.text_dim).bold()),
-                    Span::raw(" cancel  "),
-                    Span::styled("Ctrl-Delete", Style::default().fg(theme.error).bold()),
-                    Span::raw(" delete"),
-                ]),
-                Line::from(vec![
-                    Span::styled("Enter", Style::default().fg(theme.success).bold()),
-                    Span::raw(" next item  "),
-                    Span::styled("↑↓", Style::default().fg(theme.text_dim).bold()),
-                    Span::raw(" move  "),
-                    Span::styled("Ctrl-S", Style::default().fg(theme.success).bold()),
-                    Span::raw(" / "),
-                    Span::styled("Ctrl-Enter", Style::default().fg(theme.success).bold()),
-                    Span::raw(" save  "),
-                    Span::styled("Esc", Style::default().fg(theme.error).bold()),
-                    Span::raw(" close"),
-                ]),
-                Line::from(Span::styled(
-                    "One line is one persistent workspace. Paste newline-separated items to capture in bulk.",
-                    Style::default().fg(theme.text_dim),
-                )),
-            ],
+            HopperTab::Active => match self.mode {
+                Mode::Navigate => vec![
+                    Line::from(vec![
+                        Span::styled("d", Style::default().fg(theme.success).bold()),
+                        Span::raw(" done  "),
+                        Span::styled("c", Style::default().fg(theme.text_dim).bold()),
+                        Span::raw(" cancel  "),
+                        Span::styled("x", Style::default().fg(theme.error).bold()),
+                        Span::raw(" delete  "),
+                        Span::styled("j/k", Style::default().fg(theme.text_dim).bold()),
+                        Span::raw(" move  "),
+                        Span::styled("i", Style::default().fg(theme.success).bold()),
+                        Span::raw(" edit"),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("Tab", Style::default().fg(theme.success).bold()),
+                        Span::raw(" history  "),
+                        Span::styled("Esc", Style::default().fg(theme.error).bold()),
+                        Span::raw(" close"),
+                    ]),
+                    Line::from(Span::styled(
+                        "Bare letters act on this saved item. Move to the blank row to capture a new one.",
+                        Style::default().fg(theme.text_dim),
+                    )),
+                ],
+                Mode::Capture => vec![
+                    Line::from(vec![
+                        Span::styled("Enter", Style::default().fg(theme.success).bold()),
+                        Span::raw(" next item / save  "),
+                        Span::styled("↑↓", Style::default().fg(theme.text_dim).bold()),
+                        Span::raw(" move  "),
+                        Span::styled("Esc", Style::default().fg(theme.error).bold()),
+                        Span::raw(" close"),
+                    ]),
+                    Line::from(Span::styled(
+                        "Type to edit this item. Enter on the empty row saves and closes; move onto a saved item for d/c/x.",
+                        Style::default().fg(theme.text_dim),
+                    )),
+                    Line::from(Span::styled(
+                        "One line is one persistent workspace. Paste newline-separated items to capture in bulk.",
+                        Style::default().fg(theme.text_dim),
+                    )),
+                ],
+            },
             HopperTab::History => vec![
                 Line::from(vec![
                     Span::styled("↑↓", Style::default().fg(theme.text_dim).bold()),
@@ -698,8 +754,21 @@ impl AppComponent<Msg, UserEvent> for HopperEditor {
             return None;
         };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        if matches!(key.code, Key::Esc) || (ctrl && matches!(key.code, Key::Char('c'))) {
+        if ctrl && matches!(key.code, Key::Char('c')) {
+            return Some(Msg::ModalDismissed);
+        }
+        if matches!(key.code, Key::Esc) {
+            // Esc leaves an in-place rename (Capture on a saved row) back
+            // to Navigate — the vim insert→normal transition — instead of
+            // closing the whole modal. Everywhere else it dismisses.
+            if self.tab == HopperTab::Active
+                && self.mode == Mode::Capture
+                && self.current().key.is_some()
+            {
+                self.sync_mode();
+                self.error = None;
+                return None;
+            }
             return Some(Msg::ModalDismissed);
         }
         if matches!(key.code, Key::Tab | Key::BackTab) {
@@ -707,6 +776,9 @@ impl AppComponent<Msg, UserEvent> for HopperEditor {
                 HopperTab::Active => HopperTab::History,
                 HopperTab::History => HopperTab::Active,
             };
+            if self.tab == HopperTab::Active {
+                self.sync_mode();
+            }
             self.error = None;
             return None;
         }
@@ -720,48 +792,32 @@ impl AppComponent<Msg, UserEvent> for HopperEditor {
             }
             return None;
         }
-        // Save primary is Ctrl-S. lazybox runs the terminal in crossterm
-        // raw mode, which clears IXON, so Ctrl-S arrives as a key rather
-        // than XOFF flow-control — the reply Textarea relies on exactly this
-        // as its terminal-agnostic submit (textarea.rs). Ctrl-Enter is the
-        // enhanced-keyboard alias (Kitty / modifyOtherKeys report it
-        // distinctly), matching that Textarea idiom; Enter alone stays
-        // "next item" here.
-        if ctrl && matches!(key.code, Key::Char('s') | Key::Enter) {
-            return self.drafts().map(Msg::HopperSubmitted);
-        }
-        if ctrl && matches!(key.code, Key::Char('d')) {
-            return self.move_current_to_history(Outcome::Done);
-        }
-        // The reversible outcomes take a Ctrl+letter — the only command
-        // idiom every terminal delivers inside a text field (like Ctrl-S /
-        // Ctrl-D above), since many emulators send plain 0x7f/0x08 for
-        // Backspace with no modifier bit. Ctrl-X cancels (its × mirrors the
-        // canceled glyph in History); a misfire only files the item into
-        // History, undoable with `r`.
-        //
-        // Deletion is destructive and does NOT sit on any editing chord.
-        // In lazybox's own reply Textarea (textarea.rs) Ctrl-K is
-        // kill-to-EOL and Ctrl-Backspace is kill-word-back — both harmless
-        // edits — so reusing either to reap a workspace is the exact
-        // muscle-memory footgun #1422 removes. Delete lives only on
-        // Ctrl-Delete (confirm-gated downstream); where an emulator can't
-        // report the modifier it degrades to a harmless character edit
-        // rather than a silent kill, and the sidebar's own delete stays
-        // available as the always-reachable fallback (named in the row's
-        // Backspace hint).
-        if ctrl && matches!(key.code, Key::Char('x')) {
-            return self.move_current_to_history(Outcome::Canceled);
-        }
-        if ctrl && matches!(key.code, Key::Delete) {
-            return self.delete_current_line();
-        }
-        if shift && matches!(key.code, Key::Delete | Key::Backspace) {
-            return self.move_current_to_history(Outcome::Canceled);
+        // Active tab is a modal editor. Navigate mode turns bare letters
+        // into lifecycle actions on a saved row; Capture mode edits text.
+        // No Ctrl chord is required for either — the whole point of #1423.
+        if self.mode == Mode::Navigate {
+            match key.code {
+                Key::Char('j') | Key::Down => self.move_vertical(1),
+                Key::Char('k') | Key::Up => self.move_vertical(-1),
+                Key::Char('d') => return self.move_current_to_history(Outcome::Done),
+                Key::Char('c') => return self.move_current_to_history(Outcome::Canceled),
+                Key::Char('x') => return self.delete_current_line(),
+                Key::Char('i') | Key::Enter => self.enter_capture(),
+                _ => return None,
+            }
+            return None;
         }
         match key.code {
             Key::Delete => self.delete_forward(),
-            Key::Enter => self.insert_row_break(),
+            // Enter commits the row: a new item on the empty trailing row
+            // saves the buffer and closes; otherwise it starts the next
+            // item. This is the Ctrl-free replacement for the old Ctrl-S.
+            Key::Enter => {
+                if self.current().name.trim().is_empty() {
+                    return self.drafts().map(Msg::HopperSubmitted);
+                }
+                self.insert_row_break();
+            }
             Key::Up => self.move_vertical(-1),
             Key::Down => self.move_vertical(1),
             Key::Left => self.move_left(),
@@ -798,6 +854,8 @@ mod tests {
         })
     }
 
+    /// A key carrying a modifier — the mode split dropped every Ctrl
+    /// binding, so this exists to prove the dropped ones stay inert.
     fn modified(code: Key, modifiers: KeyModifiers) -> Event<UserEvent> {
         Event::Keyboard(KeyEvent { code, modifiers })
     }
@@ -827,14 +885,53 @@ mod tests {
         let existing = item("First");
         let existing_key = existing.key.clone();
         let mut editor = HopperEditor::new(vec![existing]);
-        editor.on(&key(Key::Up));
-        editor.on(&key(Key::End));
-        editor.on(&key(Key::Enter));
+        editor.on(&key(Key::Up)); // saved row → navigate mode
+        editor.on(&key(Key::Char('i'))); // edit in place → capture mode
+        editor.on(&key(Key::Enter)); // commit the row, start the next
         editor.on(&key(Key::Char('N')));
         let drafts = editor.drafts().expect("valid drafts");
         assert_eq!(drafts[0].workspace_key, Some(existing_key));
         assert_eq!(drafts[1].workspace_key, None);
         assert_eq!(drafts[1].name, "N");
+    }
+
+    #[test]
+    fn a_saved_row_enters_navigate_and_the_blank_row_is_capture() {
+        let mut editor = HopperEditor::new(vec![item("First")]);
+        assert_eq!(editor.mode, Mode::Capture, "opens on the blank capture row");
+        editor.on(&key(Key::Up));
+        assert_eq!(editor.mode, Mode::Navigate, "a saved row navigates");
+        editor.on(&key(Key::Down));
+        assert_eq!(editor.mode, Mode::Capture, "the blank row captures");
+        editor.on(&key(Key::Char('a')));
+        let drafts = editor.drafts().expect("valid drafts");
+        assert_eq!(drafts.last().expect("captured row").name, "a");
+    }
+
+    #[test]
+    fn i_edits_a_saved_row_and_esc_returns_to_navigate() {
+        let mut editor = HopperEditor::new(vec![item("First")]);
+        editor.on(&key(Key::Up)); // navigate
+        editor.on(&key(Key::Char('i'))); // capture, cursor at end
+        editor.on(&key(Key::Char('!')));
+        assert_eq!(editor.mode, Mode::Capture);
+        assert_eq!(editor.rows[editor.row].name, "First!");
+        assert_eq!(editor.on(&key(Key::Esc)), None, "Esc leaves the rename");
+        assert_eq!(editor.mode, Mode::Navigate);
+    }
+
+    #[test]
+    fn enter_on_the_empty_row_saves_and_closes() {
+        let existing = item("First");
+        let existing_key = existing.key.clone();
+        let mut editor = HopperEditor::new(vec![existing]);
+        // Cursor opens on the empty trailing capture row.
+        let submitted = editor.on(&key(Key::Enter)).expect("save");
+        let Msg::HopperSubmitted(entries) = submitted else {
+            panic!("expected HopperSubmitted, got {submitted:?}");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].workspace_key, Some(existing_key));
     }
 
     #[test]
@@ -844,17 +941,19 @@ mod tests {
         let first_key = first.key.clone();
         let second_key = second.key.clone();
         let mut editor = HopperEditor::new(vec![first, second]);
-        editor.on(&key(Key::Up));
-        editor.on(&key(Key::Up));
+        editor.on(&key(Key::Up)); // Second → navigate
+        editor.on(&key(Key::Up)); // First → navigate
         assert_eq!(
-            editor.on(&modified(Key::Char('d'), KeyModifiers::CONTROL)),
+            editor.on(&key(Key::Char('d'))),
             Some(Msg::HopperCompletionRequested {
                 workspace_key: first_key,
                 completed: true,
             })
         );
+        // The cursor lands on Second, still a saved row → still navigate.
+        assert_eq!(editor.mode, Mode::Navigate);
         assert_eq!(
-            editor.on(&modified(Key::Backspace, KeyModifiers::SHIFT)),
+            editor.on(&key(Key::Char('c'))),
             Some(Msg::HopperCancellationRequested {
                 workspace_key: second_key,
                 canceled: true,
@@ -865,35 +964,13 @@ mod tests {
     }
 
     #[test]
-    fn shifted_delete_and_backspace_cancel_into_history() {
-        for code in [Key::Delete, Key::Backspace] {
-            let existing = item("First");
-            let existing_key = existing.key.clone();
-            let mut editor = HopperEditor::new(vec![existing]);
-            editor.on(&key(Key::Up));
-            assert_eq!(
-                editor.on(&modified(code, KeyModifiers::SHIFT)),
-                Some(Msg::HopperCancellationRequested {
-                    workspace_key: existing_key,
-                    canceled: true,
-                })
-            );
-            assert_eq!(editor.history.len(), 1);
-            assert_eq!(editor.history[0].outcome, Outcome::Canceled);
-        }
-    }
-
-    #[test]
-    fn ctrl_x_cancels_into_history_on_every_terminal() {
-        // Ctrl+letter is the reliable primary; the Shift-Backspace alias
-        // is unreachable on emulators that can't report a Backspace
-        // modifier, so this path must stand on its own.
+    fn c_cancels_into_history_in_navigate_mode() {
         let existing = item("First");
         let existing_key = existing.key.clone();
         let mut editor = HopperEditor::new(vec![existing]);
         editor.on(&key(Key::Up));
         assert_eq!(
-            editor.on(&modified(Key::Char('x'), KeyModifiers::CONTROL)),
+            editor.on(&key(Key::Char('c'))),
             Some(Msg::HopperCancellationRequested {
                 workspace_key: existing_key,
                 canceled: true,
@@ -904,88 +981,67 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_k_no_longer_reaps_a_workspace() {
-        // #1422: Ctrl-K is readline kill-to-EOL, a harmless edit. It must
-        // not delete a workspace — the destructive path moved onto
-        // Ctrl-Delete.
+    fn x_deletes_the_whole_line_in_navigate_mode() {
         let existing = item("First");
         let existing_key = existing.key.clone();
         let mut editor = HopperEditor::new(vec![existing]);
         editor.on(&key(Key::Up));
         assert_eq!(
-            editor.on(&modified(Key::Char('k'), KeyModifiers::CONTROL)),
-            None
-        );
-        assert!(editor.history.is_empty());
-        let drafts = editor.drafts().expect("valid drafts");
-        assert_eq!(drafts[0].workspace_key, Some(existing_key));
-        assert_eq!(drafts[0].name, "First");
-    }
-
-    #[test]
-    fn ctrl_enter_is_an_enhanced_keyboard_save_alias() {
-        // #1422: Ctrl-S is the portable submit (raw mode clears IXON, so it
-        // is never XOFF here — the reply Textarea relies on the same). This
-        // covers the Ctrl-Enter alias that Kitty/modifyOtherKeys terminals
-        // report distinctly; Enter alone stays "next item".
-        let mut editor = HopperEditor::new(vec![item("First")]);
-        editor.on(&key(Key::Up));
-        editor.on(&key(Key::End));
-        editor.on(&key(Key::Enter));
-        editor.on(&key(Key::Char('N')));
-        let submitted = editor.on(&modified(Key::Enter, KeyModifiers::CONTROL));
-        let Some(Msg::HopperSubmitted(drafts)) = submitted else {
-            panic!("Ctrl-Enter must submit: {submitted:?}");
-        };
-        assert_eq!(drafts[1].name, "N");
-    }
-
-    #[test]
-    fn ctrl_delete_removes_a_whole_line() {
-        let existing = item("First");
-        let existing_key = existing.key.clone();
-        let mut editor = HopperEditor::new(vec![existing]);
-        editor.on(&key(Key::Up));
-        assert_eq!(
-            editor.on(&modified(Key::Delete, KeyModifiers::CONTROL)),
+            editor.on(&key(Key::Char('x'))),
             Some(Msg::HopperDeleteRequested(existing_key))
         );
         assert!(editor.history.is_empty());
         assert_eq!(editor.rows.len(), 1);
     }
 
+    /// #1422's guard, carried across the #1423 mode split. Ctrl-K is
+    /// readline kill-to-EOL — a harmless edit — and must never reap a
+    /// workspace. The mode split removed the Ctrl bindings entirely
+    /// (destruction is bare `x` in navigate mode), so this now pins that
+    /// Ctrl-K is *inert* in both modes rather than merely rebound: the
+    /// original bug was a keystroke people press by reflex deleting
+    /// their work, and nothing else would catch it coming back.
     #[test]
-    fn ctrl_backspace_is_a_harmless_edit_not_a_reap() {
-        // #1422 follow-up: Ctrl-Backspace is kill-word-back in the reply
-        // Textarea (textarea.rs). It must not reap a workspace here — the
-        // destructive path is Ctrl-Delete only, so Ctrl-Backspace falls
-        // through to an ordinary character edit.
+    fn ctrl_k_never_reaps_a_workspace_in_either_mode() {
         let existing = item("First");
         let existing_key = existing.key.clone();
         let mut editor = HopperEditor::new(vec![existing]);
+
+        // Navigate mode, sitting on the saved item — where `x` deletes.
         editor.on(&key(Key::Up));
-        editor.on(&key(Key::End));
         assert_eq!(
-            editor.on(&modified(Key::Backspace, KeyModifiers::CONTROL)),
-            None
+            editor.on(&modified(Key::Char('k'), KeyModifiers::CONTROL)),
+            None,
+            "Ctrl-K must not act in navigate mode",
         );
+        assert!(editor.history.is_empty());
+        assert_eq!(editor.rows.len(), 2, "the row survives");
+
+        // Capture mode: Ctrl-K must not type a `k` either — a modified
+        // key is a command, not text.
+        editor.on(&key(Key::Char('i')));
+        let before = editor.current().name.clone();
+        assert_eq!(
+            editor.on(&modified(Key::Char('k'), KeyModifiers::CONTROL)),
+            None,
+            "Ctrl-K must not act in capture mode",
+        );
+        assert_eq!(editor.current().name, before, "and must not insert text");
         assert!(editor.history.is_empty());
         let drafts = editor.drafts().expect("valid drafts");
         assert_eq!(drafts[0].workspace_key, Some(existing_key));
-        assert_eq!(drafts[0].name, "Firs");
     }
 
     #[test]
-    fn saved_item_backspace_hint_offers_the_sidebar_fallback() {
-        // #1422 follow-up: delete lives on Ctrl-Delete, which some emulators
-        // cannot report. When a user backspaces into a saved item's title,
-        // the hint must name a path that always works — the sidebar's own
-        // delete — not only the modifier chord.
-        let mut editor = HopperEditor::new(vec![item("First"), item("Second")]);
-        editor.on(&key(Key::Up)); // onto "Second" at column 0
-        assert_eq!(editor.on(&key(Key::Backspace)), None);
-        let hint = editor.error.clone().expect("hint is set");
-        assert!(hint.contains("sidebar"), "{hint}");
+    fn lifecycle_letters_are_plain_text_in_capture_mode() {
+        // On the blank capture row, d/c/x type rather than acting.
+        let mut editor = HopperEditor::new(vec![item("First")]);
+        for ch in ['d', 'c', 'x'] {
+            assert_eq!(editor.on(&key(Key::Char(ch))), None);
+        }
+        assert!(editor.history.is_empty());
+        let drafts = editor.drafts().expect("valid drafts");
+        assert_eq!(drafts.last().expect("captured row").name, "dcx");
     }
 
     #[test]
@@ -993,7 +1049,9 @@ mod tests {
         let existing = item("First");
         let existing_key = existing.key.clone();
         let mut editor = HopperEditor::new(vec![existing]);
-        editor.on(&key(Key::Up));
+        editor.on(&key(Key::Up)); // navigate
+        editor.on(&key(Key::Char('i'))); // edit → capture, cursor at end
+        editor.on(&key(Key::Home));
         assert_eq!(editor.on(&key(Key::Delete)), None);
         let drafts = editor.drafts().expect("valid drafts");
         assert_eq!(drafts[0].workspace_key, Some(existing_key));
@@ -1050,17 +1108,25 @@ mod tests {
     }
 
     #[test]
-    fn command_hints_wrap_without_hiding_the_delete_or_save_chords() {
+    fn command_hints_are_bare_letters_not_ctrl_chords() {
+        // Capture mode leads with the save/next Enter idiom.
         let mut editor = HopperEditor::new(vec![item("First")]);
-        let rendered = render(&mut editor, 60, 24);
-        assert!(rendered.contains("Ctrl-X"), "{rendered}");
-        assert!(rendered.contains("cancel"), "{rendered}");
-        // Delete moved off the readline-clashing Ctrl-K onto the Delete
-        // keys, and save gained a Ctrl-Enter fallback for XOFF (#1422).
-        assert!(rendered.contains("Ctrl-Delete"), "{rendered}");
-        assert!(!rendered.contains("Ctrl-K"), "{rendered}");
-        assert!(rendered.contains("Ctrl-S"), "{rendered}");
-        assert!(rendered.contains("Ctrl-Enter"), "{rendered}");
+        let capture = render(&mut editor, 70, 24);
+        assert!(capture.contains("CAPTURE"), "{capture}");
+        assert!(capture.contains("save"), "{capture}");
+        assert!(!capture.contains("Ctrl"), "no Ctrl in capture: {capture}");
+
+        // Navigate mode surfaces the bare-letter lifecycle actions.
+        editor.on(&key(Key::Up));
+        let navigate = render(&mut editor, 70, 24);
+        assert!(navigate.contains("NAVIGATE"), "{navigate}");
+        assert!(navigate.contains("done"), "{navigate}");
+        assert!(navigate.contains("cancel"), "{navigate}");
+        assert!(navigate.contains("delete"), "{navigate}");
+        assert!(
+            !navigate.contains("Ctrl"),
+            "no Ctrl in navigate: {navigate}"
+        );
     }
 
     #[test]

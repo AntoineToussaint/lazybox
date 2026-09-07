@@ -651,6 +651,15 @@ pub enum ActionKind {
     ToggleActivityPane,
     Quit,
     ResizeSplitter,
+    // Hopper (modal) — the lifecycle chords inside the personal Hopper
+    // editor. Modal-scoped: `section_rank` returns `None` for them so
+    // they never resolve from a pane focus, but they still live in the
+    // catalog so they gain remap + `?` help + collision-checking (#1421).
+    HopperDone,
+    HopperCancel,
+    HopperDelete,
+    HopperSave,
+    HopperReopen,
     // Terminal
     TerminalScroll,
     LeaveTerminal,
@@ -789,6 +798,12 @@ impl ActionKind {
         // Terminal
         Self::TerminalScroll,
         Self::LeaveTerminal,
+        // Hopper (modal)
+        Self::HopperSave,
+        Self::HopperDone,
+        Self::HopperCancel,
+        Self::HopperDelete,
+        Self::HopperReopen,
     ];
 }
 
@@ -804,6 +819,14 @@ pub enum Section {
     Sidebar,
     Activity,
     Terminal,
+    /// Chords live only while a specific modal owns all input (the
+    /// Hopper editor, #1421). Unlike the pane sections above, a modal
+    /// section has no `section_rank` — it never resolves from a pane
+    /// focus — and its chords are dispatched by the modal itself, which
+    /// reads the resolved catalog rows. Because a modal captures every
+    /// key while it's up, reusing a chord a pane also binds is never a
+    /// conflict (see [`Section::is_modal`]).
+    Hopper,
 }
 
 impl Section {
@@ -816,6 +839,7 @@ impl Section {
             Section::Sidebar => 2,
             Section::Activity => 3,
             Section::Terminal => 4,
+            Section::Hopper => 5,
         }
     }
 
@@ -827,7 +851,16 @@ impl Section {
             Section::Sidebar => "Sidebar",
             Section::Activity => "Activity",
             Section::Terminal => "Terminal",
+            Section::Hopper => "Hopper",
         }
+    }
+
+    /// Whether this section's chords are live only inside a modal that
+    /// owns all input. A modal section has no pane focus (`section_rank`
+    /// returns `None`), so its chords never compete with — and can
+    /// freely reuse — a pane binding.
+    pub fn is_modal(self) -> bool {
+        matches!(self, Section::Hopper)
     }
 }
 
@@ -1773,6 +1806,48 @@ impl ActionDef {
                 describe: "Re-unread the most recent auto-marked row.",
                 section: Section::Activity,
             },
+            // ── Hopper (modal) ──────────────────────────────────────
+            ActionKind::HopperSave => &Self {
+                kind: ActionKind::HopperSave,
+                default_keys: "Ctrl-s",
+                label: "save",
+                describe: "Persist the Hopper's active items (one line per workspace) and keep the editor open.",
+                section: Section::Hopper,
+            },
+            ActionKind::HopperDone => &Self {
+                kind: ActionKind::HopperDone,
+                default_keys: "Ctrl-d",
+                label: "done",
+                describe: "Mark the item under the cursor complete: it moves into the dated History tab in place.",
+                section: Section::Hopper,
+            },
+            ActionKind::HopperCancel => &Self {
+                kind: ActionKind::HopperCancel,
+                // Ctrl+letter is the terminal-portable primary; the
+                // Shift+Delete/Backspace aliases are convenience chords
+                // for emulators that report a modifier on those keys.
+                default_keys: "Ctrl-x | Shift-Delete | Shift-Backspace",
+                label: "cancel",
+                describe: "Cancel the item under the cursor: it moves into the dated History tab as canceled.",
+                section: Section::Hopper,
+            },
+            ActionKind::HopperDelete => &Self {
+                kind: ActionKind::HopperDelete,
+                // Ctrl+letter is the terminal-portable primary; the
+                // Ctrl+Delete/Backspace aliases are convenience chords
+                // for emulators that report a modifier on those keys.
+                default_keys: "Ctrl-k | Ctrl-Delete | Ctrl-Backspace",
+                label: "delete line",
+                describe: "Delete the item under the cursor outright (no History entry) — for a line captured by mistake.",
+                section: Section::Hopper,
+            },
+            ActionKind::HopperReopen => &Self {
+                kind: ActionKind::HopperReopen,
+                default_keys: "r",
+                label: "reopen item",
+                describe: "In the History tab, reopen the selected completed/canceled item back into the active list.",
+                section: Section::Hopper,
+            },
             // ── Terminal ────────────────────────────────────────────
             ActionKind::TerminalScroll => &Self {
                 kind: ActionKind::TerminalScroll,
@@ -2387,6 +2462,11 @@ impl ActionKind {
             ActionKind::ToggleActivityPane => "toggle_activity_pane",
             ActionKind::Quit => "quit",
             ActionKind::ResizeSplitter => "resize_splitter",
+            ActionKind::HopperDone => "hopper_done",
+            ActionKind::HopperCancel => "hopper_cancel",
+            ActionKind::HopperDelete => "hopper_delete",
+            ActionKind::HopperSave => "hopper_save",
+            ActionKind::HopperReopen => "hopper_reopen",
             ActionKind::TerminalScroll => "terminal_scroll",
             ActionKind::LeaveTerminal => "leave_terminal",
         }
@@ -3407,6 +3487,13 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::ToggleFocusMode
         | ActionKind::Quit
         | ActionKind::ResizeSplitter
+        // Hopper lifecycle chords are always usable — the modal that
+        // owns them is what gates their reachability, not a workspace.
+        | ActionKind::HopperDone
+        | ActionKind::HopperCancel
+        | ActionKind::HopperDelete
+        | ActionKind::HopperSave
+        | ActionKind::HopperReopen
         | ActionKind::TerminalScroll
         | ActionKind::LeaveTerminal => true,
     }
@@ -3829,6 +3916,11 @@ mod tests {
             ActionKind::ToggleMouseCapture,
             ActionKind::FocusPaneRight,
             ActionKind::FocusPaneLeft,
+            // The Hopper cancel/delete chords ship terminal-portable
+            // Ctrl+letter primaries plus Shift/Ctrl+Delete/Backspace
+            // aliases for emulators that report those modifiers (#1421).
+            ActionKind::HopperCancel,
+            ActionKind::HopperDelete,
         ];
         for def in ActionDef::all() {
             let count = def.default_chords().len();
@@ -3847,6 +3939,12 @@ mod tests {
         use std::collections::{BTreeSet, HashMap};
         let mut by_chord: HashMap<Chord, Vec<&ActionDef>> = HashMap::new();
         for def in ActionDef::all() {
+            // Modal sections (the Hopper editor) own all input while
+            // they're up, so reusing a chord a pane also binds is never
+            // a conflict — exclude them from the pane-scope audit (#1421).
+            if def.section.is_modal() {
+                continue;
+            }
             for chord in def.default_chords() {
                 by_chord.entry(chord).or_default().push(def);
             }

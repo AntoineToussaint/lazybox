@@ -4,10 +4,13 @@
 //! while it is renamed or reordered. Lifecycle actions update one row in
 //! place, while destructive deletion remains a separate explicit chord.
 
+use crate::realm::keymap::realm_key_to_crossterm;
+use crate::realm::model::helpers::key_event_to_stroke;
 use crate::realm::{Msg, UserEvent};
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use lazybox_core::WorkspaceKey;
 use lazybox_ipc::HopperEntryDraft;
+use lazybox_tui_core::action::{ActionKind, CatalogEntry, Chord, KeyStroke};
 use std::collections::BTreeSet;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
@@ -61,6 +64,56 @@ enum HistoryTarget {
     Item(usize),
 }
 
+/// Resolved lifecycle chords for the Hopper modal, pulled from the
+/// runtime action catalog (#1421) so they honor `ui.action_keys`
+/// overrides, appear in the `?` Keys screen, and are collision-checked
+/// like every other binding. Text-editing keys (arrows, Backspace,
+/// plain characters) stay hardcoded in the editor.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HopperKeys {
+    save: Vec<Chord>,
+    done: Vec<Chord>,
+    cancel: Vec<Chord>,
+    delete: Vec<Chord>,
+    reopen: Vec<Chord>,
+}
+
+impl HopperKeys {
+    /// Extract the resolved Hopper-section chords from the runtime
+    /// catalog (its `ui.action_keys` overrides already applied).
+    pub(crate) fn from_catalog(catalog: &[CatalogEntry]) -> Self {
+        let chords = |kind: ActionKind| {
+            catalog
+                .iter()
+                .find(|entry| entry.kind == kind)
+                .map(|entry| entry.chords.clone())
+                .unwrap_or_default()
+        };
+        Self {
+            save: chords(ActionKind::HopperSave),
+            done: chords(ActionKind::HopperDone),
+            cancel: chords(ActionKind::HopperCancel),
+            delete: chords(ActionKind::HopperDelete),
+            reopen: chords(ActionKind::HopperReopen),
+        }
+    }
+
+    fn hits(chords: &[Chord], stroke: &KeyStroke) -> bool {
+        chords
+            .iter()
+            .any(|chord| matches!(chord, Chord::Key(key) if key == stroke))
+    }
+
+    /// Primary chord for a footer hint (`Ctrl-d`), falling back to the
+    /// default label when a remap left the action unbound.
+    fn hint(chords: &[Chord], fallback: &'static str) -> String {
+        chords
+            .first()
+            .map(|chord| chord.head().display())
+            .unwrap_or_else(|| fallback.to_string())
+    }
+}
+
 /// Modal editor for an ordered set of Hopper workspaces.
 pub struct HopperEditor {
     rows: Vec<Row>,
@@ -71,12 +124,15 @@ pub struct HopperEditor {
     history_cursor: usize,
     expanded_days: BTreeSet<NaiveDate>,
     error: Option<String>,
+    keys: HopperKeys,
 }
 
 impl HopperEditor {
     /// Build the editor from all Hopper workspaces. Active items remain
     /// editable; completed and canceled items move into dated history.
-    pub(crate) fn new(items: Vec<HopperItem>) -> Self {
+    /// `keys` carries the resolved lifecycle chords from the action
+    /// catalog (#1421).
+    pub(crate) fn new(items: Vec<HopperItem>, keys: HopperKeys) -> Self {
         let mut rows = Vec::new();
         let mut history = Vec::new();
         for item in items {
@@ -112,6 +168,7 @@ impl HopperEditor {
             history_cursor: 0,
             expanded_days: BTreeSet::new(),
             error: None,
+            keys,
         }
     }
 
@@ -204,7 +261,11 @@ impl HopperEditor {
             return;
         }
         if self.current().key.is_some() {
-            self.error = Some("Use Ctrl-X to cancel or Ctrl-K to delete this item".into());
+            self.error = Some(format!(
+                "Use {} to cancel or {} to delete this item",
+                HopperKeys::hint(&self.keys.cancel, "Ctrl-x"),
+                HopperKeys::hint(&self.keys.delete, "Ctrl-k"),
+            ));
             return;
         }
         let removed = self.rows.remove(self.row);
@@ -604,11 +665,20 @@ impl Component for HopperEditor {
         let mut help = match self.tab {
             HopperTab::Active => vec![
                 Line::from(vec![
-                    Span::styled("Ctrl-D", Style::default().fg(theme.success).bold()),
+                    Span::styled(
+                        HopperKeys::hint(&self.keys.done, "Ctrl-d"),
+                        Style::default().fg(theme.success).bold(),
+                    ),
                     Span::raw(" done  "),
-                    Span::styled("Ctrl-X", Style::default().fg(theme.text_dim).bold()),
+                    Span::styled(
+                        HopperKeys::hint(&self.keys.cancel, "Ctrl-x"),
+                        Style::default().fg(theme.text_dim).bold(),
+                    ),
                     Span::raw(" cancel  "),
-                    Span::styled("Ctrl-K", Style::default().fg(theme.error).bold()),
+                    Span::styled(
+                        HopperKeys::hint(&self.keys.delete, "Ctrl-k"),
+                        Style::default().fg(theme.error).bold(),
+                    ),
                     Span::raw(" delete line"),
                 ]),
                 Line::from(vec![
@@ -616,7 +686,10 @@ impl Component for HopperEditor {
                     Span::raw(" next item  "),
                     Span::styled("↑↓", Style::default().fg(theme.text_dim).bold()),
                     Span::raw(" move  "),
-                    Span::styled("Ctrl-S", Style::default().fg(theme.success).bold()),
+                    Span::styled(
+                        HopperKeys::hint(&self.keys.save, "Ctrl-s"),
+                        Style::default().fg(theme.success).bold(),
+                    ),
                     Span::raw(" save  "),
                     Span::styled("Esc", Style::default().fg(theme.error).bold()),
                     Span::raw(" close"),
@@ -632,7 +705,10 @@ impl Component for HopperEditor {
                     Span::raw(" day  "),
                     Span::styled("Space", Style::default().fg(theme.success).bold()),
                     Span::raw(" expand/collapse  "),
-                    Span::styled("r", Style::default().fg(theme.success).bold()),
+                    Span::styled(
+                        HopperKeys::hint(&self.keys.reopen, "r"),
+                        Style::default().fg(theme.success).bold(),
+                    ),
                     Span::raw(" reopen item  "),
                     Span::styled("Tab", Style::default().fg(theme.success).bold()),
                     Span::raw(" active  "),
@@ -693,7 +769,9 @@ impl AppComponent<Msg, UserEvent> for HopperEditor {
             return None;
         };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        // Universal modal controls stay local: Esc / Ctrl-C close the
+        // editor and Tab switches tabs — navigation, not lifecycle
+        // actions, so they don't belong in the catalog (#1421).
         if matches!(key.code, Key::Esc) || (ctrl && matches!(key.code, Key::Char('c'))) {
             return Some(Msg::ModalDismissed);
         }
@@ -705,41 +783,43 @@ impl AppComponent<Msg, UserEvent> for HopperEditor {
             self.error = None;
             return None;
         }
+        // Lifecycle chords (done / cancel / delete / save / reopen) are
+        // resolved through the action catalog so they gain remap, `?`
+        // help, and collision-checking. The catalog can't model
+        // text-editing keys (`None` here), which fall through to the
+        // local editor arms below. Cancel/delete carry terminal-portable
+        // Ctrl+letter primaries plus Shift/Ctrl+Delete/Backspace aliases
+        // (see the catalog rows); many emulators send bare 0x7f/0x08 for
+        // Backspace with no modifier bit, so the Ctrl+letter path is the
+        // one every terminal can deliver.
+        let stroke = key_event_to_stroke(realm_key_to_crossterm(key));
         if self.tab == HopperTab::History {
+            if let Some(stroke) = &stroke
+                && HopperKeys::hits(&self.keys.reopen, stroke)
+            {
+                return self.reopen_history_item();
+            }
             match key.code {
                 Key::Up => self.move_history_day(-1),
                 Key::Down => self.move_history_day(1),
                 Key::Char(' ') | Key::Enter => self.toggle_history_day(),
-                Key::Char('r') => return self.reopen_history_item(),
                 _ => return None,
             }
             return None;
         }
-        if ctrl && matches!(key.code, Key::Char('s')) {
-            return self.drafts().map(Msg::HopperSubmitted);
-        }
-        if ctrl && matches!(key.code, Key::Char('d')) {
-            return self.move_current_to_history(Outcome::Done);
-        }
-        // Cancel and delete need chords every terminal can deliver.
-        // Ctrl+letter is the only reliable command idiom inside a text
-        // editor (like Ctrl-S / Ctrl-D above): many emulators send plain
-        // 0x7f/0x08 for Backspace with no modifier bit, so a
-        // modifier+Backspace combo is unreachable there. Ctrl-X (cancel)
-        // and Ctrl-K (delete line) are the primary paths; the
-        // modifier+Delete/Backspace combos below are convenience aliases
-        // for terminals that do report them.
-        if ctrl && matches!(key.code, Key::Char('x')) {
-            return self.move_current_to_history(Outcome::Canceled);
-        }
-        if ctrl && matches!(key.code, Key::Char('k')) {
-            return self.delete_current_line();
-        }
-        if ctrl && matches!(key.code, Key::Delete | Key::Backspace) {
-            return self.delete_current_line();
-        }
-        if shift && matches!(key.code, Key::Delete | Key::Backspace) {
-            return self.move_current_to_history(Outcome::Canceled);
+        if let Some(stroke) = &stroke {
+            if HopperKeys::hits(&self.keys.save, stroke) {
+                return self.drafts().map(Msg::HopperSubmitted);
+            }
+            if HopperKeys::hits(&self.keys.done, stroke) {
+                return self.move_current_to_history(Outcome::Done);
+            }
+            if HopperKeys::hits(&self.keys.cancel, stroke) {
+                return self.move_current_to_history(Outcome::Canceled);
+            }
+            if HopperKeys::hits(&self.keys.delete, stroke) {
+                return self.delete_current_line();
+            }
         }
         match key.code {
             Key::Delete => self.delete_forward(),
@@ -762,6 +842,15 @@ impl AppComponent<Msg, UserEvent> for HopperEditor {
 mod tests {
     use super::*;
     use tuirealm::event::KeyEvent;
+
+    /// The default (unremapped) Hopper lifecycle chords, resolved from
+    /// the action catalog exactly as `mount_hopper` does at runtime.
+    fn keys() -> HopperKeys {
+        HopperKeys::from_catalog(&lazybox_tui_core::action::ActionDef::catalog(
+            &[],
+            &std::collections::BTreeMap::new(),
+        ))
+    }
 
     fn item(name: &str) -> HopperItem {
         HopperItem {
@@ -808,7 +897,7 @@ mod tests {
     fn enter_creates_a_new_identity_without_losing_the_existing_one() {
         let existing = item("First");
         let existing_key = existing.key.clone();
-        let mut editor = HopperEditor::new(vec![existing]);
+        let mut editor = HopperEditor::new(vec![existing], keys());
         editor.on(&key(Key::Up));
         editor.on(&key(Key::End));
         editor.on(&key(Key::Enter));
@@ -825,7 +914,7 @@ mod tests {
         let second = item("Second");
         let first_key = first.key.clone();
         let second_key = second.key.clone();
-        let mut editor = HopperEditor::new(vec![first, second]);
+        let mut editor = HopperEditor::new(vec![first, second], keys());
         editor.on(&key(Key::Up));
         editor.on(&key(Key::Up));
         assert_eq!(
@@ -847,11 +936,48 @@ mod tests {
     }
 
     #[test]
+    fn a_remapped_lifecycle_chord_is_honored_and_the_default_stops_firing() {
+        // #1421: the Hopper lifecycle chords route through the action
+        // catalog, so a `ui.action_keys` remap actually changes what
+        // fires inside the modal.
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("hopper_done".to_string(), "Ctrl-g".to_string());
+        let remapped =
+            HopperKeys::from_catalog(&lazybox_tui_core::action::ActionDef::catalog(&[], &overrides));
+
+        let existing = item("First");
+        let existing_key = existing.key.clone();
+        let mut editor = HopperEditor::new(vec![existing], remapped.clone());
+        editor.on(&key(Key::Up));
+        // The remapped chord marks the item done.
+        assert_eq!(
+            editor.on(&modified(Key::Char('g'), KeyModifiers::CONTROL)),
+            Some(Msg::HopperCompletionRequested {
+                workspace_key: existing_key,
+                completed: true,
+            })
+        );
+        assert_eq!(editor.history.len(), 1);
+
+        // The former default (Ctrl-d) no longer completes an item, and
+        // a stray Ctrl+letter is swallowed rather than typed into a row.
+        let mut editor = HopperEditor::new(vec![item("Second")], remapped);
+        editor.on(&key(Key::Up));
+        assert_eq!(
+            editor.on(&modified(Key::Char('d'), KeyModifiers::CONTROL)),
+            None
+        );
+        assert!(editor.history.is_empty());
+        let drafts = editor.drafts().expect("valid drafts");
+        assert_eq!(drafts[0].name, "Second");
+    }
+
+    #[test]
     fn shifted_delete_and_backspace_cancel_into_history() {
         for code in [Key::Delete, Key::Backspace] {
             let existing = item("First");
             let existing_key = existing.key.clone();
-            let mut editor = HopperEditor::new(vec![existing]);
+            let mut editor = HopperEditor::new(vec![existing], keys());
             editor.on(&key(Key::Up));
             assert_eq!(
                 editor.on(&modified(code, KeyModifiers::SHIFT)),
@@ -872,7 +998,7 @@ mod tests {
         // modifier, so this path must stand on its own.
         let existing = item("First");
         let existing_key = existing.key.clone();
-        let mut editor = HopperEditor::new(vec![existing]);
+        let mut editor = HopperEditor::new(vec![existing], keys());
         editor.on(&key(Key::Up));
         assert_eq!(
             editor.on(&modified(Key::Char('x'), KeyModifiers::CONTROL)),
@@ -889,7 +1015,7 @@ mod tests {
     fn ctrl_k_deletes_whole_line_on_every_terminal() {
         let existing = item("First");
         let existing_key = existing.key.clone();
-        let mut editor = HopperEditor::new(vec![existing]);
+        let mut editor = HopperEditor::new(vec![existing], keys());
         editor.on(&key(Key::Up));
         assert_eq!(
             editor.on(&modified(Key::Char('k'), KeyModifiers::CONTROL)),
@@ -904,7 +1030,7 @@ mod tests {
         for code in [Key::Delete, Key::Backspace] {
             let existing = item("First");
             let existing_key = existing.key.clone();
-            let mut editor = HopperEditor::new(vec![existing]);
+            let mut editor = HopperEditor::new(vec![existing], keys());
             editor.on(&key(Key::Up));
             assert_eq!(
                 editor.on(&modified(code, KeyModifiers::CONTROL)),
@@ -919,7 +1045,7 @@ mod tests {
     fn plain_delete_remains_a_text_editing_key() {
         let existing = item("First");
         let existing_key = existing.key.clone();
-        let mut editor = HopperEditor::new(vec![existing]);
+        let mut editor = HopperEditor::new(vec![existing], keys());
         editor.on(&key(Key::Up));
         assert_eq!(editor.on(&key(Key::Delete)), None);
         let drafts = editor.drafts().expect("valid drafts");
@@ -935,7 +1061,7 @@ mod tests {
         done.completed_at = Some(now);
         let mut canceled = item("Canceled");
         canceled.canceled_at = Some(now);
-        let editor = HopperEditor::new(vec![canceled, done]);
+        let editor = HopperEditor::new(vec![canceled, done], keys());
         let date = now.with_timezone(&Local).date_naive();
         let items = editor.history_indices_for_date(date);
         assert_eq!(items.len(), 2);
@@ -949,7 +1075,7 @@ mod tests {
         let mut done = item("Done");
         let workspace_key = done.key.clone();
         done.completed_at = Some(now);
-        let mut editor = HopperEditor::new(vec![done]);
+        let mut editor = HopperEditor::new(vec![done], keys());
         editor.tab = HopperTab::History;
         editor.toggle_history_day();
         editor.move_history_day(1);
@@ -978,15 +1104,17 @@ mod tests {
 
     #[test]
     fn command_hints_wrap_without_hiding_the_delete_or_save_chords() {
-        let mut editor = HopperEditor::new(vec![item("First")]);
+        let mut editor = HopperEditor::new(vec![item("First")], keys());
         let rendered = render(&mut editor, 60, 24);
         // The help leads with the terminal-portable Ctrl+letter chords,
         // not the modifier+Backspace aliases that emulators may swallow.
-        assert!(rendered.contains("Ctrl-X"), "{rendered}");
+        // Rendered from the resolved catalog chords, so they follow the
+        // catalog's display convention (`Ctrl-x`, not `Ctrl-X`).
+        assert!(rendered.contains("Ctrl-x"), "{rendered}");
         assert!(rendered.contains("cancel"), "{rendered}");
-        assert!(rendered.contains("Ctrl-K"), "{rendered}");
+        assert!(rendered.contains("Ctrl-k"), "{rendered}");
         assert!(rendered.contains("delete line"), "{rendered}");
-        assert!(rendered.contains("Ctrl-S"), "{rendered}");
+        assert!(rendered.contains("Ctrl-s"), "{rendered}");
     }
 
     #[test]
@@ -996,7 +1124,7 @@ mod tests {
         done.completed_at = Some(now);
         let mut canceled = item("Skipped work");
         canceled.canceled_at = Some(now);
-        let mut editor = HopperEditor::new(vec![canceled, done]);
+        let mut editor = HopperEditor::new(vec![canceled, done], keys());
         editor.tab = HopperTab::History;
         editor.toggle_history_day();
         let rendered = render(&mut editor, 90, 28);

@@ -298,6 +298,7 @@ fn section_scope(section: crate::action::Section) -> &'static str {
         Section::Terminal => {
             "active while an embedded terminal has focus (all other keys are forwarded to the program inside)"
         }
+        Section::Hopper => "active while the personal Hopper editor is open",
     }
 }
 

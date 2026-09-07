@@ -289,10 +289,11 @@ impl Help {
 }
 
 const MAX_MODAL_WIDTH: u16 = 132;
-// Tall enough that the full reference — leader index, five section grids,
-// and the sidebar-icon legend (#1046) — fits on a roomy terminal without
-// forcing the scroll affordance; short terminals still overflow and scroll.
-const MAX_MODAL_HEIGHT: u16 = 44;
+// Tall enough that the full reference — leader index, six section grids
+// (including the modal-scoped Hopper section, #1421), and the sidebar-icon
+// legend (#1046) — fits on a roomy terminal without forcing the scroll
+// affordance; short terminals still overflow and scroll.
+const MAX_MODAL_HEIGHT: u16 = 47;
 
 fn grid_columns(width: u16) -> usize {
     if width >= 108 {
@@ -1016,8 +1017,8 @@ mod tests {
         assert!(!out.contains("↑↓"), "no scroll hint when everything fits");
         assert_eq!(tall.scroll, 0, "over-scroll clamps to 0 when it all fits");
 
-        // Short: overflows. At the top the hint shows and the Terminal
-        // row is clipped; scrolling to the end reveals it.
+        // Short: overflows. At the top the hint shows and the bottom
+        // (Hopper) section is clipped; scrolling to the end reveals it.
         let mut short = Help::from_catalog(&catalog, ']');
         let top = render(&mut short, 110, 16);
         assert!(top.contains("↑↓"), "overflow must show the scroll hint");
@@ -1027,15 +1028,15 @@ mod tests {
             "top of the panel is visible at scroll 0"
         );
         assert!(
-            !top.contains("exit to sidebar"),
+            !top.contains("reopen item"),
             "bottom is clipped at scroll 0"
         );
 
         short.scroll = u16::MAX; // End
         let bottom = render(&mut short, 110, 16);
         assert!(
-            bottom.contains("exit to sidebar"),
-            "scrolling reveals the Terminal row"
+            bottom.contains("reopen item"),
+            "scrolling reveals the bottom-most (Hopper) section"
         );
         assert!(bottom.contains('↑'), "hint shows rows scrolled above");
     }

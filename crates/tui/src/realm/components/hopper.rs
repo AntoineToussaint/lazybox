@@ -204,8 +204,10 @@ impl HopperEditor {
             return;
         }
         if self.current().key.is_some() {
-            self.error =
-                Some("Use Ctrl-X to cancel, or Ctrl-Delete (or the sidebar’s delete) to remove it".into());
+            self.error = Some(
+                "Use Ctrl-X to cancel, or Ctrl-Delete (or the sidebar’s delete) to remove it"
+                    .into(),
+            );
             return;
         }
         let removed = self.rows.remove(self.row);

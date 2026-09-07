@@ -3063,7 +3063,7 @@ mod search_tests {
         sb.open_search();
         type_query(&mut sb, "al");
         let bar = search_bar_row(&mut sb);
-        assert!(bar.contains('🔍'), "search glyph present: {bar:?}");
+        assert!(bar.contains('⌕'), "search glyph present: {bar:?}");
         assert!(bar.contains('█'), "block cursor while editing: {bar:?}");
         assert!(bar.contains("al"), "shows the typed query: {bar:?}");
     }

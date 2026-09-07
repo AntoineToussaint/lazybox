@@ -474,7 +474,7 @@ impl Sidebar {
         let counters_spec: [(&str, usize, &str, ratatui::style::Color); 5] = [
             ("●", unread, "new", theme.hover),
             ("?", input_pending, "input", theme.warn),
-            ("⏳", limited, "limited", theme.warn),
+            ("⧗", limited, "limited", theme.warn),
             ("✗", ci_failing, "CI", theme.error),
             ("◔", review_pending, "review", theme.accent),
         ];
@@ -1116,9 +1116,11 @@ impl Sidebar {
                     } else {
                         crate::components::workspace_row::CURSOR_BAR
                     };
+                    // Issues are not a hot color: red / magenta is for
+                    // things that are wrong, and an issue is just work.
                     let color = match kind {
                         WorkspaceKind::Pr => theme.success,
-                        WorkspaceKind::Issue => theme.hover,
+                        WorkspaceKind::Issue => theme.text_strong,
                         WorkspaceKind::Other => theme.text_dim,
                     };
                     let marker = kind.header_marker();
@@ -1244,7 +1246,7 @@ impl Sidebar {
             if field {
                 frame.render_widget(Block::default().style(Style::default().bg(theme.fill)), bar);
             }
-            let prefix = if global { "🔍 ⌕ " } else { "🔍 /" };
+            let prefix = if global { "⌕⌕ " } else { "⌕ /" };
             let mut spans = vec![
                 Span::styled(
                     prefix,

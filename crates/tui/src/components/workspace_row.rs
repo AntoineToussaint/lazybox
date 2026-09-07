@@ -434,14 +434,17 @@ fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         // Color the glyph by source so PR / GitHub issue / Linear are
         // distinguishable at a glance — they used to share one dim grey,
         // which hid the Linear `◆` entirely. Mirrors the section-header
-        // markers (PR → success, issue → hover) and gives Linear the
-        // accent tone. The branch order matches `workspace_type_label`,
-        // so if a glyph rendered, exactly one arm matches; the final
-        // arm is Linear (the only other glyph-bearing kind).
+        // markers (PR → success, issue → strong text) and gives Linear
+        // the accent tone. Issues are deliberately NOT a hot color: red /
+        // magenta is reserved for things that are wrong (failing CI,
+        // conflicts, blocked), and an issue is just work. The branch order
+        // matches `workspace_type_label`, so if a glyph rendered, exactly
+        // one arm matches; the final arm is Linear (the only other
+        // glyph-bearing kind).
         let color = if workspace.pr.is_some() {
             ctx.theme.success
         } else if !workspace.gh_issues.is_empty() {
-            ctx.theme.hover
+            ctx.theme.text_strong
         } else {
             ctx.theme.accent
         };
@@ -562,17 +565,17 @@ fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let (glyph, fg) = if ctx.credit_exhausted {
         ("¢", ctx.theme.warn)
     } else if ctx.limit_reached {
-        ("⏳", ctx.theme.warn)
+        ("⧗", ctx.theme.warn)
     } else if ctx.asking {
         ("?", ctx.theme.warn)
     } else if ctx.working {
         (ctx.working_glyph, ctx.theme.accent)
     } else if ctx.awaiting_reset {
         // The calm auto-waiting block: parked until reset, handled — a quiet
-        // 💤 in the dim text color, NOT an alert. Below `working` so a live
-        // sibling's spinner wins; above `done` so a still-parked agent shows
-        // over a merely-finished one.
-        ("💤", ctx.theme.text_dim)
+        // ◌ (hollow, "on hold") in the dim text color, NOT an alert. Below
+        // `working` so a live sibling's spinner wins; above `done` so a
+        // still-parked agent shows over a merely-finished one.
+        ("◌", ctx.theme.text_dim)
     } else if ctx.done {
         ("✓", ctx.theme.success)
     } else if ctx.spawning {
@@ -1177,19 +1180,21 @@ fn cell_stack(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     ))
 }
 
-/// The ` ⛔N ` dependency badge (#1521): this workspace's tasks declare `N`
+/// The ` ⊘N ` dependency badge (#1521): this workspace's tasks declare `N`
 /// blockers (a native GitHub/Linear relation or a `Blocked by:` / `Depends
 /// on:` body marker). A free-text `Blocked on:` reason with no dependency
-/// edge renders ` ⛔! ` instead — still blocked, but the count is meaning-
+/// edge renders ` ⊘! ` instead — still blocked, but the count is meaning-
 /// less, so `!` stands in. Uses `theme.error` bold because "waiting on
 /// something else" is the one passive-cluster badge that gates starting
 /// work. P0 does not resolve whether the blockers are still open; the
 /// number is the declared edge count. Packs into the shared cluster (#813).
+/// `⊘` (a monochrome "circled slash"), not the `⛔` emoji: the sidebar's
+/// glyph set is monochrome text symbols, and the color carries the alarm.
 fn cell_blocked(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let label = if ctx.blocked_by > 0 {
-        format!(" ⛔{} ", ctx.blocked_by)
+        format!(" ⊘{} ", ctx.blocked_by)
     } else if ctx.blocked_on {
-        " ⛔! ".to_string()
+        " ⊘! ".to_string()
     } else {
         return Cell::empty();
     };
@@ -1361,10 +1366,12 @@ fn cell_origin_issue(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     } else {
         format!(" {arrow}{id} ")
     };
+    // A reference, not a signal: dim, so it never competes with the
+    // alarm colors (red / magenta are for things that are wrong).
     let style = if ctx.is_cursor {
         ctx.row_style()
     } else {
-        Style::default().fg(ctx.theme.hover)
+        Style::default().fg(ctx.theme.text_dim)
     };
     Cell::from_span(Span::styled(label, style))
 }
@@ -3061,8 +3068,8 @@ mod tests {
         assert_eq!(cell_text(&cell), " ←298 ");
         assert_eq!(
             cell.spans[0].style.fg,
-            Some(theme.hover),
-            "coloured as an issue reference, not as more PR metadata",
+            Some(theme.text_dim),
+            "a reference is dim — never the hot colors reserved for things that are wrong",
         );
 
         // More than one closed issue: name the first, count the rest.
@@ -3254,13 +3261,13 @@ mod tests {
         assert_eq!(cell_blocked(&ctx).width(), 0, "no blockers, no badge");
         ctx.blocked_by = 2;
         let cell = cell_blocked(&ctx);
-        assert_eq!(cell.spans[0].content.as_ref(), " ⛔2 ");
+        assert_eq!(cell.spans[0].content.as_ref(), " ⊘2 ");
         ctx.blocked_by = 0;
         ctx.blocked_on = true;
         let cell = cell_blocked(&ctx);
         assert_eq!(
             cell.spans[0].content.as_ref(),
-            " ⛔! ",
+            " ⊘! ",
             "a bare declared reason shows the sentinel, not a count"
         );
     }
@@ -4281,7 +4288,7 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        assert_eq!(info, " ⎇ local  ✎  ]2  🔧 ");
+        assert_eq!(info, " ⎇ local  ✎  ]2  ⚙\u{FE0E} ");
         let arms: String = cell_merge_arms(&ctx0)
             .spans
             .iter()
@@ -4304,7 +4311,7 @@ mod tests {
 
         // The all-badges row shows both clusters, arms right of the info;
         // the badge-less row shows none of them.
-        assert!(l0.contains(" ⎇ local  ✎  ]2  🔧  ⚡ "), "{l0:?}");
+        assert!(l0.contains(" ⎇ local  ✎  ]2  ⚙\u{FE0E}  ⚡ "), "{l0:?}");
         assert!(l1.contains('✎'), "{l1:?}");
         assert!(
             !l2.contains('✎') && !l2.contains('⎇') && !l2.contains('⚡'),

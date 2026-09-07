@@ -2452,7 +2452,7 @@ const BUILD_MISMATCH_PREFIX: &str = "build mismatch: daemon ";
 /// recognise our own banner so a repeating ping refreshes it and the
 /// falling edge (all agents recovered) retracts it — without touching a
 /// build-mismatch / sync-error banner some other path raised.
-const USAGE_LIMIT_PREFIX: &str = "⏳ ";
+const USAGE_LIMIT_PREFIX: &str = "⧗ ";
 
 /// How many recently-used snippets the picker's "Recent" group holds
 /// (#252). Small enough to stay a shortcut list, not a second library —

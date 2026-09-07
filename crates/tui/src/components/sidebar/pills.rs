@@ -307,7 +307,7 @@ pub(crate) fn pill_for_tag(tag: lazybox_core::StatusTag) -> Option<StatusPill> {
 // the sidebar.
 pub(crate) const ARM_GLYPH: &str = "⚡"; // lazybox client-side merge-on-green
 pub(crate) const AUTO_GLYPH: &str = "◆"; // GitHub-native auto-merge
-pub(crate) const FIX_GLYPH: &str = "🔧"; // auto-fix armed
+pub(crate) const FIX_GLYPH: &str = "⚙\u{FE0E}"; // auto-fix armed (text-presentation gear, not the emoji wrench)
 pub(crate) const TRACK_GLYPH: &str = "⤓"; // track-main (auto-sync to default branch)
 pub(crate) const CLAIM_GLYPH: &str = "⚑"; // cross-machine working claim (owner-qualified lease, or a preserved legacy `working` label)
 

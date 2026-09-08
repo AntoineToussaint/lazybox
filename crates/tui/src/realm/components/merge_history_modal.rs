@@ -257,18 +257,22 @@ impl MergeHistoryModal {
                 Style::default().fg(theme.text_dim).italic(),
             ))]
         } else {
-            row.body
-                .lines()
-                .flat_map(|raw| {
-                    wrap_one(
-                        Line::from(Span::styled(
-                            raw.to_string(),
-                            Style::default().fg(theme.text_dim),
-                        )),
-                        area.width,
-                    )
-                })
-                .collect()
+            // Render as markdown (#1560), not as dimmed raw text. A PR body
+            // is markdown by construction — headings, bullets, `code`,
+            // **bold** — and printing it verbatim left `## Summary` and
+            // `**path**` on screen as literal punctuation, which is exactly
+            // the noise the reader has to look past. `render_body` is the
+            // same pass the activity pane uses, so a body reads the same
+            // here as it does in the feed. (The `Enter` reader is richer
+            // still — tables and links via `render_markdown`.)
+            //
+            // This pane does not scroll, so only the rows below the
+            // heading/meta are ever visible: cap the body to that many
+            // lines rather than to an arbitrary constant. `render_body`
+            // collapses the rest to a "+N more lines" row, and `Enter`
+            // opens the whole body in the reader.
+            let body_budget = usize::from(area.height).saturating_sub(lines.len()).max(1);
+            crate::components::comment_render::render_body(&row.body, area.width, body_budget)
         };
         lines.extend(body);
         frame.render_widget(Paragraph::new(lines), area);
@@ -495,6 +499,61 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// #1560: the preview renders the PR body as markdown, not as dimmed
+    /// raw text. A PR body is markdown by construction, so printing it
+    /// verbatim left `## Summary` and `**bold**` on screen as literal
+    /// punctuation — noise the reader has to look past on every row.
+    #[test]
+    fn body_preview_renders_markdown_rather_than_raw_source() {
+        let body = "Closes #396.\n\n## Summary\n\n- referenced by **path**, not by `source/pin`\n";
+        let rows = [task(397, "fix: provision defaults", "someone", Some(body))];
+        let mut m = MergeHistoryModal::resolved("o/r", &rows, None, Utc::now());
+        let screen = render(&mut m, 96, 24);
+
+        assert!(
+            screen.contains("Summary"),
+            "heading text survives: {screen}"
+        );
+        assert!(
+            !screen.contains("## Summary"),
+            "the heading's `##` must be rendered, not printed: {screen}"
+        );
+        assert!(
+            !screen.contains("**path**"),
+            "bold markers must be rendered, not printed: {screen}"
+        );
+        assert!(
+            screen.contains("path"),
+            "the emphasised word itself survives: {screen}"
+        );
+    }
+
+    /// A body taller than the (non-scrolling) preview pane is capped to the
+    /// pane's visible height, so the truncation marker lands on screen where
+    /// the user can see it and reach for `Enter`. A fixed oversized cap (the
+    /// old `MAX_BODY_LINES = 400`) would clip a 40-line body silently — no
+    /// marker, no cue that the rest exists.
+    #[test]
+    fn long_body_is_capped_to_the_visible_pane_not_a_fixed_constant() {
+        let body = (1..=40)
+            .map(|i| format!("- item {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let rows = [task(
+            398,
+            "chore: long body",
+            "someone",
+            Some(body.as_str()),
+        )];
+        let mut m = MergeHistoryModal::resolved("o/r", &rows, None, Utc::now());
+        let screen = render(&mut m, 96, 24);
+
+        assert!(
+            screen.contains("more lines"),
+            "a body taller than the pane shows the `+N more lines` marker: {screen}"
+        );
     }
 
     #[test]

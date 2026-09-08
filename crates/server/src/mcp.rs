@@ -932,10 +932,7 @@ impl LazyboxMcp {
 
         let name = args.workspace_name.trim();
         if name.is_empty() {
-            return Err(McpError::invalid_request(
-                "workspace_name is empty",
-                None,
-            ));
+            return Err(McpError::invalid_request("workspace_name is empty", None));
         }
 
         // Create → assign → set role. Each persists; the spawn (in the payload
@@ -971,9 +968,7 @@ impl LazyboxMcp {
         }
         if brief.len() > MAX_NOTE_BYTES {
             return Err(McpError::invalid_request(
-                format!(
-                    "brief exceeds {MAX_NOTE_BYTES} bytes (hand a distilled task, not a dump)"
-                ),
+                format!("brief exceeds {MAX_NOTE_BYTES} bytes (hand a distilled task, not a dump)"),
                 None,
             ));
         }
@@ -1890,8 +1885,11 @@ mod tests {
 
     /// Create an epic with the given members (by key). Not archived.
     async fn seed_epic(config: &ServerConfig, key: &str, members: &[&str]) {
-        let mut record =
-            lazybox_core::EpicRecord::new(lazybox_core::EpicKey::new(key), "Epic", chrono::Utc::now());
+        let mut record = lazybox_core::EpicRecord::new(
+            lazybox_core::EpicKey::new(key),
+            "Epic",
+            chrono::Utc::now(),
+        );
         record.members = members
             .iter()
             .map(|m| lazybox_core::WorkspaceKey::new(*m))
@@ -1996,7 +1994,10 @@ mod tests {
 
         // …and it is a member of the coordinator's epic.
         let records = crate::epics::list_all(&config).expect("epics");
-        let epic = records.iter().find(|r| r.key.as_str() == "e").expect("epic e");
+        let epic = records
+            .iter()
+            .find(|r| r.key.as_str() == "e")
+            .expect("epic e");
         assert!(
             epic.members.contains(&prepared.key),
             "the worker must be assigned to the epic: {:?}",

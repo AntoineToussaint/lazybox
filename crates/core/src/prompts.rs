@@ -1098,7 +1098,11 @@ mod tests {
     #[test]
     fn integrator_preamble_names_the_merge_order() {
         let ctx = RolePromptCtx {
-            merge_order: vec!["p0 (#1521)".into(), "p1 (#1522)".into(), "p2 (#1523)".into()],
+            merge_order: vec![
+                "p0 (#1521)".into(),
+                "p1 (#1522)".into(),
+                "p2 (#1523)".into(),
+            ],
             ..role_ctx()
         };
         let p = role_preamble(crate::Role::Integrator, &ctx);

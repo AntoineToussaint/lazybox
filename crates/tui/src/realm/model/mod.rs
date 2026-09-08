@@ -1075,7 +1075,9 @@ pub(crate) enum ModalFlow {
     /// `E r` orchestration-role picker (#1523): the target workspace,
     /// fixed when the picker mounts, that the pick's
     /// `Command::SetWorkspaceRole` addresses.
-    SetRole { workspace: lazybox_core::WorkspaceKey },
+    SetRole {
+        workspace: lazybox_core::WorkspaceKey,
+    },
     /// Prompt-history picker (#523) → resend into this terminal.
     PromptHistory { terminal: lazybox_ipc::TerminalId },
     /// Editors-panel add/edit form (#1102). Carries the current stage so

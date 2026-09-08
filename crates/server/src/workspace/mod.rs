@@ -882,13 +882,9 @@ pub async fn set_metered(config: &ServerConfig, key: &WorkspaceKey, enabled: boo
 /// `WorkspaceUpserted` so the sidebar role badge refreshes). `role: None`
 /// clears it. Also projects a `role:<role>` upstream label so the role is
 /// visible to other tools and survives a rebuild-from-scratch — see
-/// [`project_role_label`], called after the persist so a failed label write
+/// `project_role_label`, called after the persist so a failed label write
 /// never blocks the local state change.
-pub async fn set_role(
-    config: &ServerConfig,
-    key: &WorkspaceKey,
-    role: Option<lazybox_core::Role>,
-) {
+pub async fn set_role(config: &ServerConfig, key: &WorkspaceKey, role: Option<lazybox_core::Role>) {
     let primary = {
         let _ws_guard = config.lock_workspace(key.as_str()).await;
         let Some(mut workspace) = load_workspace_offloaded(config, key).await else {

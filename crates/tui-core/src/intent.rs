@@ -761,13 +761,11 @@ pub fn resolve_spawn_agent(workspace: Option<&Workspace>, agent_id: &str) -> Int
 /// the substance is the role preamble the server prepends; this only has
 /// to be non-empty so `spawn_handler`'s `initial_prompt.is_some()` gate
 /// fires and the preamble actually frames the brief.
-pub const PLANNER_KICKOFF: &str =
-    "Begin: carve this epic into sibling briefs, design the issues, and emit the \
+pub const PLANNER_KICKOFF: &str = "Begin: carve this epic into sibling briefs, design the issues, and emit the \
      machine-readable dependency graph as described above.";
 
 /// Kickoff line seeded into a Coordinator spawn (`E c`).
-pub const COORDINATOR_KICKOFF: &str =
-    "Begin: take ownership of this epic — read status from `epic_status`, pull ready \
+pub const COORDINATOR_KICKOFF: &str = "Begin: take ownership of this epic — read status from `epic_status`, pull ready \
      work from `epic_ready`, brief siblings, and start workers with `spawn_worker`.";
 
 /// Resolve `E p` (spawn Planner) / `E c` (spawn Coordinator): stamp the
@@ -801,7 +799,12 @@ pub fn resolve_spawn_role(
 
 /// Resolve `E p` — spawn a Planner on the cursor workspace.
 pub fn resolve_spawn_planner(workspace: Option<&Workspace>, agent_id: &str) -> Intent {
-    resolve_spawn_role(workspace, agent_id, lazybox_core::Role::Planner, PLANNER_KICKOFF)
+    resolve_spawn_role(
+        workspace,
+        agent_id,
+        lazybox_core::Role::Planner,
+        PLANNER_KICKOFF,
+    )
 }
 
 /// Resolve `E c` — spawn a Coordinator on the cursor workspace.

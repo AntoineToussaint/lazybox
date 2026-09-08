@@ -4385,7 +4385,7 @@ impl<T: TerminalAdapter> Model<T> {
         let builtin_label = lazybox_core::AgentModels::builtin(agent_id)
             .and_then(|b| b.default)
             .and_then(|a| models.tier(&a))
-            .map(|t| t.label.clone());
+            .map(tier_row_label);
         // Each row pairs its label with the tier alias it pins (`None`
         // = agent default), carried as the payload (#512).
         type ModelRow = (String, Option<String>);
@@ -4399,10 +4399,7 @@ impl<T: TerminalAdapter> Model<T> {
         // Fable-class tiers stay spawnable via an explicit chord but
         // are never offered as a default.
         for tier in models.tiers.iter().filter(|t| !t.excluded_from_default()) {
-            items.push((
-                format!("{}  ·  {}", tier.label, tier.alias),
-                Some(tier.alias.clone()),
-            ));
+            items.push((tier_row_label(tier), Some(tier.alias.clone())));
         }
         let start = models
             .default
@@ -7406,4 +7403,17 @@ fn home_dir() -> Option<std::path::PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from)
+}
+
+/// A default-model picker row: the tier's label, its alias chord, and the
+/// model id it actually pins. The id is what makes the row's decision
+/// checkable — a label like "Opus" says nothing about which Opus, and the
+/// pinned model is what a bare spawn passes as `--model` regardless of
+/// what the agent's own settings say (#1568). Tiers that select a model
+/// some other way keep the two-part row.
+fn tier_row_label(tier: &lazybox_core::ModelTier) -> String {
+    match tier.model_id() {
+        Some(model) => format!("{}  ·  {}  ·  {}", tier.label, tier.alias, model),
+        None => format!("{}  ·  {}", tier.label, tier.alias),
+    }
 }

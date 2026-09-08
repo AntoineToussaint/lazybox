@@ -173,10 +173,75 @@ mod tests {
         assert_eq!(m.default.as_deref(), Some("L"));
         assert_eq!(
             m.resolve_args(None),
-            vec!["--model".to_string(), "claude-opus-4-8".to_string()]
+            vec!["--model".to_string(), "claude-opus-5".to_string()]
         );
         let default_tier = m.tier(m.default.as_deref().unwrap()).unwrap();
         assert!(!default_tier.excluded_from_default());
+    }
+
+    /// The pinned ids are bare — a `[1m]` long-context suffix bills at a
+    /// premium past 200k tokens, which a bare spawn must not opt into.
+    #[test]
+    fn builtin_claude_tiers_pin_bare_model_ids() {
+        let m = AgentModels::builtin("claude").unwrap();
+        assert_eq!(
+            m.tiers
+                .iter()
+                .map(|t| t.model_id().expect("every built-in tier pins a model"))
+                .collect::<Vec<_>>(),
+            vec!["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"]
+        );
+    }
+
+    #[test]
+    fn model_id_reads_both_flag_spellings() {
+        let tier = |args: &[&str]| ModelTier {
+            alias: "X".into(),
+            label: "X".into(),
+            short: None,
+            args: args.iter().map(|a| (*a).to_string()).collect(),
+        };
+        assert_eq!(
+            tier(&["--model", "claude-opus-5"]).model_id(),
+            Some("claude-opus-5")
+        );
+        assert_eq!(
+            tier(&["--model=claude-opus-5"]).model_id(),
+            Some("claude-opus-5")
+        );
+        assert_eq!(tier(&["-m", "gpt-5"]).model_id(), Some("gpt-5"));
+        assert_eq!(
+            tier(&["--reasoning-effort", "max", "--model", "opus"]).model_id(),
+            Some("opus")
+        );
+        assert_eq!(tier(&["--reasoning-effort", "max"]).model_id(), None);
+    }
+
+    #[test]
+    fn overlay_tiers_replaces_in_place_and_appends_the_rest() {
+        let mut m = AgentModels::builtin("claude").unwrap();
+        m.overlay_tiers(&[
+            ModelTier {
+                alias: "L".into(),
+                label: "Opus".into(),
+                short: Some("Op".into()),
+                args: vec!["--model".into(), "claude-opus-5[1m]".into()],
+            },
+            ModelTier {
+                alias: "B".into(),
+                label: "Opus · max".into(),
+                short: None,
+                args: vec!["--model".into(), "claude-opus-5".into()],
+            },
+        ]);
+        // `L` kept its slot (menu order is display order); `B` appended.
+        assert_eq!(
+            m.tiers.iter().map(|t| t.alias.as_str()).collect::<Vec<_>>(),
+            vec!["S", "M", "L", "B"]
+        );
+        assert_eq!(m.tier("L").unwrap().model_id(), Some("claude-opus-5[1m]"));
+        // The tiers the overlay didn't mention survive untouched.
+        assert_eq!(m.tier("M").unwrap().model_id(), Some("claude-sonnet-5"));
     }
 
     #[test]
@@ -221,7 +286,7 @@ mod tests {
         // And each alias resolves to that tier's model args.
         assert_eq!(
             m.resolve_args(m.alias_for_priority(PriorityTier::High)),
-            vec!["--model".to_string(), "claude-opus-4-8".to_string()]
+            vec!["--model".to_string(), "claude-opus-5".to_string()]
         );
         assert_eq!(
             m.resolve_args(m.alias_for_priority(PriorityTier::Low)),
@@ -315,6 +380,28 @@ impl ModelTier {
         self.args
             .iter()
             .any(|a| a.to_ascii_lowercase().contains("fable"))
+    }
+
+    /// The model id this tier pins, read out of its own args — the value
+    /// after a `--model` / `-m` flag, in either the separate-arg or
+    /// `--model=<id>` spelling. `None` for a tier that selects a model
+    /// some other way (or none at all). Surfaced so the *decision* a tier
+    /// encodes is visible where a user picks it, instead of hiding behind
+    /// a label like "Opus" (#1568).
+    pub fn model_id(&self) -> Option<&str> {
+        let mut args = self.args.iter();
+        while let Some(arg) = args.next() {
+            if let Some(id) = arg
+                .strip_prefix("--model=")
+                .or_else(|| arg.strip_prefix("-m="))
+            {
+                return Some(id);
+            }
+            if arg == "--model" || arg == "-m" {
+                return args.next().map(String::as_str);
+            }
+        }
+        None
     }
 }
 
@@ -454,6 +541,20 @@ impl AgentModels {
             .unwrap_or_default()
     }
 
+    /// Layer `tiers` onto this menu by alias: a declared tier replaces
+    /// the same-alias tier in place (keeping menu order), an unknown
+    /// alias appends. So a user can retune one tier without re-declaring
+    /// the built-in menu around it — and without silently dropping the
+    /// tiers and priority mappings they didn't mention (#1568).
+    pub fn overlay_tiers(&mut self, tiers: &[ModelTier]) {
+        for tier in tiers {
+            match self.tiers.iter_mut().find(|t| t.alias == tier.alias) {
+                Some(existing) => *existing = tier.clone(),
+                None => self.tiers.push(tier.clone()),
+            }
+        }
+    }
+
     /// Built-in tier menu for a known agent id, or `None` for an agent
     /// lazybox ships no model presets for. Only Claude ships presets —
     /// its model flag (`--model`) takes stable aliases; Codex / Cursor
@@ -463,7 +564,15 @@ impl AgentModels {
             // Claude's default tier is pinned so a bare spawn always
             // passes an explicit `--model`. With no flag, Claude Code
             // falls back to its own ambient account/CLI default, which
-            // can resolve to a non-coding model (Fable).
+            // can resolve to a non-coding model (Fable). The pin wins
+            // over the user's `~/.claude/settings.json` `model`, so
+            // config load warns when the two disagree
+            // (`Config::pinned_model_warnings`).
+            //
+            // The ids stay bare — no `[1m]` long-context suffix. The 1M
+            // window bills at a premium past 200k tokens, which a bare
+            // spawn must not opt into silently; a user who wants it
+            // declares it as a tier of their own.
             "claude" => Some(AgentModels {
                 default: Some("L".into()),
                 tiers: vec![
@@ -485,7 +594,7 @@ impl AgentModels {
                         // "Op", not "O": a lone capital O reads as the
                         // digit zero in most monospace fonts ("◆0??").
                         short: Some("Op".into()),
-                        args: vec!["--model".into(), "claude-opus-4-8".into()],
+                        args: vec!["--model".into(), "claude-opus-5".into()],
                     },
                 ],
                 // A declared priority routes to the matching tier:

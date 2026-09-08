@@ -18071,7 +18071,7 @@ mod tests {
             false,
             None,
             None,
-            &["--model".to_string(), "claude-opus-4-8".to_string()],
+            &["--model".to_string(), "claude-opus-5".to_string()],
             false,
         )
         .expect("claude registered");
@@ -18080,7 +18080,7 @@ mod tests {
             vec![
                 "claude".to_string(),
                 "--model".to_string(),
-                "claude-opus-4-8".to_string(),
+                "claude-opus-5".to_string(),
             ]
         );
     }

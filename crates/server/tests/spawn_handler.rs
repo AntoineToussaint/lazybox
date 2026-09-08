@@ -1269,7 +1269,7 @@ async fn restored_agent_keeps_model_tier_across_respawn() {
             .unwrap();
 
         // `M` is Claude's Sonnet tier — distinct from the default `L` (Opus) so
-        // a lost alias would surface as `claude-opus-4-8` in the restored argv.
+        // a lost alias would surface as `claude-opus-5` in the restored argv.
         lazybox_server::spawn_handler::handle_spawn(
             &first_config,
             workspace_key.as_str().into(),

@@ -10060,6 +10060,28 @@ mod modal_input_responsiveness_tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    /// A picker row names the model it pins, not just the tier word:
+    /// "Opus" alone can't be checked against what a bare spawn actually
+    /// passes as `--model` (#1568).
+    #[test]
+    fn default_model_picker_rows_show_the_resolved_model_id() {
+        let claude = lazybox_core::AgentModels::builtin("claude").unwrap();
+        assert_eq!(
+            crate::realm::model::tier_row_label(claude.tier("L").unwrap()),
+            "Opus  ·  L  ·  claude-opus-5"
+        );
+        // A tier that selects its model some other way keeps a two-part row.
+        assert_eq!(
+            crate::realm::model::tier_row_label(&lazybox_core::ModelTier {
+                alias: "X".into(),
+                label: "House".into(),
+                short: None,
+                args: vec!["--profile".into(), "house".into()],
+            }),
+            "House  ·  X"
+        );
+    }
+
     /// A tier pinning a Fable-class model is never offered as a
     /// default — the picker filters rows on `excluded_from_default()`,
     /// so the Fable tier drops while the standard tiers stay (the tier

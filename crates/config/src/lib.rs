@@ -2661,48 +2661,52 @@ impl Config {
         ui
     }
 
-    /// The model-tier menu for `agent_id`: the user's `agents.<id>.models`
-    /// block when it defines any tiers, else the built-in preset for a
-    /// known agent, else an empty menu (agent's own default model, no
-    /// tier chords). A configured block with an empty `tiers` list is
-    /// treated as "unset" so it transparently inherits the built-in —
-    /// except its `default` and `priority`, which overlay the inherited
-    /// menu: `default` replaces the inherited default, and each `priority`
-    /// the user maps replaces just that priority's inherited mapping (the
-    /// ones they omit stay inherited). So `agents.<id>.models.default: L`
-    /// alone (the Settings default-model pick) or adding a single
-    /// `priority.best: B` works without copying the whole tier list into
-    /// YAML and without silently dropping the built-in `high`/`medium`/`low`
-    /// mappings. A `default` naming a Fable tier is never honored — it
-    /// re-points to the first default-eligible tier.
+    /// The model-tier menu for `agent_id`: the built-in preset for a known
+    /// agent (an empty menu otherwise — the agent's own default model, no
+    /// tier chords) with the user's `agents.<id>.models` block layered on
+    /// top, field by field. `default` replaces the inherited default; each
+    /// `priority` the user maps replaces just that priority's inherited
+    /// mapping; and each declared tier replaces the same-alias built-in
+    /// tier in place, appending if the alias is new. So retuning one tier
+    /// (`tiers: [{alias: L, args: [...]}]`) keeps the rest of the menu and
+    /// the built-in priority routing, instead of replacing the whole menu
+    /// and silently losing them (#1568). A `default` naming a Fable tier is
+    /// never honored — it re-points to the built-in default when that is
+    /// eligible, else to the first eligible tier.
     pub fn agent_models(&self, agent_id: &str) -> lazybox_core::AgentModels {
-        let mut models = match self.agents.get(agent_id) {
-            Some(entry) if !entry.models.tiers.is_empty() => entry.models.clone(),
-            entry => {
-                let mut models = lazybox_core::AgentModels::builtin(agent_id).unwrap_or_default();
-                if let Some(entry) = entry {
-                    if let Some(default) = entry.models.default.clone() {
-                        models.default = Some(default);
-                    }
-                    models.priority.overlay(&entry.models.priority);
-                }
-                models
+        let builtin = lazybox_core::AgentModels::builtin(agent_id).unwrap_or_default();
+        let mut models = builtin.clone();
+        if let Some(entry) = self.agents.get(agent_id) {
+            if let Some(default) = entry.models.default.clone() {
+                models.default = Some(default);
             }
-        };
-        // A default pointing at a Fable tier is re-pointed to the first
-        // eligible tier: creative-class models stay spawnable through an
-        // explicit chord but are never what a bare spawn lands on.
+            models.priority.overlay(&entry.models.priority);
+            models.overlay_tiers(&entry.models.tiers);
+        }
+        // A default pointing at a Fable tier is re-pointed: creative-class
+        // models stay spawnable through an explicit chord but are never
+        // what a bare spawn lands on. Prefer the built-in default so the
+        // re-point lands on the tier lazybox pins, not on whichever
+        // eligible tier happens to sort first (Haiku).
         if models
             .default
             .as_deref()
             .and_then(|d| models.tier(d))
             .is_some_and(lazybox_core::ModelTier::excluded_from_default)
         {
-            models.default = models
-                .tiers
-                .iter()
-                .find(|t| !t.excluded_from_default())
-                .map(|t| t.alias.clone());
+            let eligible = |alias: &str| {
+                models
+                    .tier(alias)
+                    .is_some_and(|t| !t.excluded_from_default())
+                    .then(|| alias.to_string())
+            };
+            models.default = builtin.default.as_deref().and_then(eligible).or_else(|| {
+                models
+                    .tiers
+                    .iter()
+                    .find(|t| !t.excluded_from_default())
+                    .map(|t| t.alias.clone())
+            });
         }
         models
     }
@@ -2729,6 +2733,50 @@ impl Config {
                     })
             })
             .collect()
+    }
+
+    /// Warnings for a Claude Code `model` setting lazybox's pinned default
+    /// tier silently overrides. `ambient` is the `model` value from the
+    /// user's own `~/.claude/settings.json` (see [`Self::ambient_claude_model`]).
+    ///
+    /// A bare spawn appends the default tier's args, and `--model` is the
+    /// highest-precedence model source in Claude Code — so whatever the
+    /// user set in their own settings (or with `/model`) is never
+    /// consulted. That is deliberate (a bare spawn must not land on a
+    /// non-coding ambient default), but it is invisible: the badge shows
+    /// the tier label, not where the model came from. Saying it out loud
+    /// at config load makes the override discoverable (#1568).
+    pub fn pinned_model_warnings(&self, ambient: Option<&str>) -> Vec<String> {
+        let Some(ambient) = ambient.map(str::trim).filter(|a| !a.is_empty()) else {
+            return Vec::new();
+        };
+        let models = self.agent_models("claude");
+        let Some(tier) = models.default.as_deref().and_then(|d| models.tier(d)) else {
+            return Vec::new();
+        };
+        let Some(pinned) = tier.model_id().filter(|pinned| *pinned != ambient) else {
+            return Vec::new();
+        };
+        let (alias, label) = (&tier.alias, &tier.label);
+        vec![format!(
+            "~/.claude/settings.json sets model {ambient:?}, but every bare Claude spawn \
+             passes --model {pinned} from lazybox's {alias:?} tier ({label}) and wins — \
+             the settings value is ignored. To spawn {ambient:?} instead, set \
+             agents.claude.models.tiers to \
+             [{{ alias: {alias}, args: [--model, {ambient}] }}]"
+        )]
+    }
+
+    /// The `model` the user set in their own `~/.claude/settings.json`, if
+    /// any — the value lazybox's pinned default tier overrides on every
+    /// bare Claude spawn. A missing, unreadable, or malformed settings
+    /// file simply means "no ambient model to conflict with".
+    pub fn ambient_claude_model() -> Option<String> {
+        let home = std::env::var_os("HOME")?;
+        let path = PathBuf::from(home).join(".claude").join("settings.json");
+        let text = std::fs::read_to_string(path).ok()?;
+        let root: serde_json::Value = serde_json::from_str(&text).ok()?;
+        root.get("model")?.as_str().map(str::to_owned)
     }
 
     /// Load from `~/.lazybox/config.yaml`, falling back to defaults.
@@ -2805,7 +2853,11 @@ impl Config {
         let contents = std::fs::read_to_string(path)?;
         let config = Self::parse(&contents)?;
         tracing::debug!("Loaded config from {}", path.display());
-        for warning in config.model_alias_warnings() {
+        for warning in config
+            .model_alias_warnings()
+            .into_iter()
+            .chain(config.pinned_model_warnings(Self::ambient_claude_model().as_deref()))
+        {
             tracing::warn!("{warning}");
         }
         // The file can hold Slack tokens — tighten pre-existing
@@ -5601,7 +5653,7 @@ agents:
         assert_eq!(m.default.as_deref(), Some("L"));
         assert_eq!(
             m.resolve_args(None),
-            vec!["--model".to_string(), "claude-opus-4-8".to_string()],
+            vec!["--model".to_string(), "claude-opus-5".to_string()],
             "a bare spawn resolves the persisted default tier"
         );
     }
@@ -5613,7 +5665,7 @@ agents:
         assert_eq!(m.default.as_deref(), Some("L"));
         assert_eq!(
             m.resolve_args(None),
-            vec!["--model".to_string(), "claude-opus-4-8".to_string()],
+            vec!["--model".to_string(), "claude-opus-5".to_string()],
             "a bare spawn always pins an explicit coding model"
         );
     }
@@ -5631,7 +5683,7 @@ agents:
           args: ["--model", "claude-fable-5"]
         - alias: L
           label: "Opus"
-          args: ["--model", "claude-opus-4-8"]
+          args: ["--model", "claude-opus-5"]
 "#;
         let cfg: Config = serde_yaml::from_str(yaml).expect("parse fable-default models");
         let m = cfg.agent_models("claude");
@@ -5642,7 +5694,7 @@ agents:
         );
         assert_eq!(
             m.resolve_args(None),
-            vec!["--model".to_string(), "claude-opus-4-8".to_string()]
+            vec!["--model".to_string(), "claude-opus-5".to_string()]
         );
         // The Fable tier itself stays selectable via an explicit chord.
         assert_eq!(
@@ -5682,6 +5734,99 @@ agents:
     }
 
     #[test]
+    fn agent_models_tiers_overlay_the_builtin_menu_by_alias() {
+        use lazybox_core::PriorityTier;
+        // Retuning one tier must not cost the user the rest of the menu
+        // or the built-in priority routing (#1568).
+        let yaml = r#"
+agents:
+  claude:
+    models:
+      tiers:
+        - alias: L
+          label: "Opus"
+          args: ["--model", "claude-opus-5[1m]"]
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse single-tier override");
+        let m = cfg.agent_models("claude");
+        assert_eq!(
+            m.tiers.iter().map(|t| t.alias.as_str()).collect::<Vec<_>>(),
+            vec!["S", "M", "L"],
+            "the built-in menu survives, `L` replaced in place"
+        );
+        assert_eq!(
+            m.resolve_args(None),
+            vec!["--model".to_string(), "claude-opus-5[1m]".to_string()],
+            "the built-in default alias now resolves the user's args"
+        );
+        assert_eq!(m.tier("M").unwrap().model_id(), Some("claude-sonnet-5"));
+        assert_eq!(m.alias_for_priority(PriorityTier::Medium), Some("M"));
+        assert_eq!(m.alias_for_priority(PriorityTier::Low), Some("S"));
+    }
+
+    #[test]
+    fn agent_models_tiers_with_a_new_alias_append_to_the_builtin_menu() {
+        let yaml = r#"
+agents:
+  claude:
+    models:
+      tiers:
+        - alias: B
+          label: "Opus · max"
+          args: ["--model", "claude-opus-5", "--reasoning-effort", "max"]
+      priority:
+        best: B
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse appended tier");
+        let m = cfg.agent_models("claude");
+        assert_eq!(
+            m.tiers.iter().map(|t| t.alias.as_str()).collect::<Vec<_>>(),
+            vec!["S", "M", "L", "B"]
+        );
+        assert!(cfg.model_alias_warnings().is_empty());
+    }
+
+    #[test]
+    fn pinned_model_warnings_name_the_ignored_claude_setting() {
+        let cfg = Config::default();
+        let warnings = cfg.pinned_model_warnings(Some("opus[1m]"));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let warning = &warnings[0];
+        for expected in ["\"opus[1m]\"", "--model claude-opus-5", "\"L\""] {
+            assert!(
+                warning.contains(expected),
+                "expected {expected:?} in {warning:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pinned_model_warnings_stay_quiet_when_nothing_is_overridden() {
+        let cfg = Config::default();
+        // No ambient setting, or one the pin already matches.
+        assert!(cfg.pinned_model_warnings(None).is_empty());
+        assert!(cfg.pinned_model_warnings(Some("  ")).is_empty());
+        assert!(cfg.pinned_model_warnings(Some("claude-opus-5")).is_empty());
+        // A user who overlays the tier to their own model is honored, so
+        // there is nothing to warn about.
+        let yaml = r#"
+agents:
+  claude:
+    models:
+      tiers:
+        - alias: L
+          label: "Opus"
+          args: ["--model", "opus[1m]"]
+"#;
+        let overridden: Config = serde_yaml::from_str(yaml).expect("parse tier override");
+        assert!(
+            overridden
+                .pinned_model_warnings(Some("opus[1m]"))
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn best_priority_spawns_a_model_and_effort_tier() {
         let yaml = r#"
 agents:
@@ -5694,7 +5839,7 @@ agents:
           args: ["--model", "opus", "--reasoning-effort", "max"]
         - alias: "L"
           label: "Opus"
-          args: ["--model", "claude-opus-4-8"]
+          args: ["--model", "claude-opus-5"]
       priority:
         best: B
         high: L

@@ -491,10 +491,29 @@ on the contextual agent at the small / medium / large model, and
 `a S`/`a M`/`a L` spawn the default agent at that tier. Tiers are
 declared per agent under `agents.<id>.models` in YAML (an ordered
 `alias → { label, args }` menu plus a `default` tier for bare spawns);
-Claude ships a built-in Haiku/Sonnet/Opus menu, other agents define
-their own. The alias is agent-agnostic at the chord — the daemon maps
-it to whatever agent the spawn targets — and the picked tier's label
-rides a `◆ Opus` tab badge. The `a` leader also carries the bulk
+Claude ships a built-in Haiku/Sonnet/Opus menu (`claude-haiku-4-5` /
+`claude-sonnet-5` / `claude-opus-5`, `L` the default), other agents
+define their own. The ids are pinned bare — no `[1m]` long-context
+suffix, whose premium past 200k tokens a bare spawn must not opt into;
+a user who wants it declares a tier of their own. Because a bare spawn
+always passes an explicit `--model` (the highest-precedence source in
+Claude Code), a `model` in the user's own `~/.claude/settings.json` is
+ignored — config load warns when the two disagree, and the
+default-model picker names each tier's resolved id (`Opus · L ·
+claude-opus-5`) so the pin is checkable (#1568). A `models:` block
+**overlays** the built-in menu rather than replacing it: a declared
+tier replaces the same-alias built-in tier in place and a new alias
+appends, so `tiers: [{alias: L, args: ["--model", "claude-opus-5[1m]"]}]`
+retunes one tier and keeps the rest of the menu plus the built-in
+priority routing. Because an overlay can only add, `replace: true` on
+the block takes it as the whole menu — the way to express a
+*restricted* set (Sonnet only, no `L` chord, no `high` → Opus
+routing); without it, a block that pins a `default` while inheriting a
+priority mapping to a tier it never declared is warned about at daemon
+start, since a labelled task would otherwise route around the pinned
+default in silence. The alias is agent-agnostic at the chord — the daemon
+maps it to whatever agent the spawn targets — and the picked tier's
+label rides a `◆ Opus` tab badge. The `a` leader also carries the bulk
 **rate-limit recovery** chord `a R` (restart rate-limited): for every
 agent blocked (`⧗ LimitReached`) or parked (`☾ AwaitingReset`) on a
 usage limit, the daemon stops its process, respawns the same

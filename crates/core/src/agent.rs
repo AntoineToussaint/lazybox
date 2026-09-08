@@ -106,6 +106,7 @@ mod tests {
         // tier the (empty) menu doesn't define.
         let m = AgentModels {
             default: Some("L".into()),
+            replace: false,
             tiers: vec![],
             priority: PriorityAliases {
                 best: Some("B".into()),
@@ -173,10 +174,77 @@ mod tests {
         assert_eq!(m.default.as_deref(), Some("L"));
         assert_eq!(
             m.resolve_args(None),
-            vec!["--model".to_string(), "claude-opus-4-8".to_string()]
+            vec!["--model".to_string(), "claude-opus-5".to_string()]
         );
         let default_tier = m.tier(m.default.as_deref().unwrap()).unwrap();
         assert!(!default_tier.excluded_from_default());
+    }
+
+    /// The pinned ids are bare — a `[1m]` long-context suffix bills at a
+    /// premium past 200k tokens, which a bare spawn must not opt into.
+    #[test]
+    fn builtin_claude_tiers_pin_bare_model_ids() {
+        let m = AgentModels::builtin("claude").unwrap();
+        assert_eq!(
+            m.tiers
+                .iter()
+                .map(|t| t.model_id().expect("every built-in tier pins a model"))
+                .collect::<Vec<_>>(),
+            vec!["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"]
+        );
+    }
+
+    #[test]
+    fn model_id_reads_both_flag_spellings() {
+        let tier = |args: &[&str]| ModelTier {
+            alias: "X".into(),
+            label: "X".into(),
+            short: None,
+            args: args.iter().map(|a| (*a).to_string()).collect(),
+        };
+        assert_eq!(
+            tier(&["--model", "claude-opus-5"]).model_id(),
+            Some("claude-opus-5")
+        );
+        assert_eq!(
+            tier(&["--model=claude-opus-5"]).model_id(),
+            Some("claude-opus-5")
+        );
+        assert_eq!(tier(&["-m", "gpt-5"]).model_id(), Some("gpt-5"));
+        // Attached short form is not parsed — a wrong id is worse than none.
+        assert_eq!(tier(&["-mgpt-5"]).model_id(), None);
+        assert_eq!(
+            tier(&["--reasoning-effort", "max", "--model", "opus"]).model_id(),
+            Some("opus")
+        );
+        assert_eq!(tier(&["--reasoning-effort", "max"]).model_id(), None);
+    }
+
+    #[test]
+    fn overlay_tiers_replaces_in_place_and_appends_the_rest() {
+        let mut m = AgentModels::builtin("claude").unwrap();
+        m.overlay_tiers(&[
+            ModelTier {
+                alias: "L".into(),
+                label: "Opus".into(),
+                short: Some("Op".into()),
+                args: vec!["--model".into(), "claude-opus-5[1m]".into()],
+            },
+            ModelTier {
+                alias: "B".into(),
+                label: "Opus · max".into(),
+                short: None,
+                args: vec!["--model".into(), "claude-opus-5".into()],
+            },
+        ]);
+        // `L` kept its slot (menu order is display order); `B` appended.
+        assert_eq!(
+            m.tiers.iter().map(|t| t.alias.as_str()).collect::<Vec<_>>(),
+            vec!["S", "M", "L", "B"]
+        );
+        assert_eq!(m.tier("L").unwrap().model_id(), Some("claude-opus-5[1m]"));
+        // The tiers the overlay didn't mention survive untouched.
+        assert_eq!(m.tier("M").unwrap().model_id(), Some("claude-sonnet-5"));
     }
 
     #[test]
@@ -221,7 +289,7 @@ mod tests {
         // And each alias resolves to that tier's model args.
         assert_eq!(
             m.resolve_args(m.alias_for_priority(PriorityTier::High)),
-            vec!["--model".to_string(), "claude-opus-4-8".to_string()]
+            vec!["--model".to_string(), "claude-opus-5".to_string()]
         );
         assert_eq!(
             m.resolve_args(m.alias_for_priority(PriorityTier::Low)),
@@ -316,6 +384,30 @@ impl ModelTier {
             .iter()
             .any(|a| a.to_ascii_lowercase().contains("fable"))
     }
+
+    /// The model id this tier pins, read out of its own args — the value
+    /// after `--model` / `-m`, or the `--model=<id>` long-option spelling.
+    /// `None` for a tier that selects a model some other way (or not at
+    /// all), which callers render as "no id to show". Surfaced so the
+    /// *decision* a tier encodes is visible where a user picks it,
+    /// instead of hiding behind a label like "Opus" (#1568).
+    ///
+    /// The attached short form (`-mgpt-5`) is deliberately not parsed: a
+    /// short flag glued to its value can't be told from a different flag
+    /// without knowing the agent's own option table, and guessing would
+    /// print a wrong model id — worse than printing none.
+    pub fn model_id(&self) -> Option<&str> {
+        let mut args = self.args.iter();
+        while let Some(arg) = args.next() {
+            if let Some(id) = arg.strip_prefix("--model=") {
+                return Some(id);
+            }
+            if arg == "--model" || arg == "-m" {
+                return args.next().map(String::as_str);
+            }
+        }
+        None
+    }
 }
 
 /// Which tier alias each declared task priority (`best` / `high` /
@@ -397,6 +489,14 @@ pub struct AgentModels {
     /// tier chord but the task carries a `high`/`medium`/`low` priority.
     #[serde(default)]
     pub priority: PriorityAliases,
+    /// Take this block as the whole menu instead of layering it over the
+    /// agent's built-in one. Overlay is the default because retuning one
+    /// tier shouldn't cost you the rest of the menu (#1568) — but overlay
+    /// alone can only *add* to the built-in menu, so a user who wants a
+    /// deliberately restricted set (say Sonnet only, with no `L` chord and
+    /// no `high` → Opus routing) has no way to say so. This is that way.
+    #[serde(default)]
+    pub replace: bool,
 }
 
 impl AgentModels {
@@ -454,6 +554,20 @@ impl AgentModels {
             .unwrap_or_default()
     }
 
+    /// Layer `tiers` onto this menu by alias: a declared tier replaces
+    /// the same-alias tier in place (keeping menu order), an unknown
+    /// alias appends. So a user can retune one tier without re-declaring
+    /// the built-in menu around it — and without silently dropping the
+    /// tiers and priority mappings they didn't mention (#1568).
+    pub fn overlay_tiers(&mut self, tiers: &[ModelTier]) {
+        for tier in tiers {
+            match self.tiers.iter_mut().find(|t| t.alias == tier.alias) {
+                Some(existing) => *existing = tier.clone(),
+                None => self.tiers.push(tier.clone()),
+            }
+        }
+    }
+
     /// Built-in tier menu for a known agent id, or `None` for an agent
     /// lazybox ships no model presets for. Only Claude ships presets —
     /// its model flag (`--model`) takes stable aliases; Codex / Cursor
@@ -463,9 +577,18 @@ impl AgentModels {
             // Claude's default tier is pinned so a bare spawn always
             // passes an explicit `--model`. With no flag, Claude Code
             // falls back to its own ambient account/CLI default, which
-            // can resolve to a non-coding model (Fable).
+            // can resolve to a non-coding model (Fable). The pin wins
+            // over the user's `~/.claude/settings.json` `model`, so
+            // config load warns when the two disagree
+            // (`Config::pinned_model_warnings`).
+            //
+            // The ids stay bare — no `[1m]` long-context suffix. The 1M
+            // window bills at a premium past 200k tokens, which a bare
+            // spawn must not opt into silently; a user who wants it
+            // declares it as a tier of their own.
             "claude" => Some(AgentModels {
                 default: Some("L".into()),
+                replace: false,
                 tiers: vec![
                     ModelTier {
                         alias: "S".into(),
@@ -485,7 +608,7 @@ impl AgentModels {
                         // "Op", not "O": a lone capital O reads as the
                         // digit zero in most monospace fonts ("◆0??").
                         short: Some("Op".into()),
-                        args: vec!["--model".into(), "claude-opus-4-8".into()],
+                        args: vec!["--model".into(), "claude-opus-5".into()],
                     },
                 ],
                 // A declared priority routes to the matching tier:

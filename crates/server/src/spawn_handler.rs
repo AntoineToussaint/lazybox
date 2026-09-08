@@ -539,9 +539,7 @@ fn guarded_hook_command(exe: &Path, args: &str, log: &Path) -> String {
 /// user scope). Any error (missing file, bad JSON) → `None`, which the
 /// generator treats as "no user hooks."
 fn read_user_claude_settings() -> Option<serde_json::Value> {
-    let home = std::env::var_os("HOME")?;
-    let path = PathBuf::from(home).join(".claude").join("settings.json");
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = std::fs::read_to_string(lazybox_agents::user_settings_path()?).ok()?;
     serde_json::from_str(&text).ok()
 }
 
@@ -18103,7 +18101,7 @@ mod tests {
             false,
             None,
             None,
-            &["--model".to_string(), "claude-opus-4-8".to_string()],
+            &["--model".to_string(), "claude-opus-5".to_string()],
             false,
         )
         .expect("claude registered");
@@ -18112,7 +18110,7 @@ mod tests {
             vec![
                 "claude".to_string(),
                 "--model".to_string(),
-                "claude-opus-4-8".to_string(),
+                "claude-opus-5".to_string(),
             ]
         );
     }

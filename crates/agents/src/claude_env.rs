@@ -152,14 +152,34 @@ fn seed_unattended_env_in(config_path: &Path, worktree: &Path) -> io::Result<()>
 /// "Bypass Permissions mode" warning. Missing `$HOME` is an error for the
 /// same reason as [`seed_unattended_env`].
 pub fn seed_skip_dangerous_mode_prompt() -> io::Result<()> {
-    let home = std::env::var_os("HOME").ok_or_else(|| {
+    let settings_path = user_settings_path().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             "HOME is unset; cannot persist Claude bypass consent",
         )
     })?;
-    let settings_path = PathBuf::from(home).join(".claude").join("settings.json");
     seed_skip_dangerous_mode_prompt_in(&settings_path)
+}
+
+/// The user's own `~/.claude/settings.json`. The single place that path
+/// is built — it was being reconstructed at each of the three sites that
+/// read or write the file.
+pub fn user_settings_path() -> Option<PathBuf> {
+    Some(
+        PathBuf::from(std::env::var_os("HOME")?)
+            .join(".claude")
+            .join("settings.json"),
+    )
+}
+
+/// The `model` the user set in their own Claude settings, if any — the
+/// value lazybox's pinned default tier overrides on every bare spawn
+/// (`Config::pinned_model_warnings`). A missing, unreadable, or malformed
+/// file simply means "no ambient model to conflict with".
+pub fn ambient_model() -> Option<String> {
+    let text = std::fs::read_to_string(user_settings_path()?).ok()?;
+    let root: Value = serde_json::from_str(&text).ok()?;
+    root.get("model")?.as_str().map(str::to_owned)
 }
 
 /// Read-modify-write `settings_path`, setting

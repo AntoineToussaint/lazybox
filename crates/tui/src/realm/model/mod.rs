@@ -2857,6 +2857,7 @@ impl Model<AsyncCrosstermAdapter> {
         // (no polling has run yet) so nothing flickers in behind the
         // wizard. Subscribe is idempotent on the daemon side.
         let _ = model.client.send(IpcCommand::Subscribe);
+        model.flash_model_pin_warning(lazybox_tui_core::agents::claude_ambient_model().as_deref());
         model.set_focus_attr();
         Ok(model)
     }
@@ -4501,31 +4502,7 @@ impl<T: TerminalAdapter> Model<T> {
         if models.tiers.is_empty() {
             return;
         }
-        // Row 0 unpins the YAML override. With a built-in default in
-        // play that lands back on the built-in tier, not on the
-        // agent's ambient model — say so in the label.
-        let builtin_label = lazybox_core::AgentModels::builtin(agent_id)
-            .and_then(|b| b.default)
-            .and_then(|a| models.tier(&a))
-            .map(|t| t.label.clone());
-        // Each row pairs its label with the tier alias it pins (`None`
-        // = agent default), carried as the payload (#512).
-        type ModelRow = (String, Option<String>);
-        let mut items: Vec<ModelRow> = vec![(
-            match &builtin_label {
-                Some(label) => format!("Built-in default  ·  {label}"),
-                None => "Agent default  ·  no pinned model".into(),
-            },
-            None,
-        )];
-        // Fable-class tiers stay spawnable via an explicit chord but
-        // are never offered as a default.
-        for tier in models.tiers.iter().filter(|t| !t.excluded_from_default()) {
-            items.push((
-                format!("{}  ·  {}", tier.label, tier.alias),
-                Some(tier.alias.clone()),
-            ));
-        }
+        let items = default_model_rows(agent_id, models);
         let start = models
             .default
             .as_ref()
@@ -5095,6 +5072,19 @@ impl<T: TerminalAdapter> Model<T> {
     /// `self.status.notice = Some(Notice::new(...)); self.redraw = true;`,
     /// and forgetting the `redraw = true` left the notice invisible
     /// until the next event triggered a render — a known footgun.
+    /// Surface, at startup, that lazybox's pinned model tier overrides the
+    /// user's own Claude `model` setting. The daemon logs the same line,
+    /// but a `tracing::warn!` in `/tmp/lazybox.log` is not a user surface
+    /// — the whole complaint in #1568 is that the override is invisible,
+    /// and a log nobody tails does not fix that. Lands in the footer and
+    /// so in the `Shift-M` messages history.
+    pub(crate) fn flash_model_pin_warning(&mut self, ambient: Option<&str>) {
+        let config = lazybox_config::Config::load().unwrap_or_default();
+        if let Some(warning) = config.pinned_model_warnings(ambient).into_iter().next() {
+            self.flash_hint(warning);
+        }
+    }
+
     pub fn flash_info(&mut self, msg: impl Into<String>) {
         self.flash(msg, crate::realm::components::footer::NoticeSeverity::Info);
     }
@@ -7536,4 +7526,56 @@ fn home_dir() -> Option<std::path::PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from)
+}
+
+/// A default-model picker row, paired with the tier alias it pins
+/// (`None` = unpin, the agent's own default — the payload at #512).
+pub(crate) type ModelRow = (String, Option<String>);
+
+/// The rows `mount_default_model_picker` offers. Extracted so the row
+/// *strings* are testable: the label is the only thing distinguishing two
+/// rows with different payloads, and nothing covered it (#1568).
+pub(crate) fn default_model_rows(
+    agent_id: &str,
+    models: &lazybox_core::AgentModels,
+) -> Vec<ModelRow> {
+    // Row 0 unpins the YAML override. With a built-in default in play
+    // that lands back on the built-in tier, not on the agent's ambient
+    // model — say so in the label. It names the tier and the model, but
+    // NOT the alias: this row's payload is `None`, so printing `· L ·`
+    // here would advertise a pin it does not apply, and would make the
+    // row an exact suffix-match of the real `L` row below.
+    let builtin_label = lazybox_core::AgentModels::builtin(agent_id)
+        .and_then(|b| b.default)
+        .and_then(|a| models.tier(&a))
+        .map(|tier| match tier.model_id() {
+            Some(model) => format!("{}  ·  {}", tier.label, model),
+            None => tier.label.clone(),
+        });
+    let mut items: Vec<ModelRow> = vec![(
+        match &builtin_label {
+            Some(label) => format!("Built-in default  ·  {label}"),
+            None => "Agent default  ·  no pinned model".into(),
+        },
+        None,
+    )];
+    // Fable-class tiers stay spawnable via an explicit chord but are
+    // never offered as a default.
+    for tier in models.tiers.iter().filter(|t| !t.excluded_from_default()) {
+        items.push((tier_row_label(tier), Some(tier.alias.clone())));
+    }
+    items
+}
+
+/// A tier row: the tier's label, its alias chord, and the model id it
+/// actually pins. The id is what makes the row's decision checkable — a
+/// label like "Opus" says nothing about which Opus, and the pinned model
+/// is what a bare spawn passes as `--model` regardless of what the
+/// agent's own settings say (#1568). Tiers that select a model some
+/// other way keep the two-part row.
+fn tier_row_label(tier: &lazybox_core::ModelTier) -> String {
+    match tier.model_id() {
+        Some(model) => format!("{}  ·  {}  ·  {}", tier.label, tier.alias, model),
+        None => format!("{}  ·  {}", tier.label, tier.alias),
+    }
 }

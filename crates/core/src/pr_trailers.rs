@@ -20,7 +20,7 @@
 //! surface (`git log`, a store index, an MCP tool), the format is a **stable
 //! interface**: fixed key names, one value shape per key, never reformatted. A
 //! cosmetic change to the wording silently breaks every historical query, so
-//! the exact rendering is pinned by [`tests::format_lock`] the same way a wire
+//! the exact rendering is pinned by the `format_lock` test the same way a wire
 //! contract is fingerprinted.
 //!
 //! Two rules the shape enforces:

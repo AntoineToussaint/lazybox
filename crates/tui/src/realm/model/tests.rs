@@ -4509,13 +4509,13 @@ snippets:
     }
 
     /// Agents parked on Claude's auto-continue wait (◌ `AwaitingReset`) are
-    /// rate-limited too, but a "continue" typed into that composer cancels
-    /// the wait and only hits the limit again — so `Shift-K` still injects
-    /// nothing into them. It must not claim "no rate-limited agents" while
-    /// their badges are on screen: it names them and points at `a R`, the
-    /// action that does apply to them.
+    /// rate-limited too, and `Shift-K` resumes them like the blocked ones:
+    /// each gets the settle-gated `continue`. The old "skip the parked set
+    /// by design" answered eight visibly parked agents with a hint and did
+    /// nothing (2026-09-08). The notice still names the parked count and
+    /// the restart chord, the alternative that also swaps credentials.
     #[test]
-    fn resume_rate_limited_names_parked_agents_instead_of_denying_them() {
+    fn resume_rate_limited_resumes_parked_agents_too() {
         use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
         use lazybox_tui_core::action::Action;
         let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
@@ -4531,13 +4531,25 @@ snippets:
             });
         }
         let cmds = m.dispatch_action(&Action::ResumeRateLimited);
-        assert!(
-            !cmds
-                .iter()
-                .any(|c| matches!(c, IpcCommand::InjectPrompt { .. })),
-            "a parked agent must not receive a wait-cancelling continue: {cmds:?}",
+        let mut injected: Vec<(u64, &str)> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::InjectPrompt {
+                    terminal_id,
+                    prompt,
+                    submit: true,
+                    ..
+                } => Some((terminal_id.0, prompt.as_str())),
+                _ => None,
+            })
+            .collect();
+        injected.sort();
+        assert_eq!(
+            injected,
+            vec![(1, "continue"), (2, "continue")],
+            "every parked agent gets `continue` + Enter: {cmds:?}",
         );
-        let notice = m.status.notice.as_ref().expect("a hint is shown");
+        let notice = m.status.notice.as_ref().expect("a notice is shown");
         // The restart key is resolved from the catalog, not hardcoded, so
         // assert against the effective chord rather than a literal.
         let restart_keys = lazybox_tui_core::action::ActionDef::for_kind(
@@ -4545,16 +4557,18 @@ snippets:
         )
         .effective_keys_display(&Default::default());
         assert!(
-            notice.message.contains("2 agents parked")
+            notice.message.contains("resuming 2 rate-limited agents")
+                && notice.message.contains("2 parked")
                 && notice.message.contains(restart_keys.as_ref()),
-            "the hint names the parked agents and the restart action ({restart_keys}): {}",
+            "the notice reports the resume, the parked count and the restart action \
+             ({restart_keys}): {}",
             notice.message
         );
     }
 
-    /// The parked-agents hint must name the *effective* restart chord, not
-    /// the catalog default: with `restart_rate_limited` remapped, the hint
-    /// points at the user's key. This is the regression guard for the hint
+    /// The parked-agents clause must name the *effective* restart chord, not
+    /// the catalog default: with `restart_rate_limited` remapped, the notice
+    /// points at the user's key. This is the regression guard for the notice
     /// having hardcoded `a R`, which would have gone stale under a remap.
     #[test]
     fn resume_rate_limited_parked_hint_follows_the_restart_remap() {
@@ -4571,20 +4585,18 @@ snippets:
             state: AgentState::AwaitingReset,
         });
         m.dispatch_action(&Action::ResumeRateLimited);
-        let notice = m.status.notice.as_ref().expect("a hint is shown");
+        let notice = m.status.notice.as_ref().expect("a notice is shown");
         assert!(
             notice.message.contains("a Y") && !notice.message.contains("a R"),
-            "the hint names the remapped restart chord, not the default: {}",
+            "the notice names the remapped restart chord, not the default: {}",
             notice.message
         );
     }
 
     /// Mixed block: some agents alerting (`LimitReached`), some parked
-    /// (`AwaitingReset`). `Shift-K` resumes the alerting ones AND names the
-    /// parked ones it deliberately skipped — the same "don't let untouched
-    /// badges look like a bug" contract as the all-parked case, and the
-    /// parked count must be the `AwaitingReset` count alone (1), not the
-    /// whole limited set (2).
+    /// (`AwaitingReset`). `Shift-K` resumes BOTH, and the notice's parked
+    /// count must be the `AwaitingReset` count alone (1), not the whole
+    /// limited set (2).
     ///
     /// The escalating banner is opted out here (`usage_limit_alerts = false`)
     /// so the resume *result* notice is the surface under test: with the
@@ -4623,14 +4635,14 @@ snippets:
             .collect();
         assert_eq!(
             injected,
-            vec![1],
-            "only the alerting agent is resumed; the parked one is left alone: {cmds:?}",
+            vec![1, 2],
+            "the alerting AND the parked agent are both resumed: {cmds:?}",
         );
         let notice = m.status.notice.as_ref().expect("a notice is shown");
         assert!(
-            notice.message.contains("resuming 1 rate-limited agent")
-                && notice.message.contains("1 agent parked"),
-            "the notice reports the resume AND names the single parked agent: {}",
+            notice.message.contains("resuming 2 rate-limited agents")
+                && notice.message.contains("1 parked"),
+            "the notice reports both resumes and names the single parked agent: {}",
             notice.message
         );
     }

@@ -269,44 +269,27 @@ impl<T: TerminalAdapter> Model<T> {
     /// workspaces. Each target has a live agent (that's what `LimitReached`
     /// means), so none fall through to the spawn / skip cases.
     pub(super) fn resume_rate_limited_agents(&mut self) -> Vec<IpcCommand> {
-        let terminals = self.sidebar.limit_reached_terminals();
-        // The ◌ agents are rate-limited too — parked on Claude's
-        // auto-continue wait — but a "continue" typed into that composer
-        // CANCELS the wait and only hits the limit again, so resume-all
-        // leaves them alone by design. Whether or not any alerting agent
-        // resumed, ignoring the parked ones silently reads as a lie while
-        // their badges are on screen: name them and point at the action
-        // that does apply to them. Counted directly (not `limited` minus
-        // `limit_reached`) so the number is right in the mixed case too.
+        // Every limited agent: the alerting `LimitReached` ones AND the
+        // parked `AwaitingReset` ones (Claude's auto-continue wait). The
+        // parked set used to be skipped "by design" — a typed continue
+        // cancels the wait — and `Shift-K` then answered eight visibly
+        // parked agents with a hint and did nothing (2026-09-08). That is
+        // not what the key means: resume means go into each limited agent
+        // and submit `continue`. If the account is still limited, Claude
+        // parks again and says so; if credentials changed or the window
+        // reset, it works. The key does the thing; the agent reports.
+        let terminals = self.sidebar.limited_terminals();
+        // Named in the notice so the count on screen matches the ◌ badges.
         let parked = self.sidebar.awaiting_reset_terminals().len();
-        // The restart key is remappable (`ui.action_keys.restart_rate_limited`);
-        // resolve the effective chord so the hint never names a key the
-        // user has rebound away.
-        let restart_keys = lazybox_tui_core::action::ActionDef::for_kind(
-            lazybox_tui_core::action::ActionKind::RestartRateLimited,
-        )
-        .effective_keys_display(&self.action_key_overrides);
-        let parked_clause = |parked: usize| {
-            let plural = if parked == 1 { "" } else { "s" };
-            format!(
-                "{parked} agent{plural} parked on the auto-continue wait — they resume by \
-                 themselves at the reset; {restart_keys} restarts them now with fresh credentials"
-            )
-        };
         if terminals.is_empty() {
-            if parked == 0 {
-                self.flash_hint("no rate-limited agents to resume");
-            } else {
-                self.flash_hint(parked_clause(parked));
-            }
+            self.flash_hint("no rate-limited agents to resume");
             return Vec::new();
         }
         let mut cmds = Vec::new();
         for terminal_id in &terminals {
-            // Every `LimitReached` terminal is an agent (the state only
-            // comes from agent detection), so `is_agent` is always true —
-            // each gets the settle-gated `InjectPrompt`, never a shell
-            // write.
+            // Every limited terminal is an agent (the states only come
+            // from agent detection), so `is_agent` is always true — each
+            // gets the settle-gated `InjectPrompt`, never a shell write.
             self.deliver_prompt(
                 *terminal_id,
                 true,
@@ -317,15 +300,20 @@ impl<T: TerminalAdapter> Model<T> {
         }
         let resumed = terminals.len();
         let plural = if resumed == 1 { "" } else { "s" };
-        // Mixed case: some agents resumed, but any parked siblings were
-        // deliberately skipped — say so rather than let their untouched
-        // badges look like a bug.
         if parked == 0 {
             self.flash_info(format!("resuming {resumed} rate-limited agent{plural}"));
         } else {
+            // The restart key is remappable (`ui.action_keys.restart_rate_limited`);
+            // resolve the effective chord so the notice never names a key the
+            // user has rebound away.
+            let restart_keys = lazybox_tui_core::action::ActionDef::for_kind(
+                lazybox_tui_core::action::ActionKind::RestartRateLimited,
+            )
+            .effective_keys_display(&self.action_key_overrides);
             self.flash_info(format!(
-                "resuming {resumed} rate-limited agent{plural}; {}",
-                parked_clause(parked)
+                "resuming {resumed} rate-limited agent{plural} ({parked} parked on the \
+                 auto-continue wait got `continue` too; {restart_keys} restarts them with \
+                 fresh credentials if they park again)"
             ));
         }
         self.redraw = true;

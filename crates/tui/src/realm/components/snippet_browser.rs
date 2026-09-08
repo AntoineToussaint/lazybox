@@ -257,6 +257,7 @@ mod tests {
                     body: "Please open a PR for the current branch.".into(),
                     skill: None,
                     provider: None,
+                    next: Vec::new(),
                     origin: SnippetOrigin::BuiltIn,
                 },
                 lazybox_config::SnippetState::Builtin,
@@ -269,6 +270,7 @@ mod tests {
                     body: "Review the current diff\nfor correctness bugs.".into(),
                     skill: None,
                     provider: None,
+                    next: Vec::new(),
                     origin: SnippetOrigin::Global,
                 },
                 lazybox_config::SnippetState::OverrideStale,
@@ -343,6 +345,7 @@ mod tests {
                     body: long.into(),
                     skill: None,
                     provider: None,
+                    next: Vec::new(),
                     origin: SnippetOrigin::Global,
                 },
                 // No badge: this test exercises body wrapping, not the

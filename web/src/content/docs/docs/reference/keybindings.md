@@ -141,6 +141,7 @@ A focused terminal forwards every key to the PTY; only the chords below are inte
 | `]]-` | Split the focused tile stacked |
 | `]]←↓↑→` | Move tile focus; Left/Right cycles tabs in Tabs mode |
 | `]]x` | Close the focused terminal (tile or active tab) |
+| `]]n` | Send the follow-up declared by the last snippet sent here (`next:` in snippets.yaml) |
 | `]]H` | Open the personal Hopper editor |
 | `]]z` | Toggle tmux-style zoom of the focused tile (maximize / restore); Splits grid only |
 | `]]t` | Switch this session's terminals between tabs and side-by-side tiles, and set how the next one opens (persists `ui.terminal_new_layout`) |

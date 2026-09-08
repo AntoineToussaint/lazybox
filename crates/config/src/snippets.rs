@@ -89,6 +89,27 @@ fn write_yaml_atomically(path: &Path, value: &serde_yaml::Value) -> Result<(), S
     Ok(())
 }
 
+/// The two YAML shapes [`Snippet::next`] accepts — a bare key or a list
+/// of them — collapsed into one `Vec` at deserialize time so every
+/// consumer sees a single representation.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ScalarOrSeq {
+    One(String),
+    Many(Vec<String>),
+}
+
+fn deserialize_next<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match Option::<ScalarOrSeq>::deserialize(deserializer)? {
+        None => Vec::new(),
+        Some(ScalarOrSeq::One(one)) => vec![one],
+        Some(ScalarOrSeq::Many(many)) => many,
+    })
+}
+
 /// Single snippet definition.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Snippet {
@@ -133,6 +154,30 @@ pub struct Snippet {
     /// normalized to `None` at load ([`Snippet::normalize_provider`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Optional follow-up snippets — the workflow this one chains into
+    /// (#1569). `]]n` looks up the last snippet delivered to the focused
+    /// agent, resolves this list, and sends the follow-up through the same
+    /// delivery path, so `deepreview` → `fixall` → … is a pipeline walked
+    /// with one key. YAML accepts either shape:
+    ///
+    /// ```yaml
+    /// next: fixall            # one target  → sent immediately
+    /// next: [fixall, push]    # several     → picker scoped to these
+    /// ```
+    ///
+    /// Invariant, like `skill:` / `provider:`: every element is a real,
+    /// trimmed, non-empty key that is not this snippet's own (a
+    /// self-reference would make `]]n` a no-op loop). Enforced at load by
+    /// [`Snippet::normalize_next`]. Targets are deliberately NOT validated
+    /// against the merged catalog here — the launch-directory layer may
+    /// shadow or omit keys, and a dangling target must never make a
+    /// snippets file unparseable; it is resolved (and reported) at dispatch.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_next",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub next: Vec<String>,
     /// Provenance — which file the entry came from. Hand-set by the
     /// loader; serde ignores it on the way in / out. Used by the
     /// picker to show "global" vs "repo" hints alongside each row,
@@ -285,6 +330,24 @@ impl Snippet {
         });
     }
 
+    /// Normalize `next` to uphold its invariant: trim each entry, drop
+    /// blanks and duplicates, and drop a self-reference — `next: rev` on
+    /// `rev` would make `]]n` re-send the snippet you just sent instead of
+    /// advancing. `key` is the snippet's own catalog key, which the loader
+    /// supplies. Applied at every load boundary, alongside
+    /// [`Snippet::normalize_skill`].
+    pub fn normalize_next(&mut self, key: &str) {
+        let mut seen: Vec<String> = Vec::with_capacity(self.next.len());
+        for target in std::mem::take(&mut self.next) {
+            let trimmed = target.trim();
+            if trimmed.is_empty() || trimmed == key || seen.iter().any(|s| s == trimmed) {
+                continue;
+            }
+            seen.push(trimmed.to_string());
+        }
+        self.next = seen;
+    }
+
     /// Whether this snippet should surface on a workspace spanning the
     /// given task `sources` (e.g. `["github"]`, or `["github", "linear"]`
     /// for a Linear issue that already has a GitHub PR). A snippet with no
@@ -396,6 +459,7 @@ impl Snippets {
                 s.origin = origin;
                 s.normalize_skill();
                 s.normalize_provider();
+                s.normalize_next(&k);
                 (k, s)
             })
             .collect();
@@ -414,6 +478,7 @@ impl Snippets {
             body: body.to_string(),
             skill: None,
             provider: None,
+            next: Vec::new(),
             origin: SnippetOrigin::BuiltIn,
         };
         // Provider-scoped built-in: only surfaces on a workspace whose task
@@ -425,13 +490,14 @@ impl Snippets {
             body: body.to_string(),
             skill: None,
             provider: Some(provider.to_string()),
+            next: Vec::new(),
             origin: SnippetOrigin::BuiltIn,
         };
         // Scope on the canonical provider ids so config can't drift from
         // the `TaskId.source` the providers actually stamp (see
         // [`Snippet::matches_sources`]).
         let (gh, lin) = (lazybox_core::GITHUB_SOURCE, lazybox_core::LINEAR_SOURCE);
-        let by_key = BTreeMap::from([
+        let mut by_key = BTreeMap::from([
             // ── Review ──────────────────────────────────────────────
             (
                 "rev".to_string(),
@@ -1582,6 +1648,21 @@ impl Snippets {
                 ),
             ),
         ]);
+        // The pairings that are already pipelines in practice, so `]]n`
+        // works before the user configures anything: a review is followed
+        // by applying it (#838's stated purpose), a freshened branch by a
+        // push. Asserted by `builtin_chains_declare_their_follow_up`, so
+        // renaming a target fails the build rather than leaving `]]n`
+        // pointing at nothing.
+        for (key, next) in [
+            ("rev", "fixall"),
+            ("deepreview", "fixall"),
+            ("freshen", "push"),
+        ] {
+            if let Some(snippet) = by_key.get_mut(key) {
+                snippet.next = vec![next.to_string()];
+            }
+        }
         Self { by_key }
     }
 
@@ -2454,6 +2535,7 @@ snippets:
             body: body.to_string(),
             skill: None,
             provider: None,
+            next: Vec::new(),
             origin: SnippetOrigin::Unknown,
         }
     }
@@ -2699,6 +2781,111 @@ snippets:
             loaded.get("padded").expect("padded").provider.as_deref(),
             Some("github"),
         );
+    }
+
+    /// `next:` accepts a bare key or a list of them and both land as the
+    /// same `Vec` (#1569), so a user can start with one target and grow to
+    /// several without a schema change. Absent → empty, so existing files
+    /// are unaffected.
+    #[test]
+    fn next_parses_scalar_and_sequence_alike() {
+        let path = write_tmp(
+            "next-parse",
+            "snippets:\n  \
+             plain:\n    body: text\n  \
+             one:\n    next: fixall\n    body: text\n  \
+             many:\n    next: [fixall, push]\n    body: text\n  \
+             fixall:\n    body: text\n  \
+             push:\n    body: text\n",
+        );
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).expect("loads");
+        assert!(loaded.get("plain").expect("plain").next.is_empty());
+        assert_eq!(loaded.get("one").expect("one").next, vec!["fixall"]);
+        assert_eq!(
+            loaded.get("many").expect("many").next,
+            vec!["fixall", "push"],
+        );
+    }
+
+    /// Load upholds the `next` invariant: entries are trimmed, blanks and
+    /// duplicates drop, and a self-reference drops — `next: loop` on `loop`
+    /// would make `]]n` re-send what you just sent instead of advancing.
+    #[test]
+    fn next_normalizes_blanks_duplicates_and_self_reference() {
+        let path = write_tmp(
+            "next-normalize",
+            "snippets:\n  \
+             padded:\n    next: [\"  fixall  \", \"\", \"   \"]\n    body: text\n  \
+             dupes:\n    next: [fixall, fixall, push]\n    body: text\n  \
+             loop:\n    next: [loop, fixall]\n    body: text\n",
+        );
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).expect("loads");
+        assert_eq!(
+            loaded.get("padded").expect("padded").next,
+            vec!["fixall"],
+            "entries are trimmed and blanks dropped",
+        );
+        assert_eq!(
+            loaded.get("dupes").expect("dupes").next,
+            vec!["fixall", "push"],
+            "duplicates collapse, order preserved",
+        );
+        assert_eq!(
+            loaded.get("loop").expect("loop").next,
+            vec!["fixall"],
+            "a self-reference drops",
+        );
+    }
+
+    /// A `next:` target that names no snippet must survive *load* — the
+    /// launch-directory layer can legitimately shadow or omit keys, and a
+    /// dangling target must never make a snippets file unparseable. It is
+    /// resolved (and reported) at dispatch instead.
+    #[test]
+    fn dangling_next_target_survives_load() {
+        let path = write_tmp(
+            "next-dangling",
+            "snippets:\n  rev:\n    next: nosuchsnippet\n    body: text\n",
+        );
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).expect("loads");
+        assert_eq!(loaded.get("rev").expect("rev").next, vec!["nosuchsnippet"]);
+    }
+
+    /// An empty `next` is omitted on serialize, so saving a snippet through
+    /// the settings flow doesn't litter user files with `next: []`.
+    #[test]
+    fn empty_next_is_omitted_on_serialize() {
+        let plain = snippet("Review", "Review", "body");
+        let yaml = serde_yaml::to_string(&plain).expect("serializes");
+        assert!(!yaml.contains("next"), "empty next omitted: {yaml}");
+
+        let mut chained = plain;
+        chained.next = vec!["fixall".to_string()];
+        let yaml = serde_yaml::to_string(&chained).expect("serializes");
+        let round: Snippet = serde_yaml::from_str(&yaml).expect("round-trips");
+        assert_eq!(round.next, vec!["fixall"]);
+    }
+
+    /// The built-in pairings that already are pipelines declare it, so
+    /// `]]n` works on a fresh install. Renaming a target has to fail here
+    /// rather than leave the chord pointing at nothing.
+    #[test]
+    fn builtin_chains_declare_their_follow_up() {
+        let b = Snippets::builtin();
+        for (key, next) in [
+            ("rev", "fixall"),
+            ("deepreview", "fixall"),
+            ("freshen", "push"),
+        ] {
+            let s = b
+                .get(key)
+                .unwrap_or_else(|| panic!("`{key}` ships built-in"));
+            assert_eq!(s.next, vec![next.to_string()], "`{key}` chains to `{next}`");
+            assert!(
+                b.get(next).is_some(),
+                "`{key}`'s follow-up `{next}` must exist in the built-in library",
+            );
+        }
     }
 
     /// A generic snippet applies to every workspace; a provider-scoped one

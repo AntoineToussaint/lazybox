@@ -1175,7 +1175,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// Run a resolved `]]` leader command. Shared by the direct-key
     /// path and the `Enter`-fires-the-highlight path (#343) so both
     /// dispatch identically.
-    fn run_terminal_leader_cmd(
+    pub(super) fn run_terminal_leader_cmd(
         &mut self,
         cmd: super::terminal_leader::LeaderCmd,
         cmds: &mut Vec<IpcCommand>,
@@ -1201,6 +1201,10 @@ impl<T: TerminalAdapter> Model<T> {
             LeaderCmd::Skills => self.mount_skill_picker(String::new()),
             LeaderCmd::RecallPrompt => self.recall_prompt(cmds),
             LeaderCmd::PromptHistory => self.mount_prompt_history_picker(),
+            LeaderCmd::FollowUp => match self.picker_target_terminal() {
+                Some(terminal_id) => self.send_follow_up(terminal_id, cmds),
+                None => self.flash_info("no active terminal — open a session first"),
+            },
             LeaderCmd::OpenHopper => self.mount_hopper(),
             LeaderCmd::OpenUrls => self.open_terminal_urls(),
             LeaderCmd::ToggleFocusMode => self.toggle_focus_mode(),
@@ -1238,6 +1242,7 @@ impl<T: TerminalAdapter> Model<T> {
             LeaderCmd::Skills => self.sidebar_send_skill(),
             LeaderCmd::RecallPrompt => self.sidebar_recall_prompt(cmds),
             LeaderCmd::PromptHistory => self.sidebar_prompt_history(),
+            LeaderCmd::FollowUp => self.sidebar_send_follow_up(cmds),
             LeaderCmd::OpenHopper => self.mount_hopper(),
             LeaderCmd::OpenUrls => self.sidebar_open_urls(),
             // Everything else is terminal-pane scoped and never offered in
@@ -1328,6 +1333,106 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         };
         self.mount_prompt_history_picker_for(terminal_id);
+    }
+
+    /// `]]n` from the sidebar — send the follow-up declared by the last
+    /// snippet delivered to the *cursor* workspace's agent, not the focused
+    /// tile's.
+    fn sidebar_send_follow_up(&mut self, cmds: &mut Vec<IpcCommand>) {
+        let Some((terminal_id, _)) = self.sidebar_leader_terminal() else {
+            self.flash_info("no running agent here — press w to start one");
+            return;
+        };
+        self.send_follow_up(terminal_id, cmds);
+    }
+
+    /// `]]n` — chain the workflow (#1569): resolve the last snippet
+    /// delivered to `terminal_id`, look up its `next:`, and send the
+    /// follow-up through the same `DeliverSnippet` path the picker uses. The
+    /// follow-up therefore lands in the prompt history itself, so pressing
+    /// `]]n` again walks the next link (`deepreview → fixall → push`).
+    ///
+    /// Every dead end raises its own notice — a chord that silently did
+    /// nothing would read as a dropped keystroke. Dangling targets are
+    /// dropped with a notice rather than treated as an error: `next:` is
+    /// deliberately not validated at load, since the launch-directory layer
+    /// may shadow or omit keys.
+    fn send_follow_up(&mut self, terminal_id: lazybox_ipc::TerminalId, cmds: &mut Vec<IpcCommand>) {
+        let Some(last) = self.last_snippet_sent_to(terminal_id) else {
+            self.flash_info("no snippet sent here yet — ]]s to start one");
+            return;
+        };
+        let Some(next) = self.snippets.get(&last).map(|s| s.next.clone()) else {
+            self.flash_info(format!("`{last}` is no longer in the catalog"));
+            return;
+        };
+        if next.is_empty() {
+            self.flash_info(format!(
+                "`{last}` declares no follow-up (add `next:` in snippets.yaml)"
+            ));
+            return;
+        }
+        // Provider scoping still applies, so a GitHub-only follow-up
+        // doesn't fire on a Linear workspace.
+        let sources = match self.terminals.session_key_for(terminal_id) {
+            Some(key) => self.workspace_sources(key),
+            None => Vec::new(),
+        };
+        let source_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
+        let mut targets: Vec<(String, String, String)> = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
+        for key in &next {
+            match self.snippets.get(key) {
+                None => skipped.push(format!("`{last}` → `{key}`: no such snippet")),
+                Some(snippet) if !snippet.matches_sources(&source_refs) => {
+                    let provider = snippet.provider.clone().unwrap_or_default();
+                    skipped.push(format!("`{key}` is {provider}-only"));
+                }
+                Some(snippet) => targets.push((
+                    key.clone(),
+                    snippet.category.clone(),
+                    snippet.dispatch_body(),
+                )),
+            }
+        }
+        match targets.len() {
+            0 => self.flash_info(skipped.join(" · ")),
+            1 => {
+                let (snippet_key, category, body) = targets.remove(0);
+                let mut notice = format!("`{last}` → `{snippet_key}`");
+                if !skipped.is_empty() {
+                    notice.push_str(" · ");
+                    notice.push_str(&skipped.join(" · "));
+                }
+                cmds.push(IpcCommand::DeliverSnippet {
+                    terminal_id,
+                    snippet_key,
+                    category,
+                    body,
+                    submit: true,
+                });
+                self.flash_info(notice);
+            }
+            _ => {
+                let keys: Vec<String> = targets.into_iter().map(|(key, _, _)| key).collect();
+                self.mount_follow_up_picker(&last, &keys, terminal_id);
+                if !skipped.is_empty() {
+                    self.flash_info(skipped.join(" · "));
+                }
+            }
+        }
+    }
+
+    /// The key of the most recent snippet delivered to `terminal_id`, read
+    /// off the durable per-terminal prompt history (#523) — no new state is
+    /// needed to know what a `]]n` follows. `None` when the terminal isn't
+    /// an agent, or nothing sent there came from a snippet.
+    fn last_snippet_sent_to(&self, terminal_id: lazybox_ipc::TerminalId) -> Option<String> {
+        let (_, history) = self.terminals.prompt_history_for(terminal_id)?;
+        history.into_iter().find_map(|prompt| match prompt.source {
+            lazybox_ipc::PromptSource::Snippet { key, .. } => Some(key),
+            lazybox_ipc::PromptSource::Typed => None,
+        })
     }
 
     /// `]]u` from the sidebar — scan the cursor workspace terminal for URLs

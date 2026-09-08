@@ -36,6 +36,11 @@ pub(super) enum LeaderCmd {
     /// every prompt sent to this agent, newest-first, snippet entries
     /// tagged; Enter re-sends the picked one.
     PromptHistory,
+    /// `]]n` — send the follow-up declared by the last snippet delivered
+    /// to this agent (#1569). Resolves that snippet's `next:` and delivers
+    /// the target through the normal snippet path, so pressing it again
+    /// walks the next link of the chain.
+    FollowUp,
     /// `]]H` — open the personal Hopper without forwarding a key to
     /// the focused terminal.
     OpenHopper,
@@ -176,6 +181,19 @@ const FIXED_COMMANDS: &[FixedCommandSpec] = &[
         menu_label: "close terminal",
         reference: "Close the focused terminal (tile or active tab)",
         sidebar: false,
+    },
+    // Workspace-addressed like the `s`/`l`/`r`/`h`/`u` cluster, but placed
+    // below `x` for the same bounded-row reason as `H`: in a Splits layout
+    // the menu already fills the popup exactly through `close terminal`, so
+    // a row inserted higher pushes that essential tile chrome below the
+    // fold. `]]n` stays directly dispatchable, sits above the fold in Tabs
+    // layouts and in the sidebar menu, and is documented either way.
+    FixedCommandSpec {
+        key: 'n',
+        command: LeaderCmd::FollowUp,
+        menu_label: "follow-up",
+        reference: "Send the follow-up declared by the last snippet sent here (`next:` in snippets.yaml)",
+        sidebar: true,
     },
     // Keep this after the split/move/close cluster. The popup has a bounded
     // visible row count; inserting Hopper earlier pushed `close terminal`
@@ -405,6 +423,24 @@ mod tests {
         }
         assert!(rows.iter().any(|(key, _)| key == "r"));
         assert!(rows.iter().any(|(key, _)| key == "t"));
+    }
+
+    /// `]]n` resolves to the follow-up command and is offered in the
+    /// SIDEBAR menu too — it addresses the cursor workspace's agent, so
+    /// it must work where the cursor already is (#871).
+    #[test]
+    fn follow_up_is_a_workspace_addressed_command() {
+        assert_eq!(
+            LeaderCmd::from_key(Key::Char('n'), KeyModifiers::NONE),
+            Some(LeaderCmd::FollowUp),
+        );
+        assert!(LeaderCmd::FollowUp.available_in_sidebar());
+        assert!(
+            LeaderCmd::sidebar_menu_rows()
+                .iter()
+                .any(|(key, _)| key == "n"),
+            "the sidebar menu advertises `n`",
+        );
     }
 
     #[test]

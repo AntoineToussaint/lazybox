@@ -451,8 +451,8 @@ entering its terminal or running the broadcast machinery: `]]s<key>`
 sends a snippet (same fast-path + settle-gated `DeliverSnippet` inject as
 inside the terminal — a session-less-but-spawnable workspace falls back
 to the broadcast spawn per #836), `]]l` a skill (#797), `]]r` recall,
-`]]h` history, `]]u` open-urls — the workspace-addressed subset only
-(terminal-pane chords like `]]f`/`]]x` are inert here). Because `]]`
+`]]h` history, `]]u` open-urls, `]]n` follow-up — the workspace-addressed
+subset only (terminal-pane chords like `]]f`/`]]x` are inert here). Because `]]`
 now shares the sidebar's `]` (browse), a lone `]` is held one
 `escape_window` and resolves to the browser on the next key or the idle
 tick, mirroring the terminal's held literal `]`. (The dedicated
@@ -553,7 +553,17 @@ per-session prompt-history picker (#523 — every prompt sent to this
 agent, newest-first and timestamped, snippet-sourced entries tagged
 with their key; Enter re-sends the picked prompt; the full history is
 persisted per terminal as `terminal-msgs:*` and survives restart, and
-the pinned `you ▸` recap is just its latest entry), `]]u` scans the
+the pinned `you ▸` recap is just its latest entry), `]]n` sends the
+**follow-up** the last snippet delivered here declares (#1569 — a
+snippet's `next:` field, a scalar or a list, names what it chains into;
+one target is delivered straight away through the same
+`DeliverSnippet` path, several open the picker scoped to just those.
+Because the follow-up lands in the prompt history like any other
+snippet, pressing `]]n` again walks the next link, so `deepreview →
+fixall → push` is a pipeline expressed as three ordinary `next:` fields.
+Built-in chains: `rev`/`deepreview` → `fixall`, `freshen` → `push`.
+Dangling targets and off-provider ones are dropped with a notice, never
+silently), `]]u` scans the
 visible terminal for `http(s)://…` URLs and opens the picked one in
 the browser (#596 — a single on-screen URL opens straight away, else a
 picker lists them newest-first so `]]u`+Enter opens the last; an

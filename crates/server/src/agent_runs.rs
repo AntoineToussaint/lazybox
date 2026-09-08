@@ -164,10 +164,8 @@ pub async fn handle_start_agent_run(
     // plain-gateway-only path — which, unlike passing `meter: false` to
     // `gateway_injection_for_agent`, the global `agent.meter_all` cannot
     // override into a proxy route.
-    let injection = crate::spawn_plan::plain_gateway_injection_for_agent(
-        &yaml,
-        Some(agent_impl.as_ref()),
-    );
+    let injection =
+        crate::spawn_plan::plain_gateway_injection_for_agent(&yaml, Some(agent_impl.as_ref()));
     let env = match &injection {
         GatewayInjection::Env(pairs) => pairs.clone(),
         GatewayInjection::Args(_) | GatewayInjection::None => Vec::new(),

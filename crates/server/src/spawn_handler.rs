@@ -14028,9 +14028,9 @@ mod tests {
             panic!("a metered codex spawn must inject argv flags");
         };
         assert!(
-            flags
-                .join(" ")
-                .contains(&format!("model_providers.lazyboxmeter.base_url=\"{proxy_url}\"")),
+            flags.join(" ").contains(&format!(
+                "model_providers.lazyboxmeter.base_url=\"{proxy_url}\""
+            )),
             "the per-session proxy URL must reach codex via its custom-provider base_url flag",
         );
 
@@ -14076,9 +14076,9 @@ mod tests {
             panic!("meter_all must route the PTY path through the proxy even with meter=false");
         };
         assert!(
-            flags
-                .join(" ")
-                .contains(&format!("model_providers.lazyboxmeter.base_url=\"{proxy_url}\"")),
+            flags.join(" ").contains(&format!(
+                "model_providers.lazyboxmeter.base_url=\"{proxy_url}\""
+            )),
             "meter_all routes the interactive path to the per-session proxy URL",
         );
     }

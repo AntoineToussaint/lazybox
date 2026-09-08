@@ -422,7 +422,8 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
     let Some((provider, agent_id, session, upstream_path)) = split_path(parts.uri.path()) else {
         return error_response(StatusCode::NOT_FOUND, "proxy: malformed metering path");
     };
-    let Some(Route { base, count_only }) = resolve_route(provider, &parts.headers, &state.upstreams)
+    let Some(Route { base, count_only }) =
+        resolve_route(provider, &parts.headers, &state.upstreams)
     else {
         return error_response(StatusCode::NOT_FOUND, "proxy: unknown provider");
     };

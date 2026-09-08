@@ -391,7 +391,11 @@ mod tests {
         );
         let u = acc.finish().expect("usage");
         assert_eq!(u.input_tokens, Some(1_000_000));
-        assert_eq!(u.cost_usd_micros, Some(0), "count-only → $0 despite a known model");
+        assert_eq!(
+            u.cost_usd_micros,
+            Some(0),
+            "count-only → $0 despite a known model"
+        );
     }
 
     #[test]

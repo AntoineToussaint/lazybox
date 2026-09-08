@@ -1418,9 +1418,7 @@ mod tests {
         // Registers a custom provider and makes it active — never touches the
         // reserved built-in `openai` id.
         assert!(joined.contains("model_provider=\"lazyboxmeter\""));
-        assert!(joined.contains(&format!(
-            "model_providers.lazyboxmeter.base_url=\"{url}\""
-        )));
+        assert!(joined.contains(&format!("model_providers.lazyboxmeter.base_url=\"{url}\"")));
         assert!(joined.contains("model_providers.lazyboxmeter.wire_api=\"responses\""));
         // requires_openai_auth carries the real OpenAI creds (API key, or the
         // ChatGPT bearer + chatgpt-account-id header) through the proxy.

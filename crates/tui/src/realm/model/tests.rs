@@ -4508,7 +4508,7 @@ snippets:
         );
     }
 
-    /// Agents parked on Claude's auto-continue wait (◌ `AwaitingReset`) are
+    /// Agents parked on Claude's auto-continue wait (☾ `AwaitingReset`) are
     /// rate-limited too, and `Shift-K` resumes them like the blocked ones:
     /// each gets the settle-gated `continue`. The old "skip the parked set
     /// by design" answered eight visibly parked agents with a hint and did
@@ -4594,9 +4594,9 @@ snippets:
     }
 
     /// Mixed block: some agents alerting (`LimitReached`), some parked
-    /// (`AwaitingReset`). `Shift-K` resumes BOTH, and the notice's parked
-    /// count must be the `AwaitingReset` count alone (1), not the whole
-    /// limited set (2).
+    /// (`AwaitingReset`). `Shift-K` resumes BOTH (both get the settle-gated
+    /// `continue`), and the notice's parked count must be the
+    /// `AwaitingReset` count alone (1), not the whole limited set (2).
     ///
     /// The escalating banner is opted out here (`usage_limit_alerts = false`)
     /// so the resume *result* notice is the surface under test: with the
@@ -4605,7 +4605,7 @@ snippets:
     /// the parked call-to-action — that path is covered by
     /// `usage_limit_banner_names_parked_agents_alongside_the_blocked`.
     #[test]
-    fn resume_rate_limited_mixed_resumes_alerting_and_names_parked() {
+    fn resume_rate_limited_mixed_resumes_both_and_counts_parked() {
         use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
         use lazybox_tui_core::action::Action;
         let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
@@ -4650,7 +4650,7 @@ snippets:
     /// The persistent usage-limit banner is the one surface that survives a
     /// resume, so when parked (`AwaitingReset`) agents coexist with blocked
     /// (`LimitReached`) ones it must name them and the restart chord that
-    /// applies — otherwise the ◌ badges outlive a `Shift-K` with no on-screen
+    /// applies — otherwise the ☾ badges outlive a `Shift-K` with no on-screen
     /// reason. Regression guard for the banner counting only the blocked set
     /// and hardcoding `Shift-K` (both would have hidden the parked agents /
     /// gone stale under a remap). A parked-only block raises NO banner: the

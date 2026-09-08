@@ -290,7 +290,7 @@ impl Filter {
             Filter::Unread => w.unread_count() > 0,
             Filter::Asking => crate::agent_attention::workspace_is_asking(w, ctx.agents),
             // Both limit states: the alerting `⧗ LimitReached` block AND the
-            // parked `◌ AwaitingReset` auto-continue wait. Counting only the
+            // parked `☾ AwaitingReset` auto-continue wait. Counting only the
             // former showed `rate-limited (0)` over eight parked agents.
             Filter::RateLimited => crate::agent_attention::workspace_is_limited(w, ctx.agents),
             Filter::ReviewRequested => task.is_some_and(|t| {

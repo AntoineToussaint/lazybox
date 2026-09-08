@@ -5159,7 +5159,7 @@ impl<T: TerminalAdapter> Model<T> {
                 lazybox_tui_core::action::ActionKind::ResumeRateLimited,
             )
             .effective_keys_display(&self.action_key_overrides);
-            // Parked (◌ `AwaitingReset`) agents are rate-limited too. The
+            // Parked (☾ `AwaitingReset`) agents are rate-limited too. The
             // resume chord now sends them `continue` like the blocked ones;
             // the restart chord is the alternative that also swaps in fresh
             // credentials. When any coexist with a blocked agent, this
@@ -5173,7 +5173,10 @@ impl<T: TerminalAdapter> Model<T> {
                     lazybox_tui_core::action::ActionKind::RestartRateLimited,
                 )
                 .effective_keys_display(&self.action_key_overrides);
-                format!(" · {parked} parked, {restart_keys} to restart")
+                format!(
+                    " (plus {parked} parked, resumed as well; \
+                     {restart_keys} for a fresh-credentials restart)"
+                )
             } else {
                 String::new()
             };

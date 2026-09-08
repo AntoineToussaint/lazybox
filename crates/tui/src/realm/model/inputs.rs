@@ -258,16 +258,18 @@ impl<T: TerminalAdapter> Model<T> {
             .is_some_and(|w| w.worktree_scope().is_some())
     }
 
-    /// Resume every workspace currently blocked on a provider usage /
-    /// rate limit (`Shift-K`, #847). A one-shot settle-gated inject
-    /// fan-out of a "continue" prompt across exactly the limit-blocked set
-    /// — the bulk companion to re-authing with another account, so the
-    /// user doesn't visit each terminal. Reuses the broadcast
+    /// Resume every workspace currently held by a provider usage / rate
+    /// limit (`Shift-K`, #847) — in either shape: the alerting
+    /// `⧗ LimitReached` block AND the parked `☾ AwaitingReset` auto-continue
+    /// wait (the set [`crate::components::Sidebar::limited_terminals`]
+    /// returns). A one-shot inject fan-out of a "continue" prompt across
+    /// that set — the bulk companion to re-authing with another account, so
+    /// the user doesn't visit each terminal. Reuses the broadcast
     /// [`Self::deliver_prompt`] delivery, but sources its targets from the
     /// live agent-state map rather than the manual `v` selection (so it
-    /// never touches that selection) and targets ONLY limit-blocked
-    /// workspaces. Each target has a live agent (that's what `LimitReached`
-    /// means), so none fall through to the spawn / skip cases.
+    /// never touches that selection). Every limited/parked workspace has a
+    /// live agent (the states only come from agent detection), so none fall
+    /// through to the spawn / skip cases.
     pub(super) fn resume_rate_limited_agents(&mut self) -> Vec<IpcCommand> {
         // Every limited agent: the alerting `LimitReached` ones AND the
         // parked `AwaitingReset` ones (Claude's auto-continue wait). The
@@ -279,7 +281,7 @@ impl<T: TerminalAdapter> Model<T> {
         // parks again and says so; if credentials changed or the window
         // reset, it works. The key does the thing; the agent reports.
         let terminals = self.sidebar.limited_terminals();
-        // Named in the notice so the count on screen matches the ◌ badges.
+        // Named in the notice so the count on screen matches the ☾ badges.
         let parked = self.sidebar.awaiting_reset_terminals().len();
         if terminals.is_empty() {
             self.flash_hint("no rate-limited agents to resume");

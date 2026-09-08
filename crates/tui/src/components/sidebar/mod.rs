@@ -2177,9 +2177,10 @@ impl Sidebar {
     }
 
     /// Every agent terminal in the usage-limit block, alerting
-    /// (`LimitReached`) or parked (`AwaitingReset`) — the set a restart
-    /// with fresh credentials (`a R`) applies to. Sorted like
-    /// [`Self::limit_reached_terminals`].
+    /// (`LimitReached`) or parked (`AwaitingReset`) — the target set both
+    /// the plain resume (`Shift-K`, a settle-gated `continue` into each) and
+    /// the restart with fresh credentials (`a R`, stop + `--resume`) apply
+    /// to. Sorted like [`Self::limit_reached_terminals`].
     pub fn limited_terminals(&self) -> Vec<TerminalId> {
         let mut ids: Vec<TerminalId> = self
             .agent_terminal_states
@@ -2196,10 +2197,12 @@ impl Sidebar {
         ids
     }
 
-    /// Only the *parked* agent terminals (`AwaitingReset`) — the ones a
-    /// plain resume (`Shift-K`) deliberately leaves alone because a
-    /// "continue" typed into their auto-continue composer would just
-    /// cancel the wait and re-hit the limit. Counted directly rather than
+    /// Only the *parked* agent terminals (`AwaitingReset`). `Shift-K`
+    /// resumes these alongside the alerting ones (a typed `continue`
+    /// cancels the auto-continue wait and re-submits; a still-limited
+    /// account simply parks again); this set is counted separately so the
+    /// resume notice can call out how many were parked and point at `a R`
+    /// for the fresh-credentials restart. Counted directly rather than
     /// derived from [`Self::limited_terminals`] minus
     /// [`Self::limit_reached_terminals`], so the count says what it means
     /// regardless of what else is limited. Sorted like

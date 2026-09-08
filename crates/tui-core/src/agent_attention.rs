@@ -203,7 +203,7 @@ pub fn workspace_is_credit_exhausted(
 /// lazybox pressed "Wait" on a usage-limit prompt (or Claude's own
 /// auto-continue is counting down) and it is now parked until the limit
 /// resets. Distinct from [`workspace_is_limit_reached`] on purpose — this
-/// state is *handled*, so it drives the quiet ◌ row glyph and never the
+/// state is *handled*, so it drives the quiet ☾ row glyph and never the
 /// alert count or the `!` jump. It IS rate-limited, though: the
 /// "rate-limited" filter axis and the bulk resume see it through
 /// [`workspace_is_limited`].
@@ -218,7 +218,7 @@ pub fn workspace_is_awaiting_reset(
 }
 
 /// True iff the workspace's agent is on a usage limit in either shape —
-/// alerting (`⧗ LimitReached`) or parked (`◌ AwaitingReset`). Single source
+/// alerting (`⧗ LimitReached`) or parked (`☾ AwaitingReset`). Single source
 /// of truth for "which agents does a limit hold right now": the
 /// "rate-limited" filter axis and the `Shift-K` resume-all target set.
 /// Counting only the alerting shape showed `rate-limited (0)` in the filter

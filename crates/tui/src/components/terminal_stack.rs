@@ -5792,9 +5792,9 @@ impl TerminalStack {
             )),
             // The calm sibling of `LimitReached`: auto-wait pressed Wait and
             // the agent is parked until reset — handled, nothing for you to
-            // do — so it gets a quiet ◌ in the dim text color, NOT the
+            // do — so it gets a quiet ☾ in the dim text color, NOT the
             // alerting bold `warn` the two blocks above use.
-            AgentState::AwaitingReset => Some(("◌ waiting", Style::default().fg(theme.text_dim))),
+            AgentState::AwaitingReset => Some(("☾ waiting", Style::default().fg(theme.text_dim))),
             // Idle has nothing to act on; `Exited` is surfaced by the
             // `exited` flag above (the process-ended pill lives on the
             // slot, not the live state).

@@ -77,6 +77,7 @@ fn sample_task() -> lazybox_core::Task {
         priority: None,
         state_label: None,
         blocked_by: vec![],
+        merge_after: vec![],
         blocked_on: None,
     }
 }
@@ -106,6 +107,7 @@ fn all_commands() -> Vec<Command> {
             model_alias: Some("L".into()),
             access: lazybox_ipc::AgentRunAccess::ReadOnly,
             force_new: true,
+            role: Some(lazybox_core::Role::Planner),
         },
         Command::Spawn {
             session_key: key.clone(),
@@ -119,6 +121,7 @@ fn all_commands() -> Vec<Command> {
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
             force_new: false,
+            role: None,
         },
         Command::Spawn {
             session_key: key.clone(),
@@ -137,6 +140,7 @@ fn all_commands() -> Vec<Command> {
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
             force_new: false,
+            role: Some(lazybox_core::Role::Coordinator),
         },
         Command::CancelSpawn {
             session_key: key.clone(),
@@ -376,6 +380,7 @@ fn all_commands() -> Vec<Command> {
         },
         Command::MergePr {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            force: false,
         },
         Command::CloseIssue {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
@@ -558,6 +563,10 @@ fn all_commands() -> Vec<Command> {
         },
         Command::ArchiveEpic {
             epic: "auth-refactor".into(),
+        },
+        Command::SetWorkspaceRole {
+            workspace: lazybox_core::WorkspaceKey("github:o/r#1".into()),
+            role: Some(lazybox_core::Role::Coordinator),
         },
         Command::Shutdown,
     ]
@@ -1279,13 +1288,44 @@ fn all_events() -> Vec<Event> {
                 blockers_needing_operator: 1,
                 cycle: false,
                 critical_path: vec![lazybox_core::WorkspaceKey("github:o/r#1".into())],
+                edges: vec![
+                    lazybox_ipc::EpicEdge {
+                        from: lazybox_core::WorkspaceKey("github:o/r#1".into()),
+                        to: lazybox_core::WorkspaceKey("github:o/r#2".into()),
+                        kind: lazybox_ipc::EdgeKind::Blocks,
+                    },
+                    lazybox_ipc::EpicEdge {
+                        from: lazybox_core::WorkspaceKey("github:o/r#1".into()),
+                        to: lazybox_core::WorkspaceKey("github:o/r#2".into()),
+                        kind: lazybox_ipc::EdgeKind::MergeAfter,
+                    },
+                ],
+                merge_order: vec![
+                    lazybox_ipc::MergeOrderEntry {
+                        key: lazybox_core::WorkspaceKey("github:o/r#2".into()),
+                        held_by: vec![],
+                    },
+                    lazybox_ipc::MergeOrderEntry {
+                        key: lazybox_core::WorkspaceKey("github:o/r#1".into()),
+                        held_by: vec![lazybox_core::WorkspaceKey("github:o/r#2".into())],
+                    },
+                ],
                 computed_at: 1_700_000_000_000,
             },
-            delta: vec![lazybox_ipc::EpicDelta::StatusChanged {
-                key: lazybox_core::WorkspaceKey("github:o/r#1".into()),
-                from: lazybox_ipc::EpicMemberStatus::Ready,
-                to: lazybox_ipc::EpicMemberStatus::Blocked,
-            }],
+            delta: vec![
+                lazybox_ipc::EpicDelta::StatusChanged {
+                    key: lazybox_core::WorkspaceKey("github:o/r#1".into()),
+                    from: lazybox_ipc::EpicMemberStatus::Ready,
+                    to: lazybox_ipc::EpicMemberStatus::Blocked,
+                },
+                lazybox_ipc::EpicDelta::Held {
+                    key: lazybox_core::WorkspaceKey("github:o/r#1".into()),
+                    by: vec![lazybox_core::WorkspaceKey("github:o/r#2".into())],
+                },
+                lazybox_ipc::EpicDelta::Released {
+                    key: lazybox_core::WorkspaceKey("github:o/r#3".into()),
+                },
+            ],
         },
     ]
 }
@@ -1391,6 +1431,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::ArchiveEpic { .. } => "ArchiveEpic",
         Command::RecordAction { .. } => "RecordAction",
         Command::RestartAgentAndContinue { .. } => "RestartAgentAndContinue",
+        Command::SetWorkspaceRole { .. } => "SetWorkspaceRole",
     }
 }
 
@@ -1514,7 +1555,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        96,
+        97,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(

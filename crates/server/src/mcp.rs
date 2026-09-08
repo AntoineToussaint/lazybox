@@ -263,6 +263,35 @@ struct EpicReadyArgs {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SpawnWorkerArgs {
+    /// Display name for the new worker workspace (slugified into its key; a
+    /// name collision gets a `-2` suffix). Keep it short and specific — the
+    /// task, not a sentence.
+    workspace_name: String,
+    /// `owner/name` of the GitHub repo the worker runs against; its project
+    /// scope. The worker's checkout and PR land here.
+    repo: String,
+    /// The task brief handed to the worker as its opening prompt. It is framed
+    /// with the Worker role preamble (who you are / your epic / your resolved
+    /// blockers) automatically at spawn — write the task itself, not the role.
+    brief: String,
+    /// Agent id to spawn (`claude`, `codex`, …). Omit to use the configured
+    /// default agent.
+    #[serde(default)]
+    agent: Option<String>,
+}
+
+/// The outcome of a successful [`LazyboxMcp::spawn_worker_prepare`]: the worker
+/// workspace has been created, assigned to the epic, and role-stamped, and is
+/// ready to be spawned with `agent_id`.
+#[derive(Debug)]
+struct PreparedWorker {
+    key: lazybox_core::WorkspaceKey,
+    agent_id: String,
+    epic_key: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct ReportBlockerArgs {
     /// Why this workspace is blocked, in plain words — shown to the operator and
     /// carried in the epic's derived status.
@@ -791,6 +820,199 @@ impl LazyboxMcp {
         serde_json::json!({ "cleared": true, "workspace": caller.as_str() })
     }
 
+    /// Load a workspace from the store, strict-decoding its persisted JSON.
+    /// `None` for a missing or unreadable row (a corrupt or newer-build row
+    /// decodes to `None`, so a role check treats it as unroled rather than
+    /// guessing).
+    fn load_workspace(&self, key: &lazybox_core::WorkspaceKey) -> Option<lazybox_core::Workspace> {
+        let record = self.config.store.get_workspace(key).ok().flatten()?;
+        let json = record.workspace_json?;
+        lazybox_core::Workspace::decode_persisted(&json).ok()
+    }
+
+    /// Resolve + validate a `spawn_worker` request and, on success, create the
+    /// worker workspace, assign it to the caller's epic, and stamp its Worker
+    /// role — everything up to (but not including) the agent spawn. Split from
+    /// the spawn so the gate and the store mutations are unit-testable without
+    /// launching an agent. Every refusal is an `invalid_request` the caller
+    /// reads: not a Coordinator, not in an epic, cap reached, bad repo/agent.
+    async fn spawn_worker_prepare(
+        &self,
+        caller: &SessionKey,
+        args: &SpawnWorkerArgs,
+        max_workers: usize,
+        default_agent: &str,
+    ) -> Result<PreparedWorker, McpError> {
+        // Gate 1 — the caller must be a Coordinator. This is the ONE role
+        // `spawn_worker` enforces (every other role behavior is advisory).
+        let caller_key = lazybox_core::WorkspaceKey::new(caller.as_str());
+        let caller_ws = self.load_workspace(&caller_key).ok_or_else(|| {
+            McpError::invalid_request(
+                "your workspace could not be loaded — cannot check your role",
+                None,
+            )
+        })?;
+        if caller_ws.effective_role() != Some(lazybox_core::Role::Coordinator) {
+            return Err(McpError::invalid_request(
+                "only a Coordinator may spawn workers (set the role with `E r` / SetWorkspaceRole)",
+                None,
+            ));
+        }
+
+        // Gate 2 — the coordinator must own an epic: the (non-archived) record
+        // whose explicit membership includes the caller's workspace.
+        let records = crate::epics::list_all(&self.config).unwrap_or_default();
+        let epic = records
+            .iter()
+            .find(|r| !r.archived && r.members.iter().any(|k| k == &caller_key))
+            .ok_or_else(|| {
+                McpError::invalid_request(
+                    "you are not a member of any epic — a Coordinator spawns workers into its own epic",
+                    None,
+                )
+            })?;
+        let epic_key = epic.key.as_str().to_string();
+
+        // Gate 3 — the per-epic worker cap. `spawn_worker` REFUSES over the cap
+        // (unlike `max_live_agents`, which warns and proceeds): a Coordinator
+        // fanning out unattended is exactly the runaway the cap bounds. Count
+        // the epic's current members that carry the Worker role.
+        if max_workers == 0 {
+            return Err(McpError::invalid_request(
+                "worker spawning is disabled (agent.max_epic_workers = 0)",
+                None,
+            ));
+        }
+        let live_workers = epic
+            .members
+            .iter()
+            .filter(|k| {
+                self.load_workspace(k)
+                    .is_some_and(|ws| ws.effective_role() == Some(lazybox_core::Role::Worker))
+            })
+            .count();
+        if live_workers >= max_workers {
+            return Err(McpError::invalid_request(
+                format!(
+                    "epic worker cap reached ({live_workers}/{max_workers}) — land or archive a worker before spawning another, or raise agent.max_epic_workers"
+                ),
+                None,
+            ));
+        }
+
+        // Parse the repo into a GitHub project key.
+        let (owner, name) = args
+            .repo
+            .trim()
+            .split_once('/')
+            .filter(|(o, n)| !o.is_empty() && !n.is_empty() && !n.contains('/'))
+            .ok_or_else(|| {
+                McpError::invalid_request(
+                    format!("repo must be `owner/name`, got {:?}", args.repo),
+                    None,
+                )
+            })?;
+        let project_key = lazybox_core::ProjectKey::github(owner, name);
+
+        // Resolve + validate the agent id up front so a bad id fails before any
+        // workspace is created (no orphan).
+        let agent_id = args
+            .agent
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(default_agent);
+        if self.config.agents.get(agent_id).is_none() {
+            return Err(McpError::invalid_request(
+                format!("unknown agent {agent_id:?} — enable it or pass a configured agent id"),
+                None,
+            ));
+        }
+        let agent_id = agent_id.to_string();
+
+        let name = args.workspace_name.trim();
+        if name.is_empty() {
+            return Err(McpError::invalid_request("workspace_name is empty", None));
+        }
+
+        // Create → assign → set role. Each persists; the spawn (in the payload
+        // below) then picks up the Worker role and frames the brief.
+        let key = crate::workspace::create_empty_workspace(&self.config, name, project_key)
+            .map_err(|e| McpError::internal_error(format!("create workspace: {e}"), None))?;
+        crate::epics::assign(&self.config, &epic_key, key.clone(), true).await;
+        crate::workspace::set_role(&self.config, &key, Some(lazybox_core::Role::Worker)).await;
+
+        Ok(PreparedWorker {
+            key,
+            agent_id,
+            epic_key,
+        })
+    }
+
+    /// Full `spawn_worker` flow: gate + create + assign + set role
+    /// ([`spawn_worker_prepare`]), then spawn the agent with the brief — which
+    /// `handle_spawn` auto-frames with the Worker role preamble.
+    async fn spawn_worker_payload(
+        &self,
+        caller: &SessionKey,
+        args: SpawnWorkerArgs,
+        max_workers: usize,
+        default_agent: &str,
+    ) -> Result<serde_json::Value, McpError> {
+        let brief = args.brief.trim();
+        if brief.is_empty() {
+            return Err(McpError::invalid_request(
+                "brief is empty — hand the worker a task",
+                None,
+            ));
+        }
+        if brief.len() > MAX_NOTE_BYTES {
+            return Err(McpError::invalid_request(
+                format!("brief exceeds {MAX_NOTE_BYTES} bytes (hand a distilled task, not a dump)"),
+                None,
+            ));
+        }
+        let brief = brief.to_string();
+        let PreparedWorker {
+            key,
+            agent_id,
+            epic_key,
+        } = self
+            .spawn_worker_prepare(caller, &args, max_workers, default_agent)
+            .await?;
+
+        let session_key: SessionKey = (&key).into();
+        tracing::info!(
+            coordinator = %caller.as_str(),
+            worker = %key.as_str(),
+            epic = %epic_key,
+            agent = %agent_id,
+            "mcp spawn_worker: coordinator spawning a worker into its epic"
+        );
+        crate::spawn_handler::handle_spawn(
+            &self.config,
+            session_key,
+            None,
+            lazybox_ipc::TerminalKind::Agent(agent_id.clone()),
+            crate::spawn_handler::SpawnOptions {
+                initial_prompt: Some(brief),
+                autonomous: true,
+                ..Default::default()
+            },
+        )
+        .await;
+
+        Ok(serde_json::json!({
+            "workspace_key": key.as_str(),
+            "epic": epic_key,
+            "agent": agent_id,
+            "role": lazybox_core::Role::Worker.project_label(),
+            "handed_off": true,
+            "delivery_confirmed": false,
+            "note": "Worker workspace created, assigned to the epic, role-stamped, and spawned with the brief (framed by the Worker role preamble). Not a confirmation the agent has started — verify with list_sessions / read_session.",
+        }))
+    }
+
     #[tool(
         description = "The live derived status of every cross-repo epic (or one, by `epic` key): each member's status, wave, blockers, and the epic's ready/blocked/asking/failing rollup plus critical path. This is the plan of record — answer \"where does the epic stand / what's blocked / what's left\" from here, not by re-deriving from individual PRs."
     )]
@@ -844,6 +1066,29 @@ impl LazyboxMcp {
         let caller = self.caller(&ctx)?;
         Ok(json_result(self.clear_blocker_payload(&caller).await))
     }
+
+    #[tool(
+        description = "Coordinator-only: spawn a Worker session into the epic you own. Creates a fresh workspace under `repo` (owner/name), assigns it to your epic, stamps it with the Worker role, and starts the agent with `brief` as its opening prompt — automatically framed with the Worker role preamble (who you are / your epic / your resolved blockers), so `brief` is the task itself, not the role. Refuses if you are not a Coordinator, own no epic, or the epic is at its worker cap (agent.max_epic_workers, default 6). Returns once the worker is handed off — NOT a confirmation the agent has started; verify with list_sessions / read_session."
+    )]
+    async fn spawn_worker(
+        &self,
+        Parameters(args): Parameters<SpawnWorkerArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        // Cap and fallback agent come from live config, re-read per call so an
+        // operator's edit takes effect without a daemon restart.
+        let cfg = lazybox_config::Config::load().unwrap_or_default();
+        let max_workers = cfg
+            .agent
+            .max_epic_workers
+            .unwrap_or(lazybox_config::DEFAULT_MAX_EPIC_WORKERS);
+        let default_agent = cfg.setup.default_agent.as_deref().unwrap_or("claude");
+        Ok(json_result(
+            self.spawn_worker_payload(&caller, args, max_workers, default_agent)
+                .await?,
+        ))
+    }
 }
 
 /// The `notify_session` success payload. `handle_inject_prompt` returns once
@@ -887,7 +1132,11 @@ impl ServerHandler for LazyboxMcp {
                  plan of record (each member's derived status, blockers, and the \
                  ready/blocked rollup) and epic_ready is the ranked queue of \
                  what's workable now — answer epic questions from these rather \
-                 than re-deriving from individual PRs. If your own workspace hits \
+                 than re-deriving from individual PRs. If you are a Coordinator, \
+                 spawn_worker starts a Worker session into your epic (creating + \
+                 assigning + role-stamping the workspace and framing your brief \
+                 with the Worker preamble); it refuses if you aren't a Coordinator \
+                 or the epic is at its worker cap. If your own workspace hits \
                  something a human must resolve, flag it with report_blocker and \
                  clear it with clear_blocker once unblocked."
                     .to_string(),
@@ -1613,6 +1862,163 @@ mod tests {
             .await
             .expect("report");
         assert_eq!(reported["kind"], "credential");
+    }
+
+    /// Persist a workspace carrying an explicit role, so the epic resolver
+    /// includes it and `effective_role()` reads back the role.
+    fn seed_workspace_role(config: &ServerConfig, key: &str, role: lazybox_core::Role) {
+        let mut ws = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new(key),
+            "branch",
+            chrono::Utc::now(),
+        );
+        ws.role = Some(role);
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: key.to_string(),
+                created_at: chrono::Utc::now(),
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
+    }
+
+    /// Create an epic with the given members (by key). Not archived.
+    async fn seed_epic(config: &ServerConfig, key: &str, members: &[&str]) {
+        let mut record = lazybox_core::EpicRecord::new(
+            lazybox_core::EpicKey::new(key),
+            "Epic",
+            chrono::Utc::now(),
+        );
+        record.members = members
+            .iter()
+            .map(|m| lazybox_core::WorkspaceKey::new(*m))
+            .collect();
+        crate::epics::upsert(config, record).await;
+    }
+
+    fn spawn_worker_args(name: &str, repo: &str, brief: &str) -> SpawnWorkerArgs {
+        SpawnWorkerArgs {
+            workspace_name: name.to_string(),
+            repo: repo.to_string(),
+            brief: brief.to_string(),
+            agent: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_refuses_a_non_coordinator() {
+        let config = ServerConfig::in_memory();
+        // Caller is a Worker, not a Coordinator, and is in an epic.
+        seed_workspace_role(&config, "not-coord", lazybox_core::Role::Worker);
+        seed_epic(&config, "e", &["not-coord"]).await;
+
+        let handler = LazyboxMcp::new(config);
+        let caller = SessionKey::from("not-coord");
+        let args = spawn_worker_args("task", "acme/widget", "do the thing");
+        let err = handler
+            .spawn_worker_prepare(&caller, &args, 6, "claude")
+            .await
+            .expect_err("a non-coordinator must be refused");
+        assert!(
+            err.message.contains("Coordinator"),
+            "refusal should name the role gate: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_refuses_without_an_epic() {
+        let config = ServerConfig::in_memory();
+        // A Coordinator that belongs to no epic cannot spawn a worker.
+        seed_workspace_role(&config, "coord", lazybox_core::Role::Coordinator);
+
+        let handler = LazyboxMcp::new(config);
+        let caller = SessionKey::from("coord");
+        let args = spawn_worker_args("task", "acme/widget", "do the thing");
+        let err = handler
+            .spawn_worker_prepare(&caller, &args, 6, "claude")
+            .await
+            .expect_err("no epic must be refused");
+        assert!(err.message.contains("epic"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_refuses_past_the_cap() {
+        let config = ServerConfig::in_memory();
+        seed_workspace_role(&config, "coord", lazybox_core::Role::Coordinator);
+        // One live worker already in the epic; the cap of 1 is reached.
+        seed_workspace_role(&config, "w1", lazybox_core::Role::Worker);
+        seed_epic(&config, "e", &["coord", "w1"]).await;
+
+        let handler = LazyboxMcp::new(config);
+        let caller = SessionKey::from("coord");
+        let args = spawn_worker_args("task", "acme/widget", "do the thing");
+        let err = handler
+            .spawn_worker_prepare(&caller, &args, 1, "claude")
+            .await
+            .expect_err("over-cap must be refused");
+        assert!(
+            err.message.contains("cap") && err.message.contains("1/1"),
+            "refusal should report the cap: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_prepare_creates_assigns_and_role_stamps() {
+        let config = ServerConfig::in_memory();
+        seed_workspace_role(&config, "coord", lazybox_core::Role::Coordinator);
+        seed_epic(&config, "e", &["coord"]).await;
+
+        let handler = LazyboxMcp::new(config.clone());
+        let caller = SessionKey::from("coord");
+        let args = spawn_worker_args("build the parser", "acme/widget", "implement the parser");
+        let prepared = handler
+            .spawn_worker_prepare(&caller, &args, 6, "claude")
+            .await
+            .expect("prepare should succeed for an in-cap coordinator");
+
+        assert_eq!(prepared.epic_key, "e");
+        assert_eq!(prepared.agent_id, "claude");
+
+        // The worker workspace exists, under the github project, with the Worker role.
+        let ws = handler
+            .load_workspace(&prepared.key)
+            .expect("the created worker workspace is persisted");
+        assert_eq!(ws.effective_role(), Some(lazybox_core::Role::Worker));
+        assert_eq!(
+            ws.project_key,
+            Some(lazybox_core::ProjectKey::github("acme", "widget"))
+        );
+
+        // …and it is a member of the coordinator's epic.
+        let records = crate::epics::list_all(&config).expect("epics");
+        let epic = records
+            .iter()
+            .find(|r| r.key.as_str() == "e")
+            .expect("epic e");
+        assert!(
+            epic.members.contains(&prepared.key),
+            "the worker must be assigned to the epic: {:?}",
+            epic.members
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_rejects_a_bad_repo() {
+        let config = ServerConfig::in_memory();
+        seed_workspace_role(&config, "coord", lazybox_core::Role::Coordinator);
+        seed_epic(&config, "e", &["coord"]).await;
+
+        let handler = LazyboxMcp::new(config);
+        let caller = SessionKey::from("coord");
+        let args = spawn_worker_args("task", "not-a-repo", "do the thing");
+        let err = handler
+            .spawn_worker_prepare(&caller, &args, 6, "claude")
+            .await
+            .expect_err("a repo without owner/name must be refused");
+        assert!(err.message.contains("owner/name"), "{}", err.message);
     }
 
     #[test]

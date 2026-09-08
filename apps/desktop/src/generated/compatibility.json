@@ -262,6 +262,7 @@
               "labels": [],
               "last_commenter": null,
               "linked_tasks": [],
+              "merge_after": [],
               "merge_blocked": false,
               "mergeable": "Mergeable",
               "needs_reply": false,
@@ -284,7 +285,8 @@
             "project_key": "github-o-r",
             "read_indices": [],
             "remote": null,
-            "schema": 10,
+            "role": null,
+            "schema": 11,
             "seen_count": 0,
             "sent_snippets": {
               "recent": [],
@@ -350,6 +352,7 @@
           "labels": [],
           "last_commenter": null,
           "linked_tasks": [],
+          "merge_after": [],
           "merge_blocked": false,
           "mergeable": "Mergeable",
           "needs_reply": false,
@@ -372,7 +375,8 @@
         "project_key": "github-o-r",
         "read_indices": [],
         "remote": null,
-        "schema": 10,
+        "role": null,
+        "schema": 11,
         "seen_count": 0,
         "sent_snippets": {
           "recent": [],
@@ -554,6 +558,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 2305734409,
+  "protocol_fingerprint": 370224890,
   "protocol_version": 4
 }

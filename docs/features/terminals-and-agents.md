@@ -573,6 +573,79 @@ before any multi-user or remote exposure (design doc §7b).
 
 ---
 
+## Workspace roles
+
+**Status:** shipped (#1523, P2 of the orchestration epic #1517)
+**Crate(s):** `core` (`workspace.rs` `Role`, `prompts.rs` preambles), `server`
+(`workspace/mod.rs` `set_role`, `spawn_handler.rs` injection, `mcp.rs`
+`spawn_worker`, `gh-provider` `sync_role_label_target`), `tui`
+(`E r` picker + sidebar badge)
+**Config / flags:** `agents.max_epic_workers` (default 6) caps a Coordinator's
+`spawn_worker` fan-out
+**Key bindings:** `E r` set/clear the cursor workspace's role · `E p` spawn a
+Planner · `E c` spawn a Coordinator
+
+### What it does
+Gives a workspace an **orchestration role** — Planner, Coordinator, Worker,
+Reviewer, or Integrator — that says what that session is *for* in an epic. A
+role is a persisted, serde-defaulted field on the workspace (`Workspace.role:
+Option<Role>`), OR-merge-safe like `hopper` / `remote`. It does three things:
+
+- **Badge.** Each role shows a sidebar glyph: `✎ plan`, `◆ coord`, `⚙ worker`,
+  `👁 review`, `⇅ integ`.
+- **Prompt preamble.** A role-stamped spawn gets a role-specific preamble
+  (`core/src/prompts.rs`) injected ahead of its work prompt — the Planner's
+  carve/design-issues brief, the Coordinator's "you own this epic; brief and
+  start workers, don't code", the Worker's blockers-and-contracts note, the
+  Reviewer's diff-and-DoD, the Integrator's land-order. Injection happens in
+  `spawn_handler.rs` only when the role is persisted *before* the `Spawn` is
+  processed and the prompt is non-empty.
+- **Label projection.** Setting or clearing a role converges a single
+  `role:<planner|coordinator|worker|reviewer|integrator>` GitHub label
+  (`sync_role_label_target`, add/remove — never wholesale-replace). When the
+  field is unset, `effective_role()` adopts the label, so a role set on the
+  tracker is honored and stripping the label unroles the session.
+
+Roles are **advisory** except one enforced gate: the MCP `spawn_worker` tool
+(Coordinator-only) creates a workspace, assigns it to the caller's epic as a
+Worker, and spawns an agent on a brief — refusing off-role or past
+`max_epic_workers`. Merge gating/ordering is P3; automatic dispatch is P4.
+
+### How to use it
+- `E r` on a workspace opens a picker (the five roles or *none*); the choice
+  persists and updates the badge, label, and future spawns.
+- `E p` / `E c` stamp Planner / Coordinator on the cursor workspace and spawn
+  the default agent there with a kickoff prompt, so the role preamble frames
+  the launch (role is set first, then the spawn is issued).
+- A Coordinator session staffs its epic from inside the agent with
+  `spawn_worker(workspace_name, repo, brief, agent?)` — the one MCP tool gated
+  on role. It refuses for any non-Coordinator caller.
+- On GitHub, the `role:*` label makes the plan legible to anyone looking at the
+  tracker rather than at lazybox — and lazybox adopts it back if the field is
+  unset, so the two stay in sync.
+
+### How it works (brief)
+`SetWorkspaceRole { workspace, role }` (IPC) is handled synchronously in
+`server/src/lib.rs`, which `await`s `workspace::set_role` — it locks, sets the
+field, `commit_upsert`s, then best-effort projects the label via
+`sync_role_label_target`. `E p` / `E c` push `SetWorkspaceRole` *then* `Spawn`
+(with `force_new` and a non-empty kickoff prompt) so the daemon, draining the
+command channel in order, persists the role before the spawn handler reads it
+for preamble injection. The epic-header `<epic>-coordinator` creation path is
+deferred to where client-side epic-row rendering lands (the TUI still ignores
+`Event::EpicStatus`), so `E c`'s reachable target is the cursor workspace.
+
+### Test checklist
+- [ ] `E r` sets a role; the sidebar shows the matching badge and a `role:*`
+      label appears on the PR/issue.
+- [ ] Clearing the role removes the badge and detaches (not deletes) the label.
+- [ ] A role set only via the `role:*` label is adopted by `effective_role()`;
+      a persisted field wins over a conflicting label.
+- [ ] `E p` / `E c` spawn an agent whose prompt opens with the role preamble.
+- [ ] `spawn_worker` is refused for a non-Coordinator and past `max_epic_workers`.
+
+---
+
 ## Terminal interaction model
 
 **Status:** stable

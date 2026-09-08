@@ -447,6 +447,7 @@ impl<T: TerminalAdapter> Model<T> {
             model_alias,
             access,
             force_new: false,
+            role: None,
         };
         self.spawn_follow_to = Some(conversion.draft.source.clone());
         self.last_spawn = Some(command.clone());
@@ -1009,6 +1010,19 @@ impl<T: TerminalAdapter> Model<T> {
                 self.redraw = true;
             }
             return;
+        }
+        // Epic snapshot cache (#1524): the daemon derives epic status and
+        // pushes it here (seeded on connect with `delta` empty, refreshed
+        // on any relevant change). Cache the latest per epic so the
+        // merge-order / DAG readouts and the held-merge confirm can read it
+        // without a round-trip, then repaint an open epic modal in place.
+        // Fall through afterwards — there is no other client handling of
+        // this event, but the shared side-effects below (overview
+        // projection, leader-highlight drop) still apply.
+        if let IpcEvent::EpicStatus { snapshot, .. } = &event {
+            let key = snapshot.key.clone();
+            self.epic_snapshots.insert(key.clone(), snapshot.clone());
+            self.refresh_open_epic_modal(&key);
         }
         // On a group-header row the right pane shows a repo/Space overview
         // projected — in `sync_panes` — from workspace + agent data. Unlike
@@ -1712,6 +1726,15 @@ impl<T: TerminalAdapter> Model<T> {
                 // state before this event, so the CONFLICT pill is
                 // already accurate.
                 self.mount_conflict_resolve(workspace_key, pr_label);
+            } else if let Some(held_names) =
+                reason.strip_prefix(lazybox_ipc::MERGE_HELD_REASON_PREFIX)
+            {
+                // Merge-after hold is a decision, not a failure (#1524):
+                // the PR is merge-ready but the epic says it must land
+                // after the named predecessors. Offer the out-of-order
+                // override (Yes re-sends with `force: true`) instead of a
+                // dead-end error.
+                self.mount_merge_held_confirm(workspace_key, pr_label, held_names);
             } else {
                 self.flash_action_error(
                     workspace_key,

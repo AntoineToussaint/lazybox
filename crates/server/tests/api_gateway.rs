@@ -175,6 +175,7 @@ fn make_task(key: &str) -> Task {
         priority: None,
         state_label: None,
         blocked_by: vec![],
+        merge_after: vec![],
         blocked_on: None,
     }
 }
@@ -702,6 +703,7 @@ fn web_control_contract_fixture_is_current() {
             model_alias: None,
             access: Default::default(),
             force_new: false,
+            role: None,
         }),
         "spawn_shell": JsonClientFrame::Command(Command::Spawn {
             session_key,
@@ -715,6 +717,7 @@ fn web_control_contract_fixture_is_current() {
             model_alias: None,
             access: Default::default(),
             force_new: false,
+            role: None,
         }),
     });
 
@@ -1495,6 +1498,7 @@ async fn desktop_runtime_real_pty_handles_backpressure_reconnect_replay_and_resy
         model_alias: None,
         access: lazybox_ipc::AgentRunAccess::Default,
         force_new: false,
+        role: None,
     });
     let request = Request::builder()
         .method(Method::POST)
@@ -1728,6 +1732,7 @@ async fn web_control_json_loop_drives_a_live_agent_with_bearer_auth() {
         model_alias: None,
         access: lazybox_ipc::AgentRunAccess::Default,
         force_new: false,
+        role: None,
     });
     let spawn_request = Request::builder()
         .method(Method::POST)
@@ -2202,6 +2207,7 @@ async fn command_route_returns_the_correlated_terminal_failure() {
         model_alias: None,
         access: lazybox_ipc::AgentRunAccess::Default,
         force_new: false,
+        role: None,
     });
     let request = Request::builder()
         .method(Method::POST)

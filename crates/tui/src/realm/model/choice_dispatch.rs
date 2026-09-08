@@ -122,6 +122,12 @@ impl<T: TerminalAdapter> Model<T> {
             Id::ConvertSessionRole => PickFlow::ConvertSession {
                 active: matches!(self.modal_flow, Some(ModalFlow::ConvertSession { .. })),
             },
+            Id::RolePicker => match &self.modal_flow {
+                Some(ModalFlow::SetRole { workspace }) => PickFlow::SetRole {
+                    workspace: Some(workspace.clone()),
+                },
+                _ => PickFlow::SetRole { workspace: None },
+            },
             Id::StartAgentProject => PickFlow::StartAgentProject,
             Id::StartSheet => PickFlow::StartSheet,
             Id::NewWorkspaceRepo => PickFlow::NewWorkspaceRepo,
@@ -288,6 +294,7 @@ impl<T: TerminalAdapter> Model<T> {
             | Id::JiraProjectRepo
             | Id::HopperProject
             | Id::MoveToSpacePicker
+            | Id::RolePicker
             | Id::InspectList => {
                 self.modal_flow = None;
             }
@@ -818,6 +825,7 @@ mod optimistic_assignee_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }

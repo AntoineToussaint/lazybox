@@ -54,6 +54,10 @@ pub fn plan_spawn_for_terminal(cmd: Command, terminal_id: TerminalId) -> Command
             // silently defeat "start a second agent". Only the reuse-eligible
             // spawns (force_new == false) rewrite.
             force_new: false,
+            // The in-band role preamble (#1523) rides only `force_new: true`
+            // role spawns, so this reuse-rewrite never carries one; an inject
+            // onto a live agent is deliberately never re-framed.
+            role: _,
         } if access == lazybox_ipc::AgentRunAccess::Default => Command::InjectPrompt {
             terminal_id,
             prompt,
@@ -105,6 +109,7 @@ mod tests {
             model_alias: Some("L".to_string()),
             access: lazybox_ipc::AgentRunAccess::Default,
             force_new: false,
+            role: None,
         }
     }
 

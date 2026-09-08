@@ -193,6 +193,7 @@ async fn spawn_log_tail(
             model_alias: None,
             access: Default::default(),
             force_new: false,
+            role: None,
         })
         .unwrap();
 

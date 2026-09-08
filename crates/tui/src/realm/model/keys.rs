@@ -1080,6 +1080,7 @@ impl<T: TerminalAdapter> Model<T> {
                     // Reconstructed from an inject fallback — the reuse-eligible
                     // path, so it must not force a duplicate.
                     force_new: false,
+                    role: None,
                 });
             }
         }
@@ -2921,6 +2922,9 @@ pub(super) fn action_from_kind(
         ActionKind::CollapseIntoPr => Action::CollapseIntoPr,
         ActionKind::Reply => Action::Reply,
         ActionKind::EditNotes => Action::EditNotes,
+        ActionKind::SetRole => Action::SetRole,
+        ActionKind::SpawnPlanner => Action::SpawnPlanner,
+        ActionKind::SpawnCoordinator => Action::SpawnCoordinator,
         ActionKind::RequestReviewers => Action::RequestReviewers,
         ActionKind::AddAssignees => Action::AddAssignees,
         ActionKind::ManageLabels => Action::ManageLabels,
@@ -2991,6 +2995,8 @@ pub(super) fn action_from_kind(
         ActionKind::JumpToLimited => Action::JumpToLimited,
         ActionKind::JumpToUnread => Action::JumpToUnread,
         ActionKind::JumpToBlocked => Action::JumpToBlocked,
+        ActionKind::EpicMergeOrder => Action::EpicMergeOrder,
+        ActionKind::EpicGraph => Action::EpicGraph,
         ActionKind::JumpPrevGroup => Action::JumpPrevGroup,
         ActionKind::JumpNextGroup => Action::JumpNextGroup,
         ActionKind::ResumeRateLimited => Action::ResumeRateLimited,

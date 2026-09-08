@@ -630,6 +630,14 @@ pub struct Task {
     /// Empty for providers without the concept and for older snapshots.
     #[serde(default)]
     pub blocked_by: Vec<TaskId>,
+    /// Tasks that must *land* before this one may merge — a landing-order
+    /// constraint that does not gate the work itself. Read from a `Merge
+    /// after: owner/repo#N` body marker (same grammar as `Blocked by:`) and,
+    /// on the GitHub side, parsed from PR bodies too since a PR is the
+    /// natural place to declare merge order. Order preserved, deduplicated.
+    /// Empty for providers without the concept and for older snapshots.
+    #[serde(default)]
+    pub merge_after: Vec<TaskId>,
     /// A declared blocker with a human-readable reason — parsed from a
     /// `Blocked on: <reason>` body line (a decision, a credential, an
     /// outside party). Distinct from [`Task::blocked_by`], which is task
@@ -1155,6 +1163,7 @@ mod status_tag_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }

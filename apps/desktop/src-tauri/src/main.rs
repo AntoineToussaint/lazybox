@@ -3249,7 +3249,7 @@ mod tests {
             Command::from(DesktopCommand::MergePr {
                 session_key: session_key.clone(),
             }),
-            Command::MergePr { workspace_key } if workspace_key.0 == session_key.as_str()
+            Command::MergePr { workspace_key, .. } if workspace_key.0 == session_key.as_str()
         ));
         assert!(matches!(
             Command::from(DesktopCommand::UpdateBranch {
@@ -3945,6 +3945,7 @@ mod tests {
             linked_tasks: vec![],
             parent: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
             priority: None,
             state_label: None,

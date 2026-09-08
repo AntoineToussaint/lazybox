@@ -342,6 +342,12 @@ pub enum Id {
     /// spawns/attaches the workspace's agent with the conflict-resolution
     /// prompt. The target workspace lives in `ModalFlow::ConflictResolve`.
     ConflictResolve,
+    /// Merge-after-hold override prompt (#1524). Offered when a `g m` is
+    /// refused because the PR is held behind unmerged merge-after
+    /// predecessors: `Msg::Confirmed(true)` re-sends `MergePr { force:
+    /// true }` for every held workspace. The accumulated set lives in
+    /// `ModalFlow::MergeHeldConfirm` (a bulk `g m` folds each held PR in).
+    MergeHeldConfirm,
     /// Snippet picker mounted from the terminal pane on `]]s<key>`.
     /// Filter input + scrollable snippet list. `Msg::ChoicePicked`
     /// resolves the picked row to a snippet body, which the
@@ -458,6 +464,12 @@ pub enum Id {
     /// flow. The source terminal is fixed when the picker mounts and
     /// lives in `ModalFlow::ConvertSession`.
     ConvertSessionRole,
+    /// `E r` orchestration-role picker (#1523). Rows carry a positional
+    /// [`ChoicePayload::Index`] — 0..5 are [`lazybox_core::Role::ALL`],
+    /// the trailing row clears the role. The target workspace lives in
+    /// `ModalFlow::SetRole`; the pick becomes a
+    /// [`lazybox_ipc::Command::SetWorkspaceRole`].
+    RolePicker,
     /// Single-pick `Choice` over the enabled agents (`,` Settings →
     /// "Change default agent"), opened on the current default. Each row
     /// carries its agent id as a [`ChoicePayload::Text`]. Pick → persist
@@ -532,6 +544,18 @@ pub enum Id {
     /// auto-connect toggle. The stage in `ModalFlow::SandboxOnboarding`
     /// tells `Msg::Confirmed` which one is on screen.
     SandboxConfirm,
+    /// Epic merge-order readout (`E m`, #1524). A read-only scrollable
+    /// list of the focused epic's PRs in topological merge order, with
+    /// held entries marked and their unmerged predecessors named. `Enter`
+    /// on a row jumps to that workspace; any other key closes. Repaints in
+    /// place when a fresh `Event::EpicStatus` lands (`mount_merge_order` /
+    /// `refresh_open_epic_modal`), built from the cached `EpicSnapshot`.
+    MergeOrder,
+    /// Full-screen epic DAG (`E g`, #1524). Waves as columns, `j/k` within
+    /// a column, `h/l` across, `Enter` jumps to the highlighted member,
+    /// `Esc` closes. The layout is a pure `tui_core::epic_graph::layout`
+    /// so it is unit-testable; this modal renders + navigates it.
+    EpicGraph,
 }
 
 impl Id {
@@ -558,6 +582,7 @@ impl Id {
                 | Id::SkillPicker
                 | Id::SnippetBrowser
                 | Id::MergeHistory
+                | Id::MergeOrder
         )
     }
 
@@ -956,6 +981,18 @@ pub(crate) enum ModalFlow {
     /// resolve to the wrong PR. `Msg::Confirmed(true)` runs the
     /// FixConflict work flow against this workspace.
     ConflictResolve { workspace: lazybox_core::SessionKey },
+    /// Merge-after-hold override prompt (#1524). A `g m` on a PR that is
+    /// merge-ready but held behind unmerged predecessors is refused by the
+    /// daemon; confirming re-sends `MergePr { force: true }` for each held
+    /// workspace to land them out of order. A bulk `g m` produces one refusal
+    /// event per held PR (each arriving async), so the set accumulates here —
+    /// every held PR after the first folds into this one confirm instead of
+    /// being dropped — as `(workspace, pr_label)` pairs. The workspaces are
+    /// resolved from the refusal events, so a cursor drift under the modal
+    /// can't redirect the forced merge.
+    MergeHeldConfirm {
+        held: Vec<(lazybox_core::WorkspaceKey, String)>,
+    },
     /// Action proposed by the Ask Lazybox help agent (#353). For
     /// `scaffold_skill`, `skill_root` is the destination repo resolved
     /// and shown to the user at propose time; apply writes there rather
@@ -1035,6 +1072,12 @@ pub(crate) enum ModalFlow {
     /// Structured session conversion (`x f`): role picker. Once picked,
     /// the async run moves into `Model::conversion`.
     ConvertSession { draft: ConversionDraft },
+    /// `E r` orchestration-role picker (#1523): the target workspace,
+    /// fixed when the picker mounts, that the pick's
+    /// `Command::SetWorkspaceRole` addresses.
+    SetRole {
+        workspace: lazybox_core::WorkspaceKey,
+    },
     /// Prompt-history picker (#523) → resend into this terminal.
     PromptHistory { terminal: lazybox_ipc::TerminalId },
     /// Editors-panel add/edit form (#1102). Carries the current stage so
@@ -1230,6 +1273,10 @@ pub enum Msg {
         title: String,
         body: String,
     },
+    /// `Enter` on a row of the merge-order (`E m`) or DAG (`E g`) modal
+    /// (#1524) — close the modal and jump to that member's workspace,
+    /// via `Model::jump_to_workspace_key`.
+    EpicJumpToWorkspace(lazybox_core::SessionKey),
     /// A detail-pane key in the repo issue browser (`g i`, #1436) — read
     /// the highlighted issue's full body, or dispatch a label / reply /
     /// note / open-in-browser against it. The action carries its resolved
@@ -2235,6 +2282,13 @@ pub struct Model<T: TerminalAdapter> {
     /// without a round-trip.
     pub(crate) mastery:
         std::collections::HashMap<String, std::collections::HashMap<lazybox_ipc::ActionVia, u32>>,
+    /// Live epic snapshots keyed by epic key (#1524). The daemon derives
+    /// epic status and pushes `Event::EpicStatus`; the connect-replay
+    /// burst seeds this with a snapshot per live epic (`delta` empty), and
+    /// later pushes refresh the entry in place. The merge-order (`E m`) and
+    /// DAG (`E g`) readouts render from this cache, and the held-merge
+    /// confirm on `g m` consults it to name unmerged predecessors.
+    pub(crate) epic_snapshots: std::collections::HashMap<String, lazybox_ipc::EpicSnapshot>,
     /// Skill names triggered this session, most-recent first (capped at
     /// `RECENT_SNIPPETS_MAX`). Feeds the skills picker's "Recent" group so
     /// a repeated skill is one `]]k` + `Enter` away, mirroring
@@ -2689,6 +2743,7 @@ impl<T: TerminalAdapter> Model<T> {
             snippets: lazybox_config::Snippets::default(),
             recent_snippets: Vec::new(),
             mastery: std::collections::HashMap::new(),
+            epic_snapshots: std::collections::HashMap::new(),
             recent_skills: Vec::new(),
             dismissed_updates: Vec::new(),
             snippet_keepmine: Vec::new(),
@@ -5642,6 +5697,7 @@ impl<T: TerminalAdapter> Model<T> {
                     initial_snippet: None,
                     on_main: false,
                     force_new: false,
+                    role: None,
                 });
                 self.flash_info(format!(
                     "Provisioning worktree for {workspace_key} — opening in {} when ready…",
@@ -5856,6 +5912,7 @@ impl<T: TerminalAdapter> Model<T> {
             initial_snippet: None,
             on_main: false,
             force_new: false,
+            role: None,
         });
         self.flash_info(format!(
             "Provisioning worktree for {workspace_key} — opening in {} when ready…",
@@ -7176,6 +7233,12 @@ impl<T: TerminalAdapter> Model<T> {
                 // workspace, so the reader's `a` resolves against the sidebar
                 // selection as it did before the scoping change.
                 self.mount_description_modal(title, body, None);
+            }
+            Msg::EpicJumpToWorkspace(key) => {
+                // Close the epic modal, then reveal the target row (#1524).
+                let cmds = self.handle_modal_dismissed();
+                self.dispatch_cmds(cmds);
+                self.jump_to_workspace_key(&key);
             }
             Msg::IssueBrowserAction(action) => {
                 self.handle_issue_browser_action(action);

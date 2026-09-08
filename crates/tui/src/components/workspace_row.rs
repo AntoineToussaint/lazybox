@@ -1128,6 +1128,7 @@ fn pack_badges(cells: impl IntoIterator<Item = Cell>) -> Cell {
 /// the sum of every badge type's widest cell across the whole table.
 fn cell_badges(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     pack_badges([
+        cell_role_badge(ctx),
         cell_remote(ctx),
         cell_stack(ctx),
         cell_blocked(ctx),
@@ -1157,6 +1158,28 @@ fn cell_remote(ctx: &WorkspaceRowCtx<'_>) -> Cell {
             .add_modifier(Modifier::BOLD)
     };
     Cell::from_span(Span::styled(format!(" ⇅ {name} "), style))
+}
+
+/// The ` ✎ plan ` / ` ◆ coord ` / … orchestration-role badge (#1523): this
+/// workspace has been assigned a [`Role`](lazybox_core::Role) in an epic —
+/// Planner, Coordinator, Worker, Reviewer, or Integrator. The role's glyph +
+/// short label make its part in the orchestration legible on the row itself,
+/// alongside the epic's structural badges. Set via `E r`; the role also
+/// drives the spawn-prompt preamble and the `spawn_worker` gate. A fg-only
+/// accent badge — passive identity, packed at the front of the shared cluster
+/// (#813). Renders nothing when the workspace carries no role.
+fn cell_role_badge(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    let Some(role) = ctx.workspace.and_then(|w| w.effective_role()) else {
+        return Cell::empty();
+    };
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default()
+            .fg(ctx.theme.accent)
+            .add_modifier(Modifier::BOLD)
+    };
+    Cell::from_span(Span::styled(format!(" {} ", role.badge()), style))
 }
 
 /// The ` ⇗k/N ` stacked-PR badge (issue #969): this workspace's PR sits
@@ -1610,6 +1633,7 @@ mod tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -3251,6 +3275,60 @@ mod tests {
         ctx.stack = Some(&stack);
         let cell = cell_stack(&ctx);
         assert_eq!(cell.spans[0].content.as_ref(), " ⇗2/3 ");
+    }
+
+    /// Each orchestration role paints its own glyph+label badge (#1523),
+    /// read straight off the workspace's `role` field.
+    #[test]
+    fn cell_role_badge_per_role() {
+        let task = make_task("owner/repo#2", "child");
+        let theme = theme();
+        for role in lazybox_core::Role::ALL {
+            let mut ws = Workspace::from_task(task.clone(), fixed_time());
+            ws.role = Some(role);
+            let ctx = ctx_for(&ws, &task, &theme);
+            let cell = cell_role_badge(&ctx);
+            assert_eq!(
+                cell.spans[0].content.as_ref(),
+                format!(" {} ", role.badge()),
+                "role {role:?} should paint its own badge"
+            );
+        }
+    }
+
+    /// A workspace with no assigned role shows nothing in the role slot
+    /// (#1523).
+    #[test]
+    fn cell_role_badge_empty_without_role() {
+        let task = make_task("owner/repo#2", "child");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(
+            ws.role, None,
+            "fixture starts role-less so the badge has nothing to render"
+        );
+        assert_eq!(cell_role_badge(&ctx).width(), 0);
+    }
+
+    /// With no persisted role, the badge adopts a `role:<label>` projection
+    /// carried on the primary task — a planner's `--label role:worker` shows
+    /// up in the sidebar without a round-trip through the daemon (#1523).
+    #[test]
+    fn cell_role_badge_adopts_label() {
+        let mut task = make_task("owner/repo#2", "child");
+        task.labels = vec![lazybox_core::Label::new(
+            lazybox_core::Role::Worker.project_label(),
+        )];
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(ws.role, None, "no persisted role — the label is the source");
+        assert_eq!(
+            cell_role_badge(&ctx).spans[0].content.as_ref(),
+            format!(" {} ", lazybox_core::Role::Worker.badge()),
+            "the badge adopts the role:worker label",
+        );
     }
 
     /// The dependency badge shows a count when the workspace declares

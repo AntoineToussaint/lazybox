@@ -210,6 +210,7 @@ fn task(
         priority: None,
         state_label: None,
         blocked_by: vec![],
+        merge_after: vec![],
         blocked_on: None,
     }
 }
@@ -279,6 +280,7 @@ fn send_spawn(
             initial_snippet: None,
             on_main: false,
             force_new: false,
+            role: None,
         })
         .unwrap();
 }
@@ -383,6 +385,7 @@ async fn e2e_spawn_provisions_a_real_worktree_and_collapse_carries_it_to_the_pr(
                 initial_snippet: None,
                 on_main: false,
                 force_new: false,
+                role: None,
             })
             .unwrap();
         assert!(
@@ -1552,6 +1555,7 @@ async fn e2e_serve_loop_restart_recovers_session_with_deep_scrollback() {
                 initial_snippet: None,
                 on_main: false,
                 force_new: false,
+                role: None,
             })
             .unwrap();
         let terminal_id = match wait_for(
@@ -1708,6 +1712,7 @@ async fn live_agent_boots_to_ready(agent: &str, socket: &str) {
             initial_snippet: None,
             on_main: false,
             force_new: false,
+            role: None,
         })
         .unwrap();
     let terminal_id = match wait_for(
@@ -1980,6 +1985,7 @@ async fn e2e_live_scroll_fetch_serves_deep_history_without_restart() {
                 initial_snippet: None,
                 on_main: false,
                 force_new: false,
+                role: None,
             })
             .unwrap();
         let terminal_id = match wait_for(

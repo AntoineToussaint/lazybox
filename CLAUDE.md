@@ -282,9 +282,25 @@ then falls to the pane (committed-search clear),
 open the fuzzy jump-to-workspace picker (all repos; from inside an
 agent use `]]` then `` ` ``), `!` jump to agent-asking workspace,
 `Shift-F` jump to failing CI, `E j` jump to the next blocked
-workspace (the `E` epic leader — one that declares a `Blocked on:`
+workspace (the `E` **epic** leader — one that declares a `Blocked on:`
 reason or carries a dependency edge; declared blockers first, then
-edge-blocked rows, wrapping; #1521), `Shift-P` cycle
+edge-blocked rows, wrapping; #1521), `E m` merge order (the
+topological PR landing order across the epic from `MergeAfter` edges,
+each held PR — mergeable but behind an unmerged predecessor — flagged;
+#1524), `E g` graph view (the full-screen dependency DAG, waves as
+columns; `j/k`·`h/l` navigate, `Enter` jumps to the workspace, `Esc`
+closes; #1524). The `E` leader also carries the
+**orchestration-role** chords (#1523): `E r` sets or clears the cursor
+workspace's role via a picker (Planner / Coordinator / Worker /
+Reviewer / Integrator, or *none*) — the role persists on the workspace
+(`Workspace.role`, adopted from a `role:*` GitHub label when unset),
+shows a sidebar badge (`✎ plan`, `◆ coord`, `⚙ worker`, `👁 review`,
+`⇅ integ`), and injects a role preamble ahead of the next spawn's work
+prompt; `E p` spawns a **Planner** and `E c` a **Coordinator** on the
+cursor workspace (the role rides the spawn in-band, so the preamble
+frames the launch regardless of when the parallel role persist lands).
+A Coordinator can create and
+staff sibling workers with the `spawn_worker` MCP tool. `Shift-P` cycle
 the activity pane full → summary (a slim one-line count of new activity /
 failing CI) → hidden → full, remembered per workspace with a
 `ui.activity_pane_default` starting mode (auto-hidden when the workspace

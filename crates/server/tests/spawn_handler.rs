@@ -182,6 +182,7 @@ async fn spawn_and_wait(
             initial_snippet: None,
             on_main: false,
             force_new: false,
+            role: None,
         })
         .unwrap();
     let spawned = wait_for(
@@ -804,6 +805,7 @@ async fn interactive_claude_spawn_keeps_permission_prompts() {
                 initial_snippet: None,
                 on_main: false,
                 force_new: false,
+                role: None,
             })
             .unwrap();
         let spawned = wait_for(
@@ -884,6 +886,7 @@ async fn spawn_hot_path_never_copies_into_the_stable_bin_dir() {
                 initial_snippet: None,
                 on_main: false,
                 force_new: false,
+                role: None,
             })
             .unwrap();
         wait_for(
@@ -922,6 +925,7 @@ async fn read_only_spawn_rejects_a_writable_singleton() {
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
                 force_new: false,
+                role: None,
             })
             .unwrap();
         wait_for(
@@ -944,6 +948,7 @@ async fn read_only_spawn_rejects_a_writable_singleton() {
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::ReadOnly,
                 force_new: false,
+                role: None,
             })
             .unwrap();
 
@@ -995,6 +1000,7 @@ async fn read_only_prompt_spawn_cannot_inherit_autonomous_bypass() {
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::ReadOnly,
                 force_new: false,
+                role: None,
             })
             .unwrap();
 
@@ -1381,6 +1387,7 @@ async fn hook_session_identity_is_persisted_and_used_for_restore() {
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
                 force_new: false,
+                role: None,
             })
             .unwrap();
         let Event::TerminalSpawned { terminal_id, .. } = wait_for(
@@ -1544,6 +1551,7 @@ async fn unknown_agent_id_emits_provider_error() {
                 initial_snippet: None,
                 on_main: false,
                 force_new: false,
+                role: None,
             })
             .unwrap();
         let evt = wait_for(
@@ -1602,6 +1610,7 @@ async fn successful_spawn_emits_its_correlated_completion() {
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
                 force_new: false,
+                role: None,
             })
             .unwrap();
 
@@ -2012,6 +2021,7 @@ async fn spawn_with_initial_prompt_delivers_work_to_agent() {
                 initial_snippet: None,
                 on_main: false,
                 force_new: false,
+                role: None,
             })
             .unwrap();
         let _ = wait_for(
@@ -2065,6 +2075,117 @@ async fn spawn_with_initial_prompt_delivers_work_to_agent() {
     .expect("deadline");
 }
 
+/// #1523 regression: the `E p` / `E c` role spawns carry the orchestration
+/// role *in-band* on the `Spawn` command, so the daemon frames the role
+/// preamble deterministically — before the paired, separately-dispatched
+/// `SetWorkspaceRole` persist has necessarily landed. Both commands run as
+/// independent detached mutation tasks with no ordering guarantee, so a fast
+/// `Spawn` task can reach the preamble while the persisted role is still
+/// `None`.
+///
+/// Here the persisted workspace is deliberately unroled (`effective_role()` is
+/// `None`) and the spawn carries an in-band `role: Some(Planner)`. The injected
+/// work prompt must be prefixed with the Planner preamble. On the pre-fix code
+/// the preamble derived only from the persisted `effective_role()` — `None` —
+/// so no framing was injected at all, and this test fails: exactly the race a
+/// fast `Spawn` lost against `SetWorkspaceRole`.
+#[tokio::test]
+async fn inband_role_frames_preamble_without_a_persisted_role() {
+    timeout(TEST_DEADLINE, async {
+        let _home = IsolatedConfigHome::new();
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+
+        // A persisted, *linked* workspace (a real on-disk checkout, so the
+        // spawn needs no worktree provisioning) with NO role and no `role:*`
+        // label — `effective_role()` is `None`, so the daemon can only frame
+        // the preamble from the in-band role.
+        let checkout = tempfile::tempdir().unwrap();
+        let mut ws = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new("test:ws-inband-role"),
+            "inband role",
+            chrono::Utc::now(),
+        );
+        ws.local = true;
+        ws.linked_checkout = Some(checkout.path().to_path_buf());
+        assert!(
+            ws.effective_role().is_none(),
+            "precondition: the persisted workspace must be unroled",
+        );
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: ws.key.as_str().to_string(),
+                created_at: ws.created_at,
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
+
+        let mut client = subscribed(config).await;
+
+        const WORK: &str = "Plan issue #77 into a dependency graph.";
+        client
+            .send(Command::Spawn {
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+                session_key: "test:ws-inband-role".into(),
+                session_id: None,
+                client_request_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: None,
+                initial_prompt: Some(WORK.into()),
+                initial_snippet: None,
+                on_main: false,
+                // The `E p` role spawn is a deliberate new agent carrying the
+                // role in-band — the shape this fix makes deterministic.
+                force_new: true,
+                role: Some(lazybox_core::Role::Planner),
+            })
+            .unwrap();
+        let _ = wait_for(
+            &mut client,
+            |e| matches!(e, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("TerminalSpawned arrived");
+
+        let key = mock.list().await.unwrap().into_iter().next().unwrap();
+        // Drive Claude's "ready for a pasted prompt" screen so the inject task
+        // fires promptly (see `spawn_with_initial_prompt_delivers_work_to_agent`).
+        mock.emit(&key, b"Esc to cancel  Tab to amend").await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let joined = loop {
+            let joined = mock
+                .writes_for(&key)
+                .await
+                .into_iter()
+                .flatten()
+                .collect::<Vec<u8>>();
+            let text = String::from_utf8_lossy(&joined);
+            if (text.contains("You are the **Planner**") && text.contains(WORK))
+                || tokio::time::Instant::now() >= deadline
+            {
+                break joined;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        let text = String::from_utf8_lossy(&joined);
+        assert!(
+            text.contains("You are the **Planner**"),
+            "in-band role must frame the spawn with the Planner preamble even \
+             with no persisted role; writes = {text:?}"
+        );
+        assert!(
+            text.contains(WORK),
+            "the work prompt must still be delivered after the preamble; \
+             writes = {text:?}"
+        );
+    })
+    .await
+    .expect("deadline");
+}
+
 /// Codex's TUI also treats a rapid multi-line write as a paste. Its work
 /// prompt must therefore use explicit bracketed-paste markers followed by a
 /// separate carriage-return write; appending `\n` to the prompt body leaves
@@ -2089,6 +2210,7 @@ async fn codex_initial_prompt_pastes_then_sends_enter_separately() {
                 initial_snippet: None,
                 on_main: false,
                 force_new: false,
+                role: None,
             })
             .unwrap();
         wait_for(
@@ -2188,6 +2310,7 @@ async fn spawn_onto_existing_singleton_injects_the_prompt() {
                 initial_snippet: None,
                 on_main: false,
                 force_new: false,
+                role: None,
             })
             .unwrap();
 
@@ -2280,6 +2403,7 @@ async fn linked_workspace_agent_spawn_is_a_singleton() {
                 initial_snippet: None,
                 on_main: false,
                 force_new: false,
+                role: None,
             })
             .unwrap();
         };
@@ -2362,6 +2486,7 @@ async fn force_new_spawn_starts_a_second_agent_beside_the_idle_one() {
                 initial_snippet: None,
                 on_main: false,
                 force_new,
+                role: None,
             })
             .unwrap();
         };
@@ -2821,6 +2946,7 @@ async fn wedged_session_does_not_block_subscribe_or_subsequent_spawn() {
                 initial_snippet: None,
                 on_main: false,
                 force_new: false,
+                role: None,
             })
             .unwrap();
         let spawned = wait_for(
@@ -3713,6 +3839,7 @@ async fn detectorless_spawn_prompt_pastes_blindly_at_the_hard_deadline() {
                 initial_snippet: None,
                 on_main: false,
                 force_new: false,
+                role: None,
             })
             .unwrap();
         wait_for(
@@ -4128,6 +4255,7 @@ fn collapse_task(key: &str, url: &str, closes: Vec<lazybox_core::TaskId>) -> laz
         priority: None,
         state_label: None,
         blocked_by: vec![],
+        merge_after: vec![],
         blocked_on: None,
     }
 }
@@ -4215,6 +4343,7 @@ async fn collapse_into_pr_carries_live_terminal_to_the_pr() {
                 initial_snippet: None,
                 on_main: false,
                 force_new: false,
+                role: None,
             })
             .unwrap();
         let terminal_id = match wait_for(
@@ -4641,6 +4770,7 @@ async fn failed_provision_fails_spawn_loudly_and_leaves_no_session() {
                 initial_snippet: None,
                 on_main: false,
                 force_new: false,
+                role: None,
             })
             .unwrap();
 

@@ -8498,6 +8498,7 @@ mod stale_input_tests {
                 | Id::ImportCheckoutConfirm
                 | Id::ActionConfirm
                 | Id::ConflictResolve
+                | Id::MergeHeldConfirm
                 | Id::ErrorInboxClearConfirm
                 | Id::BroadcastConfirm
                 | Id::BulkSpawnConfirm
@@ -8547,6 +8548,9 @@ mod stale_input_tests {
                 | Id::BroadcastSnippet
                 | Id::HandoffTarget
                 | Id::ConvertSessionRole
+                // Role picker projects a `role:` label upstream — an
+                // outward effect a stale buffered Enter must not fire.
+                | Id::RolePicker
                 | Id::SandboxProviderPick
                 | Id::SandboxInput
                 | Id::SandboxConfirm => false,
@@ -8565,6 +8569,12 @@ mod stale_input_tests {
                 | Id::WorktreeProgress
                 | Id::DescriptionModal
                 | Id::DiffReview
+                // Epic readouts (#1524): read-only / keyboard-navigated
+                // surfaces whose one immediate key (`Enter`) is a reversible
+                // workspace jump — but classified drop alongside the other
+                // read-only overlays; a stale Enter needn't jump.
+                | Id::MergeOrder
+                | Id::EpicGraph
                 | Id::PrChat => false,
             }
         };
@@ -8619,6 +8629,7 @@ mod stale_input_tests {
             Id::ImportCheckoutConfirm,
             Id::ActionConfirm,
             Id::ConflictResolve,
+            Id::MergeHeldConfirm,
             Id::SnippetPicker,
             Id::SkillPicker,
             Id::SyncStatus,
@@ -8639,6 +8650,7 @@ mod stale_input_tests {
             Id::HandoffTarget,
             Id::HandoffText,
             Id::ConvertSessionRole,
+            Id::RolePicker,
             Id::DefaultAgentPicker,
             Id::DefaultModelPicker,
             Id::HelpActionConfirm,
@@ -8647,6 +8659,8 @@ mod stale_input_tests {
             Id::IssueBrowser,
             Id::DiffReview,
             Id::PrChat,
+            Id::MergeOrder,
+            Id::EpicGraph,
         ] {
             assert_eq!(
                 id.retains_stale_keys(),
@@ -9634,6 +9648,105 @@ mod modal_input_responsiveness_tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    /// `E r` role picker (#1523): it lists the five roles plus a trailing
+    /// "clear" row. Picking a role row emits `SetWorkspaceRole` carrying
+    /// that role for the cursor workspace; the trailing row clears it
+    /// (`role: None`). Either pick consumes the stashed `SetRole` flow.
+    #[test]
+    fn role_picker_sets_and_clears_the_workspace_role() {
+        use lazybox_core::Role;
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#7");
+        let key = WorkspaceKey::new("github:o/r#7");
+
+        // Role-less mount: picker up, no daemon command emitted yet.
+        m.mount_role_picker(key.clone(), None);
+        assert_eq!(m.top_modal(), Some(&Id::RolePicker));
+
+        // Row 1 is Role::ALL[1] = Coordinator.
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(1)]);
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [lazybox_ipc::Command::SetWorkspaceRole {
+                    workspace,
+                    role: Some(Role::Coordinator),
+                }] if *workspace == key
+            ),
+            "picking row 1 sets Coordinator on the cursor workspace: {cmds:?}",
+        );
+        assert!(m.modal_flow.is_none(), "the pick consumes the SetRole flow");
+
+        // The trailing row (index == ALL.len()) clears the role.
+        m.mount_role_picker(key.clone(), Some(Role::Coordinator));
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(Role::ALL.len())]);
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [lazybox_ipc::Command::SetWorkspaceRole {
+                    workspace,
+                    role: None,
+                }] if *workspace == key
+            ),
+            "picking the trailing row clears the role: {cmds:?}",
+        );
+    }
+
+    /// `E p` / `E c` (#1523) emit *two* commands for the cursor workspace,
+    /// and the role must ride the `Spawn` in-band as well as being persisted.
+    ///
+    /// The daemon routes both `SetWorkspaceRole` and `Spawn` to its detached
+    /// mutation lane, where each runs as an independent concurrent task — so
+    /// there is no ordering guarantee between them. If the `Spawn` carried no
+    /// role of its own, a spawn task that won the race would read a still-unset
+    /// persisted role and silently drop the role preamble. Asserting
+    /// `role: Some(..)` on the `Spawn` pins the client half of that fix; the
+    /// daemon half is covered by `inband_role_frames_preamble_without_a_persisted_role`
+    /// in the server's spawn_handler tests.
+    #[test]
+    fn role_spawns_carry_the_role_in_band_as_well_as_persisting_it() {
+        use lazybox_core::Role;
+        use lazybox_tui_core::action::Action;
+        for (action, expected) in [
+            (Action::SpawnPlanner, Role::Planner),
+            (Action::SpawnCoordinator, Role::Coordinator),
+        ] {
+            let mut m = build_model();
+            super::seed_ws(&mut m, "github:o/r#7");
+            let key = WorkspaceKey::new("github:o/r#7");
+
+            let cmds = m.dispatch_action(&action);
+
+            // The persist half: the sidebar badge + `role:*` label projection
+            // still come from `SetWorkspaceRole`.
+            assert!(
+                cmds.iter().any(|c| matches!(
+                    c,
+                    lazybox_ipc::Command::SetWorkspaceRole {
+                        workspace,
+                        role: Some(role),
+                    } if *workspace == key && *role == expected
+                )),
+                "{action:?} must persist the role: {cmds:?}",
+            );
+            // The in-band half: the same role on the Spawn, so the daemon's
+            // preamble never depends on the racing persist.
+            assert!(
+                cmds.iter().any(|c| matches!(
+                    c,
+                    lazybox_ipc::Command::Spawn {
+                        role: Some(role),
+                        force_new: true,
+                        initial_prompt: Some(prompt),
+                        ..
+                    } if *role == expected && !prompt.is_empty()
+                )),
+                "{action:?} must carry the role in-band on a prompted, fresh \
+                 spawn so the preamble is deterministic: {cmds:?}",
+            );
+        }
+    }
+
     /// Minimal repo-labeled PR task — enough for the sidebar to group
     /// the workspace under `repo`'s header.
     fn repo_task(key: &str, repo: &str) -> lazybox_core::Task {
@@ -9682,6 +9795,7 @@ mod modal_input_responsiveness_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -10465,6 +10579,7 @@ mod merge_focus_follow_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -10511,6 +10626,7 @@ mod merge_focus_follow_tests {
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
             force_new: false,
+            role: None,
         }]);
 
         assert_eq!(model.top_modal(), Some(&Id::ClaimedSpawnConfirm));
@@ -10533,6 +10649,7 @@ mod merge_focus_follow_tests {
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
             force_new: false,
+            role: None,
         }]);
         assert!(matches!(
             model.handle_confirmed(true).as_slice(),
@@ -10570,6 +10687,7 @@ mod merge_focus_follow_tests {
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::ReadOnly,
             force_new: false,
+            role: None,
         }]);
 
         assert_ne!(model.top_modal(), Some(&Id::ClaimedSpawnConfirm));
@@ -11761,6 +11879,7 @@ mod merge_focus_follow_tests {
             model_alias: None,
             access: AgentRunAccess::ReadOnly,
             force_new: false,
+            role: None,
         };
 
         assert!(matches!(
@@ -12998,7 +13117,7 @@ mod merge_focus_follow_tests {
         let mut merged_keys: Vec<String> = cmds
             .iter()
             .map(|c| match c {
-                IpcCommand::MergePr { workspace_key } => workspace_key.as_str().to_string(),
+                IpcCommand::MergePr { workspace_key, .. } => workspace_key.as_str().to_string(),
                 other => panic!("expected MergePr, got {other:?}"),
             })
             .collect();
@@ -13100,7 +13219,7 @@ mod merge_focus_follow_tests {
 
         let cmds = m.handle_confirmed(true);
         assert!(
-            matches!(cmds.as_slice(), [IpcCommand::MergePr { workspace_key }] if workspace_key == &wk_a),
+            matches!(cmds.as_slice(), [IpcCommand::MergePr { workspace_key, .. }] if workspace_key == &wk_a),
             "only the clicked row merges: {cmds:?}",
         );
     }
@@ -14265,6 +14384,169 @@ mod merge_focus_follow_tests {
                 .as_ref()
                 .is_some_and(|n| n.message.contains("merge failed")),
             "the persistent error still surfaces",
+        );
+    }
+
+    /// Issue #1524: a merge the daemon refused because the PR is held behind
+    /// unmerged merge-after predecessors is a decision, not a dead end — it
+    /// opens the out-of-order override confirm (naming the predecessors),
+    /// not a red error banner, and accepting re-sends `MergePr { force }`.
+    #[test]
+    fn pr_merge_failed_held_offers_force_override() {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#2", true, Duration::hours(1));
+        let key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+
+        m.handle_daemon_event(IpcEvent::PrMergeFailed {
+            workspace_key: key.clone(),
+            pr_label: "owner/repo#2".into(),
+            reason: format!("{}owner/repo#1", lazybox_ipc::MERGE_HELD_REASON_PREFIX),
+            conflict: false,
+        });
+
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::MergeHeldConfirm),
+            "a held merge offers the override confirm, not a dead-end error",
+        );
+        assert!(
+            m.status.notice.is_none(),
+            "no red error banner when we can offer the override",
+        );
+        assert!(
+            matches!(&m.modal_flow, Some(ModalFlow::MergeHeldConfirm { held })
+                if held.len() == 1 && held[0].0 == key),
+        );
+
+        // Accepting re-sends the merge with the hold overridden.
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::MergePr { workspace_key, force: true } if *workspace_key == key
+            )),
+            "confirming forces the out-of-order merge: {cmds:?}",
+        );
+    }
+
+    /// Issue #1524: a bulk `g m` over several held PRs produces one refusal
+    /// event per PR, each arriving async. They must fold into a *single*
+    /// override confirm covering the whole batch — the old behavior mounted
+    /// for the first and silently dropped the rest, so only one of several
+    /// held PRs was ever forceable. Accepting forces every gathered PR.
+    #[test]
+    fn bulk_held_merges_fold_into_one_confirm() {
+        let mut m = build_model();
+        let mut keys = Vec::new();
+        for n in 1..=3 {
+            let ws = workspace(&format!("owner/repo#{n}"), true, Duration::hours(1));
+            keys.push(ws.key.clone());
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        }
+
+        // Three held-merge refusals land back-to-back (bulk `g m`).
+        for key in &keys {
+            m.handle_daemon_event(IpcEvent::PrMergeFailed {
+                workspace_key: key.clone(),
+                pr_label: key.0.split(':').next_back().unwrap_or(&key.0).to_string(),
+                reason: format!("{}owner/repo#9", lazybox_ipc::MERGE_HELD_REASON_PREFIX),
+                conflict: false,
+            });
+        }
+
+        // Exactly one confirm on the stack, holding all three.
+        assert_eq!(m.top_modal(), Some(&Id::MergeHeldConfirm));
+        assert_eq!(
+            m.modal_stack
+                .iter()
+                .filter(|id| **id == Id::MergeHeldConfirm)
+                .count(),
+            1,
+            "the held PRs fold into a single confirm, not one per PR",
+        );
+        let held_keys: Vec<_> = match &m.modal_flow {
+            Some(ModalFlow::MergeHeldConfirm { held }) => {
+                held.iter().map(|(w, _)| w.clone()).collect()
+            }
+            other => panic!("expected a MergeHeldConfirm flow, got {other:?}"),
+        };
+        assert_eq!(held_keys.len(), 3, "all three held PRs gathered");
+        for key in &keys {
+            assert!(held_keys.contains(key), "{key:?} is in the batch");
+        }
+
+        // Accepting forces every gathered PR out of order.
+        let cmds = m.handle_confirmed(true);
+        for key in &keys {
+            assert!(
+                cmds.iter().any(|c| matches!(
+                    c,
+                    IpcCommand::MergePr { workspace_key, force: true } if workspace_key == key
+                )),
+                "confirming forces {key:?}: {cmds:?}",
+            );
+        }
+    }
+
+    /// Issue #1524: declining the held-merge override leaves the hold in
+    /// place — no forced merge is sent.
+    #[test]
+    fn declining_held_merge_leaves_the_hold() {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#2", true, Duration::hours(1));
+        let key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+
+        m.handle_daemon_event(IpcEvent::PrMergeFailed {
+            workspace_key: key,
+            pr_label: "owner/repo#2".into(),
+            reason: format!("{}owner/repo#1", lazybox_ipc::MERGE_HELD_REASON_PREFIX),
+            conflict: false,
+        });
+        assert_eq!(m.top_modal(), Some(&Id::MergeHeldConfirm));
+
+        let cmds = m.handle_confirmed(false);
+        assert!(
+            !cmds.iter().any(|c| matches!(c, IpcCommand::MergePr { .. })),
+            "declining sends no forced merge: {cmds:?}",
+        );
+    }
+
+    /// Issue #1524 (mirrors #1055): the held-override confirm is an async
+    /// `PrMergeFailed` reply, so it must not preempt a modal the user
+    /// already has open — the offer is dropped with a `g m` hint.
+    #[test]
+    fn pr_merge_failed_held_does_not_preempt_an_open_modal() {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#2", true, Duration::hours(1));
+        let key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+
+        m.modal_stack.push(Id::SnippetPicker);
+
+        m.handle_daemon_event(IpcEvent::PrMergeFailed {
+            workspace_key: key,
+            pr_label: "owner/repo#2".into(),
+            reason: format!("{}owner/repo#1", lazybox_ipc::MERGE_HELD_REASON_PREFIX),
+            conflict: false,
+        });
+
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::SnippetPicker),
+            "the open modal wins — the override confirm must not stack over it",
+        );
+        assert!(
+            !m.modal_stack.contains(&Id::MergeHeldConfirm),
+            "no override confirm was mounted under the picker",
+        );
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("g m")),
+            "a hint points at re-triggering the override",
         );
     }
 
@@ -17495,7 +17777,7 @@ mod destructive_confirm_tests {
 
         let cmds = m.handle_confirmed(true);
         match cmds.as_slice() {
-            [IpcCommand::MergePr { workspace_key }] => assert_eq!(workspace_key, &wk),
+            [IpcCommand::MergePr { workspace_key, .. }] => assert_eq!(workspace_key, &wk),
             other => panic!("expected a single MergePr command, got {other:?}"),
         }
     }
@@ -17569,6 +17851,7 @@ mod destructive_confirm_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         Workspace::from_task(task, Utc::now())
@@ -19042,6 +19325,7 @@ mod focus_mode_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         let mut ws = Workspace::from_task(task, Utc::now());
@@ -19401,6 +19685,7 @@ mod jump_to_workspace_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -20403,6 +20688,7 @@ mod worktree_progress_recovery_tests {
             initial_snippet: None,
             on_main: false,
             force_new: false,
+            role: None,
         }
     }
 
@@ -20919,6 +21205,7 @@ mod worktree_progress_recovery_tests {
             initial_snippet: None,
             on_main: false,
             force_new: false,
+            role: None,
         });
         m.handle_daemon_event(IpcEvent::WorktreeProgress {
             session_key,
@@ -20966,6 +21253,7 @@ mod worktree_progress_recovery_tests {
             initial_snippet: None,
             on_main: false,
             force_new: false,
+            role: None,
         });
         m.handle_daemon_event(IpcEvent::WorktreeProgress {
             session_key,
@@ -21501,6 +21789,7 @@ mod merge_latch_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         Workspace::from_task(task, Utc::now())
@@ -23073,6 +23362,7 @@ mod pr_chat_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -25069,6 +25359,7 @@ mod spawn_focus_steal_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         lazybox_core::Workspace::from_task(task, Utc::now())
@@ -25265,6 +25556,7 @@ mod repo_labels_failure_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -25816,6 +26108,7 @@ mod keybinding_audit_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         let mut ws = Workspace::from_task(task, Utc::now());
@@ -26930,6 +27223,7 @@ mod optimistic_mutation_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -27251,6 +27545,7 @@ mod remote_spawn_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -28823,6 +29118,7 @@ mod pr_details_debounce_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         lazybox_core::Workspace::from_task(task, Utc::now())

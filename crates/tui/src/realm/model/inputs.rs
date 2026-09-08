@@ -1484,6 +1484,23 @@ showing keybinding search only",
                     self.redraw = true;
                 }
             }
+            Some(Id::MergeHeldConfirm) => {
+                // Merge-after-hold override (#1524). Yes → re-send the merge
+                // with `force: true` for every held PR gathered into this
+                // confirm (a bulk `g m` folds them all in), landing each out
+                // of order. No / Esc → leave every hold in place.
+                if let Some(ModalFlow::MergeHeldConfirm { held }) = self.modal_flow.take()
+                    && yes
+                {
+                    for (workspace, _label) in held {
+                        cmds.push(IpcCommand::MergePr {
+                            workspace_key: workspace,
+                            force: true,
+                        });
+                    }
+                    self.redraw = true;
+                }
+            }
             Some(Id::EditorRemoveConfirm) => {
                 if let Some(ModalFlow::EditorRemoveConfirm { id }) = self.modal_flow.take()
                     && yes

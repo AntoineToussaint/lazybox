@@ -24,6 +24,7 @@ pub mod choice;
 pub mod confirm_latch;
 pub mod dispatch;
 pub mod editors;
+pub mod epic_graph;
 pub mod help;
 pub mod inbox;
 pub mod intent;

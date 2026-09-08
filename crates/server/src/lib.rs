@@ -1148,6 +1148,7 @@ impl Server {
                         lazybox_ipc::Command::UpsertEpic { .. } => "UpsertEpic",
                         lazybox_ipc::Command::AssignEpic { .. } => "AssignEpic",
                         lazybox_ipc::Command::ArchiveEpic { .. } => "ArchiveEpic",
+                        lazybox_ipc::Command::SetWorkspaceRole { .. } => "SetWorkspaceRole",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` and `RecordComposingBuffer` fire on every
@@ -1772,6 +1773,19 @@ pub async fn dispatch_command(
             // mastery view on connect. Kept before AutoFixPolicyConfig so
             // that stays the end-of-replay marker.
             let _ = tx.send(Event::MasteryLedger { counts: mastery });
+            // Epic snapshots (#1524): replay every live epic's derived
+            // status so the client can seed its snapshot cache on connect
+            // (merge-order / DAG readouts read from it). `delta` is empty
+            // so this seeds state without spurious activity rows. Cheap —
+            // `all_snapshots` returns fast when no epic records exist. Kept
+            // before AutoFixPolicyConfig so that stays the end-of-replay
+            // marker.
+            for snapshot in crate::epics::all_snapshots(config).await {
+                let _ = tx.send(Event::EpicStatus {
+                    snapshot,
+                    delta: Vec::new(),
+                });
+            }
             // Keep the auto-fix policy as the last post-subscribe push so
             // existing consumers can use it as the end-of-replay marker.
             let _ = tx.send(Event::AutoFixPolicyConfig {
@@ -1791,6 +1805,7 @@ pub async fn dispatch_command(
             model_alias,
             access,
             force_new,
+            role,
         } => {
             // A spawn carrying a pre-built work prompt is an autonomous
             // "work on this" launch — run it unattended (skip permissions,
@@ -1815,6 +1830,7 @@ pub async fn dispatch_command(
                     client_request_id,
                     origin: lazybox_ipc::SpawnOrigin::Interactive,
                     force_new,
+                    role,
                     ..Default::default()
                 },
             )
@@ -2292,8 +2308,11 @@ pub async fn dispatch_command(
             polling::handle_adopt_sessions(config, source_workspace_key, target_workspace_key)
                 .await;
         }
-        lazybox_ipc::Command::MergePr { workspace_key } => {
-            polling::handle_merge_pr(config, workspace_key).await;
+        lazybox_ipc::Command::MergePr {
+            workspace_key,
+            force,
+        } => {
+            polling::handle_merge_pr(config, workspace_key, force).await;
         }
         lazybox_ipc::Command::UpdateBranch { workspace_key } => {
             polling::handle_update_branch(config, workspace_key).await;
@@ -2423,6 +2442,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::ArchiveEpic { epic } => {
             epics::archive(config, &epic).await;
+        }
+        lazybox_ipc::Command::SetWorkspaceRole { workspace, role } => {
+            workspace::set_role(config, &workspace, role).await;
         }
         lazybox_ipc::Command::Shutdown => {
             unreachable!("Shutdown is loop control, intercepted by the serve loop")

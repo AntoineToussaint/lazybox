@@ -398,6 +398,16 @@ pub(super) async fn upsert_into_workspace_key(
         commit_outcome == CommitOutcome::Changed,
     );
 
+    // Merge-after release: this PR just landed merged (its open→Merged
+    // transition), so the store now holds that as ground truth. Re-probe every
+    // armed successor that was held behind it — the one whose last predecessor
+    // just landed fires its own merge-on-green now instead of waiting for its
+    // next poll. Uniform across manual, auto, and external merges: they all
+    // reach this commit path.
+    if matches!(terminal_cleanup, Some(TerminalCleanup::MergedPr(_))) {
+        crate::epics::on_pr_merged(config, key);
+    }
+
     // 3. TERMINAL: the PR merged or the issue closed → either reap its
     //    safe-to-delete worktrees silently (when
     //    `worktree.auto_cleanup_merged` is on) or prompt the user to

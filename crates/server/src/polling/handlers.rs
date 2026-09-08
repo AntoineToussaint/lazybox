@@ -661,9 +661,9 @@ fn delete_should_fall_back_to_close(delete_err: &lazybox_core::ProviderError) ->
 ///
 /// Errors surface as `Event::ProviderError` so the TUI can flash the
 /// reason without us inventing a bespoke event variant.
-pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey) {
+pub async fn handle_merge_pr(config: &ServerConfig, workspace_key: WorkspaceKey, force: bool) {
     let config = config.clone();
-    detach_mutation(async move { merge_pr_task(&config, workspace_key).await });
+    detach_mutation(async move { merge_pr_task(&config, workspace_key, force).await });
 }
 
 /// Where the fresh pre-merge status check (#1394) routes a `g m`: to the
@@ -694,7 +694,7 @@ fn classify_fresh_pr(fresh: &lazybox_core::Task, head: Option<String>) -> FreshM
     }
 }
 
-async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
+async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey, force: bool) {
     let emit_err = |msg: &str| {
         let _ = config
             .bus
@@ -706,6 +706,33 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey) {
         return;
     };
     let pr_label = ws.pr.as_ref().map(|p| p.id.key.clone());
+
+    // Merge-after hold: this PR's epic names one or more predecessors whose PRs
+    // haven't landed, so merging now would break the declared landing order.
+    // Refuse and name them (a distinct, persistent `PrMergeFailed`, not a
+    // conflict — no resolve flow) so the user sees exactly what's holding it.
+    // `force` (the confirm's "merge anyway") overrides the hold entirely, the
+    // user having accepted the out-of-order landing.
+    if !force {
+        let held = crate::epics::held_by(config, &workspace_key);
+        if !held.is_empty() {
+            let names = held
+                .iter()
+                .map(|k| k.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let label = pr_label
+                .clone()
+                .unwrap_or_else(|| workspace_key.as_str().to_string());
+            let _ = config.bus.send(Event::PrMergeFailed {
+                workspace_key: workspace_key.clone(),
+                pr_label: label,
+                reason: format!("{}{names}", lazybox_ipc::MERGE_HELD_REASON_PREFIX),
+                conflict: false,
+            });
+            return;
+        }
+    }
 
     // Fresh pre-merge status check (#1394): `g m` used to route the
     // conflict / CI decision off the last poll's cached `Task`. A stale
@@ -2163,6 +2190,7 @@ mod merge_pr_details_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -3478,6 +3506,7 @@ mod github_target_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -3592,6 +3621,7 @@ mod prefetch_score_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -3884,6 +3914,7 @@ mod inspect_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         let mut workspace = Workspace::from_task(task, chrono::Utc::now());
@@ -4373,6 +4404,7 @@ mod inspect_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         let mut workspace = Workspace::from_task(task, chrono::Utc::now());
@@ -4442,6 +4474,7 @@ mod inspect_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         let workspace = Workspace::from_task(task, chrono::Utc::now());
@@ -4506,6 +4539,7 @@ mod inspect_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -5422,6 +5456,7 @@ mod inspect_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         let workspace = Workspace::from_task(task, chrono::Utc::now());
@@ -6384,6 +6419,7 @@ mod post_mutation_refresh_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -6570,6 +6606,7 @@ mod sync_workspace_discovery_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }

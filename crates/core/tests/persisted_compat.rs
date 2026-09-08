@@ -135,6 +135,10 @@ fn maximal_pr_task() -> Task {
                 key: "acme/other#9".into(),
             },
         ],
+        merge_after: vec![TaskId {
+            source: "github".into(),
+            key: "acme/widget#3".into(),
+        }],
         blocked_on: Some("waiting on the infra rollout".into()),
     }
 }
@@ -199,6 +203,9 @@ fn maximal_workspace() -> Workspace {
         lazybox_core::SnippetDeliveryLog::from_recent(["rev".into(), "fix-ci".into()]);
     ws.cleanup_prompt = CleanupPrompt::Declined;
     ws.remote = Some("obin".into());
+    // Schema v11: orchestration role rides the maximal fixture so its wire
+    // shape (kebab-case variant) is pinned.
+    ws.role = Some(lazybox_core::Role::Coordinator);
     ws.last_viewed_at = Some(at(13, 0));
 
     ws.sessions = vec![
@@ -368,39 +375,29 @@ fn v3_tasks_without_parent_deserialize_as_roots() {
 #[test]
 fn tasks_without_dependency_edges_deserialize_as_unblocked() {
     let mut legacy = serde_json::to_value(maximal_workspace()).expect("serialize fixture");
-    legacy["pr"]
-        .as_object_mut()
-        .expect("pr object")
-        .remove("blocked_by");
-    legacy["pr"]
-        .as_object_mut()
-        .expect("pr object")
-        .remove("blocked_on");
+    for field in ["blocked_by", "merge_after", "blocked_on"] {
+        legacy["pr"]
+            .as_object_mut()
+            .expect("pr object")
+            .remove(field);
+    }
     for collection in ["gh_issues", "linear_issues"] {
         for task in legacy[collection].as_array_mut().expect("task array") {
             let task = task.as_object_mut().expect("task object");
             task.remove("blocked_by");
+            task.remove("merge_after");
             task.remove("blocked_on");
         }
     }
 
     let ws = Workspace::decode_persisted(&serde_json::to_string(&legacy).unwrap())
         .expect("pre-#1521 workspace remains readable");
-    assert!(
-        ws.pr
-            .as_ref()
-            .is_some_and(|task| task.blocked_by.is_empty() && task.blocked_on.is_none())
-    );
-    assert!(
-        ws.gh_issues
-            .iter()
-            .all(|task| task.blocked_by.is_empty() && task.blocked_on.is_none())
-    );
-    assert!(
-        ws.linear_issues
-            .iter()
-            .all(|task| task.blocked_by.is_empty() && task.blocked_on.is_none())
-    );
+    fn unblocked(task: &Task) -> bool {
+        task.blocked_by.is_empty() && task.merge_after.is_empty() && task.blocked_on.is_none()
+    }
+    assert!(ws.pr.as_ref().is_some_and(unblocked));
+    assert!(ws.gh_issues.iter().all(unblocked));
+    assert!(ws.linear_issues.iter().all(unblocked));
 }
 
 /// The checked-in current-schema fixture must keep deserializing, and

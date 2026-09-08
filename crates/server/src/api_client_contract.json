@@ -34,6 +34,7 @@
           },
           "model_alias": null,
           "on_main": false,
+          "role": null,
           "session_id": null,
           "session_key": "github:o/r#42"
         }
@@ -52,6 +53,7 @@
           "kind": "Shell",
           "model_alias": null,
           "on_main": false,
+          "role": null,
           "session_id": null,
           "session_key": "github:o/r#42"
         }
@@ -217,6 +219,7 @@
             "labels": [],
             "last_commenter": null,
             "linked_tasks": [],
+            "merge_after": [],
             "merge_blocked": false,
             "mergeable": "Mergeable",
             "needs_reply": false,
@@ -239,7 +242,8 @@
           "project_key": "github-o-r",
           "read_indices": [],
           "remote": null,
-          "schema": 10,
+          "role": null,
+          "schema": 11,
           "seen_count": 0,
           "sent_snippets": {
             "recent": [],

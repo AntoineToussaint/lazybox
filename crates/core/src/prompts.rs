@@ -202,6 +202,115 @@ fn notes_block<S: AsRef<str>>(overrides: &[Option<S>]) -> String {
         .collect()
 }
 
+/// Concrete context threaded into [`role_preamble`] so each
+/// workspace-role brief can name the actual epic, blockers, and merge
+/// order it applies to. Assembled by the spawn path (which has the epic
+/// snapshot and the config snippet bodies); `lazybox-core` only shapes
+/// the text, so anything that would require a `lazybox-config` or
+/// `lazybox-server` dependency is passed in here as plain strings.
+#[derive(Debug, Default, Clone)]
+pub struct RolePromptCtx {
+    /// The epic key the workspace belongs to ([`crate::EpicKey::as_str`]),
+    /// or empty when a role is set before the workspace joins an epic.
+    pub epic_key: String,
+    /// The epic's human name, used in prose (`you own epic <name>`).
+    /// Falls back to a generic phrase when empty.
+    pub epic_name: String,
+    /// Worker only: the blockers that are already satisfied, taken from
+    /// the latest epic snapshot for this workspace's epic.
+    pub resolved_blockers: Vec<String>,
+    /// Integrator only: the wave / merge order to land members in.
+    pub merge_order: Vec<String>,
+    /// Planner only: the anchor issue new children hang under
+    /// (`owner/repo#N`), when one is known.
+    pub anchor_ref: Option<String>,
+    /// Planner only: the `carve` + `designissues` snippet bodies,
+    /// injected by the server because `core` cannot depend on `config`.
+    pub planner_briefs: Vec<String>,
+}
+
+/// The role-specific preamble prepended to a spawned agent's prompt when
+/// its workspace carries a [`Role`](crate::Role) (#1523). Each block is a
+/// short, self-contained "who you are / what you own" brief keyed off the
+/// roles table in `docs/orchestration-scoping.md` §4g; the concrete epic,
+/// blockers, and merge order come from `ctx`. Kept ≤12 lines per role so
+/// it frames the run without burying the task that follows it.
+pub fn role_preamble(role: crate::Role, ctx: &RolePromptCtx) -> String {
+    let epic = if ctx.epic_name.is_empty() {
+        "your epic".to_string()
+    } else {
+        format!("epic **{}**", ctx.epic_name)
+    };
+    let key = if ctx.epic_key.is_empty() {
+        "<epic>".to_string()
+    } else {
+        ctx.epic_key.clone()
+    };
+    let body = match role {
+        crate::Role::Planner => {
+            let anchor = ctx.anchor_ref.as_deref().unwrap_or("<anchor>");
+            let briefs = if ctx.planner_briefs.is_empty() {
+                String::new()
+            } else {
+                format!("\n\n{}", ctx.planner_briefs.join("\n\n"))
+            };
+            format!(
+                "You are the **Planner** for {epic}. Carve the proposed work into a few \
+                 self-contained issues, each with an explicit Definition of Done, then \
+                 create the graph machine-readably:\n\
+                 - `gh issue create --parent {anchor}` — hang each child under the anchor.\n\
+                 - `gh issue edit --blocked-by <n>` — record in-repo dependency edges.\n\
+                 - a `Blocked by: owner/repo#N` line in the body — for cross-repo blockers.\n\
+                 You may write issues and edges with `gh`; you do not implement.{briefs}"
+            )
+        }
+        crate::Role::Coordinator => format!(
+            "You are the **Coordinator** — you own {epic} (`{key}`). Answer status \
+             questions from `epic_status`; pull the next ready work from `epic_ready`; \
+             brief siblings with `notify_session`; and start workers with `spawn_worker`. \
+             You do **not** implement — you route work and clear blockers."
+        ),
+        crate::Role::Worker => {
+            let blockers = if ctx.resolved_blockers.is_empty() {
+                "none — nothing was blocking this task".to_string()
+            } else {
+                ctx.resolved_blockers.join(", ")
+            };
+            format!(
+                "You are a **Worker** on {epic}. Your blockers are done: {blockers}. \
+                 The contracts for this epic are on the blackboard — read them first with \
+                 `read_notes(tags=[\"epic:{key}\"])`. Implement the task brief below; post \
+                 decisions back as notes and notify siblings when a shared contract changes."
+            )
+        }
+        crate::Role::Reviewer => format!(
+            "You are the **Reviewer** for {epic}. Check the diff below against the issue's \
+             Definition-of-Done checklist. Post your findings as a note tagged `review`, \
+             `epic:{key}` — do not push changes yourself. You may `read_session` on a \
+             worker's terminal to understand intent before judging it."
+        ),
+        crate::Role::Integrator => {
+            let order = if ctx.merge_order.is_empty() {
+                "  (no members are ready to land yet)".to_string()
+            } else {
+                ctx.merge_order
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| format!("  {}. {m}", i + 1))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            format!(
+                "You are the **Integrator** for {epic}. Land the members in this order, \
+                 rebasing the rest after each merge:\n{order}\n\
+                 Merge each member with `g m` once it is green; if a rebase conflicts, hand \
+                 it back to its worker rather than resolving it blindly."
+            )
+        }
+    };
+    format!("## Role: {}\n\n{body}", role.display_name())
+}
+
 /// Bulleted list of the PR's failing checks (`- name — url`), or a
 /// single fallback line when GitHub gave us the rolled-up `Failure`
 /// but no per-check breakdown. Shared by the CI-fix prompt; pulled out
@@ -434,6 +543,7 @@ mod tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -917,5 +1027,90 @@ mod tests {
         // The preamble's `Closes #N` is countermanded regardless of the
         // close mode.
         assert!(prompt.contains("disregard the `Closes #N`"));
+    }
+
+    fn role_ctx() -> RolePromptCtx {
+        RolePromptCtx {
+            epic_key: "orch".into(),
+            epic_name: "orchestration".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn planner_preamble_demands_a_machine_readable_graph() {
+        let ctx = RolePromptCtx {
+            anchor_ref: Some("obin-ai/lazybox#1517".into()),
+            planner_briefs: vec!["<carve brief body>".into()],
+            ..role_ctx()
+        };
+        let p = role_preamble(crate::Role::Planner, &ctx);
+        assert!(p.contains("Planner"));
+        // The three machine-readable-graph mechanisms are load-bearing.
+        assert!(p.contains("gh issue create --parent obin-ai/lazybox#1517"));
+        assert!(p.contains("--blocked-by"));
+        assert!(p.contains("Blocked by: owner/repo#N"));
+        // Server-injected snippet briefs ride along verbatim.
+        assert!(p.contains("<carve brief body>"));
+    }
+
+    #[test]
+    fn coordinator_preamble_routes_via_the_epic_tools() {
+        let p = role_preamble(crate::Role::Coordinator, &role_ctx());
+        assert!(p.contains("Coordinator"));
+        assert!(p.contains("epic_status"));
+        assert!(p.contains("epic_ready"));
+        assert!(p.contains("spawn_worker"));
+        // A coordinator routes, it does not implement.
+        assert!(p.contains("do **not** implement"));
+    }
+
+    #[test]
+    fn worker_preamble_lists_resolved_blockers() {
+        let ctx = RolePromptCtx {
+            resolved_blockers: vec!["core wire types (#1521)".into(), "handler (#1522)".into()],
+            ..role_ctx()
+        };
+        let p = role_preamble(crate::Role::Worker, &ctx);
+        assert!(p.contains("Worker"));
+        assert!(p.contains("core wire types (#1521)"));
+        assert!(p.contains("handler (#1522)"));
+        // Contracts live on the blackboard, keyed by epic.
+        assert!(p.contains("read_notes(tags=[\"epic:orch\"])"));
+    }
+
+    #[test]
+    fn worker_preamble_without_blockers_says_none() {
+        let p = role_preamble(crate::Role::Worker, &role_ctx());
+        assert!(p.contains("nothing was blocking"));
+    }
+
+    #[test]
+    fn reviewer_preamble_posts_a_tagged_note() {
+        let p = role_preamble(crate::Role::Reviewer, &role_ctx());
+        assert!(p.contains("Reviewer"));
+        assert!(p.contains("Definition-of-Done"));
+        assert!(p.contains("`review`"));
+        assert!(p.contains("epic:orch"));
+        assert!(p.contains("read_session"));
+    }
+
+    #[test]
+    fn integrator_preamble_names_the_merge_order() {
+        let ctx = RolePromptCtx {
+            merge_order: vec![
+                "p0 (#1521)".into(),
+                "p1 (#1522)".into(),
+                "p2 (#1523)".into(),
+            ],
+            ..role_ctx()
+        };
+        let p = role_preamble(crate::Role::Integrator, &ctx);
+        assert!(p.contains("Integrator"));
+        // The wave/merge order is enumerated in order.
+        assert!(p.contains("1. p0 (#1521)"));
+        assert!(p.contains("2. p1 (#1522)"));
+        assert!(p.contains("3. p2 (#1523)"));
+        assert!(p.contains("g m"));
     }
 }

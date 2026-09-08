@@ -1302,7 +1302,7 @@ async fn handle_spawn_inner(
 ) -> Option<TerminalId> {
     let SpawnOptions {
         cwd,
-        initial_prompt,
+        mut initial_prompt,
         initial_snippet,
         autonomous,
         on_main,
@@ -1319,6 +1319,7 @@ async fn handle_spawn_inner(
         force_new,
         meter,
         untrusted,
+        role: inband_role,
     } = options;
     let access = if matches!(&kind, TerminalKind::Agent(_)) {
         access
@@ -1740,7 +1741,38 @@ async fn handle_spawn_inner(
     // are folded into `meter` here, so `gateway_injection_for_agent` — which
     // still gates on the proxy being enabled/running — needs no change and
     // every safety property of the canary is preserved.
-    let spawn_ws = load_workspace(config, &WorkspaceKey::new(session_key.as_str()));
+    let mut spawn_ws = load_workspace(config, &WorkspaceKey::new(session_key.as_str()));
+    // #1523: stamp an in-band role (the `E p` / `E c` role spawns carry one)
+    // onto this freshly-loaded workspace copy *before* the preamble is derived
+    // below. The role spawn also emits a separate `SetWorkspaceRole` to persist
+    // the role, but the two commands run as independent detached mutation tasks
+    // with no ordering guarantee — reading the persisted role here would race
+    // and silently drop the preamble whenever this spawn wins. This local copy
+    // is never committed; persistence, the sidebar badge, and label projection
+    // all stay with `SetWorkspaceRole`. `None` (every non-role spawn) leaves the
+    // loaded workspace untouched and the preamble falls back to its persisted
+    // `effective_role()`.
+    if let Some(role) = inband_role
+        && let Ok(ws) = spawn_ws.as_mut()
+    {
+        ws.role = Some(role);
+    }
+    // Role preamble (#1523): when the spawning workspace carries an epic role,
+    // frame the agent's brief with "who you are / what you own" before the task.
+    // Every *fresh* agent spawn with a prompt funnels through here — `w w`,
+    // `a c`, and the autonomous `@lazybox` path all inject via `initial_prompt`;
+    // the collapse-onto-live-agent paths above already returned, so a reused
+    // agent is never re-framed. `role_prompt_ctx` short-circuits (no snapshot
+    // work) for the common unroled spawn.
+    if matches!(kind, TerminalKind::Agent(_))
+        && initial_prompt.is_some()
+        && let Ok(ws) = spawn_ws.as_ref()
+        && let Some((role, role_ctx)) = crate::epics::role_prompt_ctx(config, ws).await
+    {
+        let preamble = lazybox_core::prompts::role_preamble(role, &role_ctx);
+        let prompt = initial_prompt.take().unwrap_or_default();
+        initial_prompt = Some(format!("{preamble}\n\n---\n\n{prompt}"));
+    }
     // A remote-box session runs on the box; the injected proxy base-URL
     // (`127.0.0.1:<port>`) points at *this* host's loopback, not the box —
     // so metering it would hand the box a dead URL, not just miss the count.
@@ -18751,6 +18783,7 @@ mod tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }

@@ -165,6 +165,13 @@ pub fn parse_lazybox_directive(text: &str) -> (Option<String>, Option<String>) {
 /// match is case-insensitive (users type freely); the agent id and model
 /// alias are returned verbatim so a case-sensitive tier alias (`L`)
 /// survives.
+///
+/// The `lazybox:w:…` working-claim labels
+/// ([`lazybox_core::WORKING_CLAIM_LABEL_PREFIX`]) and the legacy
+/// `lazybox:working` / `lazybox:working:<owner>` form are our own
+/// fleet-coordination state, not spawn directives — they never yield an agent
+/// (else a per-tick claim renewal re-submits the work prompt into the agent
+/// already holding the claim).
 pub fn parse_label_directive(label: &str) -> Option<(String, Option<String>)> {
     const PREFIX: &[u8] = b"lazybox:";
     let bytes = label.as_bytes();
@@ -173,6 +180,11 @@ pub fn parse_label_directive(label: &str) -> Option<(String, Option<String>)> {
     }
     // `PREFIX` is ASCII, so byte `PREFIX.len()` is a char boundary.
     let rest = &label[PREFIX.len()..];
+    if starts_with_ignore_case(label, lazybox_core::WORKING_CLAIM_LABEL_PREFIX)
+        || is_legacy_working_label(rest)
+    {
+        return None;
+    }
     let (agent, model) = match rest.split_once('/') {
         Some((a, m)) => (a.trim(), Some(m.trim())),
         None => (rest.trim(), None),
@@ -182,6 +194,24 @@ pub fn parse_label_directive(label: &str) -> Option<(String, Option<String>)> {
     }
     let model = model.filter(|m| !m.is_empty()).map(str::to_string);
     Some((agent.to_string(), model))
+}
+
+/// ASCII case-insensitive `starts_with`, used to match the working-claim
+/// label prefixes the same way the `lazybox:` prefix is matched.
+fn starts_with_ignore_case(haystack: &str, prefix: &str) -> bool {
+    haystack.len() >= prefix.len()
+        && haystack.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+}
+
+/// True for the legacy claim label body (the segment after `lazybox:`): the
+/// bare [`lazybox_core::WORKING_LABEL_NAME`] and its owner-qualified
+/// `working:<owner>` form. The trailing byte must end the segment or be `:`
+/// so a real agent id that merely begins with those letters (a custom
+/// `working-bot`) is not swallowed.
+fn is_legacy_working_label(rest: &str) -> bool {
+    let name = lazybox_core::WORKING_LABEL_NAME;
+    starts_with_ignore_case(rest, name)
+        && matches!(rest.as_bytes().get(name.len()), None | Some(b':'))
 }
 
 /// GitHub login alphabet for word-boundary checks: ASCII alnum +
@@ -485,6 +515,40 @@ mod tests {
         assert_eq!(parse_label_directive("lazybox"), None);
         assert_eq!(parse_label_directive("lazybox:"), None);
         assert_eq!(parse_label_directive("lazybox:/xhigh"), None);
+    }
+
+    #[test]
+    fn label_ignores_working_claim_state() {
+        // The `lazybox:w:<device>:<session>:<expiry>` working-claim label is
+        // our own fleet-coordination state; it must never parse as a
+        // `lazybox:<agent>` spawn directive (#1566).
+        assert_eq!(
+            parse_label_directive("lazybox:w:0123456789abcdef0123:1234567890:ffffffff"),
+            None
+        );
+        // Case-insensitive, matching the `lazybox:` prefix handling.
+        assert_eq!(
+            parse_label_directive("Lazybox:W:0123456789abcdef0123:1234567890:ffffffff"),
+            None
+        );
+        // Legacy `lazybox:working` / `lazybox:working:<owner>` form.
+        assert_eq!(parse_label_directive("lazybox:working"), None);
+        assert_eq!(parse_label_directive("lazybox:working:someone-else"), None);
+    }
+
+    #[test]
+    fn label_does_not_shadow_agent_ids_beginning_with_working() {
+        // The legacy-`working` guard keys off a segment boundary, so a real
+        // (custom) agent id that merely starts with those letters still spawns
+        // — the guard rejects the claim label, not the namespace.
+        assert_eq!(
+            parse_label_directive("lazybox:working-bot"),
+            Some(("working-bot".into(), None))
+        );
+        assert_eq!(
+            parse_label_directive("lazybox:workflow/L"),
+            Some(("workflow".into(), Some("L".into())))
+        );
     }
 
     // ── scan_issue ──────────────────────────────────────────────────

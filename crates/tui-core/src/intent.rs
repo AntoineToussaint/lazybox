@@ -50,6 +50,18 @@ pub enum Intent {
         agent_id: String,
         prompt: Option<String>,
     },
+    /// Spawn a fresh, role-stamped agent on a workspace (#1523, the
+    /// `E p` / `E c` chords). The model stamps `role` on `workspace_key`
+    /// *before* the spawn — so the server frames the brief with the role
+    /// preamble (`spawn_handler` only injects it when the role is already
+    /// persisted and the spawn carries a prompt) — then spawns the default
+    /// agent with `force_new` and `prompt` as its kickoff line.
+    SpawnRoleAgent {
+        workspace_key: SessionKey,
+        agent_id: String,
+        role: lazybox_core::Role,
+        prompt: String,
+    },
     /// Spawn a plain shell in the named workspace.
     SpawnShell { workspace_key: SessionKey },
     /// Mount the reply textarea targeted at the workspace.
@@ -745,6 +757,66 @@ pub fn resolve_spawn_agent(workspace: Option<&Workspace>, agent_id: &str) -> Int
         .unwrap_or(Intent::NoOp)
 }
 
+/// Kickoff line seeded into a Planner spawn (`E p`). Short by design —
+/// the substance is the role preamble the server prepends; this only has
+/// to be non-empty so `spawn_handler`'s `initial_prompt.is_some()` gate
+/// fires and the preamble actually frames the brief.
+pub const PLANNER_KICKOFF: &str = "Begin: carve this epic into sibling briefs, design the issues, and emit the \
+     machine-readable dependency graph as described above.";
+
+/// Kickoff line seeded into a Coordinator spawn (`E c`).
+pub const COORDINATOR_KICKOFF: &str = "Begin: take ownership of this epic — read status from `epic_status`, pull ready \
+     work from `epic_ready`, brief siblings, and start workers with `spawn_worker`.";
+
+/// Resolve `E p` (spawn Planner) / `E c` (spawn Coordinator): stamp the
+/// cursor workspace with `role` and spawn the default agent, framed by the
+/// role preamble. Requires a selected workspace and a non-empty agent id
+/// (an empty id can't spawn — `NoOp` rather than a bare process).
+///
+/// The epic-header path from the spec (`E c` on an epic header creates a
+/// fresh `<epic>-coordinator` workspace) is deferred to wherever epic-row
+/// rendering lands client-side — the sidebar carries no epic headers today
+/// (`IpcEvent::EpicStatus` is ignored), so the reachable target is always
+/// the cursor workspace.
+pub fn resolve_spawn_role(
+    workspace: Option<&Workspace>,
+    agent_id: &str,
+    role: lazybox_core::Role,
+    prompt: &str,
+) -> Intent {
+    if agent_id.is_empty() {
+        return Intent::NoOp;
+    }
+    workspace
+        .map(|w| Intent::SpawnRoleAgent {
+            workspace_key: SessionKey::from(&w.key),
+            agent_id: agent_id.to_string(),
+            role,
+            prompt: prompt.to_string(),
+        })
+        .unwrap_or(Intent::NoOp)
+}
+
+/// Resolve `E p` — spawn a Planner on the cursor workspace.
+pub fn resolve_spawn_planner(workspace: Option<&Workspace>, agent_id: &str) -> Intent {
+    resolve_spawn_role(
+        workspace,
+        agent_id,
+        lazybox_core::Role::Planner,
+        PLANNER_KICKOFF,
+    )
+}
+
+/// Resolve `E c` — spawn a Coordinator on the cursor workspace.
+pub fn resolve_spawn_coordinator(workspace: Option<&Workspace>, agent_id: &str) -> Intent {
+    resolve_spawn_role(
+        workspace,
+        agent_id,
+        lazybox_core::Role::Coordinator,
+        COORDINATOR_KICKOFF,
+    )
+}
+
 /// Resolve `m` (mark all read). One-shot.
 pub fn resolve_mark_read(workspace: Option<&Workspace>) -> Intent {
     workspace
@@ -977,6 +1049,7 @@ mod tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         Workspace::from_task(task, Utc::now())
@@ -2003,6 +2076,60 @@ mod tests {
                 Intent::SpawnAgent { agent_id, .. } => assert_eq!(agent_id, id),
                 other => panic!("expected SpawnAgent({id}), got {other:?}"),
             }
+        }
+    }
+
+    // ── resolve_spawn_planner / resolve_spawn_coordinator ─────────
+
+    #[test]
+    fn spawn_role_no_workspace_is_noop() {
+        assert_eq!(resolve_spawn_planner(None, "claude"), Intent::NoOp);
+        assert_eq!(resolve_spawn_coordinator(None, "claude"), Intent::NoOp);
+    }
+
+    #[test]
+    fn spawn_role_empty_id_is_noop() {
+        let ws = pr("o/r#1", CiStatus::None, ReviewStatus::None);
+        assert_eq!(resolve_spawn_planner(Some(&ws), ""), Intent::NoOp);
+        assert_eq!(resolve_spawn_coordinator(Some(&ws), ""), Intent::NoOp);
+    }
+
+    #[test]
+    fn spawn_planner_stamps_role_and_carries_kickoff() {
+        let ws = pr("o/r#1", CiStatus::None, ReviewStatus::None);
+        match resolve_spawn_planner(Some(&ws), "claude") {
+            Intent::SpawnRoleAgent {
+                workspace_key,
+                agent_id,
+                role,
+                prompt,
+            } => {
+                assert_eq!(workspace_key.as_str(), ws.key.as_str());
+                assert_eq!(agent_id, "claude");
+                assert_eq!(role, lazybox_core::Role::Planner);
+                // Non-empty so the server's preamble-injection gate fires.
+                assert!(!prompt.is_empty());
+                assert_eq!(prompt, PLANNER_KICKOFF);
+            }
+            other => panic!("expected SpawnRoleAgent(Planner), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_coordinator_stamps_role_and_carries_kickoff() {
+        let ws = pr("o/r#1", CiStatus::None, ReviewStatus::None);
+        match resolve_spawn_coordinator(Some(&ws), "codex") {
+            Intent::SpawnRoleAgent {
+                agent_id,
+                role,
+                prompt,
+                ..
+            } => {
+                assert_eq!(agent_id, "codex");
+                assert_eq!(role, lazybox_core::Role::Coordinator);
+                assert_eq!(prompt, COORDINATOR_KICKOFF);
+            }
+            other => panic!("expected SpawnRoleAgent(Coordinator), got {other:?}"),
         }
     }
 

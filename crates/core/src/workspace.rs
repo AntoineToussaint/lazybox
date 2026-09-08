@@ -46,6 +46,13 @@ pub const WORKING_LABEL_NAME: &str = "working";
 /// stable box fingerprint, a claim-session fingerprint, and an expiry.
 pub const WORKING_CLAIM_LABEL_PREFIX: &str = "lazybox:w:";
 
+/// Prefix for the upstream orchestration-role projection label (#1523). The
+/// remainder is the role's [`Role::label`] (`role:worker`, `role:planner`, …).
+/// At most one such label is attached to a task; the daemon reads it as a
+/// fallback when the persisted `Workspace.role` is unset, and the persisted
+/// field always wins over it.
+pub const ROLE_LABEL_PREFIX: &str = "role:";
+
 /// A live daemon renews each qualified claim every 15 minutes. Four missed
 /// heartbeats therefore leave a crashed or abandoned claim eligible for
 /// cleanup after one hour.
@@ -305,7 +312,10 @@ pub enum CleanupPrompt {
 ///   to metered, via the constructor, never the deserializer).
 /// - 10: `HopperMeta::canceled_at` (reversible cancellation, distinct
 ///   from both completion and destructive deletion).
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 10;
+/// - 11: `Workspace::role` (orchestration role — Planner/Coordinator/
+///   Worker/Reviewer/Integrator). Optional with `#[serde(default)]`, so
+///   older records read back cleanly as unroled.
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 11;
 
 /// How long a workspace counts as "recently woken" after an
 /// event-conditional snooze fires (#scale): within this window the row
@@ -375,6 +385,106 @@ pub struct HopperMeta {
     /// active Hopper while preserving its workspace and history.
     #[serde(default)]
     pub canceled_at: Option<DateTime<Utc>>,
+}
+
+/// The orchestration **role** a workspace plays inside a cross-repo epic
+/// (`docs/orchestration-scoping.md` §6). Purely a lazybox concept — a
+/// user-set hint that drives a sidebar badge, a spawn-time prompt preamble,
+/// and a `role:<role>` label projection — never a provider-derived field.
+/// `None` (the common case) is an unroled workspace with no badge and no
+/// preamble.
+///
+/// The five roles map to the orchestration playbook: a **Planner** breaks an
+/// epic down, a **Coordinator** dispatches and tracks its members, a
+/// **Worker** lands one member, a **Reviewer** audits others' work, and an
+/// **Integrator** merges and reconciles across members.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+#[serde(rename_all = "kebab-case")]
+pub enum Role {
+    Planner,
+    Coordinator,
+    Worker,
+    Reviewer,
+    Integrator,
+}
+
+impl Role {
+    /// Every role, in playbook order. Drives the `E r` role picker and any
+    /// exhaustiveness-style iteration.
+    pub const ALL: [Role; 5] = [
+        Role::Planner,
+        Role::Coordinator,
+        Role::Worker,
+        Role::Reviewer,
+        Role::Integrator,
+    ];
+
+    /// The sidebar row badge — a glyph + short word, rendered in the role
+    /// cell next to the agent-state badge. Stable text; the color is a UI
+    /// concern applied at render time.
+    pub fn badge(self) -> &'static str {
+        match self {
+            Role::Planner => "✎ plan",
+            Role::Coordinator => "◆ coord",
+            Role::Worker => "⚙ worker",
+            Role::Reviewer => "👁 review",
+            Role::Integrator => "⇅ integ",
+        }
+    }
+
+    /// The stable lowercase identifier used in the `role:<label>` upstream
+    /// label projection and the `role-<label>` serde form. Matches
+    /// [`Role::from_label`] round-trip.
+    pub fn label(self) -> &'static str {
+        match self {
+            Role::Planner => "planner",
+            Role::Coordinator => "coordinator",
+            Role::Worker => "worker",
+            Role::Reviewer => "reviewer",
+            Role::Integrator => "integrator",
+        }
+    }
+
+    /// A human-friendly name for menus and prompts (`"Coordinator"`).
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Role::Planner => "Planner",
+            Role::Coordinator => "Coordinator",
+            Role::Worker => "Worker",
+            Role::Reviewer => "Reviewer",
+            Role::Integrator => "Integrator",
+        }
+    }
+
+    /// Parse a role from its [`Role::label`] form (case-insensitive). The
+    /// read side of the `role:<label>` label projection: when a persisted
+    /// role is absent, the daemon falls back to an upstream `role:<label>`
+    /// label. Unknown labels return `None`.
+    pub fn from_label(s: &str) -> Option<Role> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "planner" => Some(Role::Planner),
+            "coordinator" => Some(Role::Coordinator),
+            "worker" => Some(Role::Worker),
+            "reviewer" => Some(Role::Reviewer),
+            "integrator" => Some(Role::Integrator),
+            _ => None,
+        }
+    }
+
+    /// The full upstream projection label for this role (`role:worker`). The
+    /// write side of the fallback that [`Role::from_project_label`] reads.
+    pub fn project_label(self) -> String {
+        format!("{ROLE_LABEL_PREFIX}{}", self.label())
+    }
+
+    /// Parse a role from a full `role:<label>` projection label. Returns
+    /// `None` for any name without the [`ROLE_LABEL_PREFIX`] or with an
+    /// unknown remainder. The read side of [`Role::project_label`].
+    pub fn from_project_label(name: &str) -> Option<Role> {
+        name.strip_prefix(ROLE_LABEL_PREFIX)
+            .and_then(Role::from_label)
+    }
 }
 
 /// Serialize hook for [`Workspace::schema`]: always stamp the CURRENT
@@ -567,6 +677,15 @@ pub struct Workspace {
     /// read back as local.
     #[serde(default)]
     pub remote: Option<String>,
+    /// Orchestration role this workspace plays in a cross-repo epic
+    /// (`docs/orchestration-scoping.md` §6). User-set via `E r`; drives a
+    /// sidebar badge, a spawn-time prompt preamble, and a `role:<role>`
+    /// upstream label projection. Purely a lazybox concept — never
+    /// provider-derived, so a poll must never clear it (see the OR-merge in
+    /// [`Workspace::absorb_user_state_from`]). Serde-defaulted so pre-role
+    /// records read back as unroled.
+    #[serde(default)]
+    pub role: Option<Role>,
     pub created_at: DateTime<Utc>,
     pub last_viewed_at: Option<DateTime<Utc>>,
 }
@@ -611,6 +730,7 @@ impl Workspace {
             sent_snippets: SnippetDeliveryLog::default(),
             cleanup_prompt: CleanupPrompt::default(),
             remote: None,
+            role: None,
             created_at: now,
             last_viewed_at: None,
         }
@@ -1093,6 +1213,12 @@ impl Workspace {
             // Remote placement belongs to the destination row's own
             // identity — a transfer never inherits the source's box.
             remote: _,
+            // Role follows the line of work: an issue given a role while it
+            // was planned/coordinated keeps that role after it collapses
+            // into its PR. OR-merged below so a rebadge never silently
+            // drops it, but never overwrites a role the destination already
+            // has.
+            role,
             // Metering follows the line of work: an issue metered while it
             // was worked must keep metering after it collapses into its PR.
             // Carried below (OR'd) so an issue→PR rebadge doesn't silently
@@ -1132,6 +1258,11 @@ impl Workspace {
         // destination metered across a rebadge/transfer, but never turns a
         // metered destination off.
         self.metered |= *metered;
+        // Role follows the work: carry the source's role only when the
+        // destination has none (an unroled PR inheriting the folded issue's
+        // role), never overwriting a role the user set on the destination.
+        // Same non-clearing shape a poll relies on.
+        self.role = self.role.or(*role);
         // merge-on-green is a consequential daemon arm; carry it only
         // where there's actually a PR to merge. Mirrors the UI, which
         // refuses to arm it on a PR-less workspace, so a stray arm can't
@@ -1186,6 +1317,20 @@ impl Workspace {
             .or_else(|| self.linear_issues.first_mut())
     }
 
+    /// The role that governs this workspace's spawn preamble, row badge, and
+    /// privileged-tool gating (#1523). The persisted [`Self::role`] wins; when
+    /// it is unset the daemon adopts a `role:<label>` projection carried on the
+    /// primary task, so a role set from GitHub — or by a planner's `gh issue
+    /// create --label role:worker` — is honored. `None` when neither is present.
+    pub fn effective_role(&self) -> Option<Role> {
+        self.role.or_else(|| {
+            self.primary_task()
+                .into_iter()
+                .flat_map(|task| task.labels.iter())
+                .find_map(|label| Role::from_project_label(&label.name))
+        })
+    }
+
     /// Every task this workspace represents — the PR plus any attached
     /// GitHub / Linear issues. Ticket-hierarchy resolution must address a
     /// workspace by *any* of its provider ids: once a ticket acquires a PR
@@ -1228,6 +1373,22 @@ impl Workspace {
             .chain(self.gh_issues.iter())
             .chain(self.linear_issues.iter())
             .flat_map(|task| task.blocked_by.iter())
+            .filter(move |id| seen.insert(*id))
+    }
+
+    /// Every *distinct* merge-after predecessor any task in this workspace
+    /// declares, in first-seen order. Mirrors [`Self::hierarchy_blocked_by`] — a
+    /// landing-order edge de-duplicated across the workspace's tasks — but
+    /// carries a weaker meaning: a `MergeAfter` edge does not gate the work
+    /// itself, only the *order in which PRs may merge* (this workspace's PR
+    /// must not merge before every predecessor's PR has landed).
+    pub fn hierarchy_merge_after(&self) -> impl Iterator<Item = &TaskId> {
+        let mut seen = std::collections::HashSet::new();
+        self.pr
+            .iter()
+            .chain(self.gh_issues.iter())
+            .chain(self.linear_issues.iter())
+            .flat_map(|task| task.merge_after.iter())
             .filter(move |id| seen.insert(*id))
     }
 
@@ -2340,6 +2501,7 @@ mod tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -4063,6 +4225,122 @@ mod tests {
         assert!(
             metered_target.metered,
             "a transfer never turns a metered destination off",
+        );
+    }
+
+    #[test]
+    fn role_badge_and_label_round_trip_for_every_variant() {
+        for role in Role::ALL {
+            // Each variant has a distinct, non-empty badge and label.
+            assert!(!role.badge().is_empty());
+            assert!(!role.label().is_empty());
+            // The label round-trips through from_label (case-insensitive).
+            assert_eq!(Role::from_label(role.label()), Some(role));
+            assert_eq!(Role::from_label(&role.label().to_uppercase()), Some(role));
+        }
+        assert_eq!(Role::from_label("nope"), None);
+        assert_eq!(Role::from_label(""), None);
+        // The specific badges from the epic spec.
+        assert_eq!(Role::Planner.badge(), "✎ plan");
+        assert_eq!(Role::Coordinator.badge(), "◆ coord");
+        assert_eq!(Role::Worker.badge(), "⚙ worker");
+        assert_eq!(Role::Reviewer.badge(), "👁 review");
+        assert_eq!(Role::Integrator.badge(), "⇅ integ");
+    }
+
+    #[test]
+    fn role_project_label_round_trips_and_prefixes() {
+        for role in Role::ALL {
+            let label = role.project_label();
+            // The projection label is the prefix + the stable label.
+            assert!(label.starts_with(ROLE_LABEL_PREFIX));
+            assert_eq!(label, format!("role:{}", role.label()));
+            // …and round-trips back through the read side.
+            assert_eq!(Role::from_project_label(&label), Some(role));
+        }
+        // A bare label without the `role:` prefix is not a projection label.
+        assert_eq!(Role::from_project_label("worker"), None);
+        // The prefix with an unknown remainder is rejected.
+        assert_eq!(Role::from_project_label("role:nope"), None);
+        // An unrelated label is left alone.
+        assert_eq!(Role::from_project_label("working"), None);
+    }
+
+    #[test]
+    fn workspace_role_round_trips_and_legacy_records_read_unroled() {
+        // A new workspace is unroled.
+        let mut ws = Workspace::empty(WorkspaceKey::new("w"), "main", now());
+        assert_eq!(ws.role, None);
+
+        // A set role round-trips through JSON.
+        ws.role = Some(Role::Coordinator);
+        let round: Workspace = serde_json::from_str(&serde_json::to_string(&ws).unwrap()).unwrap();
+        assert_eq!(round.role, Some(Role::Coordinator));
+
+        // A record written before the field existed reads back unroled.
+        let mut json: serde_json::Value = serde_json::to_value(&ws).unwrap();
+        json.as_object_mut().unwrap().remove("role");
+        let legacy: Workspace = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.role, None, "a record without the field is unroled");
+    }
+
+    #[test]
+    fn effective_role_is_none_without_a_role_or_label() {
+        // No persisted role and no `role:` label → no effective role.
+        let ws = Workspace::from_task(pr("o/r#1"), now());
+        assert_eq!(ws.effective_role(), None);
+    }
+
+    #[test]
+    fn role_label_is_adopted_when_field_unset() {
+        // A planner's `gh issue create --label role:worker` lands as a task
+        // label; with no persisted role the daemon adopts it.
+        let mut task = pr("o/r#1");
+        task.labels = vec![
+            crate::Label::new("working"),
+            crate::Label::new(Role::Worker.project_label()),
+        ];
+        let ws = Workspace::from_task(task, now());
+        assert_eq!(ws.role, None);
+        assert_eq!(ws.effective_role(), Some(Role::Worker));
+    }
+
+    #[test]
+    fn persisted_role_wins_over_label() {
+        // A persisted role beats a conflicting `role:` label — the field is
+        // the authority, the label only a fallback.
+        let mut task = pr("o/r#1");
+        task.labels = vec![crate::Label::new(Role::Worker.project_label())];
+        let mut ws = Workspace::from_task(task, now());
+        ws.role = Some(Role::Reviewer);
+        assert_eq!(ws.effective_role(), Some(Role::Reviewer));
+    }
+
+    /// A poll never clears a user-set role: the merge OR's the role, so a
+    /// roled destination keeps its role and an unroled destination inherits
+    /// the folded source's role across an issue→PR rebadge.
+    #[test]
+    fn absorb_user_state_carries_role_across_a_rebadge_without_clobbering() {
+        // Unroled PR inherits the folded issue's role.
+        let mut source = Workspace::empty(WorkspaceKey::new("issue-src"), "scratch", now());
+        source.role = Some(Role::Worker);
+        let mut pr_target = Workspace::from_task(pr("o/r#1"), now());
+        assert_eq!(pr_target.role, None);
+        pr_target.absorb_user_state_from(&source);
+        assert_eq!(
+            pr_target.role,
+            Some(Role::Worker),
+            "unroled destination inherits the source role",
+        );
+
+        // A destination role is never overwritten by the source.
+        let mut roled_target = Workspace::from_task(pr("o/r#2"), now());
+        roled_target.role = Some(Role::Reviewer);
+        roled_target.absorb_user_state_from(&source);
+        assert_eq!(
+            roled_target.role,
+            Some(Role::Reviewer),
+            "a transfer never overwrites a role the destination already has",
         );
     }
 

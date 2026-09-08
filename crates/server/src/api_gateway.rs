@@ -665,6 +665,9 @@ impl DesktopCommand {
                 // Desktop clients don't yet expose an explicit new-agent
                 // gesture; preserve the reuse-on-spawn behavior (#1310).
                 force_new: false,
+                // Desktop spawns don't drive the role preamble (#1523); the
+                // preamble falls back to the workspace's persisted role.
+                role: None,
             },
             DesktopCommand::SpawnShell {
                 session_key,
@@ -681,6 +684,7 @@ impl DesktopCommand {
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
                 force_new: false,
+                role: None,
             },
             DesktopCommand::CreateWorkspace {
                 name,
@@ -704,6 +708,9 @@ impl DesktopCommand {
             }
             DesktopCommand::MergePr { session_key } => Command::MergePr {
                 workspace_key: workspace_key_of(&session_key),
+                // Desktop has no merge-after-hold override yet; a held PR
+                // surfaces its `PrMergeFailed` reason like any other rejection.
+                force: false,
             },
             DesktopCommand::UpdateBranch { session_key } => Command::UpdateBranch {
                 workspace_key: workspace_key_of(&session_key),

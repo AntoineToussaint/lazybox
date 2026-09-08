@@ -97,6 +97,7 @@ async fn spawn_shell(client: &mut lazybox_ipc::Client) -> lazybox_ipc::TerminalI
             initial_snippet: None,
             on_main: false,
             force_new: false,
+            role: None,
         })
         .unwrap();
     match wait_for(
@@ -126,6 +127,7 @@ async fn spawn_agent(client: &mut lazybox_ipc::Client, agent: &str) -> lazybox_i
             initial_snippet: None,
             on_main: false,
             force_new: false,
+            role: None,
         })
         .unwrap();
     match wait_for(

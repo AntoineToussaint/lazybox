@@ -3227,6 +3227,7 @@ mod linear_cadence_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -3301,6 +3302,99 @@ mod auto_spawn_dedup_tests {
             )
             .await;
         assert!(!has_live_agent_session(&config, &sk2).await);
+    }
+
+    fn github_issue_task(key: &str, labels: Vec<&str>) -> Task {
+        Task {
+            author: "me".into(),
+            id: lazybox_core::TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::None,
+            review: lazybox_core::ReviewStatus::None,
+            checks: vec![],
+            unread_count: 0,
+            url: format!("https://github.com/{}", key.replace('#', "/issues/")),
+            repo: Some(key.split('#').next().unwrap_or_default().to_string()),
+            branch: None,
+            base_branch: None,
+            updated_at: Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: labels.into_iter().map(lazybox_core::Label::new).collect(),
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Mergeable,
+            is_behind_base: false,
+            merge_blocked: false,
+            approval_policy: Default::default(),
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            kind: Some(lazybox_core::TaskKind::Issue),
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            parent: None,
+            priority: None,
+            state_label: None,
+            blocked_by: vec![],
+            merge_after: vec![],
+            blocked_on: None,
+        }
+    }
+
+    /// A working-claim label (`lazybox:w:…`) is fleet-coordination state,
+    /// never a spawn directive — an issue whose only `lazybox:` label is a
+    /// claim must produce no `AutoSpawnAgent`, else its per-tick renewal
+    /// re-submits the work prompt into the agent already holding it (#1566).
+    #[test]
+    fn label_spawn_actions_ignores_working_claim_label() {
+        let task = github_issue_task(
+            "o/r#402",
+            vec!["lazybox:w:effacd542b611010656e:ecfd919c67:6aa05d7e"],
+        );
+        let actions = label_spawn_actions(&[task], &Default::default(), &Default::default());
+        assert!(
+            actions.is_empty(),
+            "a claim label must not trigger an auto-spawn"
+        );
+
+        // Sanity: a real directive label on the same task still spawns.
+        let task = github_issue_task("o/r#403", vec!["lazybox:codex/xhigh"]);
+        let actions = label_spawn_actions(&[task], &Default::default(), &Default::default());
+        assert_eq!(actions.len(), 1, "a real directive label still spawns");
+
+        // A claim label alongside a real directive is skipped by `find_map`,
+        // not treated as blocking — the real directive still wins.
+        let task = github_issue_task(
+            "o/r#404",
+            vec![
+                "lazybox:w:effacd542b611010656e:ecfd919c67:6aa05d7e",
+                "lazybox:codex/xhigh",
+            ],
+        );
+        let actions = label_spawn_actions(&[task], &Default::default(), &Default::default());
+        assert_eq!(
+            actions.len(),
+            1,
+            "a claim label must not block a real directive on the same task"
+        );
+        let ProviderAction::AutoSpawnAgent { agent_id, .. } = &actions[0].1 else {
+            panic!("expected an AutoSpawnAgent");
+        };
+        assert_eq!(agent_id, "codex");
     }
 
     /// A `lazybox:<agent>/<model>` label re-appears on every poll (no

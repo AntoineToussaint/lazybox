@@ -33,6 +33,9 @@ it now thinks is free.\n\
   - `no-auto-fix` / `do-not-lazybox` opt a PR out of lazybox's auto-fix only (not \
 auto-merge, not `@lazybox`). Add one to stop lazybox auto-fixing a PR; remove it to \
 let it resume.\n\
+  - `role:<planner|coordinator|worker|reviewer|integrator>` marks a workspace's \
+orchestration role (#1523); lazybox adopts it when no role is set, so stripping it \
+unroles the session.\n\
 \n\
 Standing policies (set in lazybox, not GitHub labels; shown as `ARM` / `FIX` pills) \
 can act on a PR without you: auto-merge-on-green merges it once CI passes, and \
@@ -78,7 +81,10 @@ delivery, so verify with `read_session`.\n\
   - `epic_status` / `epic_ready` are the live plan of record for any epic this \
 workspace joins — the daemon derives status, so answer \"what's blocked / what's next\" \
 from them, not from re-reading the graph; `report_blocker` flags this workspace as \
-blocked (a reason a sibling can see) and `clear_blocker` lifts it."
+blocked (a reason a sibling can see) and `clear_blocker` lifts it.\n\
+  - `spawn_worker` (Coordinator only) creates a workspace, assigns it to your epic as a \
+Worker, and spawns an agent on a brief; it refuses off-role or past the epic's worker \
+cap."
 }
 
 /// The full briefing an MCP-wired agent gets: the base blurb plus the
@@ -211,9 +217,10 @@ mod tests {
         // every agent, so it must stay a mechanics reference, not a manual.
         // Measure the worst case — the composed base + MCP paragraph a wired
         // agent gets. The caps carry the coordination vocabulary (labels,
-        // policies, handles, and the six MCP tools) with real slack for a word
+        // policies, handles, and the MCP tools) with real slack for a word
         // or a tool name, while still failing if the blurb grows into prose:
-        // the text is ~2.5 KB today, so 3200 bytes / 35 lines is prose-shaped
+        // the text is ~2.6 KB today (P2 roles added the `role:*` label + the
+        // `spawn_worker` clause, #1523), so 3300 bytes / 35 lines is prose-shaped
         // headroom, not an exact-fit tripwire on the current string.
         let text = lazybox_session_context_with_mcp();
         assert!(
@@ -222,7 +229,7 @@ mod tests {
             text.lines().count()
         );
         assert!(
-            text.len() <= 3200,
+            text.len() <= 3300,
             "session context should stay tight: {} bytes",
             text.len()
         );

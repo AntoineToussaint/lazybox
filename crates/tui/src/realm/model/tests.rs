@@ -12915,7 +12915,7 @@ mod merge_focus_follow_tests {
         let mut merged_keys: Vec<String> = cmds
             .iter()
             .map(|c| match c {
-                IpcCommand::MergePr { workspace_key } => workspace_key.as_str().to_string(),
+                IpcCommand::MergePr { workspace_key, .. } => workspace_key.as_str().to_string(),
                 other => panic!("expected MergePr, got {other:?}"),
             })
             .collect();
@@ -13017,7 +13017,7 @@ mod merge_focus_follow_tests {
 
         let cmds = m.handle_confirmed(true);
         assert!(
-            matches!(cmds.as_slice(), [IpcCommand::MergePr { workspace_key }] if workspace_key == &wk_a),
+            matches!(cmds.as_slice(), [IpcCommand::MergePr { workspace_key, .. }] if workspace_key == &wk_a),
             "only the clicked row merges: {cmds:?}",
         );
     }
@@ -17412,7 +17412,7 @@ mod destructive_confirm_tests {
 
         let cmds = m.handle_confirmed(true);
         match cmds.as_slice() {
-            [IpcCommand::MergePr { workspace_key }] => assert_eq!(workspace_key, &wk),
+            [IpcCommand::MergePr { workspace_key, .. }] => assert_eq!(workspace_key, &wk),
             other => panic!("expected a single MergePr command, got {other:?}"),
         }
     }

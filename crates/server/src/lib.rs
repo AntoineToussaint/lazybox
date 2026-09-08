@@ -2292,8 +2292,11 @@ pub async fn dispatch_command(
             polling::handle_adopt_sessions(config, source_workspace_key, target_workspace_key)
                 .await;
         }
-        lazybox_ipc::Command::MergePr { workspace_key } => {
-            polling::handle_merge_pr(config, workspace_key).await;
+        lazybox_ipc::Command::MergePr {
+            workspace_key,
+            force,
+        } => {
+            polling::handle_merge_pr(config, workspace_key, force).await;
         }
         lazybox_ipc::Command::UpdateBranch { workspace_key } => {
             polling::handle_update_branch(config, workspace_key).await;

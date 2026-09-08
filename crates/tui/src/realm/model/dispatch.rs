@@ -285,7 +285,14 @@ impl<T: TerminalAdapter> Model<T> {
         }
         match intent {
             Intent::MergePr { workspace_key } => {
-                vec![IpcCommand::MergePr { workspace_key }]
+                // A plain `g m` never forces: the daemon refuses a
+                // merge-after-held PR with a `PrMergeFailed` naming the
+                // predecessors, and the held-merge confirm re-sends with
+                // `force: true`.
+                vec![IpcCommand::MergePr {
+                    workspace_key,
+                    force: false,
+                }]
             }
             Intent::UpdateBranch { workspace_key } => {
                 vec![IpcCommand::UpdateBranch { workspace_key }]

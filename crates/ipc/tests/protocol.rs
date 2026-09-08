@@ -377,6 +377,7 @@ fn all_commands() -> Vec<Command> {
         },
         Command::MergePr {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            force: false,
         },
         Command::CloseIssue {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),

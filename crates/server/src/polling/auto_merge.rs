@@ -261,6 +261,27 @@ pub(crate) fn on_workspace_committed(
     signal: Signal,
     changed: bool,
 ) {
+    // Merge-after hold: an armed, otherwise merge-ready PR whose epic names an
+    // unmerged merge-after predecessor must not land yet. Downgrade Fire → Hold
+    // so the latch waits without re-arming; the predecessor's own merge
+    // re-probes this key via `crate::epics::on_pr_merged`, and the hold lifts
+    // once `held_by` comes back empty. Only Fire pays the lookup, which is
+    // cheap when no epics exist.
+    let signal = if signal == Signal::Fire {
+        let held = crate::epics::held_by(config, key);
+        if held.is_empty() {
+            Signal::Fire
+        } else {
+            tracing::info!(
+                workspace = %key,
+                ?held,
+                "auto-merge: holding — merge-after predecessor not yet landed"
+            );
+            Signal::Hold
+        }
+    } else {
+        signal
+    };
     let ticket = {
         let mut memory = config.poll.auto_merge.lock();
         plan(&mut memory, key, signal, changed)

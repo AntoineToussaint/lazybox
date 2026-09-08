@@ -1396,6 +1396,119 @@ pub async fn all_snapshots(config: &ServerConfig) -> Vec<EpicSnapshot> {
     out
 }
 
+// ── merge-after hold (auto-merge integration) ────────────────────────────
+
+/// The not-yet-landed merge-after predecessors of `key` across every active
+/// epic — the workspaces whose PRs must merge before `key`'s may. Empty when
+/// nothing holds `key`: no epic constrains it, or every predecessor has already
+/// landed (Merged/Closed). Backs the merge-on-green hold
+/// ([`crate::polling::auto_merge::on_workspace_committed`]) and the manual-merge
+/// `force` gate. Deduped and sorted so a workspace held by more than one epic
+/// lists each predecessor once.
+///
+/// Cheap in the common case: with no epic records the prefix scan returns empty
+/// before any workspace load.
+pub fn held_by(config: &ServerConfig, key: &WorkspaceKey) -> Vec<WorkspaceKey> {
+    let records = match list_all(config) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("epics: held_by list failed: {e}");
+            return Vec::new();
+        }
+    };
+    if records.is_empty() {
+        return Vec::new();
+    }
+    let workspaces = crate::load_workspaces(&*config.store).values;
+    held_by_in(&records, &workspaces, key)
+}
+
+/// Pure core of [`held_by`]: the unmerged merge-after predecessors of `key`
+/// across `records`, from already-loaded workspaces. Split out so the hold
+/// logic unit-tests without a `ServerConfig`.
+fn held_by_in(
+    records: &[EpicRecord],
+    workspaces: &[Workspace],
+    key: &WorkspaceKey,
+) -> Vec<WorkspaceKey> {
+    let mut held: BTreeSet<WorkspaceKey> = BTreeSet::new();
+    for record in records {
+        if record.archived {
+            continue;
+        }
+        let resolved = resolved_graph(record, workspaces);
+        let Some(preds) = resolved.merge_after.get(key) else {
+            continue;
+        };
+        for pred in preds {
+            if !resolved.done.get(pred).copied().unwrap_or(false) {
+                held.insert(pred.clone());
+            }
+        }
+    }
+    held.into_iter().collect()
+}
+
+/// A PR just landed merged (manual, auto, or external) and the store now holds
+/// that ground truth. Re-probe every workspace that named `merged` as a
+/// merge-after predecessor, so a successor whose *last* predecessor just landed
+/// fires its own merge-on-green immediately rather than waiting for the next
+/// poll of that workspace. Successors still holding on other predecessors stay
+/// held — [`on_workspace_committed`] recomputes [`held_by`] and finds the
+/// remaining ones.
+///
+/// [`on_workspace_committed`]: crate::polling::auto_merge::on_workspace_committed
+pub fn on_pr_merged(config: &ServerConfig, merged: &WorkspaceKey) {
+    let records = match list_all(config) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("epics: on_pr_merged list failed: {e}");
+            return;
+        }
+    };
+    if records.is_empty() {
+        return;
+    }
+    let workspaces = crate::load_workspaces(&*config.store).values;
+    let by_key: HashMap<WorkspaceKey, &Workspace> =
+        workspaces.iter().map(|w| (w.key.clone(), w)).collect();
+
+    for succ in merged_successors(&records, &workspaces, merged) {
+        let Some(ws) = by_key.get(&succ) else {
+            continue;
+        };
+        // Re-run the auto-merge projection for the successor. `merged` is now
+        // done in the store, so `on_workspace_committed`'s hold check no longer
+        // counts it; if that was the last predecessor and the PR is armed +
+        // mergeable, the hold lifts and the attempt fires.
+        let signal = crate::polling::auto_merge::signal_for(ws);
+        crate::polling::auto_merge::on_workspace_committed(config, &succ, signal, true);
+    }
+}
+
+/// Pure core of [`on_pr_merged`]: every member that named `merged` as a
+/// merge-after predecessor, across `records`, deduped and sorted. Split out so
+/// the release fan-out unit-tests without a `ServerConfig`.
+fn merged_successors(
+    records: &[EpicRecord],
+    workspaces: &[Workspace],
+    merged: &WorkspaceKey,
+) -> Vec<WorkspaceKey> {
+    let mut successors: BTreeSet<WorkspaceKey> = BTreeSet::new();
+    for record in records {
+        if record.archived {
+            continue;
+        }
+        let resolved = resolved_graph(record, workspaces);
+        for (member, preds) in &resolved.merge_after {
+            if member != merged && preds.contains(merged) {
+                successors.insert(member.clone());
+            }
+        }
+    }
+    successors.into_iter().collect()
+}
+
 // ── command handlers ────────────────────────────────────────────────────
 
 /// Record a declared blocker on `workspace` (the caller's own), then recompute
@@ -2072,6 +2185,110 @@ mod tests {
         let order: Vec<&str> = snap.merge_order.iter().map(|e| e.key.as_str()).collect();
         assert_eq!(order, vec!["b"]);
         assert!(snap.merge_order[0].held_by.is_empty());
+    }
+
+    fn keys(v: Vec<WorkspaceKey>) -> Vec<String> {
+        v.iter().map(|k| k.as_str().to_string()).collect()
+    }
+
+    /// `held_by_in` (the pure core of the auto-merge hold and the manual
+    /// `force` gate) reports a dependent's not-yet-landed merge-after
+    /// predecessors, and nothing once every predecessor has landed.
+    #[test]
+    fn held_by_in_reports_unmerged_predecessors() {
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Open, CiStatus::Success);
+        let mut b = ws("b");
+        let mut b_pr = task("github", "b#pr");
+        b_pr.merge_after = vec![task("github", "a#pr").id];
+        b.pr = Some(b_pr);
+
+        let mut record = record_with(&["a", "b"]);
+        record.implied_merge_after = false;
+        let records = [record];
+
+        // a's PR is open → it holds b; a has no predecessors → unheld.
+        assert_eq!(
+            keys(held_by_in(&records, &[a.clone(), b.clone()], &WorkspaceKey::new("b"))),
+            vec!["a".to_string()]
+        );
+        assert!(held_by_in(&records, &[a.clone(), b.clone()], &WorkspaceKey::new("a")).is_empty());
+
+        // a lands → b is released.
+        pr(&mut a, TaskState::Merged, CiStatus::Success);
+        assert!(held_by_in(&records, &[a, b], &WorkspaceKey::new("b")).is_empty());
+    }
+
+    /// A dependent held by two predecessors stays held until BOTH land — one
+    /// merging leaves the other in `held_by`.
+    #[test]
+    fn held_by_in_needs_all_predecessors_landed() {
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Merged, CiStatus::Success); // one landed…
+        let mut x = ws("x");
+        pr(&mut x, TaskState::Open, CiStatus::Success); // …one still open.
+        let mut b = ws("b");
+        let mut b_pr = task("github", "b#pr");
+        b_pr.merge_after = vec![task("github", "a#pr").id, task("github", "x#pr").id];
+        b.pr = Some(b_pr);
+
+        let mut record = record_with(&["a", "x", "b"]);
+        record.implied_merge_after = false;
+        assert_eq!(
+            keys(held_by_in(&[record], &[a, x, b], &WorkspaceKey::new("b"))),
+            vec!["x".to_string()]
+        );
+    }
+
+    /// An archived epic never holds a merge — its edges are inert.
+    #[test]
+    fn held_by_in_ignores_archived_epic() {
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Open, CiStatus::Success);
+        let mut b = ws("b");
+        let mut b_pr = task("github", "b#pr");
+        b_pr.merge_after = vec![task("github", "a#pr").id];
+        b.pr = Some(b_pr);
+
+        let mut record = record_with(&["a", "b"]);
+        record.implied_merge_after = false;
+        record.archived = true;
+        assert!(held_by_in(&[record], &[a, b], &WorkspaceKey::new("b")).is_empty());
+    }
+
+    /// `merged_successors` (the pure core of the release fan-out) finds every
+    /// member that named the just-landed workspace as a merge-after predecessor
+    /// — the keys `on_pr_merged` re-probes.
+    #[test]
+    fn merged_successors_finds_direct_dependents() {
+        // a → b → c chain.
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Merged, CiStatus::Success);
+        let mut b = ws("b");
+        let mut b_pr = task("github", "b#pr");
+        b_pr.merge_after = vec![task("github", "a#pr").id];
+        b.pr = Some(b_pr);
+        let mut c = ws("c");
+        let mut c_pr = task("github", "c#pr");
+        c_pr.merge_after = vec![task("github", "b#pr").id];
+        c.pr = Some(c_pr);
+
+        let mut record = record_with(&["a", "b", "c"]);
+        record.implied_merge_after = false;
+        let records = [record];
+        let all = [a, b, c];
+
+        // Only b named a; c named b, not a — the release is one hop, not
+        // transitive (c re-probes when b later lands).
+        assert_eq!(
+            keys(merged_successors(&records, &all, &WorkspaceKey::new("a"))),
+            vec!["b".to_string()]
+        );
+        assert_eq!(
+            keys(merged_successors(&records, &all, &WorkspaceKey::new("b"))),
+            vec!["c".to_string()]
+        );
+        assert!(merged_successors(&records, &all, &WorkspaceKey::new("c")).is_empty());
     }
 
     /// A merge-ready PR whose merge-after predecessor hasn't landed reads as

@@ -1483,8 +1483,18 @@ pub enum Command {
     /// CI) row. The daemon looks up the PR's `node_id` and calls
     /// the GraphQL `mergePullRequest` mutation. Method defaults
     /// to the repo's setting; future per-repo config can override.
+    ///
+    /// `force` overrides a merge-after hold: when the workspace's epic
+    /// names an unmerged predecessor its PR must land after, a normal
+    /// `g m` (`force: false`) is refused with a `PrMergeFailed` naming
+    /// the predecessors, and the client re-sends with `force: true`
+    /// after the user confirms the out-of-order landing. It does NOT
+    /// override GitHub's own gates (conflicts, rulesets) — those stay
+    /// the merge-time authority.
     MergePr {
         workspace_key: lazybox_core::WorkspaceKey,
+        #[serde(default)]
+        force: bool,
     },
     /// Close the workspace's GitHub issue upstream. Fires from the
     /// sidebar's `x c` shortcut on an issue-only workspace, after

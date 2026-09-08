@@ -815,6 +815,7 @@ fn all_non_shutdown_commands() -> Vec<Command> {
         },
         Command::MergePr {
             workspace_key: wkey(),
+            force: false,
         },
         Command::CloseIssue {
             workspace_key: wkey(),

@@ -2708,6 +2708,7 @@ mod argv_tests {
                 composing_buffer: None,
                 agent_state: None,
                 authenticating: false,
+                replay_sizes: Vec::new(),
             }
         };
         let (command_tx, _command_rx) = tokio::sync::mpsc::unbounded_channel();

@@ -2501,6 +2501,7 @@ pub fn encode_terminal_event(event: &Event) -> Vec<Vec<u8>> {
             bytes,
             first_seq,
             seq,
+            ..
         } => vec![encode_terminal_server_frame(
             TERMINAL_SERVER_FRAME_OUTPUT,
             *terminal_id,
@@ -2512,6 +2513,7 @@ pub fn encode_terminal_event(event: &Event) -> Vec<Vec<u8>> {
             terminal_id,
             replay,
             seq,
+            ..
         } => vec![encode_terminal_server_frame(
             TERMINAL_SERVER_FRAME_RESYNC,
             *terminal_id,

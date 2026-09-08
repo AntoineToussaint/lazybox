@@ -2505,6 +2505,18 @@ pub enum Event {
         /// `bytes`. Together with `first_seq`, lets the consumer detect
         /// gaps even after adjacent chunks are coalesced.
         seq: u64,
+        /// The PTY's column count when the daemon read `bytes` — the
+        /// grid the program producing them was laid out for. A consumer
+        /// parsing into a VT of any other size reflows cursor-relative
+        /// paints wrongly (a repaint walking the cursor up over a frame
+        /// taller than the grid clamps at row 0 and scrolls stale copies
+        /// into scrollback), so it sizes its VT to this before feeding.
+        /// A resize is announced in stream order as a chunk with empty
+        /// `bytes` carrying the new size, so the consumer's grid changes
+        /// exactly where the PTY's did. `0` when the size is unknown.
+        cols: u16,
+        /// See `cols`.
+        rows: u16,
     },
     /// Re-establish a terminal's grid from the daemon-side replay ring
     /// after the bounded event channel dropped one or more
@@ -2522,6 +2534,9 @@ pub enum Event {
         terminal_id: TerminalId,
         replay: Vec<u8>,
         seq: u64,
+        /// The PTY sizes `replay` was produced at, as byte spans (see
+        /// [`ReplaySizeSpan`]). The consumer feeds each span at its size.
+        sizes: Vec<ReplaySizeSpan>,
     },
     /// Recovery could not currently produce a complete replay covering
     /// the observed gap. The consumer must preserve its last coherent
@@ -3001,6 +3016,9 @@ pub enum Event {
         bytes: Vec<u8>,
         first_seq: u64,
         seq: u64,
+        /// PTY size `bytes` were produced at; see `TerminalOutput::cols`.
+        cols: u16,
+        rows: u16,
     },
     /// Connection-private authoritative replay for an authentication PTY,
     /// used when ownership moves to a reconnecting client.
@@ -3008,6 +3026,8 @@ pub enum Event {
         terminal_id: TerminalId,
         replay: Vec<u8>,
         seq: u64,
+        /// PTY sizes `replay` was produced at; see `TerminalResync::sizes`.
+        sizes: Vec<ReplaySizeSpan>,
     },
     /// The model + reasoning effort a live agent terminal is running has
     /// changed. Sourced from the daemon's PTY detection (Codex prints
@@ -3857,6 +3877,20 @@ impl Event {
     }
 }
 
+/// One run of a terminal replay produced at a single PTY size: the bytes
+/// from offset `at` (into the replay) up to the next span's `at` — or the
+/// end — were read while the PTY was `cols` × `rows`. Spans are ordered by
+/// `at`, the first one at `0`, so feeding a replay means sizing the VT to
+/// each span before feeding its bytes; the VT ends at the size the PTY has
+/// now, which is where the live stream continues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct ReplaySizeSpan {
+    pub at: u64,
+    pub cols: u16,
+    pub rows: u16,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct TerminalSnapshot {
@@ -3878,6 +3912,12 @@ pub struct TerminalSnapshot {
     /// its last coherent screen and requests a resync.
     #[serde(default)]
     pub replay_available: bool,
+    /// The PTY sizes `replay` was produced at, as byte spans (see
+    /// [`ReplaySizeSpan`]). The client feeds each span at its size, so
+    /// a replay produced across a resize reconstructs the same grid the
+    /// live stream built.
+    #[serde(default)]
+    pub replay_sizes: Vec<ReplaySizeSpan>,
     /// Launched in no-permission / bypass mode. Lets a reconnecting
     /// client re-render the "no-perms" indicator without waiting for
     /// a fresh `TerminalSpawned`.

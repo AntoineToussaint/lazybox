@@ -24,6 +24,7 @@
 //! restart the server reads `backend.list()` to re-bind to existing
 //! sessions and re-allocates fresh `TerminalId`s for them.
 
+use lazybox_ipc::ReplaySizeSpan;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -55,6 +56,11 @@ pub struct OutputChunk {
     /// gaps when re-attaching after a lag.
     pub seq: u64,
     pub bytes: Vec<u8>,
+    /// PTY size `bytes` were produced at. A resize arrives as a chunk
+    /// with empty `bytes` and the new size, in stream order (see
+    /// `crate::pty::OutputChunk`).
+    pub cols: u16,
+    pub rows: u16,
 }
 
 /// A point-in-time replay of a session's output stream.
@@ -69,6 +75,8 @@ pub struct ReplaySnapshot {
     pub replay: Vec<u8>,
     pub last_seq: u64,
     pub complete: bool,
+    /// PTY sizes `replay` was produced at, by byte span into it.
+    pub sizes: Vec<ReplaySizeSpan>,
 }
 
 /// A gap-free delta of a terminal's output since a byte watermark — the
@@ -113,6 +121,8 @@ pub struct Subscription {
     /// Whether `replay` starts at a clean terminal baseline and can
     /// therefore rebuild a parser from scratch.
     pub replay_complete: bool,
+    /// PTY sizes `replay` was produced at, by byte span into it.
+    pub replay_sizes: Vec<ReplaySizeSpan>,
     /// `seq` value at the moment of subscription; chunks arriving on
     /// `live` start at `seq > last_seq`.
     pub last_seq: u64,

@@ -53,6 +53,7 @@ mod multi_agent_state_tests {
             composing_buffer: None,
             agent_state: Some(state),
             authenticating: false,
+            replay_sizes: Vec::new(),
         }
     }
 
@@ -6084,6 +6085,7 @@ mod agent_model_badge_tests {
                 composing_buffer: None,
                 agent_state: None,
                 authenticating: false,
+                replay_sizes: Vec::new(),
             }],
             projects: Vec::new(),
             recent_snippets: Vec::new(),

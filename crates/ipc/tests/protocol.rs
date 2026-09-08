@@ -595,6 +595,7 @@ fn all_events() -> Vec<Event> {
                 composing_buffer: Some("half typed prompt".into()),
                 agent_state: Some(AgentState::InputNeeded),
                 authenticating: false,
+                replay_sizes: Vec::new(),
             }],
             projects: vec![],
             recent_snippets: vec!["rev".into(), "pr".into()],
@@ -774,22 +775,28 @@ fn all_events() -> Vec<Event> {
             bytes: Arc::<[u8]>::from(b"ANSI: \x1b[31mred\x1b[0m".to_vec()),
             first_seq: 1,
             seq: 1,
+            cols: 0,
+            rows: 0,
         },
         Event::AgentAuthOutput {
             terminal_id: TerminalId(3),
             bytes: b"provider login".to_vec(),
             first_seq: 1,
             seq: 1,
+            cols: 0,
+            rows: 0,
         },
         Event::AgentAuthReplay {
             terminal_id: TerminalId(3),
             replay: b"provider login replay".to_vec(),
             seq: 2,
+            sizes: Vec::new(),
         },
         Event::TerminalResync {
             terminal_id: TerminalId(2),
             replay: b"full replay".to_vec(),
             seq: 9,
+            sizes: Vec::new(),
         },
         Event::TerminalResyncUnavailable {
             terminal_id: TerminalId(2),
@@ -1664,6 +1671,8 @@ async fn socket_binary_terminal_output_round_trip() {
         bytes: Arc::<[u8]>::from(nasty.clone()),
         first_seq: 99,
         seq: 99,
+        cols: 0,
+        rows: 0,
     };
     write_frame(&mut a, &msg).await.expect("write");
     drop(a);

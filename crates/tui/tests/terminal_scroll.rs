@@ -113,6 +113,8 @@ fn fresh_agent() -> TerminalStack {
         bytes: scrollback_payload().into(),
         first_seq: 1,
         seq: 1,
+        cols: 0,
+        rows: 0,
     });
     render(&mut stack);
     stack
@@ -139,6 +141,7 @@ fn reattached_agent() -> TerminalStack {
             composing_buffer: None,
             agent_state: None,
             authenticating: false,
+            replay_sizes: Vec::new(),
         }],
         recent_snippets: Vec::new(),
         dismissed_updates: Vec::new(),
@@ -299,6 +302,7 @@ fn snapshot_replay(payload: &[u8]) -> Event {
             composing_buffer: None,
             agent_state: None,
             authenticating: false,
+            replay_sizes: Vec::new(),
         }],
         recent_snippets: Vec::new(),
         dismissed_updates: Vec::new(),
@@ -324,6 +328,8 @@ fn focused_reattach_flush_parses_replay_at_render_width() {
         bytes: payload.clone().into(),
         first_seq: 1,
         seq: 1,
+        cols: 0,
+        rows: 0,
     });
     render_at(&mut fresh, RW, RH);
 
@@ -376,6 +382,8 @@ fn split_stack() -> TerminalStack {
             bytes: scrollback_payload().into(),
             first_seq: 1,
             seq: 1,
+            cols: 0,
+            rows: 0,
         });
     }
     render(&mut stack);

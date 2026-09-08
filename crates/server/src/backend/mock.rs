@@ -16,6 +16,11 @@
 //! real backends do. Tests using it exercise the daemon end-to-end.
 
 use crate::backend::{BackendError, OutputChunk, OutputDelta, SessionBackend, Subscription};
+use lazybox_ipc::ReplaySizeSpan;
+
+/// Spawn-time PTY size, matching the real backends.
+const DEFAULT_COLS: u16 = 120;
+const DEFAULT_ROWS: u16 = 32;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;
@@ -91,6 +96,11 @@ struct MockSession {
     writes: Vec<Vec<u8>>,
     /// Resize calls captured: (cols, rows).
     resizes: Vec<(u16, u16)>,
+    /// Current PTY size, stamped on every emitted chunk; a resize also
+    /// announces itself as an empty chunk, like the real backends.
+    size: (u16, u16),
+    /// Size spans of `replay` (see `ReplaySizeSpan`).
+    sizes: Vec<ReplaySizeSpan>,
     /// Replay buffer — everything emitted so far. New subscribers get
     /// this in their `Subscription.replay`.
     replay: Vec<u8>,
@@ -146,6 +156,8 @@ impl MockBackend {
         let chunk = OutputChunk {
             seq: session.last_seq,
             bytes: bytes.clone(),
+            cols: session.size.0,
+            rows: session.size.1,
         };
         session.replay.extend_from_slice(&bytes);
         // Drop disconnected subscribers as we go; a full (stalled)
@@ -174,6 +186,8 @@ impl MockBackend {
         let chunk = OutputChunk {
             seq: session.last_seq,
             bytes,
+            cols: session.size.0,
+            rows: session.size.1,
         };
         session.subscribers.retain(|tx| {
             !matches!(
@@ -210,6 +224,8 @@ impl MockBackend {
             let chunk = OutputChunk {
                 seq: session.last_seq,
                 bytes: bytes.clone(),
+                cols: session.size.0,
+                rows: session.size.1,
             };
             session.replay.extend_from_slice(&bytes);
             (chunk, session.subscribers.clone())
@@ -470,6 +486,12 @@ impl SessionBackend for MockBackend {
                 cwd: cwd.map(|p| p.to_path_buf()),
                 writes: Vec::new(),
                 resizes: Vec::new(),
+                size: (DEFAULT_COLS, DEFAULT_ROWS),
+                sizes: vec![ReplaySizeSpan {
+                    at: 0,
+                    cols: DEFAULT_COLS,
+                    rows: DEFAULT_ROWS,
+                }],
                 replay: Vec::new(),
                 evicted_before: 0,
                 last_seq: 0,
@@ -545,6 +567,27 @@ impl SessionBackend for MockBackend {
                 .get_mut(key)
                 .ok_or_else(|| BackendError::NotFound(key.into()))?;
             session.resizes.push((cols, rows));
+            if session.size != (cols, rows) {
+                session.size = (cols, rows);
+                session.sizes.push(ReplaySizeSpan {
+                    at: session.replay.len() as u64,
+                    cols,
+                    rows,
+                });
+            }
+            session.last_seq += 1;
+            let chunk = OutputChunk {
+                seq: session.last_seq,
+                bytes: Vec::new(),
+                cols,
+                rows,
+            };
+            session.subscribers.retain(|tx| {
+                !matches!(
+                    tx.try_send(chunk.clone()),
+                    Err(mpsc::error::TrySendError::Closed(_))
+                )
+            });
             Ok(())
         })
     }
@@ -636,6 +679,7 @@ impl SessionBackend for MockBackend {
                 .get_mut(key)
                 .ok_or_else(|| BackendError::NotFound(key.into()))?;
             let replay = session.replay.clone();
+            let replay_sizes = session.sizes.clone();
             let last_seq = session.last_seq;
             let (tx, rx) = mpsc::channel(crate::backend::SUBSCRIPTION_CHANNEL_CAPACITY);
             // If the session has already exited, close the channel
@@ -649,6 +693,7 @@ impl SessionBackend for MockBackend {
             Ok(Subscription {
                 replay,
                 replay_complete: true,
+                replay_sizes,
                 last_seq,
                 live: rx,
             })
@@ -690,6 +735,7 @@ impl SessionBackend for MockBackend {
                 replay: session.replay.clone(),
                 last_seq: session.last_seq,
                 complete: !incomplete,
+                sizes: session.sizes.clone(),
             })
         })
     }
@@ -845,6 +891,40 @@ mod tests {
             let chunk = sub.live.recv().await.expect("chunk");
             assert_eq!(chunk.bytes, b"hi");
             assert_eq!(chunk.seq, 1);
+        })
+        .await;
+    }
+
+    /// Mirrors the real backends: every resize is announced as an empty
+    /// chunk with the PTY size, later chunks carry it, and only a change
+    /// adds a replay size span.
+    #[tokio::test]
+    async fn resize_announces_the_size_and_stamps_later_chunks() {
+        run(async {
+            let b = MockBackend::new();
+            let k = b.spawn(&argv("x"), None, &[], "t").await.unwrap();
+            let mut sub = b.subscribe(&k).await.unwrap();
+            assert_eq!(sub.replay_sizes.len(), 1);
+
+            b.resize(&k, 100, 40).await.unwrap();
+            b.resize(&k, 100, 40).await.unwrap();
+            for seq in 1..=2 {
+                let marker = sub.live.recv().await.expect("announcement");
+                assert!(marker.bytes.is_empty());
+                assert_eq!((marker.cols, marker.rows), (100, 40));
+                assert_eq!(marker.seq, seq);
+            }
+
+            b.emit(&k, b"hi").await;
+            let chunk = sub.live.recv().await.expect("chunk");
+            assert_eq!(chunk.bytes, b"hi");
+            assert_eq!((chunk.cols, chunk.rows), (100, 40));
+            assert_eq!(chunk.seq, 3);
+
+            let snapshot = b.snapshot(&k).await.unwrap();
+            assert_eq!(snapshot.sizes.len(), 2, "one span per size change");
+            let last = snapshot.sizes.last().copied().expect("size span");
+            assert_eq!((last.at, last.cols, last.rows), (0, 100, 40));
         })
         .await;
     }

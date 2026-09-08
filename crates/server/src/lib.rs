@@ -2818,6 +2818,7 @@ mod snapshot_budget_tests {
             composing_buffer: None,
             agent_state: None,
             authenticating: false,
+            replay_sizes: Vec::new(),
         }
     }
 

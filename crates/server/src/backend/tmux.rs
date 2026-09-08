@@ -1111,6 +1111,7 @@ impl SessionBackend for TmuxBackend {
             let mut sub = pty.subscribe().await;
             let replay = std::mem::take(&mut sub.replay);
             let replay_complete = sub.replay_complete;
+            let replay_sizes = std::mem::take(&mut sub.replay_sizes);
             let last_seq = sub.last_seq;
             // Bounded bridge: a stalled subscriber drops chunks via
             // `try_send` instead of growing an unbounded backlog. The
@@ -1131,6 +1132,8 @@ impl SessionBackend for TmuxBackend {
                                 match tx.try_send(OutputChunk {
                                     seq: c.seq,
                                     bytes: c.bytes.to_vec(),
+                                    cols: c.cols,
+                                    rows: c.rows,
                                 }) {
                                     Ok(()) => {}
                                     Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
@@ -1172,6 +1175,7 @@ impl SessionBackend for TmuxBackend {
             Ok(Subscription {
                 replay,
                 replay_complete,
+                replay_sizes,
                 last_seq,
                 live: rx,
             })

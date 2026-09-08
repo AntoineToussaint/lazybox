@@ -746,6 +746,7 @@ pub(crate) async fn replay_auth_output(
                 terminal_id,
                 replay: snapshot.replay,
                 seq: snapshot.last_seq,
+                sizes: snapshot.sizes,
             });
         }
     }
@@ -1300,11 +1301,17 @@ async fn pump_auth_terminal(
     if !subscription.replay.is_empty()
         && let Some(output) = config.agent_recovery.output(recovery_terminal_id).await
     {
+        let (cols, rows) = subscription
+            .replay_sizes
+            .last()
+            .map_or((0, 0), |span| (span.cols, span.rows));
         let _ = output.send(Event::AgentAuthOutput {
             terminal_id,
             bytes: subscription.replay,
             first_seq: 1,
             seq: subscription.last_seq,
+            cols,
+            rows,
         });
     }
     while let Some(chunk) = subscription.live.recv().await {
@@ -1314,6 +1321,8 @@ async fn pump_auth_terminal(
                 bytes: chunk.bytes,
                 first_seq: chunk.seq,
                 seq: chunk.seq,
+                cols: chunk.cols,
+                rows: chunk.rows,
             });
         }
     }
@@ -1540,6 +1549,7 @@ mod tests {
                 bytes,
                 first_seq: 1,
                 seq: 1,
+                            ..
             } if id == auth_terminal_id && bytes == b"interactive provider output\r\n"
         ));
         while let Ok(event) = broadcast_events.try_recv() {

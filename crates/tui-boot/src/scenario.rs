@@ -561,6 +561,8 @@ impl Driver {
                     bytes: bytes.into(),
                     first_seq: seq,
                     seq,
+                    cols: 0,
+                    rows: 0,
                 });
             }
             Stage::Backed { mock, .. } => {

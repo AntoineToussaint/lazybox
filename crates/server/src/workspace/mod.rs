@@ -2423,6 +2423,23 @@ mod tombstone_tests {
 /// not park behind it forever while holding the workspace lock.
 const DETACH_AFTER_KILL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Bound for the out-of-band terminal reclaim after a wedged-guard detach.
+///
+/// Deliberately *longer* than [`DETACH_AFTER_KILL_TIMEOUT`], which bounds a
+/// wait on the terminal's io guard (normally milliseconds; a short cap keeps a
+/// wedged guard from parking the removal behind the modal). The reclaim is
+/// guard-free — it takes every lock *except* the wedged io lock — so there is
+/// no guard wait to keep short here. The one step inside it that legitimately
+/// runs for seconds is the working-claim's GitHub label mutation, bounded by
+/// [`crate::working_claims::MUTATION_TIMEOUT`]. Bounding the reclaim at the
+/// 10s guard-wait cap cut a merely-slow-but-healthy GitHub off mid-release,
+/// logging a false "reclaim did not complete" error and leaking the claim; the
+/// bound must exceed the mutation timeout so only a genuine unknown-lock wedge
+/// trips it, while staying finite so such a wedge can't hang the removal — and
+/// the workspace lock — forever.
+const RECLAIM_AFTER_WEDGE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(crate::working_claims::MUTATION_TIMEOUT.as_secs() + 5);
+
 /// A removal slower than this gets a warning breadcrumb with its duration and
 /// outcome — the user is looking at a modal, and a removal that never wrote a
 /// line was undiagnosable from the log.
@@ -2759,9 +2776,25 @@ impl<'a> WorkspaceLifecycle<'a> {
                 // `WorkspaceRemoved` ever went out, hooks and poll upserts for
                 // the key queued behind the lock, and the next daemon restart
                 // resurrected the agent from the still-present row.
+                //
+                // `WorkspaceLockHeld`: this removal holds the workspace lock
+                // (`remove_timed`), and the working-claim release inside the
+                // detach projects the released claim into the workspace row
+                // by taking that same non-reentrant lock. That re-entry — not
+                // the io guard — is what the field's `io_lock_holder=<unrecorded>
+                // held_ms=0` removal hang was: the GitHub label mutation
+                // succeeded, then the projection parked on our own lock
+                // forever, the claim kv row stayed, and the reclaim below
+                // walked into the identical deadlock with no bound at all.
+                // The row is being deleted; there is nothing to project.
                 match tokio::time::timeout(
                     DETACH_AFTER_KILL_TIMEOUT,
-                    crate::spawn_handler::detach_killed_terminal(config, tid, &backend_key),
+                    crate::spawn_handler::detach_killed_terminal(
+                        config,
+                        tid,
+                        &backend_key,
+                        crate::working_claims::ClaimRelease::WorkspaceLockHeld,
+                    ),
                 )
                 .await
                 {
@@ -2793,8 +2826,42 @@ impl<'a> WorkspaceLifecycle<'a> {
                              after the kill — reclaiming the terminal out of band, since the \
                              wedged guard also parks the output pump",
                         );
-                        crate::spawn_handler::reclaim_wedged_terminal(config, tid, &backend_key)
-                            .await;
+                        // Bounded too. The reclaim is built from guard-free
+                        // steps, but "cannot deadlock" is a claim about the
+                        // locks we know of; an unbounded await here is how one
+                        // more unknown parks the removal — and the workspace
+                        // lock — for the life of the daemon. Past the bound
+                        // the removal proceeds: the kill landed, the row is
+                        // about to go, and whatever the reclaim could not free
+                        // is a leak to log, not a reason to keep the phantom.
+                        // The bound is `RECLAIM_AFTER_WEDGE_TIMEOUT`, not the
+                        // 10s guard-wait cap: the reclaim itself releases the
+                        // working claim, which performs a GitHub mutation
+                        // bounded at `MUTATION_TIMEOUT` (20s), so a shorter cap
+                        // would cut a slow-but-healthy GitHub off mid-release
+                        // and leak the claim on every slow poll.
+                        if tokio::time::timeout(
+                            RECLAIM_AFTER_WEDGE_TIMEOUT,
+                            crate::spawn_handler::reclaim_wedged_terminal(
+                                config,
+                                tid,
+                                &backend_key,
+                                crate::working_claims::ClaimRelease::WorkspaceLockHeld,
+                            ),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            tracing::error!(
+                                workspace = %key,
+                                terminal_id = ?tid,
+                                %backend_key,
+                                timeout_secs = RECLAIM_AFTER_WEDGE_TIMEOUT.as_secs(),
+                                "delete_workspace: out-of-band terminal reclaim did not complete \
+                                 within the bound — continuing the removal without it (the \
+                                 terminal's backend slot or working claim may leak)",
+                            );
+                        }
                     }
                 }
             }
@@ -4011,6 +4078,24 @@ mod orphan_backend_session_tests {
             }
         }
         assert!(saw_removed, "WorkspaceRemoved must be broadcast");
+    }
+
+    /// The reclaim bound must stay strictly above the working-claim mutation
+    /// timeout. The reclaim is guard-free, so its one legitimately-slow step is
+    /// that GitHub label mutation; a bound at or below it would cut a healthy
+    /// mutation off mid-flight, log a false "reclaim did not complete", and leak
+    /// the claim (the field regression the dedicated const fixed). Pin the
+    /// relationship so a later edit to either constant can't silently reintroduce
+    /// it. Finite-ness is guaranteed by the type; only the ordering can regress.
+    #[test]
+    fn reclaim_bound_exceeds_the_working_claim_mutation_timeout() {
+        assert!(
+            RECLAIM_AFTER_WEDGE_TIMEOUT > crate::working_claims::MUTATION_TIMEOUT,
+            "reclaim bound ({:?}) must exceed the mutation timeout ({:?}) so a slow-but-healthy \
+             GitHub release is never cut off mid-flight",
+            RECLAIM_AFTER_WEDGE_TIMEOUT,
+            crate::working_claims::MUTATION_TIMEOUT,
+        );
     }
 
     /// The wedge warning is only actionable if it can name who holds the guard.

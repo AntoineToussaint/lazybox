@@ -11,7 +11,24 @@ use uuid::Uuid;
 use crate::ServerConfig;
 
 const CLAIM_KEY_PREFIX: &str = "terminal-working-claim:";
-const MUTATION_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a single GitHub label mutation for a claim may run before we stop
+/// waiting on it. Any bound wrapping an operation that performs this mutation
+/// (the removal's out-of-band terminal reclaim does) MUST exceed it, or a
+/// merely-slow-but-healthy GitHub trips the outer bound and abandons the
+/// release mid-flight — see `workspace::RECLAIM_AFTER_WEDGE_TIMEOUT`.
+pub(crate) const MUTATION_TIMEOUT: Duration = Duration::from_secs(20);
+/// Backstop for the workspace-lock acquisition inside a `Project` row
+/// projection. `apply_and_commit` takes the workspace's own non-reentrant
+/// lock; a caller that already holds it and omits
+/// [`ClaimRelease::WorkspaceLockHeld`] would otherwise park on its own lock
+/// forever — the phantom-workspace deadlock this module's [`ClaimRelease`]
+/// exists to prevent, reintroduced by one forgetful caller. No legitimate
+/// single-key hold approaches this bound (the longest holder, a multi-terminal
+/// workspace removal, deletes the row it holds — so a projection dropped behind
+/// it had nothing to update anyway), so it never cuts a real surviving-row
+/// projection; it converts a silent, daemon-wedging hang into a loud,
+/// recoverable error.
+const PROJECTION_LOCK_BACKSTOP: Duration = Duration::from_secs(120);
 /// Transient sync failures (offline, GitHub down, timeouts) re-occur on every
 /// 15-minute heartbeat tick; surface at most one retryable notice per
 /// workspace/action per hour so an offline laptop is not error spam.
@@ -237,12 +254,39 @@ async fn acquire(
     });
 }
 
+/// How a synchronized claim change is projected into the workspace row.
+///
+/// The projection (`apply_and_commit`) takes the workspace's own lock, which
+/// is a plain non-reentrant `tokio::sync::Mutex`. A caller that already holds
+/// that lock — workspace removal, which kills and detaches the terminals
+/// *inside* its `lock_workspace` hold — must say so, or the release parks on
+/// its own lock forever. That was the residual phantom-workspace hang after
+/// #1533/#1534: the GitHub label mutation succeeded, the projection then
+/// waited on the lock the removal held, no `WorkspaceRemoved` ever went out,
+/// the claim kv row stayed, and the io-guard diagnostics showed no holder
+/// (`io_lock_holder=<unrecorded> held_ms=0`) because the io guard was never
+/// the problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaimRelease {
+    /// Project the change into the workspace row under its lock (the default:
+    /// output-pump teardown, auth restarts, the session reaper).
+    Project,
+    /// The caller holds the workspace lock and is deleting the row: skip the
+    /// projection. Nothing would survive it anyway.
+    WorkspaceLockHeld,
+}
+
 pub(crate) async fn release_pty(config: &ServerConfig, backend_key: &str) {
+    release_pty_with(config, backend_key, ClaimRelease::Project).await;
+}
+
+pub(crate) async fn release_pty_with(config: &ServerConfig, backend_key: &str, mode: ClaimRelease) {
     release(
         config,
         &ClaimHolder::Pty {
             backend_key: backend_key.to_string(),
         },
+        mode,
     )
     .await;
 }
@@ -253,11 +297,12 @@ pub(crate) async fn release_structured(config: &ServerConfig, holder_key: &str) 
         &ClaimHolder::Structured {
             key: holder_key.to_string(),
         },
+        ClaimRelease::Project,
     )
     .await;
 }
 
-async fn release(config: &ServerConfig, holder: &ClaimHolder) {
+async fn release(config: &ServerConfig, holder: &ClaimHolder, mode: ClaimRelease) {
     if !config.working_claims_enabled {
         return;
     }
@@ -279,7 +324,7 @@ async fn release(config: &ServerConfig, holder: &ClaimHolder) {
         );
         return;
     }
-    if sync_remote(config, &record, None).await
+    if sync_remote(config, &record, None, mode).await
         && let Err(error) = config.store.delete_kv(&key)
     {
         emit_error(config, &record.workspace_key, "forget", &error.to_string());
@@ -306,7 +351,7 @@ async fn heartbeat_record(
         emit_error(config, &record.workspace_key, "persist", &error);
         return;
     }
-    if sync_remote(config, record, Some(&record.label)).await {
+    if sync_remote(config, record, Some(&record.label), ClaimRelease::Project).await {
         record.applied = true;
         if let Err(error) = persist_record(config, record) {
             emit_error(config, &record.workspace_key, "persist", &error);
@@ -318,6 +363,7 @@ async fn sync_remote(
     config: &ServerConfig,
     record: &WorkingClaimRecord,
     desired_label: Option<&str>,
+    mode: ClaimRelease,
 ) -> bool {
     let Some(identity) = record.parsed_label() else {
         emit_error(
@@ -369,10 +415,35 @@ async fn sync_remote(
         }
     }
 
+    project_synced_claim(config, record, desired_label, &identity, mode).await;
+    true
+}
+
+/// Reflect a claim change GitHub has already accepted into the workspace
+/// row. Under [`ClaimRelease::Project`] this takes the workspace lock via
+/// `apply_and_commit`; under [`ClaimRelease::WorkspaceLockHeld`] it takes no
+/// lock and touches no row — the caller owns the lock and is deleting the
+/// row. Returns whether a row was updated.
+async fn project_synced_claim(
+    config: &ServerConfig,
+    record: &WorkingClaimRecord,
+    desired_label: Option<&str>,
+    identity: &QualifiedWorkingClaim,
+    mode: ClaimRelease,
+) -> bool {
+    if mode == ClaimRelease::WorkspaceLockHeld {
+        tracing::debug!(
+            workspace = %record.workspace_key,
+            claimed = desired_label.is_some(),
+            "working claim synchronized; row projection skipped — the caller holds the \
+             workspace lock and is removing the row"
+        );
+        return false;
+    }
     let target = record.target.id.clone();
     let desired = desired_label.map(str::to_string);
     let identity_for_projection = identity.clone();
-    let outcome =
+    let commit =
         crate::polling::apply_and_commit(config, &record.workspace_key, move |workspace| {
             project_identity(
                 workspace,
@@ -380,10 +451,30 @@ async fn sync_remote(
                 &identity_for_projection,
                 desired.as_deref(),
             );
-        })
-        .await;
+        });
+    // Backstop the workspace-lock acquisition. A caller that already holds the
+    // workspace lock and omits `ClaimRelease::WorkspaceLockHeld` would park
+    // here forever, wedging its own lock hold — and everything queued behind
+    // that key — for the life of the daemon. That is exactly the deadlock
+    // `ClaimRelease` prevents; the bound stops one forgetful caller from
+    // reintroducing it silently, turning the hang into a diagnosable error.
+    let outcome = match tokio::time::timeout(PROJECTION_LOCK_BACKSTOP, commit).await {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            tracing::error!(
+                workspace = %record.workspace_key,
+                backstop_secs = PROJECTION_LOCK_BACKSTOP.as_secs(),
+                "working-claim row projection could not acquire the workspace lock within the \
+                 backstop — a caller almost certainly holds it and should pass \
+                 ClaimRelease::WorkspaceLockHeld; abandoning the projection so the lock hold \
+                 cannot hang forever (the row is left for the next poll to reconcile)"
+            );
+            return false;
+        }
+    };
     config.poll.wake(true);
-    if outcome.is_applied() {
+    let applied = outcome.is_applied();
+    if applied {
         tracing::info!(
             workspace = %record.workspace_key,
             claimed = desired_label.is_some(),
@@ -392,7 +483,7 @@ async fn sync_remote(
             "synchronized owner-qualified working claim"
         );
     }
-    true
+    applied
 }
 
 fn project_identity(
@@ -475,7 +566,7 @@ async fn maintain_once(config: &ServerConfig, now: DateTime<Utc>) {
         if live {
             heartbeat_holder(config, &record.holder, now).await;
         } else {
-            release(config, &record.holder).await;
+            release(config, &record.holder, ClaimRelease::Project).await;
         }
     }
     cleanup_expired(config, now).await;
@@ -750,6 +841,81 @@ mod tests {
 
         let restarted = crate::ServerConfig::with_store(first.store.clone());
         assert_eq!(load_record(&restarted, &key).unwrap(), Some(claim));
+    }
+
+    /// The phantom-workspace residual (#1534 → #1533 → this): workspace
+    /// removal kills + detaches terminals while holding the workspace lock,
+    /// and the claim release inside that detach projected the released claim
+    /// into the row by taking the same non-reentrant lock — a self-deadlock
+    /// that parked the removal forever. With the lock held by the caller, the
+    /// `WorkspaceLockHeld` projection must complete without touching the
+    /// lock, while `Project` is the shape that waits on it.
+    #[tokio::test]
+    async fn projection_under_a_held_workspace_lock_completes_when_the_caller_says_so() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
+        let config = crate::ServerConfig::in_memory();
+        let claim = record(now);
+        let identity = claim.parsed_label().expect("well-formed label");
+        // The removal's hold.
+        let _removal_holds_it = config.lock_workspace(claim.workspace_key.as_str()).await;
+
+        // What the removal path does: no lock, no row, returns promptly.
+        let skipped = tokio::time::timeout(
+            Duration::from_secs(1),
+            project_synced_claim(
+                &config,
+                &claim,
+                None,
+                &identity,
+                ClaimRelease::WorkspaceLockHeld,
+            ),
+        )
+        .await
+        .expect("must not wait on the workspace lock the caller holds");
+        assert!(!skipped, "no row is projected while the caller removes it");
+
+        // The default projection is the deadlock shape: it queues on the held
+        // lock (the regression this test pins — never call it from under the
+        // removal's hold).
+        let parked = tokio::time::timeout(
+            Duration::from_millis(200),
+            project_synced_claim(&config, &claim, None, &identity, ClaimRelease::Project),
+        )
+        .await;
+        assert!(
+            parked.is_err(),
+            "Project re-takes the workspace lock and waits"
+        );
+    }
+
+    /// The backstop for the deadlock the previous test pins: a forgetful caller
+    /// that holds the workspace lock but passes `Project` (instead of
+    /// `WorkspaceLockHeld`) must NOT hang the daemon forever — the projection
+    /// gives up after `PROJECTION_LOCK_BACKSTOP` and returns `false`, turning a
+    /// silent wedge into a loud, recoverable error. `start_paused` auto-advances
+    /// virtual time while the projection is parked on the held lock, so the 120s
+    /// backstop elapses instantly rather than really sleeping.
+    #[tokio::test(start_paused = true)]
+    async fn projection_under_a_held_lock_gives_up_at_the_backstop_instead_of_hanging() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
+        let config = crate::ServerConfig::in_memory();
+        let claim = record(now);
+        let identity = claim.parsed_label().expect("well-formed label");
+        // A caller holds the lock and never releases it (the deadlock shape).
+        let _held = config.lock_workspace(claim.workspace_key.as_str()).await;
+
+        let started = tokio::time::Instant::now();
+        let projected =
+            project_synced_claim(&config, &claim, None, &identity, ClaimRelease::Project).await;
+
+        assert!(
+            !projected,
+            "the backstop must abandon the projection rather than apply it"
+        );
+        assert!(
+            started.elapsed() >= PROJECTION_LOCK_BACKSTOP,
+            "it must wait the full backstop before giving up, not return early"
+        );
     }
 
     #[tokio::test]

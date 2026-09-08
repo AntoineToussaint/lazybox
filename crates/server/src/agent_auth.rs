@@ -563,7 +563,13 @@ pub(crate) async fn restart_agent_and_continue(config: &ServerConfig, terminal_i
                 .send(reject(format!("could not stop the agent: {error}")));
             return;
         }
-        crate::spawn_handler::detach_killed_terminal(config, terminal_id, &backend_key).await;
+        crate::spawn_handler::detach_killed_terminal(
+            config,
+            terminal_id,
+            &backend_key,
+            crate::working_claims::ClaimRelease::Project,
+        )
+        .await;
         config.backend.release(&backend_key).await;
     }
     tracing::info!(
@@ -726,7 +732,13 @@ pub(crate) async fn close_failed_auth_terminal(
         if let Err(error) = config.backend.kill(&backend_key).await {
             return Some(Err(error.to_string()));
         }
-        crate::spawn_handler::detach_killed_terminal(config, terminal_id, &backend_key).await;
+        crate::spawn_handler::detach_killed_terminal(
+            config,
+            terminal_id,
+            &backend_key,
+            crate::working_claims::ClaimRelease::Project,
+        )
+        .await;
         config.backend.release(&backend_key).await;
     }
     config.agent_recovery.forget(recovery_terminal_id).await;
@@ -1040,8 +1052,13 @@ async fn run_reauthentication(
         .await;
     drop(old_terminal_guard);
     if let Some(backend_key) = current_backend_key.as_deref() {
-        crate::spawn_handler::detach_killed_terminal(&config, current_terminal_id, backend_key)
-            .await;
+        crate::spawn_handler::detach_killed_terminal(
+            &config,
+            current_terminal_id,
+            backend_key,
+            crate::working_claims::ClaimRelease::Project,
+        )
+        .await;
         if previous_failure.is_some() {
             config.backend.release(backend_key).await;
         }
@@ -1150,7 +1167,13 @@ async fn run_reauthentication(
         phase: AgentAuthPhase::Resuming,
     });
     if let Some(resumed_terminal_id) = resume_agent(&config, recovery_terminal_id).await {
-        crate::spawn_handler::detach_killed_terminal(&config, auth_terminal_id, &login_key).await;
+        crate::spawn_handler::detach_killed_terminal(
+            &config,
+            auth_terminal_id,
+            &login_key,
+            crate::working_claims::ClaimRelease::Project,
+        )
+        .await;
         config.backend.release(&login_key).await;
         let _ = config.bus.send(Event::AgentAuthFinished {
             recovery_terminal_id,
@@ -2183,7 +2206,13 @@ mod tests {
         context.on_main = true;
         config.agent_recovery.remember_spawn(context.clone()).await;
         let backend_key = context.backend_key.expect("blocked backend");
-        crate::spawn_handler::detach_killed_terminal(&config, terminal_id, &backend_key).await;
+        crate::spawn_handler::detach_killed_terminal(
+            &config,
+            terminal_id,
+            &backend_key,
+            crate::working_claims::ClaimRelease::Project,
+        )
+        .await;
         let mut events = config.bus.subscribe();
 
         resume_agent(&config, terminal_id).await;

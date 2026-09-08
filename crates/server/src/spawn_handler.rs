@@ -6100,16 +6100,25 @@ pub(crate) async fn teardown_exited_terminal(
 /// self-exit. The output pump still owns backend `release` once it observes
 /// the actual child exit; if it wins the teardown race first, this call is an
 /// idempotent no-op.
+///
+/// `claim` says how the released working claim is projected into the
+/// workspace row. A caller that already holds the workspace lock — the
+/// removal path — MUST pass [`ClaimRelease::WorkspaceLockHeld`]: the
+/// projection re-takes that (non-reentrant) lock, and the removal that
+/// parked forever on it after the kill was exactly the phantom-workspace
+/// bug (#1534 residual: agent "exited (killed)", row never removed, working
+/// claim kv row retained, upserts for the key queued behind the lock).
 pub(crate) async fn detach_killed_terminal(
     config: &ServerConfig,
     terminal_id: TerminalId,
     backend_key: &str,
+    claim: crate::working_claims::ClaimRelease,
 ) {
     if finish_terminal(config, terminal_id, backend_key, None, false)
         .await
         .is_some()
     {
-        crate::working_claims::release_pty(config, backend_key).await;
+        crate::working_claims::release_pty_with(config, backend_key, claim).await;
     }
 }
 
@@ -6136,10 +6145,14 @@ pub(crate) async fn detach_killed_terminal(
 /// (`TerminalExited` / `AgentState::Exited`) are intentionally skipped: the
 /// caller broadcasts `WorkspaceRemoved`, which drops the whole workspace and
 /// its terminals client-side, so a per-terminal exit event would be redundant.
+///
+/// `release_mode`: see [`detach_killed_terminal`]'s `claim` — the removal holds
+/// the workspace lock, so its claim release must not re-take it.
 pub(crate) async fn reclaim_wedged_terminal(
     config: &ServerConfig,
     terminal_id: TerminalId,
     backend_key: &str,
+    release_mode: crate::working_claims::ClaimRelease,
 ) {
     match config
         .terminal
@@ -6173,7 +6186,7 @@ pub(crate) async fn reclaim_wedged_terminal(
         .forget_terminal_persistence_lock(backend_key);
     config.terminal.forget_terminal_io_lock(backend_key);
     config.backend.release(backend_key).await;
-    crate::working_claims::release_pty(config, backend_key).await;
+    crate::working_claims::release_pty_with(config, backend_key, release_mode).await;
 }
 
 async fn finish_terminal(

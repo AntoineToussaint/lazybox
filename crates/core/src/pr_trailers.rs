@@ -176,10 +176,23 @@ fn agents_value(agents: &[AgentCount]) -> Option<String> {
     (!agents.is_empty()).then(|| {
         agents
             .iter()
-            .map(|a| format!("{} ×{}", a.label, a.count))
+            .map(|a| format!("{} ×{}", sanitize_label(&a.label), a.count))
             .collect::<Vec<_>>()
             .join(", ")
     })
+}
+
+/// A trailer value is single-line by definition. Agent / model labels are the
+/// one caller-supplied free-text field (they originate in user YAML), so a
+/// stray newline would split the trailer paragraph — truncating the value when
+/// `extract` reads it back, or letting a crafted label inject a forged
+/// `Lazybox-*` line into permanent history. Collapse any control character to a
+/// space so a rendered value can never break the line it lives on.
+fn sanitize_label(label: &str) -> String {
+    label
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 /// Append `trailers` to an existing commit `body`, forming the trailing
@@ -269,14 +282,18 @@ fn fmt_count(n: u64) -> String {
         };
         format!("{v:.decimals$}{suffix}")
     };
-    if n >= 1_000_000_000 {
-        scaled(1_000_000_000.0, "B")
-    } else if n >= 1_000_000 {
-        scaled(1_000_000.0, "M")
-    } else if n >= 1_000 {
-        scaled(1_000.0, "k")
-    } else {
+    // Tier is chosen on the *rounded* value, not raw magnitude: a mantissa that
+    // rounds up to 1000 must promote to the next suffix, so 999_999 reads
+    // "1.00M" (not "1000k"). The k/M mantissa is printed at 0 decimals once
+    // >= 100, so it renders as 1000 the moment n / div >= 999.5.
+    if n < 1_000 {
         n.to_string()
+    } else if n < 999_500 {
+        scaled(1_000.0, "k")
+    } else if n < 999_500_000 {
+        scaled(1_000_000.0, "M")
+    } else {
+        scaled(1_000_000_000.0, "B")
     }
 }
 
@@ -450,6 +467,19 @@ mod tests {
     }
 
     #[test]
+    fn counts_promote_at_a_rounding_boundary() {
+        // Regression: picking the tier by raw magnitude then rounding produced
+        // "1000k" (and "1000M") when the mantissa rounded up to 1000. The last
+        // value of each tier must stay under 1000, and the first that would
+        // round up must promote to the next suffix.
+        assert_eq!(fmt_count(999_499), "999k");
+        assert_eq!(fmt_count(999_500), "1.00M");
+        assert_eq!(fmt_count(999_999), "1.00M");
+        assert_eq!(fmt_count(999_499_000), "999M");
+        assert_eq!(fmt_count(999_500_000), "1.00B");
+    }
+
+    #[test]
     fn durations_show_two_units() {
         assert_eq!(fmt_duration(3 * 86_400 + 4 * 3_600), "3d4h");
         assert_eq!(fmt_duration(2 * 3_600 + 5 * 60), "2h5m");
@@ -551,6 +581,41 @@ mod tests {
         assert_eq!(
             extract(commit),
             vec![("Lazybox-Cost".to_string(), "$0.42".to_string())],
+        );
+    }
+
+    #[test]
+    fn agent_labels_cannot_break_out_of_their_line() {
+        // A label is the one caller-supplied free-text field and comes from
+        // user YAML. A newline in it must not split the trailer paragraph:
+        // without sanitizing, this rendered `Lazybox-Agents: claude\nopus ×3`,
+        // and extract read the value back as just "claude" — silent truncation.
+        // A crafted label likewise must not inject a second `Lazybox-*` line.
+        let t = PrTrailers {
+            agents: vec![
+                AgentCount {
+                    label: "claude\nopus".into(),
+                    count: 3,
+                },
+                AgentCount {
+                    label: "x\nLazybox-Cost: $999.99".into(),
+                    count: 1,
+                },
+            ],
+            ..Default::default()
+        };
+        let rendered = t.render();
+        // The whole set of trailers is exactly one line: no embedded newline.
+        assert_eq!(rendered.lines().count(), 1);
+        assert!(!rendered.contains('\n'));
+        // The forged cost text is neutralized to inline data, not a trailer.
+        let extracted = extract(&rendered);
+        assert_eq!(
+            extracted,
+            vec![(
+                "Lazybox-Agents".to_string(),
+                "claude opus ×3, x Lazybox-Cost: $999.99 ×1".to_string()
+            )],
         );
     }
 }

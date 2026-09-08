@@ -1273,7 +1273,9 @@ impl TerminalSlot {
             self.vt.feed(bytes);
             return;
         }
-        if let Some(request) = &mut self.resize_request {
+        if sizes.iter().any(|span| span.cols != 0 && span.rows != 0)
+            && let Some(request) = &mut self.resize_request
+        {
             request.answered = true;
         }
         for (i, span) in sizes.iter().enumerate() {
@@ -4394,6 +4396,11 @@ impl TerminalStack {
                         {
                             slot.vt = fresh;
                             slot.last_frame_rev = None;
+                            // The PTY is gone with the parser: nothing
+                            // stamps the fresh grid again, so the pane
+                            // sizes it (an exited slot asks for nothing).
+                            slot.pty_size = None;
+                            slot.resize_request = None;
                         }
                     }
                 } else {

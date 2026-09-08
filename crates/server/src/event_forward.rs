@@ -761,8 +761,8 @@ mod tests {
                     bytes: Arc::<[u8]>::from(format!("chunk{seq}").into_bytes()),
                     first_seq: seq,
                     seq,
-                    cols: 80,
-                    rows: 24,
+                    cols: 0,
+                    rows: 0,
                 })
                 .unwrap();
         }
@@ -857,8 +857,8 @@ mod tests {
                 bytes: Arc::<[u8]>::from(vec![b'x']),
                 first_seq: 1,
                 seq: 1,
-                cols: 80,
-                rows: 24,
+                cols: 0,
+                rows: 0,
             },
         );
         assert!(matches!(cf, ControlFlow::Continue(())));
@@ -870,8 +870,8 @@ mod tests {
                 bytes: Arc::<[u8]>::from(vec![b'y']),
                 first_seq: 2,
                 seq: 2,
-                cols: 80,
-                rows: 24,
+                cols: 0,
+                rows: 0,
             },
         );
         assert!(matches!(cf, ControlFlow::Continue(())));
@@ -961,8 +961,8 @@ mod tests {
                 bytes: Arc::<[u8]>::from(b"B".to_vec()),
                 first_seq: 2,
                 seq: 2,
-                cols: 80,
-                rows: 24,
+                cols: 0,
+                rows: 0,
             },
         );
         assert!(rx.try_recv().is_err(), "torn output must stay suppressed");
@@ -1021,8 +1021,8 @@ mod tests {
                     bytes: Arc::<[u8]>::from(vec![b'z']),
                     first_seq: seq,
                     seq,
-                    cols: 80,
-                    rows: 24,
+                    cols: 0,
+                    rows: 0,
                 },
             );
         }
@@ -1075,8 +1075,8 @@ mod tests {
                     bytes: vec![b'x'].into(),
                     first_seq: 1,
                     seq: 1,
-                    cols: 80,
-                    rows: 24,
+                    cols: 0,
+                    rows: 0,
                 },
             );
             assert!(matches!(cf, ControlFlow::Continue(())));
@@ -1162,8 +1162,8 @@ mod tests {
                     bytes: Arc::<[u8]>::from(vec![b'x']),
                     first_seq: seq,
                     seq,
-                    cols: 80,
-                    rows: 24,
+                    cols: 0,
+                    rows: 0,
                 })
                 .unwrap();
         }

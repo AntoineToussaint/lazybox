@@ -93,9 +93,45 @@ fn assert_moved_from(stack: &TerminalStack, before: u64, outcome: ScrollOutcome)
     }
 }
 
+/// The daemon's side of the resize handshake: the size the first render
+/// asked for, "applied" and announced as an empty stamped chunk.
+fn ack_resize(stack: &mut TerminalStack, seq: u64) -> (u16, u16) {
+    let (_, cols, rows) = stack
+        .drain_pending_resizes()
+        .into_iter()
+        .find(|(id, _, _)| *id == TerminalId(1))
+        .expect("the render asked for a resize");
+    stack.on_event(&Event::TerminalOutput {
+        terminal_id: TerminalId(1),
+        bytes: Vec::new().into(),
+        first_seq: seq,
+        seq,
+        cols,
+        rows,
+    });
+    (cols, rows)
+}
+
+/// The PTY size a fresh agent ends up at in the `W × H` pane.
+fn pane_grid() -> (u16, u16) {
+    let mut stack = TerminalStack::new(PaneId::new(0));
+    stack.on_event(&Event::TerminalSpawned {
+        terminal_id: TerminalId(1),
+        session_key: sk("s"),
+        kind: TerminalKind::Agent("claude".into()),
+        no_permission: false,
+        on_main: false,
+        model_label: None,
+    });
+    stack.set_active_session(Some(sk("s")));
+    render(&mut stack);
+    ack_resize(&mut stack, 1)
+}
+
 /// A fresh-spawned agent driven entirely through the daemon event path —
-/// `TerminalSpawned` then `TerminalOutput`, never a reattach/replay. This
-/// is the case the chronic regression always bit.
+/// `TerminalSpawned`, the resize handshake, then `TerminalOutput` stamped
+/// with the PTY size, never a reattach/replay. This is the case the
+/// chronic regression always bit.
 fn fresh_agent() -> TerminalStack {
     let mut stack = TerminalStack::new(PaneId::new(0));
     stack.on_event(&Event::TerminalSpawned {
@@ -108,13 +144,14 @@ fn fresh_agent() -> TerminalStack {
     });
     stack.set_active_session(Some(sk("s")));
     render(&mut stack);
+    let (cols, rows) = ack_resize(&mut stack, 1);
     stack.on_event(&Event::TerminalOutput {
         terminal_id: TerminalId(1),
         bytes: scrollback_payload().into(),
-        first_seq: 1,
-        seq: 1,
-        cols: 0,
-        rows: 0,
+        first_seq: 2,
+        seq: 2,
+        cols,
+        rows,
     });
     render(&mut stack);
     stack
@@ -123,6 +160,7 @@ fn fresh_agent() -> TerminalStack {
 /// The same terminal, but reconstructed from a daemon `Snapshot` replay
 /// — the reattach-after-restart path.
 fn reattached_agent() -> TerminalStack {
+    let (cols, rows) = pane_grid();
     let mut stack = TerminalStack::new(PaneId::new(0));
     stack.on_event(&Event::Snapshot {
         workspaces: vec![],
@@ -132,7 +170,7 @@ fn reattached_agent() -> TerminalStack {
             session_key: sk("s"),
             kind: TerminalKind::Agent("claude".into()),
             replay: scrollback_payload(),
-            last_seq: 1,
+            last_seq: 2,
             replay_available: true,
             no_permission: false,
             on_main: false,
@@ -141,7 +179,7 @@ fn reattached_agent() -> TerminalStack {
             composing_buffer: None,
             agent_state: None,
             authenticating: false,
-            replay_sizes: Vec::new(),
+            replay_sizes: vec![lazybox_ipc::ReplaySizeSpan { at: 0, cols, rows }],
         }],
         recent_snippets: Vec::new(),
         dismissed_updates: Vec::new(),

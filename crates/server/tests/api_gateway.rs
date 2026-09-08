@@ -1197,8 +1197,8 @@ fn terminal_binary_frames_preserve_raw_bytes_and_sequence_metadata() {
         bytes: Arc::<[u8]>::from(vec![0, 1, 2, 0xff]),
         first_seq: 11,
         seq: 13,
-        cols: 80,
-        rows: 24,
+        cols: 0,
+        rows: 0,
     };
 
     let frames = api_gateway::encode_terminal_event(&event);
@@ -1390,8 +1390,8 @@ fn json_control_stream_never_serializes_terminal_byte_payloads() {
             bytes: Arc::<[u8]>::from(vec![1, 2, 3]),
             first_seq: 1,
             seq: 1,
-            cols: 80,
-            rows: 24,
+            cols: 0,
+            rows: 0,
         })
         .is_none()
     );
@@ -2304,8 +2304,8 @@ async fn json_command_route_rejects_every_binary_terminal_command() {
         },
         Command::Resize {
             terminal_id: TerminalId(1),
-            cols: 80,
-            rows: 24,
+            cols: 0,
+            rows: 0,
         },
         Command::RequestTerminalResync {
             requests: vec![lazybox_ipc::TerminalResyncRequest {

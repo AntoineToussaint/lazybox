@@ -20,8 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{RwLock, watch};
 
-const DEFAULT_COLS: u16 = 120;
-const DEFAULT_ROWS: u16 = 32;
+use super::{DEFAULT_COLS, DEFAULT_ROWS};
 
 /// How long `kill()` waits for a SIGTERM'd child to exit before
 /// escalating to SIGKILL. A child that traps/ignores SIGTERM would

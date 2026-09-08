@@ -658,8 +658,12 @@ const COALESCE_MAX_BYTES: usize = 256 * 1024;
 /// otherwise preserved — only *adjacent* same-terminal output is merged,
 /// so an interleaved event for another terminal (or any non-output
 /// event) ends the run, and so does a size change: bytes produced at two
-/// sizes must reach the parser as two feeds. Runs are additionally capped
-/// at [`COALESCE_MAX_BYTES`]. Pure; unit-tested in `coalesce_tests`.
+/// sizes must reach the parser as two feeds. An empty-bytes event is a
+/// resize announcement and is never merged in either direction — merged
+/// into neighbouring output of the same size it would vanish, and the
+/// consumer would never see the daemon's answer to its resize request.
+/// Runs are additionally capped at [`COALESCE_MAX_BYTES`]. Pure;
+/// unit-tested in `coalesce_tests`.
 pub(super) fn coalesce_adjacent_output(events: Vec<IpcEvent>) -> Vec<IpcEvent> {
     let mut out: Vec<IpcEvent> = Vec::with_capacity(events.len());
     for evt in events {
@@ -682,6 +686,8 @@ pub(super) fn coalesce_adjacent_output(events: Vec<IpcEvent>) -> Vec<IpcEvent> {
                 }) = out.last_mut()
                     && *prev_id == terminal_id
                     && (*prev_cols, *prev_rows) == (cols, rows)
+                    && !prev_bytes.is_empty()
+                    && !bytes.is_empty()
                     && prev_seq.saturating_add(1) == first_seq
                     && prev_bytes.len().saturating_add(bytes.len()) <= COALESCE_MAX_BYTES
                 {

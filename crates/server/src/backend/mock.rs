@@ -15,12 +15,9 @@
 //! Coverage: this fake honors the same `SessionBackend` contract the
 //! real backends do. Tests using it exercise the daemon end-to-end.
 
+use super::{DEFAULT_COLS, DEFAULT_ROWS};
 use crate::backend::{BackendError, OutputChunk, OutputDelta, SessionBackend, Subscription};
 use lazybox_ipc::ReplaySizeSpan;
-
-/// Spawn-time PTY size, matching the real backends.
-const DEFAULT_COLS: u16 = 120;
-const DEFAULT_ROWS: u16 = 32;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::Path;

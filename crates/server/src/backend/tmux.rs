@@ -284,8 +284,7 @@ fn server_option_cmds(history_limit: u32) -> Vec<Vec<String>> {
     cmds
 }
 
-const DEFAULT_COLS: u16 = 120;
-const DEFAULT_ROWS: u16 = 32;
+use super::{DEFAULT_COLS, DEFAULT_ROWS};
 
 /// Wall-clock cap on every tmux subprocess invocation. A tmux server
 /// wedged on a dead socket (or a hung first-start) must surface as an

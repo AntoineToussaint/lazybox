@@ -49,6 +49,11 @@ pub enum BackendError {
     Other(String),
 }
 
+/// PTY size every backend spawns at; the client resizes it to its pane
+/// right after.
+pub(crate) const DEFAULT_COLS: u16 = 120;
+pub(crate) const DEFAULT_ROWS: u16 = 32;
+
 /// One chunk of output flowing from a session.
 #[derive(Debug, Clone)]
 pub struct OutputChunk {

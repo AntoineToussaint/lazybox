@@ -337,6 +337,12 @@ impl Read for RelayReader {
     }
 }
 
+/// Most PTY size changes a [`ReplayRing`] keeps exact offsets for. Every
+/// snapshot and resync clones the whole log, and eviction alone would
+/// only bound it by ring turnover — a size change per few bytes of
+/// output could otherwise grow it without limit.
+const SIZE_LOG_CAP: usize = 1024;
+
 /// Fixed-capacity byte ring. Writes overwrite the oldest bytes; reads
 /// return a logical linear slice of everything currently stored.
 ///
@@ -421,6 +427,13 @@ impl ReplayRing {
             *last = (self.total_written, cols, rows);
         } else {
             self.sizes.push_back((self.total_written, cols, rows));
+        }
+        // Past the cap, fold the second-oldest change into the baseline:
+        // the oldest retained bytes take the size of the bytes before
+        // them, the cheapest place to be wrong and the first to be
+        // evicted anyway. Bytes newer than that keep exact sizes.
+        while self.sizes.len() > SIZE_LOG_CAP {
+            self.sizes.remove(1);
         }
     }
 
@@ -1773,6 +1786,35 @@ mod ring_tests {
             spans,
             vec![span(0, 80, 24), span(2, 80, 12)],
             "`xy` was produced at 80×24, `z\\n` at 80×12"
+        );
+    }
+
+    /// The size log is bounded: past the cap the second-oldest change
+    /// folds into the baseline, so the newest changes keep exact offsets
+    /// and the oldest retained bytes inherit their predecessors' size.
+    #[test]
+    fn size_log_is_capped_by_folding_its_oldest_changes() {
+        let mut r = ReplayRing::with_capacity(MAX_RING_SIZE);
+        r.note_size(80, 24);
+        r.push(b"a");
+        for i in 0..(SIZE_LOG_CAP as u16 + 100) {
+            r.note_size(100 + i, 24);
+            r.push(b"a");
+        }
+        assert_eq!(r.sizes.len(), SIZE_LOG_CAP);
+        assert_eq!(r.sizes.front().copied(), Some((0, 80, 24)), "baseline kept");
+        assert_eq!(
+            r.sizes.back().copied(),
+            Some((
+                SIZE_LOG_CAP as u64 + 100,
+                100 + SIZE_LOG_CAP as u16 + 99,
+                24
+            )),
+            "newest change exact"
+        );
+        assert_eq!(
+            r.sizes[1].0, 102,
+            "the 101 oldest changes folded into the baseline, the rest are exact"
         );
     }
 

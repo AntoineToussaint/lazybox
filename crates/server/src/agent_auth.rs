@@ -1301,18 +1301,32 @@ async fn pump_auth_terminal(
     if !subscription.replay.is_empty()
         && let Some(output) = config.agent_recovery.output(recovery_terminal_id).await
     {
-        let (cols, rows) = subscription
-            .replay_sizes
-            .last()
-            .map_or((0, 0), |span| (span.cols, span.rows));
-        let _ = output.send(Event::AgentAuthOutput {
-            terminal_id,
-            bytes: subscription.replay,
-            first_seq: 1,
-            seq: subscription.last_seq,
-            cols,
-            rows,
-        });
+        // Same convention as the terminal pump's `replay_event`: a replay
+        // produced at one size streams as stamped output, one that
+        // straddles a resize needs the spans only the replay event carries.
+        let event = match subscription.replay_sizes.as_slice() {
+            [] | [_] => {
+                let (cols, rows) = subscription
+                    .replay_sizes
+                    .first()
+                    .map_or((0, 0), |span| (span.cols, span.rows));
+                Event::AgentAuthOutput {
+                    terminal_id,
+                    bytes: subscription.replay,
+                    first_seq: 1,
+                    seq: subscription.last_seq,
+                    cols,
+                    rows,
+                }
+            }
+            sizes => Event::AgentAuthReplay {
+                terminal_id,
+                replay: subscription.replay,
+                seq: subscription.last_seq,
+                sizes: sizes.to_vec(),
+            },
+        };
+        let _ = output.send(event);
     }
     while let Some(chunk) = subscription.live.recv().await {
         if let Some(output) = config.agent_recovery.output(recovery_terminal_id).await {

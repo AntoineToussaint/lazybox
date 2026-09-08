@@ -8897,6 +8897,12 @@ fn replay_event(
 }
 
 pub async fn handle_resize(config: &ServerConfig, terminal_id: TerminalId, cols: u16, rows: u16) {
+    // A zero dimension is not a terminal size; applied, it would stamp
+    // output `0 × 0` — the "unknown size" value clients fall back from.
+    if cols == 0 || rows == 0 {
+        tracing::warn!(?terminal_id, cols, rows, "ignoring zero-sized resize");
+        return;
+    }
     let Some(key) = config.terminal.backend_key_for(terminal_id).await else {
         return;
     };
@@ -13370,6 +13376,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn zero_sized_resize_never_reaches_the_backend() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "zero-resize")
+            .await
+            .expect("spawn");
+        let terminal_id = TerminalId(698);
+        config
+            .terminal
+            .register_terminal(
+                terminal_id,
+                backend_key.clone(),
+                SessionKey::new("zero-resize"),
+                TerminalKind::Shell,
+            )
+            .await;
+        handle_resize(&config, terminal_id, 0, 40).await;
+        handle_resize(&config, terminal_id, 100, 0).await;
+        assert!(mock.resizes_for(&backend_key).await.is_empty());
+        handle_resize(&config, terminal_id, 100, 40).await;
+        assert_eq!(mock.resizes_for(&backend_key).await, vec![(100, 40)]);
+    }
+
+    #[tokio::test]
     async fn view_activity_is_released_only_by_submitted_input() {
         let (config, mock) = ServerConfig::in_memory_with_mock();
         let backend_key = mock
@@ -14697,8 +14727,8 @@ mod tests {
             bytes: Arc::<[u8]>::from(b"composer ready".to_vec()),
             first_seq: 1,
             seq: 1,
-            cols: 80,
-            rows: 24,
+            cols: 0,
+            rows: 0,
         });
         wait_for_write_count(&mock, &backend_key, 2).await;
         let _ = config.bus.send(Event::TerminalOutput {
@@ -14706,8 +14736,8 @@ mod tests {
             bytes: Arc::<[u8]>::from(b"Continue the work you were doing.".to_vec()),
             first_seq: 2,
             seq: 2,
-            cols: 80,
-            rows: 24,
+            cols: 0,
+            rows: 0,
         });
         wait_for_write_count(&mock, &backend_key, 3).await;
         assert_eq!(
@@ -15050,8 +15080,8 @@ mod tests {
             bytes: Arc::<[u8]>::from(b"composer ready".to_vec()),
             first_seq: 1,
             seq: 1,
-            cols: 80,
-            rows: 24,
+            cols: 0,
+            rows: 0,
         });
         task.await.expect("failed injection task");
 
@@ -15795,8 +15825,8 @@ mod tests {
                             bytes: Arc::<[u8]>::from(prompt.into_bytes()),
                             first_seq: 1,
                             seq: 1,
-                            cols: 80,
-                            rows: 24,
+                            cols: 0,
+                            rows: 0,
                         });
                         wait_for_write_count(&mock, &backend_key, 2).await;
                         let _ = config.bus.send(Event::AgentState {
@@ -15978,8 +16008,8 @@ mod tests {
                 bytes: Arc::<[u8]>::from(Vec::new()),
                 first_seq: 0,
                 seq: 0,
-                cols: 80,
-                rows: 24,
+                cols: 0,
+                rows: 0,
             });
         }
         // Subscribed after the flood so this receiver never lags and a
@@ -17490,8 +17520,8 @@ mod tests {
                     bytes: Arc::<[u8]>::from(b"paint".to_vec()),
                     first_seq: seq,
                     seq,
-                    cols: 80,
-                    rows: 24,
+                    cols: 0,
+                    rows: 0,
                 });
                 tokio::time::sleep(Duration::from_millis(40)).await;
             }
@@ -17525,8 +17555,8 @@ mod tests {
                     bytes: Arc::<[u8]>::from(b"noise".to_vec()),
                     first_seq: seq,
                     seq,
-                    cols: 80,
-                    rows: 24,
+                    cols: 0,
+                    rows: 0,
                 });
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -17562,8 +17592,8 @@ mod tests {
                     bytes: Arc::<[u8]>::from(b"spin".to_vec()),
                     first_seq: seq,
                     seq,
-                    cols: 80,
-                    rows: 24,
+                    cols: 0,
+                    rows: 0,
                 });
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -17612,8 +17642,8 @@ mod tests {
                     bytes: Arc::<[u8]>::from(bytes),
                     first_seq: seq,
                     seq,
-                    cols: 80,
-                    rows: 24,
+                    cols: 0,
+                    rows: 0,
                 });
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -17657,8 +17687,8 @@ mod tests {
                 ),
                 first_seq: 0,
                 seq: 0,
-                cols: 80,
-                rows: 24,
+                cols: 0,
+                rows: 0,
             });
         });
         let settle = await_paste_settled(

@@ -7887,8 +7887,9 @@ mod coalesce_tests {
     fn a_size_change_ends_the_run() {
         let merged = coalesce_adjacent_output(vec![
             out_at(1, b"tall", 1, (80, 40)),
-            out_at(1, b"", 2, (80, 24)),
+            out_at(1, b"tall2", 2, (80, 40)),
             out_at(1, b"short", 3, (80, 24)),
+            out_at(1, b"short2", 4, (80, 24)),
         ]);
         assert_eq!(merged.len(), 2, "{merged:?}");
         match (&merged[0], &merged[1]) {
@@ -7896,25 +7897,59 @@ mod coalesce_tests {
                 Event::TerminalOutput {
                     bytes: tall,
                     first_seq: 1,
-                    seq: 1,
+                    seq: 2,
                     cols: 80,
                     rows: 40,
                     ..
                 },
                 Event::TerminalOutput {
                     bytes: short,
-                    first_seq: 2,
-                    seq: 3,
+                    first_seq: 3,
+                    seq: 4,
                     cols: 80,
                     rows: 24,
                     ..
                 },
             ) => {
-                assert_eq!(tall.as_ref(), b"tall");
-                assert_eq!(short.as_ref(), b"short");
+                assert_eq!(tall.as_ref(), b"talltall2");
+                assert_eq!(short.as_ref(), b"shortshort2");
             }
             other => panic!("unexpected merge: {other:?}"),
         }
+    }
+
+    /// A resize announcement (empty bytes) survives coalescing on both
+    /// sides even when its size matches the neighbouring output. Merged
+    /// away, the consumer's resize request would stay "unanswered" and be
+    /// re-sent — with two clients on one terminal, forever.
+    #[test]
+    fn a_resize_announcement_is_never_merged_with_same_size_output() {
+        let merged = coalesce_adjacent_output(vec![
+            out_at(1, b"before", 1, (80, 24)),
+            out_at(1, b"", 2, (80, 24)),
+            out_at(1, b"after", 3, (80, 24)),
+        ]);
+        let shape: Vec<(Vec<u8>, u64, u64)> = merged
+            .iter()
+            .map(|e| match e {
+                Event::TerminalOutput {
+                    bytes,
+                    first_seq,
+                    seq,
+                    ..
+                } => (bytes.to_vec(), *first_seq, *seq),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (b"before".to_vec(), 1, 1),
+                (Vec::new(), 2, 2),
+                (b"after".to_vec(), 3, 3),
+            ],
+            "the announcement stays its own event"
+        );
     }
 
     /// A run of same-terminal output merges into ONE event carrying

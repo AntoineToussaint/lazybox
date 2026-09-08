@@ -42,9 +42,10 @@ the key, description, and category. An exact key auto-submits only when
 it is the sole key with that prefix, so ambiguous shortcuts remain in
 the picker for you to resolve.
 
-The `]]` terminal leader also holds `]]q` (return to the sidebar),
-`]]f` (focus mode), `]]<digit>` (jump to an agent workspace), and
-`` ]]` `` (workspace switcher). It is non-timed: after `]]`, lazybox
+The `]]` terminal leader also holds `]]n` (send the follow-up the last
+workflow declares — see [Chain a workflow](#chain-a-workflow)), `]]q`
+(return to the sidebar), `]]f` (focus mode), `]]<digit>` (jump to an
+agent workspace), and `` ]]` `` (workspace switcher). It is non-timed: after `]]`, lazybox
 waits for a command instead of racing your next key. A lone `]` followed
 by any non-`]` key is sent to the terminal verbatim. You can change the
 prefix with `terminal.escape_char`.
@@ -141,6 +142,64 @@ The outer key (`feedback`) is what you type after `]]s`.
 `description` and `category` make the workflow easier to discover;
 `body` is the complete instruction sent to the agent. Hand-edited files
 are loaded at startup, so restart lazybox after changing them.
+
+## Chain a workflow
+
+Workflows run in pipelines: a review is followed by applying it, a
+freshened branch by a push. A `next:` field declares that relationship,
+and `]]n` fires it — lazybox looks up the last workflow sent to the
+focused agent, resolves its `next:`, and sends that one.
+
+```yaml
+snippets:
+  deepreview:
+    category: Review
+    next: fixall
+    body: |
+      …
+```
+
+`]]sdeepreview` then `]]n` is the whole review→fix loop. The follow-up
+is delivered through the ordinary snippet path, so it lands in **Recent**,
+the `]N` workspace badge, and the prompt history like anything else —
+which means **pressing `]]n` again advances to the next link**. Three
+ordinary `next:` fields make `deepreview → fixall → push` a pipeline you
+walk with one key.
+
+`next:` accepts one key or a list:
+
+```yaml
+next: fixall            # one target  → sent immediately, no modal
+next: [fixall, push]    # several     → the picker, scoped to just these
+```
+
+With several targets the ordinary snippet picker opens showing only
+those workflows, so the fork is `]]n` then `Enter`.
+
+`]]n` works from the sidebar too (it addresses the cursor workspace's
+agent, like `]]s`), and with a `v` multi-select live it fans out over the
+whole selection — each workspace's *own* chain position is resolved, so
+one press advances every marked workspace by one link and names the ones
+it couldn't.
+
+Nothing is silent: if no workflow has been sent here yet, if the last one
+declares no `next:`, or if a target names a workflow that isn't in your
+catalog, lazybox says so in the footer. Targets are resolved when you
+press the key, not at load — a launch-directory file that omits a key
+stays valid.
+
+If the previous workflow was pasted but its submit was never
+acknowledged — a parked agent, or a permission prompt — `]]n` stops and
+says so instead of pasting the next one on top of it. Submit the pending
+one, or press `]]n` again to continue anyway.
+
+Provider scoping still applies: a `provider: github` follow-up won't
+fire on a Linear workspace. Follow-ups need an agent session: a snippet
+sent to a plain shell records no prompt history, so there is no chain to
+walk there.
+
+Three built-in pairs ship chained: `rev` → `fixall`, `deepreview` →
+`fixall`, and `freshen` → `push`.
 
 ## Dispatch a native skill
 
@@ -425,6 +484,7 @@ snippets:
     category: <optional grouping label>
     skill: <optional native skill name>
     provider: <optional workspace source scope>
+    next: <optional follow-up key, or a list of them>
     body: |
       <text sent to the agent>
 ```
@@ -436,6 +496,7 @@ snippets:
 | `category`    | no       | Group header + colored tag in the picker (e.g. `Review`, `Git & PR`). Free-form; defaults to empty, which files under a trailing **Other** group. |
 | `skill`       | no       | Name of a native agent skill this snippet dispatches. When set, the delivered instruction tells the agent to invoke that `SKILL.md` skill; `body` becomes the task context. See [Dispatch a native skill](#dispatch-a-native-skill). |
 | `provider`    | no       | Workspace source this snippet is scoped to (`github`, `linear`, matching a task's provider). When set, the picker only shows it on a workspace of that source; when omitted the snippet is generic and shows everywhere. See [Provider-scoped workflows](#provider-scoped-workflows). |
+| `next`        | no       | The workflow(s) `]]n` sends next. A single key or a list; a blank, duplicate, or self-referencing entry is dropped at load. See [Chain a workflow](#chain-a-workflow). |
 | `body`        | yes\*    | Sent to the agent. May span multiple lines. \*Optional when `skill` is set — the skill invocation is then the whole instruction. |
 
 ## Behaviour & gotchas

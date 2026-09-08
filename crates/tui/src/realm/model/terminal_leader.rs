@@ -36,6 +36,11 @@ pub(super) enum LeaderCmd {
     /// every prompt sent to this agent, newest-first, snippet entries
     /// tagged; Enter re-sends the picked one.
     PromptHistory,
+    /// `]]n` — send the follow-up declared by the last snippet delivered
+    /// to this agent (#1569). Resolves that snippet's `next:` and delivers
+    /// the target through the normal snippet path, so pressing it again
+    /// walks the next link of the chain.
+    FollowUp,
     /// `]]H` — open the personal Hopper without forwarding a key to
     /// the focused terminal.
     OpenHopper,
@@ -119,6 +124,13 @@ const FIXED_COMMANDS: &[FixedCommandSpec] = &[
         command: LeaderCmd::PromptHistory,
         menu_label: "prompt history",
         reference: "Browse this session's prompt history (newest-first, snippets tagged); Enter re-sends one",
+        sidebar: true,
+    },
+    FixedCommandSpec {
+        key: 'n',
+        command: LeaderCmd::FollowUp,
+        menu_label: "follow-up",
+        reference: "Send the follow-up declared by the last snippet sent here (`next:` in snippets.yaml)",
         sidebar: true,
     },
     FixedCommandSpec {
@@ -405,6 +417,51 @@ mod tests {
         }
         assert!(rows.iter().any(|(key, _)| key == "r"));
         assert!(rows.iter().any(|(key, _)| key == "t"));
+    }
+
+    /// The popup shows at most [`LEADER_MAX_ROWS`] rows and collapses the
+    /// rest into a bare "+N more" — a hidden row has no affordance, so a
+    /// command added to a full budget silently costs an existing one its
+    /// visibility. That is exactly what happened when `]]n` first landed
+    /// at 12 rows: it pushed `]]H` below the fold in a single-tab session.
+    /// Every layout must keep its essential head — the workspace-addressed
+    /// cluster plus `close terminal` — inside the budget.
+    #[test]
+    fn every_layout_keeps_its_essential_head_above_the_fold() {
+        let cap = crate::realm::components::which_key::LEADER_MAX_ROWS;
+        for (splits, tabs, label) in [
+            (false, 1, "tabs, one terminal"),
+            (false, 2, "tabs, two tabs"),
+            (true, 2, "splits"),
+        ] {
+            let rows = LeaderCmd::menu_rows(splits, tabs, NewTerminalLayout::Tabs, None);
+            let visible: Vec<&str> = rows.iter().take(cap).map(|(k, _)| k.as_str()).collect();
+            for required in ["s", "l", "r", "h", "n", "u", "x"] {
+                assert!(
+                    visible.contains(&required),
+                    "{label}: `]]{required}` fell below the fold — raise LEADER_MAX_ROWS \
+                     rather than let a new command evict an existing one. Visible: {visible:?}",
+                );
+            }
+        }
+    }
+
+    /// `]]n` resolves to the follow-up command and is offered in the
+    /// SIDEBAR menu too — it addresses the cursor workspace's agent, so
+    /// it must work where the cursor already is (#871).
+    #[test]
+    fn follow_up_is_a_workspace_addressed_command() {
+        assert_eq!(
+            LeaderCmd::from_key(Key::Char('n'), KeyModifiers::NONE),
+            Some(LeaderCmd::FollowUp),
+        );
+        assert!(LeaderCmd::FollowUp.available_in_sidebar());
+        assert!(
+            LeaderCmd::sidebar_menu_rows()
+                .iter()
+                .any(|(key, _)| key == "n"),
+            "the sidebar menu advertises `n`",
+        );
     }
 
     #[test]

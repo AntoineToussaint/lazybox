@@ -2272,6 +2272,15 @@ pub struct Model<T: TerminalAdapter> {
     /// AND is shared across in-process and `--connect` clients. This local
     /// copy is the pruned-against-catalog view the pickers render.
     pub(crate) recent_snippets: Vec<String>,
+    /// Per-terminal key of a snippet whose delivery landed but whose
+    /// SUBMIT the daemon never saw acknowledged (#1569). The prompt
+    /// history records such a delivery like any other (#1544 — the paste
+    /// is real), so the `]]n` chain cursor would otherwise step past a
+    /// snippet still sitting unsent in the composer and paste the next one
+    /// on top of it. Set on an unconfirmed `SnippetDelivered`, dropped on a
+    /// confirmed one for the same terminal, and consumed by the one warning
+    /// `]]n` raises — so a deliberate second press still continues.
+    pub(crate) unconfirmed_snippet: std::collections::HashMap<lazybox_ipc::TerminalId, String>,
     /// Per-action usage counts keyed by the action's stable
     /// `ActionKind::name()`, each broken down by the channel it was invoked
     /// through — the mastery ledger (#1502). The daemon owns the durable
@@ -2742,6 +2751,7 @@ impl<T: TerminalAdapter> Model<T> {
             deferred_focus_terminal: None,
             snippets: lazybox_config::Snippets::default(),
             recent_snippets: Vec::new(),
+            unconfirmed_snippet: std::collections::HashMap::new(),
             mastery: std::collections::HashMap::new(),
             epic_snapshots: std::collections::HashMap::new(),
             recent_skills: Vec::new(),
@@ -3755,6 +3765,55 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::SnippetPicker, picker);
     }
 
+    /// Mount the snippet picker restricted to one snippet's `next:` targets
+    /// — the multi-target branch of `]]n` (#1569). Rows are the ordinary
+    /// classified picker rows for exactly those keys, so the pick resolves
+    /// through the unchanged `PickFlow::Snippet` path; only the row list
+    /// narrows. Retargeted at the terminal the follow-up was resolved for,
+    /// so a sidebar `]]n` delivers to the cursor workspace's agent.
+    fn mount_follow_up_picker(
+        &mut self,
+        from: &str,
+        keys: &[String],
+        terminal_id: lazybox_ipc::TerminalId,
+    ) {
+        use crate::realm::components::snippet_picker::SnippetPicker;
+        if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
+            return;
+        }
+        let picker = SnippetPicker::new(self.follow_up_picker_rows(keys), String::new())
+            .with_title(format!(" Follow-up to ]{from} "))
+            .with_insert_without_submit();
+        self.mount_modal(Id::SnippetPicker, picker);
+        self.leader_target = Some(terminal_id);
+    }
+
+    /// The classified picker rows for one snippet's `next:` targets. Split
+    /// out of [`Self::mount_follow_up_picker`] so its test exercises the
+    /// row set the picker actually shows.
+    fn follow_up_picker_rows(
+        &self,
+        keys: &[String],
+    ) -> Vec<crate::realm::components::snippet_picker::PickerRow> {
+        use crate::realm::components::snippet_picker::PickerRow;
+        let builtins = lazybox_config::Snippets::builtin();
+        let mut rows: Vec<PickerRow> = keys
+            .iter()
+            .filter_map(|key| {
+                let snippet = self.snippets.get(key)?;
+                Some(PickerRow::classified(
+                    key,
+                    snippet,
+                    self.snippet_state(key, snippet, &builtins),
+                ))
+            })
+            .collect();
+        // `SnippetPicker::new` requires key-sorted rows; `next:` is
+        // authored in workflow order, not alphabetical.
+        rows.sort_by(|a, b| a.key.cmp(&b.key));
+        rows
+    }
+
     /// The snippet entries visible on the focused workspace, provider-scoped
     /// (#868): every generic snippet plus those whose `provider` matches one
     /// of the workspace's task sources. Shared by the `]]s` picker and the
@@ -3916,6 +3975,14 @@ impl<T: TerminalAdapter> Model<T> {
         let Some(session_key) = self.terminals.active_session() else {
             return Vec::new();
         };
+        self.workspace_sources(session_key)
+    }
+
+    /// The task sources spanned by one workspace, for provider scoping
+    /// (#868). Split out of [`Self::active_workspace_sources`] so `]]n`
+    /// can scope a follow-up against the terminal it targets, which under
+    /// the sidebar leader is not the active one.
+    fn workspace_sources(&self, session_key: &lazybox_core::SessionKey) -> Vec<String> {
         let Some(workspace) = self.sidebar.workspace_by_key(session_key) else {
             return Vec::new();
         };

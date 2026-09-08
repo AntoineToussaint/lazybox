@@ -66,6 +66,7 @@ mod tests {
                 body: format!("{key} body"),
                 skill: None,
                 provider: None,
+                next: Vec::new(),
                 origin: SnippetOrigin::Global,
             },
         )

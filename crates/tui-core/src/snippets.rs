@@ -331,6 +331,7 @@ mod tests {
             body: body.into(),
             skill: None,
             provider: None,
+            next: Vec::new(),
             origin,
         }
     }

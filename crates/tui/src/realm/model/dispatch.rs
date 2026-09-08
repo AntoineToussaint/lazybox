@@ -242,7 +242,7 @@ fn bulk_confirmed_verb(action: &lazybox_tui_core::action::Action) -> &'static st
 /// Render an affected-workspace list for bulk confirm copy: the first
 /// few names inline, the remainder collapsed to `+N more` so a large
 /// selection can't overflow the modal.
-fn truncate_affected_list(names: &[String]) -> String {
+pub(super) fn truncate_affected_list(names: &[String]) -> String {
     const SHOWN: usize = 5;
     if names.len() <= SHOWN {
         names.join(", ")

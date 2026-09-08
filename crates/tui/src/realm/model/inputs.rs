@@ -1679,6 +1679,7 @@ showing keybinding search only",
                     body,
                     skill: None,
                     provider: None,
+                    next: Vec::new(),
                     origin: Default::default(),
                 };
                 match lazybox_config::Snippets::upsert_global_snippet(&key, &snippet) {

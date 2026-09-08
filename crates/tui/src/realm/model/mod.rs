@@ -2225,6 +2225,15 @@ pub struct Model<T: TerminalAdapter> {
     /// AND is shared across in-process and `--connect` clients. This local
     /// copy is the pruned-against-catalog view the pickers render.
     pub(crate) recent_snippets: Vec<String>,
+    /// Per-terminal key of a snippet whose delivery landed but whose
+    /// SUBMIT the daemon never saw acknowledged (#1569). The prompt
+    /// history records such a delivery like any other (#1544 — the paste
+    /// is real), so the `]]n` chain cursor would otherwise step past a
+    /// snippet still sitting unsent in the composer and paste the next one
+    /// on top of it. Set on an unconfirmed `SnippetDelivered`, dropped on a
+    /// confirmed one for the same terminal, and consumed by the one warning
+    /// `]]n` raises — so a deliberate second press still continues.
+    pub(crate) unconfirmed_snippet: std::collections::HashMap<lazybox_ipc::TerminalId, String>,
     /// Per-action usage counts keyed by the action's stable
     /// `ActionKind::name()`, each broken down by the channel it was invoked
     /// through — the mastery ledger (#1502). The daemon owns the durable
@@ -2688,6 +2697,7 @@ impl<T: TerminalAdapter> Model<T> {
             deferred_focus_terminal: None,
             snippets: lazybox_config::Snippets::default(),
             recent_snippets: Vec::new(),
+            unconfirmed_snippet: std::collections::HashMap::new(),
             mastery: std::collections::HashMap::new(),
             recent_skills: Vec::new(),
             dismissed_updates: Vec::new(),

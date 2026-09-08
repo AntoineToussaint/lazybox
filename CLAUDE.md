@@ -563,7 +563,10 @@ snippet, pressing `]]n` again walks the next link, so `deepreview →
 fixall → push` is a pipeline expressed as three ordinary `next:` fields.
 Built-in chains: `rev`/`deepreview` → `fixall`, `freshen` → `push`.
 Dangling targets and off-provider ones are dropped with a notice, never
-silently), `]]u` scans the
+silently; a delivery whose submit went unacknowledged stops the chain
+once rather than pasting the next body onto the unsent one; under a `v`
+multi-select it fans out, resolving each workspace's own chain position
+and naming what it skipped), `]]u` scans the
 visible terminal for `http(s)://…` URLs and opens the picked one in
 the browser (#596 — a single on-screen URL opens straight away, else a
 picker lists them newest-first so `]]u`+Enter opens the last; an

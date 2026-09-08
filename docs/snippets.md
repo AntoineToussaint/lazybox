@@ -177,14 +177,26 @@ With several targets the ordinary snippet picker opens showing only
 those workflows, so the fork is `]]n` then `Enter`.
 
 `]]n` works from the sidebar too (it addresses the cursor workspace's
-agent, like `]]s`). Nothing is silent: if no workflow has been sent
-here yet, if the last one declares no `next:`, or if a target names a
-workflow that isn't in your catalog, lazybox says so in the footer.
-Targets are resolved when you press the key, not at load — a
-launch-directory file that omits a key stays valid.
+agent, like `]]s`), and with a `v` multi-select live it fans out over the
+whole selection — each workspace's *own* chain position is resolved, so
+one press advances every marked workspace by one link and names the ones
+it couldn't.
+
+Nothing is silent: if no workflow has been sent here yet, if the last one
+declares no `next:`, or if a target names a workflow that isn't in your
+catalog, lazybox says so in the footer. Targets are resolved when you
+press the key, not at load — a launch-directory file that omits a key
+stays valid.
+
+If the previous workflow was pasted but its submit was never
+acknowledged — a parked agent, or a permission prompt — `]]n` stops and
+says so instead of pasting the next one on top of it. Submit the pending
+one, or press `]]n` again to continue anyway.
 
 Provider scoping still applies: a `provider: github` follow-up won't
-fire on a Linear workspace.
+fire on a Linear workspace. Follow-ups need an agent session: a snippet
+sent to a plain shell records no prompt history, so there is no chain to
+walk there.
 
 Three built-in pairs ship chained: `rev` → `fixall`, `deepreview` →
 `fixall`, and `freshen` → `push`.

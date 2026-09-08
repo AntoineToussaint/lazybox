@@ -2733,6 +2733,15 @@ impl<T: TerminalAdapter> Model<T> {
                 self.terminals
                     .apply_delivered_prompt(*terminal_id, prompt.clone());
             }
+            // …but remember WHICH state the history entry is in, so the
+            // `]]n` chain (#1569) doesn't step past a snippet that was
+            // pasted and never submitted.
+            if *confirmed {
+                self.unconfirmed_snippet.remove(terminal_id);
+            } else {
+                self.unconfirmed_snippet
+                    .insert(*terminal_id, snippet_key.clone());
+            }
             // Only announce a fresh "sent" toast when the submit was
             // confirmed. On an unconfirmed submit the daemon's resend ladder
             // has already flashed a Retryable give-up notice ("looks parked —

@@ -270,12 +270,17 @@ pub fn render_quit_hint(frame: &mut Frame, area: Rect, quit_keys: &str) {
 
 /// Most rows the terminal-leader popup enumerates before collapsing the
 /// tail into a "+N more" row. Keeps the popup from swallowing the screen
-/// when the agent roster is long. Sized so the fixed command menu (8
-/// rows: snippets/focus/exit/jump + the tile chords, #286) never eats
-/// the whole budget — a few agent-jump rows always show before the
-/// overflow marker. `pub(crate)` so the model can bound `]]`-leader
-/// highlight navigation to the rows the popup actually shows (#343).
-pub(crate) const LEADER_MAX_ROWS: usize = 12;
+/// when the agent roster is long. `pub(crate)` so the model can bound
+/// `]]`-leader highlight navigation to the rows the popup actually shows
+/// (#343).
+///
+/// Sized to the fixed command menu, which has outgrown the budget it was
+/// first cut for: adding `]]n` (#1569) made a single-tab session need 13
+/// rows, and at 12 that row's arrival silently pushed `]]H` below the
+/// fold. Every layout's essential head — through `close terminal`, plus
+/// the workspace-addressed cluster — now fits, so a new command costs a
+/// deliberate bump here rather than quietly evicting an existing one.
+pub(crate) const LEADER_MAX_ROWS: usize = 13;
 
 /// Render the which-key popup for the armed terminal `]]` leader
 /// (issues #205, #252). Lists the leader's command menu — the caller
@@ -519,9 +524,14 @@ mod tests {
             ("q".to_string(), "exit to sidebar".to_string()),
             ("`".to_string(), "jump to workspace".to_string()),
         ];
-        for i in 1..=9 {
+        // Derive the roster length from the budget rather than hardcoding
+        // one: pinning it meant a later bump to LEADER_MAX_ROWS (#1569)
+        // silently left this fixture under the cap, so it stopped
+        // exercising truncation at all.
+        for i in 1..=(LEADER_MAX_ROWS + 1 - rows.len()) {
             rows.push((i.to_string(), format!("agent-{i}")));
         }
+        assert!(rows.len() > LEADER_MAX_ROWS, "fixture must overflow");
         let out = render_leader(&rows);
         assert!(out.contains("snippets"), "head command dropped: {out}");
         assert!(

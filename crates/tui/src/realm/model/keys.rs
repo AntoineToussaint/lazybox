@@ -1175,7 +1175,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// Run a resolved `]]` leader command. Shared by the direct-key
     /// path and the `Enter`-fires-the-highlight path (#343) so both
     /// dispatch identically.
-    pub(super) fn run_terminal_leader_cmd(
+    fn run_terminal_leader_cmd(
         &mut self,
         cmd: super::terminal_leader::LeaderCmd,
         cmds: &mut Vec<IpcCommand>,
@@ -1338,12 +1338,83 @@ impl<T: TerminalAdapter> Model<T> {
     /// `]]n` from the sidebar — send the follow-up declared by the last
     /// snippet delivered to the *cursor* workspace's agent, not the focused
     /// tile's.
+    ///
+    /// Under a live `v` multi-select the follow-up fans out over the whole
+    /// selection, like every other bulk-appropriate workspace action: each
+    /// workspace carries its OWN chain position, so this resolves `next:`
+    /// per target rather than broadcasting one snippet. Acting on the
+    /// cursor row alone here was the #1077 shape — one row served, the rest
+    /// silently untouched.
     fn sidebar_send_follow_up(&mut self, cmds: &mut Vec<IpcCommand>) {
+        if self.bulk_active() {
+            self.bulk_send_follow_up(cmds);
+            return;
+        }
         let Some((terminal_id, _)) = self.sidebar_leader_terminal() else {
             self.flash_info("no running agent here — press w to start one");
             return;
         };
         self.send_follow_up(terminal_id, cmds);
+    }
+
+    /// `]]n` over a multi-select: resolve each marked workspace's own
+    /// follow-up and deliver the ones that resolve, naming the rest and why.
+    /// A fork (several `next:` targets) needs a picker, which is inherently
+    /// single-target, so it is reported as skipped instead of silently
+    /// picking for the user.
+    fn bulk_send_follow_up(&mut self, cmds: &mut Vec<IpcCommand>) {
+        let mut skipped: Vec<String> = Vec::new();
+        let mut acted = 0usize;
+        for key in self.resolve_targets() {
+            let name = self
+                .sidebar
+                .workspace_by_key(&key)
+                .map(|ws| crate::util::notice_slug(&ws.name).into_owned())
+                .unwrap_or_else(|| key.as_str().to_string());
+            let Some((terminal_id, _)) = self.sidebar.broadcast_terminal(&key) else {
+                skipped.push(format!("{name} (no running session)"));
+                continue;
+            };
+            match self.resolve_follow_up(terminal_id) {
+                FollowUp::Send {
+                    snippet_key,
+                    category,
+                    body,
+                    ..
+                } => {
+                    cmds.push(IpcCommand::DeliverSnippet {
+                        terminal_id,
+                        snippet_key,
+                        category,
+                        body,
+                        submit: true,
+                    });
+                    acted += 1;
+                }
+                FollowUp::Fork { from, .. } => {
+                    skipped.push(format!("{name} (`{from}` forks — open it and press ]]n)"))
+                }
+                FollowUp::Blocked(reason) => skipped.push(format!("{name} ({reason})")),
+            }
+        }
+        let plural = if acted == 1 { "" } else { "s" };
+        let mut parts: Vec<String> = Vec::new();
+        if acted > 0 {
+            parts.push(format!("sent {acted} follow-up{plural}"));
+        }
+        if !skipped.is_empty() {
+            parts.push(format!(
+                "{} skipped: {}",
+                skipped.len(),
+                super::dispatch::truncate_affected_list(&skipped),
+            ));
+        }
+        let summary = if parts.is_empty() {
+            "nothing to follow up".to_string()
+        } else {
+            parts.join(" · ")
+        };
+        self.flash_bulk_outcome(summary, acted);
     }
 
     /// `]]n` — chain the workflow (#1569): resolve the last snippet
@@ -1353,57 +1424,16 @@ impl<T: TerminalAdapter> Model<T> {
     /// `]]n` again walks the next link (`deepreview → fixall → push`).
     ///
     /// Every dead end raises its own notice — a chord that silently did
-    /// nothing would read as a dropped keystroke. Dangling targets are
-    /// dropped with a notice rather than treated as an error: `next:` is
-    /// deliberately not validated at load, since the launch-directory layer
-    /// may shadow or omit keys.
+    /// nothing would read as a dropped keystroke.
     fn send_follow_up(&mut self, terminal_id: lazybox_ipc::TerminalId, cmds: &mut Vec<IpcCommand>) {
-        let Some(last) = self.last_snippet_sent_to(terminal_id) else {
-            self.flash_info("no snippet sent here yet — ]]s to start one");
-            return;
-        };
-        let Some(next) = self.snippets.get(&last).map(|s| s.next.clone()) else {
-            self.flash_info(format!("`{last}` is no longer in the catalog"));
-            return;
-        };
-        if next.is_empty() {
-            self.flash_info(format!(
-                "`{last}` declares no follow-up (add `next:` in snippets.yaml)"
-            ));
-            return;
-        }
-        // Provider scoping still applies, so a GitHub-only follow-up
-        // doesn't fire on a Linear workspace.
-        let sources = match self.terminals.session_key_for(terminal_id) {
-            Some(key) => self.workspace_sources(key),
-            None => Vec::new(),
-        };
-        let source_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
-        let mut targets: Vec<(String, String, String)> = Vec::new();
-        let mut skipped: Vec<String> = Vec::new();
-        for key in &next {
-            match self.snippets.get(key) {
-                None => skipped.push(format!("`{last}` → `{key}`: no such snippet")),
-                Some(snippet) if !snippet.matches_sources(&source_refs) => {
-                    let provider = snippet.provider.clone().unwrap_or_default();
-                    skipped.push(format!("`{key}` is {provider}-only"));
-                }
-                Some(snippet) => targets.push((
-                    key.clone(),
-                    snippet.category.clone(),
-                    snippet.dispatch_body(),
-                )),
-            }
-        }
-        match targets.len() {
-            0 => self.flash_info(skipped.join(" · ")),
-            1 => {
-                let (snippet_key, category, body) = targets.remove(0);
-                let mut notice = format!("`{last}` → `{snippet_key}`");
-                if !skipped.is_empty() {
-                    notice.push_str(" · ");
-                    notice.push_str(&skipped.join(" · "));
-                }
+        match self.resolve_follow_up(terminal_id) {
+            FollowUp::Send {
+                from,
+                snippet_key,
+                category,
+                body,
+            } => {
+                let notice = format!("`{from}` → `{snippet_key}`");
                 cmds.push(IpcCommand::DeliverSnippet {
                     terminal_id,
                     snippet_key,
@@ -1413,20 +1443,98 @@ impl<T: TerminalAdapter> Model<T> {
                 });
                 self.flash_info(notice);
             }
-            _ => {
-                let keys: Vec<String> = targets.into_iter().map(|(key, _, _)| key).collect();
-                self.mount_follow_up_picker(&last, &keys, terminal_id);
-                if !skipped.is_empty() {
-                    self.flash_info(skipped.join(" · "));
+            FollowUp::Fork { from, keys } => self.mount_follow_up_picker(&from, &keys, terminal_id),
+            FollowUp::Blocked(reason) => self.flash_info(reason),
+        }
+    }
+
+    /// Resolve what `]]n` should do for one terminal, without acting. Shared
+    /// by the single-target and bulk paths so they can't drift on which
+    /// states are dead ends.
+    ///
+    /// Dangling and off-provider `next:` targets are dropped rather than
+    /// treated as an error: `next:` is deliberately not validated at load,
+    /// since the launch-directory layer may shadow or omit keys.
+    fn resolve_follow_up(&mut self, terminal_id: lazybox_ipc::TerminalId) -> FollowUp {
+        // Snippets reach shells too, but a shell delivery records no prompt
+        // history (`Event::SnippetDelivered.prompt` is agent-only), so the
+        // chain has nothing to read. Say that, rather than the history
+        // path's "no snippet sent here yet" — which would be a flat lie
+        // right after a snippet landed in this very shell.
+        if !self.terminals.terminal_is_agent(terminal_id) {
+            return FollowUp::Blocked("follow-ups need an agent session".into());
+        }
+        let Some(last) = self.last_snippet_sent_to(terminal_id) else {
+            return FollowUp::Blocked("no snippet sent here yet — ]]s to start one".into());
+        };
+        // The prompt history records a delivery whose submit went
+        // UNACKNOWLEDGED too (#1544 — the paste is real either way), so the
+        // chain cursor would otherwise advance past a snippet still sitting
+        // unsent in the composer and paste the next one on top of it. Warn
+        // once and clear the mark, so a deliberate second `]]n` still
+        // continues and the user is never permanently stuck behind a
+        // delivery the daemon merely failed to see acknowledged.
+        if self.unconfirmed_snippet.get(&terminal_id) == Some(&last) {
+            self.unconfirmed_snippet.remove(&terminal_id);
+            return FollowUp::Blocked(format!(
+                "`{last}` was delivered but not submitted — submit it, or press ]]n again to continue"
+            ));
+        }
+        let Some(next) = self.snippets.get(&last).map(|s| s.next.clone()) else {
+            return FollowUp::Blocked(format!("`{last}` is no longer in the catalog"));
+        };
+        if next.is_empty() {
+            return FollowUp::Blocked(format!(
+                "`{last}` declares no follow-up (add `next:` in snippets.yaml)"
+            ));
+        }
+        // Provider scoping still applies, so a GitHub-only follow-up
+        // doesn't fire on a Linear workspace.
+        let sources = match self.terminals.session_key_for(terminal_id) {
+            Some(key) => self.workspace_sources(key),
+            None => Vec::new(),
+        };
+        let source_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
+        let mut targets: Vec<(String, String, String)> = Vec::new();
+        let mut dropped: Vec<String> = Vec::new();
+        for key in &next {
+            match self.snippets.get(key) {
+                None => dropped.push(format!("`{last}` → `{key}`: no such snippet")),
+                // `matches_sources` is false only for a snippet that HAS a
+                // provider, so the scope always names one here.
+                Some(snippet) if !snippet.matches_sources(&source_refs) => {
+                    let provider = snippet.provider.as_deref().unwrap_or_default();
+                    dropped.push(format!("`{key}` is {provider}-only"));
+                }
+                Some(snippet) => targets.push((
+                    key.clone(),
+                    snippet.category.clone(),
+                    snippet.dispatch_body(),
+                )),
+            }
+        }
+        match targets.len() {
+            0 => FollowUp::Blocked(dropped.join(" · ")),
+            1 => {
+                let (snippet_key, category, body) = targets.remove(0);
+                FollowUp::Send {
+                    from: last,
+                    snippet_key,
+                    category,
+                    body,
                 }
             }
+            _ => FollowUp::Fork {
+                from: last,
+                keys: targets.into_iter().map(|(key, _, _)| key).collect(),
+            },
         }
     }
 
     /// The key of the most recent snippet delivered to `terminal_id`, read
     /// off the durable per-terminal prompt history (#523) — no new state is
-    /// needed to know what a `]]n` follows. `None` when the terminal isn't
-    /// an agent, or nothing sent there came from a snippet.
+    /// needed to know what a `]]n` follows. `None` when nothing sent there
+    /// came from a snippet.
     fn last_snippet_sent_to(&self, terminal_id: lazybox_ipc::TerminalId) -> Option<String> {
         let (_, history) = self.terminals.prompt_history_for(terminal_id)?;
         history.into_iter().find_map(|prompt| match prompt.source {
@@ -2886,6 +2994,25 @@ fn popup_nav_delta(key: &RealmKey) -> Option<i32> {
         Key::Down if key.modifiers.is_empty() => Some(1),
         _ => popup_letter_nav_delta(key),
     }
+}
+
+/// What `]]n` resolves to for one terminal (#1569). Resolution is split
+/// from the acting so the single-target and bulk paths agree on which
+/// states are dead ends and why.
+enum FollowUp {
+    /// One target — deliver it. `from` is the snippet it follows, for the
+    /// visible trail.
+    Send {
+        from: String,
+        snippet_key: String,
+        category: String,
+        body: String,
+    },
+    /// Several targets — the user picks. Inherently single-target.
+    Fork { from: String, keys: Vec<String> },
+    /// Nothing to send, with the reason to show (or to name in a bulk
+    /// summary).
+    Blocked(String),
 }
 
 /// `j`/`k`-only highlight delta (`k` → −1, `j` → +1). Used where the

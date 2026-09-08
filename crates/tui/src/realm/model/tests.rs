@@ -6668,7 +6668,7 @@ snippets:
         let keys: Vec<&str> = rows.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(
             keys,
-            vec!["s", "l", "r", "h", "u", "n"],
+            vec!["s", "l", "r", "h", "n", "u"],
             "sidebar menu is the workspace-addressed subset only",
         );
     }
@@ -28962,12 +28962,16 @@ mod follow_up_chain_tests {
     //! so repeating the chord walks the chain (`deepreview → fixall →
     //! push`). Every dead end raises its own notice — a chord that
     //! silently did nothing would read as a dropped keystroke.
+    //!
+    //! Tests drive the real `]]n` chord and read what reached the daemon,
+    //! so key resolution is covered along with dispatch.
     use super::super::*;
     use lazybox_core::{SessionKey, WorkspaceKey};
     use lazybox_ipc::{
         Event as IpcEvent, PromptSource, TerminalId, TerminalKind, TerminalSnapshot, UserPrompt,
         channel,
     };
+    use tuirealm::event::{Key, KeyEvent as RealmKey, KeyModifiers as RealmMods};
     use tuirealm::ratatui::layout::Size;
 
     const CATALOG: &str = "snippets:\n  \
@@ -29005,28 +29009,39 @@ mod follow_up_chain_tests {
         }
     }
 
-    /// One agent terminal per `(id, workspace key, history)`, seeded
+    fn agent(
+        id: u64,
+        workspace: &str,
+        history: Vec<UserPrompt>,
+    ) -> (u64, &str, TerminalKind, Vec<UserPrompt>) {
+        (id, workspace, TerminalKind::Agent("claude".into()), history)
+    }
+
+    /// One terminal per `(id, workspace key, kind, history)`, seeded
     /// through a daemon snapshot so both the terminal stack (prompt
-    /// history) and the sidebar (`broadcast_terminal`) see them. Terminal
-    /// 1 is the focused tile and its workspace the sidebar cursor.
+    /// history) and the sidebar (`broadcast_terminal`) see them. Terminal 1
+    /// is the focused tile and its workspace the sidebar cursor.
     fn model_with(
-        terminals: Vec<(u64, &str, Vec<UserPrompt>)>,
-    ) -> Model<tuirealm::terminal::TestTerminalAdapter> {
-        let (client, _server) = channel::pair();
+        terminals: Vec<(u64, &str, TerminalKind, Vec<UserPrompt>)>,
+    ) -> (
+        Model<tuirealm::terminal::TestTerminalAdapter>,
+        lazybox_ipc::Connection,
+    ) {
+        let (client, server) = channel::pair();
         let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
         m.apply_snippets(catalog());
         let workspaces = terminals
             .iter()
-            .map(|(_, ws, _)| {
+            .map(|(_, ws, _, _)| {
                 lazybox_core::Workspace::empty(WorkspaceKey::new(*ws), "main", chrono::Utc::now())
             })
             .collect();
         let snapshots = terminals
             .iter()
-            .map(|(id, ws, history)| TerminalSnapshot {
+            .map(|(id, ws, kind, history)| TerminalSnapshot {
                 terminal_id: TerminalId(*id),
                 session_key: SessionKey::from(*ws),
-                kind: TerminalKind::Agent("claude".into()),
+                kind: kind.clone(),
                 replay: Vec::new(),
                 last_seq: 0,
                 replay_available: true,
@@ -29049,7 +29064,7 @@ mod follow_up_chain_tests {
         });
         focus_terminal(&mut m, 1, terminals[0].1);
         m.focus = PaneFocus::Terminals;
-        m
+        (m, server)
     }
 
     /// Point the model at one terminal: active session plus a single-leaf
@@ -29069,28 +29084,19 @@ mod follow_up_chain_tests {
         assert!(m.sidebar.focus_workspace_key(&key));
     }
 
-    /// The `]]n` effect contract: what the resolved command emits. `n` →
-    /// [`LeaderCmd::FollowUp`] is covered by the leader table's own tests,
-    /// so these assert on the returned commands directly rather than
-    /// driving a client.
-    fn press_follow_up(m: &mut Model<tuirealm::terminal::TestTerminalAdapter>) -> Vec<IpcCommand> {
-        let mut cmds = Vec::new();
-        m.run_terminal_leader_cmd(
-            super::super::terminal_leader::LeaderCmd::FollowUp,
-            &mut cmds,
-        );
-        cmds
-    }
-
-    fn press_sidebar_follow_up(
+    /// Press the real `]]n` chord and collect what reached the daemon.
+    fn press_follow_up(
         m: &mut Model<tuirealm::terminal::TestTerminalAdapter>,
+        server: &mut lazybox_ipc::Connection,
     ) -> Vec<IpcCommand> {
-        let mut cmds = Vec::new();
-        m.run_sidebar_leader_cmd(
-            super::super::terminal_leader::LeaderCmd::FollowUp,
-            &mut cmds,
-        );
-        cmds
+        while server.rx.try_recv().is_ok() {}
+        m.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
+        m.dispatch_key(RealmKey::new(Key::Char(']'), RealmMods::NONE));
+        assert!(m.terminal_leader_pending(), "`]]` arms the leader");
+        m.dispatch_key(RealmKey::new(Key::Char('n'), RealmMods::NONE));
+        std::iter::from_fn(|| server.rx.try_recv().ok())
+            .filter(|c| matches!(c, IpcCommand::DeliverSnippet { .. }))
+            .collect()
     }
 
     fn notice(m: &Model<tuirealm::terminal::TestTerminalAdapter>) -> String {
@@ -29105,13 +29111,12 @@ mod follow_up_chain_tests {
     /// `fixall`, submitted, with the trail visible in the footer.
     #[test]
     fn follow_up_delivers_the_declared_next_snippet() {
-        let mut m = model_with(vec![(
+        let (mut m, mut server) = model_with(vec![agent(
             1,
             "github:o/r#1",
             vec![sent("review it", "deepreview")],
         )]);
-        let cmds = press_follow_up(&mut m);
-        match cmds.as_slice() {
+        match press_follow_up(&mut m, &mut server).as_slice() {
             [
                 IpcCommand::DeliverSnippet {
                     terminal_id,
@@ -29140,12 +29145,12 @@ mod follow_up_chain_tests {
     /// snippet, pressing `]]n` again advances one more link.
     #[test]
     fn repeating_the_chord_walks_the_chain() {
-        let mut m = model_with(vec![(
+        let (mut m, mut server) = model_with(vec![agent(
             1,
             "github:o/r#1",
             vec![sent("review it", "deepreview")],
         )]);
-        assert!(!press_follow_up(&mut m).is_empty());
+        assert!(!press_follow_up(&mut m, &mut server).is_empty());
         // The daemon's delivery acknowledgement is what appends to the
         // history — the same event the picker path produces.
         m.handle_daemon_event(IpcEvent::SnippetDelivered {
@@ -29155,16 +29160,89 @@ mod follow_up_chain_tests {
             prompt: Some(sent("fix it", "fixall")),
             confirmed: true,
         });
-        match press_follow_up(&mut m).as_slice() {
+        match press_follow_up(&mut m, &mut server).as_slice() {
             [IpcCommand::DeliverSnippet { snippet_key, .. }] => assert_eq!(snippet_key, "push"),
             other => panic!("expected the next link (push), got {other:?}"),
         }
     }
 
+    /// A delivery whose SUBMIT went unacknowledged (parked agent, or a
+    /// permission chooser the resend ladder refused to type into) is still
+    /// recorded in the prompt history (#1544). The chain must NOT step past
+    /// it and paste the next body on top of the unsent one: the first `]]n`
+    /// warns instead, and only a deliberate second press continues.
+    #[test]
+    fn unconfirmed_delivery_warns_once_before_advancing() {
+        let (mut m, mut server) = model_with(vec![agent(1, "github:o/r#1", vec![])]);
+        m.handle_daemon_event(IpcEvent::SnippetDelivered {
+            terminal_id: TerminalId(1),
+            session_key: SessionKey::from("github:o/r#1"),
+            snippet_key: "deepreview".into(),
+            prompt: Some(sent("review it", "deepreview")),
+            confirmed: false,
+        });
+
+        assert!(
+            press_follow_up(&mut m, &mut server).is_empty(),
+            "no follow-up while the previous one may be sitting unsent",
+        );
+        assert!(
+            notice(&m).contains("`deepreview` was delivered but not submitted"),
+            "{}",
+            notice(&m),
+        );
+        // The warning is consumed, so the user is never permanently stuck
+        // behind a submit the daemon merely failed to see acknowledged.
+        match press_follow_up(&mut m, &mut server).as_slice() {
+            [IpcCommand::DeliverSnippet { snippet_key, .. }] => assert_eq!(snippet_key, "fixall"),
+            other => panic!("a second press continues the chain, got {other:?}"),
+        }
+    }
+
+    /// A CONFIRMED delivery clears any earlier doubt about the same
+    /// terminal, so the chain advances with no warning.
+    #[test]
+    fn confirmed_delivery_clears_the_unsubmitted_warning() {
+        let (mut m, mut server) = model_with(vec![agent(1, "github:o/r#1", vec![])]);
+        for confirmed in [false, true] {
+            m.handle_daemon_event(IpcEvent::SnippetDelivered {
+                terminal_id: TerminalId(1),
+                session_key: SessionKey::from("github:o/r#1"),
+                snippet_key: "deepreview".into(),
+                prompt: Some(sent("review it", "deepreview")),
+                confirmed,
+            });
+        }
+        match press_follow_up(&mut m, &mut server).as_slice() {
+            [IpcCommand::DeliverSnippet { snippet_key, .. }] => assert_eq!(snippet_key, "fixall"),
+            other => panic!("expected fixall with no warning, got {other:?}"),
+        }
+    }
+
+    /// Snippets reach shells too, but a shell delivery records no prompt
+    /// history, so `]]n` can never chain there. It must say that rather
+    /// than claim no snippet was sent — which would be a flat lie right
+    /// after one landed in this very shell.
+    #[test]
+    fn follow_up_on_a_shell_names_the_real_reason() {
+        let (mut m, mut server) = model_with(vec![(
+            1,
+            "github:o/r#1",
+            TerminalKind::Shell,
+            vec![sent("review it", "deepreview")],
+        )]);
+        assert!(press_follow_up(&mut m, &mut server).is_empty());
+        assert!(
+            notice(&m).contains("follow-ups need an agent session"),
+            "{}",
+            notice(&m)
+        );
+    }
+
     /// Nothing sent from a snippet yet → a nudge, not a silent no-op.
     #[test]
     fn follow_up_without_a_prior_snippet_flashes() {
-        let mut m = model_with(vec![(
+        let (mut m, mut server) = model_with(vec![agent(
             1,
             "github:o/r#1",
             vec![UserPrompt {
@@ -29173,7 +29251,7 @@ mod follow_up_chain_tests {
                 source: PromptSource::Typed,
             }],
         )]);
-        assert!(press_follow_up(&mut m).is_empty());
+        assert!(press_follow_up(&mut m, &mut server).is_empty());
         assert!(
             notice(&m).contains("no snippet sent here yet"),
             "{}",
@@ -29184,12 +29262,12 @@ mod follow_up_chain_tests {
     /// A snippet with no `next:` says so, and points at where to declare one.
     #[test]
     fn follow_up_on_an_unchained_snippet_flashes() {
-        let mut m = model_with(vec![(
+        let (mut m, mut server) = model_with(vec![agent(
             1,
             "github:o/r#1",
             vec![sent("nothing follows", "lonely")],
         )]);
-        assert!(press_follow_up(&mut m).is_empty());
+        assert!(press_follow_up(&mut m, &mut server).is_empty());
         assert!(
             notice(&m).contains("`lonely` declares no follow-up"),
             "{}",
@@ -29202,12 +29280,12 @@ mod follow_up_chain_tests {
     /// nothing.
     #[test]
     fn dangling_follow_up_flashes_and_delivers_nothing() {
-        let mut m = model_with(vec![(
+        let (mut m, mut server) = model_with(vec![agent(
             1,
             "github:o/r#1",
             vec![sent("broken chain", "dangling")],
         )]);
-        assert!(press_follow_up(&mut m).is_empty());
+        assert!(press_follow_up(&mut m, &mut server).is_empty());
         assert!(
             notice(&m).contains("`dangling` → `gone`: no such snippet"),
             "{}",
@@ -29219,8 +29297,12 @@ mod follow_up_chain_tests {
     /// launch-directory layer that omits it) is named rather than ignored.
     #[test]
     fn follow_up_from_a_vanished_snippet_flashes() {
-        let mut m = model_with(vec![(1, "github:o/r#1", vec![sent("whatever", "retired")])]);
-        assert!(press_follow_up(&mut m).is_empty());
+        let (mut m, mut server) = model_with(vec![agent(
+            1,
+            "github:o/r#1",
+            vec![sent("whatever", "retired")],
+        )]);
+        assert!(press_follow_up(&mut m, &mut server).is_empty());
         assert!(
             notice(&m).contains("`retired` is no longer in the catalog"),
             "{}",
@@ -29234,7 +29316,7 @@ mod follow_up_chain_tests {
     fn off_provider_follow_up_is_skipped_with_a_reason() {
         let workspace = super::focus_mode_tests::workspace_with_agent("owner/repo#1");
         let key = SessionKey::from(&workspace.key);
-        let mut m = model_with(vec![(
+        let (mut m, mut server) = model_with(vec![agent(
             1,
             key.as_str(),
             vec![sent("chains off-provider", "ghchain")],
@@ -29242,7 +29324,7 @@ mod follow_up_chain_tests {
         // Replace the bare workspace with the task-carrying one so its
         // sources resolve to `github`.
         m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(workspace)));
-        assert!(press_follow_up(&mut m).is_empty());
+        assert!(press_follow_up(&mut m, &mut server).is_empty());
         assert!(
             notice(&m).contains("`linonly` is linear-only"),
             "{}",
@@ -29251,26 +29333,44 @@ mod follow_up_chain_tests {
     }
 
     /// Several targets open the ordinary snippet picker restricted to
-    /// exactly those keys, so the fork is `]]n` + Enter.
+    /// exactly those keys, so the fork is `]]n` + Enter. Asserted on what
+    /// the MOUNTED picker renders, not on the row helper in isolation — the
+    /// narrowing is only real if the mount path applied it.
     #[test]
     fn several_targets_mount_a_picker_scoped_to_them() {
-        let mut m = model_with(vec![(
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        use tuirealm::ratatui::layout::Rect;
+
+        let (mut m, mut server) = model_with(vec![agent(
             1,
             "github:o/r#1",
             vec![sent("two ways on", "forked")],
         )]);
-        let cmds = press_follow_up(&mut m);
-        assert!(cmds.is_empty(), "the pick hasn't happened yet");
+        assert!(
+            press_follow_up(&mut m, &mut server).is_empty(),
+            "the pick hasn't happened yet",
+        );
         assert_eq!(m.top_modal(), Some(&Id::SnippetPicker));
-        let keys: Vec<String> = m
-            .follow_up_picker_rows(&["push".to_string(), "fixall".to_string()])
-            .into_iter()
-            .map(|row| row.key)
-            .collect();
-        assert_eq!(
-            keys,
-            vec!["fixall", "push"],
-            "only the declared targets, key-sorted for the picker",
+
+        let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        term.draw(|f| m.app.view(&Id::SnippetPicker, f, Rect::new(0, 0, 120, 40)))
+            .unwrap();
+        let buf = term.backend().buffer();
+        let screen: String = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for target in ["fixall", "push"] {
+            assert!(screen.contains(target), "`{target}` row missing:\n{screen}");
+        }
+        assert!(
+            !screen.contains("deepreview") && !screen.contains("lonely"),
+            "the picker must show ONLY the declared targets:\n{screen}",
         );
         assert_eq!(
             m.leader_target,
@@ -29283,9 +29383,9 @@ mod follow_up_chain_tests {
     /// terminal 1 — not the focused tile (terminal 2).
     #[test]
     fn sidebar_follow_up_targets_the_cursor_workspace() {
-        let mut m = model_with(vec![
-            (1, "github:o/r#1", vec![sent("review it", "deepreview")]),
-            (2, "github:o/r#2", vec![sent("nothing follows", "lonely")]),
+        let (mut m, mut server) = model_with(vec![
+            agent(1, "github:o/r#1", vec![sent("review it", "deepreview")]),
+            agent(2, "github:o/r#2", vec![sent("nothing follows", "lonely")]),
         ]);
         focus_terminal(&mut m, 2, "github:o/r#2");
         m.focus = PaneFocus::Sidebar;
@@ -29294,7 +29394,7 @@ mod follow_up_chain_tests {
                 .focus_workspace_key(&SessionKey::from("github:o/r#1"))
         );
 
-        match press_sidebar_follow_up(&mut m).as_slice() {
+        match press_follow_up(&mut m, &mut server).as_slice() {
             [
                 IpcCommand::DeliverSnippet {
                     terminal_id,
@@ -29307,5 +29407,71 @@ mod follow_up_chain_tests {
             }
             other => panic!("expected one DeliverSnippet to terminal 1, got {other:?}"),
         }
+    }
+
+    /// #1077 shape: with a `v` multi-select live, `]]n` must fan out over
+    /// the WHOLE selection instead of serving the cursor row and leaving
+    /// the rest silently untouched. Each workspace carries its own chain
+    /// position, so the follow-up is resolved per target — and the ones
+    /// that can't run are named with their reason.
+    #[test]
+    fn sidebar_follow_up_under_multiselect_fans_out_per_workspace() {
+        let (mut m, mut server) = model_with(vec![
+            agent(1, "github:o/r#1", vec![sent("review it", "deepreview")]),
+            agent(2, "github:o/r#2", vec![sent("nothing follows", "lonely")]),
+        ]);
+        m.focus = PaneFocus::Sidebar;
+        for ws in ["github:o/r#1", "github:o/r#2"] {
+            assert!(m.sidebar.focus_workspace_key(&SessionKey::from(ws)));
+            m.sidebar.toggle_broadcast_select();
+        }
+        assert_eq!(m.sidebar.broadcast_selected_count(), 2);
+
+        match press_follow_up(&mut m, &mut server).as_slice() {
+            [
+                IpcCommand::DeliverSnippet {
+                    terminal_id,
+                    snippet_key,
+                    ..
+                },
+            ] => {
+                assert_eq!(*terminal_id, TerminalId(1), "the one that has a follow-up");
+                assert_eq!(snippet_key, "fixall");
+            }
+            other => panic!("expected one per-workspace DeliverSnippet, got {other:?}"),
+        }
+        let notice = notice(&m);
+        assert!(notice.contains("sent 1 follow-up"), "{notice}");
+        assert!(
+            notice.contains("1 skipped") && notice.contains("declares no follow-up"),
+            "the untouched workspace is named with its reason: {notice}",
+        );
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            0,
+            "a bulk action that acted consumes its selection (#1498)",
+        );
+    }
+
+    /// A bulk run where nothing was eligible keeps the marks, so it can be
+    /// retried after fixing whatever blocked it (#1498).
+    #[test]
+    fn bulk_follow_up_with_no_eligible_target_keeps_the_selection() {
+        let (mut m, mut server) = model_with(vec![
+            agent(1, "github:o/r#1", vec![sent("nothing follows", "lonely")]),
+            agent(2, "github:o/r#2", vec![sent("nothing follows", "lonely")]),
+        ]);
+        m.focus = PaneFocus::Sidebar;
+        for ws in ["github:o/r#1", "github:o/r#2"] {
+            assert!(m.sidebar.focus_workspace_key(&SessionKey::from(ws)));
+            m.sidebar.toggle_broadcast_select();
+        }
+        assert!(press_follow_up(&mut m, &mut server).is_empty());
+        assert!(notice(&m).contains("2 skipped"), "{}", notice(&m));
+        assert_eq!(
+            m.sidebar.broadcast_selected_count(),
+            2,
+            "a no-op bulk run leaves the marks for a retry",
+        );
     }
 }

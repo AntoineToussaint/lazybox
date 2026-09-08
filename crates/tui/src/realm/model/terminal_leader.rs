@@ -127,6 +127,13 @@ const FIXED_COMMANDS: &[FixedCommandSpec] = &[
         sidebar: true,
     },
     FixedCommandSpec {
+        key: 'n',
+        command: LeaderCmd::FollowUp,
+        menu_label: "follow-up",
+        reference: "Send the follow-up declared by the last snippet sent here (`next:` in snippets.yaml)",
+        sidebar: true,
+    },
+    FixedCommandSpec {
         key: 'u',
         command: LeaderCmd::OpenUrls,
         menu_label: "open url",
@@ -181,19 +188,6 @@ const FIXED_COMMANDS: &[FixedCommandSpec] = &[
         menu_label: "close terminal",
         reference: "Close the focused terminal (tile or active tab)",
         sidebar: false,
-    },
-    // Workspace-addressed like the `s`/`l`/`r`/`h`/`u` cluster, but placed
-    // below `x` for the same bounded-row reason as `H`: in a Splits layout
-    // the menu already fills the popup exactly through `close terminal`, so
-    // a row inserted higher pushes that essential tile chrome below the
-    // fold. `]]n` stays directly dispatchable, sits above the fold in Tabs
-    // layouts and in the sidebar menu, and is documented either way.
-    FixedCommandSpec {
-        key: 'n',
-        command: LeaderCmd::FollowUp,
-        menu_label: "follow-up",
-        reference: "Send the follow-up declared by the last snippet sent here (`next:` in snippets.yaml)",
-        sidebar: true,
     },
     // Keep this after the split/move/close cluster. The popup has a bounded
     // visible row count; inserting Hopper earlier pushed `close terminal`
@@ -423,6 +417,33 @@ mod tests {
         }
         assert!(rows.iter().any(|(key, _)| key == "r"));
         assert!(rows.iter().any(|(key, _)| key == "t"));
+    }
+
+    /// The popup shows at most [`LEADER_MAX_ROWS`] rows and collapses the
+    /// rest into a bare "+N more" — a hidden row has no affordance, so a
+    /// command added to a full budget silently costs an existing one its
+    /// visibility. That is exactly what happened when `]]n` first landed
+    /// at 12 rows: it pushed `]]H` below the fold in a single-tab session.
+    /// Every layout must keep its essential head — the workspace-addressed
+    /// cluster plus `close terminal` — inside the budget.
+    #[test]
+    fn every_layout_keeps_its_essential_head_above_the_fold() {
+        let cap = crate::realm::components::which_key::LEADER_MAX_ROWS;
+        for (splits, tabs, label) in [
+            (false, 1, "tabs, one terminal"),
+            (false, 2, "tabs, two tabs"),
+            (true, 2, "splits"),
+        ] {
+            let rows = LeaderCmd::menu_rows(splits, tabs, NewTerminalLayout::Tabs, None);
+            let visible: Vec<&str> = rows.iter().take(cap).map(|(k, _)| k.as_str()).collect();
+            for required in ["s", "l", "r", "h", "n", "u", "x"] {
+                assert!(
+                    visible.contains(&required),
+                    "{label}: `]]{required}` fell below the fold — raise LEADER_MAX_ROWS \
+                     rather than let a new command evict an existing one. Visible: {visible:?}",
+                );
+            }
+        }
     }
 
     /// `]]n` resolves to the follow-up command and is offered in the

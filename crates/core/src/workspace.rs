@@ -1317,6 +1317,20 @@ impl Workspace {
             .or_else(|| self.linear_issues.first_mut())
     }
 
+    /// The role that governs this workspace's spawn preamble, row badge, and
+    /// privileged-tool gating (#1523). The persisted [`Self::role`] wins; when
+    /// it is unset the daemon adopts a `role:<label>` projection carried on the
+    /// primary task, so a role set from GitHub — or by a planner's `gh issue
+    /// create --label role:worker` — is honored. `None` when neither is present.
+    pub fn effective_role(&self) -> Option<Role> {
+        self.role.or_else(|| {
+            self.primary_task()
+                .into_iter()
+                .flat_map(|task| task.labels.iter())
+                .find_map(|label| Role::from_project_label(&label.name))
+        })
+    }
+
     /// Every task this workspace represents — the PR plus any attached
     /// GitHub / Linear issues. Ticket-hierarchy resolution must address a
     /// workspace by *any* of its provider ids: once a ticket acquires a PR
@@ -4268,6 +4282,38 @@ mod tests {
         json.as_object_mut().unwrap().remove("role");
         let legacy: Workspace = serde_json::from_value(json).unwrap();
         assert_eq!(legacy.role, None, "a record without the field is unroled");
+    }
+
+    #[test]
+    fn effective_role_is_none_without_a_role_or_label() {
+        // No persisted role and no `role:` label → no effective role.
+        let ws = Workspace::from_task(pr("o/r#1"), now());
+        assert_eq!(ws.effective_role(), None);
+    }
+
+    #[test]
+    fn role_label_is_adopted_when_field_unset() {
+        // A planner's `gh issue create --label role:worker` lands as a task
+        // label; with no persisted role the daemon adopts it.
+        let mut task = pr("o/r#1");
+        task.labels = vec![
+            crate::Label::new("working"),
+            crate::Label::new(Role::Worker.project_label()),
+        ];
+        let ws = Workspace::from_task(task, now());
+        assert_eq!(ws.role, None);
+        assert_eq!(ws.effective_role(), Some(Role::Worker));
+    }
+
+    #[test]
+    fn persisted_role_wins_over_label() {
+        // A persisted role beats a conflicting `role:` label — the field is
+        // the authority, the label only a fallback.
+        let mut task = pr("o/r#1");
+        task.labels = vec![crate::Label::new(Role::Worker.project_label())];
+        let mut ws = Workspace::from_task(task, now());
+        ws.role = Some(Role::Reviewer);
+        assert_eq!(ws.effective_role(), Some(Role::Reviewer));
     }
 
     /// A poll never clears a user-set role: the merge OR's the role, so a

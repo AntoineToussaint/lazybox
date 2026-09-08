@@ -26,7 +26,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use lazybox_core::{
-    Activity, ActivityKind, EpicRecord, Task, TaskId, TaskState, Workspace, WorkspaceKey,
+    Activity, ActivityKind, EpicRecord, Role, Task, TaskId, TaskState, Workspace, WorkspaceKey,
 };
 use lazybox_ipc::{
     AgentState, Blocker, BlockerKind, BlockerOwner, EdgeKind, EpicDelta, EpicEdge, EpicMember,
@@ -1558,6 +1558,92 @@ fn merged_successors(
     successors.into_iter().collect()
 }
 
+/// Assemble the spawn-time [`RolePromptCtx`](lazybox_core::prompts::RolePromptCtx)
+/// for a role-bearing workspace (#1523 Step 4): the epic it belongs to, the
+/// blockers already satisfied (Worker), the wave/merge order (Integrator), and
+/// the anchor + planning briefs (Planner). Returns `None` when the workspace
+/// carries no role; the resolved [`Role`] rides alongside the ctx so the caller
+/// can pick the matching preamble. A role set before the workspace joins an
+/// epic still yields `Some` with an epic-less ctx — the preamble degrades to a
+/// generic framing rather than being dropped.
+pub async fn role_prompt_ctx(
+    config: &ServerConfig,
+    workspace: &Workspace,
+) -> Option<(Role, lazybox_core::prompts::RolePromptCtx)> {
+    let role = workspace.effective_role()?;
+    let mut ctx = lazybox_core::prompts::RolePromptCtx::default();
+
+    // The Planner authors the graph; its briefs are the `carve` + `designissues`
+    // snippet bodies. Injected here because `core` (which shapes the preamble)
+    // cannot depend on `config` (which owns the snippet bodies).
+    if role == Role::Planner {
+        ctx.planner_briefs = ["carve", "designissues"]
+            .into_iter()
+            .filter_map(lazybox_config::Snippets::builtin_body)
+            .collect();
+    }
+
+    // Locate the workspace's epic. The snapshot's member list covers explicit
+    // assignments (`spawn_worker` / `E c`) *and* anchor-descendant workers; the
+    // record fallback catches an assigned member whose workspace did not surface
+    // in the snapshot (e.g. a task-less coordinator not yet loaded).
+    let records = list_all(config).unwrap_or_default();
+    let snapshots = all_snapshots(config).await;
+    let snapshot = snapshots
+        .iter()
+        .find(|s| s.members.iter().any(|m| m.key == workspace.key))
+        .or_else(|| {
+            records
+                .iter()
+                .find(|r| r.members.iter().any(|k| k == &workspace.key))
+                .and_then(|r| snapshots.iter().find(|s| s.key == r.key.as_str()))
+        });
+
+    let Some(snapshot) = snapshot else {
+        return Some((role, ctx));
+    };
+    ctx.epic_key = snapshot.key.clone();
+    ctx.epic_name = snapshot.name.clone();
+    ctx.anchor_ref = records
+        .iter()
+        .find(|r| r.key.as_str() == snapshot.key)
+        .and_then(|r| r.anchor.as_ref())
+        .map(|anchor| anchor.key.clone());
+
+    // Worker: the blockers already satisfied — this member's `blocked_by` edges
+    // whose target member is Done (`blocked_by` is every direct dependency,
+    // `blockers` only the *unsatisfied* ones, so "resolved" is the difference).
+    if role == Role::Worker
+        && let Some(me) = snapshot.members.iter().find(|m| m.key == workspace.key)
+    {
+        let done: HashSet<&WorkspaceKey> = snapshot
+            .members
+            .iter()
+            .filter(|m| m.status == EpicMemberStatus::Done)
+            .map(|m| &m.key)
+            .collect();
+        ctx.resolved_blockers = me
+            .blocked_by
+            .iter()
+            .filter(|b| done.contains(*b))
+            .map(|b| b.as_str().to_string())
+            .collect();
+    }
+
+    // Integrator: land members in wave order (the snapshot is pre-sorted by wave
+    // then key), skipping those already merged.
+    if role == Role::Integrator {
+        ctx.merge_order = snapshot
+            .members
+            .iter()
+            .filter(|m| m.status != EpicMemberStatus::Done)
+            .map(|m| m.key.as_str().to_string())
+            .collect();
+    }
+
+    Some((role, ctx))
+}
+
 // ── command handlers ────────────────────────────────────────────────────
 
 /// Record a declared blocker on `workspace` (the caller's own), then recompute
@@ -2959,5 +3045,115 @@ mod tests {
             "the epic StatusChange row must be merged on top: {:?}",
             after.activity
         );
+    }
+
+    /// Persist a workspace so `all_snapshots`/`load_workspaces` can read it.
+    fn save_ws(config: &ServerConfig, w: &Workspace) {
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: w.key.as_str().to_string(),
+                created_at: w.created_at,
+                workspace_json: Some(serde_json::to_string(w).unwrap()),
+            })
+            .unwrap();
+    }
+
+    /// An unroled workspace short-circuits before the expensive snapshot pass:
+    /// no role, no ctx (#1523).
+    #[tokio::test]
+    async fn role_prompt_ctx_none_without_a_role() {
+        let config = ServerConfig::in_memory();
+        assert!(role_prompt_ctx(&config, &ws("w")).await.is_none());
+    }
+
+    /// A Worker's ctx lists the blockers already satisfied — its direct deps
+    /// whose member is Done — and the rendered preamble names them (#1523).
+    #[tokio::test]
+    async fn worker_ctx_lists_resolved_blockers() {
+        let config = ServerConfig::in_memory();
+        // Dependency `a` is a merged PR → Done.
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Merged, CiStatus::Success);
+        // Worker `w` is blocked by a#pr and carries the Worker role.
+        let mut w = ws("w");
+        w.role = Some(Role::Worker);
+        let mut w_issue = task("github", "w#1");
+        w_issue.blocked_by = vec![task("github", "a#pr").id];
+        w.gh_issues = vec![w_issue];
+        save_ws(&config, &a);
+        save_ws(&config, &w);
+        let mut record = record_with(&["a", "w"]);
+        record.anchor = Some(task("github", "o/r#100").id);
+        persist(&config, &record).unwrap();
+
+        let (role, ctx) = role_prompt_ctx(&config, &w).await.unwrap();
+        assert_eq!(role, Role::Worker);
+        assert_eq!(ctx.epic_key, "e");
+        assert_eq!(ctx.epic_name, "Epic");
+        assert_eq!(ctx.anchor_ref.as_deref(), Some("o/r#100"));
+        assert_eq!(ctx.resolved_blockers, vec!["a".to_string()]);
+        // The satisfied blocker surfaces in the rendered preamble, tagged for
+        // the blackboard read.
+        let preamble = lazybox_core::prompts::role_preamble(role, &ctx);
+        assert!(preamble.contains('a'));
+        assert!(preamble.contains("epic:e"));
+    }
+
+    /// An Integrator's ctx is the wave-ordered merge plan of members not yet
+    /// landed — Done members drop out (#1523).
+    #[tokio::test]
+    async fn integrator_ctx_lists_unlanded_members_in_wave_order() {
+        let config = ServerConfig::in_memory();
+        // `a` merged (Done → excluded); `b` open, blocked by a (wave 1).
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Merged, CiStatus::Success);
+        let mut b = ws("b");
+        let mut b_issue = task("github", "b#1");
+        b_issue.blocked_by = vec![task("github", "a#pr").id];
+        b.gh_issues = vec![b_issue];
+        pr(&mut b, TaskState::Open, CiStatus::Pending);
+        // Integrator `i` — task-less explicit member, so it resolves Ready.
+        let mut integ = ws("i");
+        integ.role = Some(Role::Integrator);
+        save_ws(&config, &a);
+        save_ws(&config, &b);
+        save_ws(&config, &integ);
+        persist(&config, &record_with(&["a", "b", "i"])).unwrap();
+
+        let (role, ctx) = role_prompt_ctx(&config, &integ).await.unwrap();
+        assert_eq!(role, Role::Integrator);
+        assert!(
+            ctx.merge_order.contains(&"b".to_string()),
+            "an unlanded member is in the merge plan: {:?}",
+            ctx.merge_order
+        );
+        assert!(
+            !ctx.merge_order.contains(&"a".to_string()),
+            "a landed (Done) member drops out: {:?}",
+            ctx.merge_order
+        );
+        let preamble = lazybox_core::prompts::role_preamble(role, &ctx);
+        assert!(preamble.contains('b'));
+    }
+
+    /// A Planner's ctx carries the built-in planning briefs regardless of epic
+    /// membership, and the preamble teaches the machine-readable graph (#1523).
+    #[tokio::test]
+    async fn planner_ctx_carries_builtin_briefs() {
+        let config = ServerConfig::in_memory();
+        let mut p = ws("p");
+        p.role = Some(Role::Planner);
+
+        let (role, ctx) = role_prompt_ctx(&config, &p).await.unwrap();
+        assert_eq!(role, Role::Planner);
+        assert!(
+            !ctx.planner_briefs.is_empty(),
+            "carve/designissues bodies are injected server-side",
+        );
+        let preamble = lazybox_core::prompts::role_preamble(role, &ctx);
+        assert!(preamble.contains("--parent"));
+        assert!(preamble.contains("--blocked-by"));
+        assert!(preamble.contains("Blocked by:"));
     }
 }

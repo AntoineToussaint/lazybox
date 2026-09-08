@@ -1169,7 +1169,7 @@ fn cell_remote(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 /// accent badge — passive identity, packed at the front of the shared cluster
 /// (#813). Renders nothing when the workspace carries no role.
 fn cell_role_badge(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    let Some(role) = ctx.workspace.and_then(|w| w.role) else {
+    let Some(role) = ctx.workspace.and_then(|w| w.effective_role()) else {
         return Cell::empty();
     };
     let style = if ctx.is_cursor {
@@ -3309,6 +3309,26 @@ mod tests {
             "fixture starts role-less so the badge has nothing to render"
         );
         assert_eq!(cell_role_badge(&ctx).width(), 0);
+    }
+
+    /// With no persisted role, the badge adopts a `role:<label>` projection
+    /// carried on the primary task — a planner's `--label role:worker` shows
+    /// up in the sidebar without a round-trip through the daemon (#1523).
+    #[test]
+    fn cell_role_badge_adopts_label() {
+        let mut task = make_task("owner/repo#2", "child");
+        task.labels = vec![lazybox_core::Label::new(
+            lazybox_core::Role::Worker.project_label(),
+        )];
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(ws.role, None, "no persisted role — the label is the source");
+        assert_eq!(
+            cell_role_badge(&ctx).spans[0].content.as_ref(),
+            format!(" {} ", lazybox_core::Role::Worker.badge()),
+            "the badge adopts the role:worker label",
+        );
     }
 
     /// The dependency badge shows a count when the workspace declares

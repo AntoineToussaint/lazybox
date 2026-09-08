@@ -1304,7 +1304,7 @@ async fn handle_spawn_inner(
 ) -> Option<TerminalId> {
     let SpawnOptions {
         cwd,
-        initial_prompt,
+        mut initial_prompt,
         initial_snippet,
         autonomous,
         on_main,
@@ -1743,6 +1743,22 @@ async fn handle_spawn_inner(
     // still gates on the proxy being enabled/running — needs no change and
     // every safety property of the canary is preserved.
     let spawn_ws = load_workspace(config, &WorkspaceKey::new(session_key.as_str()));
+    // Role preamble (#1523): when the spawning workspace carries an epic role,
+    // frame the agent's brief with "who you are / what you own" before the task.
+    // Every *fresh* agent spawn with a prompt funnels through here — `w w`,
+    // `a c`, and the autonomous `@lazybox` path all inject via `initial_prompt`;
+    // the collapse-onto-live-agent paths above already returned, so a reused
+    // agent is never re-framed. `role_prompt_ctx` short-circuits (no snapshot
+    // work) for the common unroled spawn.
+    if matches!(kind, TerminalKind::Agent(_))
+        && initial_prompt.is_some()
+        && let Ok(ws) = spawn_ws.as_ref()
+        && let Some((role, role_ctx)) = crate::epics::role_prompt_ctx(config, ws).await
+    {
+        let preamble = lazybox_core::prompts::role_preamble(role, &role_ctx);
+        let prompt = initial_prompt.take().unwrap_or_default();
+        initial_prompt = Some(format!("{preamble}\n\n---\n\n{prompt}"));
+    }
     // A remote-box session runs on the box; the injected proxy base-URL
     // (`127.0.0.1:<port>`) points at *this* host's loopback, not the box —
     // so metering it would hand the box a dead URL, not just miss the count.

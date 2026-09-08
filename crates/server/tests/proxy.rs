@@ -62,11 +62,11 @@ async fn mock_upstream_capturing(body: &'static str) -> (String, Arc<Mutex<Strin
     (format!("http://{addr}"), seen)
 }
 
-fn recording_sink() -> (
-    Arc<Mutex<Vec<(String, String, AgentUsage)>>>,
-    proxy::UsageSink,
-) {
-    let captured: Arc<Mutex<Vec<(String, String, AgentUsage)>>> = Arc::new(Mutex::new(Vec::new()));
+/// `(agent_id, session, usage)` triples the sink observed, newest last.
+type Captured = Arc<Mutex<Vec<(String, String, AgentUsage)>>>;
+
+fn recording_sink() -> (Captured, proxy::UsageSink) {
+    let captured: Captured = Arc::new(Mutex::new(Vec::new()));
     let recorder = captured.clone();
     let sink: proxy::UsageSink = Arc::new(move |agent_id: &str, session: &str, usage| {
         recorder
@@ -102,7 +102,7 @@ async fn proxy_forwards_and_captures_usage() {
         data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":88}}\n\n\
         data: [DONE]\n\n";
 
-    let captured: Arc<Mutex<Vec<(String, String, AgentUsage)>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured: Captured = Arc::new(Mutex::new(Vec::new()));
     let recorder = captured.clone();
     let sink: proxy::UsageSink = Arc::new(move |agent_id: &str, session: &str, usage| {
         recorder
@@ -280,7 +280,7 @@ async fn proxy_returns_502_when_the_upstream_is_unreachable() {
 
 #[tokio::test]
 async fn proxy_rejects_a_pathless_request_without_metering() {
-    let captured: Arc<Mutex<Vec<(String, String, AgentUsage)>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured: Captured = Arc::new(Mutex::new(Vec::new()));
     let recorder = captured.clone();
     let sink: proxy::UsageSink = Arc::new(move |agent_id: &str, session: &str, usage| {
         recorder

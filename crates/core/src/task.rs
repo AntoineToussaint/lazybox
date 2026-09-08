@@ -83,7 +83,7 @@ pub fn is_working_claim_label_name(name: &str) -> bool {
 
 /// A unique identifier for a task, scoped by source.
 /// e.g. ("github", "owner/repo#123") or ("linear", "ENG-456")
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct TaskId {
     /// Which provider created this task (e.g. "github", "linear").

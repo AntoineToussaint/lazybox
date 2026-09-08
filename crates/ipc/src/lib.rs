@@ -389,6 +389,188 @@ impl AgentState {
     ];
 }
 
+// ── Epic status (#1517 / #1522) ─────────────────────────────────────────
+//
+// Derived, never stored: the daemon's `EpicResolver` recomputes these on
+// every relevant event and broadcasts them on the bus. They ride `Event`, so
+// they live here in `ipc` next to `AgentState`.
+
+/// Why a member of an epic cannot proceed. More than a graph edge: the one a
+/// human must act on (a decision, a credential) is *declared*, not inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum BlockerKind {
+    Dependency,
+    External,
+    Decision,
+    Credential,
+    Review,
+    MergeOrder,
+    Contract,
+    Cycle,
+    Other,
+}
+
+impl BlockerKind {
+    /// The `blocked:<kind>` label suffix / declared-marker keyword.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Dependency => "dependency",
+            Self::External => "external",
+            Self::Decision => "decision",
+            Self::Credential => "credential",
+            Self::Review => "review",
+            Self::MergeOrder => "mergeorder",
+            Self::Contract => "contract",
+            Self::Cycle => "cycle",
+            Self::Other => "other",
+        }
+    }
+
+    /// Parse a `blocked:<kind>` label suffix / declared keyword back to a
+    /// kind, defaulting to [`BlockerKind::Other`] for anything unrecognized.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "dependency" => Self::Dependency,
+            "external" => Self::External,
+            "decision" => Self::Decision,
+            "credential" => Self::Credential,
+            "review" => Self::Review,
+            "mergeorder" | "merge-order" => Self::MergeOrder,
+            "contract" => Self::Contract,
+            "cycle" => Self::Cycle,
+            _ => Self::Other,
+        }
+    }
+}
+
+/// Who must clear a blocker. `Operator` blockers are the ones that surface
+/// with a `!` and raise a stale-blocker notification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum BlockerOwner {
+    Operator,
+    Agent(lazybox_core::WorkspaceKey),
+    External(String),
+}
+
+/// One reason a member is blocked, with enough context to answer "on what, on
+/// whom, since when" without a model in the loop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct Blocker {
+    pub kind: BlockerKind,
+    /// Human-readable one-liner: `waiting on api#843 (open)`, `decision:
+    /// token expiry`, `needs STRIPE_KEY`.
+    pub reason: String,
+    pub owner: BlockerOwner,
+    /// Unix ms when this blocker first appeared. Stable across recomputes and
+    /// daemon restarts (kept in the resolver's latch memory, keyed by
+    /// `(member, kind, reason)`), so its age is trustworthy.
+    pub since: i64,
+    /// How many other members this blocker transitively holds (0 for a leaf).
+    pub holds: u32,
+}
+
+/// Derived status of one epic member. Precedence (first match wins): Done →
+/// Failed → Asking → InProgress → Mergeable → PrOpen → Claimed → Blocked →
+/// Ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum EpicMemberStatus {
+    /// At least one blocker is not Merged/Closed (or is external and unknown).
+    Blocked,
+    /// No open blockers, no agent session yet.
+    Ready,
+    /// A `working` claim exists but no agent session locally (another box).
+    Claimed,
+    /// Agent state Working.
+    InProgress,
+    /// Agent state InputNeeded / LimitReached / CreditExhausted.
+    Asking,
+    /// PR open; carries CI + review summary.
+    PrOpen {
+        ci_failing: bool,
+        changes_requested: bool,
+    },
+    /// PR merge-ready (green, no conflict, not blocked).
+    Mergeable,
+    /// Task state Merged or Closed.
+    Done,
+    /// Agent exited non-zero and no PR.
+    Failed,
+}
+
+/// One member of an epic, in wave order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct EpicMember {
+    pub key: lazybox_core::WorkspaceKey,
+    pub wave: u16,
+    pub status: EpicMemberStatus,
+    /// Blocking member workspace keys (the resolved graph edges).
+    pub blocked_by: Vec<lazybox_core::WorkspaceKey>,
+    /// Blockers that are tasks lazybox does not track as workspaces.
+    pub external_blockers: Vec<lazybox_core::TaskId>,
+    /// The *why* behind [`EpicMemberStatus::Blocked`] (and any declared
+    /// blockers even when another status wins).
+    pub blockers: Vec<Blocker>,
+}
+
+/// A full derived snapshot of an epic. Everything the "give me status"
+/// question needs, computed daemon-side.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct EpicSnapshot {
+    pub key: String,
+    pub name: String,
+    /// Members in wave order.
+    pub members: Vec<EpicMember>,
+    pub done: u32,
+    pub total: u32,
+    pub ready: u32,
+    pub blocked: u32,
+    pub asking: u32,
+    pub failing: u32,
+    /// Blockers whose owner is the operator (surface with a `!`).
+    pub blockers_needing_operator: u32,
+    pub cycle: bool,
+    /// Longest dependency path from any root to any leaf, as member keys.
+    pub critical_path: Vec<lazybox_core::WorkspaceKey>,
+    /// Unix ms the snapshot was computed.
+    pub computed_at: i64,
+}
+
+/// What changed between two epic snapshots. Rendered in the activity feed and
+/// replayed to a coordinator asking "what changed since I last looked".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum EpicDelta {
+    Unblocked {
+        key: lazybox_core::WorkspaceKey,
+        because: Vec<lazybox_core::WorkspaceKey>,
+    },
+    StatusChanged {
+        key: lazybox_core::WorkspaceKey,
+        from: EpicMemberStatus,
+        to: EpicMemberStatus,
+    },
+    BlockerAdded {
+        key: lazybox_core::WorkspaceKey,
+        blocker: Blocker,
+    },
+    BlockerCleared {
+        key: lazybox_core::WorkspaceKey,
+        kind: BlockerKind,
+        reason: String,
+    },
+    /// Every remaining member is blocked on an external task or a cycle.
+    Stalled {
+        reason: String,
+    },
+    Completed,
+}
+
 /// A normalized lifecycle hook fired by an agent, decoupled from the
 /// agent's wire JSON. Claude Code emits these via configured hooks
 /// (`Stop`, `Notification`, `PreToolUse`, …); lazybox injects a hook
@@ -1732,6 +1914,24 @@ pub enum Command {
     RestartAgentAndContinue {
         terminal_id: TerminalId,
     },
+    /// Create or replace an epic record (#1522). The daemon persists it under
+    /// `epic:<key>` and recomputes its derived status.
+    UpsertEpic {
+        record: lazybox_core::EpicRecord,
+    },
+    /// Add or remove one workspace as an explicit member of an epic (#1522).
+    /// `member: true` adds, `false` removes. Anchor-derived members are
+    /// unaffected — this only edits the explicit `members` list.
+    AssignEpic {
+        epic: String,
+        workspace: lazybox_core::WorkspaceKey,
+        member: bool,
+    },
+    /// Archive an epic (#1522): it stops deriving status and drops out of the
+    /// sidebar tier, but the record is retained.
+    ArchiveEpic {
+        epic: String,
+    },
 }
 
 impl Command {
@@ -2954,6 +3154,15 @@ pub enum Event {
     /// is ordinal-sensitive).
     MasteryLedger {
         counts: Vec<(String, ActionVia, u32)>,
+    },
+    /// Derived status of one epic recomputed by the daemon (#1522), with the
+    /// deltas since the previous snapshot for the activity feed. Pushed on any
+    /// relevant change (member state, blockers, membership). `delta` is empty
+    /// on the first snapshot of a session. Appended last (bincode is
+    /// ordinal-sensitive).
+    EpicStatus {
+        snapshot: EpicSnapshot,
+        delta: Vec<EpicDelta>,
     },
 }
 

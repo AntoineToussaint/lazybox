@@ -400,6 +400,32 @@ config, and writing the `epic:*` + status projection labels back to the
 tracker (§4j). The desktop protocol version stays at 4 — the desktop DTOs do
 not yet consume `EpicStatus`.
 
+**P2 shipped (#1523) — roles.** `Workspace.role: Option<Role>` is a
+serde-defaulted, OR-merge-safe field (`core/src/workspace.rs`);
+`effective_role()` lets the persisted field win and falls back to the
+`role:<planner|coordinator|worker|reviewer|integrator>` project label so a
+role set on the tracker is adopted when the field is unset. `E r` sets or
+clears it through a Choice modal + `SetWorkspaceRole` command; each role
+carries a sidebar badge (`✎ plan`, `◆ coord`, `⚙ worker`, `👁 review`,
+`⇅ integ`). A role-stamped spawn gets a **prompt preamble** injected ahead of
+its work prompt (`core/src/prompts.rs`, applied in `server/src/spawn_handler.rs`
+whenever the spawn resolves a role and the prompt is non-empty). `E p` / `E c`
+spawn a Planner / Coordinator on the cursor workspace, carrying the role
+*in-band* on the `Spawn` command: `SetWorkspaceRole` and `Spawn` both dispatch
+on the daemon's detached lane as independent concurrent tasks, so the preamble
+must not depend on the persist landing first — the in-band copy governs the
+framing while the separate command still persists the role for the badge and
+label projection. The MCP `spawn_worker` tool (`server/src/mcp.rs`) is
+Coordinator-only: it creates a workspace, assigns it to the caller's epic as a
+Worker, and spawns an agent on a brief, refusing off-role or past the epic's
+worker cap (`agents.max_epic_workers`, default 6). Labels are written on
+set/clear via `sync_role_label_target` (single `role:*` label converged, never
+wholesale-replaced). Roles are advisory except the `spawn_worker` gate — merge
+gating/ordering is P3 and automatic dispatch is P4. The epic-header
+`<epic>-coordinator` creation path is deferred to where client-side epic-row
+rendering lands (the TUI still ignores `Event::EpicStatus`), so the reachable
+`E c` target is the cursor workspace.
+
 **P3 delivery (#1524) shipped.** `MergeAfter` edges land on
 `Task.merge_after` (`Vec<TaskId>`), parsed from `Merge after: owner/repo#N`
 body markers and *implied* by every `Blocks` edge unless

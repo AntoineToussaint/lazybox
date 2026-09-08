@@ -236,6 +236,13 @@ pub enum PickFlow {
     HeaderContext {
         actions: Vec<Action>,
     },
+    /// `E r` orchestration-role picker (#1523). Rows are indexed: 0..5
+    /// are [`lazybox_core::Role::ALL`] in order, and the trailing row
+    /// (index 5, out of `ALL`'s bounds) clears the role. The pick becomes
+    /// a [`Command::SetWorkspaceRole`] on `workspace`.
+    SetRole {
+        workspace: Option<WorkspaceKey>,
+    },
     Runner,
     Plain,
 }
@@ -570,6 +577,24 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                 .map(|target| PickOutcome::MountHandoffComposer { target })
                 .unwrap_or(PickOutcome::NoOp)
         }
+        PickFlow::SetRole { workspace } => {
+            match (workspace, picks.first().and_then(P::as_index)) {
+                (Some(workspace), Some(idx)) => {
+                    // Rows 0..5 are `Role::ALL`; the trailing "none" row
+                    // (index 5) falls past `ALL`'s bounds → `None` → clear.
+                    let role = lazybox_core::Role::ALL.get(idx).copied();
+                    let notice = match role {
+                        Some(role) => format!("role set: {}", role.display_name()),
+                        None => "role cleared".to_string(),
+                    };
+                    PickOutcome::Commands {
+                        notice: Some(notice),
+                        commands: vec![Command::SetWorkspaceRole { workspace, role }],
+                    }
+                }
+                _ => PickOutcome::NoOp,
+            }
+        }
         PickFlow::ConvertSession { active } => {
             if !active {
                 return PickOutcome::NoOp;
@@ -881,6 +906,7 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                     on_main: false,
                     access: lazybox_ipc::AgentRunAccess::Default,
                     force_new: false,
+                    role: None,
                 };
                 let notice = format!(
                     "Provisioning worktree for {workspace_key} — opening in {} when ready…",

@@ -40,6 +40,13 @@ pub struct SpawnOptions {
     /// enabled (`agent.metering_proxy`) and running; ignored otherwise. The
     /// global `agent.meter_all` overrides this to route every spawn.
     pub meter: bool,
+    /// In-band orchestration role for the role preamble (#1523). When set,
+    /// `handle_spawn_inner` stamps it onto its freshly-loaded workspace copy
+    /// before computing the preamble, so the framing is deterministic even
+    /// though the parallel `SetWorkspaceRole` persist may not have landed
+    /// yet (both commands run as independent detached tasks with no ordering
+    /// guarantee). Governs the preamble only — never the persisted role.
+    pub role: Option<lazybox_core::Role>,
 }
 
 #[derive(Debug)]

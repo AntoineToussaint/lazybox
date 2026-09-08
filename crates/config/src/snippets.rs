@@ -1585,6 +1585,16 @@ impl Snippets {
         Self { by_key }
     }
 
+    /// The `dispatch_body` of a built-in snippet by key, or `None` when no
+    /// built-in ships under that key. The workspace-role preamble path
+    /// (#1523) uses this to fold the `carve` + `designissues` briefs into a
+    /// Planner's spawn prompt: `lazybox-core::prompts` shapes the preamble
+    /// but cannot depend on `lazybox-config`, so the server reads the brief
+    /// bodies here and injects them through `RolePromptCtx::planner_briefs`.
+    pub fn builtin_body(key: &str) -> Option<String> {
+        Self::builtin().by_key.get(key).map(Snippet::dispatch_body)
+    }
+
     /// Remove `key` from the global `<lazybox_home>/snippets.yaml` — the
     /// inverse of [`Self::upsert_global_snippet`]. A missing file or a
     /// missing key is a no-op success. Used by the #1312 "adopt built-in"
@@ -2840,6 +2850,22 @@ snippets:
                 "`carve` body should anchor on {anchor:?}",
             );
         }
+    }
+
+    /// `builtin_body` is the layering-safe read path the role preamble
+    /// (#1523) uses to fold the `carve` / `designissues` briefs into a
+    /// Planner's prompt from the server. It returns the same text as
+    /// `get(key).dispatch_body()` and `None` for an unknown key.
+    #[test]
+    fn builtin_body_reads_planner_briefs() {
+        let carve = Snippets::builtin_body("carve").expect("`carve` ships built-in");
+        assert!(carve.to_ascii_lowercase().contains("gh issue create"));
+        assert_eq!(
+            Snippets::builtin_body("carve"),
+            Snippets::builtin().get("carve").map(Snippet::dispatch_body),
+        );
+        assert!(Snippets::builtin_body("designissues").is_some());
+        assert!(Snippets::builtin_body("no-such-snippet").is_none());
     }
 
     /// `dod` ships as a provider-scoped GitHub workflow (#1434): a lightweight

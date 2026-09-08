@@ -2388,6 +2388,7 @@ impl<T: TerminalAdapter> Model<T> {
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
             force_new: false,
+            role: None,
         });
         if self.modal_stack.last() == Some(&Id::ErrorInbox) {
             self.pop_modal();
@@ -3444,6 +3445,41 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::ConvertSessionRole, modal);
     }
 
+    /// Mount the `E r` orchestration-role picker (#1523). Rows are the
+    /// five [`Role`]s in order — each shown as `<badge> <name>` — then a
+    /// trailing "none — clear role" row. Rows report their positional
+    /// [`ChoicePayload::Index`], which [`PickFlow::SetRole`] resolves
+    /// (0..5 → that role, index 5 → clear). Preselects the current role.
+    pub(super) fn mount_role_picker(
+        &mut self,
+        workspace: lazybox_core::WorkspaceKey,
+        current: Option<lazybox_core::Role>,
+    ) {
+        use crate::realm::components::choice::Choice;
+        use lazybox_core::Role;
+
+        self.set_modal_flow(ModalFlow::SetRole { workspace });
+
+        let mut rows: Vec<String> = Role::ALL
+            .iter()
+            .map(|role| format!("{} {}", role.badge(), role.display_name()))
+            .collect();
+        rows.push("none — clear role".to_string());
+
+        // Preselect the current role's row, else the trailing clear row.
+        let preselect = current
+            .and_then(|role| Role::ALL.iter().position(|r| *r == role))
+            .unwrap_or(Role::ALL.len());
+
+        // No `payload_for`: rows report their positional
+        // `ChoicePayload::Index`, which `PickFlow::SetRole` resolves.
+        let modal = Choice::single("Orchestration role for this workspace", rows)
+            .title("Set role")
+            .label(|l: &String| l.clone())
+            .select_index(preselect);
+        self.mount_modal(Id::RolePicker, modal);
+    }
+
     /// The name of the scratch project the Start sheet's Chat row
     /// creates on demand (#1502). Its key is `local-scratch`.
     pub(crate) const SCRATCH_PROJECT: &'static str = "scratch";
@@ -4003,6 +4039,12 @@ impl<T: TerminalAdapter> Model<T> {
             // The recreate retry re-provisions the same target; it is a
             // reuse-eligible replay, not a deliberate second agent.
             force_new: _,
+            // The in-band role (#1523) only frames the first attempt's
+            // preamble; the recreate replay routes through SpawnFallback,
+            // which has no role channel. By retry time the paired
+            // SetWorkspaceRole has persisted, so the daemon's
+            // effective_role() still frames the preamble — no loss here.
+            role: _,
         }) = self.last_spawn.clone()
         else {
             self.flash_hint("nothing to recreate");

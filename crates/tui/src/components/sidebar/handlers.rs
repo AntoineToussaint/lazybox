@@ -142,6 +142,7 @@ impl Sidebar {
                         on_main: false,
                         // Sidebar `w w` continues a live conversation.
                         force_new: false,
+                        role: None,
                     });
                 }
                 PaneOutcome::Consumed
@@ -170,6 +171,7 @@ impl Sidebar {
                             initial_snippet: None,
                             on_main: false,
                             force_new: false,
+                            role: None,
                         });
                     }
                     _ => {

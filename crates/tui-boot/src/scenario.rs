@@ -517,6 +517,7 @@ impl Driver {
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
             force_new: true,
+            role: None,
         };
         lazybox_server::dispatch_command(&config, &self.sink, cmd).await;
 
@@ -1127,6 +1128,7 @@ mod tests {
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
                 force_new: true,
+                role: None,
             },
         )
         .await;
@@ -1223,6 +1225,7 @@ mod tests {
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
                 force_new: true,
+                role: None,
             },
         )
         .await;
@@ -1324,6 +1327,7 @@ mod tests {
                 model_alias: None,
                 access: lazybox_ipc::AgentRunAccess::Default,
                 force_new: true,
+                role: None,
             },
         )
         .await;

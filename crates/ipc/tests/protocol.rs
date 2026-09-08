@@ -107,6 +107,7 @@ fn all_commands() -> Vec<Command> {
             model_alias: Some("L".into()),
             access: lazybox_ipc::AgentRunAccess::ReadOnly,
             force_new: true,
+            role: Some(lazybox_core::Role::Planner),
         },
         Command::Spawn {
             session_key: key.clone(),
@@ -120,6 +121,7 @@ fn all_commands() -> Vec<Command> {
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
             force_new: false,
+            role: None,
         },
         Command::Spawn {
             session_key: key.clone(),
@@ -138,6 +140,7 @@ fn all_commands() -> Vec<Command> {
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
             force_new: false,
+            role: Some(lazybox_core::Role::Coordinator),
         },
         Command::CancelSpawn {
             session_key: key.clone(),
@@ -560,6 +563,10 @@ fn all_commands() -> Vec<Command> {
         },
         Command::ArchiveEpic {
             epic: "auth-refactor".into(),
+        },
+        Command::SetWorkspaceRole {
+            workspace: lazybox_core::WorkspaceKey("github:o/r#1".into()),
+            role: Some(lazybox_core::Role::Coordinator),
         },
         Command::Shutdown,
     ]
@@ -1424,6 +1431,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::ArchiveEpic { .. } => "ArchiveEpic",
         Command::RecordAction { .. } => "RecordAction",
         Command::RestartAgentAndContinue { .. } => "RestartAgentAndContinue",
+        Command::SetWorkspaceRole { .. } => "SetWorkspaceRole",
     }
 }
 
@@ -1547,7 +1555,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        96,
+        97,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(

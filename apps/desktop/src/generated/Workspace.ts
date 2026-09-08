@@ -4,6 +4,7 @@ import type { AutomationPolicies } from "./AutomationPolicies";
 import type { CleanupPrompt } from "./CleanupPrompt";
 import type { HopperMeta } from "./HopperMeta";
 import type { ProjectKey } from "./ProjectKey";
+import type { Role } from "./Role";
 import type { Session } from "./Session";
 import type { SnippetDeliveryLog } from "./SnippetDeliveryLog";
 import type { SnoozeWake } from "./SnoozeWake";
@@ -190,4 +191,14 @@ cleanup_prompt: CleanupPrompt,
  * sidebar's remote indicator. Serde-defaulted so pre-existing records
  * read back as local.
  */
-remote: string | null, created_at: string, last_viewed_at: string | null, };
+remote: string | null,
+/**
+ * Orchestration role this workspace plays in a cross-repo epic
+ * (`docs/orchestration-scoping.md` §6). User-set via `E r`; drives a
+ * sidebar badge, a spawn-time prompt preamble, and a `role:<role>`
+ * upstream label projection. Purely a lazybox concept — never
+ * provider-derived, so a poll must never clear it (see the OR-merge in
+ * [`Workspace::absorb_user_state_from`]). Serde-defaulted so pre-role
+ * records read back as unroled.
+ */
+role: Role | null, created_at: string, last_viewed_at: string | null, };

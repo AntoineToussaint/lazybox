@@ -1120,6 +1120,18 @@ pub enum Command {
         /// so they keep collapsing onto a live agent.
         #[serde(default)]
         force_new: bool,
+        /// In-band orchestration role for the role-preamble (#1523). When
+        /// set, the daemon stamps this role onto its freshly-loaded
+        /// workspace copy *before* computing the spawn's role preamble, so
+        /// the framing is deterministic regardless of when the parallel
+        /// `SetWorkspaceRole` persist lands. The `E p` / `E c` role spawns
+        /// set it; every other spawn leaves it `None` and the preamble
+        /// falls back to the workspace's persisted `effective_role()`.
+        /// Persistence + the sidebar badge + label projection still come
+        /// from the separate `SetWorkspaceRole` command — this field only
+        /// governs the preamble, never the stored role.
+        #[serde(default)]
+        role: Option<lazybox_core::Role>,
     },
     /// Cancel an in-flight `Spawn` for this workspace that is still
     /// provisioning its worktree (cold clone / fetch). The daemon
@@ -2005,6 +2017,15 @@ pub enum Command {
     /// sidebar tier, but the record is retained.
     ArchiveEpic {
         epic: String,
+    },
+    /// Set or clear a workspace's orchestration role (#1523). `role: None`
+    /// clears it. The daemon persists the role on the workspace row and
+    /// projects a `role:<role>` upstream label (added on set, removed on
+    /// clear) so a role is visible to other tools and survives a restart.
+    /// Appended last (bincode is ordinal-sensitive).
+    SetWorkspaceRole {
+        workspace: lazybox_core::WorkspaceKey,
+        role: Option<lazybox_core::Role>,
     },
 }
 

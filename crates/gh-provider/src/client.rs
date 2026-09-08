@@ -5690,6 +5690,97 @@ impl GhClient {
         Ok(())
     }
 
+    /// Converge the single `role:<role>` orchestration label (#1523) on a
+    /// task's issue or PR through the add/remove path — never a wholesale
+    /// replace — so every other label (working claims, `working`, user labels)
+    /// is left untouched. `desired` names the role label to hold
+    /// (e.g. `role:worker`); `None` clears every `role:*` label.
+    ///
+    /// The label *definition* is created in the repo on demand when attaching.
+    /// Unlike a per-lease working claim it is **detached, not deleted**, on
+    /// clear or rebadge: roles are a small fixed vocabulary, so the definition
+    /// is reused rather than churned. Best effort — the caller treats a failure
+    /// as non-fatal because the persisted `Workspace.role` is the source of
+    /// truth and this projection is only a fallback/visibility aid.
+    pub async fn sync_role_label_target(
+        &self,
+        task_id: &lazybox_core::TaskId,
+        repo: &str,
+        desired: Option<&str>,
+    ) -> Result<(), GhError> {
+        let (owner, name, number) = github_issue_target(task_id, repo)?;
+        let handler = self.inner.issues(owner, name);
+        let _permit = self.acquire_rest("list role labels").await?;
+        let mut page = handler
+            .list_labels_for_issue(number)
+            .per_page(100)
+            .send()
+            .await
+            .map_err(GhError::Api)?;
+        let mut attached = Vec::new();
+        loop {
+            attached.extend(page.items.iter().map(|label| label.name.clone()));
+            if page.next.is_none() {
+                break;
+            }
+            let _permit = self.acquire_rest("list role labels next page").await?;
+            page = match self
+                .inner
+                .get_page::<octocrab::models::Label>(&page.next)
+                .await
+                .map_err(GhError::Api)?
+            {
+                Some(next) => next,
+                None => break,
+            };
+        }
+        let existing: Vec<String> = attached
+            .into_iter()
+            .filter(|name| name.starts_with(lazybox_core::ROLE_LABEL_PREFIX))
+            .collect();
+
+        if let Some(desired) = desired {
+            if !existing.iter().any(|name| name == desired) {
+                // Create the definition if the repo does not have it yet, then
+                // attach. A 422 means it already exists — harmless here.
+                let _permit = self.acquire_rest("create role label").await?;
+                match handler
+                    .create_label(desired, "5319e7", "lazybox orchestration role (#1523).")
+                    .await
+                {
+                    Ok(_) => {}
+                    Err(error) if octocrab_error_status(&error) == Some(422) => {}
+                    Err(error) => return Err(GhError::Api(error)),
+                }
+                let _permit = self.acquire_rest("add role label").await?;
+                handler
+                    .add_labels(number, &[desired.to_string()])
+                    .await
+                    .map_err(GhError::Api)?;
+            }
+            // Detach any other role:* label (a rebadge). A 404 means it is
+            // already gone — treat as success.
+            for previous in existing.iter().filter(|name| name.as_str() != desired) {
+                let _permit = self.acquire_rest("remove role label").await?;
+                if let Err(error) = handler.remove_label(number, previous).await
+                    && octocrab_error_status(&error) != Some(404)
+                {
+                    return Err(GhError::Api(error));
+                }
+            }
+        } else {
+            for previous in &existing {
+                let _permit = self.acquire_rest("remove role label").await?;
+                if let Err(error) = handler.remove_label(number, previous).await
+                    && octocrab_error_status(&error) != Some(404)
+                {
+                    return Err(GhError::Api(error));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Remove exact expired qualified labels without interpreting or touching
     /// the legacy `working` label or any still-live owner. Deletion happens at
     /// the repository level — an expired lease's label definition is unique to
@@ -6201,6 +6292,43 @@ fn working_claim_target<'a>(
     if task_repo != repo {
         return Err(GhError::Graphql(format!(
             "working claim: task key repository `{task_repo}` does not match `{repo}`"
+        )));
+    }
+    Ok((owner, name, number))
+}
+
+/// Resolve a GitHub task to its `(owner, repo, issue_number)` for a
+/// label-mutation route. The generic sibling of [`working_claim_target`]
+/// (same parse, provider-neutral error text) used by the role-label
+/// projection (#1523).
+fn github_issue_target<'a>(
+    task_id: &lazybox_core::TaskId,
+    repo: &'a str,
+) -> Result<(&'a str, &'a str, u64), GhError> {
+    if task_id.source != lazybox_core::GITHUB_SOURCE {
+        return Err(GhError::Graphql(format!(
+            "github target: task source {:?} is not GitHub",
+            task_id.source
+        )));
+    }
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or_else(|| GhError::Graphql(format!("github target: invalid repository `{repo}`")))?;
+    let (task_repo, number) = task_id
+        .key
+        .rsplit_once('#')
+        .and_then(|(task_repo, number)| {
+            number.parse::<u64>().ok().map(|number| (task_repo, number))
+        })
+        .ok_or_else(|| {
+            GhError::Graphql(format!(
+                "github target: cannot parse issue number from `{}`",
+                task_id.key
+            ))
+        })?;
+    if task_repo != repo {
+        return Err(GhError::Graphql(format!(
+            "github target: task key repository `{task_repo}` does not match `{repo}`"
         )));
     }
     Ok((owner, name, number))

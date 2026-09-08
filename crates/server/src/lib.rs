@@ -1148,6 +1148,7 @@ impl Server {
                         lazybox_ipc::Command::UpsertEpic { .. } => "UpsertEpic",
                         lazybox_ipc::Command::AssignEpic { .. } => "AssignEpic",
                         lazybox_ipc::Command::ArchiveEpic { .. } => "ArchiveEpic",
+                        lazybox_ipc::Command::SetWorkspaceRole { .. } => "SetWorkspaceRole",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` and `RecordComposingBuffer` fire on every
@@ -2439,6 +2440,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::ArchiveEpic { epic } => {
             epics::archive(config, &epic).await;
+        }
+        lazybox_ipc::Command::SetWorkspaceRole { workspace, role } => {
+            workspace::set_role(config, &workspace, role).await;
         }
         lazybox_ipc::Command::Shutdown => {
             unreachable!("Shutdown is loop control, intercepted by the serve loop")

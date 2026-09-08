@@ -877,6 +877,78 @@ pub async fn set_metered(config: &ServerConfig, key: &WorkspaceKey, enabled: boo
     commit_upsert_offloaded_reported(config, key, workspace, "set metering preference").await;
 }
 
+/// Persist the workspace's orchestration role (#1523). Mirrors
+/// [`set_metered`]: load, set the field, commit (persists + broadcasts
+/// `WorkspaceUpserted` so the sidebar role badge refreshes). `role: None`
+/// clears it. Also projects a `role:<role>` upstream label so the role is
+/// visible to other tools and survives a rebuild-from-scratch — see
+/// [`project_role_label`], called after the persist so a failed label write
+/// never blocks the local state change.
+pub async fn set_role(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    role: Option<lazybox_core::Role>,
+) {
+    let primary = {
+        let _ws_guard = config.lock_workspace(key.as_str()).await;
+        let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+            return;
+        };
+        workspace.role = role;
+        // Snapshot the primary task (id + labels) under the lock so the
+        // label projection below runs without holding it.
+        let primary = workspace.primary_task().cloned();
+        commit_upsert_offloaded_reported(config, key, workspace, "set workspace role").await;
+        primary
+    };
+    // Project the role as an upstream `role:<role>` label (best effort;
+    // #1523 Step 7). Only when there's a primary task to carry it.
+    if let Some(task) = primary {
+        project_role_label(config, &task, role).await;
+    }
+}
+
+/// Best-effort upstream `role:<role>` label projection for a workspace's
+/// primary task (#1523 Step 7). `role: None` clears every `role:*` label.
+///
+/// This is a visibility/fallback aid, never the source of truth — the
+/// persisted `Workspace.role` always wins — so every failure path here only
+/// logs and returns: a workspace with no GitHub task (a local Coordinator is
+/// the common case), a non-GitHub task, an unreachable client, or a rejected
+/// mutation must not block the local role change that already committed.
+async fn project_role_label(
+    config: &ServerConfig,
+    task: &lazybox_core::Task,
+    role: Option<lazybox_core::Role>,
+) {
+    // Only GitHub tasks carry an upstream label. Local/Coordinator workspaces
+    // and non-GitHub providers simply hold the role in the persisted field.
+    let Some(repo) = task.repo.as_deref() else {
+        return;
+    };
+    if task.id.source != lazybox_core::GITHUB_SOURCE {
+        return;
+    }
+    let desired = role.map(|role| role.project_label());
+    let client = match crate::polling::resolve_gh_client_result(config).await {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::warn!(%repo, %error, "project_role_label: github client unavailable");
+            return;
+        }
+    };
+    let mutation = client.sync_role_label_target(&task.id, repo, desired.as_deref());
+    match tokio::time::timeout(std::time::Duration::from_secs(20), mutation).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%repo, error = %error, "project_role_label: label sync failed");
+        }
+        Err(_) => {
+            tracing::warn!(%repo, "project_role_label: label sync timed out after 20s");
+        }
+    }
+}
+
 /// Persist the workspace's per-session auto-fix arm for one
 /// [`lazybox_core::AutoFixKind`] (issue #363). Mirrors
 /// [`set_auto_merge_on_green`]: load, set the policy, commit (persists +

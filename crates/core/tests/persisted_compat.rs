@@ -203,6 +203,9 @@ fn maximal_workspace() -> Workspace {
         lazybox_core::SnippetDeliveryLog::from_recent(["rev".into(), "fix-ci".into()]);
     ws.cleanup_prompt = CleanupPrompt::Declined;
     ws.remote = Some("obin".into());
+    // Schema v11: orchestration role rides the maximal fixture so its wire
+    // shape (kebab-case variant) is pinned.
+    ws.role = Some(lazybox_core::Role::Coordinator);
     ws.last_viewed_at = Some(at(13, 0));
 
     ws.sessions = vec![

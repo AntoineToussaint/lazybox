@@ -2006,6 +2006,15 @@ pub enum Command {
     ArchiveEpic {
         epic: String,
     },
+    /// Set or clear a workspace's orchestration role (#1523). `role: None`
+    /// clears it. The daemon persists the role on the workspace row and
+    /// projects a `role:<role>` upstream label (added on set, removed on
+    /// clear) so a role is visible to other tools and survives a restart.
+    /// Appended last (bincode is ordinal-sensitive).
+    SetWorkspaceRole {
+        workspace: lazybox_core::WorkspaceKey,
+        role: Option<lazybox_core::Role>,
+    },
 }
 
 impl Command {

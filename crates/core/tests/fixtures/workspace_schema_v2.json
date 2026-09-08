@@ -1,5 +1,5 @@
 {
-  "schema": 10,
+  "schema": 11,
   "key": "github-acme-widget-7",
   "project_key": "github-acme-widget",
   "local": true,
@@ -439,6 +439,7 @@
   },
   "cleanup_prompt": "declined",
   "remote": "obin",
+  "role": "coordinator",
   "created_at": "2026-03-14T08:15:00Z",
   "last_viewed_at": "2026-03-14T13:00:00Z"
 }

@@ -727,7 +727,7 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey, force
             let _ = config.bus.send(Event::PrMergeFailed {
                 workspace_key: workspace_key.clone(),
                 pr_label: label,
-                reason: format!("held: must merge after {names}"),
+                reason: format!("{}{names}", lazybox_ipc::MERGE_HELD_REASON_PREFIX),
                 conflict: false,
             });
             return;

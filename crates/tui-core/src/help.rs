@@ -261,7 +261,10 @@ pub fn search(catalog: &[CatalogEntry], query: &str) -> Vec<usize> {
             }
         }
     }
-    ranked.sort_by_key(|&(rank, idx)| (rank, idx));
+    // Within a rank bucket, a shorter label is the tighter match — for
+    // "merge", the two-word "merge PR" outranks "merge order" — so break
+    // ties on label length before falling back to catalog order.
+    ranked.sort_by_key(|&(rank, idx)| (rank, catalog[idx].label.chars().count(), idx));
     ranked.into_iter().map(|(_, idx)| idx).collect()
 }
 

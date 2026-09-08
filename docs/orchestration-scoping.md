@@ -400,6 +400,26 @@ config, and writing the `epic:*` + status projection labels back to the
 tracker (§4j). The desktop protocol version stays at 4 — the desktop DTOs do
 not yet consume `EpicStatus`.
 
+**P3 delivery (#1524) shipped.** `MergeAfter` edges land on
+`Task.merge_after` (`Vec<TaskId>`), parsed from `Merge after: owner/repo#N`
+body markers and *implied* by every `Blocks` edge unless
+`EpicRecord.implied_merge_after` (default true) opts out — so the common case
+("a blocks b" ⇒ b lands after a) needs no extra marker. The `EpicResolver`
+topologically orders the epic's PRs and marks each one that is mergeable but
+sits behind an unmerged predecessor as **held**; the overview pane and the new
+`E m` merge-order modal render that order with held rows flagged. Merge-on-green
+respects the hold — an armed workspace whose PR is ready but held is not merged
+until its predecessor lands (`epics::held_by`, checked in `merge_pr_task`) —
+and a manual `g m` on a held PR surfaces a force-confirm (`Y` merges out of
+order, sending `Command::MergePr { force: true }`); the daemon signals the
+refusal with the shared `MERGE_HELD_REASON_PREFIX` sentinel on
+`Event::PrMergeFailed`'s `reason` so the client can offer the override without a
+new wire field. `E g` opens the full-screen DAG (waves as columns, `j/k`·`h/l`
+nav, `Enter` jumps, `Esc` closes) over a pure `layout()` in tui-core
+(`epic_graph.rs`) so the layering stays testable and ratatui-free. Wire
+additions (`Task.merge_after`, held merge status, `Command::MergePr { force }`)
+bump the desktop contract; the sentinel const is not a schema change.
+
 ## 7. Open questions
 
 1. **Epic anchor on GitHub without a parent issue** — require one (the

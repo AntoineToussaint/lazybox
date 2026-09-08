@@ -2991,6 +2991,8 @@ pub(super) fn action_from_kind(
         ActionKind::JumpToLimited => Action::JumpToLimited,
         ActionKind::JumpToUnread => Action::JumpToUnread,
         ActionKind::JumpToBlocked => Action::JumpToBlocked,
+        ActionKind::EpicMergeOrder => Action::EpicMergeOrder,
+        ActionKind::EpicGraph => Action::EpicGraph,
         ActionKind::JumpPrevGroup => Action::JumpPrevGroup,
         ActionKind::JumpNextGroup => Action::JumpNextGroup,
         ActionKind::ResumeRateLimited => Action::ResumeRateLimited,

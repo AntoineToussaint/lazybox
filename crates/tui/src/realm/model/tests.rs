@@ -8498,6 +8498,7 @@ mod stale_input_tests {
                 | Id::ImportCheckoutConfirm
                 | Id::ActionConfirm
                 | Id::ConflictResolve
+                | Id::MergeHeldConfirm
                 | Id::ErrorInboxClearConfirm
                 | Id::BroadcastConfirm
                 | Id::BulkSpawnConfirm
@@ -8565,6 +8566,12 @@ mod stale_input_tests {
                 | Id::WorktreeProgress
                 | Id::DescriptionModal
                 | Id::DiffReview
+                // Epic readouts (#1524): read-only / keyboard-navigated
+                // surfaces whose one immediate key (`Enter`) is a reversible
+                // workspace jump — but classified drop alongside the other
+                // read-only overlays; a stale Enter needn't jump.
+                | Id::MergeOrder
+                | Id::EpicGraph
                 | Id::PrChat => false,
             }
         };
@@ -8619,6 +8626,7 @@ mod stale_input_tests {
             Id::ImportCheckoutConfirm,
             Id::ActionConfirm,
             Id::ConflictResolve,
+            Id::MergeHeldConfirm,
             Id::SnippetPicker,
             Id::SkillPicker,
             Id::SyncStatus,
@@ -8647,6 +8655,8 @@ mod stale_input_tests {
             Id::IssueBrowser,
             Id::DiffReview,
             Id::PrChat,
+            Id::MergeOrder,
+            Id::EpicGraph,
         ] {
             assert_eq!(
                 id.retains_stale_keys(),
@@ -14182,6 +14192,109 @@ mod merge_focus_follow_tests {
                 .as_ref()
                 .is_some_and(|n| n.message.contains("merge failed")),
             "the persistent error still surfaces",
+        );
+    }
+
+    /// Issue #1524: a merge the daemon refused because the PR is held behind
+    /// unmerged merge-after predecessors is a decision, not a dead end — it
+    /// opens the out-of-order override confirm (naming the predecessors),
+    /// not a red error banner, and accepting re-sends `MergePr { force }`.
+    #[test]
+    fn pr_merge_failed_held_offers_force_override() {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#2", true, Duration::hours(1));
+        let key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+
+        m.handle_daemon_event(IpcEvent::PrMergeFailed {
+            workspace_key: key.clone(),
+            pr_label: "owner/repo#2".into(),
+            reason: format!("{}owner/repo#1", lazybox_ipc::MERGE_HELD_REASON_PREFIX),
+            conflict: false,
+        });
+
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::MergeHeldConfirm),
+            "a held merge offers the override confirm, not a dead-end error",
+        );
+        assert!(
+            m.status.notice.is_none(),
+            "no red error banner when we can offer the override",
+        );
+        assert!(
+            matches!(&m.modal_flow, Some(ModalFlow::MergeHeldConfirm { workspace }) if *workspace == key),
+        );
+
+        // Accepting re-sends the merge with the hold overridden.
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::MergePr { workspace_key, force: true } if *workspace_key == key
+            )),
+            "confirming forces the out-of-order merge: {cmds:?}",
+        );
+    }
+
+    /// Issue #1524: declining the held-merge override leaves the hold in
+    /// place — no forced merge is sent.
+    #[test]
+    fn declining_held_merge_leaves_the_hold() {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#2", true, Duration::hours(1));
+        let key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+
+        m.handle_daemon_event(IpcEvent::PrMergeFailed {
+            workspace_key: key,
+            pr_label: "owner/repo#2".into(),
+            reason: format!("{}owner/repo#1", lazybox_ipc::MERGE_HELD_REASON_PREFIX),
+            conflict: false,
+        });
+        assert_eq!(m.top_modal(), Some(&Id::MergeHeldConfirm));
+
+        let cmds = m.handle_confirmed(false);
+        assert!(
+            !cmds.iter().any(|c| matches!(c, IpcCommand::MergePr { .. })),
+            "declining sends no forced merge: {cmds:?}",
+        );
+    }
+
+    /// Issue #1524 (mirrors #1055): the held-override confirm is an async
+    /// `PrMergeFailed` reply, so it must not preempt a modal the user
+    /// already has open — the offer is dropped with a `g m` hint.
+    #[test]
+    fn pr_merge_failed_held_does_not_preempt_an_open_modal() {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#2", true, Duration::hours(1));
+        let key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+
+        m.modal_stack.push(Id::SnippetPicker);
+
+        m.handle_daemon_event(IpcEvent::PrMergeFailed {
+            workspace_key: key,
+            pr_label: "owner/repo#2".into(),
+            reason: format!("{}owner/repo#1", lazybox_ipc::MERGE_HELD_REASON_PREFIX),
+            conflict: false,
+        });
+
+        assert_eq!(
+            m.top_modal(),
+            Some(&Id::SnippetPicker),
+            "the open modal wins — the override confirm must not stack over it",
+        );
+        assert!(
+            !m.modal_stack.contains(&Id::MergeHeldConfirm),
+            "no override confirm was mounted under the picker",
+        );
+        assert!(
+            m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.message.contains("g m")),
+            "a hint points at re-triggering the override",
         );
     }
 

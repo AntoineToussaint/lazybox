@@ -2286,6 +2286,12 @@ impl<T: TerminalAdapter> Model<T> {
                     self.flash_hint("no blocked tasks");
                 }
             }
+            Action::EpicMergeOrder => {
+                self.mount_merge_order();
+            }
+            Action::EpicGraph => {
+                self.mount_epic_graph();
+            }
             Action::JumpPrevGroup | Action::JumpNextGroup => {
                 if self
                     .sidebar

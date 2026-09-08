@@ -2153,6 +2153,16 @@ pub mod stats {
     pub const COST_MICROS: &str = "cost_micros";
 }
 
+/// Sentinel prefix on [`Event::PrMergeFailed`]'s `reason` marking the one
+/// merge refusal a manual `g m` can override: the PR is merge-ready but held
+/// behind unmerged merge-after predecessors (#1524). Unlike GitHub's
+/// free-form conflict/protection text — which earned the structured
+/// `conflict` flag because it can't be pattern-matched — this string is
+/// authored by the daemon, so both sides agree on it here and the client
+/// prefix-matches it to offer the force-confirm. The predecessors' short
+/// keys follow the prefix.
+pub const MERGE_HELD_REASON_PREFIX: &str = "held: must merge after ";
+
 /// Connection → TUI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]

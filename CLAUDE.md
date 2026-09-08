@@ -284,7 +284,12 @@ agent use `]]` then `` ` ``), `!` jump to agent-asking workspace,
 `Shift-F` jump to failing CI, `E j` jump to the next blocked
 workspace (the `E` epic leader — one that declares a `Blocked on:`
 reason or carries a dependency edge; declared blockers first, then
-edge-blocked rows, wrapping; #1521), `Shift-P` cycle
+edge-blocked rows, wrapping; #1521), `E m` merge order (the
+topological PR landing order across the epic from `MergeAfter` edges,
+each held PR — mergeable but behind an unmerged predecessor — flagged;
+#1524), `E g` graph view (the full-screen dependency DAG, waves as
+columns; `j/k`·`h/l` navigate, `Enter` jumps to the workspace, `Esc`
+closes; #1524), `Shift-P` cycle
 the activity pane full → summary (a slim one-line count of new activity /
 failing CI) → hidden → full, remembered per workspace with a
 `ui.activity_pane_default` starting mode (auto-hidden when the workspace

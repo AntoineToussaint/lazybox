@@ -250,6 +250,8 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | Chord | Action |
 | --- | --- |
 | `E j` | next blocked |
+| `E m` | merge order |
+| `E g` | graph view |
 
 ## Mouse
 

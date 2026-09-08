@@ -1772,6 +1772,19 @@ pub async fn dispatch_command(
             // mastery view on connect. Kept before AutoFixPolicyConfig so
             // that stays the end-of-replay marker.
             let _ = tx.send(Event::MasteryLedger { counts: mastery });
+            // Epic snapshots (#1524): replay every live epic's derived
+            // status so the client can seed its snapshot cache on connect
+            // (merge-order / DAG readouts read from it). `delta` is empty
+            // so this seeds state without spurious activity rows. Cheap —
+            // `all_snapshots` returns fast when no epic records exist. Kept
+            // before AutoFixPolicyConfig so that stays the end-of-replay
+            // marker.
+            for snapshot in crate::epics::all_snapshots(config).await {
+                let _ = tx.send(Event::EpicStatus {
+                    snapshot,
+                    delta: Vec::new(),
+                });
+            }
             // Keep the auto-fix policy as the last post-subscribe push so
             // existing consumers can use it as the end-of-replay marker.
             let _ = tx.send(Event::AutoFixPolicyConfig {

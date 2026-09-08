@@ -1484,6 +1484,20 @@ showing keybinding search only",
                     self.redraw = true;
                 }
             }
+            Some(Id::MergeHeldConfirm) => {
+                // Merge-after-hold override (#1524). Yes → re-send the merge
+                // with `force: true` to land it out of order. No / Esc →
+                // drop the stash, leaving the hold in place.
+                if let Some(ModalFlow::MergeHeldConfirm { workspace }) = self.modal_flow.take()
+                    && yes
+                {
+                    cmds.push(IpcCommand::MergePr {
+                        workspace_key: workspace,
+                        force: true,
+                    });
+                    self.redraw = true;
+                }
+            }
             Some(Id::EditorRemoveConfirm) => {
                 if let Some(ModalFlow::EditorRemoveConfirm { id }) = self.modal_flow.take()
                     && yes

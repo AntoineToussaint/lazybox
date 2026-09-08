@@ -1234,7 +1234,7 @@ async fn preserve_stuck_worktree(
         },
     );
     let backup = mgr
-        .preserve_worktree_aside(&bare_path, &preserve_path, &label)
+        .preserve_worktree_aside(&bare_path, &preserve_path, &label, &Utc::now().to_rfc3339())
         .await?;
     if let Some(backup) = &backup {
         tracing::info!(
@@ -1305,6 +1305,101 @@ pub async fn handle_recreate_worktree(
     .await;
 }
 
+/// Tell the client an adopt request was refused, naming why. Adoption is
+/// a deliberate user action, so a refusal must be visible rather than a
+/// silent no-op that leaves the spawn hanging.
+fn refuse_adoption(config: &ServerConfig, reason: String) {
+    let _ = config.bus.send(Event::provider_error(
+        "spawn:adopt",
+        reason,
+        lazybox_ipc::ProviderErrorKind::Permanent,
+    ));
+}
+
+/// The branch this workspace may adopt from its own checkout, together
+/// with that checkout's path — or the reason adoption is refused.
+///
+/// The automatic spawn path gets these guards from
+/// [`lazybox_git_ops::DriftPolicy::AdoptUnlessBase`]; the explicit `a`
+/// press routes around `ensure_worktree_branch` entirely, so it has to
+/// apply them itself or it becomes a one-keypress path to an outcome the
+/// policy forbids. `workspace.branch` feeds the workspace-removal safety
+/// gate and the managed-worktree reclaim, so a wrong value here is not
+/// cosmetic — and it persists.
+async fn adoptable_branch_at(
+    config: &ServerConfig,
+    workspace: &Workspace,
+    session_id: Option<SessionId>,
+    on_main: bool,
+) -> Result<(PathBuf, String), String> {
+    // The main checkout is shared by every workspace in the repo: the
+    // branch it sits on is not this workspace's to take, and recording it
+    // would both mis-target the reclaim and pin the row against removal.
+    if on_main {
+        return Err(
+            "the shared main checkout is not this workspace's branch — adopt only \
+                    applies to an isolated worktree"
+                .to_string(),
+        );
+    }
+    let Some(target) =
+        spawn_target_worktree_path(workspace, session_id, false, config.worktree_root_path())
+    else {
+        return Err("this workspace has no isolated worktree to adopt a branch from".to_string());
+    };
+    let Some(actual) = lazybox_git_ops::current_branch_at(&target).await else {
+        return Err(format!(
+            "no branch to adopt at {} — the checkout is detached or gone",
+            target.display()
+        ));
+    };
+    let cfg = lazybox_config::Config::load().unwrap_or_default();
+    // A standalone (repo-less) worktree has no origin and no base branch,
+    // so there is nothing to exclude. Everything else must clear the same
+    // base check the automatic path applies — including the case where the
+    // base can't be resolved at all, where refusing is the only way to be
+    // sure we are not adopting the repo default.
+    let Ok(Some(repo)) = repo_for_workspace_provision(config, workspace, &cfg) else {
+        return Ok((target, actual));
+    };
+    let Some((owner, name)) = repo.split_once('/') else {
+        return Ok((target, actual));
+    };
+    let mgr = config.worktree_manager();
+    let Some(base) = adoption_base(workspace, &mgr, owner, name).await else {
+        return Err(format!(
+            "could not resolve {repo}'s base branch, so adopting '{actual}' can't be \
+             checked against it"
+        ));
+    };
+    if actual == base {
+        return Err(format!(
+            "'{actual}' is {repo}'s base branch — adopting it would make this workspace \
+             track {base}"
+        ));
+    }
+    Ok((target, actual))
+}
+
+/// The branch adoption must never take over: an agent that left a worktree
+/// on the repo default must not turn its workspace into a main-tracking
+/// one. `None` when it can't be resolved — callers treat that as "refuse",
+/// never as "no base to worry about".
+async fn adoption_base(
+    workspace: &Workspace,
+    mgr: &lazybox_git_ops::WorktreeManager,
+    owner: &str,
+    name: &str,
+) -> Option<String> {
+    match workspace.base_branch.clone() {
+        Some(base) => Some(base),
+        None => mgr
+            .default_branch(owner, name, lazybox_git_ops::LockPriority::Interactive)
+            .await
+            .ok(),
+    }
+}
+
 /// Take a workspace's records to the branch its checkout actually sits on,
 /// then re-run the spawn (#1572). The lossless counterpart to
 /// [`handle_recreate_worktree`] for a `BranchMismatch`: nothing is moved
@@ -1319,30 +1414,19 @@ pub async fn handle_adopt_worktree_branch(
 ) {
     let session_key = spawn.session_key.clone();
     let workspace_key = WorkspaceKey::new(session_key.as_str());
-    let target = load_workspace(config, &workspace_key).ok().and_then(|ws| {
-        spawn_target_worktree_path(&ws, spawn.session_id, on_main, config.worktree_root_path())
-    });
-    match target {
-        Some(target) => match lazybox_git_ops::current_branch_at(&target).await {
-            Some(actual) => adopt_drifted_branch(config, &workspace_key, &target, &actual).await,
-            None => {
-                let _ = config.bus.send(Event::provider_error(
-                    "spawn:adopt",
-                    format!(
-                        "no branch to adopt at {} — the checkout is detached or gone",
-                        target.display()
-                    ),
-                    lazybox_ipc::ProviderErrorKind::Permanent,
-                ));
-                return;
-            }
-        },
-        None => {
-            let _ = config.bus.send(Event::provider_error(
-                "spawn:adopt",
-                "this workspace has no isolated worktree to adopt a branch from".to_string(),
-                lazybox_ipc::ProviderErrorKind::Permanent,
-            ));
+    let workspace = match load_workspace(config, &workspace_key) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            refuse_adoption(config, format!("workspace could not be loaded: {error}"));
+            return;
+        }
+    };
+    match adoptable_branch_at(config, &workspace, spawn.session_id, on_main).await {
+        Ok((target, actual)) => {
+            adopt_drifted_branch(config, &workspace_key, &target, &actual).await;
+        }
+        Err(reason) => {
+            refuse_adoption(config, reason);
             return;
         }
     }
@@ -4131,14 +4215,7 @@ async fn drift_policy_for(
         Some(actual) if actual != branch => {}
         _ => return no_adoption,
     }
-    let base = match workspace.base_branch.clone() {
-        Some(base) => Some(base),
-        None => mgr
-            .default_branch(owner, name, lazybox_git_ops::LockPriority::Interactive)
-            .await
-            .ok(),
-    };
-    match base {
+    match adoption_base(workspace, mgr, owner, name).await {
         Some(base) => lazybox_git_ops::DriftPolicy::AdoptUnlessBase { base },
         None => no_adoption,
     }
@@ -4503,7 +4580,12 @@ async fn provision_worktree(
         origin,
     )
     .await;
-    if let lazybox_git_ops::BranchDrift::Drifted { actual, .. } = &worktree.drift {
+    // Both provisioning arms can report drift: the repo-backed checkout
+    // only under `AdoptUnlessBase`, and the standalone one whenever the
+    // branch was renamed in place (it has no base to protect). `adopt_drift`
+    // is what gates the second — a branch-agnostic shell reuses a drifted
+    // tree without rewriting the record it reuses.
+    if adopt_drift && let lazybox_git_ops::BranchDrift::Drifted { actual } = &worktree.drift {
         adopt_drifted_branch(config, &workspace.key, target, actual).await;
     }
     Ok(worktree.branch)
@@ -20726,75 +20808,32 @@ mod tests {
     /// A shell (and the editor, which piggybacks on a shell spawn) is
     /// branch-agnostic: it must open in the existing worktree wherever it
     /// sits, even after the checkout has drifted onto a different branch
-    /// than the session recorded. An agent spawn keeps the branch-strict
-    /// guard, since it operates on the branch's code (#1199).
+    /// than the session recorded (#1199). The agent-side contracts live in
+    /// their own tests — `agent_spawn_adopts_the_branch_the_previous_agent_created`
+    /// for an issue workspace and
+    /// `pr_workspace_agent_spawn_switches_back_or_refuses_on_drift` for a PR
+    /// one — rather than riding this fixture, so neither can be quietly
+    /// changed by editing the other's setup.
     #[tokio::test]
     async fn shell_reuses_a_worktree_drifted_onto_another_branch() {
-        fn git(cwd: &Path, args: &[&str]) {
-            let output = std::process::Command::new("git")
-                .current_dir(cwd)
-                .args(args)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .env("GIT_AUTHOR_NAME", "test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
         let root = tempfile::tempdir().unwrap();
-        let upstream = tempfile::tempdir().unwrap();
-        git(upstream.path(), &["init", "-q", "-b", "main"]);
-        std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
-        git(upstream.path(), &["add", "."]);
-        git(upstream.path(), &["commit", "-q", "-m", "base"]);
-
         let config = ServerConfig::with_store_backend_and_worktree_root(
             std::sync::Arc::new(lazybox_store::MemoryStore::new()),
             std::sync::Arc::new(crate::backend::MockBackend::new()),
             root.path().to_path_buf(),
         );
-        let mgr = config.worktree_manager();
-        let bare = mgr.bare_path("acme", "core");
-        std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
-        git(
-            root.path(),
-            &[
-                "clone",
-                "--bare",
-                "-q",
-                &upstream.path().to_string_lossy(),
-                &bare.to_string_lossy(),
-            ],
-        );
+        let wt = drifted_worktree_fixture(root.path(), &config, "solutions").await;
 
-        // Provision the session's worktree on `solutions`, then drift it
-        // onto `feat/azure-env-render` (a collision, a manual switch, an
+        // Drift onto another branch (a collision, a manual switch, an
         // agent that changed branch) so the on-disk branch no longer
         // matches what the session recorded.
-        let wt = root.path().join("worktree");
-        mgr.checkout_new_branch_at(&wt, "acme", "core", "solutions", "main")
-            .await
-            .expect("provision worktree");
-        git(&wt, &["switch", "-q", "-c", "feat/azure-env-render"]);
+        test_git(&wt, &["switch", "-q", "-c", "feat/azure-env-render"]);
         // Uncommitted work the dirty-worktree guard would refuse to
         // clobber — the shell must still open here.
         std::fs::write(wt.join("wip.txt"), "unsaved\n").unwrap();
 
         let mut task = titled_task("github", "acme/core#271", "solutions work");
         task.repo = Some("acme/core".into());
-        // A PR workspace: its head branch is authoritative upstream, so
-        // the agent half below keeps the branch-strict contract. (An
-        // issue/local workspace adopts the drift instead — #1572.)
-        task.kind = Some(lazybox_core::TaskKind::Pr);
-        task.branch = Some("solutions".into());
         let mut ws = Workspace::from_task(task, Utc::now());
         let mut session = lazybox_core::WorkspaceSession::new(
             ws.key.clone(),
@@ -20807,7 +20846,6 @@ mod tests {
         let session_key = SessionKey::new(ws.key.as_str());
         persist_and_broadcast(&config, &ws).await.unwrap();
 
-        // Shell: reuse the drifted worktree in place, no re-checkout.
         let (path, _id, _on_main) = resolve_or_create_session(
             &config,
             &session_key,
@@ -20820,20 +20858,175 @@ mod tests {
         .expect("a shell opens on a worktree that drifted to another branch");
         assert_eq!(path, wt, "the shell lands in the existing worktree");
         assert!(wt.join("wip.txt").exists(), "uncommitted work untouched");
-        let head = std::process::Command::new("git")
-            .current_dir(&wt)
-            .args(["symbolic-ref", "--short", "HEAD"])
-            .output()
-            .unwrap();
         assert_eq!(
-            String::from_utf8_lossy(&head.stdout).trim(),
+            head_branch(&wt),
             "feat/azure-env-render",
             "the shell never switched the branch back",
         );
+        let reloaded = load_workspace(&config, &ws.key).expect("reload");
+        assert_eq!(
+            reloaded.sessions[0].worktree_branch.as_deref(),
+            Some("solutions"),
+            "a branch-agnostic shell reuses the drift without rewriting the record",
+        );
+    }
 
-        // Agent: an untracked-only drift is lossless to undo, so the spawn
-        // switches the checkout back to the session branch instead of
-        // dead-ending behind the mismatch prompt (advise-never-forbid).
+    /// #1572 review: the `a adopt` command routes around
+    /// `ensure_worktree_branch`, so it has to re-apply the base-branch
+    /// guard itself. Without it, a PR workspace whose agent left the
+    /// checkout on `main` was one keypress from becoming main-tracking —
+    /// and `workspace.branch` feeds the workspace-removal safety gate and
+    /// the managed-worktree reclaim, so the damage persists in the store.
+    #[tokio::test]
+    async fn adopt_command_refuses_the_base_branch_and_the_shared_main_checkout() {
+        let root = tempfile::tempdir().unwrap();
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let wt = drifted_worktree_fixture(root.path(), &config, "issue-1521-epic-p0").await;
+        test_git(&wt, &["switch", "-q", "main"]);
+
+        let mut task = titled_task("github", "acme/core#1521", "epic P0");
+        task.repo = Some("acme/core".into());
+        task.kind = Some(lazybox_core::TaskKind::Issue);
+        let mut ws = Workspace::from_task(task, Utc::now());
+        let mut session = lazybox_core::WorkspaceSession::new(
+            ws.key.clone(),
+            lazybox_core::SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            wt.clone(),
+            Utc::now(),
+        );
+        session.worktree_branch = Some("issue-1521-epic-p0".into());
+        ws.add_session(session);
+        persist_and_broadcast(&config, &ws).await.unwrap();
+
+        let refusal = adoptable_branch_at(&config, &ws, None, false)
+            .await
+            .expect_err("the base branch must never be adopted");
+        assert!(
+            refusal.contains("base branch"),
+            "the refusal says why: {refusal}"
+        );
+
+        // The shared main checkout belongs to every workspace in the repo;
+        // its branch is not this workspace's to record.
+        let on_main = adoptable_branch_at(&config, &ws, None, true)
+            .await
+            .expect_err("the shared main checkout is never adopted from");
+        assert!(
+            on_main.contains("shared main checkout"),
+            "the refusal says why: {on_main}"
+        );
+
+        // A real feature branch still adopts.
+        test_git(&wt, &["switch", "-q", "-c", "feat-1521-deps"]);
+        let (path, branch) = adoptable_branch_at(&config, &ws, None, false)
+            .await
+            .expect("a non-base branch is adoptable");
+        assert_eq!(path, wt);
+        assert_eq!(branch, "feat-1521-deps");
+    }
+
+    /// #1572 review: a local (repo-less) workspace takes the standalone
+    /// provisioning arm, which never reported drift — so its record stayed
+    /// stale forever and every later spawn re-ran the full provision,
+    /// mounts and setup scripts included.
+    #[tokio::test]
+    async fn agent_spawn_adopts_a_drifted_branch_on_a_repo_less_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let wt = root.path().join("standalone");
+        config
+            .worktree_manager()
+            .init_standalone_at(&wt, "scratch-notes")
+            .await
+            .expect("standalone provision");
+        test_git(&wt, &["symbolic-ref", "HEAD", "refs/heads/feat-x"]);
+
+        let mut ws = Workspace::empty(
+            WorkspaceKey::new("local-notes-scratch"),
+            "scratch-notes",
+            Utc::now(),
+        );
+        ws.project_key = Some(lazybox_core::ProjectKey::local("notes"));
+        let mut session = lazybox_core::WorkspaceSession::new(
+            ws.key.clone(),
+            lazybox_core::SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            wt.clone(),
+            Utc::now(),
+        );
+        session.worktree_branch = Some("scratch-notes".into());
+        ws.add_session(session);
+        let session_key = SessionKey::new(ws.key.as_str());
+        persist_and_broadcast(&config, &ws).await.unwrap();
+
+        resolve_or_create_session(
+            &config,
+            &session_key,
+            None,
+            &TerminalKind::Agent("claude".into()),
+            false,
+            lazybox_ipc::SpawnOrigin::Interactive,
+        )
+        .await
+        .expect("the agent spawn reuses the standalone worktree");
+
+        let reloaded = load_workspace(&config, &ws.key).expect("reload");
+        assert_eq!(
+            reloaded.sessions[0].worktree_branch.as_deref(),
+            Some("feat-x"),
+            "the standalone record is reconciled, not left to re-provision forever",
+        );
+        assert_eq!(reloaded.branch, "feat-x");
+    }
+
+    /// A PR workspace's head branch is authoritative upstream, so an agent
+    /// spawn there keeps the pre-#1572 contract: a clean drift is switched
+    /// back (lossless), and a drift holding uncommitted tracked work is
+    /// refused rather than clobbered. #1572's adoption applies only where
+    /// the expected branch is a name lazybox invented.
+    #[tokio::test]
+    async fn pr_workspace_agent_spawn_switches_back_or_refuses_on_drift() {
+        let root = tempfile::tempdir().unwrap();
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let wt = drifted_worktree_fixture(root.path(), &config, "solutions").await;
+
+        let mut task = titled_task("github", "acme/core#271", "solutions work");
+        task.repo = Some("acme/core".into());
+        task.kind = Some(lazybox_core::TaskKind::Pr);
+        task.branch = Some("solutions".into());
+        let mut ws = Workspace::from_task(task, Utc::now());
+        let mut session = lazybox_core::WorkspaceSession::new(
+            ws.key.clone(),
+            lazybox_core::SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            wt.clone(),
+            Utc::now(),
+        );
+        session.worktree_branch = Some("solutions".into());
+        ws.add_session(session);
+        let session_key = SessionKey::new(ws.key.as_str());
+        persist_and_broadcast(&config, &ws).await.unwrap();
+
+        // Untracked-only drift is lossless to undo, so the spawn switches
+        // the checkout back instead of dead-ending behind the prompt.
+        test_git(&wt, &["switch", "-q", "-c", "feat/azure-env-render"]);
+        std::fs::write(wt.join("wip.txt"), "unsaved\n").unwrap();
         let (path, _id, _on_main) = resolve_or_create_session(
             &config,
             &session_key,
@@ -20845,27 +21038,18 @@ mod tests {
         .await
         .expect("an agent spawn auto-switches a clean drifted worktree back");
         assert_eq!(path, wt, "the agent lands in the existing worktree");
-        let head = std::process::Command::new("git")
-            .current_dir(&wt)
-            .args(["symbolic-ref", "--short", "HEAD"])
-            .output()
-            .unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&head.stdout).trim(),
-            "solutions",
-            "the checkout is back on the session branch",
-        );
+        assert_eq!(head_branch(&wt), "solutions", "back on the PR head");
         assert!(
             wt.join("wip.txt").exists(),
             "untracked work rides along with the switch"
         );
 
-        // Drift again, but this time with uncommitted TRACKED changes —
-        // real work is at stake, so the agent keeps the explicit prompt.
-        git(&wt, &["switch", "-q", "-c", "feat/azure-env-render-2"]);
+        // Drift again with uncommitted TRACKED changes — real work is at
+        // stake, so the agent keeps the explicit prompt.
+        test_git(&wt, &["switch", "-q", "-c", "feat/azure-env-render-2"]);
         std::fs::write(wt.join("tracked.txt"), "v1\n").unwrap();
-        git(&wt, &["add", "tracked.txt"]);
-        git(&wt, &["commit", "-q", "-m", "tracked file"]);
+        test_git(&wt, &["add", "tracked.txt"]);
+        test_git(&wt, &["commit", "-q", "-m", "tracked file"]);
         std::fs::write(wt.join("tracked.txt"), "v2 uncommitted\n").unwrap();
         let err = resolve_or_create_session(
             &config,
@@ -20881,13 +21065,8 @@ mod tests {
             err.to_string().contains("spawn aborted"),
             "the dirty-drift agent spawn is refused: {err}"
         );
-        let head = std::process::Command::new("git")
-            .current_dir(&wt)
-            .args(["symbolic-ref", "--short", "HEAD"])
-            .output()
-            .unwrap();
         assert_eq!(
-            String::from_utf8_lossy(&head.stdout).trim(),
+            head_branch(&wt),
             "feat/azure-env-render-2",
             "the refused spawn leaves the dirty checkout untouched",
         );

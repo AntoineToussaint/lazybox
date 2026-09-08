@@ -21270,15 +21270,19 @@ mod worktree_progress_recovery_tests {
         while server.rx.try_recv().is_ok() {}
 
         m.recreate_worktree_provision();
+        // Since #1572 a wrong-branch recreate confirms first (moving a live
+        // checkout aside is destructive); the payload this test guards is
+        // unchanged and rides through the confirm.
+        let cmds = m.handle_confirmed(true);
 
         assert!(!m.modal_stack.contains(&Id::WorktreeProgress));
-        let mut recreate = None;
-        while let Ok(cmd) = server.rx.try_recv() {
-            if let lazybox_ipc::Command::RecreateWorktree { spawn, .. } = cmd {
-                recreate = Some(spawn);
-            }
-        }
-        let spawn = recreate.expect("recreate must issue a RecreateWorktree command");
+        let spawn = cmds
+            .into_iter()
+            .find_map(|cmd| match cmd {
+                lazybox_ipc::Command::RecreateWorktree { spawn, .. } => Some(spawn),
+                _ => None,
+            })
+            .expect("recreate must issue a RecreateWorktree command");
         assert!(matches!(spawn.kind, TerminalKind::Agent(ref id) if id == "claude"));
         // A plain BranchMismatch moves the workspace's own target, not a holder.
         // (holder preservation only applies to BranchHeldManaged.)
@@ -21333,11 +21337,14 @@ mod worktree_progress_recovery_tests {
         assert!(matches!(spawn.kind, TerminalKind::Agent(ref id) if id == "claude"));
     }
 
-    /// #1572: `r` moves a live checkout into a `.bak-<n>` sibling. When
-    /// that checkout holds uncommitted tracked work, ask first instead of
-    /// acting on the single keypress; the recreate only goes out on Yes.
+    /// #1572: `r` moves a live checkout into a `.bak-<n>` sibling and
+    /// rebuilds from zero, so it asks first — and declining must leave the
+    /// recovery modal standing. An earlier revision dismissed the
+    /// checklist *before* mounting the confirm, so answering "no" dropped
+    /// the user on an empty screen with the spawn dead and the lossless
+    /// `a adopt` alternative gone.
     #[test]
-    fn recreate_confirms_before_preserving_a_dirty_checkout_aside() {
+    fn recreate_confirms_and_declining_keeps_the_recovery_modal() {
         let (client, mut server) = channel::pair();
         let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
         let key = WorkspaceKey::new("github:acme/widget#42");
@@ -21360,9 +21367,9 @@ mod worktree_progress_recovery_tests {
             session_key,
             step: WorktreeStep::WorktreeAdd,
             status: WorktreeStepStatus::Failed(
-                "checkout_at: worktree /tmp/wt is checked out on branch 'feat-42-work' \
-                 with uncommitted changes, not the requested branch 'issue-42-new' — \
-                 refusing to reuse it"
+                "worktree: checkout_at: worktree /tmp/wt is checked out on branch \
+                 'feat-42-work', not the requested branch 'issue-42-new' — refusing to \
+                 reuse it"
                     .into(),
             ),
             origin: lazybox_ipc::SpawnOrigin::Interactive,
@@ -21374,7 +21381,11 @@ mod worktree_progress_recovery_tests {
         assert_eq!(
             m.modal_stack.last(),
             Some(&Id::WorktreeRecreateConfirm),
-            "a dirty checkout is confirmed before it is moved aside",
+            "preserving a checkout aside is confirmed before it happens",
+        );
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "the recovery modal stays mounted behind the confirm",
         );
         assert!(
             !server
@@ -21384,7 +21395,69 @@ mod worktree_progress_recovery_tests {
             "nothing is dispatched until the confirm is answered",
         );
 
+        // No: back to the recovery modal, spawn still recoverable.
+        let cmds = m.handle_confirmed(false);
+        assert!(cmds.is_empty(), "a refusal dispatches nothing: {cmds:?}");
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::WorktreeProgress),
+            "declining returns to the recovery modal, `a adopt` included",
+        );
+
+        // And `a` is still reachable from there.
+        m.adopt_worktree_branch();
+        let mut adopted = false;
+        while let Ok(cmd) = server.rx.try_recv() {
+            adopted |= matches!(cmd, lazybox_ipc::Command::AdoptWorktreeBranch { .. });
+        }
+        assert!(
+            adopted,
+            "the lossless alternative survives a declined recreate"
+        );
+    }
+
+    /// The Yes half of the same confirm: the checklist is torn down and
+    /// the recreate goes out.
+    #[test]
+    fn recreate_confirmed_dismisses_the_checklist_and_dispatches() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let key = WorkspaceKey::new("github:acme/widget#42");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        m.last_spawn = Some(lazybox_ipc::Command::Spawn {
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
+            session_key: session_key.clone(),
+            session_id: None,
+            client_request_id: None,
+            kind: TerminalKind::Agent("claude".into()),
+            cwd: None,
+            initial_prompt: Some("fix it".into()),
+            initial_snippet: None,
+            on_main: false,
+            force_new: false,
+            role: None,
+        });
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key,
+            step: WorktreeStep::WorktreeAdd,
+            status: WorktreeStepStatus::Failed(
+                "worktree: checkout_at: worktree /tmp/wt is checked out on branch \
+                 'feat-42-work', not the requested branch 'issue-42-new' — refusing to \
+                 reuse it"
+                    .into(),
+            ),
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
+        });
+        while server.rx.try_recv().is_ok() {}
+
+        m.recreate_worktree_provision();
         let cmds = m.handle_confirmed(true);
+
+        assert!(
+            !m.modal_stack.contains(&Id::WorktreeProgress),
+            "Yes tears the checklist down",
+        );
         assert!(
             cmds.iter()
                 .any(|cmd| matches!(cmd, lazybox_ipc::Command::RecreateWorktree { .. })),

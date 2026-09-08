@@ -1457,6 +1457,10 @@ showing keybinding search only",
                 if let Some(ModalFlow::WorktreeRecreateConfirm { cmd }) = self.modal_flow.take()
                     && yes
                 {
+                    // Only a Yes tears the checklist down; the pop above
+                    // already returned a No to it, `a adopt` included.
+                    self.force_dismiss_worktree_progress();
+                    self.worktree_progress_dismissed = None;
                     cmds.push(*cmd);
                 }
             }

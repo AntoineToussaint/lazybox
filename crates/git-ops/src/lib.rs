@@ -3,7 +3,6 @@
 //! Git worktree management. Maintains a base directory with bare clones,
 //! creates worktrees per-branch for parallel work.
 
-use chrono::Utc;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -179,20 +178,14 @@ pub enum GitError {
         blocker: WorktreeReclaimBlocker,
     },
     #[error(
-        "worktree {} is checked out on branch '{actual}'{}, not the requested branch \
-         '{expected}' — refusing to reuse it; preserve or switch that checkout, then retry",
-        .path.display(),
-        if *.dirty { " with uncommitted changes" } else { "" }
+        "worktree {} is checked out on branch '{actual}', not the requested branch '{expected}' — \
+         refusing to reuse it; preserve or switch that checkout, then retry",
+        .path.display()
     )]
     WorktreeBranchMismatch {
         path: PathBuf,
         expected: String,
         actual: String,
-        /// The drifted checkout has staged/unstaged changes to tracked
-        /// files, so preserving it aside is destructive-feeling and the
-        /// client confirms first. Named in the message so the classifier
-        /// can recover it from the wire text.
-        dirty: bool,
     },
     #[error(
         "branch '{branch}' can't be created because '{conflicting}' already exists — git can't \
@@ -327,14 +320,13 @@ pub struct Worktree {
 /// What reusing an existing checkout found about the branch it sits on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum BranchDrift {
-    /// On the expected branch, or detached with no branch to compare.
+    /// Nothing for the caller to reconcile: the checkout is on the
+    /// expected branch, is detached with no branch to compare, or drifted
+    /// and was switched back.
     #[default]
     None,
-    /// Was on `from` with a clean tree and was switched back to the
-    /// expected branch.
-    SwitchedBack { from: String },
     /// Sitting on `actual`, left there for the caller to adopt.
-    Drifted { actual: String, dirty: bool },
+    Drifted { actual: String },
 }
 
 /// How `checkout_at_mode` materializes the head, and — for the ordinary
@@ -991,8 +983,8 @@ impl WorktreeManager {
                 .map(|f| f.to_string_lossy().into_owned())
                 .unwrap_or_else(|| branch.to_string());
             let branch = match &drift {
-                BranchDrift::Drifted { actual, .. } => actual.clone(),
-                _ => branch.to_string(),
+                BranchDrift::Drifted { actual } => actual.clone(),
+                BranchDrift::None => branch.to_string(),
             };
             return Ok(Worktree {
                 name,
@@ -1412,11 +1404,24 @@ impl WorktreeManager {
             .await
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| branch.to_string());
+            // Reusing a renamed branch has always silently returned it as
+            // the worktree's branch; reporting it as drift is what lets
+            // the caller reconcile its own record too, instead of leaving
+            // a stale one that re-provisions on every later spawn (#1572).
+            // A standalone repo has no origin and no base branch, so there
+            // is nothing here to exclude from adoption.
+            let drift = if current == branch {
+                BranchDrift::None
+            } else {
+                BranchDrift::Drifted {
+                    actual: current.clone(),
+                }
+            };
             return Ok(Worktree {
                 name,
                 path: wt_path.to_path_buf(),
                 branch: current,
-                drift: BranchDrift::None,
+                drift,
             });
         }
 
@@ -1926,12 +1931,17 @@ impl WorktreeManager {
     /// takes over, so `git status` inside the copy would diff the old
     /// files against the *new* checkout's index. It is removed and a
     /// `LAZYBOX-PRESERVED.md` written in its place, naming `label`, the
-    /// branch, the timestamp and the gitdir the copy used to reference.
+    /// branch, `preserved_at` and the gitdir the copy used to reference.
+    ///
+    /// `preserved_at` is a pre-formatted stamp supplied by the caller
+    /// rather than read here, so this crate needs no clock dependency for
+    /// one note.
     pub async fn preserve_worktree_aside(
         &self,
         bare_path: &Path,
         worktree_path: &Path,
         label: &str,
+        preserved_at: &str,
     ) -> Result<Option<PathBuf>, GitError> {
         let lock = repo_lock(bare_path);
         let _guard = lock.lock(LockPriority::Interactive).await;
@@ -1946,7 +1956,7 @@ impl WorktreeManager {
         // prune drops the registration and releases its branch; the fresh
         // `git worktree add` that follows then sees a clean slate.
         let _ = run_git_in(self.git_runner(), bare_path, &["worktree", "prune"]).await;
-        detach_preserved_copy(&backup, label, branch.as_deref()).await;
+        detach_preserved_copy(&backup, label, branch.as_deref(), preserved_at).await;
         Ok(Some(backup))
     }
 }
@@ -1957,7 +1967,12 @@ pub const PRESERVED_NOTE_FILE: &str = "LAZYBOX-PRESERVED.md";
 /// Turn a just-renamed `.bak-<n>` copy into a plain folder with a note
 /// explaining what it is. Best-effort throughout: the files are already
 /// safe on disk, so a failure here must not fail the recovery.
-async fn detach_preserved_copy(backup: &Path, label: &str, branch: Option<&str>) {
+async fn detach_preserved_copy(
+    backup: &Path,
+    label: &str,
+    branch: Option<&str>,
+    preserved_at: &str,
+) {
     let gitfile = backup.join(".git");
     let gitdir = tokio::fs::read_to_string(&gitfile)
         .await
@@ -1975,7 +1990,7 @@ async fn detach_preserved_copy(backup: &Path, label: &str, branch: Option<&str>)
          gitdir: left in place, `git status` here would compare these files against the \
          *new* checkout's index.\n",
         branch.unwrap_or("detached HEAD"),
-        Utc::now().to_rfc3339(),
+        preserved_at,
         gitdir
             .map(|dir| format!(" (it pointed at `{dir}`)"))
             .unwrap_or_default(),
@@ -3552,12 +3567,13 @@ async fn ensure_worktree_branch(
         None => Ok(BranchDrift::None),
         Some(actual) if actual == expected => Ok(BranchDrift::None),
         Some(actual) => {
-            let clean = worktree_tracked_changes_clean(wt_path).await;
             // The branch lazybox expects on a task-less workspace is a
             // name lazybox invented; the branch the agent switched to is
             // where the work is. Adopt it rather than fight it — clean or
-            // dirty. The base branch is the one exception: adopting it
-            // would turn the workspace into a main-tracking one.
+            // dirty alike, which is why this decision is taken before the
+            // `git status` probe below and never pays for one. The base
+            // branch is the one exception: adopting it would turn the
+            // workspace into a main-tracking one.
             if let DriftPolicy::AdoptUnlessBase { base } = policy
                 && &actual != base
             {
@@ -3565,13 +3581,9 @@ async fn ensure_worktree_branch(
                     worktree = %wt_path.display(),
                     from = %expected,
                     to = %actual,
-                    dirty = !clean,
                     "adopting the branch the worktree drifted to",
                 );
-                return Ok(BranchDrift::Drifted {
-                    actual,
-                    dirty: !clean,
-                });
+                return Ok(BranchDrift::Drifted { actual });
             }
             // A CLEAN drifted checkout switches back automatically
             // (advise-never-forbid): the drift is usually an agent's
@@ -3582,7 +3594,7 @@ async fn ensure_worktree_branch(
             // the explicit prompt — that is real work at stake. A
             // failed switch (branch held elsewhere, etc.) falls back to
             // the same prompt.
-            if clean {
+            if worktree_tracked_changes_clean(wt_path).await {
                 let output = apply_git_env(
                     Command::new("git")
                         .current_dir(wt_path)
@@ -3597,7 +3609,7 @@ async fn ensure_worktree_branch(
                         to = %expected,
                         "clean drifted worktree switched back to its session branch",
                     );
-                    return Ok(BranchDrift::SwitchedBack { from: actual });
+                    return Ok(BranchDrift::None);
                 }
                 tracing::warn!(
                     worktree = %wt_path.display(),
@@ -3611,7 +3623,6 @@ async fn ensure_worktree_branch(
                 path: wt_path.to_path_buf(),
                 expected: expected.to_string(),
                 actual,
-                dirty: !clean,
             })
         }
     }
@@ -6400,7 +6411,6 @@ mod track_main_tests {
             drift,
             BranchDrift::Drifted {
                 actual: "feat-1521-dependency-edges".into(),
-                dirty: true,
             },
         );
         assert_eq!(
@@ -6434,9 +6444,8 @@ mod track_main_tests {
             .expect("clean base-branch drift switches back");
         assert_eq!(
             drift,
-            BranchDrift::SwitchedBack {
-                from: "main".into()
-            }
+            BranchDrift::None,
+            "nothing left for the caller to adopt"
         );
         assert_eq!(
             current_worktree_branch(&wt)
@@ -6461,14 +6470,58 @@ mod track_main_tests {
         let err = ensure_worktree_branch(&wt, "scratch", &policy)
             .await
             .expect_err("dirty base-branch drift keeps the prompt");
-        let GitError::WorktreeBranchMismatch { actual, dirty, .. } = &err else {
+        let GitError::WorktreeBranchMismatch { actual, .. } = &err else {
             panic!("expected a branch mismatch, got {err:?}");
         };
         assert_eq!(actual, "main");
-        assert!(dirty, "the mismatch names the dirty tree");
-        assert!(
-            err.to_string().contains("with uncommitted changes"),
-            "the message carries the dirty state for the client: {err}",
+        assert_eq!(
+            current_worktree_branch(&wt)
+                .await
+                .expect("branch")
+                .as_deref(),
+            Some("main"),
+            "the refusal leaves the dirty checkout exactly where it was",
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("f.txt")).expect("read"),
+            "uncommitted edit\n",
+            "the uncommitted work is untouched",
+        );
+    }
+
+    /// #1572: a standalone (repo-less) worktree reused on a branch the
+    /// agent renamed reports the drift, so the caller can reconcile its
+    /// record. Without it the record stays stale and every later spawn
+    /// re-runs the full provision — mounts and setup scripts included.
+    #[tokio::test]
+    async fn standalone_reuse_reports_the_renamed_branch_as_drift() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mgr = WorktreeManager::new(tmp.path().join("base"));
+        let wt = tmp.path().join("standalone");
+
+        let first = mgr
+            .init_standalone_at(&wt, "scratch-notes")
+            .await
+            .expect("first init");
+        assert_eq!(first.branch, "scratch-notes");
+        assert_eq!(
+            first.drift,
+            BranchDrift::None,
+            "a fresh init has not drifted"
+        );
+
+        git(&wt, &["symbolic-ref", "HEAD", "refs/heads/feat-x"]);
+        let reused = mgr
+            .init_standalone_at(&wt, "scratch-notes")
+            .await
+            .expect("reuse");
+        assert_eq!(reused.branch, "feat-x");
+        assert_eq!(
+            reused.drift,
+            BranchDrift::Drifted {
+                actual: "feat-x".into()
+            },
+            "the rename must be reported so the caller reconciles its record",
         );
     }
 
@@ -6499,7 +6552,12 @@ mod track_main_tests {
         std::fs::write(wt.join("wip.txt"), "unsaved\n").expect("write wip");
 
         let backup = mgr
-            .preserve_worktree_aside(&bare, &wt, "workspace github-acme-widgets-7")
+            .preserve_worktree_aside(
+                &bare,
+                &wt,
+                "workspace github-acme-widgets-7",
+                "2026-09-08T00:00:00Z",
+            )
             .await
             .expect("preserve runs")
             .expect("a backup was created");
@@ -6800,7 +6858,7 @@ mod track_main_tests {
         std::fs::write(wt.join("wip.txt"), "unsaved\n").expect("write wip");
 
         let backup = mgr
-            .preserve_worktree_aside(&bare, &wt, "test workspace")
+            .preserve_worktree_aside(&bare, &wt, "test workspace", "2026-09-08T00:00:00Z")
             .await
             .expect("preserve runs")
             .expect("a backup was created");
@@ -6826,7 +6884,7 @@ mod track_main_tests {
 
         // A second preserve counts up rather than clobbering the first.
         let backup2 = mgr
-            .preserve_worktree_aside(&bare, &wt, "test workspace")
+            .preserve_worktree_aside(&bare, &wt, "test workspace", "2026-09-08T00:00:00Z")
             .await
             .expect("preserve runs")
             .expect("second backup");

@@ -3819,14 +3819,6 @@ impl WorktreeRecovery {
         (!path.is_empty()).then(|| path.to_string())
     }
 
-    /// Whether a `BranchMismatch` checkout holds uncommitted changes to
-    /// tracked files. Preserving one aside is the destructive-feeling step
-    /// in the recovery, so the client confirms first rather than acting on
-    /// a single keypress (#1572).
-    pub fn mismatch_is_dirty(message: &str) -> bool {
-        message.contains("with uncommitted changes")
-    }
-
     /// Whether the modal can offer a one-keypress **repo pick**: an
     /// unmapped Linear team, where the fix is to choose the repo its
     /// tickets should use and persist the mapping, then re-provision
@@ -4769,36 +4761,32 @@ mod worktree_recovery_tests {
     }
 
     /// #1572: the mismatch modal's `a adopt` needs the branch the checkout
-    /// actually sits on, and its `r preserve & recreate` needs to know
-    /// whether that checkout holds uncommitted tracked work (the one
-    /// destructive-feeling step, which then confirms first). Both ride the
-    /// wire message the daemon already emits.
+    /// actually sits on, and its `r preserve & recreate` needs the path it
+    /// is about to move aside. Both ride the wire message the daemon
+    /// already emits — the daemon wraps it in `ServerError::Worktree`, so
+    /// the parse has to survive the `worktree: ` prefix too.
     #[test]
-    fn branch_mismatch_carries_the_actual_branch_and_its_dirty_state() {
-        let dirty = "worktree /tmp/w is checked out on branch 'feat-1521-deps' with \
-             uncommitted changes, not the requested branch 'issue-1521-epic' — refusing \
-             to reuse it; preserve or switch that checkout, then retry";
-        let class = WorktreeRecovery::classify(dirty);
+    fn branch_mismatch_carries_the_actual_branch_and_the_checkout_path() {
+        let msg = "worktree: checkout_at: worktree /tmp/w is checked out on branch \
+             'feat-1521-deps', not the requested branch 'issue-1521-epic' — refusing to \
+             reuse it; preserve or switch that checkout, then retry";
+        let class = WorktreeRecovery::classify(msg);
         assert_eq!(class, WorktreeRecovery::BranchMismatch);
         assert!(class.adopts_branch(), "adopting is the lossless recovery");
         assert_eq!(
-            WorktreeRecovery::mismatch_branch(dirty).as_deref(),
+            WorktreeRecovery::mismatch_branch(msg).as_deref(),
             Some("feat-1521-deps"),
         );
-        assert!(WorktreeRecovery::mismatch_is_dirty(dirty));
-
-        let clean = "worktree /tmp/w is checked out on branch 'feat-1521-deps', not the \
-             requested branch 'issue-1521-epic' — refusing to reuse it; preserve or \
-             switch that checkout, then retry";
         assert_eq!(
-            WorktreeRecovery::classify(clean),
-            WorktreeRecovery::BranchMismatch
+            WorktreeRecovery::mismatch_path(msg).as_deref(),
+            Some("/tmp/w"),
+            "the `worktree: ` error prefix must not be mistaken for the path",
         );
-        assert_eq!(
-            WorktreeRecovery::mismatch_branch(clean).as_deref(),
-            Some("feat-1521-deps"),
+        assert!(
+            class.remediation(msg).contains("feat-1521-deps"),
+            "the guidance names the branch you would adopt: {}",
+            class.remediation(msg),
         );
-        assert!(!WorktreeRecovery::mismatch_is_dirty(clean));
 
         // Every other class has no branch to adopt.
         assert!(!WorktreeRecovery::BranchHeldLive.adopts_branch());

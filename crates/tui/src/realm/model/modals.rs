@@ -4063,24 +4063,21 @@ impl<T: TerminalAdapter> Model<T> {
             })
             .flatten()
         });
-        // Moving a checkout that holds uncommitted tracked work into a
-        // `.bak-<n>` sibling is the one destructive-feeling step in this
-        // flow, and it used to be a single keypress (#1572).
-        let dirty_mismatch = self.worktree_progress.as_ref().is_some_and(|state| {
-            matches!(
-                state.recovery(),
-                Some(lazybox_ipc::WorktreeRecovery::BranchMismatch)
-            ) && state
-                .error()
-                .is_some_and(lazybox_ipc::WorktreeRecovery::mismatch_is_dirty)
-        });
+        // Moving a live checkout into a `.bak-<n>` sibling and rebuilding
+        // from zero is the one destructive step in this flow, and it used
+        // to be a single keypress (#1572). Confirm it on a wrong-branch
+        // failure, where the lossless alternative (`a` adopt) is sitting
+        // right there — whether or not the tree is dirty, since that is
+        // exactly what the user cannot see from the modal.
+        let confirm_preserve = matches!(
+            self.worktree_progress.as_ref().and_then(|s| s.recovery()),
+            Some(lazybox_ipc::WorktreeRecovery::BranchMismatch)
+        );
         let preserved_path = self
             .worktree_progress
             .as_ref()
             .and_then(|state| state.error())
             .and_then(lazybox_ipc::WorktreeRecovery::mismatch_path);
-        self.force_dismiss_worktree_progress();
-        self.worktree_progress_dismissed = None;
         let cmd = lazybox_ipc::Command::RecreateWorktree {
             spawn: Box::new(lazybox_ipc::SpawnFallback {
                 session_key,
@@ -4095,9 +4092,12 @@ impl<T: TerminalAdapter> Model<T> {
             on_main,
             preserve_holder,
         };
-        if dirty_mismatch {
+        if confirm_preserve {
             let target = preserved_path.unwrap_or_else(|| "this worktree".to_string());
             self.set_modal_flow(ModalFlow::WorktreeRecreateConfirm { cmd: Box::new(cmd) });
+            // The checklist stays mounted underneath: declining must land
+            // the user back on the recovery modal with `a adopt` still
+            // reachable, not on an empty screen with the spawn dead.
             self.mount_modal(
                 Id::WorktreeRecreateConfirm,
                 Confirm::new(format!(
@@ -4108,6 +4108,8 @@ impl<T: TerminalAdapter> Model<T> {
             );
             return;
         }
+        self.force_dismiss_worktree_progress();
+        self.worktree_progress_dismissed = None;
         self.flush_dispatched_cmds(vec![cmd]);
     }
 

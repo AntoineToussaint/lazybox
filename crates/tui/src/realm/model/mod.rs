@@ -464,6 +464,12 @@ pub enum Id {
     /// flow. The source terminal is fixed when the picker mounts and
     /// lives in `ModalFlow::ConvertSession`.
     ConvertSessionRole,
+    /// `E r` orchestration-role picker (#1523). Rows carry a positional
+    /// [`ChoicePayload::Index`] — 0..5 are [`lazybox_core::Role::ALL`],
+    /// the trailing row clears the role. The target workspace lives in
+    /// `ModalFlow::SetRole`; the pick becomes a
+    /// [`Command::SetWorkspaceRole`].
+    RolePicker,
     /// Single-pick `Choice` over the enabled agents (`,` Settings →
     /// "Change default agent"), opened on the current default. Each row
     /// carries its agent id as a [`ChoicePayload::Text`]. Pick → persist
@@ -1066,6 +1072,10 @@ pub(crate) enum ModalFlow {
     /// Structured session conversion (`x f`): role picker. Once picked,
     /// the async run moves into `Model::conversion`.
     ConvertSession { draft: ConversionDraft },
+    /// `E r` orchestration-role picker (#1523): the target workspace,
+    /// fixed when the picker mounts, that the pick's
+    /// `Command::SetWorkspaceRole` addresses.
+    SetRole { workspace: lazybox_core::WorkspaceKey },
     /// Prompt-history picker (#523) → resend into this terminal.
     PromptHistory { terminal: lazybox_ipc::TerminalId },
     /// Editors-panel add/edit form (#1102). Carries the current stage so

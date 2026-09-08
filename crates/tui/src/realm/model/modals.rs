@@ -3444,6 +3444,41 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::ConvertSessionRole, modal);
     }
 
+    /// Mount the `E r` orchestration-role picker (#1523). Rows are the
+    /// five [`Role`]s in order — each shown as `<badge> <name>` — then a
+    /// trailing "none — clear role" row. Rows report their positional
+    /// [`ChoicePayload::Index`], which [`PickFlow::SetRole`] resolves
+    /// (0..5 → that role, index 5 → clear). Preselects the current role.
+    pub(super) fn mount_role_picker(
+        &mut self,
+        workspace: lazybox_core::WorkspaceKey,
+        current: Option<lazybox_core::Role>,
+    ) {
+        use crate::realm::components::choice::Choice;
+        use lazybox_core::Role;
+
+        self.set_modal_flow(ModalFlow::SetRole { workspace });
+
+        let mut rows: Vec<String> = Role::ALL
+            .iter()
+            .map(|role| format!("{} {}", role.badge(), role.display_name()))
+            .collect();
+        rows.push("none — clear role".to_string());
+
+        // Preselect the current role's row, else the trailing clear row.
+        let preselect = current
+            .and_then(|role| Role::ALL.iter().position(|r| *r == role))
+            .unwrap_or(Role::ALL.len());
+
+        // No `payload_for`: rows report their positional
+        // `ChoicePayload::Index`, which `PickFlow::SetRole` resolves.
+        let modal = Choice::single("Orchestration role for this workspace", rows)
+            .title("Set role")
+            .label(|l: &String| l.clone())
+            .select_index(preselect);
+        self.mount_modal(Id::RolePicker, modal);
+    }
+
     /// The name of the scratch project the Start sheet's Chat row
     /// creates on demand (#1502). Its key is `local-scratch`.
     pub(crate) const SCRATCH_PROJECT: &'static str = "scratch";

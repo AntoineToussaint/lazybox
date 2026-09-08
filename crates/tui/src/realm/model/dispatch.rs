@@ -2292,6 +2292,15 @@ impl<T: TerminalAdapter> Model<T> {
             Action::EpicGraph => {
                 self.mount_epic_graph();
             }
+            Action::SetRole => {
+                // Set (or clear) the focused workspace's orchestration
+                // role (#1523). Section::Workspace, so this fires from
+                // both Sidebar and Right focus; the picker preselects the
+                // current role.
+                if let Some(ws) = self.sidebar.selected_workspace() {
+                    self.mount_role_picker(ws.key.clone(), ws.role);
+                }
+            }
             Action::JumpPrevGroup | Action::JumpNextGroup => {
                 if self
                     .sidebar

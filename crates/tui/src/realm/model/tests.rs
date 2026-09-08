@@ -8548,6 +8548,9 @@ mod stale_input_tests {
                 | Id::BroadcastSnippet
                 | Id::HandoffTarget
                 | Id::ConvertSessionRole
+                // Role picker projects a `role:` label upstream — an
+                // outward effect a stale buffered Enter must not fire.
+                | Id::RolePicker
                 | Id::SandboxProviderPick
                 | Id::SandboxInput
                 | Id::SandboxConfirm => false,
@@ -8647,6 +8650,7 @@ mod stale_input_tests {
             Id::HandoffTarget,
             Id::HandoffText,
             Id::ConvertSessionRole,
+            Id::RolePicker,
             Id::DefaultAgentPicker,
             Id::DefaultModelPicker,
             Id::HelpActionConfirm,
@@ -9642,6 +9646,50 @@ mod modal_input_responsiveness_tests {
 
         unsafe { std::env::remove_var("LAZYBOX_HOME") };
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// `E r` role picker (#1523): it lists the five roles plus a trailing
+    /// "clear" row. Picking a role row emits `SetWorkspaceRole` carrying
+    /// that role for the cursor workspace; the trailing row clears it
+    /// (`role: None`). Either pick consumes the stashed `SetRole` flow.
+    #[test]
+    fn role_picker_sets_and_clears_the_workspace_role() {
+        use lazybox_core::Role;
+        let mut m = build_model();
+        super::seed_ws(&mut m, "github:o/r#7");
+        let key = WorkspaceKey::new("github:o/r#7");
+
+        // Role-less mount: picker up, no daemon command emitted yet.
+        m.mount_role_picker(key.clone(), None);
+        assert_eq!(m.top_modal(), Some(&Id::RolePicker));
+
+        // Row 1 is Role::ALL[1] = Coordinator.
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(1)]);
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [lazybox_ipc::Command::SetWorkspaceRole {
+                    workspace,
+                    role: Some(Role::Coordinator),
+                }] if *workspace == key
+            ),
+            "picking row 1 sets Coordinator on the cursor workspace: {cmds:?}",
+        );
+        assert!(m.modal_flow.is_none(), "the pick consumes the SetRole flow");
+
+        // The trailing row (index == ALL.len()) clears the role.
+        m.mount_role_picker(key.clone(), Some(Role::Coordinator));
+        let cmds = m.handle_choice_picked(vec![ChoicePayload::Index(Role::ALL.len())]);
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [lazybox_ipc::Command::SetWorkspaceRole {
+                    workspace,
+                    role: None,
+                }] if *workspace == key
+            ),
+            "picking the trailing row clears the role: {cmds:?}",
+        );
     }
 
     /// Minimal repo-labeled PR task — enough for the sidebar to group

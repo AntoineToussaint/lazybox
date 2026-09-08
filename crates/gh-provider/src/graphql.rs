@@ -2715,6 +2715,16 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
         priority: None,
         state_label: None,
         blocked_by: vec![],
+        // A PR is the natural place to declare landing order, so unlike
+        // `Blocked by:` (issues only) the `Merge after:` marker is read from
+        // PR bodies too. Closing keywords stay issue-only.
+        merge_after: pr
+            .body
+            .as_deref()
+            .map(|b| {
+                issue_links_to_task_ids(&lazybox_core::issue_links::extract_merge_after(b), &repo)
+            })
+            .unwrap_or_default(),
         blocked_on: None,
     }
 }
@@ -3741,6 +3751,11 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
         .as_deref()
         .map(|b| issue_links_to_task_ids(&lazybox_core::issue_links::extract_blocked_by(b), &repo))
         .unwrap_or_default();
+    let merge_after: Vec<TaskId> = issue
+        .body
+        .as_deref()
+        .map(|b| issue_links_to_task_ids(&lazybox_core::issue_links::extract_merge_after(b), &repo))
+        .unwrap_or_default();
 
     Task {
         id: TaskId {
@@ -3804,6 +3819,7 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
         priority: None,
         state_label: None,
         blocked_by,
+        merge_after,
         blocked_on: issue
             .body
             .as_deref()

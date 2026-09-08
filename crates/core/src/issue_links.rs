@@ -97,6 +97,30 @@ pub fn body_mentions_blocker(body: &str) -> bool {
     BLOCKED_KEYWORDS.iter().any(|kw| lower.contains(kw))
 }
 
+/// Keywords that introduce a *merge-order* reference: "this PR may not merge
+/// before the referenced one lands." Same link grammar and matcher as
+/// [`BLOCKED_KEYWORDS`]; distinct from blocking because a merge-after edge
+/// constrains landing order without gating the work itself.
+const MERGE_AFTER_KEYWORDS: &[&str] = &[
+    "merge after",
+    "merge-after",
+    "mergeafter",
+    "land after",
+    "land-after",
+];
+
+/// Every `Merge after:` / `Land after:` reference in `body`, deduplicated,
+/// deterministic order. Same link grammar as [`extract`].
+pub fn extract_merge_after(body: &str) -> Vec<IssueLink> {
+    let mut out = BTreeSet::new();
+    for token in tokenize_with(body, MERGE_AFTER_KEYWORDS, 80) {
+        if let Some(link) = parse_link_after_keyword(&token) {
+            out.insert(link);
+        }
+    }
+    out.into_iter().collect()
+}
+
 /// Keywords that introduce a *declared* (free-text) blocker.
 const BLOCKED_ON_KEYWORDS: &[&str] = &["blocked on", "blocked-on", "blockedon"];
 
@@ -538,5 +562,109 @@ mod tests {
         let body = format!("Blocked on: {reason}");
         let got = extract_blocked_on(&body).unwrap();
         assert_eq!(got.chars().count(), 200);
+    }
+
+    #[test]
+    fn merge_after_extracts_same_repo() {
+        assert_eq!(
+            extract_merge_after("Merge after: #4"),
+            vec![IssueLink::GitHub {
+                repo: None,
+                number: 4
+            }]
+        );
+    }
+
+    #[test]
+    fn merge_after_extracts_cross_repo() {
+        assert_eq!(
+            extract_merge_after("merge after owner/repo#4"),
+            vec![IssueLink::GitHub {
+                repo: Some("owner/repo".into()),
+                number: 4
+            }]
+        );
+    }
+
+    #[test]
+    fn merge_after_accepts_hyphenated_and_land_forms() {
+        for body in [
+            "Merge-after #7",
+            "MergeAfter #7",
+            "Land after #7",
+            "land-after #7",
+        ] {
+            assert_eq!(
+                extract_merge_after(body),
+                vec![IssueLink::GitHub {
+                    repo: None,
+                    number: 7
+                }],
+                "body: {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_after_ignores_closes_and_blocked_keywords() {
+        // Neither a closing keyword nor a blocking keyword is a merge-order
+        // keyword — the three axes stay independent.
+        assert!(extract_merge_after("Closes #3").is_empty());
+        assert!(extract_merge_after("Blocked by: #3").is_empty());
+    }
+
+    #[test]
+    fn merge_after_dedupes_and_sorts() {
+        let body = "Merge after #2. Also land after #1. Merge after #2 again.";
+        assert_eq!(
+            extract_merge_after(body),
+            vec![
+                IssueLink::GitHub {
+                    repo: None,
+                    number: 1
+                },
+                IssueLink::GitHub {
+                    repo: None,
+                    number: 2
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn merge_after_does_not_panic_on_multibyte_window() {
+        let body = "Merge after #73.\n\nSummary: …";
+        assert_eq!(
+            extract_merge_after(body),
+            vec![IssueLink::GitHub {
+                repo: None,
+                number: 73,
+            }]
+        );
+    }
+
+    #[test]
+    fn merge_after_and_blocked_by_are_independent() {
+        // A body can carry both; each extractor keeps only its own axis.
+        let body = "Blocked by: #1\nMerge after: #2";
+        assert_eq!(
+            extract_blocked_by(body),
+            vec![IssueLink::GitHub {
+                repo: None,
+                number: 1
+            }]
+        );
+        assert_eq!(
+            extract_merge_after(body),
+            vec![IssueLink::GitHub {
+                repo: None,
+                number: 2
+            }]
+        );
+    }
+
+    #[test]
+    fn merge_after_empty_body_returns_empty() {
+        assert!(extract_merge_after("").is_empty());
     }
 }

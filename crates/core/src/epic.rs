@@ -74,9 +74,24 @@ pub struct EpicRecord {
     /// in.
     #[serde(default)]
     pub publish_status_labels: bool,
+    /// When true (the default), every dependency (`Blocks`) edge between two
+    /// members also *implies* a merge-after edge: a member's PR must not land
+    /// before the PRs it depends on. An epic opts out (setting this false) when
+    /// its members can merge in any order despite the work ordering — the graph
+    /// still gates *starting* work, but not the *merge* sequence. An explicit
+    /// `Merge after:` marker always adds a merge-after edge regardless of this.
+    #[serde(default = "default_true")]
+    pub implied_merge_after: bool,
     #[serde(default)]
     pub archived: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// serde default for [`EpicRecord::implied_merge_after`] — a `Blocks` edge
+/// implies a merge-after edge unless an epic explicitly opts out, and a record
+/// written before the field existed must load with the implication *on*.
+fn default_true() -> bool {
+    true
 }
 
 impl EpicRecord {
@@ -88,6 +103,7 @@ impl EpicRecord {
             anchor: None,
             members: Vec::new(),
             publish_status_labels: false,
+            implied_merge_after: true,
             archived: false,
             created_at: now,
         }
@@ -118,6 +134,7 @@ mod tests {
         assert!(!back.publish_status_labels);
         assert!(back.anchor.is_none());
         assert!(back.members.is_empty());
+        assert!(back.implied_merge_after);
     }
 
     #[test]
@@ -130,5 +147,18 @@ mod tests {
         assert_eq!(back.key.as_str(), "x");
         assert!(back.members.is_empty());
         assert!(!back.archived);
+        // A record written before `implied_merge_after` existed must load with
+        // the implication ON — the default-true migration, not bool's false.
+        assert!(back.implied_merge_after);
+    }
+
+    #[test]
+    fn implied_merge_after_opt_out_round_trips() {
+        let now = chrono::Utc::now();
+        let mut record = EpicRecord::new(EpicKey::new("x"), "X", now);
+        record.implied_merge_after = false;
+        let json = serde_json::to_string(&record).unwrap();
+        let back: EpicRecord = serde_json::from_str(&json).unwrap();
+        assert!(!back.implied_merge_after);
     }
 }

@@ -442,6 +442,7 @@ fn issue_to_task(issue: &Issue, base: &str, viewer_account_id: &str) -> Task {
         // Jira's dependency links aren't projected yet (#1521); keep the
         // provider compiling with empty edges.
         blocked_by: vec![],
+        merge_after: vec![],
         blocked_on: None,
         parent: f.parent.as_ref().map(|p| TaskId {
             source: SOURCE.into(),

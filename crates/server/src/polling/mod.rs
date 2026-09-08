@@ -648,6 +648,7 @@ mod engagement_tier_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -4799,6 +4800,7 @@ fn issue_id_to_workspace_key(issue_id: &lazybox_core::TaskId) -> WorkspaceKey {
         priority: None,
         state_label: None,
         blocked_by: vec![],
+        merge_after: vec![],
         blocked_on: None,
     };
     WorkspaceKey::new(lazybox_core::workspace_key_for(&stub))
@@ -5021,6 +5023,7 @@ mod workspace_lock_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -5254,6 +5257,7 @@ mod merge_detection_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -5572,6 +5576,7 @@ mod rescope_collapse_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -6739,6 +6744,7 @@ mod unreadable_row_preservation_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -7111,6 +7117,7 @@ mod tick_noop_skip_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }

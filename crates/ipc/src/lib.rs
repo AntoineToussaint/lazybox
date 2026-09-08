@@ -472,10 +472,48 @@ pub struct Blocker {
     pub holds: u32,
 }
 
+/// What one epic edge means. Two members can be joined by a work-ordering edge
+/// (`Blocks` — the dependent's work waits on the blocker), a landing-order edge
+/// (`MergeAfter` — the dependent's PR must not merge before the predecessor's
+/// lands), or both. A `Blocks` edge also *implies* a `MergeAfter` edge unless
+/// the epic opts out ([`lazybox_core::EpicRecord::implied_merge_after`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum EdgeKind {
+    /// The dependent's *work* is gated on the blocker (`Blocked by:`).
+    Blocks,
+    /// The dependent's *merge* is gated on the predecessor landing
+    /// (`Merge after:`, or implied by a `Blocks` edge).
+    MergeAfter,
+}
+
+/// One directed edge in an epic's dependency graph. `from` depends on `to`:
+/// for [`EdgeKind::Blocks`], `from` is blocked by `to`; for
+/// [`EdgeKind::MergeAfter`], `from`'s PR must land after `to`'s. Both members
+/// are keys that resolved to a loaded workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct EpicEdge {
+    pub from: lazybox_core::WorkspaceKey,
+    pub to: lazybox_core::WorkspaceKey,
+    pub kind: EdgeKind,
+}
+
+/// One PR in an epic's merge order (topological over the merge-after graph). A
+/// non-empty `held_by` means the PR is merge-ready but must wait for those
+/// predecessors to land first — the merge-on-green hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct MergeOrderEntry {
+    pub key: lazybox_core::WorkspaceKey,
+    /// Predecessors whose PRs have not yet landed. Empty = free to merge.
+    pub held_by: Vec<lazybox_core::WorkspaceKey>,
+}
+
 /// Derived status of one epic member. Precedence (first match wins): Done →
 /// Failed → Asking → InProgress → Mergeable → PrOpen → Claimed → Blocked →
 /// Ready.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum EpicMemberStatus {
     /// At least one blocker is not Merged/Closed (or is external and unknown).
@@ -493,8 +531,13 @@ pub enum EpicMemberStatus {
         ci_failing: bool,
         changes_requested: bool,
     },
-    /// PR merge-ready (green, no conflict, not blocked).
-    Mergeable,
+    /// PR merge-ready (green, no conflict, not blocked). `held_by` names the
+    /// merge-after predecessors whose PRs have not yet landed — non-empty means
+    /// the PR is being *held* from an armed merge-on-green until they do. An
+    /// empty `held_by` is a free merge-ready PR.
+    Mergeable {
+        held_by: Vec<lazybox_core::WorkspaceKey>,
+    },
     /// Task state Merged or Closed.
     Done,
     /// Agent exited non-zero and no PR.
@@ -537,6 +580,15 @@ pub struct EpicSnapshot {
     pub cycle: bool,
     /// Longest dependency path from any root to any leaf, as member keys.
     pub critical_path: Vec<lazybox_core::WorkspaceKey>,
+    /// Every typed edge in the graph (both `Blocks` and `MergeAfter`), for the
+    /// full-screen DAG view. Deterministically ordered.
+    #[serde(default)]
+    pub edges: Vec<EpicEdge>,
+    /// The PRs in this epic in the order they may land — a topological sort of
+    /// the merge-after graph, restricted to members that currently have a live
+    /// PR. A held entry carries the predecessors it waits on.
+    #[serde(default)]
+    pub merge_order: Vec<MergeOrderEntry>,
     /// Unix ms the snapshot was computed.
     pub computed_at: i64,
 }
@@ -567,6 +619,18 @@ pub enum EpicDelta {
     /// Every remaining member is blocked on an external task or a cycle.
     Stalled {
         reason: String,
+    },
+    /// A merge-ready PR is being held from an armed merge-on-green because a
+    /// merge-after predecessor has not landed yet. `by` names those
+    /// predecessors.
+    Held {
+        key: lazybox_core::WorkspaceKey,
+        by: Vec<lazybox_core::WorkspaceKey>,
+    },
+    /// A previously-held PR's last merge-after predecessor landed — it is now
+    /// free to merge (an armed workspace will merge on the next green tick).
+    Released {
+        key: lazybox_core::WorkspaceKey,
     },
     Completed,
 }

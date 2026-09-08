@@ -9682,6 +9682,7 @@ mod modal_input_responsiveness_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -10380,6 +10381,7 @@ mod merge_focus_follow_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -17484,6 +17486,7 @@ mod destructive_confirm_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         Workspace::from_task(task, Utc::now())
@@ -18957,6 +18960,7 @@ mod focus_mode_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         let mut ws = Workspace::from_task(task, Utc::now());
@@ -19316,6 +19320,7 @@ mod jump_to_workspace_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -21416,6 +21421,7 @@ mod merge_latch_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         Workspace::from_task(task, Utc::now())
@@ -22988,6 +22994,7 @@ mod pr_chat_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -24984,6 +24991,7 @@ mod spawn_focus_steal_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         lazybox_core::Workspace::from_task(task, Utc::now())
@@ -25180,6 +25188,7 @@ mod repo_labels_failure_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -25731,6 +25740,7 @@ mod keybinding_audit_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         let mut ws = Workspace::from_task(task, Utc::now());
@@ -26845,6 +26855,7 @@ mod optimistic_mutation_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -27166,6 +27177,7 @@ mod remote_spawn_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -28738,6 +28750,7 @@ mod pr_details_debounce_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         lazybox_core::Workspace::from_task(task, Utc::now())

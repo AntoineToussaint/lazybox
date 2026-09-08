@@ -366,6 +366,55 @@ pub fn error_message_from_body(body: &str) -> Option<String> {
 
 // ── Mapper ─────────────────────────────────────────────────────────────
 
+/// Resolve a set of task edges for a Linear issue from two sources: its
+/// native inverse `blocks` relations, and a body marker parsed by `marker`
+/// (`extract_blocked_by` or `extract_merge_after`). Order-preserving,
+/// deduped, skipping relations with no resolved source. A bare same-repo
+/// `#N` in prose is dropped — Linear has no "own repo" to resolve it against,
+/// so only an explicit `owner/repo#N` cross-links to a GitHub task.
+fn linear_edges(issue: &Issue, marker: fn(&str) -> Vec<lazybox_core::IssueLink>) -> Vec<TaskId> {
+    let mut out: Vec<TaskId> = Vec::new();
+    if let Some(relations) = issue.inverse_relations.as_ref() {
+        for rel in &relations.nodes {
+            if rel.relation_type != "blocks" {
+                continue;
+            }
+            let Some(src) = rel.issue.as_ref() else {
+                continue;
+            };
+            let id = TaskId {
+                source: "linear".into(),
+                key: src.identifier.clone(),
+            };
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        }
+    }
+    if let Some(desc) = issue.description.as_deref() {
+        for link in marker(desc) {
+            let id = match link {
+                lazybox_core::IssueLink::Linear { key } => TaskId {
+                    source: "linear".into(),
+                    key,
+                },
+                lazybox_core::IssueLink::GitHub {
+                    repo: Some(repo),
+                    number,
+                } => TaskId {
+                    source: "github".into(),
+                    key: format!("{repo}#{number}"),
+                },
+                lazybox_core::IssueLink::GitHub { repo: None, .. } => continue,
+            };
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        }
+    }
+    out
+}
+
 pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
     let role = match &issue.assignee {
         Some(a) if a.id == viewer_id => TaskRole::Assignee,
@@ -513,58 +562,14 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         // Preserve Linear's exact workflow-state name ("In Review",
         // "Todo", …), which `state` above collapses to a canonical set.
         state_label: Some(issue.state.name.clone()),
-        // Native `blocked_by` edges: inverse relations of type "blocks"
-        // name the issue that blocks this one (#1521). Order-preserving,
-        // deduped, skipping any relation with no resolved source issue.
-        blocked_by: {
-            let mut out: Vec<TaskId> = Vec::new();
-            if let Some(relations) = issue.inverse_relations.as_ref() {
-                for rel in &relations.nodes {
-                    if rel.relation_type != "blocks" {
-                        continue;
-                    }
-                    let Some(src) = rel.issue.as_ref() else {
-                        continue;
-                    };
-                    let id = TaskId {
-                        source: "linear".into(),
-                        key: src.identifier.clone(),
-                    };
-                    if !out.contains(&id) {
-                        out.push(id);
-                    }
-                }
-            }
-            // Body-marker fallback (#1521): an issue that declares its
-            // blocker in prose ("Blocked by ENG-42", "Depends on
-            // owner/repo#7") is parsed with the same source-agnostic
-            // extractor the GitHub provider uses, and the edges are unioned
-            // in. A bare same-repo `#N` is dropped — Linear has no "own
-            // repo" to resolve it against, so only an explicit `owner/repo#N`
-            // cross-links to a GitHub task.
-            if let Some(desc) = issue.description.as_deref() {
-                for link in lazybox_core::issue_links::extract_blocked_by(desc) {
-                    let id = match link {
-                        lazybox_core::IssueLink::Linear { key } => TaskId {
-                            source: "linear".into(),
-                            key,
-                        },
-                        lazybox_core::IssueLink::GitHub {
-                            repo: Some(repo),
-                            number,
-                        } => TaskId {
-                            source: "github".into(),
-                            key: format!("{repo}#{number}"),
-                        },
-                        lazybox_core::IssueLink::GitHub { repo: None, .. } => continue,
-                    };
-                    if !out.contains(&id) {
-                        out.push(id);
-                    }
-                }
-            }
-            out
-        },
+        // Native `blocked_by` edges (inverse "blocks" relations) unioned with
+        // the `Blocked by:` / `Depends on:` body marker (#1521).
+        blocked_by: linear_edges(issue, lazybox_core::issue_links::extract_blocked_by),
+        // Merge-order edges: the `Merge after:` marker plus, mirroring P0's
+        // blocked_by, the same native "blocks" relations — Linear has no
+        // dedicated merge-order relation, so a blocking issue is treated as a
+        // landing-order predecessor too.
+        merge_after: linear_edges(issue, lazybox_core::issue_links::extract_merge_after),
         // Free-text `Blocked on:` reason declared in the description
         // (#1521) — the same prose extractor GitHub issues use.
         blocked_on: issue

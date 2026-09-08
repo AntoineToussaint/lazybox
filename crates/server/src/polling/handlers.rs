@@ -2163,6 +2163,7 @@ mod merge_pr_details_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -3478,6 +3479,7 @@ mod github_target_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -3592,6 +3594,7 @@ mod prefetch_score_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -3884,6 +3887,7 @@ mod inspect_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         let mut workspace = Workspace::from_task(task, chrono::Utc::now());
@@ -4373,6 +4377,7 @@ mod inspect_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         let mut workspace = Workspace::from_task(task, chrono::Utc::now());
@@ -4442,6 +4447,7 @@ mod inspect_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         let workspace = Workspace::from_task(task, chrono::Utc::now());
@@ -4506,6 +4512,7 @@ mod inspect_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -5422,6 +5429,7 @@ mod inspect_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         let workspace = Workspace::from_task(task, chrono::Utc::now());
@@ -6384,6 +6392,7 @@ mod post_mutation_refresh_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }
@@ -6570,6 +6579,7 @@ mod sync_workspace_discovery_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }

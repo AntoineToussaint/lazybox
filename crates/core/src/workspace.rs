@@ -1231,6 +1231,22 @@ impl Workspace {
             .filter(move |id| seen.insert(*id))
     }
 
+    /// Every *distinct* merge-after predecessor any task in this workspace
+    /// declares, in first-seen order. Mirrors [`hierarchy_blocked_by`] — a
+    /// landing-order edge de-duplicated across the workspace's tasks — but
+    /// carries a weaker meaning: a `MergeAfter` edge does not gate the work
+    /// itself, only the *order in which PRs may merge* (this workspace's PR
+    /// must not merge before every predecessor's PR has landed).
+    pub fn hierarchy_merge_after(&self) -> impl Iterator<Item = &TaskId> {
+        let mut seen = std::collections::HashSet::new();
+        self.pr
+            .iter()
+            .chain(self.gh_issues.iter())
+            .chain(self.linear_issues.iter())
+            .flat_map(|task| task.merge_after.iter())
+            .filter(move |id| seen.insert(*id))
+    }
+
     /// The declared `Blocked on:` reason, if any task in this workspace
     /// carries one. Looks past the PR headline task like
     /// `hierarchy_blocked_by`: the first task with a reason wins.
@@ -2340,6 +2356,7 @@ mod tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         }
     }

@@ -3945,6 +3945,7 @@ mod tests {
             linked_tasks: vec![],
             parent: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
             priority: None,
             state_label: None,

@@ -468,7 +468,7 @@ pub enum Id {
     /// [`ChoicePayload::Index`] — 0..5 are [`lazybox_core::Role::ALL`],
     /// the trailing row clears the role. The target workspace lives in
     /// `ModalFlow::SetRole`; the pick becomes a
-    /// [`Command::SetWorkspaceRole`].
+    /// [`lazybox_ipc::Command::SetWorkspaceRole`].
     RolePicker,
     /// Single-pick `Choice` over the enabled agents (`,` Settings →
     /// "Change default agent"), opened on the current default. Each row

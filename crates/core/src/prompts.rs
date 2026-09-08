@@ -213,7 +213,7 @@ pub struct RolePromptCtx {
     /// The epic key the workspace belongs to ([`crate::EpicKey::as_str`]),
     /// or empty when a role is set before the workspace joins an epic.
     pub epic_key: String,
-    /// The epic's human name, used in prose ("you own epic <name>").
+    /// The epic's human name, used in prose (`you own epic <name>`).
     /// Falls back to a generic phrase when empty.
     pub epic_name: String,
     /// Worker only: the blockers that are already satisfied, taken from

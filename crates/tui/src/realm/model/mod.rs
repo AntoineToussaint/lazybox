@@ -5707,6 +5707,7 @@ impl<T: TerminalAdapter> Model<T> {
                     initial_snippet: None,
                     on_main: false,
                     force_new: false,
+                    role: None,
                 });
                 self.flash_info(format!(
                     "Provisioning worktree for {workspace_key} — opening in {} when ready…",
@@ -5921,6 +5922,7 @@ impl<T: TerminalAdapter> Model<T> {
             initial_snippet: None,
             on_main: false,
             force_new: false,
+            role: None,
         });
         self.flash_info(format!(
             "Provisioning worktree for {workspace_key} — opening in {} when ready…",

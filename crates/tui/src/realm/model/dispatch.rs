@@ -108,6 +108,7 @@ fn bulk_spawn_command(
         // Bulk starts inject into any workspace already running an agent
         // (#932) — reuse-friendly, so never force a duplicate.
         force_new: false,
+        role: None,
     }
 }
 
@@ -1035,6 +1036,7 @@ impl<T: TerminalAdapter> Model<T> {
                         on_main: true,
                         // `b c` / `b x` / `b u` explicit agent spawn (#1310).
                         force_new: true,
+                        role: None,
                     }],
                     Action::SpawnShellOnMain => vec![IpcCommand::Spawn {
                         model_alias: None,
@@ -1048,6 +1050,7 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_snippet: None,
                         on_main: true,
                         force_new: false,
+                        role: None,
                     }],
                     // A future destructive action that hasn't grown a
                     // targeted arm yet falls back to the legacy
@@ -1350,6 +1353,7 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_snippet: None,
                         on_main: false,
                         force_new: false,
+                        role: None,
                     });
                 }
             }
@@ -1372,6 +1376,7 @@ impl<T: TerminalAdapter> Model<T> {
                         // Explicit `a c` / `a x` / `a u`: always start a new
                         // agent, even beside an idle one of the same kind (#1310).
                         force_new: true,
+                        role: None,
                     });
                 }
             }
@@ -1463,6 +1468,7 @@ impl<T: TerminalAdapter> Model<T> {
                         on_main: false,
                         // `r c` / `r x` / `r u` mirror `a c` (#1310).
                         force_new: true,
+                        role: None,
                     };
                     self.send_to_remote(&remote, spawn);
                     // Optimistic client-side tag so the sidebar row shows
@@ -1494,6 +1500,7 @@ impl<T: TerminalAdapter> Model<T> {
                         on_main: true,
                         // `b c` / `b x` / `b u` are explicit agent spawns too (#1310).
                         force_new: true,
+                        role: None,
                     });
                 }
             }
@@ -1511,6 +1518,7 @@ impl<T: TerminalAdapter> Model<T> {
                         initial_snippet: None,
                         on_main: true,
                         force_new: false,
+                        role: None,
                     });
                 }
             }
@@ -1567,6 +1575,7 @@ impl<T: TerminalAdapter> Model<T> {
                         access: lazybox_ipc::AgentRunAccess::Default,
                         // `a S` / `a M` / `a L` are explicit agent spawns (#1310).
                         force_new: true,
+                        role: None,
                     });
                 }
             }
@@ -2309,12 +2318,17 @@ impl<T: TerminalAdapter> Model<T> {
             Action::SpawnPlanner | Action::SpawnCoordinator => {
                 // `E p` / `E c` (#1523): stamp the cursor workspace with the
                 // orchestration role, then spawn a *fresh* default agent framed
-                // by that role's preamble. Order matters — `SetWorkspaceRole`
-                // is pushed BEFORE `Spawn` so the daemon (which drains the
-                // command channel in order, awaiting each) has persisted the
-                // role by the time `spawn_handler` reads it; the preamble is
-                // only injected when the role is already set AND the spawn
-                // carries a prompt, so the kickoff line is non-empty.
+                // by that role's preamble. The role rides the `Spawn` command
+                // in-band (`role: Some(..)`) so the daemon frames the preamble
+                // deterministically — the two commands are NOT ordered: both
+                // route to the daemon's detached-mutation lane and run as
+                // independent concurrent tasks, so `Spawn` cannot rely on
+                // `SetWorkspaceRole` having persisted the role first. The
+                // separate `SetWorkspaceRole` still persists the role (sidebar
+                // badge + `role:*` label projection); the in-band copy governs
+                // only this spawn's preamble. The preamble is injected only
+                // when the spawn carries a prompt, so the kickoff line is
+                // non-empty.
                 let agent = self.sidebar.default_agent().to_string();
                 let intent = if matches!(action, Action::SpawnPlanner) {
                     crate::intent::resolve_spawn_planner(self.sidebar.selected_workspace(), &agent)
@@ -2349,6 +2363,10 @@ impl<T: TerminalAdapter> Model<T> {
                         // Always a fresh agent so the role preamble frames a
                         // clean session, never injected into a live one.
                         force_new: true,
+                        // In-band role: makes the daemon's preamble framing
+                        // deterministic regardless of when the parallel
+                        // `SetWorkspaceRole` persist lands (#1523).
+                        role: Some(role),
                     });
                 }
             }
@@ -3421,6 +3439,7 @@ impl<T: TerminalAdapter> Model<T> {
                     // `w` / `w w` continue an existing conversation when one is
                     // live (reuse/inject) — never force a duplicate.
                     force_new: false,
+                    role: None,
                 };
                 let command = match terminal_id {
                     Some(terminal_id) => self.rewrite_spawn_to_terminal(spawn, terminal_id),

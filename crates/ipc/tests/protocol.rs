@@ -107,6 +107,7 @@ fn all_commands() -> Vec<Command> {
             model_alias: Some("L".into()),
             access: lazybox_ipc::AgentRunAccess::ReadOnly,
             force_new: true,
+            role: Some(lazybox_core::Role::Planner),
         },
         Command::Spawn {
             session_key: key.clone(),
@@ -120,6 +121,7 @@ fn all_commands() -> Vec<Command> {
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
             force_new: false,
+            role: None,
         },
         Command::Spawn {
             session_key: key.clone(),
@@ -138,6 +140,7 @@ fn all_commands() -> Vec<Command> {
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
             force_new: false,
+            role: Some(lazybox_core::Role::Coordinator),
         },
         Command::CancelSpawn {
             session_key: key.clone(),

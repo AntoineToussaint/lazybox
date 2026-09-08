@@ -1080,6 +1080,7 @@ impl<T: TerminalAdapter> Model<T> {
                     // Reconstructed from an inject fallback — the reuse-eligible
                     // path, so it must not force a duplicate.
                     force_new: false,
+                    role: None,
                 });
             }
         }

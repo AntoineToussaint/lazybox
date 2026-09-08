@@ -447,6 +447,7 @@ impl<T: TerminalAdapter> Model<T> {
             model_alias,
             access,
             force_new: false,
+            role: None,
         };
         self.spawn_follow_to = Some(conversion.draft.source.clone());
         self.last_spawn = Some(command.clone());

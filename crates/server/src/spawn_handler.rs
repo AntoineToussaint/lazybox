@@ -1321,6 +1321,7 @@ async fn handle_spawn_inner(
         force_new,
         meter,
         untrusted,
+        role: inband_role,
     } = options;
     let access = if matches!(&kind, TerminalKind::Agent(_)) {
         access
@@ -1742,7 +1743,22 @@ async fn handle_spawn_inner(
     // are folded into `meter` here, so `gateway_injection_for_agent` — which
     // still gates on the proxy being enabled/running — needs no change and
     // every safety property of the canary is preserved.
-    let spawn_ws = load_workspace(config, &WorkspaceKey::new(session_key.as_str()));
+    let mut spawn_ws = load_workspace(config, &WorkspaceKey::new(session_key.as_str()));
+    // #1523: stamp an in-band role (the `E p` / `E c` role spawns carry one)
+    // onto this freshly-loaded workspace copy *before* the preamble is derived
+    // below. The role spawn also emits a separate `SetWorkspaceRole` to persist
+    // the role, but the two commands run as independent detached mutation tasks
+    // with no ordering guarantee — reading the persisted role here would race
+    // and silently drop the preamble whenever this spawn wins. This local copy
+    // is never committed; persistence, the sidebar badge, and label projection
+    // all stay with `SetWorkspaceRole`. `None` (every non-role spawn) leaves the
+    // loaded workspace untouched and the preamble falls back to its persisted
+    // `effective_role()`.
+    if let Some(role) = inband_role
+        && let Ok(ws) = spawn_ws.as_mut()
+    {
+        ws.role = Some(role);
+    }
     // Role preamble (#1523): when the spawning workspace carries an epic role,
     // frame the agent's brief with "who you are / what you own" before the task.
     // Every *fresh* agent spawn with a prompt funnels through here — `w w`,

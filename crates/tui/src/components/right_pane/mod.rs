@@ -2351,6 +2351,7 @@ impl RightPane {
                         on_main: false,
                         // Activity-pane `w` continues a live conversation.
                         force_new: false,
+                        role: None,
                     });
                     self.feed.clear_selection();
                 }

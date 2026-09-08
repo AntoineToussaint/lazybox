@@ -860,6 +860,7 @@ async fn log_open(
             initial_snippet: None,
             access: Default::default(),
             force_new: false,
+            role: None,
         })
         .map_err(|e| anyhow::anyhow!("send spawn: {e}"))?;
     // A session-less workspace provisions a worktree first, so allow generously;

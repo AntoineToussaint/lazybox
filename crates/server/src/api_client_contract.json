@@ -34,6 +34,7 @@
           },
           "model_alias": null,
           "on_main": false,
+          "role": null,
           "session_id": null,
           "session_key": "github:o/r#42"
         }
@@ -52,6 +53,7 @@
           "kind": "Shell",
           "model_alias": null,
           "on_main": false,
+          "role": null,
           "session_id": null,
           "session_key": "github:o/r#42"
         }

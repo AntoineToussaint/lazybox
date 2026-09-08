@@ -4896,6 +4896,7 @@ impl TerminalStack {
             // (isolated) worktree, not the shared main checkout.
             on_main: false,
             force_new: false,
+            role: None,
         });
     }
 

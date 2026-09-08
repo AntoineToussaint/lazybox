@@ -9692,6 +9692,61 @@ mod modal_input_responsiveness_tests {
         );
     }
 
+    /// `E p` / `E c` (#1523) emit *two* commands for the cursor workspace,
+    /// and the role must ride the `Spawn` in-band as well as being persisted.
+    ///
+    /// The daemon routes both `SetWorkspaceRole` and `Spawn` to its detached
+    /// mutation lane, where each runs as an independent concurrent task — so
+    /// there is no ordering guarantee between them. If the `Spawn` carried no
+    /// role of its own, a spawn task that won the race would read a still-unset
+    /// persisted role and silently drop the role preamble. Asserting
+    /// `role: Some(..)` on the `Spawn` pins the client half of that fix; the
+    /// daemon half is covered by `inband_role_frames_preamble_without_a_persisted_role`
+    /// in the server's spawn_handler tests.
+    #[test]
+    fn role_spawns_carry_the_role_in_band_as_well_as_persisting_it() {
+        use lazybox_core::Role;
+        use lazybox_tui_core::action::Action;
+        for (action, expected) in [
+            (Action::SpawnPlanner, Role::Planner),
+            (Action::SpawnCoordinator, Role::Coordinator),
+        ] {
+            let mut m = build_model();
+            super::seed_ws(&mut m, "github:o/r#7");
+            let key = WorkspaceKey::new("github:o/r#7");
+
+            let cmds = m.dispatch_action(&action);
+
+            // The persist half: the sidebar badge + `role:*` label projection
+            // still come from `SetWorkspaceRole`.
+            assert!(
+                cmds.iter().any(|c| matches!(
+                    c,
+                    lazybox_ipc::Command::SetWorkspaceRole {
+                        workspace,
+                        role: Some(role),
+                    } if *workspace == key && *role == expected
+                )),
+                "{action:?} must persist the role: {cmds:?}",
+            );
+            // The in-band half: the same role on the Spawn, so the daemon's
+            // preamble never depends on the racing persist.
+            assert!(
+                cmds.iter().any(|c| matches!(
+                    c,
+                    lazybox_ipc::Command::Spawn {
+                        role: Some(role),
+                        force_new: true,
+                        initial_prompt: Some(prompt),
+                        ..
+                    } if *role == expected && !prompt.is_empty()
+                )),
+                "{action:?} must carry the role in-band on a prompted, fresh \
+                 spawn so the preamble is deterministic: {cmds:?}",
+            );
+        }
+    }
+
     /// Minimal repo-labeled PR task — enough for the sidebar to group
     /// the workspace under `repo`'s header.
     fn repo_task(key: &str, repo: &str) -> lazybox_core::Task {
@@ -10486,6 +10541,7 @@ mod merge_focus_follow_tests {
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
             force_new: false,
+            role: None,
         }]);
 
         assert_eq!(model.top_modal(), Some(&Id::ClaimedSpawnConfirm));
@@ -10508,6 +10564,7 @@ mod merge_focus_follow_tests {
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
             force_new: false,
+            role: None,
         }]);
         assert!(matches!(
             model.handle_confirmed(true).as_slice(),
@@ -10545,6 +10602,7 @@ mod merge_focus_follow_tests {
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::ReadOnly,
             force_new: false,
+            role: None,
         }]);
 
         assert_ne!(model.top_modal(), Some(&Id::ClaimedSpawnConfirm));
@@ -11736,6 +11794,7 @@ mod merge_focus_follow_tests {
             model_alias: None,
             access: AgentRunAccess::ReadOnly,
             force_new: false,
+            role: None,
         };
 
         assert!(matches!(
@@ -20544,6 +20603,7 @@ mod worktree_progress_recovery_tests {
             initial_snippet: None,
             on_main: false,
             force_new: false,
+            role: None,
         }
     }
 
@@ -21060,6 +21120,7 @@ mod worktree_progress_recovery_tests {
             initial_snippet: None,
             on_main: false,
             force_new: false,
+            role: None,
         });
         m.handle_daemon_event(IpcEvent::WorktreeProgress {
             session_key,
@@ -21107,6 +21168,7 @@ mod worktree_progress_recovery_tests {
             initial_snippet: None,
             on_main: false,
             force_new: false,
+            role: None,
         });
         m.handle_daemon_event(IpcEvent::WorktreeProgress {
             session_key,

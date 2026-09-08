@@ -1805,6 +1805,7 @@ pub async fn dispatch_command(
             model_alias,
             access,
             force_new,
+            role,
         } => {
             // A spawn carrying a pre-built work prompt is an autonomous
             // "work on this" launch — run it unattended (skip permissions,
@@ -1829,6 +1830,7 @@ pub async fn dispatch_command(
                     client_request_id,
                     origin: lazybox_ipc::SpawnOrigin::Interactive,
                     force_new,
+                    role,
                     ..Default::default()
                 },
             )

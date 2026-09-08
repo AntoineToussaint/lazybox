@@ -2388,6 +2388,7 @@ impl<T: TerminalAdapter> Model<T> {
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
             force_new: false,
+            role: None,
         });
         if self.modal_stack.last() == Some(&Id::ErrorInbox) {
             self.pop_modal();
@@ -4038,6 +4039,12 @@ impl<T: TerminalAdapter> Model<T> {
             // The recreate retry re-provisions the same target; it is a
             // reuse-eligible replay, not a deliberate second agent.
             force_new: _,
+            // The in-band role (#1523) only frames the first attempt's
+            // preamble; the recreate replay routes through SpawnFallback,
+            // which has no role channel. By retry time the paired
+            // SetWorkspaceRole has persisted, so the daemon's
+            // effective_role() still frames the preamble — no loss here.
+            role: _,
         }) = self.last_spawn.clone()
         else {
             self.flash_hint("nothing to recreate");

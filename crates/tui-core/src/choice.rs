@@ -906,6 +906,7 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                     on_main: false,
                     access: lazybox_ipc::AgentRunAccess::Default,
                     force_new: false,
+                    role: None,
                 };
                 let notice = format!(
                     "Provisioning worktree for {workspace_key} — opening in {} when ready…",

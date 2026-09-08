@@ -77,6 +77,7 @@ fn make_task(key: &str, minutes_old: i64) -> Task {
         priority: None,
         state_label: None,
         blocked_by: vec![],
+        merge_after: vec![],
         blocked_on: None,
     }
 }

@@ -578,6 +578,7 @@ mod merge_gate_tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         Workspace::from_task(task, Utc::now())

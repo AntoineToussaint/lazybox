@@ -440,6 +440,15 @@ pub enum Action {
     /// dependency edge. Declared blockers sweep first, then edges. Wraps
     /// around.
     JumpToBlocked,
+    /// Open the epic merge-order readout (`E m`, #1524): the focused
+    /// workspace's epic PRs in topological merge order, held ones marked
+    /// with the predecessor they wait on. Read-only; `Enter` on a row
+    /// jumps to that workspace.
+    EpicMergeOrder,
+    /// Open the full-screen epic dependency graph (`E g`, #1524): waves as
+    /// columns, `j/k`/`h/l` navigate, `Enter` jumps to the highlighted
+    /// member, `Esc` closes.
+    EpicGraph,
     /// Move the sidebar cursor to the previous group header (`{`,
     /// #1502). Clamps at the first.
     JumpPrevGroup,
@@ -653,6 +662,8 @@ pub enum ActionKind {
     JumpToLimited,
     JumpToUnread,
     JumpToBlocked,
+    EpicMergeOrder,
+    EpicGraph,
     JumpPrevGroup,
     JumpNextGroup,
     ResumeRateLimited,
@@ -705,6 +716,8 @@ impl ActionKind {
         Self::JumpToLimited,
         Self::JumpToUnread,
         Self::JumpToBlocked,
+        Self::EpicMergeOrder,
+        Self::EpicGraph,
         Self::ToggleFocusMode,
         Self::StartAgent,
         Self::ConnectBox,
@@ -954,6 +967,8 @@ impl Action {
             Action::JumpToLimited => ActionKind::JumpToLimited,
             Action::JumpToUnread => ActionKind::JumpToUnread,
             Action::JumpToBlocked => ActionKind::JumpToBlocked,
+            Action::EpicMergeOrder => ActionKind::EpicMergeOrder,
+            Action::EpicGraph => ActionKind::EpicGraph,
             Action::JumpPrevGroup => ActionKind::JumpPrevGroup,
             Action::JumpNextGroup => ActionKind::JumpNextGroup,
             Action::ResumeRateLimited => ActionKind::ResumeRateLimited,
@@ -1159,6 +1174,20 @@ impl ActionDef {
                 default_keys: "E j",
                 label: "next blocked",
                 describe: "Jump the cursor to the next blocked workspace — one that declares a `Blocked on:` reason or carries a dependency edge (#1521). Declared blockers come first, then edge-blocked rows. Wraps around.",
+                section: Section::Global,
+            },
+            ActionKind::EpicMergeOrder => &Self {
+                kind: ActionKind::EpicMergeOrder,
+                default_keys: "E m",
+                label: "merge order",
+                describe: "Open the merge-order readout for the focused workspace's epic (#1524): its PRs in topological merge order, each marked merged / mergeable / held / not-ready, with a held PR naming the merge-after predecessor it waits on. Read-only; Enter on a row jumps to that workspace.",
+                section: Section::Global,
+            },
+            ActionKind::EpicGraph => &Self {
+                kind: ActionKind::EpicGraph,
+                default_keys: "E g",
+                label: "graph view",
+                describe: "Open the full-screen dependency graph for the focused workspace's epic (#1524): waves laid out as columns with the typed edges between them (solid for a blocking dependency, dashed for a merge-after-only edge). j/k move within a wave, h/l across; Enter jumps to the highlighted member, Esc closes.",
                 section: Section::Global,
             },
             ActionKind::JumpPrevGroup => &Self {
@@ -2411,6 +2440,8 @@ impl ActionKind {
             ActionKind::JumpToLimited => "jump_to_limited",
             ActionKind::JumpToUnread => "jump_to_unread",
             ActionKind::JumpToBlocked => "jump_to_blocked",
+            ActionKind::EpicMergeOrder => "epic_merge_order",
+            ActionKind::EpicGraph => "epic_graph",
             ActionKind::JumpPrevGroup => "jump_prev_group",
             ActionKind::JumpNextGroup => "jump_next_group",
             ActionKind::ResumeRateLimited => "resume_rate_limited",
@@ -2656,7 +2687,9 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         // jumps to the next blocked workspace; the group grows as later
         // epic slices land. `Shift-E` is the Error Inbox and `e` the
         // editor, so the epic leader takes bare `E`.
-        ActionKind::JumpToBlocked => Some("epic"),
+        ActionKind::JumpToBlocked | ActionKind::EpicMergeOrder | ActionKind::EpicGraph => {
+            Some("epic")
+        }
         _ => None,
     }
 }
@@ -3442,6 +3475,8 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         | ActionKind::JumpToLimited
         | ActionKind::JumpToUnread
         | ActionKind::JumpToBlocked
+        | ActionKind::EpicMergeOrder
+        | ActionKind::EpicGraph
         | ActionKind::JumpPrevGroup
         | ActionKind::JumpNextGroup
         | ActionKind::ResumeRateLimited
@@ -4127,6 +4162,7 @@ mod tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
 
@@ -4218,6 +4254,7 @@ mod tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
 
@@ -4337,6 +4374,7 @@ mod tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
 
@@ -4419,6 +4457,7 @@ mod tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         let ws_with_pr = |state: TaskState| {
@@ -4541,6 +4580,7 @@ mod tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
 

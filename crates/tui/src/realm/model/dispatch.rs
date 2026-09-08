@@ -285,7 +285,14 @@ impl<T: TerminalAdapter> Model<T> {
         }
         match intent {
             Intent::MergePr { workspace_key } => {
-                vec![IpcCommand::MergePr { workspace_key }]
+                // A plain `g m` never forces: the daemon refuses a
+                // merge-after-held PR with a `PrMergeFailed` naming the
+                // predecessors, and the held-merge confirm re-sends with
+                // `force: true`.
+                vec![IpcCommand::MergePr {
+                    workspace_key,
+                    force: false,
+                }]
             }
             Intent::UpdateBranch { workspace_key } => {
                 vec![IpcCommand::UpdateBranch { workspace_key }]
@@ -2278,6 +2285,12 @@ impl<T: TerminalAdapter> Model<T> {
                 } else {
                     self.flash_hint("no blocked tasks");
                 }
+            }
+            Action::EpicMergeOrder => {
+                self.mount_merge_order();
+            }
+            Action::EpicGraph => {
+                self.mount_epic_graph();
             }
             Action::JumpPrevGroup | Action::JumpNextGroup => {
                 if self

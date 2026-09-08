@@ -77,6 +77,7 @@ fn sample_task() -> lazybox_core::Task {
         priority: None,
         state_label: None,
         blocked_by: vec![],
+        merge_after: vec![],
         blocked_on: None,
     }
 }
@@ -376,6 +377,7 @@ fn all_commands() -> Vec<Command> {
         },
         Command::MergePr {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            force: false,
         },
         Command::CloseIssue {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
@@ -1279,13 +1281,44 @@ fn all_events() -> Vec<Event> {
                 blockers_needing_operator: 1,
                 cycle: false,
                 critical_path: vec![lazybox_core::WorkspaceKey("github:o/r#1".into())],
+                edges: vec![
+                    lazybox_ipc::EpicEdge {
+                        from: lazybox_core::WorkspaceKey("github:o/r#1".into()),
+                        to: lazybox_core::WorkspaceKey("github:o/r#2".into()),
+                        kind: lazybox_ipc::EdgeKind::Blocks,
+                    },
+                    lazybox_ipc::EpicEdge {
+                        from: lazybox_core::WorkspaceKey("github:o/r#1".into()),
+                        to: lazybox_core::WorkspaceKey("github:o/r#2".into()),
+                        kind: lazybox_ipc::EdgeKind::MergeAfter,
+                    },
+                ],
+                merge_order: vec![
+                    lazybox_ipc::MergeOrderEntry {
+                        key: lazybox_core::WorkspaceKey("github:o/r#2".into()),
+                        held_by: vec![],
+                    },
+                    lazybox_ipc::MergeOrderEntry {
+                        key: lazybox_core::WorkspaceKey("github:o/r#1".into()),
+                        held_by: vec![lazybox_core::WorkspaceKey("github:o/r#2".into())],
+                    },
+                ],
                 computed_at: 1_700_000_000_000,
             },
-            delta: vec![lazybox_ipc::EpicDelta::StatusChanged {
-                key: lazybox_core::WorkspaceKey("github:o/r#1".into()),
-                from: lazybox_ipc::EpicMemberStatus::Ready,
-                to: lazybox_ipc::EpicMemberStatus::Blocked,
-            }],
+            delta: vec![
+                lazybox_ipc::EpicDelta::StatusChanged {
+                    key: lazybox_core::WorkspaceKey("github:o/r#1".into()),
+                    from: lazybox_ipc::EpicMemberStatus::Ready,
+                    to: lazybox_ipc::EpicMemberStatus::Blocked,
+                },
+                lazybox_ipc::EpicDelta::Held {
+                    key: lazybox_core::WorkspaceKey("github:o/r#1".into()),
+                    by: vec![lazybox_core::WorkspaceKey("github:o/r#2".into())],
+                },
+                lazybox_ipc::EpicDelta::Released {
+                    key: lazybox_core::WorkspaceKey("github:o/r#3".into()),
+                },
+            ],
         },
     ]
 }

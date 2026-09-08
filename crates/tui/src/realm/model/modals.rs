@@ -2181,6 +2181,159 @@ impl<T: TerminalAdapter> Model<T> {
         self.mount_modal(Id::Stats, stats);
     }
 
+    /// The cached epic snapshot whose members include the focused
+    /// workspace, if any. Returns the epic *key* (owned) so a caller can
+    /// re-borrow `self` mutably afterwards without holding the map borrow.
+    /// A workspace never joins two epics, so the first match is the one.
+    fn focused_epic_key(&self) -> Option<String> {
+        let ws = self.sidebar.selected_workspace()?.key.clone();
+        self.epic_snapshots
+            .values()
+            .find(|snap| snap.members.iter().any(|m| m.key == ws))
+            .map(|snap| snap.key.clone())
+    }
+
+    /// `owner/repo#N  Display name` for one epic member — the provider
+    /// prefix dropped, the workspace's display name appended when the row
+    /// is loaded locally (it always is, for a resolved member).
+    fn epic_member_label(&self, key: &lazybox_core::WorkspaceKey) -> String {
+        let short = key.0.split_once(':').map(|(_, r)| r).unwrap_or(&key.0);
+        match self
+            .sidebar
+            .workspace_by_key(&lazybox_core::SessionKey::from(key))
+        {
+            Some(ws) => format!("{short}  {}", ws.name),
+            None => short.to_string(),
+        }
+    }
+
+    /// Resolve a snapshot's `merge_order` into the modal's pre-rendered
+    /// rows: a glyph kind per PR (merged / mergeable / held / not-ready),
+    /// a display label, and the short keys of any predecessors holding it.
+    fn merge_order_rows(
+        &self,
+        snap: &lazybox_ipc::EpicSnapshot,
+    ) -> Vec<crate::realm::components::merge_order::MergeOrderRow> {
+        use crate::realm::components::merge_order::{MergeOrderRow, MergeRowKind};
+        use lazybox_ipc::EpicMemberStatus;
+
+        let short = |k: &lazybox_core::WorkspaceKey| -> String {
+            k.0.split_once(':')
+                .map(|(_, r)| r)
+                .unwrap_or(&k.0)
+                .to_string()
+        };
+        snap.merge_order
+            .iter()
+            .map(|entry| {
+                let status = snap
+                    .members
+                    .iter()
+                    .find(|m| m.key == entry.key)
+                    .map(|m| &m.status);
+                // A held entry is authoritative; otherwise fall back to the
+                // member's derived status for the glyph.
+                let kind = if !entry.held_by.is_empty() {
+                    MergeRowKind::Held
+                } else {
+                    match status {
+                        Some(EpicMemberStatus::Done) => MergeRowKind::Merged,
+                        Some(EpicMemberStatus::Mergeable { held_by }) if !held_by.is_empty() => {
+                            MergeRowKind::Held
+                        }
+                        Some(EpicMemberStatus::Mergeable { .. }) => MergeRowKind::Mergeable,
+                        _ => MergeRowKind::NotReady,
+                    }
+                };
+                MergeOrderRow {
+                    kind,
+                    label: self.epic_member_label(&entry.key),
+                    held_by: entry.held_by.iter().map(short).collect(),
+                    key: lazybox_core::SessionKey::from(&entry.key),
+                }
+            })
+            .collect()
+    }
+
+    /// Build + mount the epic merge-order readout (`E m`, #1524) for the
+    /// focused workspace's epic. Flashes a hint when the cursor is not on
+    /// an epic member. Idempotent while it's the top modal.
+    pub(super) fn mount_merge_order(&mut self) {
+        use crate::realm::components::merge_order::MergeOrder;
+
+        if self.modal_stack.last() == Some(&Id::MergeOrder) {
+            return;
+        }
+        let Some(epic_key) = self.focused_epic_key() else {
+            self.flash_hint("not part of an epic");
+            return;
+        };
+        let Some(snap) = self.epic_snapshots.get(&epic_key).cloned() else {
+            return;
+        };
+        let rows = self.merge_order_rows(&snap);
+        self.mount_modal(Id::MergeOrder, MergeOrder::new(snap.name, rows));
+    }
+
+    /// Build + mount the full-screen epic DAG (`E g`, #1524) for the
+    /// focused workspace's epic. Flashes a hint off an epic. Idempotent.
+    pub(super) fn mount_epic_graph(&mut self) {
+        use crate::realm::components::epic_graph::EpicGraph;
+
+        if self.modal_stack.last() == Some(&Id::EpicGraph) {
+            return;
+        }
+        let Some(epic_key) = self.focused_epic_key() else {
+            self.flash_hint("not part of an epic");
+            return;
+        };
+        let Some(snap) = self.epic_snapshots.get(&epic_key).cloned() else {
+            return;
+        };
+        let name = snap.name.clone();
+        self.mount_modal(Id::EpicGraph, EpicGraph::new(name, snap));
+    }
+
+    /// Repaint an open epic readout in place when a fresh `EpicStatus` for
+    /// its epic lands (#1524). The merge-order list rebuilds from scratch
+    /// (read-only, so a reset is harmless); the DAG carries its selected
+    /// member across the rebuild so a poll never yanks the cursor. A
+    /// snapshot for a *different* epic than the one on screen is ignored.
+    pub(super) fn refresh_open_epic_modal(&mut self, key: &str) {
+        use crate::realm::components::epic_graph::EpicGraph;
+        use crate::realm::components::merge_order::MergeOrder;
+
+        match self.modal_stack.last() {
+            Some(&Id::MergeOrder) => {
+                if self.focused_epic_key().as_deref() != Some(key) {
+                    return;
+                }
+                let Some(snap) = self.epic_snapshots.get(key).cloned() else {
+                    return;
+                };
+                let rows = self.merge_order_rows(&snap);
+                self.mount_modal(Id::MergeOrder, MergeOrder::new(snap.name, rows));
+            }
+            Some(&Id::EpicGraph) => {
+                if self.focused_epic_key().as_deref() != Some(key) {
+                    return;
+                }
+                let Some(snap) = self.epic_snapshots.get(key).cloned() else {
+                    return;
+                };
+                let selected = match self.app.state(&Id::EpicGraph) {
+                    Ok(tuirealm::state::State::Single(tuirealm::state::StateValue::Usize(n))) => n,
+                    _ => 0,
+                };
+                let name = snap.name.clone();
+                let mut modal = EpicGraph::new(name, snap);
+                modal.set_selected(selected);
+                self.mount_modal(Id::EpicGraph, modal);
+            }
+            _ => {}
+        }
+    }
+
     /// `i` in the Error Inbox — open a pre-filled GitHub *new issue*
     /// form in the browser, deriving the repo from the error's
     /// workspace key. Pre-filling the form (rather than creating the
@@ -2572,6 +2725,100 @@ impl<T: TerminalAdapter> Model<T> {
             workspace: session_key,
         });
         self.mount_modal(Id::ConflictResolve, Confirm::new(prompt).default_yes());
+    }
+
+    /// Merge-after-hold override prompt (#1524). A `g m` on a PR the daemon
+    /// refused because it is held behind unmerged predecessors comes back as
+    /// a `PrMergeFailed` whose reason carries [`MERGE_HELD_REASON_PREFIX`];
+    /// this offers the out-of-order override, and Yes re-sends `MergePr {
+    /// force: true }` for every held PR gathered here.
+    ///
+    /// A bulk `g m` over a selection produces one such refusal per held PR,
+    /// each landing async — so rather than let the first mount win and drop
+    /// the rest (the old behavior, where only one of several held PRs was
+    /// ever confirmable), a refusal that arrives while this same prompt is
+    /// already open *folds into it*: the held set grows and the copy renames
+    /// to cover the whole batch, matching how the other destructive bulk
+    /// actions confirm the full set at once. A *different* modal still wins
+    /// (the row stays actionable, so `g m` re-triggers it). Mounts async like
+    /// [`Self::mount_conflict_resolve`]. `default_no()` — an out-of-order
+    /// merge is not the safe default, so a buffered Enter can't force it.
+    pub(super) fn mount_merge_held_confirm(
+        &mut self,
+        workspace: &lazybox_core::WorkspaceKey,
+        pr_label: &str,
+        held_names: &str,
+    ) {
+        use crate::realm::components::confirm::Confirm;
+        let session_key = lazybox_core::SessionKey::from(workspace);
+        if self.sidebar.workspace_by_key(&session_key).is_none() {
+            return;
+        }
+        // Already showing a held-merge confirm from an earlier PR in this same
+        // bulk merge: fold this PR into it instead of dropping it.
+        if self.modal_stack.last() == Some(&Id::MergeHeldConfirm) {
+            if let Some(ModalFlow::MergeHeldConfirm { mut held }) = self.modal_flow.take() {
+                if !held.iter().any(|(w, _)| w == workspace) {
+                    held.push((workspace.clone(), pr_label.to_string()));
+                }
+                let prompt = Self::merge_held_prompt(&held, held_names);
+                self.set_modal_flow(ModalFlow::MergeHeldConfirm { held });
+                self.mount_modal(Id::MergeHeldConfirm, Confirm::new(prompt).default_no());
+                self.redraw = true;
+            }
+            return;
+        }
+        // A different modal owns the stack — keep it, hint the override path.
+        if let Some(top) = self.modal_stack.last() {
+            tracing::info!(
+                ?top,
+                "merge-hold override prompt skipped — another modal owns the stack"
+            );
+            self.flash_hint("held merge — close this dialog and press g m to override");
+            return;
+        }
+        let held = vec![(workspace.clone(), pr_label.to_string())];
+        let prompt = Self::merge_held_prompt(&held, held_names);
+        self.set_modal_flow(ModalFlow::MergeHeldConfirm { held });
+        self.mount_modal(Id::MergeHeldConfirm, Confirm::new(prompt).default_no());
+    }
+
+    /// Copy for the held-merge override confirm. A single held PR names its
+    /// predecessors (`held_names`, the reason from *its* refusal); a batch
+    /// lists the held PRs and offers to force all of them, since per-PR
+    /// predecessor lists would bury the one thing that matters — which PRs
+    /// land out of order.
+    fn merge_held_prompt(
+        held: &[(lazybox_core::WorkspaceKey, String)],
+        held_names: &str,
+    ) -> String {
+        if held.len() == 1 {
+            let (_, pr_label) = &held[0];
+            return format!(
+                "{pr_label} is held — it must merge after {held_names}, which \
+                 haven't landed yet.\n\n\
+                 [Y] merges it now anyway, out of the declared order. Esc keeps \
+                 the hold. GitHub's own gates (conflicts, required checks) still \
+                 apply."
+            );
+        }
+        const SHOWN: usize = 5;
+        let labels: Vec<&str> = held.iter().map(|(_, l)| l.as_str()).collect();
+        let list = if labels.len() <= SHOWN {
+            labels.join(", ")
+        } else {
+            format!(
+                "{}, +{} more",
+                labels[..SHOWN].join(", "),
+                labels.len() - SHOWN
+            )
+        };
+        let n = held.len();
+        format!(
+            "{n} PRs are held behind unmerged predecessors: {list}.\n\n\
+             [Y] merges all {n} now, out of the declared order. Esc keeps the \
+             holds. GitHub's own gates (conflicts, required checks) still apply."
+        )
     }
 
     /// Turn an action the help agent proposed (#353) into a
@@ -4184,6 +4431,7 @@ mod tests {
             priority: None,
             state_label: None,
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
         };
         let mut ws = lazybox_core::Workspace::from_task(

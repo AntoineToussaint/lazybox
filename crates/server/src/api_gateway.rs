@@ -704,6 +704,9 @@ impl DesktopCommand {
             }
             DesktopCommand::MergePr { session_key } => Command::MergePr {
                 workspace_key: workspace_key_of(&session_key),
+                // Desktop has no merge-after-hold override yet; a held PR
+                // surfaces its `PrMergeFailed` reason like any other rejection.
+                force: false,
             },
             DesktopCommand::UpdateBranch { session_key } => Command::UpdateBranch {
                 workspace_key: workspace_key_of(&session_key),

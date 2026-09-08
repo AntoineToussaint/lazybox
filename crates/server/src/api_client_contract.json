@@ -217,6 +217,7 @@
             "labels": [],
             "last_commenter": null,
             "linked_tasks": [],
+            "merge_after": [],
             "merge_blocked": false,
             "mergeable": "Mergeable",
             "needs_reply": false,

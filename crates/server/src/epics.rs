@@ -29,8 +29,8 @@ use lazybox_core::{
     Activity, ActivityKind, EpicRecord, Task, TaskId, TaskState, Workspace, WorkspaceKey,
 };
 use lazybox_ipc::{
-    AgentState, Blocker, BlockerKind, BlockerOwner, EpicDelta, EpicMember, EpicMemberStatus,
-    EpicSnapshot, Event,
+    AgentState, Blocker, BlockerKind, BlockerOwner, EdgeKind, EpicDelta, EpicEdge, EpicMember,
+    EpicMemberStatus, EpicSnapshot, Event, MergeOrderEntry,
 };
 use tokio::sync::broadcast;
 
@@ -190,10 +190,26 @@ struct Resolved<'a> {
     by_key: HashMap<WorkspaceKey, &'a Workspace>,
     /// `depends_on[M]` = the members M directly depends on (edges).
     depends_on: HashMap<WorkspaceKey, BTreeSet<WorkspaceKey>>,
+    /// `merge_after[M]` = the members whose PRs must land before M's may merge.
+    /// The union of M's explicit `Merge after:` markers and — unless the epic
+    /// opts out — every `depends_on[M]` edge (a work dependency implies a
+    /// landing-order one).
+    merge_after: HashMap<WorkspaceKey, BTreeSet<WorkspaceKey>>,
     /// `external[M]` = blocking tasks that are not themselves members.
     external: HashMap<WorkspaceKey, BTreeSet<TaskId>>,
-    /// Whether each member's own PR/issue is already Merged/Closed.
+    /// Whether each member has *landed* — counts toward epic completion. A PR
+    /// is done only when **merged** (a closed-unmerged PR is abandoned, not
+    /// done); an issue is done when merged or closed. See [`member_done`].
     done: HashMap<WorkspaceKey, bool>,
+    /// Whether each member has stopped gating a successor's *landing order* —
+    /// its merge-after edge is no longer live. True once the deliverable reaches
+    /// a terminal state: a PR **merged** (order honored) *or* **closed** without
+    /// merging (abandoned, so the "land after me" premise is void). Distinct
+    /// from `done`, which excludes the closed case. See [`landing_settled`].
+    landing_settled: HashMap<WorkspaceKey, bool>,
+    /// Whether each member currently has a *live* PR (open, not merged/closed).
+    /// Merge order lists only PR members.
+    has_pr: HashMap<WorkspaceKey, bool>,
 }
 
 /// Resolve an epic's membership + dependency graph from the loaded workspaces.
@@ -249,13 +265,29 @@ fn resolved_graph<'a>(record: &EpicRecord, workspaces: &'a [Workspace]) -> Resol
     // skipped; anything else (a non-member workspace, or an unknown task) is
     // external.
     let mut depends_on: HashMap<WorkspaceKey, BTreeSet<WorkspaceKey>> = HashMap::new();
+    let mut merge_after: HashMap<WorkspaceKey, BTreeSet<WorkspaceKey>> = HashMap::new();
     let mut external: HashMap<WorkspaceKey, BTreeSet<TaskId>> = HashMap::new();
     let mut done: HashMap<WorkspaceKey, bool> = HashMap::new();
+    let mut landing_settled: HashMap<WorkspaceKey, bool> = HashMap::new();
+    let mut has_pr: HashMap<WorkspaceKey, bool> = HashMap::new();
+    // Same classify-a-blocker logic reused for `blocked_by` and `merge_after`:
+    // a member's own task is internal, another member is an internal edge, and
+    // anything else is external. Merge-after only tracks the internal-edge case
+    // (cross-member landing order); external merge-after tasks aren't part of
+    // the epic's own merge sequence.
     for key in &members {
         let ws = by_key[key];
         done.insert(key.clone(), member_done(ws));
+        landing_settled.insert(key.clone(), landing_settled_for(ws));
+        has_pr.insert(
+            key.clone(),
+            ws.pr
+                .as_ref()
+                .is_some_and(|p| p.state != TaskState::Merged && p.state != TaskState::Closed),
+        );
         let deps = depends_on.entry(key.clone()).or_default();
         let ext = external.entry(key.clone()).or_default();
+        let mut ma: BTreeSet<WorkspaceKey> = BTreeSet::new();
         for task in tasks_of(ws) {
             for blocker in &task.blocked_by {
                 match task_ws.get(blocker) {
@@ -271,6 +303,30 @@ fn resolved_graph<'a>(record: &EpicRecord, workspaces: &'a [Workspace]) -> Resol
                     }
                 }
             }
+            for pred in &task.merge_after {
+                match task_ws.get(pred) {
+                    Some(other) if other == key => {}
+                    Some(other) if member_set.contains(other) => {
+                        ma.insert(other.clone());
+                    }
+                    _ => {
+                        // A merge-after predecessor lazybox doesn't track as a
+                        // member is out of scope for the epic's merge sequence.
+                    }
+                }
+            }
+        }
+        merge_after.insert(key.clone(), ma);
+    }
+
+    // A `Blocks` edge implies a `MergeAfter` edge unless the epic opts out: the
+    // dependent's PR must not land before the PR it depends on.
+    if record.implied_merge_after {
+        for (key, deps) in &depends_on {
+            let ma = merge_after.entry(key.clone()).or_default();
+            for dep in deps {
+                ma.insert(dep.clone());
+            }
         }
     }
 
@@ -278,8 +334,11 @@ fn resolved_graph<'a>(record: &EpicRecord, workspaces: &'a [Workspace]) -> Resol
         members,
         by_key,
         depends_on,
+        merge_after,
         external,
         done,
+        landing_settled,
+        has_pr,
     }
 }
 
@@ -317,6 +376,31 @@ fn reaches_anchor(start: &TaskId, anchor: &TaskId, parents: &HashMap<TaskId, Tas
 fn member_done(ws: &Workspace) -> bool {
     if let Some(pr) = &ws.pr {
         return pr.state == TaskState::Merged;
+    }
+    tasks_of(ws)
+        .next()
+        .is_some_and(|t| matches!(t.state, TaskState::Merged | TaskState::Closed))
+}
+
+/// Whether a member has stopped gating a successor's landing order.
+///
+/// A `merge_after` edge encodes "B must land after A." That constraint is live
+/// only while A is still expected to land, and it resolves in *two* ways, both
+/// of which must free B:
+///   * A's PR **merged** — the order was honored; or
+///   * A's PR **closed without merging** — A is abandoned and will never land,
+///     so the "land after me" premise is void. Holding B behind a dead PR
+///     forever is a stall, not a safeguard (auto-merge silently never fires and
+///     manual `g m` keeps being refused). An issue-only member settles when its
+///     issue reaches a terminal Merged/Closed state.
+///
+/// Deliberately distinct from [`member_done`]: an abandoned predecessor is *not*
+/// Done (it must not count toward the epic's `Completed`, and it must not
+/// satisfy a work dependency), but it must not gate a merge either. Completion
+/// keys off `member_done`; the merge hold keys off this.
+fn landing_settled_for(ws: &Workspace) -> bool {
+    if let Some(pr) = &ws.pr {
+        return matches!(pr.state, TaskState::Merged | TaskState::Closed);
     }
     tasks_of(ws)
         .next()
@@ -523,6 +607,7 @@ fn member_status(
     ws: &Workspace,
     agent: Option<AgentState>,
     blockers: &[Blocker],
+    held_by: &[WorkspaceKey],
 ) -> EpicMemberStatus {
     if member_done(ws) {
         return EpicMemberStatus::Done;
@@ -556,7 +641,9 @@ fn member_status(
             && !changes_requested
             && !pr.merge_blocked;
         if mergeable {
-            return EpicMemberStatus::Mergeable;
+            return EpicMemberStatus::Mergeable {
+                held_by: held_by.to_vec(),
+            };
         }
         return EpicMemberStatus::PrOpen {
             ci_failing,
@@ -621,6 +708,14 @@ fn critical_path(
     path
 }
 
+/// The full typed edge set of an epic's dependency graph — both `Blocks` and
+/// `MergeAfter` edges — resolved fresh from the loaded workspaces. A thin
+/// public entry point over the internal graph builder, for callers that want
+/// the edges without a full status snapshot.
+pub fn epic_graph(record: &EpicRecord, workspaces: &[Workspace]) -> Vec<EpicEdge> {
+    graph_edges(&resolved_graph(record, workspaces))
+}
+
 /// Resolve a full [`EpicSnapshot`] for one epic. `since_latch` is this epic's
 /// blocker-age memory (mutated in place: new blockers get `now`, disappeared
 /// ones are pruned). `now` is unix-ms.
@@ -661,7 +756,26 @@ pub fn resolve(
             )
         };
         let ws = resolved.by_key[key];
-        let status = member_status(ws, agent_states.get(key).copied(), &blockers);
+        // Merge-after predecessors that haven't settled hold this member's
+        // merge. A predecessor settles when it merges (order honored) or its PR
+        // is closed without merging (abandoned — the ordering premise is void);
+        // either way it stops gating. Keyed off `landing_settled`, not `done`,
+        // so a dead predecessor can't hold a successor's merge forever.
+        let held_by: Vec<WorkspaceKey> = resolved
+            .merge_after
+            .get(key)
+            .into_iter()
+            .flatten()
+            .filter(|pred| {
+                !resolved
+                    .landing_settled
+                    .get(*pred)
+                    .copied()
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        let status = member_status(ws, agent_states.get(key).copied(), &blockers, &held_by);
         members.push(EpicMember {
             key: key.clone(),
             wave: wave.get(key).copied().unwrap_or(0),
@@ -698,13 +812,13 @@ pub fn resolve(
     let mut asking = 0;
     let mut failing = 0;
     for m in &members {
-        match m.status {
+        match &m.status {
             EpicMemberStatus::Done => done += 1,
             EpicMemberStatus::Ready => ready += 1,
             EpicMemberStatus::Blocked => blocked += 1,
             EpicMemberStatus::Asking => asking += 1,
             EpicMemberStatus::Failed => failing += 1,
-            EpicMemberStatus::PrOpen { ci_failing, .. } if ci_failing => failing += 1,
+            EpicMemberStatus::PrOpen { ci_failing, .. } if *ci_failing => failing += 1,
             _ => {}
         }
     }
@@ -727,8 +841,102 @@ pub fn resolve(
         blockers_needing_operator,
         cycle: !cycle.is_empty(),
         critical_path: critical_path(&order, &resolved.depends_on),
+        edges: graph_edges(&resolved),
+        merge_order: merge_order(&resolved),
         computed_at: now,
     }
+}
+
+/// Every typed edge in the resolved graph, deterministically ordered
+/// (`from`, `to`, `kind`). A pair joined by both a `Blocks` and a `MergeAfter`
+/// edge yields two edges — the DAG view draws them distinctly.
+fn graph_edges(resolved: &Resolved) -> Vec<EpicEdge> {
+    let mut edges: Vec<EpicEdge> = Vec::new();
+    for (from, tos) in &resolved.depends_on {
+        for to in tos {
+            edges.push(EpicEdge {
+                from: from.clone(),
+                to: to.clone(),
+                kind: EdgeKind::Blocks,
+            });
+        }
+    }
+    for (from, tos) in &resolved.merge_after {
+        for to in tos {
+            edges.push(EpicEdge {
+                from: from.clone(),
+                to: to.clone(),
+                kind: EdgeKind::MergeAfter,
+            });
+        }
+    }
+    edges.sort();
+    edges
+}
+
+/// The epic's PRs in the order they may land: a topological sort of the
+/// merge-after graph restricted to members with a live PR, each annotated with
+/// the not-yet-landed predecessors holding it. Cycle members (never drained)
+/// are appended in key order so the readout still lists them.
+fn merge_order(resolved: &Resolved) -> Vec<MergeOrderEntry> {
+    let pr_members: Vec<WorkspaceKey> = resolved
+        .members
+        .iter()
+        .filter(|m| resolved.has_pr.get(*m).copied().unwrap_or(false))
+        .cloned()
+        .collect();
+    let pr_set: HashSet<&WorkspaceKey> = pr_members.iter().collect();
+
+    // Edges restricted to PR members (a predecessor with no live PR — already
+    // merged, or issue-only — does not sequence the landing).
+    let restricted: HashMap<WorkspaceKey, BTreeSet<WorkspaceKey>> = pr_members
+        .iter()
+        .map(|m| {
+            let preds = resolved
+                .merge_after
+                .get(m)
+                .into_iter()
+                .flatten()
+                .filter(|p| pr_set.contains(p))
+                .cloned()
+                .collect();
+            (m.clone(), preds)
+        })
+        .collect();
+
+    let (_wave, order, cycle) = waves(&pr_members, &restricted);
+
+    let mut ordered = order.clone();
+    // Members caught in a merge-after cycle never drain; append them (key order)
+    // so the readout is exhaustive rather than silently dropping them.
+    let mut leftover: Vec<WorkspaceKey> = cycle.into_iter().collect();
+    leftover.sort();
+    for k in leftover {
+        if !ordered.contains(&k) {
+            ordered.push(k);
+        }
+    }
+
+    ordered
+        .into_iter()
+        .map(|key| {
+            let held_by: Vec<WorkspaceKey> = resolved
+                .merge_after
+                .get(&key)
+                .into_iter()
+                .flatten()
+                .filter(|pred| {
+                    !resolved
+                        .landing_settled
+                        .get(*pred)
+                        .copied()
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect();
+            MergeOrderEntry { key, held_by }
+        })
+        .collect()
 }
 
 /// Compute the deltas from `old` to `new`. `None` old (first sight) yields no
@@ -748,6 +956,8 @@ pub fn diff(old: Option<&EpicSnapshot>, new: &EpicSnapshot) -> Vec<EpicDelta> {
         };
 
         if prev.status != m.status {
+            let prev_held = held_preds(&prev.status);
+            let new_held = held_preds(&m.status);
             // A member leaving Blocked is reported as Unblocked (with the
             // dependencies that cleared it), which is more useful in the feed
             // than a bare status transition.
@@ -766,11 +976,30 @@ pub fn diff(old: Option<&EpicSnapshot>, new: &EpicSnapshot) -> Vec<EpicDelta> {
                     key: m.key.clone(),
                     because: now_done,
                 });
-            } else {
+            } else if new_held.is_some_and(|h| !h.is_empty())
+                && !prev_held.is_some_and(|h| !h.is_empty())
+            {
+                // Newly held: became merge-ready-but-held, or the predecessor
+                // set went from empty to non-empty. A held→held change (a
+                // predecessor landed but others remain) is not re-announced.
+                deltas.push(EpicDelta::Held {
+                    key: m.key.clone(),
+                    by: new_held.unwrap_or(&[]).to_vec(),
+                });
+            } else if prev_held.is_some_and(|h| !h.is_empty())
+                && new_held.is_some_and(|h| h.is_empty())
+            {
+                // The last predecessor landed while still merge-ready: released.
+                deltas.push(EpicDelta::Released { key: m.key.clone() });
+            } else if !(prev_held.is_some() && new_held.is_some()) {
+                // Genuine status-class change. Two `Mergeable`s differing only
+                // in `held_by` are handled by the Held/Released arms above; any
+                // remaining both-`Mergeable` case (e.g. held-set churn) is not a
+                // status change worth a delta.
                 deltas.push(EpicDelta::StatusChanged {
                     key: m.key.clone(),
-                    from: prev.status,
-                    to: m.status,
+                    from: prev.status.clone(),
+                    to: m.status.clone(),
                 });
             }
         }
@@ -837,7 +1066,7 @@ fn stalled(s: &EpicSnapshot) -> bool {
             EpicMemberStatus::Ready
                 | EpicMemberStatus::InProgress
                 | EpicMemberStatus::Asking
-                | EpicMemberStatus::Mergeable
+                | EpicMemberStatus::Mergeable { .. }
         )
     })
 }
@@ -902,13 +1131,15 @@ fn same_status(a: &EpicSnapshot, b: &EpicSnapshot) -> bool {
         && a.blockers_needing_operator == b.blockers_needing_operator
         && a.cycle == b.cycle
         && a.critical_path == b.critical_path
+        && a.edges == b.edges
+        && a.merge_order == b.merge_order
         && a.members == b.members
 }
 
 // ── epic events → activity feed (step 8) ────────────────────────────────
 
 /// A short human label for a member status, for activity-feed bodies.
-fn status_label(s: EpicMemberStatus) -> &'static str {
+fn status_label(s: &EpicMemberStatus) -> &'static str {
     match s {
         EpicMemberStatus::Blocked => "blocked",
         EpicMemberStatus::Ready => "ready",
@@ -916,7 +1147,8 @@ fn status_label(s: EpicMemberStatus) -> &'static str {
         EpicMemberStatus::InProgress => "in progress",
         EpicMemberStatus::Asking => "asking",
         EpicMemberStatus::PrOpen { .. } => "PR open",
-        EpicMemberStatus::Mergeable => "mergeable",
+        EpicMemberStatus::Mergeable { held_by } if !held_by.is_empty() => "held",
+        EpicMemberStatus::Mergeable { .. } => "mergeable",
         EpicMemberStatus::Done => "done",
         EpicMemberStatus::Failed => "failed",
     }
@@ -946,9 +1178,23 @@ fn delta_activity(delta: &EpicDelta, epic_name: &str) -> Option<(WorkspaceKey, S
             key.clone(),
             format!(
                 "Epic {epic_name}: {} → {}",
-                status_label(*from),
-                status_label(*to)
+                status_label(from),
+                status_label(to)
             ),
+        )),
+        EpicDelta::Held { key, by } => {
+            let names: Vec<&str> = by.iter().map(WorkspaceKey::as_str).collect();
+            Some((
+                key.clone(),
+                format!(
+                    "Merge held in epic {epic_name} — waiting on {}",
+                    names.join(", ")
+                ),
+            ))
+        }
+        EpicDelta::Released { key } => Some((
+            key.clone(),
+            format!("Merge released in epic {epic_name} — free to land"),
         )),
         EpicDelta::BlockerAdded { key, blocker } => Some((
             key.clone(),
@@ -961,6 +1207,15 @@ fn delta_activity(delta: &EpicDelta, epic_name: &str) -> Option<(WorkspaceKey, S
         // Epic-wide: no single member to attach to. Still rides the
         // `EpicStatus` event; just not an activity row.
         EpicDelta::Completed | EpicDelta::Stalled { .. } => None,
+    }
+}
+
+/// The merge-after predecessors a `Mergeable` status is held on, if any.
+/// `None` for every non-`Mergeable` status; `Some(&[])` for a free merge.
+fn held_preds(s: &EpicMemberStatus) -> Option<&[WorkspaceKey]> {
+    match s {
+        EpicMemberStatus::Mergeable { held_by } => Some(held_by),
+        _ => None,
     }
 }
 
@@ -1190,6 +1445,119 @@ pub async fn all_snapshots(config: &ServerConfig) -> Vec<EpicSnapshot> {
     out
 }
 
+// ── merge-after hold (auto-merge integration) ────────────────────────────
+
+/// The unsettled merge-after predecessors of `key` across every active epic —
+/// the workspaces whose PRs must merge before `key`'s may. Empty when nothing
+/// holds `key`: no epic constrains it, or every predecessor has *settled* — each
+/// either merged (order honored) or had its PR closed without merging
+/// (abandoned, so it can no longer gate; see `landing_settled_for`). Backs the
+/// merge-on-green hold
+/// (`auto_merge::on_workspace_committed`) and the manual-merge
+/// `force` gate. Deduped and sorted so a workspace held by more than one epic
+/// lists each predecessor once.
+///
+/// Cheap in the common case: with no epic records the prefix scan returns empty
+/// before any workspace load.
+pub fn held_by(config: &ServerConfig, key: &WorkspaceKey) -> Vec<WorkspaceKey> {
+    let records = match list_all(config) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("epics: held_by list failed: {e}");
+            return Vec::new();
+        }
+    };
+    if records.is_empty() {
+        return Vec::new();
+    }
+    let workspaces = crate::load_workspaces(&*config.store).values;
+    held_by_in(&records, &workspaces, key)
+}
+
+/// Pure core of [`held_by`]: the unmerged merge-after predecessors of `key`
+/// across `records`, from already-loaded workspaces. Split out so the hold
+/// logic unit-tests without a `ServerConfig`.
+fn held_by_in(
+    records: &[EpicRecord],
+    workspaces: &[Workspace],
+    key: &WorkspaceKey,
+) -> Vec<WorkspaceKey> {
+    let mut held: BTreeSet<WorkspaceKey> = BTreeSet::new();
+    for record in records {
+        if record.archived {
+            continue;
+        }
+        let resolved = resolved_graph(record, workspaces);
+        let Some(preds) = resolved.merge_after.get(key) else {
+            continue;
+        };
+        for pred in preds {
+            if !resolved.landing_settled.get(pred).copied().unwrap_or(false) {
+                held.insert(pred.clone());
+            }
+        }
+    }
+    held.into_iter().collect()
+}
+
+/// A PR just landed merged (manual, auto, or external) and the store now holds
+/// that ground truth. Re-probe every workspace that named `merged` as a
+/// merge-after predecessor, so a successor whose *last* predecessor just landed
+/// fires its own merge-on-green immediately rather than waiting for the next
+/// poll of that workspace. Successors still holding on other predecessors stay
+/// held — `auto_merge::on_workspace_committed` recomputes [`held_by`] and finds
+/// the remaining ones.
+pub fn on_pr_merged(config: &ServerConfig, merged: &WorkspaceKey) {
+    let records = match list_all(config) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("epics: on_pr_merged list failed: {e}");
+            return;
+        }
+    };
+    if records.is_empty() {
+        return;
+    }
+    let workspaces = crate::load_workspaces(&*config.store).values;
+    let by_key: HashMap<WorkspaceKey, &Workspace> =
+        workspaces.iter().map(|w| (w.key.clone(), w)).collect();
+
+    for succ in merged_successors(&records, &workspaces, merged) {
+        let Some(ws) = by_key.get(&succ) else {
+            continue;
+        };
+        // Re-run the auto-merge projection for the successor. `merged` is now
+        // done in the store, so `on_workspace_committed`'s hold check no longer
+        // counts it; if that was the last predecessor and the PR is armed +
+        // mergeable, the hold lifts and the attempt fires.
+        let signal = crate::polling::auto_merge::signal_for(ws);
+        crate::polling::auto_merge::on_workspace_committed(config, &succ, signal, true);
+    }
+}
+
+/// Pure core of [`on_pr_merged`]: every member that named `merged` as a
+/// merge-after predecessor, across `records`, deduped and sorted. Split out so
+/// the release fan-out unit-tests without a `ServerConfig`.
+fn merged_successors(
+    records: &[EpicRecord],
+    workspaces: &[Workspace],
+    merged: &WorkspaceKey,
+) -> Vec<WorkspaceKey> {
+    let mut successors: BTreeSet<WorkspaceKey> = BTreeSet::new();
+    for record in records {
+        if record.archived {
+            continue;
+        }
+        let resolved = resolved_graph(record, workspaces);
+        for (member, preds) in &resolved.merge_after {
+            if member != merged && preds.contains(merged) {
+                successors.insert(member.clone());
+            }
+        }
+    }
+    successors.into_iter().collect()
+}
+
 // ── command handlers ────────────────────────────────────────────────────
 
 /// Record a declared blocker on `workspace` (the caller's own), then recompute
@@ -1331,6 +1699,7 @@ mod tests {
             closes_issues: vec![],
             linked_tasks: vec![],
             blocked_by: vec![],
+            merge_after: vec![],
             blocked_on: None,
             parent: None,
             kind: None,
@@ -1518,9 +1887,10 @@ mod tests {
                 .find(|m| m.key.as_str() == k)
                 .unwrap()
                 .status
+                .clone()
         };
         assert_eq!(st("done"), EpicMemberStatus::Done);
-        assert_eq!(st("green"), EpicMemberStatus::Mergeable);
+        assert_eq!(st("green"), EpicMemberStatus::Mergeable { held_by: vec![] });
         assert_eq!(
             st("failing"),
             EpicMemberStatus::PrOpen {
@@ -1745,6 +2115,363 @@ mod tests {
         );
         let deltas = diff(Some(&before), &after);
         assert!(deltas.iter().any(|d| matches!(d, EpicDelta::Completed)));
+    }
+
+    /// A PR whose body carries an explicit `Merge after: …` marker gets a
+    /// `MergeAfter` edge to that member — a landing-order edge with no work
+    /// dependency, so no `Blocks` edge accompanies it.
+    #[test]
+    fn explicit_merge_after_marker_creates_edge() {
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Open, CiStatus::Pending);
+        let mut b = ws("b");
+        let mut b_pr = task("github", "b#pr");
+        b_pr.merge_after = vec![task("github", "a#pr").id];
+        b.pr = Some(b_pr);
+
+        let mut record = record_with(&["a", "b"]);
+        // Isolate the explicit marker from the implied-edge path.
+        record.implied_merge_after = false;
+        let edges = epic_graph(&record, &[a, b]);
+        assert!(edges.iter().any(|e| e.from.as_str() == "b"
+            && e.to.as_str() == "a"
+            && e.kind == EdgeKind::MergeAfter));
+        assert!(!edges.iter().any(|e| e.kind == EdgeKind::Blocks));
+    }
+
+    /// A `Blocks` edge implies a `MergeAfter` edge under the default opt-in:
+    /// the dependent's PR must not land before the PR it depends on.
+    #[test]
+    fn blocks_edge_implies_merge_after() {
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Open, CiStatus::Pending);
+        let mut b = ws("b");
+        let mut b_issue = task("github", "b#1");
+        b_issue.blocked_by = vec![task("github", "a#pr").id];
+        b.gh_issues = vec![b_issue];
+
+        let edges = epic_graph(&record_with(&["a", "b"]), &[a, b]);
+        assert!(
+            edges.iter().any(|e| e.from.as_str() == "b"
+                && e.to.as_str() == "a"
+                && e.kind == EdgeKind::Blocks)
+        );
+        assert!(edges.iter().any(|e| e.from.as_str() == "b"
+            && e.to.as_str() == "a"
+            && e.kind == EdgeKind::MergeAfter));
+    }
+
+    /// Opting out (`implied_merge_after = false`) keeps the work `Blocks` edge
+    /// but drops the implied landing-order edge — the members may merge in any
+    /// order despite the work ordering.
+    #[test]
+    fn implied_merge_after_opt_out_drops_implied_edge() {
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Open, CiStatus::Pending);
+        let mut b = ws("b");
+        let mut b_issue = task("github", "b#1");
+        b_issue.blocked_by = vec![task("github", "a#pr").id];
+        b.gh_issues = vec![b_issue];
+
+        let mut record = record_with(&["a", "b"]);
+        record.implied_merge_after = false;
+        let edges = epic_graph(&record, &[a, b]);
+        assert!(edges.iter().any(|e| e.kind == EdgeKind::Blocks));
+        assert!(!edges.iter().any(|e| e.kind == EdgeKind::MergeAfter));
+    }
+
+    /// `merge_order` topologically sorts the PRs by their merge-after edges and
+    /// annotates each held entry with the not-yet-landed predecessors gating it.
+    #[test]
+    fn merge_order_lists_prs_topologically_and_marks_held() {
+        // a → b → c landing chain, all three with open PRs.
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Open, CiStatus::Success);
+        let mut b = ws("b");
+        let mut b_pr = task("github", "b#pr");
+        b_pr.merge_after = vec![task("github", "a#pr").id];
+        b.pr = Some(b_pr);
+        let mut c = ws("c");
+        let mut c_pr = task("github", "c#pr");
+        c_pr.merge_after = vec![task("github", "b#pr").id];
+        c.pr = Some(c_pr);
+
+        let mut record = record_with(&["a", "b", "c"]);
+        record.implied_merge_after = false;
+        let snap = resolve_fresh(&record, &[a, b, c]);
+        let order: Vec<&str> = snap.merge_order.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(order, vec!["a", "b", "c"]);
+        let held = |k: &str| -> Vec<String> {
+            snap.merge_order
+                .iter()
+                .find(|e| e.key.as_str() == k)
+                .unwrap()
+                .held_by
+                .iter()
+                .map(|w| w.as_str().to_string())
+                .collect()
+        };
+        assert!(held("a").is_empty());
+        assert_eq!(held("b"), vec!["a".to_string()]);
+        assert_eq!(held("c"), vec!["b".to_string()]);
+    }
+
+    /// The merge readout sequences only *live* PRs: a merged predecessor no
+    /// longer holds its dependent (and drops out of the order), and an
+    /// issue-only member with no PR never appears.
+    #[test]
+    fn merge_order_drops_landed_predecessor_and_issue_only_members() {
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Merged, CiStatus::Success); // landed → no live PR.
+        let mut b = ws("b");
+        let mut b_pr = task("github", "b#pr");
+        b_pr.merge_after = vec![task("github", "a#pr").id];
+        b.pr = Some(b_pr);
+        let mut c = ws("c");
+        c.gh_issues = vec![task("github", "c#1")]; // issue only, no PR.
+
+        let mut record = record_with(&["a", "b", "c"]);
+        record.implied_merge_after = false;
+        let snap = resolve_fresh(&record, &[a, b, c]);
+        let order: Vec<&str> = snap.merge_order.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(order, vec!["b"]);
+        assert!(snap.merge_order[0].held_by.is_empty());
+    }
+
+    fn keys(v: Vec<WorkspaceKey>) -> Vec<String> {
+        v.iter().map(|k| k.as_str().to_string()).collect()
+    }
+
+    /// `held_by_in` (the pure core of the auto-merge hold and the manual
+    /// `force` gate) reports a dependent's not-yet-landed merge-after
+    /// predecessors, and nothing once every predecessor has landed.
+    #[test]
+    fn held_by_in_reports_unmerged_predecessors() {
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Open, CiStatus::Success);
+        let mut b = ws("b");
+        let mut b_pr = task("github", "b#pr");
+        b_pr.merge_after = vec![task("github", "a#pr").id];
+        b.pr = Some(b_pr);
+
+        let mut record = record_with(&["a", "b"]);
+        record.implied_merge_after = false;
+        let records = [record];
+
+        // a's PR is open → it holds b; a has no predecessors → unheld.
+        assert_eq!(
+            keys(held_by_in(
+                &records,
+                &[a.clone(), b.clone()],
+                &WorkspaceKey::new("b")
+            )),
+            vec!["a".to_string()]
+        );
+        assert!(held_by_in(&records, &[a.clone(), b.clone()], &WorkspaceKey::new("a")).is_empty());
+
+        // a lands → b is released.
+        pr(&mut a, TaskState::Merged, CiStatus::Success);
+        assert!(held_by_in(&records, &[a, b], &WorkspaceKey::new("b")).is_empty());
+    }
+
+    /// A predecessor whose PR is **closed without merging** is abandoned: it
+    /// will never land, so the "b merges after a" ordering premise is void and b
+    /// must be released. Regression for the indefinite-hold bug — the hold used
+    /// to key off `member_done` (merged-only for PRs), so a closed predecessor
+    /// stayed `!done` forever and held b's merge (auto-merge silently never
+    /// fired, manual `g m` kept being refused) until a manual force-override.
+    #[test]
+    fn held_by_in_releases_when_predecessor_pr_closed_unmerged() {
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Closed, CiStatus::Failure); // abandoned, never merged.
+        let mut b = ws("b");
+        let mut b_pr = task("github", "b#pr");
+        b_pr.merge_after = vec![task("github", "a#pr").id];
+        b.pr = Some(b_pr);
+
+        let mut record = record_with(&["a", "b"]);
+        record.implied_merge_after = false;
+
+        // a can never land, so it no longer gates b — b is free to merge.
+        assert!(
+            held_by_in(&[record], &[a, b], &WorkspaceKey::new("b")).is_empty(),
+            "a closed-unmerged predecessor must not hold its successor's merge",
+        );
+    }
+
+    /// A dependent held by two predecessors stays held until BOTH land — one
+    /// merging leaves the other in `held_by`.
+    #[test]
+    fn held_by_in_needs_all_predecessors_landed() {
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Merged, CiStatus::Success); // one landed…
+        let mut x = ws("x");
+        pr(&mut x, TaskState::Open, CiStatus::Success); // …one still open.
+        let mut b = ws("b");
+        let mut b_pr = task("github", "b#pr");
+        b_pr.merge_after = vec![task("github", "a#pr").id, task("github", "x#pr").id];
+        b.pr = Some(b_pr);
+
+        let mut record = record_with(&["a", "x", "b"]);
+        record.implied_merge_after = false;
+        assert_eq!(
+            keys(held_by_in(&[record], &[a, x, b], &WorkspaceKey::new("b"))),
+            vec!["x".to_string()]
+        );
+    }
+
+    /// An archived epic never holds a merge — its edges are inert.
+    #[test]
+    fn held_by_in_ignores_archived_epic() {
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Open, CiStatus::Success);
+        let mut b = ws("b");
+        let mut b_pr = task("github", "b#pr");
+        b_pr.merge_after = vec![task("github", "a#pr").id];
+        b.pr = Some(b_pr);
+
+        let mut record = record_with(&["a", "b"]);
+        record.implied_merge_after = false;
+        record.archived = true;
+        assert!(held_by_in(&[record], &[a, b], &WorkspaceKey::new("b")).is_empty());
+    }
+
+    /// `merged_successors` (the pure core of the release fan-out) finds every
+    /// member that named the just-landed workspace as a merge-after predecessor
+    /// — the keys `on_pr_merged` re-probes.
+    #[test]
+    fn merged_successors_finds_direct_dependents() {
+        // a → b → c chain.
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Merged, CiStatus::Success);
+        let mut b = ws("b");
+        let mut b_pr = task("github", "b#pr");
+        b_pr.merge_after = vec![task("github", "a#pr").id];
+        b.pr = Some(b_pr);
+        let mut c = ws("c");
+        let mut c_pr = task("github", "c#pr");
+        c_pr.merge_after = vec![task("github", "b#pr").id];
+        c.pr = Some(c_pr);
+
+        let mut record = record_with(&["a", "b", "c"]);
+        record.implied_merge_after = false;
+        let records = [record];
+        let all = [a, b, c];
+
+        // Only b named a; c named b, not a — the release is one hop, not
+        // transitive (c re-probes when b later lands).
+        assert_eq!(
+            keys(merged_successors(&records, &all, &WorkspaceKey::new("a"))),
+            vec!["b".to_string()]
+        );
+        assert_eq!(
+            keys(merged_successors(&records, &all, &WorkspaceKey::new("b"))),
+            vec!["c".to_string()]
+        );
+        assert!(merged_successors(&records, &all, &WorkspaceKey::new("c")).is_empty());
+    }
+
+    /// A merge-ready PR whose merge-after predecessor hasn't landed reads as
+    /// `Mergeable { held_by }`; when the predecessor merges it becomes an
+    /// unheld `Mergeable` and `diff` reports a `Released`.
+    #[test]
+    fn held_then_released_diff_transitions() {
+        let mut record = record_with(&["a", "b"]);
+        record.implied_merge_after = false;
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Open, CiStatus::Success);
+        let mut b = ws("b");
+        let mut b_pr = task("github", "b#pr");
+        b_pr.merge_after = vec![task("github", "a#pr").id];
+        b_pr.ci = CiStatus::Success;
+        b.pr = Some(b_pr);
+
+        let mut latch = HashMap::new();
+        let before = resolve(
+            &record,
+            &[a.clone(), b.clone()],
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut latch,
+            1,
+        );
+        let bm = before
+            .members
+            .iter()
+            .find(|m| m.key.as_str() == "b")
+            .unwrap();
+        assert_eq!(
+            bm.status,
+            EpicMemberStatus::Mergeable {
+                held_by: vec![WorkspaceKey::new("a")]
+            }
+        );
+
+        // a merges → b released (unheld Mergeable).
+        pr(&mut a, TaskState::Merged, CiStatus::Success);
+        let after = resolve(
+            &record,
+            &[a, b],
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut latch,
+            2,
+        );
+        let bm2 = after
+            .members
+            .iter()
+            .find(|m| m.key.as_str() == "b")
+            .unwrap();
+        assert_eq!(bm2.status, EpicMemberStatus::Mergeable { held_by: vec![] });
+        let deltas = diff(Some(&before), &after);
+        assert!(
+            deltas
+                .iter()
+                .any(|d| matches!(d, EpicDelta::Released { key } if key.as_str() == "b"))
+        );
+    }
+
+    /// A PR that first becomes merge-ready while its predecessor is still open
+    /// emits a `Held` delta naming the predecessor.
+    #[test]
+    fn newly_held_emits_held_delta() {
+        let mut record = record_with(&["a", "b"]);
+        record.implied_merge_after = false;
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Open, CiStatus::Success);
+        let make_b = |ci: CiStatus| {
+            let mut b = ws("b");
+            let mut b_pr = task("github", "b#pr");
+            b_pr.merge_after = vec![task("github", "a#pr").id];
+            b_pr.ci = ci;
+            b.pr = Some(b_pr);
+            b
+        };
+
+        let mut latch = HashMap::new();
+        // b failing CI first → PrOpen, not yet held.
+        let before = resolve(
+            &record,
+            &[a.clone(), make_b(CiStatus::Failure)],
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut latch,
+            1,
+        );
+        // b green now → merge-ready but held by a's still-open PR.
+        let after = resolve(
+            &record,
+            &[a, make_b(CiStatus::Success)],
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut latch,
+            2,
+        );
+        let deltas = diff(Some(&before), &after);
+        assert!(deltas.iter().any(|d| matches!(
+            d,
+            EpicDelta::Held { key, by } if key.as_str() == "b" && by.iter().any(|w| w.as_str() == "a")
+        )));
     }
 
     #[test]

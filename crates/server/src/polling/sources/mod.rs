@@ -3373,6 +3373,26 @@ mod auto_spawn_dedup_tests {
         let task = github_issue_task("o/r#403", vec!["lazybox:codex/xhigh"]);
         let actions = label_spawn_actions(&[task], &Default::default(), &Default::default());
         assert_eq!(actions.len(), 1, "a real directive label still spawns");
+
+        // A claim label alongside a real directive is skipped by `find_map`,
+        // not treated as blocking — the real directive still wins.
+        let task = github_issue_task(
+            "o/r#404",
+            vec![
+                "lazybox:w:effacd542b611010656e:ecfd919c67:6aa05d7e",
+                "lazybox:codex/xhigh",
+            ],
+        );
+        let actions = label_spawn_actions(&[task], &Default::default(), &Default::default());
+        assert_eq!(
+            actions.len(),
+            1,
+            "a claim label must not block a real directive on the same task"
+        );
+        let ProviderAction::AutoSpawnAgent { agent_id, .. } = &actions[0].1 else {
+            panic!("expected an AutoSpawnAgent");
+        };
+        assert_eq!(agent_id, "codex");
     }
 
     /// A `lazybox:<agent>/<model>` label re-appears on every poll (no

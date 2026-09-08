@@ -168,9 +168,10 @@ pub fn parse_lazybox_directive(text: &str) -> (Option<String>, Option<String>) {
 ///
 /// The `lazybox:w:…` working-claim labels
 /// ([`lazybox_core::WORKING_CLAIM_LABEL_PREFIX`]) and the legacy
-/// `lazybox:working…` form are our own fleet-coordination state, not spawn
-/// directives — they never yield an agent (else a per-tick claim renewal
-/// re-submits the work prompt into the agent already holding the claim).
+/// `lazybox:working` / `lazybox:working:<owner>` form are our own
+/// fleet-coordination state, not spawn directives — they never yield an agent
+/// (else a per-tick claim renewal re-submits the work prompt into the agent
+/// already holding the claim).
 pub fn parse_label_directive(label: &str) -> Option<(String, Option<String>)> {
     const PREFIX: &[u8] = b"lazybox:";
     let bytes = label.as_bytes();
@@ -180,7 +181,7 @@ pub fn parse_label_directive(label: &str) -> Option<(String, Option<String>)> {
     // `PREFIX` is ASCII, so byte `PREFIX.len()` is a char boundary.
     let rest = &label[PREFIX.len()..];
     if starts_with_ignore_case(label, lazybox_core::WORKING_CLAIM_LABEL_PREFIX)
-        || starts_with_ignore_case(rest, "working")
+        || is_legacy_working_label(rest)
     {
         return None;
     }
@@ -200,6 +201,17 @@ pub fn parse_label_directive(label: &str) -> Option<(String, Option<String>)> {
 fn starts_with_ignore_case(haystack: &str, prefix: &str) -> bool {
     haystack.len() >= prefix.len()
         && haystack.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+}
+
+/// True for the legacy claim label body (the segment after `lazybox:`): the
+/// bare [`lazybox_core::WORKING_LABEL_NAME`] and its owner-qualified
+/// `working:<owner>` form. The trailing byte must end the segment or be `:`
+/// so a real agent id that merely begins with those letters (a custom
+/// `working-bot`) is not swallowed.
+fn is_legacy_working_label(rest: &str) -> bool {
+    let name = lazybox_core::WORKING_LABEL_NAME;
+    starts_with_ignore_case(rest, name)
+        && matches!(rest.as_bytes().get(name.len()), None | Some(b':'))
 }
 
 /// GitHub login alphabet for word-boundary checks: ASCII alnum +
@@ -519,9 +531,24 @@ mod tests {
             parse_label_directive("Lazybox:W:0123456789abcdef0123:1234567890:ffffffff"),
             None
         );
-        // Legacy `lazybox:working…` form.
+        // Legacy `lazybox:working` / `lazybox:working:<owner>` form.
         assert_eq!(parse_label_directive("lazybox:working"), None);
         assert_eq!(parse_label_directive("lazybox:working:someone-else"), None);
+    }
+
+    #[test]
+    fn label_does_not_shadow_agent_ids_beginning_with_working() {
+        // The legacy-`working` guard keys off a segment boundary, so a real
+        // (custom) agent id that merely starts with those letters still spawns
+        // — the guard rejects the claim label, not the namespace.
+        assert_eq!(
+            parse_label_directive("lazybox:working-bot"),
+            Some(("working-bot".into(), None))
+        );
+        assert_eq!(
+            parse_label_directive("lazybox:workflow/L"),
+            Some(("workflow".into(), Some("L".into())))
+        );
     }
 
     // ── scan_issue ──────────────────────────────────────────────────

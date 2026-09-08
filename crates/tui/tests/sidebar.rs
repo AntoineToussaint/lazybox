@@ -3108,13 +3108,13 @@ fn space_metering_toggle_persists_and_reverses() {
     );
 }
 
-/// A Space header shows its accrued cost whenever any of its workspaces has
-/// spent — WITHOUT the Space-tier `x $` toggle. Metering is on by default for
-/// new workspaces, so most spend lands without the toggle and the figure is
-/// the point; gating it on `metered_spaces` (the old rule) hid it. A Space
-/// with nothing priced shows no `$` at all.
+/// A Space header never shows a dollar figure — with or without the
+/// Space-tier `x $` toggle, priced or not. The accrued cost is still
+/// tracked per Space (`space_cost_micros`, feeding the stats view and the
+/// header today strip), but sidebar rows name work, not money: a
+/// `codefly-dev $ $58.36` header was noise on every scan of the list.
 #[test]
-fn space_header_shows_accrued_cost_without_the_space_toggle() {
+fn space_header_never_shows_a_dollar_figure() {
     let _home = ConfigHome::sandbox();
     let now = Utc::now();
     let a = make_workspace("obin-ai/platform", "obin-ai/platform#1", now);
@@ -3150,18 +3150,42 @@ fn space_header_shows_accrued_cost_without_the_space_toggle() {
     );
 
     // Durable per-session totals replayed on connect (Event::SessionCosts):
-    // two obin-ai workspaces sum onto the obin-ai Space header.
+    // two obin-ai workspaces sum under the obin-ai Space — tracked, but
+    // never drawn on the row.
     s.hydrate_session_costs(&[(a_key, 1_500_000), (b_key, 500_000)]);
+    assert_eq!(
+        s.space_cost_micros("obin-ai"),
+        2_000_000,
+        "cost still summed"
+    );
     let after = render_to_string(&mut s, 60, 20, true);
     let obin_line = space_line(&after, "obin-ai");
     assert!(
-        obin_line.contains("$ $2.00"),
-        "summed Space cost: {obin_line:?}"
+        !obin_line.contains('$'),
+        "no dollar figure on a priced Space header: {obin_line:?}"
+    );
+    assert!(
+        !after.contains("$2.00"),
+        "the Space cost must not appear on any row:\n{after}"
     );
     let acme_line = space_line(&after, "acme");
     assert!(
         !acme_line.contains('$'),
         "acme spent nothing: {acme_line:?}"
+    );
+
+    // The metering toggle (`x $`) marks the Space but still draws no `$`.
+    assert!(s.focus_header_row("obin-ai"), "park on the Space header");
+    assert!(s.cursor_on_space_header());
+    assert_eq!(
+        s.toggle_space_metering_at_cursor(),
+        Some(("obin-ai".to_string(), true)),
+    );
+    let metered = render_to_string(&mut s, 60, 20, true);
+    assert!(
+        !space_line(&metered, "obin-ai").contains('$'),
+        "metered Space header carries no `$` badge: {:?}",
+        space_line(&metered, "obin-ai")
     );
 }
 

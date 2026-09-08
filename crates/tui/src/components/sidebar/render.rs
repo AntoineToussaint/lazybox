@@ -953,28 +953,13 @@ impl Sidebar {
                                 .add_modifier(Modifier::BOLD),
                         ),
                     ];
-                    // Space-tier metering badge (approach C): a `$` marks every
-                    // workspace under this Space as metered (`x $` toggles it),
-                    // trailed by the Space's accrued cost once any priced usage
-                    // lands (#1389) — the legible per-Space figure, summed over
-                    // its workspaces and durable across restarts.
-                    // The cost shows whenever the Space has accrued any —
-                    // with metering on by default (new workspaces) and
-                    // `meter_all`, most spend lands without the Space-tier
-                    // toggle, and the figure is the point. A bare `$` marks
-                    // a Space-toggled Space that hasn't spent yet.
-                    let cost = self.space_cost_micros(name);
-                    if cost > 0 || self.metered_spaces.contains(name) {
-                        let badge = if cost > 0 {
-                            format!(" $ {}", lazybox_tui_core::usage::format_cost_micros(cost))
-                        } else {
-                            " $".to_string()
-                        };
-                        spans.push(Span::styled(
-                            badge,
-                            row_bg.unwrap_or_default().fg(theme.accent),
-                        ));
-                    }
+                    // No cost on the row. The Space-tier `$ <cost>` badge
+                    // (#1389) was the last dollar figure drawn on a sidebar
+                    // row; spend lives in the sidebar header's today strip,
+                    // the terminal tab badge and the stats view. Rows name
+                    // work, not money — a `$58.36` after a Space name read as
+                    // noise on every scan of the list. The metering toggle
+                    // (`x $`, `agent.metered_spaces`) is untouched.
                     if let Some(bg) = row_bg {
                         extend_cursor_fill(&mut spans, row_budget, bg);
                     }

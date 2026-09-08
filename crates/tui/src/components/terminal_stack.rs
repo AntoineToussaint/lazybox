@@ -1132,19 +1132,25 @@ struct TerminalSlot {
     /// the bottom, so parking in scrollback never re-resets the grid
     /// while a fresh visit still re-captures up-to-date history (#393).
     deep_scrollback_requested: bool,
-    /// Live output landed AFTER this visit's deep-scrollback capture was
-    /// adopted, so the local grid's history above the live screen is no
-    /// longer tmux's: it is whatever the tmux client stream scrolled off
-    /// the top since — and tmux scrolls the client view up and down as a
-    /// *paint optimization* while a program redraws a block, pushing the
-    /// same top row into the client VT's scrollback again and again
-    /// (#1547: one row repeated ~27× when scrolling; tmux's own history
-    /// had it once). The next upward scroll re-fetches instead of
-    /// scrolling that junk.
+    /// Live bytes have been parsed into the local grid since it was last
+    /// rebuilt from a tmux capture (or ever), so its history above the
+    /// live screen is not tmux's: it is whatever the tmux client stream
+    /// scrolled off the top — and tmux scrolls the client view up and
+    /// down as a *paint optimization* while a program redraws a block,
+    /// pushing the same rows into the client VT's scrollback again and
+    /// again (#1547: one row repeated ~27×, a 6-row block repeated 6×;
+    /// tmux's own history had each once). The raw stream is also
+    /// size-agnostic: bytes produced for the pane's previous height are
+    /// parsed at its current one. Two consequences: within a scrollback
+    /// visit the next upward scroll re-fetches, and a capture that
+    /// carries real history is adopted even when the inflated local grid
+    /// is "deeper" — tmux's grid is the authority, the local one is only
+    /// a parse of the paint stream.
     scrollback_stale: bool,
-    /// When this visit's capture was adopted — the re-fetch above is
-    /// debounced against it so a streaming agent can't turn every wheel
-    /// notch into a multi-megabyte capture.
+    /// When this visit's capture was last *requested* — the re-fetch
+    /// above is debounced against it so a streaming agent can't turn
+    /// every wheel notch into a multi-megabyte capture, including the
+    /// notches that land while the first reply is still in flight.
     last_scrollback_fetch: Option<std::time::Instant>,
 }
 
@@ -2246,6 +2252,7 @@ impl TerminalStack {
         // possible "show me the history" signal.
         if slot.exited.is_none() && slot.wants_scrollback_fetch() {
             slot.deep_scrollback_requested = true;
+            slot.last_scrollback_fetch = Some(std::time::Instant::now());
             self.pending_scrollback_fetch = Some(id);
         }
         outcome
@@ -3118,6 +3125,10 @@ impl TerminalStack {
         if delta < 0 {
             if slot.exited.is_none() && slot.wants_scrollback_fetch() {
                 slot.deep_scrollback_requested = true;
+                // Stamped at the request, not the reply: the notches that
+                // land while the capture is in flight must not each ship
+                // another multi-megabyte fetch (11 in 700 ms was observed).
+                slot.last_scrollback_fetch = Some(std::time::Instant::now());
                 self.pending_scrollback_fetch = Some(id);
             }
         } else if delta > 0 && at_live_bottom(outcome) {
@@ -3193,12 +3204,13 @@ impl TerminalStack {
         if seq <= slot.last_seq {
             return;
         }
-        // Live bytes after this visit's deep-scrollback capture: whatever
-        // the tmux client stream scrolls off the top from here on is paint
-        // traffic, not history (#1547) — the next upward scroll re-fetches.
-        if slot.deep_scrollback_requested {
-            slot.scrollback_stale = true;
-        }
+        // Live bytes: whatever the tmux client stream scrolls off the top
+        // from here on is paint traffic, not history (#1547) — the next
+        // upward scroll re-fetches, and the capture it brings back wins
+        // over this grid even when the paint junk made the grid deeper.
+        // Unconditional, not gated on an active scrollback visit: output
+        // that lands between visits inflates the grid just the same.
+        slot.scrollback_stale = true;
         if let TerminalStreamSync::Desynced {
             request,
             request_pending,
@@ -3364,6 +3376,10 @@ impl TerminalStack {
         // next upward scroll re-fetches instead of scrolling a grid
         // the resync silently emptied (#393).
         slot.deep_scrollback_requested = false;
+        // A ring replay is the raw paint stream again (and one produced
+        // across every size the pane has had), so the rebuilt history is
+        // suspect until the next capture replaces it (#1547).
+        slot.scrollback_stale = true;
     }
 
     /// Rebuild a terminal's grid from the daemon's deep-scrollback
@@ -3396,14 +3412,23 @@ impl TerminalStack {
         };
         let t = &slot.vt.terminal;
         // Pre-flight the rebuild in a scratch parser at the same width
-        // and only adopt it when it is actually DEEPER than the current
-        // grid. A capture from a pane with no retained history — the
-        // pane sat on the alternate screen under an older server config,
-        // or was freshly spawned — is ~one screenful, and adopting it
-        // would replace whatever scrollback the local grid had: the
-        // scrollbar vanished on the very first scroll. The daemon skips
-        // those fetches at the source; this guard makes shrinkage
-        // impossible regardless of what arrives on the wire.
+        // and adopt it when it is DEEPER than the current grid, or when
+        // it carries real history and live bytes have been parsed into
+        // the local grid since its last capture (`scrollback_stale`). A
+        // capture from a pane with no retained history — the pane sat on
+        // the alternate screen under an older server config, or was
+        // freshly spawned — is ~one screenful, and adopting it would
+        // replace whatever scrollback the local grid had: the scrollbar
+        // vanished on the very first scroll. The daemon skips those
+        // fetches at the source; the history floor below makes that
+        // shrinkage impossible regardless of what arrives on the wire.
+        //
+        // "Deeper only" alone was the #1547 trap: the local grid is a
+        // parse of tmux's paint stream (rows re-pushed by its scroll
+        // optimization, bytes produced for a previous pane height), so
+        // the very junk this fetch exists to replace makes the local grid
+        // *deeper* than tmux's clean history — and the clean capture was
+        // rejected every time, one repeated block per scroll.
         let current_total = t.scrollbar().ok().map(|b| b.total).unwrap_or(0);
         let Some(mut scratch) = TerminalVt::new() else {
             return;
@@ -3416,7 +3441,8 @@ impl TerminalStack {
             .ok()
             .map(|b| b.total)
             .unwrap_or(0);
-        if rebuilt_total <= current_total {
+        let capture_has_history = rebuilt_total > u64::from(slot.vt.rows);
+        if rebuilt_total <= current_total && !(capture_has_history && slot.scrollback_stale) {
             return;
         }
         let preserved: Vec<(u16, bool)> = PRESERVED_DEC_MODES
@@ -9223,6 +9249,114 @@ mod deep_scrollback_tests {
             stack.terminals[&TerminalId(1)].last_seq,
             5,
             "a skipped rebuild adopts nothing"
+        );
+    }
+
+    /// #1547, the case that survived #1548 + #1550: the local grid is a
+    /// parse of tmux's paint stream, so a block the program redrew in
+    /// place lands in the local scrollback once per redraw (6 copies of
+    /// a 6-row diff block, one per wheel notch), while tmux's own history
+    /// holds it once. That junk makes the local grid DEEPER than the
+    /// clean capture — and the "deeper only" adoption guard then rejected
+    /// the capture on every fetch, so the repeats could never go away.
+    /// A capture that carries real history wins over a grid that has
+    /// parsed live bytes since its last capture.
+    #[test]
+    fn capture_replaces_a_grid_inflated_by_repeated_paint_rows() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(1);
+        let mut stack = agent_stack(id, &sk);
+        // Paint-stream parse: 40 real lines, then a 6-row block that the
+        // stream re-pushed 6 times.
+        let mut junk = String::new();
+        for i in 0..40 {
+            junk.push_str(&format!("real line {i}\r\n"));
+        }
+        for _ in 0..6 {
+            for r in 0..6 {
+                junk.push_str(&format!("block row {r}\r\n"));
+            }
+        }
+        junk.push_str("live bottom");
+        feed(&mut stack, id, junk.as_bytes(), 1, 5);
+        let before = scrollbar(&stack, id);
+        assert!(before.total > before.len, "precondition: deep local grid");
+
+        // tmux's history: the same 40 lines and the block ONCE — shallower
+        // than the inflated grid, but real history.
+        let mut clean = String::new();
+        for i in 0..40 {
+            clean.push_str(&format!("real line {i}\r\n"));
+        }
+        for r in 0..6 {
+            clean.push_str(&format!("block row {r}\r\n"));
+        }
+        clean.push_str("live bottom");
+        let _ = stack.scroll_active(-3);
+        assert_eq!(stack.take_scrollback_fetch(), Some(id));
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: clean.clone().into_bytes(),
+            seq: 9,
+        });
+
+        let after = scrollbar(&stack, id);
+        assert!(
+            after.total < before.total,
+            "the clean capture replaced the inflated grid: {} -> {}",
+            before.total,
+            after.total
+        );
+        assert!(after.total > after.len, "…and it still has scrollback");
+        assert_eq!(
+            stack.terminals[&id].last_seq, 9,
+            "the rebuild was adopted (seq advanced to the capture's)"
+        );
+        // The adopted grid IS the clean capture's parse — same depth as
+        // the capture fed alone at this size (the block once), and the
+        // capture's first history line at the very top.
+        let (cols, rows) = (stack.terminals[&id].vt.cols, stack.terminals[&id].vt.rows);
+        let mut expected = TerminalVt::new().expect("scratch vt");
+        expected.ensure_size(cols, rows);
+        expected.feed(clean.as_bytes());
+        assert_eq!(
+            after.total,
+            expected.terminal.scrollbar().unwrap().total,
+            "the grid is exactly the clean capture — one copy of the block"
+        );
+        let _ = stack.scroll_to_top();
+        let rect = ratatui::layout::Rect::new(0, 0, 80, 30);
+        let a = stack.selection_point(id, rect, 1, 3).expect("anchor");
+        let b = stack.selection_point(id, rect, 20, 3).expect("focus");
+        assert_eq!(stack.extract_selection(id, a, b), "real line 0");
+    }
+
+    /// The fetch debounce is stamped at the REQUEST: wheel notches that
+    /// land while the first capture is still in flight (and live output
+    /// keeps arriving) must not each ship another multi-megabyte fetch —
+    /// 11 `FetchScrollback` in 700 ms were observed on a streaming agent.
+    #[test]
+    fn notches_while_the_fetch_is_in_flight_do_not_refetch() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(4);
+        let mut stack = agent_stack(id, &sk);
+        feed(&mut stack, id, b"a couple\r\nof lines", 1, 1);
+
+        let _ = stack.scroll_active(-3);
+        assert_eq!(
+            stack.take_scrollback_fetch(),
+            Some(id),
+            "first notch fetches"
+        );
+        // Live output while the reply is in flight, then more notches.
+        feed(&mut stack, id, b"streaming\r\n", 2, 2);
+        let _ = stack.scroll_active(-3);
+        feed(&mut stack, id, b"streaming\r\n", 3, 3);
+        let _ = stack.scroll_active(-3);
+        assert_eq!(
+            stack.take_scrollback_fetch(),
+            None,
+            "notches inside the debounce window ride the in-flight fetch"
         );
     }
 

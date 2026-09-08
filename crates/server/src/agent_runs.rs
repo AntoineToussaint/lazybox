@@ -11,7 +11,7 @@ use crate::agent_stream::{
     AgentStreamConfig, AgentStreamIo, AgentStreamSpawner, ParsedAgentEvent, encode_user_text_jsonl,
     parse_agent_jsonl_line,
 };
-use lazybox_agents::{SpawnCtx, StructuredAgentProtocol};
+use lazybox_agents::{GatewayInjection, SpawnCtx, StructuredAgentProtocol};
 use lazybox_ipc::{
     AgentApprovalDecision, AgentInputMessage, AgentQuestionAnswer, AgentRunAccess, AgentRunId,
     AgentRunRequestId, AgentRuntimeMode, AgentUsage, Event,
@@ -155,25 +155,36 @@ pub async fn handle_start_agent_run(
     };
 
     // Structured runs speak to the same upstream as PTY spawns, so
-    // they need the same LLM-gateway base-URL routing
-    // (`agent.llm_gateway_url` → ANTHROPIC_BASE_URL / OPENAI_BASE_URL)
-    // and the same per-agent spawn-env defaults (Codex brew suppression).
-    // They opt OUT of the metering proxy (`meter = false`): a structured
-    // run already reports its token usage by parsing its own stream-json,
-    // so routing it through the proxy too would count every turn twice in
-    // the header summary (#1109).
-    let env = crate::spawn_plan::gateway_env_for_agent(
+    // they need the same LLM-gateway routing (`agent.llm_gateway_url` →
+    // base-URL env for most agents, `-c` provider flags for Codex) and the
+    // same per-agent spawn-env defaults (Codex brew suppression). They opt OUT
+    // of the metering proxy (`meter = false`): a structured run already reports
+    // its token usage by parsing its own stream-json, so routing it through the
+    // proxy too would count every turn twice in the header summary (#1109) —
+    // which leaves only the plain-gateway fallback, active when a gateway URL
+    // is configured.
+    let injection = crate::spawn_plan::gateway_injection_for_agent(
         &yaml,
         Some(agent_impl.as_ref()),
         false,
         false,
         resolved_session_key.as_str(),
     );
+    let env = match &injection {
+        GatewayInjection::Env(pairs) => pairs.clone(),
+        GatewayInjection::Args(_) | GatewayInjection::None => Vec::new(),
+    };
     let env = crate::spawn_plan::with_agent_spawn_defaults(env, Some(agent_impl.as_ref()));
+    // Codex's gateway routing is argv-based; append its flags after the
+    // subcommand's own args (which already carry any model-tier flags).
+    let mut extra_args = extra_args.to_vec();
+    if let GatewayInjection::Args(flags) = &injection {
+        extra_args.extend(flags.iter().cloned());
+    }
 
     let mut stream_config = AgentStreamConfig::new(protocol, program.clone());
     stream_config.cwd = cwd_path;
-    stream_config.extra_args = extra_args.to_vec();
+    stream_config.extra_args = extra_args;
     stream_config.env = env;
     stream_config.access = access;
     stream_config.continue_latest = resume_latest;

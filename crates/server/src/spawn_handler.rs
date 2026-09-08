@@ -1739,15 +1739,15 @@ async fn handle_spawn_inner(
     // metered Space (`agent.metered_spaces`, approach C). The per-workspace flag
     // is read straight from the store (single source of truth across restarts);
     // the Space check resolves the workspace's source through `ui.spaces`. Both
-    // are folded into `meter` here, so `gateway_env_for_agent` — which still
-    // gates on the proxy being enabled/running — needs no change and every
-    // safety property of the canary is preserved.
+    // are folded into `meter` here, so `gateway_injection_for_agent` — which
+    // still gates on the proxy being enabled/running — needs no change and
+    // every safety property of the canary is preserved.
     let spawn_ws = load_workspace(config, &WorkspaceKey::new(session_key.as_str()));
     // A remote-box session runs on the box; the injected proxy base-URL
     // (`127.0.0.1:<port>`) points at *this* host's loopback, not the box —
     // so metering it would hand the box a dead URL, not just miss the count.
     // Never meter a remote workspace (this also overrides `meter_all`, threaded
-    // into `gateway_env_for_agent`).
+    // into `gateway_injection_for_agent`).
     let remote = spawn_ws.as_ref().is_ok_and(|ws| ws.remote.is_some());
     let meter = !remote
         && (meter
@@ -11588,9 +11588,11 @@ mod tests {
     use super::*;
     use crate::backend::SessionBackend;
     use crate::spawn_plan::{
-        argv_for as build_argv, gateway_env_for_agent, skip_permissions_for,
-        with_agent_pty_spawn_env, with_agent_spawn_defaults, with_worktree_cargo_target,
+        argv_for as build_argv, gateway_env_for_agent, gateway_injection_for_agent,
+        skip_permissions_for, with_agent_pty_spawn_env, with_agent_spawn_defaults,
+        with_worktree_cargo_target,
     };
+    use lazybox_agents::GatewayInjection;
 
     async fn register_test_agent(
         terminals: &TerminalRegistry,
@@ -13874,19 +13876,31 @@ mod tests {
                 "http://gateway.internal".to_string()
             )]
         );
-        // Codex and Cursor both speak OpenAI → same global URL, OpenAI var.
-        for agent in [
-            &lazybox_agents::agent::builtins::Codex as &dyn lazybox_agents::Agent,
-            &lazybox_agents::agent::builtins::Cursor,
-        ] {
-            assert_eq!(
-                gateway_env_for_agent(&cfg, Some(agent), true, false, "sess-x"),
-                vec![(
-                    "OPENAI_BASE_URL".to_string(),
-                    "http://gateway.internal".to_string()
-                )]
-            );
-        }
+        // Cursor speaks OpenAI and honors the env → OpenAI var, global URL.
+        let cursor = lazybox_agents::agent::builtins::Cursor;
+        assert_eq!(
+            gateway_env_for_agent(&cfg, Some(&cursor), true, false, "sess-x"),
+            vec![(
+                "OPENAI_BASE_URL".to_string(),
+                "http://gateway.internal".to_string()
+            )]
+        );
+        // Codex ignores that env, so its injection is argv-based instead: the
+        // gateway URL lands in a `-c` custom-provider `base_url` flag, and the
+        // env view is therefore empty.
+        let codex = lazybox_agents::agent::builtins::Codex;
+        assert!(gateway_env_for_agent(&cfg, Some(&codex), true, false, "sess-x").is_empty());
+        let GatewayInjection::Args(flags) =
+            gateway_injection_for_agent(&cfg, Some(&codex), true, false, "sess-x")
+        else {
+            panic!("codex gateway injection must be argv-based");
+        };
+        assert!(
+            flags
+                .join(" ")
+                .contains("model_providers.lazyboxmeter.base_url=\"http://gateway.internal\""),
+            "the gateway URL must reach codex via its custom-provider base_url flag",
+        );
     }
 
     #[test]
@@ -13987,6 +14001,43 @@ mod tests {
             !gateway_env_for_agent(&cfg, Some(&claude), true, false, "github-acme-widget-7")
                 .is_empty(),
             "a meterable agent is still routed",
+        );
+    }
+
+    #[test]
+    fn metering_proxy_routes_codex_via_argv_provider_flags() {
+        // Codex is meterable but ignores `OPENAI_BASE_URL`, so a metered spawn
+        // is pointed at the per-session proxy URL through `-c` provider flags,
+        // not an env var. The env view stays empty; the argv view carries the
+        // proxy URL as the custom provider's base_url.
+        crate::proxy::set_port(45999);
+        let port = crate::proxy::port().expect("a proxy port is published");
+        let proxy_url = format!("http://127.0.0.1:{port}/openai/codex/github-acme-widget-7");
+        let mut cfg = lazybox_config::Config::default();
+        cfg.agent.metering_proxy = true;
+        let codex = lazybox_agents::agent::builtins::Codex;
+
+        assert!(
+            gateway_env_for_agent(&cfg, Some(&codex), true, false, "github-acme-widget-7")
+                .is_empty(),
+            "codex is never routed via an env var",
+        );
+        let GatewayInjection::Args(flags) =
+            gateway_injection_for_agent(&cfg, Some(&codex), true, false, "github-acme-widget-7")
+        else {
+            panic!("a metered codex spawn must inject argv flags");
+        };
+        assert!(
+            flags
+                .join(" ")
+                .contains(&format!("model_providers.lazyboxmeter.base_url=\"{proxy_url}\"")),
+            "the per-session proxy URL must reach codex via its custom-provider base_url flag",
+        );
+
+        // Opted out (meter=false, no gateway) → nothing injected at all.
+        assert_eq!(
+            gateway_injection_for_agent(&cfg, Some(&codex), false, false, "github-acme-widget-7"),
+            GatewayInjection::None,
         );
     }
 

@@ -87,6 +87,10 @@ pub struct UsageAccumulator {
     model: Option<String>,
     /// Per-model price overrides; empty → built-in rate card only.
     prices: PriceOverrides,
+    /// Count-only mode: capture token counts but report `$0` cost regardless
+    /// of the rate card. Used for traffic lazybox can't price — a ChatGPT
+    /// subscription pays a flat fee, so its per-token cost is meaningless.
+    count_only: bool,
 }
 
 /// A partial line longer than this without a newline is parsed and
@@ -103,6 +107,15 @@ impl UsageAccumulator {
             prices,
             ..Self::default()
         }
+    }
+
+    /// Capture token counts but report `$0` cost regardless of the rate card.
+    /// For traffic lazybox can't meaningfully price — a ChatGPT-subscription
+    /// Codex session pays a flat monthly fee, so its per-token cost is `$0`
+    /// while the counts still flow into usage totals.
+    pub fn counting_only(mut self) -> Self {
+        self.count_only = true;
+        self
     }
 
     /// Feed one response chunk. Complete lines are parsed and dropped;
@@ -129,20 +142,26 @@ impl UsageAccumulator {
         if self.merged.is_empty() {
             return None;
         }
-        // Price the tokens when the stream named a model we recognize; an
+        // Count-only traffic (a ChatGPT subscription) is a flat fee, so its
+        // per-token cost is $0 even though the counts are real. Otherwise
+        // price the tokens when the stream named a model we recognize; an
         // unknown model leaves cost absent rather than guessing.
-        let cost_usd_micros = self.model.as_deref().and_then(|model| {
-            pricing::cost_micros(
-                model,
-                &TokenCounts {
-                    input: self.merged.input.unwrap_or(0),
-                    output: self.merged.output.unwrap_or(0),
-                    cache_creation: self.merged.cache_creation.unwrap_or(0),
-                    cache_read: self.merged.cache_read.unwrap_or(0),
-                },
-                &self.prices,
-            )
-        });
+        let cost_usd_micros = if self.count_only {
+            Some(0)
+        } else {
+            self.model.as_deref().and_then(|model| {
+                pricing::cost_micros(
+                    model,
+                    &TokenCounts {
+                        input: self.merged.input.unwrap_or(0),
+                        output: self.merged.output.unwrap_or(0),
+                        cache_creation: self.merged.cache_creation.unwrap_or(0),
+                        cache_read: self.merged.cache_read.unwrap_or(0),
+                    },
+                    &self.prices,
+                )
+            })
+        };
         Some(AgentUsage {
             input_tokens: self.merged.input,
             output_tokens: self.merged.output,
@@ -359,5 +378,26 @@ mod tests {
     #[test]
     fn non_json_noise_is_ignored() {
         assert!(feed(&[": keep-alive comment\n\nevent: ping\n"]).is_none());
+    }
+
+    #[test]
+    fn counting_only_reports_zero_cost_but_keeps_counts() {
+        // A ChatGPT-subscription Codex stream names a real, priceable model,
+        // but the subscription is a flat fee — count-only zeroes the cost
+        // while the token counts still flow through.
+        let mut acc = UsageAccumulator::default().counting_only();
+        acc.push(
+            b"data: {\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":1000000,\"output_tokens\":0}}\n\n",
+        );
+        let u = acc.finish().expect("usage");
+        assert_eq!(u.input_tokens, Some(1_000_000));
+        assert_eq!(u.cost_usd_micros, Some(0), "count-only → $0 despite a known model");
+    }
+
+    #[test]
+    fn counting_only_with_no_usage_still_none() {
+        // Count-only doesn't fabricate a usage record where the body had none.
+        let acc = UsageAccumulator::default().counting_only();
+        assert!(acc.finish().is_none());
     }
 }

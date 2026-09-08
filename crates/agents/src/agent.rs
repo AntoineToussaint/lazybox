@@ -61,6 +61,22 @@ impl LlmProvider {
     }
 }
 
+/// How a spawned agent is pointed at the metering proxy (or a configured
+/// LLM gateway). Most CLIs read a base-URL env var ([`LlmProvider::base_url_env`]);
+/// Codex ignores that env and defaults its built-in provider to a WebSocket
+/// transport the HTTP proxy can't intercept, so it must be pointed via `-c`
+/// provider overrides on its argv instead. See [`Agent::gateway_injection`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GatewayInjection {
+    /// Nothing to inject — a provider-less agent, or no proxy/gateway to
+    /// route through.
+    None,
+    /// Set these `(name, value)` environment variables on the spawn.
+    Env(Vec<(String, String)>),
+    /// Append these arguments to the agent's argv.
+    Args(Vec<String>),
+}
+
 /// Provider-specific wire protocol available for a headless structured
 /// run. Interactive terminal support alone does not imply this
 /// capability: the daemon only advertises agents whose machine-readable
@@ -229,17 +245,35 @@ pub trait Agent: Send + Sync {
 
     /// Whether the metering proxy can actually meter this agent's traffic.
     ///
-    /// Metering works by pointing the provider's base-URL env
-    /// (`ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`) at the local proxy. That
-    /// only captures usage if the agent (a) speaks a known provider and (b)
-    /// honors that env var. The default ties meterability to
-    /// [`Agent::llm_provider`] — a provider-less `GenericCli` can't be
-    /// metered. An agent that speaks a provider but ignores the base-URL env
-    /// overrides this to `false` so a metered spawn is never a silent bypass
-    /// (the caller surfaces a "metered-but-not" notice instead of pointing
-    /// the agent at a proxy URL it won't use).
+    /// Metering works by pointing the agent at the local proxy — most CLIs
+    /// through the provider's base-URL env (the default
+    /// [`Agent::gateway_injection`]), Codex through `-c` provider overrides.
+    /// It captures usage only if the agent (a) speaks a known provider and
+    /// (b) actually honors whichever mechanism its `gateway_injection` uses.
+    /// The default ties meterability to [`Agent::llm_provider`] — a
+    /// provider-less `GenericCli` can't be metered. An agent that speaks a
+    /// provider but honors neither mechanism (`cursor-agent` talks to Cursor's
+    /// own backend) overrides this to `false` so a metered spawn is never a
+    /// silent bypass (the caller surfaces a "metered-but-not" notice instead
+    /// of pointing the agent at a proxy URL it won't use).
     fn meterable(&self) -> bool {
         self.llm_provider().is_some()
+    }
+
+    /// How to point this agent at `base_url` — the metering-proxy URL, or a
+    /// configured `agent.llm_gateway_url`. The default sets the provider's
+    /// base-URL env var ([`LlmProvider::base_url_env`]); an agent whose CLI
+    /// ignores that env overrides this to inject the URL another way (Codex
+    /// registers a custom provider via `-c`). A provider-less agent injects
+    /// nothing.
+    fn gateway_injection(&self, base_url: &str) -> GatewayInjection {
+        match self.llm_provider() {
+            Some(provider) => GatewayInjection::Env(vec![(
+                provider.base_url_env().to_string(),
+                base_url.to_string(),
+            )]),
+            None => GatewayInjection::None,
+        }
     }
 
     /// Machine-readable runtime supported by this agent, if any.
@@ -945,6 +979,44 @@ pub mod builtins {
         )
     }
 
+    /// The `-c` overrides that point Codex at `base_url` (the metering proxy,
+    /// or a configured LLM gateway) over plain HTTP.
+    ///
+    /// Codex ignores `OPENAI_BASE_URL`, and its built-in `openai` provider
+    /// defaults to a WebSocket transport an HTTP proxy can't intercept — so
+    /// metering it via the base-URL env is a silent no-op. Instead we register
+    /// a *custom* provider (`lazyboxmeter`) and make it the active one:
+    ///
+    /// - `base_url` → the proxy URL (TOML-quoted; the proxy appends
+    ///   `/responses`, so the URL must NOT already end in `/v1`).
+    /// - `wire_api="responses"` picks the plain-HTTP Responses API rather than
+    ///   the WebSocket realtime transport.
+    /// - `requires_openai_auth=true` makes Codex attach its *resolved* OpenAI
+    ///   credentials to this custom provider — the API key in api-key mode, or
+    ///   the ChatGPT OAuth bearer plus the `chatgpt-account-id` header in
+    ///   subscription mode. That header is what the proxy reads to route
+    ///   (chatgpt.com + count-only vs. api.openai.com + priced), so the same
+    ///   flags meter both auth modes without spawn-time detection.
+    /// - `supports_websockets=false` is defensive: it forecloses any fallback
+    ///   to the transport the proxy can't see.
+    fn codex_gateway_provider_flags(base_url: &str) -> Vec<String> {
+        let quoted = serde_json::to_string(base_url).unwrap_or_else(|_| "\"\"".to_string());
+        vec![
+            "-c".into(),
+            "model_providers.lazyboxmeter.name=\"lazybox metering\"".into(),
+            "-c".into(),
+            format!("model_providers.lazyboxmeter.base_url={quoted}"),
+            "-c".into(),
+            "model_providers.lazyboxmeter.wire_api=\"responses\"".into(),
+            "-c".into(),
+            "model_providers.lazyboxmeter.requires_openai_auth=true".into(),
+            "-c".into(),
+            "model_providers.lazyboxmeter.supports_websockets=false".into(),
+            "-c".into(),
+            "model_provider=\"lazyboxmeter\"".into(),
+        ]
+    }
+
     impl Agent for Codex {
         fn id(&self) -> &'static str {
             "codex"
@@ -962,6 +1034,12 @@ pub mod builtins {
         }
         fn llm_provider(&self) -> Option<LlmProvider> {
             Some(LlmProvider::OpenAI)
+        }
+        /// Codex ignores `OPENAI_BASE_URL`, so the env-based default would
+        /// meter nothing. Point it at the proxy through `-c` provider
+        /// overrides on the argv instead. See [`codex_gateway_provider_flags`].
+        fn gateway_injection(&self, base_url: &str) -> GatewayInjection {
+            GatewayInjection::Args(codex_gateway_provider_flags(base_url))
         }
         fn structured_protocol(&self) -> Option<StructuredAgentProtocol> {
             Some(StructuredAgentProtocol::CodexExecJson)
@@ -1289,6 +1367,66 @@ mod tests {
             asking_patterns: vec![],
         };
         assert!(!generic.meterable(), "no provider → not meterable");
+    }
+
+    #[test]
+    fn gateway_injection_env_for_base_url_env_agents() {
+        use super::{GatewayInjection, LlmProvider};
+        // Claude/Cursor honor a base-URL env, so injection sets that env var.
+        assert_eq!(
+            Claude.gateway_injection("http://127.0.0.1:9/anthropic/x/s"),
+            GatewayInjection::Env(vec![(
+                LlmProvider::Anthropic.base_url_env().to_string(),
+                "http://127.0.0.1:9/anthropic/x/s".to_string(),
+            )]),
+        );
+        assert_eq!(
+            super::builtins::Cursor.gateway_injection("http://127.0.0.1:9/openai/x/s"),
+            GatewayInjection::Env(vec![(
+                LlmProvider::OpenAI.base_url_env().to_string(),
+                "http://127.0.0.1:9/openai/x/s".to_string(),
+            )]),
+        );
+    }
+
+    #[test]
+    fn gateway_injection_none_for_provider_less_agent() {
+        use super::GatewayInjection;
+        let generic = super::builtins::GenericCli {
+            id: "custom".into(),
+            display_name: "Custom".into(),
+            spawn_cmd: vec!["custom".into()],
+            resume_cmd: None,
+            asking_patterns: vec![],
+        };
+        assert_eq!(
+            generic.gateway_injection("http://127.0.0.1:9/openai/x/s"),
+            GatewayInjection::None,
+        );
+    }
+
+    #[test]
+    fn gateway_injection_args_for_codex_custom_provider() {
+        use super::GatewayInjection;
+        let url = "http://127.0.0.1:9123/openai/codex/sess-1";
+        let GatewayInjection::Args(flags) = super::builtins::Codex.gateway_injection(url) else {
+            panic!("codex must inject via argv, not env");
+        };
+        // Flags come in `-c key=value` pairs.
+        assert_eq!(flags.len() % 2, 0);
+        let joined = flags.join(" ");
+        // Registers a custom provider and makes it active — never touches the
+        // reserved built-in `openai` id.
+        assert!(joined.contains("model_provider=\"lazyboxmeter\""));
+        assert!(joined.contains(&format!(
+            "model_providers.lazyboxmeter.base_url=\"{url}\""
+        )));
+        assert!(joined.contains("model_providers.lazyboxmeter.wire_api=\"responses\""));
+        // requires_openai_auth carries the real OpenAI creds (API key, or the
+        // ChatGPT bearer + chatgpt-account-id header) through the proxy.
+        assert!(joined.contains("model_providers.lazyboxmeter.requires_openai_auth=true"));
+        // base_url must not pre-append /v1 — the proxy adds /responses itself.
+        assert!(!url.ends_with("/v1"));
     }
 
     #[test]

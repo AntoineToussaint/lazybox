@@ -356,16 +356,19 @@ the *run*.
 ## LLM gateway
 
 **Status:** shipped
-**Crate(s):** `server` (`gateway_env_for_agent`), `agents` (`LlmProvider`), `config` (`agent.llm_gateway_url`)
+**Crate(s):** `server` (`gateway_injection_for_agent`), `agents` (`LlmProvider`, `GatewayInjection`), `config` (`agent.llm_gateway_url`)
 **Config / flags:** `agent.llm_gateway_url` (global), per-repo `env` overrides
 **Key bindings:** —
 
 ### What it does
-Points a spawned agent at an operator-provided LLM gateway by injecting a single
-base-URL env var — `ANTHROPIC_BASE_URL` for Anthropic agents (Claude),
-`OPENAI_BASE_URL` for OpenAI agents (Codex / Cursor). lazybox does **no
-proxying itself**: there is no in-process HTTP server and no telemetry capture
-from agent API traffic — the agent talks to the configured gateway directly.
+Points a spawned agent at an operator-provided LLM gateway. Most agents take a
+single base-URL env var — `ANTHROPIC_BASE_URL` for Anthropic agents (Claude),
+`OPENAI_BASE_URL` for Cursor. Codex ignores `OPENAI_BASE_URL` (its built-in
+provider defaults to a WebSocket transport), so it is pointed instead through
+`-c` custom-provider overrides on its argv — see `Agent::gateway_injection` and
+`GatewayInjection`. The gateway itself does the routing; when metering is on
+(`agent.metering_proxy`), lazybox's own loopback proxy (`crates/server/src/proxy/`)
+sits in front of it to capture per-session token usage.
 
 > An earlier design ran an in-process 127.0.0.1 telemetry proxy (the `llm-proxy`
 > crate); it was never wired up and has been removed. See the superseded section
@@ -377,20 +380,22 @@ agent — the daemon adds the env var at spawn time. A per-repo `env` entry stil
 wins, so a repo can override or opt out.
 
 ### How it works (brief)
-`gateway_env_for_agent` (`crates/server/src/spawn_handler.rs`) maps the agent's
-`LlmProvider` to the right base-URL env var (`LlmProvider::base_url_env`) and
-sets it to `agent.gateway_url()`. Returns nothing for non-agent spawns, agents
-with no inferable provider (`GenericCli`), or when no gateway URL is set.
+`gateway_injection_for_agent` (`crates/server/src/spawn_plan.rs`) asks the agent
+how to be pointed at the URL via `Agent::gateway_injection`: a base-URL env var
+for env-honoring agents (`LlmProvider::base_url_env`), or `-c` provider flags for
+Codex. Returns `GatewayInjection::None` for non-agent spawns, agents with no
+inferable provider (`GenericCli`), or when no gateway URL is set.
 
 ### Test checklist
-- [x] A spawned Anthropic agent gets `ANTHROPIC_BASE_URL`; OpenAI agents get `OPENAI_BASE_URL`.
-- [x] No env var is injected when `agent.llm_gateway_url` is unset.
+- [x] A spawned Anthropic agent gets `ANTHROPIC_BASE_URL`; Cursor gets `OPENAI_BASE_URL`.
+- [x] Codex is pointed via `-c` custom-provider flags, not an env var.
+- [x] No injection when `agent.llm_gateway_url` is unset.
 - [x] A per-repo `env` override takes precedence over the global gateway.
 - [x] `GenericCli` / non-agent spawns get nothing.
 
 ### Known sharp edges
-- It only sets a base-URL env var; the gateway itself (routing, auth, telemetry) lives outside lazybox.
-- An agent that ignores the base-URL env var, or whose provider can't be inferred (`GenericCli`), simply talks to its default upstream.
+- The gateway itself (routing, auth, telemetry) lives outside lazybox; lazybox only points the agent at it.
+- An agent whose provider can't be inferred (`GenericCli`) simply talks to its default upstream.
 
 ---
 

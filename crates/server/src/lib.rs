@@ -281,6 +281,12 @@ pub const INLINE_BUDGET: std::time::Duration = std::time::Duration::from_millis(
 /// progress"; a deep backlog logs a warning instead.
 pub const MAX_CONNECTION_MUTATIONS: usize = 128;
 
+/// A detached mutation (Kill, RemoveMergedWorkspace, a spawn, …) that runs
+/// longer than this earns a `slow detached command` warning naming the
+/// command. Removals normally finish in milliseconds; one that took minutes
+/// (parked behind a wedged terminal guard) used to leave no trace at all.
+const SLOW_DETACHED_COMMAND_WARN_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// How long a closing connection waits for its in-flight detached
 /// mutation tasks (merge saves, worktree teardowns, spawns) before
 /// abandoning them. Applied on EVERY serve-loop exit — client
@@ -1228,7 +1234,22 @@ impl Server {
                                 let cfg = self.config.clone();
                                 let tx = conn.tx.clone();
                                 mutations.spawn(async move {
+                                    let started = tokio::time::Instant::now();
                                     dispatch_command(&cfg, &tx, cmd).await;
+                                    // A detached mutation that takes this long is
+                                    // holding some lock or awaiting something
+                                    // wedged (a Kill/Remove parked behind a
+                                    // terminal's interaction guard). Name it, so
+                                    // the next "the row never went away" report
+                                    // is diagnosable from the log alone.
+                                    let elapsed = started.elapsed();
+                                    if elapsed > SLOW_DETACHED_COMMAND_WARN_AFTER {
+                                        tracing::warn!(
+                                            command = label,
+                                            elapsed_ms = elapsed.as_millis() as u64,
+                                            "slow detached command",
+                                        );
+                                    }
                                 });
                             } else {
                                 // Queue, never refuse (#1237): the cap
@@ -1345,6 +1366,7 @@ impl Server {
             {
                 tracing::warn!(
                     drain_timeout = ?self.mutation_drain_timeout,
+                    remaining = mutations.len(),
                     "shutdown: detached mutation task(s) still running past the drain bound — \
                      abandoning them"
                 );

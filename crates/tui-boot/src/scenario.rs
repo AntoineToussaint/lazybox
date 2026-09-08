@@ -290,6 +290,8 @@ fn build_workspace(spec: &WsSpec, worktree: &Path) -> Workspace {
         parent: None,
         priority: None,
         state_label: None,
+        blocked_by: vec![],
+        blocked_on: None,
     };
     let mut workspace = Workspace::from_task(task, Utc::now());
     let now = Utc::now();

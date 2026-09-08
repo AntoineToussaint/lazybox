@@ -274,7 +274,10 @@ then falls to the pane (committed-search clear),
 `` ` ``
 open the fuzzy jump-to-workspace picker (all repos; from inside an
 agent use `]]` then `` ` ``), `!` jump to agent-asking workspace,
-`Shift-F` jump to failing CI, `Shift-P` cycle
+`Shift-F` jump to failing CI, `E j` jump to the next blocked
+workspace (the `E` epic leader — one that declares a `Blocked on:`
+reason or carries a dependency edge; declared blockers first, then
+edge-blocked rows, wrapping; #1521), `Shift-P` cycle
 the activity pane full → summary (a slim one-line count of new activity /
 failing CI) → hidden → full, remembered per workspace with a
 `ui.activity_pane_default` starting mode (auto-hidden when the workspace
@@ -305,7 +308,7 @@ selection), mouse-click any pane to focus it, mouse-drag splitters to
 resize.
 
 **Sidebar**: the header is three fixed rows (#1502): brand + dim
-version + every attention counter (`● new`, `? input`, `⏳ limited`,
+version + every attention counter (`● new`, `? input`, `⧗ limited`,
 `✗ CI`, `◔ review` — compacting to `●6 ?1 ✗3` and shedding the version
 before any counter drops, never wrapping) with the item count right;
 the filter / sort / find chips with today's tally right-aligned (no
@@ -340,7 +343,7 @@ the pin set persists — #760), `Shift-S`
 cycle mailbox (Inbox → Inactive → Snoozed), `/` search (composes with
 the active filters; matches title, number, repo, labels, reviewers /
 assignees). While editing, the bottom bar is a filled, accented field
-with a `🔍 /<query>` prefix + block cursor so it's unmistakable you're
+with a `⌕ /<query>` prefix + block cursor so it's unmistakable you're
 typing into search, matched substrings are underlined in the visible
 rows, and a query that filters everything away shows an explicit "No
 matches for … · Esc to clear" panel rather than a blank pane (#1099).
@@ -470,7 +473,7 @@ their own. The alias is agent-agnostic at the chord — the daemon maps
 it to whatever agent the spawn targets — and the picked tier's label
 rides a `◆ Opus` tab badge. The `a` leader also carries the bulk
 **rate-limit recovery** chord `a R` (restart rate-limited): for every
-agent blocked (`⏳ LimitReached`) or parked (`💤 AwaitingReset`) on a
+agent blocked (`⧗ LimitReached`) or parked (`☾ AwaitingReset`) on a
 usage limit, the daemon stops its process, respawns the same
 conversation in the same pane (`--resume`), and submits the configured
 continuation prompt — the way to pick up fresh credentials after

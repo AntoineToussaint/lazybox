@@ -1155,6 +1155,14 @@ const _: () = assert!(
     "concurrency gate too high for GitHub's secondary (abuse) limiter"
 );
 
+/// Cached native `blocked_by` edges keyed by the blocked issue's
+/// [`TaskId`], each paired with its fetch instant so a stale entry is
+/// refetched past the TTL. Behind an `Arc<Mutex<…>>` so it's shared
+/// across `GhClient` clones (see `issue_deps_cache`).
+type IssueDepsCache = std::sync::Arc<
+    parking_lot::Mutex<std::collections::HashMap<TaskId, (Vec<TaskId>, std::time::Instant)>>,
+>;
+
 #[derive(Clone)]
 pub struct GhClient {
     inner: Octocrab,
@@ -1227,6 +1235,24 @@ pub struct GhClient {
     /// never disables the probe for good; `force_full_sweep` resets it
     /// too so an explicit refresh re-tries the batch.
     hot_batch_graphql_failures: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Native `blocked_by` edges learned from GitHub's issue-dependencies
+    /// REST API (`GET …/issues/{n}/dependencies/blocked_by`, GA 2025-08),
+    /// keyed by the blocked issue's own [`TaskId`]. GitHub does not return
+    /// these in the PR/issue GraphQL, so we enrich task-by-task — but only
+    /// for issues that warrant a round-trip (a body that mentions a blocker
+    /// keyword, or a sub-issue with a parent), and at most once per
+    /// `repo_refresh_interval`. The cached value carries its fetch instant
+    /// so an entry older than the TTL is refetched. Shared across clones
+    /// (one dependency view per credential); cleared by `force_full_sweep`.
+    issue_deps_cache: IssueDepsCache,
+    /// Freshness bound for [`issue_deps_cache`](Self::issue_deps_cache):
+    /// an entry older than this is refetched. Set from the configured
+    /// `repo_refresh_interval` (via
+    /// [`with_repo_refresh_interval`](Self::with_repo_refresh_interval)) so
+    /// native edges refresh on the same cadence as the rest of the row —
+    /// tightening the refresh tightens edge freshness. Defaults to
+    /// [`ISSUE_DEPS_TTL`](Self::ISSUE_DEPS_TTL) when never set.
+    deps_ttl: std::time::Duration,
 }
 
 /// Per-branch cost breakdown for one branch of a PR fetch, emitted
@@ -1358,6 +1384,10 @@ impl GhClient {
                 std::collections::HashMap::new(),
             )),
             hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            issue_deps_cache: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            deps_ttl: Self::ISSUE_DEPS_TTL,
         })
     }
 
@@ -1396,6 +1426,10 @@ impl GhClient {
                 std::collections::HashMap::new(),
             )),
             hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            issue_deps_cache: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            deps_ttl: Self::ISSUE_DEPS_TTL,
         })
     }
 
@@ -2231,6 +2265,17 @@ impl GhClient {
         self
     }
 
+    /// Tie the native-dependency cache freshness (`deps_ttl`)
+    /// to the configured `repo_refresh_interval`, so native `blocked_by`
+    /// edges refresh on the same cadence as the rest of a row: tightening the
+    /// refresh interval also tightens how stale an edge set can get, rather
+    /// than leaving it pinned at the [`ISSUE_DEPS_TTL`](Self::ISSUE_DEPS_TTL)
+    /// default.
+    pub fn with_repo_refresh_interval(mut self, interval: std::time::Duration) -> Self {
+        self.deps_ttl = interval;
+        self
+    }
+
     /// Hydrate the user's GitHub namespace as a list of org scopes:
     /// every org they belong to, plus their personal-repo "org"
     /// (their login). Repos under each org are NOT enumerated here
@@ -2588,6 +2633,17 @@ impl GhClient {
     /// watched-repo count.
     pub const ISSUE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(90);
 
+    /// Default freshness bound for a learned native `blocked_by` edge set
+    /// before `issue_blocked_by` is asked again —
+    /// the fallback for `deps_ttl` when the configured
+    /// `repo_refresh_interval` was never wired in
+    /// ([`with_repo_refresh_interval`](Self::with_repo_refresh_interval)).
+    /// Matches the *default* `repo_refresh_interval` (5 min) so, at steady
+    /// state, an eligible issue costs at most one extra dependencies REST
+    /// call per repo-refresh cycle; a `force_full_sweep` clears the cache
+    /// outright.
+    pub const ISSUE_DEPS_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
     /// Should the next sync cycle run a heavy full sweep, or is the
     /// notifications-driven incremental path safe to use? Returns true
     /// when no sweep has run yet (first tick after daemon start) or
@@ -2725,6 +2781,8 @@ impl GhClient {
         // And give the batched hot query another chance on this server.
         self.hot_batch_graphql_failures
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        // Re-learn native dependency edges from scratch too.
+        self.issue_deps_cache.lock().clear();
     }
 
     pub fn manual_refresh_pending(&self) -> bool {
@@ -3285,6 +3343,21 @@ impl GhClient {
                 .retain(|id, _| requested.contains(id));
         }
 
+        // Native dependency edges (#1521): enrich freshly-fetched issue
+        // tasks here, AFTER every `hot_freshness` lock has been released —
+        // holding a `parking_lot::Mutex` across the `.await` in
+        // `enrich_task_blocked_by` would be a bug. Doing it on the hot path
+        // (rather than only on the 5-min sweep) means a hot re-poll of a
+        // blocked issue keeps its `⊘` badge instead of dropping it for a
+        // tick and re-adding it (flicker); the per-issue TTL cache keeps the
+        // steady-state cost to at most one dependencies call per issue per
+        // `deps_ttl` window.
+        for slot in &mut out {
+            if let HotFetch::Fresh(task) = slot {
+                self.enrich_task_blocked_by(task).await;
+            }
+        }
+
         metrics.prs = out
             .iter()
             .filter_map(|slot| match slot {
@@ -3463,7 +3536,12 @@ impl GhClient {
             return Ok(None);
         };
         let issue = data.repository.and_then(|r| r.issue);
-        Ok(issue.map(|i| graphql::issue_to_task(&i, &self.user)))
+        let Some(issue) = issue else {
+            return Ok(None);
+        };
+        let mut task = graphql::issue_to_task(&issue, &self.user);
+        self.enrich_task_blocked_by(&mut task).await;
+        Ok(Some(task))
     }
 
     /// Cheap discovery probe for PRs the authenticated user AUTHORED that
@@ -3538,6 +3616,7 @@ impl GhClient {
                 tasks.push(graphql::issue_to_task(issue, &self.user));
             }
         }
+        self.merge_native_blocked_by(&mut tasks).await;
         Ok(tasks)
     }
 
@@ -4291,6 +4370,7 @@ impl GhClient {
                 tasks.push(graphql::issue_to_task(issue, &self.user));
             }
         }
+        self.merge_native_blocked_by(&mut tasks).await;
         Ok(tasks)
     }
 
@@ -4537,6 +4617,7 @@ impl GhClient {
             );
             return Err(incomplete_pagination_error(op, tasks.len(), reason));
         }
+        self.merge_native_blocked_by(&mut tasks).await;
         Ok((tasks, mentions))
     }
 
@@ -4625,6 +4706,7 @@ impl GhClient {
                 }
             }
         }
+        self.merge_native_blocked_by(&mut tasks).await;
         Ok((tasks, mentions))
     }
 
@@ -4744,6 +4826,10 @@ impl GhClient {
                 reason,
             ));
         }
+        // Enrich the `involves:`-query issues with native dependency edges.
+        // The watched-repo fan-out below enriches its own tasks inside
+        // `fetch_watched_repo_issues`, so it isn't re-scanned here.
+        self.merge_native_blocked_by(&mut tasks).await;
 
         // Watched repos: the main query above is `involves:you`-scoped, so a
         // watched repo's issues that DON'T involve you never appear (before
@@ -5860,6 +5946,122 @@ impl GhClient {
             }
         }
         names
+    }
+
+    /// Native `blocked_by` edges for one issue, from GitHub's issue
+    /// dependencies REST API
+    /// (`GET /repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by`,
+    /// GA 2025-08). Returns the blocking issues as [`TaskId`]s keyed the
+    /// lazybox way (`owner/repo#N`). Same-repo only — that is all the API
+    /// reports; a cross-repo dependency declared in the body is picked up
+    /// separately by the marker parse. Best-effort: any error (older host,
+    /// missing scope, network) yields an empty list, exactly like
+    /// [`branch_rule_names`](Self::branch_rule_names), so a task simply
+    /// carries no native edges rather than failing the poll.
+    pub(crate) async fn issue_blocked_by(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Vec<TaskId> {
+        #[derive(serde::Deserialize)]
+        struct Dep {
+            number: u64,
+        }
+        let route = format!("/repos/{owner}/{repo}/issues/{number}/dependencies/blocked_by");
+        let deps: Vec<Dep> = match self.inner.get(&route, None::<&()>).await {
+            Ok(deps) => deps,
+            Err(e) => {
+                tracing::debug!("blocked_by lookup for {owner}/{repo}#{number} failed: {e}");
+                return Vec::new();
+            }
+        };
+        deps.into_iter()
+            .map(|d| TaskId {
+                source: "github".into(),
+                key: format!("{owner}/{repo}#{}", d.number),
+            })
+            .collect()
+    }
+
+    /// Merge GitHub's native `blocked_by` edges into a freshly built issue
+    /// task, in place. Bounded by construction: only *open* issues trigger
+    /// the REST round-trip (a closed or merged issue is done and never
+    /// probed), and the result is cached per issue for [`deps_ttl`] so
+    /// a hot re-poll of the same issue reuses it — the cost is one request
+    /// per open issue per refresh cycle, not one per poll. The probe is
+    /// deliberately *not* gated on the body text: a dependency set through
+    /// GitHub's web UI carries no body keyword, so a body proxy would drop
+    /// exactly the native edges this call exists to fetch. Edges the body
+    /// marker already produced are preserved; native edges are unioned in
+    /// and the set is de-duplicated so the two sources can't double-count
+    /// the same blocker.
+    ///
+    /// [`deps_ttl`]: Self::deps_ttl
+    async fn enrich_task_blocked_by(&self, task: &mut Task) {
+        // Dependencies are an issue-only concept on GitHub; PRs never carry
+        // them and must never spend a request probing.
+        if task.kind != Some(TaskKind::Issue) {
+            return;
+        }
+        // Budget gate: dependencies only matter while an issue is still in
+        // play, so a closed or merged one never spends a request. Every
+        // *open* issue is probed, though — a dependency set through GitHub's
+        // web UI leaves no keyword in the body and no parent link, so a
+        // body-text proxy has false negatives for exactly the UI-set edges
+        // the native API exists to surface; gating on it silently drops
+        // them. The per-issue `deps_ttl` cache bounds the cost to one
+        // request per open issue per refresh cycle, not one per poll.
+        if matches!(task.state, TaskState::Closed | TaskState::Merged) {
+            return;
+        }
+        // Parse `owner/repo#N` out of the task key.
+        let Some((repo_path, num)) = task.id.key.rsplit_once('#') else {
+            return;
+        };
+        let Some((owner, repo)) = repo_path.split_once('/') else {
+            return;
+        };
+        let Ok(number) = num.parse::<u64>() else {
+            return;
+        };
+
+        // Serve from cache while fresh, otherwise fetch and record.
+        let cached = {
+            let cache = self.issue_deps_cache.lock();
+            cache
+                .get(&task.id)
+                .and_then(|(edges, at)| (at.elapsed() < self.deps_ttl).then(|| edges.clone()))
+        };
+        let native = match cached {
+            Some(edges) => edges,
+            None => {
+                let edges = self.issue_blocked_by(owner, repo, number).await;
+                self.issue_deps_cache
+                    .lock()
+                    .insert(task.id.clone(), (edges.clone(), std::time::Instant::now()));
+                edges
+            }
+        };
+
+        // Union native edges with whatever the body marker found, dropping
+        // duplicates while preserving the existing order.
+        for edge in native {
+            if !task.blocked_by.contains(&edge) {
+                task.blocked_by.push(edge);
+            }
+        }
+    }
+
+    /// Apply [`enrich_task_blocked_by`](Self::enrich_task_blocked_by) to a
+    /// batch of freshly built tasks. Called from the discovery and
+    /// single-issue paths after `issue_to_task` has run, and from the hot
+    /// path *after* its freshness lock is released — so a hot re-poll never
+    /// drops a native edge and re-adds it a tick later (badge flicker).
+    async fn merge_native_blocked_by(&self, tasks: &mut [Task]) {
+        for task in tasks.iter_mut() {
+            self.enrich_task_blocked_by(task).await;
+        }
     }
 
     pub async fn close_issue_node(&self, issue_node_id: &str) -> Result<(), GhError> {
@@ -8180,6 +8382,10 @@ mod tests {
                 std::collections::HashMap::new(),
             )),
             hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            issue_deps_cache: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            deps_ttl: GhClient::ISSUE_DEPS_TTL,
         }
     }
 
@@ -8232,6 +8438,8 @@ mod tests {
             kind: Some(kind),
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -8398,14 +8606,23 @@ mod tests {
             "rateLimit": {"cost": 2, "limit": 5000, "remaining": 4998, "resetAt": "2026-07-25T11:00:00Z"}
           }
         }"#;
+        // A fresh open issue is enriched with native deps right after its
+        // full fetch (#1521); the per-issue TTL cache means only the *first*
+        // sight and the post-`force_full_sweep` sight (cache cleared) spend
+        // a dependencies request — the unchanged and cached-moved ticks
+        // don't. `[]` = no native edges.
+        const DEPS: &str = "[]";
         let base_uri = spawn_sequenced_response_server(vec![
             LEAN,         // call 1: probe (first sight → mover)
             FULL_ONE,     //         full detail for I_one
-            LEAN,         // call 2: probe unchanged → NO full request
+            DEPS,         //         enrich I_one native deps (uncached)
+            LEAN,         // call 2: probe unchanged → NO full, NO enrich
             LEAN_CHANGED, // call 3: probe moved
             FULL_ONE,     //         full detail again
-            LEAN,         // call 4 (after force_full_sweep): probe
-            FULL_ONE,     //         cache cleared → full again
+            //               enrich reuses the cached deps → NO request
+            LEAN,     // call 4 (after force_full_sweep): probe
+            FULL_ONE, //         cache cleared → full again
+            DEPS,     //         enrich re-probes (deps cache cleared too)
         ])
         .await;
         let client = make_client(&base_uri);
@@ -9833,6 +10050,192 @@ mod tests {
         assert!(
             mutation.is_retryable(),
             "a timed-out mutation is re-drivable, not permanently rejected",
+        );
+    }
+
+    /// An issue whose body warrants a probe gets its native `blocked_by`
+    /// edges from the dependencies REST API, mapped to lazybox-keyed
+    /// `TaskId`s (`owner/repo#N`) and unioned with the body-marker edges.
+    #[tokio::test(flavor = "current_thread")]
+    async fn issue_blocked_by_maps_dep_numbers_to_task_ids() {
+        const BODY: &str = r#"[{"number":3},{"number":9}]"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        let edges = client.issue_blocked_by("acme", "widget", 7).await;
+        assert_eq!(
+            edges,
+            vec![
+                TaskId {
+                    source: "github".into(),
+                    key: "acme/widget#3".into()
+                },
+                TaskId {
+                    source: "github".into(),
+                    key: "acme/widget#9".into()
+                },
+            ]
+        );
+    }
+
+    /// A failing dependencies lookup (older host, missing scope, 404) is
+    /// best-effort: the issue simply carries no native edges.
+    #[tokio::test(flavor = "current_thread")]
+    async fn issue_blocked_by_is_empty_on_error() {
+        let base_uri =
+            spawn_canned_response_server("404 Not Found", "application/json", "{}").await;
+        let client = make_client(&base_uri);
+        assert!(
+            client
+                .issue_blocked_by("acme", "widget", 7)
+                .await
+                .is_empty()
+        );
+    }
+
+    /// `enrich_task_blocked_by` only probes issues that look like they
+    /// have a dependency, caches the result for `ISSUE_DEPS_TTL`, and
+    /// merges native edges without double-counting the body-marker ones.
+    #[tokio::test(flavor = "current_thread")]
+    async fn enrich_blocked_by_probes_caches_and_unions() {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // `#3` is already known from the body marker; the API also
+        // reports `#3` (dup) and `#9` (new).
+        const BODY: &str = r#"[{"number":3},{"number":9}]"#;
+        let base_uri =
+            spawn_counting_response_server("200 OK", "application/json", "", BODY, hits.clone())
+                .await;
+        let client = make_client(&base_uri);
+
+        let mut issue = task_without_node_id(TaskKind::Issue);
+        issue.id.key = "acme/widget#7".to_string();
+        issue.repo = Some("acme/widget".to_string());
+        issue.body = Some("Blocked by #3, needs the infra rollout".to_string());
+        issue.blocked_by = vec![TaskId {
+            source: "github".into(),
+            key: "acme/widget#3".into(),
+        }];
+
+        client.enrich_task_blocked_by(&mut issue).await;
+        assert_eq!(
+            issue.blocked_by,
+            vec![
+                TaskId {
+                    source: "github".into(),
+                    key: "acme/widget#3".into()
+                },
+                TaskId {
+                    source: "github".into(),
+                    key: "acme/widget#9".into()
+                },
+            ],
+            "native `#9` is added; the shared `#3` is not duplicated"
+        );
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // A second enrichment of the same issue is served from cache — no
+        // new request.
+        let mut again = task_without_node_id(TaskKind::Issue);
+        again.id.key = "acme/widget#7".to_string();
+        again.repo = Some("acme/widget".to_string());
+        again.body = Some("Blocked by #3".to_string());
+        client.enrich_task_blocked_by(&mut again).await;
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "cached edges are reused within the TTL"
+        );
+    }
+
+    /// A PR, or a closed/merged issue, never spends a request — but an
+    /// *open* issue is always probed, even with a plain body and no parent,
+    /// because a dependency set through GitHub's web UI leaves no body
+    /// keyword to gate on. Regression for the body-proxy gate that silently
+    /// dropped UI-set native edges.
+    #[tokio::test(flavor = "current_thread")]
+    async fn enrich_blocked_by_probes_every_open_issue_but_skips_terminal() {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // The native API reports a dependency the body never mentions.
+        const BODY: &str = r#"[{"number":42}]"#;
+        let base_uri =
+            spawn_counting_response_server("200 OK", "application/json", "", BODY, hits.clone())
+                .await;
+        let client = make_client(&base_uri);
+
+        // A PR is never probed, even with a blocker-looking body.
+        let mut pr = task_without_node_id(TaskKind::Pr);
+        pr.body = Some("Blocked by #3".to_string());
+        client.enrich_task_blocked_by(&mut pr).await;
+        assert!(pr.blocked_by.is_empty());
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // A closed issue is done — never probed, even body-keyworded.
+        let mut closed = task_without_node_id(TaskKind::Issue);
+        closed.id.key = "acme/widget#8".to_string();
+        closed.repo = Some("acme/widget".to_string());
+        closed.state = TaskState::Closed;
+        closed.body = Some("Blocked by #3".to_string());
+        client.enrich_task_blocked_by(&mut closed).await;
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // An OPEN issue with a plain body and no parent IS probed, and the
+        // UI-set native edge — invisible to any body scan — is discovered.
+        let mut issue = task_without_node_id(TaskKind::Issue);
+        issue.id.key = "acme/widget#7".to_string();
+        issue.repo = Some("acme/widget".to_string());
+        issue.body = Some("just a normal description".to_string());
+        client.enrich_task_blocked_by(&mut issue).await;
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            issue.blocked_by,
+            vec![TaskId {
+                source: "github".into(),
+                key: "acme/widget#42".into(),
+            }],
+            "the native edge is discovered without any body keyword"
+        );
+    }
+
+    /// The deps-cache TTL is driven by the configured `repo_refresh_interval`
+    /// (via `with_repo_refresh_interval`), not a hardcoded 5-minute constant.
+    /// With the interval set to zero, every entry reads as stale, so a second
+    /// enrichment of the same open issue re-probes instead of serving the
+    /// cache — proving the cache honors `deps_ttl` rather than
+    /// `ISSUE_DEPS_TTL`. Regression for the TTL being decoupled from config.
+    #[tokio::test(flavor = "current_thread")]
+    async fn deps_cache_ttl_follows_the_configured_repo_refresh_interval() {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        const BODY: &str = r#"[{"number":42}]"#;
+        let base_uri =
+            spawn_counting_response_server("200 OK", "application/json", "", BODY, hits.clone())
+                .await;
+        // A zero refresh interval means the cache is never fresh.
+        let client = make_client(&base_uri).with_repo_refresh_interval(std::time::Duration::ZERO);
+        assert_eq!(
+            client.deps_ttl,
+            std::time::Duration::ZERO,
+            "the builder wires the interval into the cache TTL"
+        );
+
+        let mut issue = task_without_node_id(TaskKind::Issue);
+        issue.id.key = "acme/widget#7".to_string();
+        issue.repo = Some("acme/widget".to_string());
+        issue.body = Some("just a normal description".to_string());
+
+        client.enrich_task_blocked_by(&mut issue).await;
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Same issue again: with a hardcoded 5-min TTL this would be served
+        // from cache (hits == 1). Because the TTL is the configured zero, the
+        // entry is stale and the native endpoint is hit a second time.
+        let mut again = task_without_node_id(TaskKind::Issue);
+        again.id.key = "acme/widget#7".to_string();
+        again.repo = Some("acme/widget".to_string());
+        again.body = Some("just a normal description".to_string());
+        client.enrich_task_blocked_by(&mut again).await;
+        assert_eq!(
+            hits.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a zero TTL re-probes rather than reusing a stale cache entry"
         );
     }
 }

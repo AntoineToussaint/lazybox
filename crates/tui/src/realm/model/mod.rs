@@ -2452,7 +2452,7 @@ const BUILD_MISMATCH_PREFIX: &str = "build mismatch: daemon ";
 /// recognise our own banner so a repeating ping refreshes it and the
 /// falling edge (all agents recovered) retracts it — without touching a
 /// build-mismatch / sync-error banner some other path raised.
-const USAGE_LIMIT_PREFIX: &str = "⏳ ";
+const USAGE_LIMIT_PREFIX: &str = "⧗ ";
 
 /// How many recently-used snippets the picker's "Recent" group holds
 /// (#252). Small enough to stay a shortcut list, not a second library —
@@ -3527,7 +3527,10 @@ impl<T: TerminalAdapter> Model<T> {
         };
         if matches!(
             action,
-            Action::JumpToAsking | Action::JumpToFailingCi | Action::JumpToWorkspace
+            Action::JumpToAsking
+                | Action::JumpToFailingCi
+                | Action::JumpToWorkspace
+                | Action::JumpToBlocked
         ) {
             coach.note_jump();
         }
@@ -5100,8 +5103,8 @@ impl<T: TerminalAdapter> Model<T> {
 
     /// Reconcile the escalating usage-limit alert (#1012) with the number
     /// of workspaces whose agent is currently blocked on its provider
-    /// usage limit. The passive `⏳ N limited` header count and the
-    /// per-row `⏳` pills always render; this is the escalation on top of
+    /// usage limit. The passive `⧗ N limited` header count and the
+    /// per-row `⧗` pills always render; this is the escalation on top of
     /// them: a sticky footer banner naming the resume action (and the
     /// parsed reset time where one is known), raised while any agent is
     /// blocked and retracted once they all recover. Gated by
@@ -5149,8 +5152,36 @@ impl<T: TerminalAdapter> Model<T> {
                 .map(|r| format!(" · resets {r}"))
                 .unwrap_or_default();
             let plural = if count == 1 { "" } else { "s" };
+            // The resume chord is remappable (`ui.action_keys.resume_rate_limited`);
+            // resolve the effective key so the banner never names a chord the
+            // user has rebound away.
+            let resume_keys = lazybox_tui_core::action::ActionDef::for_kind(
+                lazybox_tui_core::action::ActionKind::ResumeRateLimited,
+            )
+            .effective_keys_display(&self.action_key_overrides);
+            // Parked (◌ `AwaitingReset`) agents are rate-limited too, but the
+            // resume chord deliberately skips them — a "continue" only cancels
+            // their auto-continue wait and re-hits the limit. When any coexist
+            // with a blocked agent, this standing banner is the one persistent
+            // surface that can carry their call-to-action, so name them and the
+            // restart chord that *does* apply; otherwise a resume leaves the ◌
+            // badges untouched with no on-screen reason why. (Parked-only raises
+            // no banner: the gate above is still the blocked count alone, so a
+            // self-resolving wait never escalates to a sticky banner on its own.)
+            let parked = self.sidebar.awaiting_reset_terminals().len();
+            let parked_clause = if parked > 0 {
+                let restart_keys = lazybox_tui_core::action::ActionDef::for_kind(
+                    lazybox_tui_core::action::ActionKind::RestartRateLimited,
+                )
+                .effective_keys_display(&self.action_key_overrides);
+                format!(" · {parked} parked, {restart_keys} to restart")
+            } else {
+                String::new()
+            };
             self.flash(
-                format!("{USAGE_LIMIT_PREFIX}{count} agent{plural} rate-limited{reset} — Shift-K to resume"),
+                format!(
+                    "{USAGE_LIMIT_PREFIX}{count} agent{plural} rate-limited{reset} — {resume_keys} to resume{parked_clause}"
+                ),
                 crate::realm::components::footer::NoticeSeverity::Permanent,
             );
         }

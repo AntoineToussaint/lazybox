@@ -46,13 +46,13 @@ pub struct WorkspaceRowCtx<'a> {
     /// set (they can't be, by the disjoint asking/working sets).
     pub asking: bool,
     /// Any agent in this workspace is in `AgentState::LimitReached` — a
-    /// provider usage / rate-limit block (#847). Renders the `⏳` pill in
+    /// provider usage / rate-limit block (#847). Renders the `⧗` pill in
     /// the shared state slot. Highest precedence: it's the most urgent
     /// "act (externally) before this moves" signal.
     pub limit_reached: bool,
     /// Any agent in this workspace is in `AgentState::AwaitingReset` — the
     /// calm auto-waiting block (lazybox pressed Wait; it's parked until the
-    /// limit resets). Renders the quiet `💤` glyph. Lower precedence than
+    /// limit resets). Renders the quiet `☾` glyph. Lower precedence than
     /// the alerting states and than `working`: it's handled, nothing to act
     /// on, so an actively working sibling wins the slot.
     pub awaiting_reset: bool,
@@ -136,19 +136,6 @@ pub struct WorkspaceRowCtx<'a> {
     /// `⤓` glyph to its warn color so a stuck (dirty/diverged) worktree
     /// reads at a glance. Only meaningful when `track_main`.
     pub track_main_behind: bool,
-    /// This workspace has the per-workspace meter *armed* (`Workspace::metered`,
-    /// toggled with `x $`): while set, its agent spawns route through lazybox's
-    /// local metering proxy — effective only when `agent.metering_proxy` is on
-    /// and the proxy is running, otherwise inert (#1488). Renders a `$` in the
-    /// passive badge cluster — the *durable* cue that the canary is armed,
-    /// matching (and gated on the same field as) the sidebar header's
-    /// ` $ METER ` pill. Before this, that per-workspace signal lived only in
-    /// the header, drawn from the focused row alone, so you couldn't see which
-    /// rows were armed without visiting each one. Reflects the per-workspace
-    /// opt-in only: Space-tier (`agent.metered_spaces`) and blanket
-    /// (`meter_all`) metering don't light it — exactly as they don't light the
-    /// header pill, so the two surfaces can't drift.
-    pub metered: bool,
     /// The issue this PR was opened from, as `(identifier, extra)` —
     /// `("298", 0)` / `("ENG-12", 2)` (#1528). Renders a `←298` chip so a
     /// collapsed issue→PR row still says where it came from; the collapse
@@ -179,6 +166,15 @@ pub struct WorkspaceRowCtx<'a> {
     /// badge so a chain of stacked PRs reads as an ordered stack at a
     /// glance rather than unrelated rows. `None` for standalone PRs.
     pub stack: Option<&'a lazybox_core::StackPosition>,
+    /// Number of dependency blockers on this workspace's tasks (#1521; P0
+    /// does not resolve whether they are still open). Renders a ` ⊗N `
+    /// badge in the passive cluster; nothing when zero.
+    pub blocked_by: usize,
+    /// A declared `Blocked on:` reason exists on some task. Renders ` ⊗! `
+    /// when there are no dependency blockers, else folds into the count
+    /// badge (the count already says "blocked"). The reason text itself is
+    /// shown in the right pane, not the row.
+    pub blocked_on: bool,
     /// Tier `(badge_letter, label) → short` map for the model badge
     /// (`('C', "Opus") → "O"`), aggregated from every agent's model menu.
     /// The badge reads a declared short here and falls back to the label's
@@ -438,14 +434,17 @@ fn cell_type(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         // Color the glyph by source so PR / GitHub issue / Linear are
         // distinguishable at a glance — they used to share one dim grey,
         // which hid the Linear `◆` entirely. Mirrors the section-header
-        // markers (PR → success, issue → hover) and gives Linear the
-        // accent tone. The branch order matches `workspace_type_label`,
-        // so if a glyph rendered, exactly one arm matches; the final
-        // arm is Linear (the only other glyph-bearing kind).
+        // markers (PR → success, issue → strong text) and gives Linear
+        // the accent tone. Issues are deliberately NOT a hot color: red /
+        // magenta is reserved for things that are wrong (failing CI,
+        // conflicts, blocked), and an issue is just work. The branch order
+        // matches `workspace_type_label`, so if a glyph rendered, exactly
+        // one arm matches; the final arm is Linear (the only other
+        // glyph-bearing kind).
         let color = if workspace.pr.is_some() {
             ctx.theme.success
         } else if !workspace.gh_issues.is_empty() {
-            ctx.theme.hover
+            ctx.theme.text_strong
         } else {
             ctx.theme.accent
         };
@@ -534,7 +533,7 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 ///     glyph: the agent is making progress right now.
 ///   - `Done`        → ` ✓ ` (success, bold) — a static glyph: the
 ///     agent finished its turn and is waiting to be looked at (#80).
-///   - `LimitReached`→ ` ⏳ ` (warn, bold) — a static glyph: the agent
+///   - `LimitReached`→ ` ⧗ ` (warn, bold) — a static glyph: the agent
 ///     hit its provider usage limit and is waiting to be resumed (#847).
 ///   - `CreditExhausted` → ` ¢ ` (warn, bold) — the provider credit
 ///     recovery transaction has not completed yet.
@@ -546,7 +545,7 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 ///     ended (clean or crash; #356/#357). Not an alert color — a dead
 ///     agent is a fact to notice, not an emergency.
 ///   - `Idle`        → blank.
-///   - `AwaitingReset` → ` 💤 ` (dim) — a static glyph: lazybox pressed
+///   - `AwaitingReset` → ` ☾ ` (dim) — a static glyph: lazybox pressed
 ///     Wait and the agent is parked, sleeping until its limit resets. Calm,
 ///     not an alert — nothing for you to do.
 /// Reserved width either way so the kind/title to the right don't
@@ -566,17 +565,19 @@ fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let (glyph, fg) = if ctx.credit_exhausted {
         ("¢", ctx.theme.warn)
     } else if ctx.limit_reached {
-        ("⏳", ctx.theme.warn)
+        ("⧗", ctx.theme.warn)
     } else if ctx.asking {
         ("?", ctx.theme.warn)
     } else if ctx.working {
         (ctx.working_glyph, ctx.theme.accent)
     } else if ctx.awaiting_reset {
         // The calm auto-waiting block: parked until reset, handled — a quiet
-        // 💤 in the dim text color, NOT an alert. Below `working` so a live
-        // sibling's spinner wins; above `done` so a still-parked agent shows
-        // over a merely-finished one.
-        ("💤", ctx.theme.text_dim)
+        // ☾ ("asleep until the limit resets") in the dim text color, NOT an
+        // alert. Not `◌`: that is the review-pending status glyph
+        // (`pills::G_REVIEW`). Below `working` so a live sibling's spinner
+        // wins; above `done` so a still-parked agent shows over a
+        // merely-finished one.
+        ("☾", ctx.theme.text_dim)
     } else if ctx.done {
         ("✓", ctx.theme.success)
     } else if ctx.spawning {
@@ -1129,11 +1130,11 @@ fn cell_badges(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     pack_badges([
         cell_remote(ctx),
         cell_stack(ctx),
+        cell_blocked(ctx),
         cell_linked(ctx),
         cell_notes(ctx),
         cell_snippet(ctx),
         cell_track_main(ctx),
-        cell_metered(ctx),
         cell_fix(ctx),
         cell_origin_issue(ctx),
     ])
@@ -1179,6 +1180,36 @@ fn cell_stack(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         format!(" ⇗{}/{} ", stack.position, stack.depth),
         style,
     ))
+}
+
+/// The ` ⊗N ` dependency badge (#1521): this workspace's tasks declare `N`
+/// blockers (a native GitHub/Linear relation or a `Blocked by:` / `Depends
+/// on:` body marker). A free-text `Blocked on:` reason with no dependency
+/// edge renders ` ⊗! ` instead — still blocked, but the count is meaning-
+/// less, so `!` stands in. Uses `theme.error` bold because "waiting on
+/// something else" is the one passive-cluster badge that gates starting
+/// work. P0 does not resolve whether the blockers are still open; the
+/// number is the declared edge count. Packs into the shared cluster (#813).
+/// `⊗` (a monochrome "circled times"), not the `⛔` emoji: the sidebar's
+/// glyph set is monochrome text symbols, and the color carries the alarm.
+/// Not `⊘` — that is the *closed-PR* status glyph (`pills::G_CLOSED`), and
+/// one symbol must not mean two things on the same row.
+fn cell_blocked(ctx: &WorkspaceRowCtx<'_>) -> Cell {
+    let label = if ctx.blocked_by > 0 {
+        format!(" ⊗{} ", ctx.blocked_by)
+    } else if ctx.blocked_on {
+        " ⊗! ".to_string()
+    } else {
+        return Cell::empty();
+    };
+    let style = if ctx.is_cursor {
+        ctx.row_style()
+    } else {
+        Style::default()
+            .fg(ctx.theme.error)
+            .add_modifier(Modifier::BOLD)
+    };
+    Cell::from_span(Span::styled(label, style))
 }
 
 /// The merge-arm badge cluster (#813): `⚡` (lazybox client-side
@@ -1247,7 +1278,7 @@ fn cell_snippet(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 }
 
 /// The `◆` GitHub-native auto-merge glyph (#778, iconized #1046) — an
-/// accent-colored marker in the same slot family as `⚡`/`🔧`. It's a
+/// accent-colored marker in the same slot family as `⚡`/`⚙`. It's a
 /// standing automation *policy*, so it lives here rather than in the
 /// status column, where it used to hide the `✗` CI-fail glyph on exactly
 /// the armed PRs that most need it. Packs into the merge-arm cluster.
@@ -1292,7 +1323,7 @@ fn cell_arm(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     // arm — the one merge-on-green state the user drives with `g g` — so it
     // reads at a glance the way the old ` ARM ` block did, while staying one
     // glyph wide (keeping #1046's column budget). Its passive siblings `◆`
-    // (GitHub-native AUTO) and `🔧` (FIX) stay fg-only, so the block draws
+    // (GitHub-native AUTO) and `⚙` (FIX) stay fg-only, so the block draws
     // the eye to the arm you toggled.
     let style = if ctx.is_cursor {
         ctx.row_style()
@@ -1339,29 +1370,17 @@ fn cell_origin_issue(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     } else {
         format!(" {arrow}{id} ")
     };
+    // A reference, not a signal: dim, so it never competes with the
+    // alarm colors (red / magenta are for things that are wrong).
     let style = if ctx.is_cursor {
         ctx.row_style()
     } else {
-        Style::default().fg(ctx.theme.hover)
+        Style::default().fg(ctx.theme.text_dim)
     };
     Cell::from_span(Span::styled(label, style))
 }
 
-fn cell_metered(ctx: &WorkspaceRowCtx<'_>) -> Cell {
-    if !ctx.metered {
-        return Cell::empty();
-    }
-    let style = if ctx.is_cursor {
-        ctx.row_style()
-    } else {
-        Style::default()
-            .fg(ctx.theme.accent)
-            .add_modifier(Modifier::BOLD)
-    };
-    Cell::from_span(Span::styled(" $ ".to_string(), style))
-}
-
-/// The compact `🔧` auto-fix glyph (iconized #1046). Packs into the shared
+/// The compact `⚙` auto-fix glyph (iconized #1046). Packs into the shared
 /// badge cluster (#813); the focused workspace's full trigger description
 /// lives in the sidebar header.
 fn cell_fix(ctx: &WorkspaceRowCtx<'_>) -> Cell {
@@ -1590,6 +1609,8 @@ mod tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -1638,12 +1659,13 @@ mod tests {
             auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
-            metered: false,
             origin_issue: None,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
             stack: None,
+            blocked_by: 0,
+            blocked_on: false,
             model_shorts: empty_shorts(),
             highlight_query: None,
             repo_prefix: None,
@@ -2152,12 +2174,13 @@ mod tests {
             auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
-            metered: false,
             origin_issue: None,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
             stack: None,
+            blocked_by: 0,
+            blocked_on: false,
             model_shorts: empty_shorts(),
             highlight_query: None,
             repo_prefix: None,
@@ -2721,12 +2744,13 @@ mod tests {
             auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
-            metered: false,
             origin_issue: None,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
             stack: None,
+            blocked_by: 0,
+            blocked_on: false,
             model_shorts: empty_shorts(),
             highlight_query: None,
             repo_prefix: None,
@@ -3048,8 +3072,8 @@ mod tests {
         assert_eq!(cell_text(&cell), " ←298 ");
         assert_eq!(
             cell.spans[0].style.fg,
-            Some(theme.hover),
-            "coloured as an issue reference, not as more PR metadata",
+            Some(theme.text_dim),
+            "a reference is dim — never the hot colors reserved for things that are wrong",
         );
 
         // More than one closed issue: name the first, count the rest.
@@ -3081,59 +3105,22 @@ mod tests {
         assert!(text.contains('✎'), "notes badge missing: {text:?}");
     }
 
+    /// Metering never shows on a workspace row: with metering on by default
+    /// a per-row `$` is noise. The per-workspace figure lives in the sidebar
+    /// header's ` $ METER · $cost ` pill (focused row) and the Space header.
     #[test]
-    fn cell_metered_marks_a_metered_workspace() {
-        let task = make_task("owner/repo#1", "x");
-        let mut ws = Workspace::from_task(task.clone(), fixed_time());
-        let theme = theme();
-
-        // Not metered → nothing, so the column collapses for a sidebar
-        // where no row is metered.
-        let ctx = ctx_for(&ws, &task, &theme);
-        assert_eq!(cell_metered(&ctx).width(), 0);
-
-        ws.metered = true;
-        let mut ctx = ctx_for(&ws, &task, &theme);
-        ctx.metered = true;
-        let cell = cell_metered(&ctx);
-        assert_eq!(cell_text(&cell), " $ ");
-        assert_eq!(
-            cell.spans[0].style.fg,
-            Some(theme.accent),
-            "metering observes; it doesn't act on the PR the way FIX/ARM do",
-        );
-
-        // On the cursor row the badge inherits the row highlight so the
-        // fill stays legible — same rule every other badge follows.
-        ctx.is_cursor = true;
-        assert_eq!(cell_metered(&ctx).spans[0].style, ctx.row_style());
-    }
-
-    /// The badge rides the shared passive cluster, so it packs with the
-    /// other decorations instead of reserving its own column.
-    #[test]
-    fn metered_badge_packs_into_the_passive_cluster() {
+    fn workspace_row_carries_no_metering_badge() {
         let task = make_task("owner/repo#1", "x");
         let ws = Workspace::from_task(task.clone(), fixed_time());
+        assert!(ws.metered, "new workspaces meter by default");
         let theme = theme();
         let mut ctx = ctx_for(&ws, &task, &theme);
-        ctx.metered = true;
         ctx.has_notes = true;
         ctx.auto_fix_ci_armed = true;
 
         let text = cell_text(&cell_badges(&ctx));
-        assert!(text.contains('$'), "metered badge missing: {text:?}");
-        assert!(text.contains('✎'), "notes badge missing: {text:?}");
-
-        // Ordering (#813 doctrine, least → most consequential): metering is
-        // passive observation, so `$` packs *before* the `FIX` automation
-        // glyph — not after it as the most-consequential badge.
-        let dollar = text.find('$').expect("metered badge present");
-        let fix = text.find('🔧').expect("fix badge present");
-        assert!(
-            dollar < fix,
-            "metered `$` must render before the FIX glyph: {text:?}",
-        );
+        assert!(!text.contains('$'), "no `$` on the row: {text:?}");
+        assert!(text.contains('✎'), "other badges unaffected: {text:?}");
     }
 
     #[test]
@@ -3264,6 +3251,40 @@ mod tests {
         ctx.stack = Some(&stack);
         let cell = cell_stack(&ctx);
         assert_eq!(cell.spans[0].content.as_ref(), " ⇗2/3 ");
+    }
+
+    /// The dependency badge shows a count when the workspace declares
+    /// blockers, and folds to ` ⊗! ` when only a free-text `Blocked on:`
+    /// reason exists with no counted edges (#1521).
+    #[test]
+    fn cell_blocked_shows_count_badge() {
+        let task = make_task("owner/repo#2", "child");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(cell_blocked(&ctx).width(), 0, "no blockers, no badge");
+        ctx.blocked_by = 2;
+        let cell = cell_blocked(&ctx);
+        assert_eq!(cell.spans[0].content.as_ref(), " ⊗2 ");
+        ctx.blocked_by = 0;
+        ctx.blocked_on = true;
+        let cell = cell_blocked(&ctx);
+        assert_eq!(
+            cell.spans[0].content.as_ref(),
+            " ⊗! ",
+            "a bare declared reason shows the sentinel, not a count"
+        );
+    }
+
+    /// With neither a counted edge nor a declared reason, the badge slot
+    /// is empty (#1521).
+    #[test]
+    fn cell_blocked_is_empty_without_blockers() {
+        let task = make_task("owner/repo#2", "child");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+        let ctx = ctx_for(&ws, &task, &theme);
+        assert_eq!(cell_blocked(&ctx).width(), 0);
     }
 
     /// A workspace that's been sent snippets surfaces a ` ]N ` badge
@@ -4201,12 +4222,13 @@ mod tests {
             auto_fix_conflict_armed: false,
             track_main: false,
             track_main_behind: false,
-            metered: false,
             origin_issue: None,
             has_notes: false,
             sent_snippet_count: 0,
             ticket_tree: None,
             stack: None,
+            blocked_by: 0,
+            blocked_on: false,
             model_shorts: empty_shorts(),
             highlight_query: None,
             repo_prefix: None,
@@ -4270,7 +4292,7 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        assert_eq!(info, " ⎇ local  ✎  ]2  🔧 ");
+        assert_eq!(info, " ⎇ local  ✎  ]2  ⚙\u{FE0E} ");
         let arms: String = cell_merge_arms(&ctx0)
             .spans
             .iter()
@@ -4293,7 +4315,7 @@ mod tests {
 
         // The all-badges row shows both clusters, arms right of the info;
         // the badge-less row shows none of them.
-        assert!(l0.contains(" ⎇ local  ✎  ]2  🔧  ⚡ "), "{l0:?}");
+        assert!(l0.contains(" ⎇ local  ✎  ]2  ⚙\u{FE0E}  ⚡ "), "{l0:?}");
         assert!(l1.contains('✎'), "{l1:?}");
         assert!(
             !l2.contains('✎') && !l2.contains('⎇') && !l2.contains('⚡'),

@@ -1423,7 +1423,7 @@ pub struct UiSection {
     /// usage limit (#1012): a transient notice the moment the first agent
     /// is rate-limited, escalating to a sticky banner naming the resume
     /// action while any agent stays blocked, retracted once they all
-    /// recover. The `⏳ N limited` header count and the per-row `⏳` pill
+    /// recover. The `⧗ N limited` header count and the per-row `⧗` pill
     /// are always shown; this only gates the footer escalation. Opt-out —
     /// set `false` to keep the block to the passive header/pill signals.
     /// Defaults to `true`.
@@ -1432,7 +1432,7 @@ pub struct UiSection {
     /// Show the always-visible per-provider usage summary in the sidebar
     /// header (#1059): a compact `Claude ▓▓▓░░ 62% · 76k left` widget per
     /// agent with a live terminal, visible before any limit is hit. It is
-    /// the proactive baseline the reactive `⏳ N limited` count escalates
+    /// the proactive baseline the reactive `⧗ N limited` count escalates
     /// from. Opt-out — set `false` to hide the row. Defaults to `true`.
     #[serde(default = "default_true")]
     pub usage_summary: bool,
@@ -2125,13 +2125,14 @@ pub struct AgentSection {
     #[serde(default)]
     pub metering_proxy: bool,
     /// Route EVERY interactive agent spawn through the metering proxy when
-    /// `metering_proxy` is on. Off by default: metering is opt-in
-    /// **per session** — a spawn is proxied only when it explicitly asks
-    /// (the per-workspace meter toggle, `$ meter`), so `metering_proxy: true`
-    /// alone just makes the proxy *run* and never redirects a session that
-    /// didn't opt in. Set this `true` to restore blanket metering once you
-    /// trust the proxy (e.g. for fleet-wide cost), accepting that a proxy
-    /// fault then affects every session rather than one canary.
+    /// `metering_proxy` is on, ignoring the per-workspace flag. Off by
+    /// default: routing is decided **per workspace** by
+    /// `Workspace::metered` — on for every new workspace, off for records
+    /// persisted before that default, toggled with `x $` — so
+    /// `metering_proxy: true` alone makes the proxy run and meters new
+    /// workspaces while leaving an explicitly un-metered one alone. Set this
+    /// `true` for blanket metering (e.g. fleet-wide cost including legacy
+    /// rows), accepting that a proxy fault then affects every session.
     #[serde(default)]
     pub meter_all: bool,
     /// Per-model price overrides for cost attribution, keyed by **model-id

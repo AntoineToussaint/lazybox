@@ -245,6 +245,12 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | `x V` | views |
 | `x A` | add repo |
 
+### `E` — epic
+
+| Chord | Action |
+| --- | --- |
+| `E j` | next blocked |
+
 ## Mouse
 
 - Click any pane to focus it; drag a splitter to resize.

@@ -125,6 +125,17 @@ fn maximal_pr_task() -> Task {
         parent: None,
         priority: None,
         state_label: None,
+        blocked_by: vec![
+            TaskId {
+                source: "github".into(),
+                key: "acme/widget#3".into(),
+            },
+            TaskId {
+                source: "github".into(),
+                key: "acme/other#9".into(),
+            },
+        ],
+        blocked_on: Some("waiting on the infra rollout".into()),
     }
 }
 
@@ -349,6 +360,47 @@ fn v3_tasks_without_parent_deserialize_as_roots() {
     assert!(ws.pr.as_ref().is_some_and(|task| task.parent.is_none()));
     assert!(ws.gh_issues.iter().all(|task| task.parent.is_none()));
     assert!(ws.linear_issues.iter().all(|task| task.parent.is_none()));
+}
+
+/// Tasks predating #1521 carry no dependency edges. Every task slot must
+/// continue to load with empty `blocked_by` / absent `blocked_on` when the
+/// fields are missing, so an older snapshot reads without inventing edges.
+#[test]
+fn tasks_without_dependency_edges_deserialize_as_unblocked() {
+    let mut legacy = serde_json::to_value(maximal_workspace()).expect("serialize fixture");
+    legacy["pr"]
+        .as_object_mut()
+        .expect("pr object")
+        .remove("blocked_by");
+    legacy["pr"]
+        .as_object_mut()
+        .expect("pr object")
+        .remove("blocked_on");
+    for collection in ["gh_issues", "linear_issues"] {
+        for task in legacy[collection].as_array_mut().expect("task array") {
+            let task = task.as_object_mut().expect("task object");
+            task.remove("blocked_by");
+            task.remove("blocked_on");
+        }
+    }
+
+    let ws = Workspace::decode_persisted(&serde_json::to_string(&legacy).unwrap())
+        .expect("pre-#1521 workspace remains readable");
+    assert!(
+        ws.pr
+            .as_ref()
+            .is_some_and(|task| task.blocked_by.is_empty() && task.blocked_on.is_none())
+    );
+    assert!(
+        ws.gh_issues
+            .iter()
+            .all(|task| task.blocked_by.is_empty() && task.blocked_on.is_none())
+    );
+    assert!(
+        ws.linear_issues
+            .iter()
+            .all(|task| task.blocked_by.is_empty() && task.blocked_on.is_none())
+    );
 }
 
 /// The checked-in current-schema fixture must keep deserializing, and

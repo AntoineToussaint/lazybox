@@ -1349,6 +1349,8 @@ mod tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
         let mut ws = Workspace::from_task(task, fixed_time());
         ws.key = WorkspaceKey(key_str.into());

@@ -199,6 +199,8 @@ mod status_pill_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -1502,7 +1504,7 @@ mod filter_tests {
     #[test]
     fn every_filter_has_an_axis_and_appears_in_all() {
         // ALL must list each variant exactly once; drives the menu.
-        assert_eq!(Filter::ALL.len(), 27);
+        assert_eq!(Filter::ALL.len(), 29);
         let mut seen = std::collections::BTreeSet::new();
         for f in Filter::ALL {
             assert!(seen.insert(f), "{f:?} listed twice in Filter::ALL");
@@ -2137,6 +2139,59 @@ mod search_tests {
         assert_eq!(sb.space_cost_micros("nonexistent"), 0);
     }
 
+    /// No dollar figure on any sidebar row. A metered Space with accrued
+    /// spend used to render `codefly-dev $ $58.36` on its header — money
+    /// on every scan of the list. Spend stays in the header's today strip
+    /// and the tab badge; the metering toggle itself is untouched.
+    #[test]
+    fn space_header_row_carries_no_cost_or_dollar_badge() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let a = issue_ws_in_repo("obin-ai/platform", "1", "one");
+        // A second owner keeps the Space tier visible (a lone Space is
+        // suppressed).
+        let other = issue_ws_in_repo("acme/widget", "3", "three");
+        let a_key = SessionKey::from(&a.key);
+        sb.workspaces.insert(a_key.clone(), a);
+        sb.workspaces.insert(SessionKey::from(&other.key), other);
+        sb.recompute_visible();
+        sb.hydrate_session_costs(&[(a_key.as_str().to_string(), 58_360_000)]);
+        sb.metered_spaces.insert("obin-ai".into());
+        assert_eq!(
+            sb.space_cost_micros("obin-ai"),
+            58_360_000,
+            "cost is tracked"
+        );
+
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        let header = rows
+            .iter()
+            .find(|row| row.contains("obin-ai") && !row.contains("obin-ai/"))
+            .expect("the Space header row is rendered");
+        assert!(
+            !header.contains('$'),
+            "no dollar on the Space header row: {header:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("$58.36")),
+            "the Space cost must not appear on any row:\n{}",
+            rows.join("\n")
+        );
+    }
+
     /// Frame-budget regression gate (#1090, acceptance #4): the sidebar's
     /// per-frame widget build must stay cheap at scale.
     /// `prebuild_workspace_lines` rebuilds every visible row every frame
@@ -2381,9 +2436,9 @@ mod search_tests {
             .draw(|frame| sb.render(frame.area(), frame, true))
             .expect("draw");
         let buffer = terminal.backend().buffer();
-        // The usage summary sits under the (conditional) automation row,
-        // just above the divider (#1502).
-        let y = 2 + sb.stats_row_height(Rect::new(0, 0, 60, 14));
+        // The usage summary keeps its own row; since #1535 removed the
+        // conditional automation strip above it, that row is always 2.
+        let y = 2;
         (0..buffer.area.width)
             .map(|x| buffer[(x, y)].symbol())
             .collect()
@@ -2900,6 +2955,29 @@ mod search_tests {
         assert!(!row.contains("merged"), "merged did not fit: {row:?}");
     }
 
+    /// A today-only trailer (no automation on the focused row) must get the
+    /// FULL `trailer_budget`. The 2-cell separator between automation and
+    /// the tally is only due when automation actually precedes it — with an
+    /// empty trailer the tally starts the group and needs none. Regression
+    /// for an unconditional `+ 2` reservation that docked the today strip 2
+    /// cells at every width: at a width where the tally exactly fills the
+    /// budget, the lowest group fell off even though it fit. `3 sessions ·
+    /// 4 merged` is exactly 21 cells; size the pane so the strip's budget is
+    /// exactly 21 and assert `merged` survives.
+    #[test]
+    fn today_only_trailer_gets_the_full_budget() {
+        let mut sb = sidebar_with_issues(&[("1", "Alpha")]);
+        set_today(&mut sb, 3, 4, 0);
+        let width = pane_width_for_room(&mut sb, 21);
+        let row = today_row(&mut sb, width);
+        assert!(row.contains("3 sessions"), "{row:?}");
+        assert!(
+            row.contains("4 merged"),
+            "the tally exactly fills the budget with no automation ahead of \
+             it — a phantom separator must not push `merged` off: {row:?}"
+        );
+    }
+
     /// `TodayStats::from_buckets` sums only today's buckets for the metrics
     /// the strip shows, ignoring other days and unrelated metrics.
     #[test]
@@ -3030,7 +3108,7 @@ mod search_tests {
     }
 
     /// While the bar is capturing keystrokes it reads as an unmistakable
-    /// field: the `🔍` glyph, the vim `/` prefix, the typed query, and a
+    /// field: the `⌕` glyph, the vim `/` prefix, the typed query, and a
     /// solid block cursor (#1099).
     #[test]
     fn editing_search_bar_is_a_prominent_field_with_a_block_cursor() {
@@ -3038,9 +3116,42 @@ mod search_tests {
         sb.open_search();
         type_query(&mut sb, "al");
         let bar = search_bar_row(&mut sb);
-        assert!(bar.contains('🔍'), "search glyph present: {bar:?}");
+        assert!(bar.contains('⌕'), "search glyph present: {bar:?}");
         assert!(bar.contains('█'), "block cursor while editing: {bar:?}");
         assert!(bar.contains("al"), "shows the typed query: {bar:?}");
+    }
+
+    /// The search-bar prefix leads with a *single* `⌕` — the one the
+    /// header find box uses — in both modes: global has no scope suffix,
+    /// the scoped `/` search keeps the vim `⌕ /` shape. The emoji→text
+    /// swap once collapsed the old `🔍 ⌕ ` global prefix into a doubled
+    /// `⌕⌕`, which this pins against (#1546).
+    #[test]
+    fn search_bar_prefix_is_a_single_glyph() {
+        // Global (unscoped): one ⌕, never the doubled `⌕⌕`.
+        let mut g = sidebar_with_issues(&[("1", "Alpha")]);
+        g.open_global_search();
+        type_query(&mut g, "al");
+        let bar = search_bar_row(&mut g);
+        assert!(bar.contains('⌕'), "global search glyph present: {bar:?}");
+        assert!(
+            !bar.contains("⌕⌕"),
+            "global prefix must not double the glyph: {bar:?}"
+        );
+
+        // Scoped: the vim `⌕ /` prefix, still a single leading glyph.
+        let mut s = sidebar_with_issues(&[("1", "Alpha")]);
+        s.open_search();
+        type_query(&mut s, "al");
+        let bar = search_bar_row(&mut s);
+        assert!(
+            bar.contains("⌕ /"),
+            "scoped search shows the vim `/` prefix: {bar:?}"
+        );
+        assert!(
+            !bar.contains("⌕⌕"),
+            "scoped prefix is a single glyph: {bar:?}"
+        );
     }
 
     /// A search that filters every workspace away shows an explicit
@@ -3680,42 +3791,57 @@ mod broadcast_select_tests {
             lazybox_core::PolicyArm::Arm,
         );
 
-        let backend = TestBackend::new(40, 12);
+        // 50 cells: the chips leave just enough for the compact label.
+        // Below that it drops whole rather than clipping (#794).
+        let backend = TestBackend::new(50, 12);
         let mut terminal = Terminal::new(backend).expect("terminal");
         terminal
             .draw(|frame| sb.render(frame.area(), frame, true))
             .expect("draw");
         let buffer = terminal.backend().buffer();
+        // The automation rides the chip row (row 1) since #1535.
         let header: String = (0..buffer.area.width)
-            .map(|x| buffer[(x, 2)].symbol())
+            .map(|x| buffer[(x, 1)].symbol())
             .collect();
         let screen: String = (0..buffer.area.height)
             .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol()))
             .collect();
 
-        assert!(header.contains("AUTO-FIX ON · CI+CONFLICT"), "{header:?}");
+        // 40 cells leaves the chips little room, so the label takes its
+        // compact form — which still names both armed kinds.
+        assert!(header.contains("FIX ci+conflict"), "{header:?}");
         assert!(
             screen.contains(crate::components::sidebar::FIX_GLYPH),
             "compact auto-fix row glyph is still visible"
         );
     }
 
-    /// #794: the focused row's merge automation is spelled out in the
-    /// header so the durability difference the ` ARM ` / ` AUTO ` pills
-    /// can't show is legible. lazybox's client-side arm names its
-    /// while-running limit; GitHub-native auto-merge names that it works
-    /// offline, and wins the header when both are set.
+    /// #794: the focused row's merge automation is named in the header so
+    /// the durability difference the ` ARM ` / ` AUTO ` pills can't show
+    /// is legible — which system will do the merge, and therefore whether
+    /// it survives lazybox being closed. GitHub-native auto-merge wins the
+    /// label when both are set.
+    ///
+    /// Since #1535 the label rides the chip row, and shortens rather than
+    /// vanishing when the chips leave it little room. The shortening keeps
+    /// the part that carries the meaning — `(GitHub)` vs `(lazybox)`.
     #[test]
     fn focused_merge_automation_is_explained_in_the_sidebar_header() {
-        // lazybox client-side arm.
+        // lazybox client-side arm. Wide: the full phrasing.
         let mut sb = Sidebar::new(PaneId::new(1));
         let mut armed = pr_ws("https://github.com/o/r/pull/1");
         armed.auto_merge_on_green = true;
         sb.workspaces.insert(SessionKey::from(&armed.key), armed);
         sb.recompute_visible();
-        let header = header_at(&mut sb, 60);
-        assert!(header.contains("MERGE ON GREEN"), "{header:?}");
-        assert!(header.contains("lazybox only"), "{header:?}");
+        let wide = header_at(&mut sb, 90);
+        assert!(wide.contains("MERGE ON GREEN"), "{wide:?}");
+        assert!(wide.contains("lazybox only"), "{wide:?}");
+        // Tighter: the compact form, still naming lazybox as the actor.
+        // (The two labels have different lengths, so they cross over at
+        // different widths — 50 is below both.)
+        let narrow = header_at(&mut sb, 50);
+        assert!(narrow.contains("on-green"), "{narrow:?}");
+        assert!(narrow.contains("(lazybox)"), "{narrow:?}");
 
         // GitHub-native auto-merge takes precedence in the label.
         let mut sb = Sidebar::new(PaneId::new(1));
@@ -3724,9 +3850,15 @@ mod broadcast_select_tests {
         both.pr.as_mut().expect("pr").auto_merge_enabled = true;
         sb.workspaces.insert(SessionKey::from(&both.key), both);
         sb.recompute_visible();
-        let header = header_at(&mut sb, 60);
-        assert!(header.contains("AUTO-MERGE · GitHub"), "{header:?}");
-        assert!(header.contains("works offline"), "{header:?}");
+        let wide = header_at(&mut sb, 90);
+        assert!(wide.contains("AUTO-MERGE · GitHub"), "{wide:?}");
+        assert!(wide.contains("works offline"), "{wide:?}");
+        let narrow = header_at(&mut sb, 60);
+        assert!(narrow.contains("auto-merge"), "{narrow:?}");
+        assert!(
+            narrow.contains("(GitHub)"),
+            "the compact form must still name GitHub as the actor: {narrow:?}",
+        );
     }
 
     /// Render the header (row 2) at an arbitrary width.
@@ -3739,8 +3871,10 @@ mod broadcast_select_tests {
             .draw(|frame| sb.render(frame.area(), frame, true))
             .expect("draw");
         let buffer = terminal.backend().buffer();
+        // The focused row's automation rides the chip row (row 1) since
+        // #1535 — it no longer spends a header row of its own.
         (0..buffer.area.width)
-            .map(|x| buffer[(x, 2)].symbol())
+            .map(|x| buffer[(x, 1)].symbol())
             .collect()
     }
 
@@ -3777,15 +3911,207 @@ mod broadcast_select_tests {
                 );
             }
         }
-        // Too narrow to fit the label at all → it is fully absent, not a stub.
+        // Too narrow for even the compact form → fully absent, not a stub.
+        let tiny = header_at(&mut sb, 22);
+        assert!(!tiny.contains("AUTO-MERGE"), "{tiny:?}");
         assert!(
-            !header_at(&mut sb, 22).contains("AUTO-MERGE"),
-            "a label that can't fit must drop whole"
+            !tiny.contains("auto-merge"),
+            "a label that can't fit must drop whole, compact form included: {tiny:?}"
         );
         // Generous width → present whole.
-        let wide = header_at(&mut sb, 60);
+        let wide = header_at(&mut sb, 90);
         assert!(wide.contains("AUTO-MERGE · GitHub"), "{wide:?}");
         assert!(wide.contains("works offline"), "{wide:?}");
+    }
+
+    /// #1535: the header must not change height as the cursor moves. The
+    /// automation strip used to be reserved from the *focused* row, so
+    /// every `j`/`k` across an armed workspace grew or shrank the header
+    /// and shoved the whole list down a row and back — content moving
+    /// under a moving cursor, exactly while the user is reading it.
+    #[test]
+    fn header_height_is_stable_while_the_cursor_moves() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        // One armed workspace among plain ones — the mixed case where the
+        // old reservation flip-flopped. Distinct task keys, or the two
+        // fold into a single row and there is nothing to move between.
+        let ws = |num: u64, armed: bool| {
+            let mut t = base_task();
+            t.id.key = format!("o/r#{num}");
+            t.url = format!("https://github.com/o/r/pull/{num}");
+            let mut w = Workspace::from_task(t, chrono::Utc::now());
+            w.name = format!("Alpha {num}");
+            w.auto_merge_on_green = armed;
+            w
+        };
+        for w in [ws(1, true), ws(2, false)] {
+            sb.workspaces.insert(SessionKey::from(&w.key), w);
+        }
+        sb.recompute_visible();
+
+        let area = Rect::new(0, 0, 60, 20);
+        let selectable: Vec<usize> = sb
+            .visible
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| matches!(row, VisibleRow::Workspace(_)))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            selectable.len() >= 2,
+            "need both rows selectable: {selectable:?}"
+        );
+
+        // `header_height` is cursor-independent by construction (`3 +
+        // usage_row_height`), so asserting it alone is near-tautological —
+        // it can't catch a regression where the automation strip creeps
+        // back onto a *rendered* row of its own. Read the divider's actual
+        // y off the backend instead: the row that is mostly `─`. That is
+        // the last header row, so if the strip ever reserved a line again
+        // the divider — and the whole list under it — would shift.
+        let divider_y = |sb: &mut Sidebar| -> u16 {
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+            let backend = TestBackend::new(area.width, area.height);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| sb.render(area, frame, true))
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            (0..area.height)
+                .find(|&y| {
+                    let dashes = (0..area.width)
+                        .filter(|&x| buffer[(x, y)].symbol() == "─")
+                        .count();
+                    dashes * 2 > area.width as usize
+                })
+                .expect("a divider row of `─` must render")
+        };
+
+        let baseline = sb.header_height(area);
+        let baseline_divider = divider_y(&mut sb);
+        for i in selectable {
+            sb.cursor = i;
+            assert_eq!(
+                sb.header_height(area),
+                baseline,
+                "header height moved when the cursor landed on visible row {i}",
+            );
+            assert_eq!(
+                divider_y(&mut sb),
+                baseline_divider,
+                "the rendered divider (and the list under it) shifted when \
+                 the cursor landed on visible row {i}",
+            );
+        }
+        assert_eq!(
+            baseline, 3,
+            "two content rows plus the divider — no conditional strip",
+        );
+        assert_eq!(
+            baseline_divider, 2,
+            "divider sits on row 2: brand, chip+automation, divider",
+        );
+    }
+
+    /// #1535, in the *rendered* output. The sibling test above exercises
+    /// only `header_height()`, which the mouse hit-test consults but the
+    /// layout in `render()` does not — `render()` reserved the strip from
+    /// the *focused* row instead. That left two bugs the helper-only test
+    /// could not see: the list still shifted a row on every `j`/`k` across
+    /// an armed workspace, and render disagreed with `header_height()` so a
+    /// click mapped to the wrong workspace. This renders a mixed inbox with
+    /// the cursor on each visible row and asserts (a) the divider and list
+    /// rows never move, and (b) the divider sits exactly at
+    /// `header_height() - 1` every time, so render and the click mapping
+    /// can never diverge.
+    #[test]
+    fn rendered_header_and_list_stay_put_as_the_cursor_moves() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        // One armed workspace among plain ones — the mixed case where the
+        // focused-row reservation flip-flopped. Distinct titles so each
+        // row is findable in the rendered buffer.
+        let ws = |num: u64, armed: bool| {
+            let mut t = base_task();
+            t.id.key = format!("o/r#{num}");
+            t.url = format!("https://github.com/o/r/pull/{num}");
+            t.title = format!("Zeta {num}");
+            let mut w = Workspace::from_task(t, chrono::Utc::now());
+            w.name = format!("Zeta {num}");
+            w.auto_merge_on_green = armed;
+            w
+        };
+        let mut sb = Sidebar::new(PaneId::new(1));
+        for w in [ws(1, true), ws(2, false)] {
+            sb.workspaces.insert(SessionKey::from(&w.key), w);
+        }
+        sb.recompute_visible();
+
+        let area = Rect::new(0, 0, 60, 20);
+        let selectable: Vec<usize> = sb
+            .visible
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| matches!(row, VisibleRow::Workspace(_)))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(selectable.len() >= 2, "need both rows: {selectable:?}");
+
+        // Render at the current cursor and read the buffer back as rows.
+        let render_rows = |sb: &mut Sidebar| -> Vec<String> {
+            let backend = TestBackend::new(area.width, area.height);
+            let mut terminal = Terminal::new(backend).expect("terminal");
+            terminal
+                .draw(|frame| sb.render(area, frame, true))
+                .expect("draw");
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect()
+        };
+        // The header divider is the first (and only) chrome line drawn with
+        // the box-drawing rule; the list starts on the line below it.
+        let divider_y = |rows: &[String]| {
+            rows.iter()
+                .position(|r| r.contains('─'))
+                .expect("header divider rendered") as u16
+        };
+        let row_y = |rows: &[String], needle: &str| {
+            rows.iter()
+                .position(|r| r.contains(needle))
+                .unwrap_or_else(|| panic!("row {needle:?} rendered")) as u16
+        };
+
+        let mut baseline: Option<(u16, u16)> = None;
+        for i in selectable {
+            sb.cursor = i;
+            let rows = render_rows(&mut sb);
+            let divider = divider_y(&rows);
+            let alpha2 = row_y(&rows, "Zeta 2");
+
+            // The divider is the last chrome line, so it must land at
+            // `header_height() - 1`. If render reserved the strip from the
+            // focused row while `header_height()` reserved it from the
+            // visible set, these disagree and the click mapping is off.
+            assert_eq!(
+                divider + 1,
+                sb.header_height(area),
+                "rendered divider disagrees with header_height() on row {i}",
+            );
+            match baseline {
+                None => baseline = Some((divider, alpha2)),
+                Some((base_divider, base_alpha2)) => {
+                    assert_eq!(divider, base_divider, "divider moved on row {i}");
+                    assert_eq!(alpha2, base_alpha2, "list row moved on row {i}");
+                }
+            }
+        }
     }
 
     /// #794 regression, re-homed by #1502: the merge label lives on the
@@ -3803,12 +4129,19 @@ mod broadcast_select_tests {
         sb.recompute_visible();
         assert_eq!(sb.ci_failing_count(), 1, "the failing PR is counted");
 
-        // 24 cells (inner 22) can't hold the 31-cell " MERGE ON GREEN ·
-        // lazybox only " label; the row is omitted rather than clipped.
+        // 24 cells can hold neither the full label nor its compact form,
+        // so it drops whole rather than clipping — and since #1535 the
+        // label rides the chip row, so dropping it costs no header row
+        // either way.
+        let narrow = header_at(&mut sb, 24);
+        assert!(!narrow.contains("MERGE ON GREEN"), "{narrow:?}");
+        assert!(!narrow.contains("on-green"), "{narrow:?}");
+        // And the header keeps its height either way: the strip is not a
+        // row any more, so nothing about it can move the list (#1535).
         assert_eq!(
-            sb.stats_row_height(Rect::new(0, 0, 24, 12)),
-            0,
-            "merge label must drop whole when it can't fit"
+            sb.header_height(Rect::new(0, 0, 24, 12)),
+            sb.header_height(Rect::new(0, 0, 90, 12)),
+            "header height must not depend on whether the label fits",
         );
         let row0 = header_row(&mut sb, 24);
         assert!(
@@ -3844,6 +4177,28 @@ mod broadcast_select_tests {
         assert!(
             crate::util::visual_width(&tight) <= 24,
             "row must never overflow: {tight:?}"
+        );
+    }
+
+    /// The sidebar header carries no per-workspace metering pill: with
+    /// metering on by default it would sit on nearly every focused row. The
+    /// per-workspace figure is the right panel's workspace header (the agent
+    /// terminal's `◔ 5h 32% left · $7.24`); the sidebar aggregates on the
+    /// Space header only.
+    #[test]
+    fn header_carries_no_per_workspace_meter_pill() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let mut ws = pr_ws("https://github.com/o/r/pull/1");
+        ws.metered = true;
+        let key = SessionKey::from(&ws.key);
+        sb.workspaces.insert(key.clone(), ws);
+        sb.recompute_visible();
+        sb.hydrate_session_costs(&[(key.as_str().to_string(), 420_000)]);
+
+        let header = header_at(&mut sb, 80);
+        assert!(
+            !header.contains("METER") && !header.contains("$0.42"),
+            "no per-workspace meter pill in the sidebar header: {header:?}"
         );
     }
 

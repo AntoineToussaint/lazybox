@@ -428,10 +428,7 @@ impl Component for IssueBrowser {
         let count = format!("{}/{}", self.visible.len(), self.rows.len());
         let count_w = count.len() as u16;
         let filter_w = inner.width.saturating_sub(count_w + 1);
-        let mut filter_spans = vec![Span::styled(
-            "🔍 ",
-            Style::default().fg(theme.accent).bold(),
-        )];
+        let mut filter_spans = vec![Span::styled("⌕ ", Style::default().fg(theme.accent).bold())];
         if self.filter.is_empty() && !self.filtering {
             filter_spans.push(Span::styled(
                 "/ to filter",

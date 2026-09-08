@@ -2990,6 +2990,7 @@ pub(super) fn action_from_kind(
         ActionKind::JumpToFailingCi => Action::JumpToFailingCi,
         ActionKind::JumpToLimited => Action::JumpToLimited,
         ActionKind::JumpToUnread => Action::JumpToUnread,
+        ActionKind::JumpToBlocked => Action::JumpToBlocked,
         ActionKind::JumpPrevGroup => Action::JumpPrevGroup,
         ActionKind::JumpNextGroup => Action::JumpNextGroup,
         ActionKind::ResumeRateLimited => Action::ResumeRateLimited,

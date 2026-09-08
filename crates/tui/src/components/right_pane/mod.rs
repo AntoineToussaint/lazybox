@@ -1528,6 +1528,28 @@ impl RightPane {
             lines.push(Line::from(spans));
         }
 
+        // Dependency edge (#1521). The row's ` ⊗N ` badge says a task is
+        // blocked; the reason lives here, where there's room for it. A
+        // free-text `Blocked on:` marker prints verbatim; otherwise the
+        // count of declared blockers stands in so "blocked by something"
+        // is at least legible. P0 shows the declared edge — it does not
+        // resolve whether the blocker is still open.
+        if let Some(reason) = workspace.declared_blocker() {
+            lines.push(Line::from(vec![
+                Span::styled("Blocked on: ", Style::default().fg(theme.error)),
+                Span::styled(reason.to_string(), Style::default().fg(theme.text_dim)),
+            ]));
+        } else if let count @ 1.. = workspace.hierarchy_blocked_by().count() {
+            let noun = if count == 1 { "blocker" } else { "blockers" };
+            lines.push(Line::from(vec![
+                Span::styled("Blocked on: ", Style::default().fg(theme.error)),
+                Span::styled(
+                    format!("{count} {noun}"),
+                    Style::default().fg(theme.text_dim),
+                ),
+            ]));
+        }
+
         // Diffstat — a one-line at-a-glance sense of a PR's size/shape.
         // PRs only; issues have no diff. Additions green, deletions red,
         // file count dim, matching the desktop `detailSignals` summary.
@@ -2396,7 +2418,13 @@ impl RightPane {
             .as_ref()
             .and_then(|w| w.primary_task())
             .is_some_and(|t| t.is_pr());
-        4 + u16::from(has_origin) + u16::from(show_diffstat)
+        // The dependency `Blocked on:` line (#1521) is emitted when the
+        // workspace declares a blocker reason or carries counted edges;
+        // reserve its row so a short pane doesn't clip it.
+        let has_blocked = self.workspace.as_ref().is_some_and(|w| {
+            w.declared_blocker().is_some() || w.hierarchy_blocked_by().next().is_some()
+        });
+        4 + u16::from(has_origin) + u16::from(show_diffstat) + u16::from(has_blocked)
     }
 
     /// The rows the pane would fill given unlimited height, laid out

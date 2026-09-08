@@ -3667,6 +3667,7 @@ snippets:
             session_key: "github:o/r#1".into(),
             snippet_key: "ls".into(),
             prompt: None,
+            confirmed: true,
         });
         assert_eq!(m.recent_snippets, vec!["ls"]);
     }
@@ -4507,6 +4508,187 @@ snippets:
         );
     }
 
+    /// Agents parked on Claude's auto-continue wait (◌ `AwaitingReset`) are
+    /// rate-limited too, but a "continue" typed into that composer cancels
+    /// the wait and only hits the limit again — so `Shift-K` still injects
+    /// nothing into them. It must not claim "no rate-limited agents" while
+    /// their badges are on screen: it names them and points at `a R`, the
+    /// action that does apply to them.
+    #[test]
+    fn resume_rate_limited_names_parked_agents_instead_of_denying_them() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent()]);
+        for (i, state) in [AgentState::AwaitingReset, AgentState::AwaitingReset]
+            .into_iter()
+            .enumerate()
+        {
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: keys[i].clone(),
+                terminal_id: TerminalId(i as u64 + 1),
+                state,
+            });
+        }
+        let cmds = m.dispatch_action(&Action::ResumeRateLimited);
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, IpcCommand::InjectPrompt { .. })),
+            "a parked agent must not receive a wait-cancelling continue: {cmds:?}",
+        );
+        let notice = m.status.notice.as_ref().expect("a hint is shown");
+        // The restart key is resolved from the catalog, not hardcoded, so
+        // assert against the effective chord rather than a literal.
+        let restart_keys = lazybox_tui_core::action::ActionDef::for_kind(
+            lazybox_tui_core::action::ActionKind::RestartRateLimited,
+        )
+        .effective_keys_display(&Default::default());
+        assert!(
+            notice.message.contains("2 agents parked")
+                && notice.message.contains(restart_keys.as_ref()),
+            "the hint names the parked agents and the restart action ({restart_keys}): {}",
+            notice.message
+        );
+    }
+
+    /// The parked-agents hint must name the *effective* restart chord, not
+    /// the catalog default: with `restart_rate_limited` remapped, the hint
+    /// points at the user's key. This is the regression guard for the hint
+    /// having hardcoded `a R`, which would have gone stale under a remap.
+    #[test]
+    fn resume_rate_limited_parked_hint_follows_the_restart_remap() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent()]);
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("restart_rate_limited".to_string(), "a Y".to_string());
+        m.apply_action_key_overrides(overrides);
+        m.handle_daemon_event(IpcEvent::AgentState {
+            session_key: keys[0].clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::AwaitingReset,
+        });
+        m.dispatch_action(&Action::ResumeRateLimited);
+        let notice = m.status.notice.as_ref().expect("a hint is shown");
+        assert!(
+            notice.message.contains("a Y") && !notice.message.contains("a R"),
+            "the hint names the remapped restart chord, not the default: {}",
+            notice.message
+        );
+    }
+
+    /// Mixed block: some agents alerting (`LimitReached`), some parked
+    /// (`AwaitingReset`). `Shift-K` resumes the alerting ones AND names the
+    /// parked ones it deliberately skipped — the same "don't let untouched
+    /// badges look like a bug" contract as the all-parked case, and the
+    /// parked count must be the `AwaitingReset` count alone (1), not the
+    /// whole limited set (2).
+    ///
+    /// The escalating banner is opted out here (`usage_limit_alerts = false`)
+    /// so the resume *result* notice is the surface under test: with the
+    /// sticky banner up (the default), a non-sticky result flash is routed to
+    /// the messages log instead of the footer, and the banner itself carries
+    /// the parked call-to-action — that path is covered by
+    /// `usage_limit_banner_names_parked_agents_alongside_the_blocked`.
+    #[test]
+    fn resume_rate_limited_mixed_resumes_alerting_and_names_parked() {
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        use lazybox_tui_core::action::Action;
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent()]);
+        m.ui_defaults.usage_limit_alerts = false;
+        for (i, state) in [AgentState::LimitReached, AgentState::AwaitingReset]
+            .into_iter()
+            .enumerate()
+        {
+            m.handle_daemon_event(IpcEvent::AgentState {
+                session_key: keys[i].clone(),
+                terminal_id: TerminalId(i as u64 + 1),
+                state,
+            });
+        }
+        let cmds = m.dispatch_action(&Action::ResumeRateLimited);
+        let injected: Vec<u64> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                IpcCommand::InjectPrompt {
+                    terminal_id,
+                    submit: true,
+                    ..
+                } => Some(terminal_id.0),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            injected,
+            vec![1],
+            "only the alerting agent is resumed; the parked one is left alone: {cmds:?}",
+        );
+        let notice = m.status.notice.as_ref().expect("a notice is shown");
+        assert!(
+            notice.message.contains("resuming 1 rate-limited agent")
+                && notice.message.contains("1 agent parked"),
+            "the notice reports the resume AND names the single parked agent: {}",
+            notice.message
+        );
+    }
+
+    /// The persistent usage-limit banner is the one surface that survives a
+    /// resume, so when parked (`AwaitingReset`) agents coexist with blocked
+    /// (`LimitReached`) ones it must name them and the restart chord that
+    /// applies — otherwise the ◌ badges outlive a `Shift-K` with no on-screen
+    /// reason. Regression guard for the banner counting only the blocked set
+    /// and hardcoding `Shift-K` (both would have hidden the parked agents /
+    /// gone stale under a remap). A parked-only block raises NO banner: the
+    /// wait self-resolves, so it never escalates to a sticky notice alone.
+    #[test]
+    fn usage_limit_banner_names_parked_agents_alongside_the_blocked() {
+        use crate::realm::components::footer::NoticeSeverity;
+        use lazybox_ipc::{AgentState, Event as IpcEvent, TerminalId};
+        let restart_keys = lazybox_tui_core::action::ActionDef::for_kind(
+            lazybox_tui_core::action::ActionKind::RestartRateLimited,
+        )
+        .effective_keys_display(&Default::default());
+        let agent = || Some(lazybox_ipc::TerminalKind::Agent("claude".into()));
+        let (mut m, keys) = model_with_broadcast_targets(&[agent(), agent()]);
+
+        // A parked agent alone raises no sticky banner — the wait resolves
+        // itself, so escalating to a Permanent notice would be noise.
+        m.handle_daemon_event(IpcEvent::AgentState {
+            session_key: keys[1].clone(),
+            terminal_id: TerminalId(2),
+            state: AgentState::AwaitingReset,
+        });
+        assert!(
+            !m.status
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.severity == NoticeSeverity::Permanent),
+            "a parked-only block must not raise the sticky banner: {:?}",
+            m.status.notice,
+        );
+
+        // A blocked agent joins it → the banner escalates AND names the
+        // parked sibling plus the restart chord.
+        m.handle_daemon_event(IpcEvent::AgentState {
+            session_key: keys[0].clone(),
+            terminal_id: TerminalId(1),
+            state: AgentState::LimitReached,
+        });
+        let n = m.status.notice.as_ref().expect("banner raised");
+        assert_eq!(n.severity, NoticeSeverity::Permanent);
+        assert!(
+            n.message.contains("1 agent rate-limited")
+                && n.message.contains("1 parked")
+                && n.message.contains(restart_keys.as_ref()),
+            "the banner names the blocked count, the parked count, and the \
+             restart chord ({restart_keys}): {}",
+            n.message,
+        );
+    }
+
     /// `a R` restarts every agent in the usage-limit block — the alerting
     /// `LimitReached` AND the parked `AwaitingReset` (a "continue" typed
     /// into an auto-continue composer would only cancel the wait, but a
@@ -4798,7 +4980,7 @@ snippets:
     }
 
     /// #1012: `ui.usage_limit_alerts = false` suppresses the escalating
-    /// sticky banner, but the passive `⏳ N limited` header count still
+    /// sticky banner, but the passive `⧗ N limited` header count still
     /// tracks the blocked set. The opt-out only silences the escalation —
     /// the transient #847 rising-edge hint ("hit its usage limit —
     /// Shift-L/Shift-K") still fires, so the assertion targets the sticky
@@ -4922,6 +5104,7 @@ snippets:
                 session_key,
                 snippet_key: "rev".into(),
                 prompt: None,
+                confirmed: true,
             });
         }
         assert_eq!(m.recent_snippets, vec!["rev"], "bulk send de-duplicates");
@@ -9392,6 +9575,8 @@ mod modal_input_responsiveness_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -10088,6 +10273,8 @@ mod merge_focus_follow_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -17160,6 +17347,8 @@ mod destructive_confirm_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
         Workspace::from_task(task, Utc::now())
     }
@@ -18631,6 +18820,8 @@ mod focus_mode_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
         let mut ws = Workspace::from_task(task, Utc::now());
         let wk = ws.key.clone();
@@ -18986,6 +19177,8 @@ mod jump_to_workspace_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -21083,6 +21276,8 @@ mod merge_latch_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
         Workspace::from_task(task, Utc::now())
     }
@@ -22653,6 +22848,8 @@ mod pr_chat_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -23168,6 +23365,76 @@ mod recent_snippets_tests {
         m.apply_recent_snippet("rev".into());
         assert_eq!(m.recent_snippets, vec!["rev".to_string()]);
         assert!(server.rx.try_recv().is_err(), "success is not re-reported");
+    }
+
+    /// A CONFIRMED delivery updates the MRU *and* flashes the "sent
+    /// snippet" footer notice — the acknowledgement path where the toast is
+    /// the right feedback.
+    #[test]
+    fn confirmed_delivery_flashes_sent_notice() {
+        let (mut m, _server) = build_model();
+        m.handle_daemon_event(Event::SnippetDelivered {
+            terminal_id: lazybox_ipc::TerminalId(1),
+            session_key: "github:o/r#1".into(),
+            snippet_key: "rev".into(),
+            prompt: None,
+            confirmed: true,
+        });
+        assert_eq!(m.recent_snippets, vec!["rev".to_string()]);
+        let notice = m.status.notice.as_ref().expect("a confirmed send flashes");
+        assert!(
+            notice.message.contains("sent snippet ]rev"),
+            "message: {}",
+            notice.message
+        );
+    }
+
+    /// Regression (#1544): an UNCONFIRMED delivery must still update the
+    /// durable MRU, but must NOT flash a "sent snippet" toast — the daemon's
+    /// resend ladder has already posted its Retryable "parked — press Enter"
+    /// give-up notice, and a non-sticky Info toast would immediately replace
+    /// it, hiding from the user that their work never actually started.
+    #[test]
+    fn unconfirmed_delivery_updates_mru_without_masking_the_give_up_notice() {
+        use crate::realm::components::footer::{Notice, NoticeSeverity};
+        let (mut m, _server) = build_model();
+        // The resend ladder's give-up notice is already in the footer.
+        m.status.notice = Some(Notice::new(
+            "⚠ terminal input not delivered — looks parked unsubmitted; \
+             open the terminal and press Enter",
+            NoticeSeverity::Retryable,
+        ));
+
+        m.handle_daemon_event(Event::SnippetDelivered {
+            terminal_id: lazybox_ipc::TerminalId(1),
+            session_key: "github:o/r#1".into(),
+            snippet_key: "rev".into(),
+            prompt: None,
+            confirmed: false,
+        });
+
+        // Durable client state still reflects what was written.
+        assert_eq!(
+            m.recent_snippets,
+            vec!["rev".to_string()],
+            "the delivery still records to Recent",
+        );
+        // …but the give-up notice survives — no "sent snippet" toast stomped it.
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .expect("the give-up notice is still present");
+        assert!(
+            notice.message.contains("press Enter"),
+            "the parked-submit warning must remain visible, got: {}",
+            notice.message
+        );
+        assert_eq!(
+            notice.severity,
+            NoticeSeverity::Retryable,
+            "an unconfirmed send does not downgrade the warning to an Info toast",
+        );
     }
 
     #[test]
@@ -24577,6 +24844,8 @@ mod spawn_focus_steal_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
         lazybox_core::Workspace::from_task(task, Utc::now())
     }
@@ -24771,6 +25040,8 @@ mod repo_labels_failure_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -25320,6 +25591,8 @@ mod keybinding_audit_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
         let mut ws = Workspace::from_task(task, Utc::now());
         for i in 0..activity_rows {
@@ -26432,6 +26705,8 @@ mod optimistic_mutation_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -26751,6 +27026,8 @@ mod remote_spawn_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         }
     }
 
@@ -28321,6 +28598,8 @@ mod pr_details_debounce_tests {
             parent: None,
             priority: None,
             state_label: None,
+            blocked_by: vec![],
+            blocked_on: None,
         };
         lazybox_core::Workspace::from_task(task, Utc::now())
     }

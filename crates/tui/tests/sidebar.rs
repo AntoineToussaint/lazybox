@@ -79,6 +79,8 @@ fn make_task(repo: &str, key: &str, updated: DateTime<Utc>) -> Task {
         parent: None,
         priority: None,
         state_label: None,
+        blocked_by: vec![],
+        blocked_on: None,
     }
 }
 
@@ -2776,8 +2778,11 @@ impl ConfigHome {
     /// Flush the async persist queue, then load the YAML back — the
     /// same file the next launch would read.
     fn reload(&self) -> lazybox_config::Config {
+        // 30s, not 5s: this box runs many agents at once and can sit at
+        // 100% CPU, so a tight bound flakes; a genuinely stuck worker still
+        // fails. Matches the sandbox guard's bound (#1539 review).
         assert!(
-            lazybox_config::Config::flush_pending_saves(std::time::Duration::from_secs(5)),
+            lazybox_config::Config::flush_pending_saves(std::time::Duration::from_secs(30)),
             "pending config saves must flush within the bound"
         );
         lazybox_config::Config::load_from(&lazybox_config::Config::default_path())
@@ -3100,6 +3105,87 @@ fn space_metering_toggle_persists_and_reverses() {
     assert!(
         !home.reload().agent.metered_spaces.contains("obin-ai"),
         "the metered Space was removed on the second toggle"
+    );
+}
+
+/// A Space header never shows a dollar figure — with or without the
+/// Space-tier `x $` toggle, priced or not. The accrued cost is still
+/// tracked per Space (`space_cost_micros`, feeding the stats view and the
+/// header today strip), but sidebar rows name work, not money: a
+/// `codefly-dev $ $58.36` header was noise on every scan of the list.
+#[test]
+fn space_header_never_shows_a_dollar_figure() {
+    let _home = ConfigHome::sandbox();
+    let now = Utc::now();
+    let a = make_workspace("obin-ai/platform", "obin-ai/platform#1", now);
+    let b = make_workspace(
+        "obin-ai/service",
+        "obin-ai/service#2",
+        now - Duration::minutes(1),
+    );
+    let other = make_workspace("acme/widget", "acme/widget#1", now - Duration::minutes(2));
+    let a_key = SessionKey::from(&a.key).as_str().to_string();
+    let b_key = SessionKey::from(&b.key).as_str().to_string();
+
+    let mut s = Sidebar::new(PaneId::new(1));
+    apply_persisted(&mut s, Vec::new(), Vec::new());
+    s.on_event(&snapshot_of(vec![a, b, other]));
+    assert!(!s.is_space_metered("obin-ai"), "no Space-tier toggle");
+
+    // The Space header row: the line naming the Space that isn't a
+    // workspace row (`#N`) or a repo header (`owner/name`).
+    fn space_line(screen: &str, space: &str) -> String {
+        screen
+            .lines()
+            .find(|l| l.contains(space) && !l.contains('#') && !l.contains('/'))
+            .unwrap_or_else(|| panic!("{space} Space header rendered:\n{screen}"))
+            .to_string()
+    }
+
+    // Nothing priced yet → no `$` on either Space header.
+    let before = render_to_string(&mut s, 60, 20, true);
+    assert!(
+        !space_line(&before, "obin-ai").contains('$'),
+        "no cost, no badge:\n{before}"
+    );
+
+    // Durable per-session totals replayed on connect (Event::SessionCosts):
+    // two obin-ai workspaces sum under the obin-ai Space — tracked, but
+    // never drawn on the row.
+    s.hydrate_session_costs(&[(a_key, 1_500_000), (b_key, 500_000)]);
+    assert_eq!(
+        s.space_cost_micros("obin-ai"),
+        2_000_000,
+        "cost still summed"
+    );
+    let after = render_to_string(&mut s, 60, 20, true);
+    let obin_line = space_line(&after, "obin-ai");
+    assert!(
+        !obin_line.contains('$'),
+        "no dollar figure on a priced Space header: {obin_line:?}"
+    );
+    assert!(
+        !after.contains("$2.00"),
+        "the Space cost must not appear on any row:\n{after}"
+    );
+    let acme_line = space_line(&after, "acme");
+    assert!(
+        !acme_line.contains('$'),
+        "acme spent nothing: {acme_line:?}"
+    );
+
+    // The metering toggle (`x $`) marks the Space but still draws no `$`.
+    assert!(s.focus_header_row("obin-ai"), "park on the Space header");
+    assert!(s.cursor_on_space_header());
+    assert_eq!(
+        s.toggle_space_metering_at_cursor(),
+        Some(("obin-ai".to_string(), true)),
+    );
+    let metered = render_to_string(&mut s, 60, 20, true);
+    assert!(
+        !space_line(&metered, "obin-ai").contains('$'),
+        "metered Space header carries no `$` badge: {:?}",
+        space_line(&metered, "obin-ai")
     );
 }
 

@@ -25,8 +25,8 @@
 //! ## Calm status while parked
 //!
 //! Pressing Wait also relabels the block from the alerting
-//! [`AgentState::LimitReached`] (`⏳`, reads as "needs you") to the calm
-//! [`AgentState::AwaitingReset`] (`💤`, "parked, will resume") — the block
+//! [`AgentState::LimitReached`] (`⧗`, reads as "needs you") to the calm
+//! [`AgentState::AwaitingReset`] (`◌`, "parked, will resume") — the block
 //! is handled now, so it drops out of the alert count, resume-all set, and
 //! desktop/Slack notifications. The relabel is daemon-asserted and held by
 //! the state machine against the lingering limit banner.
@@ -131,7 +131,7 @@ async fn press_wait(config: ServerConfig, terminal_id: TerminalId) {
     .await;
     // Relabel the block to the calm `AwaitingReset`: we've handled it, so
     // the agent is now parked waiting on the reset, not on the user. This
-    // swaps the alerting `⏳` pill for the quiet 💤 badge and drops it out
+    // swaps the alerting `⧗` pill for the quiet ◌ badge and drops it out
     // of the alert count / resume-all set. Daemon-asserted and held against
     // the lingering banner by the state machine.
     crate::spawn_handler::park_limit_reached_as_awaiting_reset(&config, terminal_id).await;

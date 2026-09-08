@@ -362,8 +362,8 @@ pub enum AgentState {
     /// affirmative evidence that clears `LimitReached` — the agent visibly
     /// working again or coming to rest once the reset lands (where
     /// auto-wait injects its continuation nudge). **Not** an alert: no
-    /// desktop/Slack notification, no `⏳ N limited` count, no resume-all
-    /// target — it renders a distinct 💤 badge and otherwise stays quiet.
+    /// desktop/Slack notification, no `⧗ N limited` count, no resume-all
+    /// target — it renders a distinct ◌ badge and otherwise stays quiet.
     ///
     /// Appended last: the socket transport encodes this enum by bincode
     /// ordinal, so it must never be reordered ahead of `CreditExhausted`.
@@ -2712,12 +2712,24 @@ pub enum Event {
     /// A [`Command::DeliverSnippet`] reached the terminal and its durable
     /// histories were updated. `prompt` is present for agent terminals,
     /// whose recap/history display submitted prompts; shell deliveries
-    /// have no prompt history. Appended last.
+    /// have no prompt history.
+    ///
+    /// `confirmed` says whether the *submit* was acknowledged, not whether
+    /// the delivery happened — the delivery always did (that is why this
+    /// event fires). For a shell write or a spawn-as-initial-prompt it is
+    /// always `true`. For an agent inject it is `false` when the submit
+    /// went unacknowledged (a late hook, or a genuinely-parked / permission
+    /// chooser where the resend ladder gave up and already raised its own
+    /// notice). A consumer must still update durable state (Recent, recall,
+    /// history) either way, but must NOT announce a fresh "sent" toast when
+    /// `confirmed` is `false` — doing so would paper over the give-up notice
+    /// the ladder just posted. Appended last.
     SnippetDelivered {
         terminal_id: TerminalId,
         session_key: SessionKey,
         snippet_key: String,
         prompt: Option<UserPrompt>,
+        confirmed: bool,
     },
     /// A client-correlated command reached its durable success boundary.
     /// Appended last for bincode ordinal compatibility.

@@ -1228,6 +1228,68 @@ mod tests {
             .to_string()
     }
 
+    /// #1547: a row the program repaints in place (Claude Code's
+    /// collapsed `… +N lines` tool result, rewritten every tick) exists
+    /// once in history, and scrolling the viewport into scrollback must
+    /// show it once. The persistent render state rebuilds every row when
+    /// the viewport pin moves, so each scrolled frame must equal a
+    /// fresh-state full walk — a stale-row skip on the pure-scroll path
+    /// would surface here as a divergence or a repeated row.
+    #[test]
+    fn scrolled_viewport_shows_a_row_repainted_in_place_once() {
+        use libghostty_vt::terminal::ScrollViewport;
+        let mut h = Harness::new(40, 5);
+        let area = Rect::new(0, 0, 40, 5);
+        for i in 0..12 {
+            h.terminal
+                .vt_write(format!("output line {i}\r\n").as_bytes());
+        }
+        let marker = "… +17 lines (ctrl+o to expand)";
+        h.terminal.vt_write(marker.as_bytes());
+        let _ = h.render(area);
+        for _ in 0..27 {
+            h.terminal.vt_write(format!("\r\x1b[2K{marker}").as_bytes());
+            let _ = h.render(area);
+        }
+
+        let count_marker =
+            |buf: &Buffer| (0..5).filter(|&y| row_text(buf, area, y) == marker).count();
+
+        // Page through the whole history from the top: every frame
+        // matches a fresh full walk, and the marker shows up once total.
+        // Rows are keyed by absolute history index so the clamped final
+        // page can't count its overlap with the previous one twice.
+        h.terminal.scroll_viewport(ScrollViewport::Top);
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let frame = h.render(area);
+            let fresh = h.render_via_fresh_state(area);
+            assert_eq!(
+                frame, fresh,
+                "scrolled frame diverged from a fresh full walk"
+            );
+            let before = h.terminal.scrollbar().unwrap().offset;
+            for y in (0..5u16).filter(|&y| row_text(&frame, area, y) == marker) {
+                seen.insert(before + y as u64);
+            }
+            h.terminal.scroll_viewport(ScrollViewport::Delta(5));
+            if h.terminal.scrollbar().unwrap().offset == before {
+                break;
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            1,
+            "the in-place repainted row must appear once in history"
+        );
+
+        // Back at the live bottom it is the last row, once.
+        h.terminal.scroll_viewport(ScrollViewport::Bottom);
+        let bottom = h.render(area);
+        assert_eq!(count_marker(&bottom), 1);
+        assert_eq!(row_text(&bottom, area, 4), marker);
+    }
+
     /// #874 regression: a full, faithful Claude composer redraw with an
     /// inline autosuggestion (ghost text). This pins the whole family the
     /// #844 fix belongs to against a *non-blinking* cursor — the style
@@ -1310,5 +1372,177 @@ mod tests {
             "* Crunched for 1m 15s",
             "reserve newlines scrolled the finished-turn line off its row",
         );
+    }
+
+    /// Count the viewport rows whose text equals `needle`.
+    fn rows_equal(buf: &Buffer, area: Rect, needle: &str) -> usize {
+        (0..area.height)
+            .filter(|y| row_text(buf, area, *y) == needle)
+            .count()
+    }
+
+    /// #1547 (regression of #909): scrolling the scrollback showed ONE row —
+    /// Claude Code's collapsed `… +17 lines (ctrl+o to expand)` — repeated
+    /// down the whole viewport. Claude redraws that row in place many times
+    /// (cursor up, erase line, rewrite) while the turn streams. Under a
+    /// scrolled viewport the persistent render state must show exactly what
+    /// a fresh render state shows for the same terminal, and the redrawn
+    /// row must appear at most as often as it truly exists in history.
+    #[test]
+    fn scrolled_viewport_does_not_repeat_an_in_place_redrawn_row() {
+        let mut h = Harness::new(60, 6);
+        let area = Rect::new(0, 0, 60, 6);
+        // Enough history to scroll into.
+        for i in 0..20 {
+            h.terminal.vt_write(format!("line {i:02}\r\n").as_bytes());
+            h.render(area);
+        }
+        // Claude's in-place redraw: the collapsed row is rewritten 27
+        // times on the same screen row — cursor up, erase, rewrite — with
+        // a render between frames exactly as the run loop would.
+        h.terminal
+            .vt_write(b"\xe2\x80\xa6 +17 lines (ctrl+o to expand)\r\n");
+        h.render(area);
+        for _ in 0..27 {
+            h.terminal
+                .vt_write(b"\x1b[A\x1b[2K\xe2\x80\xa6 +17 lines (ctrl+o to expand)\r\n");
+            h.render(area);
+        }
+        h.terminal.vt_write(b"final line\r\n");
+        let bottom = h.render(area);
+        assert_eq!(
+            rows_equal(&bottom, area, "\u{2026} +17 lines (ctrl+o to expand)"),
+            1,
+            "at the live bottom the redrawn row shows once:\n{}",
+            dump(&bottom, area)
+        );
+
+        // Scroll up a few rows at a time, comparing the persistent-state
+        // render against a fresh render state at every step.
+        for step in 1..=6 {
+            h.terminal
+                .scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(-2));
+            let scrolled = h.render(area);
+            let truth = h.render_via_fresh_state(area);
+            for y in 0..area.height {
+                assert_eq!(
+                    row_text(&scrolled, area, y),
+                    row_text(&truth, area, y),
+                    "step {step}, row {y}: persistent render state diverged from a fresh one\n\
+                     persistent:\n{}\nfresh:\n{}",
+                    dump(&scrolled, area),
+                    dump(&truth, area)
+                );
+            }
+            assert!(
+                rows_equal(&scrolled, area, "\u{2026} +17 lines (ctrl+o to expand)") <= 1,
+                "step {step}: the in-place redrawn row multiplied under scroll:\n{}",
+                dump(&scrolled, area)
+            );
+        }
+    }
+
+    /// Offline reproduction harness for #1547: feed a real
+    /// `tmux capture-pane -p -e -J -S -` dump (path in `LAZYBOX_CAPTURE`,
+    /// grid in `LAZYBOX_CAPTURE_GRID` as `COLSxROWS`) through the same
+    /// normalization + resized-then-fed VT the client's deep-scrollback
+    /// adoption uses, then walk the scrollback a screen at a time and report
+    /// the longest run of identical consecutive rows. No env → no-op.
+    #[test]
+    fn capture_dump_scrollback_has_no_repeated_rows() {
+        let Ok(path) = std::env::var("LAZYBOX_CAPTURE") else {
+            return;
+        };
+        let (cols, rows) = std::env::var("LAZYBOX_CAPTURE_GRID")
+            .ok()
+            .and_then(|g| {
+                let (c, r) = g.split_once('x')?;
+                Some((c.parse::<u16>().ok()?, r.parse::<u16>().ok()?))
+            })
+            .unwrap_or((105, 39));
+        let raw = std::fs::read(&path).expect("read capture");
+        // normalize_capture: `\n` → `\r\n`, trailing blank rows trimmed.
+        let mut end = raw.len();
+        while end > 0 && (raw[end - 1] == b'\n' || raw[end - 1] == b'\r' || raw[end - 1] == b' ') {
+            end -= 1;
+        }
+        let mut seed = Vec::with_capacity(end + end / 40);
+        for &b in &raw[..end] {
+            if b == b'\n' {
+                seed.push(b'\r');
+            }
+            seed.push(b);
+        }
+        let mut h = Harness::new(80, 24);
+        // The client's production limits, not the harness's 100-line cap.
+        h.terminal = Terminal::new(TerminalOptions {
+            cols: 80,
+            rows: 24,
+            max_scrollback_lines: 10_000,
+            max_scrollback_bytes: Some(10_000 * 4096),
+        })
+        .unwrap();
+        h.terminal.resize(cols, rows, 0, 0).unwrap();
+        h.terminal.vt_write(&seed);
+        let area = Rect::new(0, 0, cols, rows);
+        let bar = h.terminal.scrollbar().unwrap();
+        eprintln!(
+            "scrollbar total={} len={} offset={}",
+            bar.total, bar.len, bar.offset
+        );
+
+        let mut worst: (usize, String) = (0, String::new());
+        let mut needle_hits = 0usize;
+        let mut prev: Option<String> = None;
+        let mut run = 1usize;
+        // Walk from the top down, one screen at a time, so every history
+        // row is seen exactly once.
+        h.terminal
+            .scroll_viewport(libghostty_vt::terminal::ScrollViewport::Top);
+        loop {
+            let frame = h.render(area);
+            for y in 0..area.height {
+                let text = row_text(&frame, area, y);
+                if text.contains("+17 lines (ctrl+o to expand)") {
+                    needle_hits += 1;
+                }
+                let blank = text.trim().is_empty() || text.trim().chars().all(|c| c == '─');
+                if !blank && prev.as_deref() == Some(text.as_str()) {
+                    run += 1;
+                    if run > worst.0 {
+                        worst = (run, text.clone());
+                    }
+                } else {
+                    run = 1;
+                }
+                prev = Some(text);
+            }
+            let before = h.terminal.scrollbar().unwrap().offset;
+            h.terminal
+                .scroll_viewport(libghostty_vt::terminal::ScrollViewport::Delta(
+                    rows as isize,
+                ));
+            let after = h.terminal.scrollbar().unwrap().offset;
+            if after == before {
+                break;
+            }
+        }
+        eprintln!(
+            "needle rows={needle_hits} longest identical run={} text={:?}",
+            worst.0, worst.1
+        );
+        assert!(
+            worst.0 < 5,
+            "a row repeated {}× in the rebuilt scrollback: {:?}",
+            worst.0,
+            worst.1
+        );
+    }
+
+    fn dump(buf: &Buffer, area: Rect) -> String {
+        (0..area.height)
+            .map(|y| row_text(buf, area, y))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }

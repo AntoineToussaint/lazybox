@@ -810,6 +810,13 @@ impl Sidebar {
         self.inner.focus_next_unread_workspace()
     }
 
+    /// Move the cursor onto the next blocked workspace (declared reason or
+    /// dependency edge), wrapping around. Backs the `E j` global key
+    /// (#1521).
+    pub fn focus_next_blocked_workspace(&mut self) -> bool {
+        self.inner.focus_next_blocked_workspace()
+    }
+
     /// Move the cursor to the previous / next group header. Backs the
     /// `{` / `}` sidebar keys (#1502).
     pub fn move_cursor_to_group(&mut self, forward: bool) -> bool {
@@ -824,6 +831,11 @@ impl Sidebar {
     /// See `Sidebar::limited_terminals`.
     pub fn limited_terminals(&self) -> Vec<lazybox_ipc::TerminalId> {
         self.inner.limited_terminals()
+    }
+
+    /// See `Sidebar::awaiting_reset_terminals`.
+    pub fn awaiting_reset_terminals(&self) -> Vec<lazybox_ipc::TerminalId> {
+        self.inner.awaiting_reset_terminals()
     }
 
     /// See `Sidebar::limit_reached_workspace_count`.

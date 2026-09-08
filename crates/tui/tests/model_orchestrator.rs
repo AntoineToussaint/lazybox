@@ -19,6 +19,12 @@ use lazybox_tui::realm::model::{Id, PaneFocus, Preselect};
 use tuirealm::event::{Key, KeyEvent, KeyModifiers};
 use tuirealm::ratatui::layout::{Rect, Size};
 
+// Dispatching workspace actions here persists `ui.*` view state, which
+// resolves through `LAZYBOX_HOME`. `mod common` installs a before-main
+// redirect (and a guard test) that keeps those writes off the developer's
+// real config (#1539).
+mod common;
+
 fn build_model() -> Model<tuirealm::terminal::TestTerminalAdapter> {
     let (client, _server) = channel::pair();
     Model::new_for_test(client, Size::new(120, 40)).expect("model init")
@@ -1028,6 +1034,8 @@ fn task_with_issue(key: &str, title: &str, body: Option<&str>) -> lazybox_core::
         parent: None,
         priority: None,
         state_label: None,
+        blocked_by: vec![],
+        blocked_on: None,
     }
 }
 
@@ -1298,6 +1306,8 @@ fn task_with_pr(key: &str) -> lazybox_core::Task {
         parent: None,
         priority: None,
         state_label: None,
+        blocked_by: vec![],
+        blocked_on: None,
     }
 }
 

@@ -308,11 +308,15 @@ fn reaches_anchor(start: &TaskId, anchor: &TaskId, parents: &HashMap<TaskId, Tas
     false
 }
 
-/// A workspace's own PR/issue is "done" when it is merged or closed. The PR
-/// wins when present; otherwise the first linked issue stands for the member.
+/// A workspace's own PR/issue is "done" only when the work actually landed. A
+/// PR is done when **merged** — a PR *closed without merging* is an abandoned
+/// deliverable, not a completion, so it must not count toward `Done`, must not
+/// satisfy a downstream dependency, and must not fire the epic-wide `Completed`.
+/// An issue has no merge state, so it is done when closed. The PR wins when
+/// present; otherwise the first linked issue stands for the member.
 fn member_done(ws: &Workspace) -> bool {
     if let Some(pr) = &ws.pr {
-        return matches!(pr.state, TaskState::Merged | TaskState::Closed);
+        return pr.state == TaskState::Merged;
     }
     tasks_of(ws)
         .next()
@@ -523,7 +527,12 @@ fn member_status(
     if member_done(ws) {
         return EpicMemberStatus::Done;
     }
-    let pr = ws.pr.as_ref();
+    // A PR closed without merging is a dead deliverable, not a live PR, so it
+    // must not read as `Mergeable`/`PrOpen`. `member_done` already returned for
+    // a *merged* PR above, so filtering `Closed` here leaves only live PR states
+    // and lets an abandoned PR fall through to Claimed/Blocked/Ready — the honest
+    // "this member still needs a completed deliverable."
+    let pr = ws.pr.as_ref().filter(|p| p.state != TaskState::Closed);
     if pr.is_none() && matches!(agent, Some(AgentState::Exited { code: Some(c) }) if c != 0) {
         return EpicMemberStatus::Failed;
     }
@@ -1736,6 +1745,50 @@ mod tests {
         );
         let deltas = diff(Some(&before), &after);
         assert!(deltas.iter().any(|d| matches!(d, EpicDelta::Completed)));
+    }
+
+    #[test]
+    fn closed_unmerged_pr_is_not_done_and_does_not_complete_the_epic() {
+        // A PR *closed without merging* is abandoned work, not a completion. It
+        // must not read as `Done`, must not fire the epic-wide `Completed`, and
+        // must not masquerade as a live `PrOpen` — it falls through to `Ready`,
+        // the honest "this member still needs a completed deliverable."
+        let record = record_with(&["a"]);
+        let mut open = ws("a");
+        pr(&mut open, TaskState::Open, CiStatus::Pending);
+        let mut latch = HashMap::new();
+        let before = resolve(
+            &record,
+            &[open],
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut latch,
+            1,
+        );
+
+        let mut closed = ws("a");
+        pr(&mut closed, TaskState::Closed, CiStatus::Failure); // abandoned, unmerged.
+        let after = resolve(
+            &record,
+            &[closed],
+            &HashMap::new(),
+            &HashMap::new(),
+            &mut latch,
+            2,
+        );
+
+        let m = &after.members[0];
+        assert_eq!(
+            m.status,
+            EpicMemberStatus::Ready,
+            "a closed-unmerged PR is neither Done nor PrOpen"
+        );
+        assert_eq!(after.done, 0, "an abandoned PR does not count as done");
+        let deltas = diff(Some(&before), &after);
+        assert!(
+            !deltas.iter().any(|d| matches!(d, EpicDelta::Completed)),
+            "closing a PR without merging must not complete the epic: {deltas:?}"
+        );
     }
 
     #[test]

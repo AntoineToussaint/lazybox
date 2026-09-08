@@ -220,6 +220,12 @@ impl MergeHistoryModal {
     }
 
     /// Render the right preview: the highlighted PR's author + merge time
+    /// Upper bound on the preview's rendered lines. The pane scrolls no
+    /// further than its own height, and a pathological body (a pasted log,
+    /// a giant table) should not cost a full markdown pass every frame —
+    /// `Enter` opens the whole thing in the reader.
+    const MAX_BODY_LINES: usize = 400;
+
     /// and its full wrapped body.
     fn render_preview(&self, frame: &mut Frame, area: Rect, theme: &Theme, row: &MergeRow) {
         let mut lines: Vec<Line> = Vec::new();
@@ -257,18 +263,18 @@ impl MergeHistoryModal {
                 Style::default().fg(theme.text_dim).italic(),
             ))]
         } else {
-            row.body
-                .lines()
-                .flat_map(|raw| {
-                    wrap_one(
-                        Line::from(Span::styled(
-                            raw.to_string(),
-                            Style::default().fg(theme.text_dim),
-                        )),
-                        area.width,
-                    )
-                })
-                .collect()
+            // Render as markdown (#1560), not as dimmed raw text. A PR body
+            // is markdown by construction — headings, bullets, `code`,
+            // **bold** — and printing it verbatim left `## Summary` and
+            // `**path**` on screen as literal punctuation, which is exactly
+            // the noise the reader has to look past. `render_body` is the
+            // same pass the activity pane and the reader modal use, so a
+            // body reads identically wherever lazybox shows it.
+            crate::components::comment_render::render_body(
+                &row.body,
+                area.width,
+                Self::MAX_BODY_LINES,
+            )
         };
         lines.extend(body);
         frame.render_widget(Paragraph::new(lines), area);
@@ -495,6 +501,35 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// #1560: the preview renders the PR body as markdown, not as dimmed
+    /// raw text. A PR body is markdown by construction, so printing it
+    /// verbatim left `## Summary` and `**bold**` on screen as literal
+    /// punctuation — noise the reader has to look past on every row.
+    #[test]
+    fn body_preview_renders_markdown_rather_than_raw_source() {
+        let body = "Closes #396.\n\n## Summary\n\n- referenced by **path**, not by `source/pin`\n";
+        let rows = [task(397, "fix: provision defaults", "someone", Some(body))];
+        let mut m = MergeHistoryModal::resolved("o/r", &rows, None, Utc::now());
+        let screen = render(&mut m, 96, 24);
+
+        assert!(
+            screen.contains("Summary"),
+            "heading text survives: {screen}"
+        );
+        assert!(
+            !screen.contains("## Summary"),
+            "the heading's `##` must be rendered, not printed: {screen}"
+        );
+        assert!(
+            !screen.contains("**path**"),
+            "bold markers must be rendered, not printed: {screen}"
+        );
+        assert!(
+            screen.contains("path"),
+            "the emphasised word itself survives: {screen}"
+        );
     }
 
     #[test]

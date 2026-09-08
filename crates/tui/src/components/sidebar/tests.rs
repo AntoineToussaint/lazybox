@@ -2139,6 +2139,59 @@ mod search_tests {
         assert_eq!(sb.space_cost_micros("nonexistent"), 0);
     }
 
+    /// No dollar figure on any sidebar row. A metered Space with accrued
+    /// spend used to render `codefly-dev $ $58.36` on its header — money
+    /// on every scan of the list. Spend stays in the header's today strip
+    /// and the tab badge; the metering toggle itself is untouched.
+    #[test]
+    fn space_header_row_carries_no_cost_or_dollar_badge() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let a = issue_ws_in_repo("obin-ai/platform", "1", "one");
+        // A second owner keeps the Space tier visible (a lone Space is
+        // suppressed).
+        let other = issue_ws_in_repo("acme/widget", "3", "three");
+        let a_key = SessionKey::from(&a.key);
+        sb.workspaces.insert(a_key.clone(), a);
+        sb.workspaces.insert(SessionKey::from(&other.key), other);
+        sb.recompute_visible();
+        sb.hydrate_session_costs(&[(a_key.as_str().to_string(), 58_360_000)]);
+        sb.metered_spaces.insert("obin-ai".into());
+        assert_eq!(
+            sb.space_cost_micros("obin-ai"),
+            58_360_000,
+            "cost is tracked"
+        );
+
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        let header = rows
+            .iter()
+            .find(|row| row.contains("obin-ai") && !row.contains("obin-ai/"))
+            .expect("the Space header row is rendered");
+        assert!(
+            !header.contains('$'),
+            "no dollar on the Space header row: {header:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("$58.36")),
+            "the Space cost must not appear on any row:\n{}",
+            rows.join("\n")
+        );
+    }
+
     /// Frame-budget regression gate (#1090, acceptance #4): the sidebar's
     /// per-frame widget build must stay cheap at scale.
     /// `prebuild_workspace_lines` rebuilds every visible row every frame

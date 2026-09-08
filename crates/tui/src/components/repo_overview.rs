@@ -271,7 +271,7 @@ fn agent_chip(state: &AgentState, theme: &crate::theme::Theme) -> Option<(&'stat
             "¢ no credit",
             Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
         )),
-        AgentState::AwaitingReset => Some(("◌ waiting", Style::default().fg(theme.text_dim))),
+        AgentState::AwaitingReset => Some(("☾ waiting", Style::default().fg(theme.text_dim))),
         AgentState::Idle | AgentState::Exited { .. } => None,
     }
 }

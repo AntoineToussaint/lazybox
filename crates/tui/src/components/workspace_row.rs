@@ -52,7 +52,7 @@ pub struct WorkspaceRowCtx<'a> {
     pub limit_reached: bool,
     /// Any agent in this workspace is in `AgentState::AwaitingReset` — the
     /// calm auto-waiting block (lazybox pressed Wait; it's parked until the
-    /// limit resets). Renders the quiet `◌` glyph. Lower precedence than
+    /// limit resets). Renders the quiet `☾` glyph. Lower precedence than
     /// the alerting states and than `working`: it's handled, nothing to act
     /// on, so an actively working sibling wins the slot.
     pub awaiting_reset: bool,
@@ -167,10 +167,10 @@ pub struct WorkspaceRowCtx<'a> {
     /// glance rather than unrelated rows. `None` for standalone PRs.
     pub stack: Option<&'a lazybox_core::StackPosition>,
     /// Number of dependency blockers on this workspace's tasks (#1521; P0
-    /// does not resolve whether they are still open). Renders a ` ⊘N `
+    /// does not resolve whether they are still open). Renders a ` ⊗N `
     /// badge in the passive cluster; nothing when zero.
     pub blocked_by: usize,
-    /// A declared `Blocked on:` reason exists on some task. Renders ` ⊘! `
+    /// A declared `Blocked on:` reason exists on some task. Renders ` ⊗! `
     /// when there are no dependency blockers, else folds into the count
     /// badge (the count already says "blocked"). The reason text itself is
     /// shown in the right pane, not the row.
@@ -545,7 +545,7 @@ fn cell_role(ctx: &WorkspaceRowCtx<'_>) -> Cell {
 ///     ended (clean or crash; #356/#357). Not an alert color — a dead
 ///     agent is a fact to notice, not an emergency.
 ///   - `Idle`        → blank.
-///   - `AwaitingReset` → ` ◌ ` (dim) — a static glyph: lazybox pressed
+///   - `AwaitingReset` → ` ☾ ` (dim) — a static glyph: lazybox pressed
 ///     Wait and the agent is parked, sleeping until its limit resets. Calm,
 ///     not an alert — nothing for you to do.
 /// Reserved width either way so the kind/title to the right don't
@@ -572,10 +572,12 @@ fn cell_state(ctx: &WorkspaceRowCtx<'_>) -> Cell {
         (ctx.working_glyph, ctx.theme.accent)
     } else if ctx.awaiting_reset {
         // The calm auto-waiting block: parked until reset, handled — a quiet
-        // ◌ (hollow, "on hold") in the dim text color, NOT an alert. Below
-        // `working` so a live sibling's spinner wins; above `done` so a
-        // still-parked agent shows over a merely-finished one.
-        ("◌", ctx.theme.text_dim)
+        // ☾ ("asleep until the limit resets") in the dim text color, NOT an
+        // alert. Not `◌`: that is the review-pending status glyph
+        // (`pills::G_REVIEW`). Below `working` so a live sibling's spinner
+        // wins; above `done` so a still-parked agent shows over a
+        // merely-finished one.
+        ("☾", ctx.theme.text_dim)
     } else if ctx.done {
         ("✓", ctx.theme.success)
     } else if ctx.spawning {
@@ -1180,21 +1182,23 @@ fn cell_stack(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     ))
 }
 
-/// The ` ⊘N ` dependency badge (#1521): this workspace's tasks declare `N`
+/// The ` ⊗N ` dependency badge (#1521): this workspace's tasks declare `N`
 /// blockers (a native GitHub/Linear relation or a `Blocked by:` / `Depends
 /// on:` body marker). A free-text `Blocked on:` reason with no dependency
-/// edge renders ` ⊘! ` instead — still blocked, but the count is meaning-
+/// edge renders ` ⊗! ` instead — still blocked, but the count is meaning-
 /// less, so `!` stands in. Uses `theme.error` bold because "waiting on
 /// something else" is the one passive-cluster badge that gates starting
 /// work. P0 does not resolve whether the blockers are still open; the
 /// number is the declared edge count. Packs into the shared cluster (#813).
-/// `⊘` (a monochrome "circled slash"), not the `⛔` emoji: the sidebar's
+/// `⊗` (a monochrome "circled times"), not the `⛔` emoji: the sidebar's
 /// glyph set is monochrome text symbols, and the color carries the alarm.
+/// Not `⊘` — that is the *closed-PR* status glyph (`pills::G_CLOSED`), and
+/// one symbol must not mean two things on the same row.
 fn cell_blocked(ctx: &WorkspaceRowCtx<'_>) -> Cell {
     let label = if ctx.blocked_by > 0 {
-        format!(" ⊘{} ", ctx.blocked_by)
+        format!(" ⊗{} ", ctx.blocked_by)
     } else if ctx.blocked_on {
-        " ⊘! ".to_string()
+        " ⊗! ".to_string()
     } else {
         return Cell::empty();
     };
@@ -3250,7 +3254,7 @@ mod tests {
     }
 
     /// The dependency badge shows a count when the workspace declares
-    /// blockers, and folds to ` ⊘! ` when only a free-text `Blocked on:`
+    /// blockers, and folds to ` ⊗! ` when only a free-text `Blocked on:`
     /// reason exists with no counted edges (#1521).
     #[test]
     fn cell_blocked_shows_count_badge() {
@@ -3261,13 +3265,13 @@ mod tests {
         assert_eq!(cell_blocked(&ctx).width(), 0, "no blockers, no badge");
         ctx.blocked_by = 2;
         let cell = cell_blocked(&ctx);
-        assert_eq!(cell.spans[0].content.as_ref(), " ⊘2 ");
+        assert_eq!(cell.spans[0].content.as_ref(), " ⊗2 ");
         ctx.blocked_by = 0;
         ctx.blocked_on = true;
         let cell = cell_blocked(&ctx);
         assert_eq!(
             cell.spans[0].content.as_ref(),
-            " ⊘! ",
+            " ⊗! ",
             "a bare declared reason shows the sentinel, not a count"
         );
     }

@@ -473,7 +473,7 @@ their own. The alias is agent-agnostic at the chord — the daemon maps
 it to whatever agent the spawn targets — and the picked tier's label
 rides a `◆ Opus` tab badge. The `a` leader also carries the bulk
 **rate-limit recovery** chord `a R` (restart rate-limited): for every
-agent blocked (`⧗ LimitReached`) or parked (`◌ AwaitingReset`) on a
+agent blocked (`⧗ LimitReached`) or parked (`☾ AwaitingReset`) on a
 usage limit, the daemon stops its process, respawns the same
 conversation in the same pane (`--resume`), and submits the configured
 continuation prompt — the way to pick up fresh credentials after

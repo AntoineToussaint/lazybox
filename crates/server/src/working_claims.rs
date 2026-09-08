@@ -237,12 +237,39 @@ async fn acquire(
     });
 }
 
+/// How a synchronized claim change is projected into the workspace row.
+///
+/// The projection (`apply_and_commit`) takes the workspace's own lock, which
+/// is a plain non-reentrant `tokio::sync::Mutex`. A caller that already holds
+/// that lock — workspace removal, which kills and detaches the terminals
+/// *inside* its `lock_workspace` hold — must say so, or the release parks on
+/// its own lock forever. That was the residual phantom-workspace hang after
+/// #1533/#1534: the GitHub label mutation succeeded, the projection then
+/// waited on the lock the removal held, no `WorkspaceRemoved` ever went out,
+/// the claim kv row stayed, and the io-guard diagnostics showed no holder
+/// (`io_lock_holder=<unrecorded> held_ms=0`) because the io guard was never
+/// the problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaimRelease {
+    /// Project the change into the workspace row under its lock (the default:
+    /// output-pump teardown, auth restarts, the session reaper).
+    Project,
+    /// The caller holds the workspace lock and is deleting the row: skip the
+    /// projection. Nothing would survive it anyway.
+    WorkspaceLockHeld,
+}
+
 pub(crate) async fn release_pty(config: &ServerConfig, backend_key: &str) {
+    release_pty_with(config, backend_key, ClaimRelease::Project).await;
+}
+
+pub(crate) async fn release_pty_with(config: &ServerConfig, backend_key: &str, mode: ClaimRelease) {
     release(
         config,
         &ClaimHolder::Pty {
             backend_key: backend_key.to_string(),
         },
+        mode,
     )
     .await;
 }
@@ -253,11 +280,12 @@ pub(crate) async fn release_structured(config: &ServerConfig, holder_key: &str) 
         &ClaimHolder::Structured {
             key: holder_key.to_string(),
         },
+        ClaimRelease::Project,
     )
     .await;
 }
 
-async fn release(config: &ServerConfig, holder: &ClaimHolder) {
+async fn release(config: &ServerConfig, holder: &ClaimHolder, mode: ClaimRelease) {
     if !config.working_claims_enabled {
         return;
     }
@@ -279,7 +307,7 @@ async fn release(config: &ServerConfig, holder: &ClaimHolder) {
         );
         return;
     }
-    if sync_remote(config, &record, None).await
+    if sync_remote(config, &record, None, mode).await
         && let Err(error) = config.store.delete_kv(&key)
     {
         emit_error(config, &record.workspace_key, "forget", &error.to_string());
@@ -306,7 +334,7 @@ async fn heartbeat_record(
         emit_error(config, &record.workspace_key, "persist", &error);
         return;
     }
-    if sync_remote(config, record, Some(&record.label)).await {
+    if sync_remote(config, record, Some(&record.label), ClaimRelease::Project).await {
         record.applied = true;
         if let Err(error) = persist_record(config, record) {
             emit_error(config, &record.workspace_key, "persist", &error);
@@ -318,6 +346,7 @@ async fn sync_remote(
     config: &ServerConfig,
     record: &WorkingClaimRecord,
     desired_label: Option<&str>,
+    mode: ClaimRelease,
 ) -> bool {
     let Some(identity) = record.parsed_label() else {
         emit_error(
@@ -369,6 +398,31 @@ async fn sync_remote(
         }
     }
 
+    project_synced_claim(config, record, desired_label, &identity, mode).await;
+    true
+}
+
+/// Reflect a claim change GitHub has already accepted into the workspace
+/// row. Under [`ClaimRelease::Project`] this takes the workspace lock via
+/// `apply_and_commit`; under [`ClaimRelease::WorkspaceLockHeld`] it takes no
+/// lock and touches no row — the caller owns the lock and is deleting the
+/// row. Returns whether a row was updated.
+async fn project_synced_claim(
+    config: &ServerConfig,
+    record: &WorkingClaimRecord,
+    desired_label: Option<&str>,
+    identity: &QualifiedWorkingClaim,
+    mode: ClaimRelease,
+) -> bool {
+    if mode == ClaimRelease::WorkspaceLockHeld {
+        tracing::debug!(
+            workspace = %record.workspace_key,
+            claimed = desired_label.is_some(),
+            "working claim synchronized; row projection skipped — the caller holds the \
+             workspace lock and is removing the row"
+        );
+        return false;
+    }
     let target = record.target.id.clone();
     let desired = desired_label.map(str::to_string);
     let identity_for_projection = identity.clone();
@@ -383,7 +437,8 @@ async fn sync_remote(
         })
         .await;
     config.poll.wake(true);
-    if outcome.is_applied() {
+    let applied = outcome.is_applied();
+    if applied {
         tracing::info!(
             workspace = %record.workspace_key,
             claimed = desired_label.is_some(),
@@ -392,7 +447,7 @@ async fn sync_remote(
             "synchronized owner-qualified working claim"
         );
     }
-    true
+    applied
 }
 
 fn project_identity(
@@ -475,7 +530,7 @@ async fn maintain_once(config: &ServerConfig, now: DateTime<Utc>) {
         if live {
             heartbeat_holder(config, &record.holder, now).await;
         } else {
-            release(config, &record.holder).await;
+            release(config, &record.holder, ClaimRelease::Project).await;
         }
     }
     cleanup_expired(config, now).await;
@@ -750,6 +805,51 @@ mod tests {
 
         let restarted = crate::ServerConfig::with_store(first.store.clone());
         assert_eq!(load_record(&restarted, &key).unwrap(), Some(claim));
+    }
+
+    /// The phantom-workspace residual (#1534 → #1533 → this): workspace
+    /// removal kills + detaches terminals while holding the workspace lock,
+    /// and the claim release inside that detach projected the released claim
+    /// into the row by taking the same non-reentrant lock — a self-deadlock
+    /// that parked the removal forever. With the lock held by the caller, the
+    /// `WorkspaceLockHeld` projection must complete without touching the
+    /// lock, while `Project` is the shape that waits on it.
+    #[tokio::test]
+    async fn projection_under_a_held_workspace_lock_completes_when_the_caller_says_so() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
+        let config = crate::ServerConfig::in_memory();
+        let claim = record(now);
+        let identity = claim.parsed_label().expect("well-formed label");
+        // The removal's hold.
+        let _removal_holds_it = config.lock_workspace(claim.workspace_key.as_str()).await;
+
+        // What the removal path does: no lock, no row, returns promptly.
+        let skipped = tokio::time::timeout(
+            Duration::from_secs(1),
+            project_synced_claim(
+                &config,
+                &claim,
+                None,
+                &identity,
+                ClaimRelease::WorkspaceLockHeld,
+            ),
+        )
+        .await
+        .expect("must not wait on the workspace lock the caller holds");
+        assert!(!skipped, "no row is projected while the caller removes it");
+
+        // The default projection is the deadlock shape: it queues on the held
+        // lock (the regression this test pins — never call it from under the
+        // removal's hold).
+        let parked = tokio::time::timeout(
+            Duration::from_millis(200),
+            project_synced_claim(&config, &claim, None, &identity, ClaimRelease::Project),
+        )
+        .await;
+        assert!(
+            parked.is_err(),
+            "Project re-takes the workspace lock and waits"
+        );
     }
 
     #[tokio::test]

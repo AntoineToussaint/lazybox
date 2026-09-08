@@ -2759,9 +2759,25 @@ impl<'a> WorkspaceLifecycle<'a> {
                 // `WorkspaceRemoved` ever went out, hooks and poll upserts for
                 // the key queued behind the lock, and the next daemon restart
                 // resurrected the agent from the still-present row.
+                //
+                // `WorkspaceLockHeld`: this removal holds the workspace lock
+                // (`remove_timed`), and the working-claim release inside the
+                // detach projects the released claim into the workspace row
+                // by taking that same non-reentrant lock. That re-entry — not
+                // the io guard — is what the field's `io_lock_holder=<unrecorded>
+                // held_ms=0` removal hang was: the GitHub label mutation
+                // succeeded, then the projection parked on our own lock
+                // forever, the claim kv row stayed, and the reclaim below
+                // walked into the identical deadlock with no bound at all.
+                // The row is being deleted; there is nothing to project.
                 match tokio::time::timeout(
                     DETACH_AFTER_KILL_TIMEOUT,
-                    crate::spawn_handler::detach_killed_terminal(config, tid, &backend_key),
+                    crate::spawn_handler::detach_killed_terminal(
+                        config,
+                        tid,
+                        &backend_key,
+                        crate::working_claims::ClaimRelease::WorkspaceLockHeld,
+                    ),
                 )
                 .await
                 {
@@ -2793,8 +2809,36 @@ impl<'a> WorkspaceLifecycle<'a> {
                              after the kill — reclaiming the terminal out of band, since the \
                              wedged guard also parks the output pump",
                         );
-                        crate::spawn_handler::reclaim_wedged_terminal(config, tid, &backend_key)
-                            .await;
+                        // Bounded too. The reclaim is built from guard-free
+                        // steps, but "cannot deadlock" is a claim about the
+                        // locks we know of; an unbounded await here is how one
+                        // more unknown parks the removal — and the workspace
+                        // lock — for the life of the daemon. Past the bound
+                        // the removal proceeds: the kill landed, the row is
+                        // about to go, and whatever the reclaim could not free
+                        // is a leak to log, not a reason to keep the phantom.
+                        if tokio::time::timeout(
+                            DETACH_AFTER_KILL_TIMEOUT,
+                            crate::spawn_handler::reclaim_wedged_terminal(
+                                config,
+                                tid,
+                                &backend_key,
+                                crate::working_claims::ClaimRelease::WorkspaceLockHeld,
+                            ),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            tracing::error!(
+                                workspace = %key,
+                                terminal_id = ?tid,
+                                %backend_key,
+                                timeout_secs = DETACH_AFTER_KILL_TIMEOUT.as_secs(),
+                                "delete_workspace: out-of-band terminal reclaim did not complete \
+                                 within the bound — continuing the removal without it (the \
+                                 terminal's backend slot or working claim may leak)",
+                            );
+                        }
                     }
                 }
             }

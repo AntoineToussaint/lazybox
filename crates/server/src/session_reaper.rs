@@ -154,7 +154,13 @@ async fn reap_workspace_terminals(config: &ServerConfig, key_str: &str) -> usize
             continue;
         }
         drop(interaction);
-        crate::spawn_handler::detach_killed_terminal(config, tid, &backend_key).await;
+        crate::spawn_handler::detach_killed_terminal(
+            config,
+            tid,
+            &backend_key,
+            crate::working_claims::ClaimRelease::Project,
+        )
+        .await;
         killed += 1;
     }
     killed

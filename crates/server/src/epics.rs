@@ -1110,41 +1110,18 @@ pub async fn recompute_all(config: &ServerConfig) {
     // read/seen marks and the content dedupe are honored, and a persisted
     // workspace re-broadcasts as `WorkspaceUpserted`.
     let rows = activity_rows_for(&to_emit, now);
-    if !rows.is_empty() {
-        let by_key: HashMap<&WorkspaceKey, &Workspace> =
-            workspaces.iter().map(|w| (&w.key, w)).collect();
-        let mut ws_events: Vec<Workspace> = Vec::new();
-        for (key, acts) in rows {
-            let Some(base) = by_key.get(&key) else {
-                continue; // A member with no loaded workspace has no feed.
-            };
-            let mut ws = (*base).clone();
-            ws.merge_activity(&acts);
-            match serde_json::to_string(&ws) {
-                Ok(json) => {
-                    if let Err(e) = config
-                        .store
-                        .save_workspace(&lazybox_store::WorkspaceRecord {
-                            key: key.as_str().to_string(),
-                            created_at: ws.created_at,
-                            workspace_json: Some(json),
-                        })
-                    {
-                        tracing::warn!("epics: persist activity for {} failed: {e}", key.as_str());
-                        continue;
-                    }
-                    ws_events.push(ws);
-                }
-                Err(e) => {
-                    tracing::warn!("epics: serialize activity for {} failed: {e}", key.as_str());
-                }
-            }
-        }
-        for ws in ws_events {
-            let _ = config
-                .bus
-                .send(Event::WorkspaceUpserted(std::sync::Arc::new(ws)));
-        }
+    for (key, acts) in rows {
+        // Route each activity write through the race-safe mutation primitive.
+        // It locks the workspace, re-loads the *fresh* row, merges, then commits
+        // (persist + broadcast as `WorkspaceUpserted`). The old path cloned the
+        // stale top-of-function snapshot (`workspaces`, loaded before the async
+        // agent-state read and the whole resolve loop) and raw-`save_workspace`d
+        // it — so any concurrent poll that wrote fresher CI / review / mergeable
+        // state into the row between our load and this write was silently
+        // clobbered, dropping real activity. That is exactly the lost-update
+        // race `apply_and_commit` exists to close (see `polling::mutate`).
+        // A member whose workspace has vanished returns `Missing` and is skipped.
+        crate::polling::apply_and_commit(config, &key, |ws| ws.merge_activity(&acts)).await;
     }
 
     for event in to_emit {
@@ -2098,6 +2075,108 @@ mod tests {
         assert!(
             after.unread_count() > 0,
             "the epic-event row must be unread: {:?}",
+            after.activity
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_store_write_survives_epic_activity_persist() {
+        // `recompute_all` snapshots every workspace once at the top, then writes
+        // each epic-status activity row back. The original path cloned that stale
+        // top-of-function snapshot and raw-`save_workspace`d it, so a concurrent
+        // poll that wrote fresher activity into the row *after* the snapshot was
+        // clobbered — a lost-update race (the same one `polling::mutate` was
+        // built to close). Routing the write through `apply_and_commit` re-loads
+        // the fresh row under the workspace lock and merges the status row on
+        // top, so both the concurrent write and the epic row survive.
+        let config = ServerConfig::in_memory();
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: "w".to_string(),
+                created_at: Utc::now(),
+                workspace_json: Some(serde_json::to_string(&ws("w")).unwrap()),
+            })
+            .unwrap();
+        upsert(&config, record_with(&["w"])).await; // seeds latch, no delta yet.
+
+        // Hold "w"'s workspace lock so the activity persist inside the pending
+        // recompute parks on `apply_and_commit`'s lock acquisition — *after* the
+        // recompute has already taken its (now-about-to-go-stale) snapshot.
+        let guard = config.lock_workspace("w").await;
+
+        let task_config = config.clone();
+        let task = tokio::spawn(async move {
+            // Declaring a blocker drives a Ready→Blocked delta whose StatusChange
+            // row is written through `apply_and_commit` for "w".
+            report_blocker(
+                &task_config,
+                WorkspaceKey::new("w"),
+                "need sign-off".into(),
+                BlockerKind::Review,
+                BlockerOwner::Operator,
+            )
+            .await;
+        });
+
+        // Give the recompute time to snapshot "w" and park on the held lock. Its
+        // snapshot load + resolve are synchronous, so once polled it reaches the
+        // lock and blocks; the fix is timing-independent regardless (a snapshot
+        // taken after our write already contains it), but this pins the race.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // A concurrent poll commits a fresh comment into "w" *after* the
+        // recompute's snapshot was taken.
+        let mut fresh = ws("w");
+        fresh.merge_activity(&[Activity {
+            author: "octocat".to_string(),
+            body: "CONCURRENT poll comment".to_string(),
+            created_at: Utc::now(),
+            kind: ActivityKind::Comment,
+            node_id: Some("concurrent-node".to_string()),
+            path: None,
+            line: None,
+            diff_hunk: None,
+            thread_id: None,
+        }]);
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: "w".to_string(),
+                created_at: fresh.created_at,
+                workspace_json: Some(serde_json::to_string(&fresh).unwrap()),
+            })
+            .unwrap();
+
+        // Release the lock; the parked activity persist now re-loads fresh.
+        drop(guard);
+        task.await.unwrap();
+
+        let after: Workspace = serde_json::from_str(
+            config
+                .store
+                .get_workspace(&WorkspaceKey::new("w"))
+                .unwrap()
+                .unwrap()
+                .workspace_json
+                .as_deref()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            after
+                .activity
+                .iter()
+                .any(|a| a.body.contains("CONCURRENT poll comment")),
+            "the concurrent poll's comment must not be clobbered: {:?}",
+            after.activity
+        );
+        assert!(
+            after
+                .activity
+                .iter()
+                .any(|a| a.kind == ActivityKind::StatusChange && a.body.contains("need sign-off")),
+            "the epic StatusChange row must be merged on top: {:?}",
             after.activity
         );
     }

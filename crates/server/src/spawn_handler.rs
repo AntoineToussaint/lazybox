@@ -6146,13 +6146,13 @@ pub(crate) async fn detach_killed_terminal(
 /// caller broadcasts `WorkspaceRemoved`, which drops the whole workspace and
 /// its terminals client-side, so a per-terminal exit event would be redundant.
 ///
-/// `claim`: see [`detach_killed_terminal`] — the removal holds the workspace
-/// lock, so its claim release must not re-take it.
+/// `release_mode`: see [`detach_killed_terminal`]'s `claim` — the removal holds
+/// the workspace lock, so its claim release must not re-take it.
 pub(crate) async fn reclaim_wedged_terminal(
     config: &ServerConfig,
     terminal_id: TerminalId,
     backend_key: &str,
-    claim: crate::working_claims::ClaimRelease,
+    release_mode: crate::working_claims::ClaimRelease,
 ) {
     match config
         .terminal
@@ -6186,7 +6186,7 @@ pub(crate) async fn reclaim_wedged_terminal(
         .forget_terminal_persistence_lock(backend_key);
     config.terminal.forget_terminal_io_lock(backend_key);
     config.backend.release(backend_key).await;
-    crate::working_claims::release_pty_with(config, backend_key, claim).await;
+    crate::working_claims::release_pty_with(config, backend_key, release_mode).await;
 }
 
 async fn finish_terminal(

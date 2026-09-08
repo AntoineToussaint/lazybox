@@ -11,7 +11,24 @@ use uuid::Uuid;
 use crate::ServerConfig;
 
 const CLAIM_KEY_PREFIX: &str = "terminal-working-claim:";
-const MUTATION_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a single GitHub label mutation for a claim may run before we stop
+/// waiting on it. Any bound wrapping an operation that performs this mutation
+/// (the removal's out-of-band terminal reclaim does) MUST exceed it, or a
+/// merely-slow-but-healthy GitHub trips the outer bound and abandons the
+/// release mid-flight — see `workspace::RECLAIM_AFTER_WEDGE_TIMEOUT`.
+pub(crate) const MUTATION_TIMEOUT: Duration = Duration::from_secs(20);
+/// Backstop for the workspace-lock acquisition inside a `Project` row
+/// projection. `apply_and_commit` takes the workspace's own non-reentrant
+/// lock; a caller that already holds it and omits
+/// [`ClaimRelease::WorkspaceLockHeld`] would otherwise park on its own lock
+/// forever — the phantom-workspace deadlock this module's [`ClaimRelease`]
+/// exists to prevent, reintroduced by one forgetful caller. No legitimate
+/// single-key hold approaches this bound (the longest holder, a multi-terminal
+/// workspace removal, deletes the row it holds — so a projection dropped behind
+/// it had nothing to update anyway), so it never cuts a real surviving-row
+/// projection; it converts a silent, daemon-wedging hang into a loud,
+/// recoverable error.
+const PROJECTION_LOCK_BACKSTOP: Duration = Duration::from_secs(120);
 /// Transient sync failures (offline, GitHub down, timeouts) re-occur on every
 /// 15-minute heartbeat tick; surface at most one retryable notice per
 /// workspace/action per hour so an offline laptop is not error spam.
@@ -426,7 +443,7 @@ async fn project_synced_claim(
     let target = record.target.id.clone();
     let desired = desired_label.map(str::to_string);
     let identity_for_projection = identity.clone();
-    let outcome =
+    let commit =
         crate::polling::apply_and_commit(config, &record.workspace_key, move |workspace| {
             project_identity(
                 workspace,
@@ -434,8 +451,27 @@ async fn project_synced_claim(
                 &identity_for_projection,
                 desired.as_deref(),
             );
-        })
-        .await;
+        });
+    // Backstop the workspace-lock acquisition. A caller that already holds the
+    // workspace lock and omits `ClaimRelease::WorkspaceLockHeld` would park
+    // here forever, wedging its own lock hold — and everything queued behind
+    // that key — for the life of the daemon. That is exactly the deadlock
+    // `ClaimRelease` prevents; the bound stops one forgetful caller from
+    // reintroducing it silently, turning the hang into a diagnosable error.
+    let outcome = match tokio::time::timeout(PROJECTION_LOCK_BACKSTOP, commit).await {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            tracing::error!(
+                workspace = %record.workspace_key,
+                backstop_secs = PROJECTION_LOCK_BACKSTOP.as_secs(),
+                "working-claim row projection could not acquire the workspace lock within the \
+                 backstop — a caller almost certainly holds it and should pass \
+                 ClaimRelease::WorkspaceLockHeld; abandoning the projection so the lock hold \
+                 cannot hang forever (the row is left for the next poll to reconcile)"
+            );
+            return false;
+        }
+    };
     config.poll.wake(true);
     let applied = outcome.is_applied();
     if applied {
@@ -849,6 +885,36 @@ mod tests {
         assert!(
             parked.is_err(),
             "Project re-takes the workspace lock and waits"
+        );
+    }
+
+    /// The backstop for the deadlock the previous test pins: a forgetful caller
+    /// that holds the workspace lock but passes `Project` (instead of
+    /// `WorkspaceLockHeld`) must NOT hang the daemon forever — the projection
+    /// gives up after `PROJECTION_LOCK_BACKSTOP` and returns `false`, turning a
+    /// silent wedge into a loud, recoverable error. `start_paused` auto-advances
+    /// virtual time while the projection is parked on the held lock, so the 120s
+    /// backstop elapses instantly rather than really sleeping.
+    #[tokio::test(start_paused = true)]
+    async fn projection_under_a_held_lock_gives_up_at_the_backstop_instead_of_hanging() {
+        let now = Utc.with_ymd_and_hms(2026, 8, 18, 12, 0, 0).unwrap();
+        let config = crate::ServerConfig::in_memory();
+        let claim = record(now);
+        let identity = claim.parsed_label().expect("well-formed label");
+        // A caller holds the lock and never releases it (the deadlock shape).
+        let _held = config.lock_workspace(claim.workspace_key.as_str()).await;
+
+        let started = tokio::time::Instant::now();
+        let projected =
+            project_synced_claim(&config, &claim, None, &identity, ClaimRelease::Project).await;
+
+        assert!(
+            !projected,
+            "the backstop must abandon the projection rather than apply it"
+        );
+        assert!(
+            started.elapsed() >= PROJECTION_LOCK_BACKSTOP,
+            "it must wait the full backstop before giving up, not return early"
         );
     }
 

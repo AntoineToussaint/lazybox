@@ -1,4 +1,4 @@
-use lazybox_agents::{Agent, CredentialIsolation, Registry, SpawnCtx};
+use lazybox_agents::{Agent, CredentialIsolation, GatewayInjection, Registry, SpawnCtx};
 use lazybox_core::{SessionId, SessionKey};
 use lazybox_ipc::{AgentRunAccess, SpawnOrigin, TerminalId, TerminalKind, UserPrompt};
 use std::path::{Path, PathBuf};
@@ -220,6 +220,16 @@ pub(crate) fn build_spawn_plan(
         argv.push("--mcp-config".into());
         argv.push(path.to_string_lossy().into_owned());
     }
+    // Point this spawn at the metering proxy / gateway. Most agents take a
+    // base-URL env var (applied to `env` below); Codex ignores that env and is
+    // pointed via `-c` provider overrides on its argv, so an `Args` injection
+    // is appended here while the binary is still argv[0] (before the nice-wrap
+    // prepends `nice -n`). Computed once and reused for the env branch.
+    let gateway_injection =
+        gateway_injection_for_agent(cfg, agent.as_deref(), meter, remote, session_key.as_str());
+    if let GatewayInjection::Args(flags) = &gateway_injection {
+        argv.extend(flags.iter().cloned());
+    }
     // Deprioritize agent processes (`agent.nice`, default 10) so a big
     // fleet's CPU burn can't starve the interactive stack: a 50-agent
     // fleet at normal priority ran the load average to 17× the core
@@ -244,11 +254,11 @@ pub(crate) fn build_spawn_plan(
         .zip(hook_command.as_deref())
         .is_some_and(|(agent, command)| !agent.hook_command_args(command).is_empty());
     let mut env = repo_env;
-    for (key, value) in
-        gateway_env_for_agent(cfg, agent.as_deref(), meter, remote, session_key.as_str())
-    {
-        if !env.iter().any(|(existing, _)| existing == &key) {
-            env.push((key, value));
+    if let GatewayInjection::Env(pairs) = &gateway_injection {
+        for (key, value) in pairs {
+            if !env.iter().any(|(existing, _)| existing == key) {
+                env.push((key.clone(), value.clone()));
+            }
         }
     }
     for (key, value) in credential_home_env(agent.as_deref(), &session_key) {
@@ -394,20 +404,12 @@ pub(crate) fn argv_for(
     }
 }
 
-/// Base-URL env for an agent spawn. `meter` is this spawn's per-session
-/// opt-in (the workspace meter toggle); the agent is routed through the local
-/// metering proxy when `meter` — OR the global `agent.meter_all` — is set and
-/// the proxy is enabled and running. `session` attributes the proxied usage to
-/// a workspace (#per-session cost). Pass metering only for interactive PTY
-/// spawns, whose usage has no other source: structured runs pass `meter: false`
-/// because they already report token usage by parsing their own stream-json,
-/// so proxying them too would count every turn twice in the header summary
-/// (#1109). `agent.metering_proxy` alone only makes the proxy *run* — a session
-/// that didn't opt in is never redirected. Two coverage guards keep a metered
-/// spawn from being a silent bypass: `remote` skips a workspace whose sessions
-/// run on a box (its loopback isn't this host's — the proxy URL would be dead),
-/// and [`Agent::meterable`] skips an agent that ignores the base-URL env
-/// (`cursor-agent`) so it never shows metered while it isn't.
+/// Env-only view of [`gateway_injection_for_agent`] — the historical return
+/// shape, kept as a test helper for the many cases that only ever expect
+/// base-URL env vars. An agent whose injection is argv-based (Codex) surfaces
+/// nothing here; production code reads the full [`GatewayInjection`] so its
+/// argv flags aren't lost.
+#[cfg(test)]
 pub(crate) fn gateway_env_for_agent(
     cfg: &lazybox_config::Config,
     agent: Option<&dyn Agent>,
@@ -415,13 +417,45 @@ pub(crate) fn gateway_env_for_agent(
     remote: bool,
     session: &str,
 ) -> Vec<(String, String)> {
+    match gateway_injection_for_agent(cfg, agent, meter, remote, session) {
+        GatewayInjection::Env(pairs) => pairs,
+        GatewayInjection::Args(_) | GatewayInjection::None => Vec::new(),
+    }
+}
+
+/// How an agent spawn should be pointed at the metering proxy (or a configured
+/// gateway): base-URL env vars for most agents, `-c` provider flags for Codex,
+/// chosen by [`Agent::gateway_injection`].
+///
+/// `meter` is this spawn's per-session opt-in (the workspace meter toggle); the
+/// agent is routed through the local metering proxy when `meter` — OR the
+/// global `agent.meter_all` — is set and the proxy is enabled and running.
+/// `session` attributes the proxied usage to a workspace (#per-session cost).
+/// This is for interactive PTY spawns, whose usage has no other source. A
+/// caller that reports its own token usage (structured runs parse their own
+/// stream-json) must NOT come through here even with `meter: false`, because
+/// `meter_all` would still route it through the proxy and count every turn
+/// twice in the header summary (#1109); such callers use
+/// [`plain_gateway_injection_for_agent`], which has no proxy branch at all.
+/// `agent.metering_proxy` alone only makes the proxy *run* — a session that
+/// didn't opt in is never redirected. Two coverage guards keep a metered spawn
+/// from being a silent bypass: `remote` skips a workspace whose sessions run on
+/// a box (its loopback isn't this host's — the proxy URL would be dead), and
+/// [`Agent::meterable`] skips an agent that honors neither injection mechanism
+/// (`cursor-agent`) so it never shows metered while it isn't.
+pub(crate) fn gateway_injection_for_agent(
+    cfg: &lazybox_config::Config,
+    agent: Option<&dyn Agent>,
+    meter: bool,
+    remote: bool,
+    session: &str,
+) -> GatewayInjection {
     let Some(agent) = agent else {
-        return Vec::new();
+        return GatewayInjection::None;
     };
     let Some(provider) = agent.llm_provider() else {
-        return Vec::new();
+        return GatewayInjection::None;
     };
-    let env_var = provider.base_url_env().to_string();
 
     // Metering proxy on and serving, and this spawn opted in (per-session
     // toggle) or blanket metering is configured: point this provider's traffic
@@ -436,13 +470,33 @@ pub(crate) fn gateway_env_for_agent(
         && let Some(port) = crate::proxy::port()
     {
         let url = crate::proxy::injected_base_url(port, provider, agent.id(), session);
-        return vec![(env_var, url)];
+        return agent.gateway_injection(&url);
     }
 
-    cfg.agent
-        .gateway_url()
-        .map(|url| vec![(env_var, url.to_string())])
-        .unwrap_or_default()
+    plain_gateway_injection_for_agent(cfg, Some(agent))
+}
+
+/// Plain gateway injection with the metering proxy deliberately out of reach:
+/// point the agent at a configured LLM gateway (or nothing), never at a
+/// per-session proxy URL. For callers that report their own token usage —
+/// structured runs parse their own stream-json — where routing through the
+/// proxy would count every turn twice (#1109). Unlike passing `meter: false`
+/// to [`gateway_injection_for_agent`], this cannot be overridden by the global
+/// `agent.meter_all`: the proxy branch is not on this path at all.
+pub(crate) fn plain_gateway_injection_for_agent(
+    cfg: &lazybox_config::Config,
+    agent: Option<&dyn Agent>,
+) -> GatewayInjection {
+    let Some(agent) = agent else {
+        return GatewayInjection::None;
+    };
+    if agent.llm_provider().is_none() {
+        return GatewayInjection::None;
+    }
+    match cfg.agent.gateway_url() {
+        Some(url) => agent.gateway_injection(url),
+        None => GatewayInjection::None,
+    }
 }
 
 /// Per-session credential-home env for `agent`, or empty when the agent

@@ -131,24 +131,55 @@ type ProxyBody = BoxBody<Bytes, BoxErr>;
 pub struct Upstreams {
     pub anthropic: String,
     pub openai: String,
+    /// The ChatGPT-subscription backend Codex talks to when logged in with a
+    /// ChatGPT account rather than an API key. A request under the `openai`
+    /// segment carrying a `chatgpt-account-id` header routes here instead of
+    /// `openai`, and is metered count-only ($0) — a subscription is a flat fee.
+    pub chatgpt: String,
 }
 
 impl Default for Upstreams {
     fn default() -> Self {
         Self {
             anthropic: "https://api.anthropic.com".to_string(),
-            openai: "https://api.openai.com".to_string(),
+            // Codex's custom-provider `base_url` appends `/responses` (not
+            // `/v1/responses`), so the `/v1` lives here on the upstream.
+            openai: "https://api.openai.com/v1".to_string(),
+            chatgpt: "https://chatgpt.com/backend-api/codex".to_string(),
         }
     }
 }
 
-impl Upstreams {
-    fn base_for(&self, provider: &str) -> Option<&str> {
-        match provider {
-            "anthropic" => Some(&self.anthropic),
-            "openai" => Some(&self.openai),
-            _ => None,
-        }
+/// A resolved upstream: where to forward, and whether to meter count-only.
+struct Route<'a> {
+    base: &'a str,
+    count_only: bool,
+}
+
+/// Resolve which upstream a request forwards to, and whether its tokens are
+/// count-only. Codex uses a single `openai` segment for both auth modes; the
+/// `chatgpt-account-id` request header — which Codex attaches only in
+/// ChatGPT-subscription mode — is what splits them, so post-spawn logins are
+/// handled without any spawn-time auth detection.
+fn resolve_route<'a>(
+    provider: &str,
+    headers: &HeaderMap,
+    upstreams: &'a Upstreams,
+) -> Option<Route<'a>> {
+    match provider {
+        "anthropic" => Some(Route {
+            base: &upstreams.anthropic,
+            count_only: false,
+        }),
+        "openai" if headers.contains_key("chatgpt-account-id") => Some(Route {
+            base: &upstreams.chatgpt,
+            count_only: true,
+        }),
+        "openai" => Some(Route {
+            base: &upstreams.openai,
+            count_only: false,
+        }),
+        _ => None,
     }
 }
 
@@ -205,10 +236,29 @@ pub async fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHand
 
     // Chain through a configured gateway when one is set, so the proxy
     // meters traffic that still terminates at the user's own endpoint.
+    //
+    // Path contract: the proxy forwards each provider's wire path appended to
+    // its upstream, and the two agents append DIFFERENT prefixes — Claude adds
+    // `/v1/messages`, Codex adds only `/responses` (no `/v1`; that is why the
+    // vendor default bakes `/v1` onto `openai` but not `anthropic`). A single
+    // `gateway_url` fronting both therefore receives `<url>/v1/messages` for
+    // Claude and `<url>/responses` for Codex, so the gateway must accept BOTH
+    // shapes. In particular, an OpenAI-compatible gateway that expects
+    // `/v1/responses` needs the `/v1` included in the configured URL — the
+    // proxy does not add it here (the vendor default's `/v1` is OpenAI's real
+    // host path, not something to presume onto an arbitrary gateway, and many
+    // gateway URLs already carry their own `/v1`).
     let upstreams = match cfg.agent.gateway_url() {
         Some(url) => Upstreams {
             anthropic: url.to_string(),
             openai: url.to_string(),
+            // ChatGPT-subscription requests are authenticated by the user's
+            // ChatGPT account session (`chatgpt-account-id` + an OAuth session
+            // token) that ONLY chatgpt.com/backend-api/codex can validate — a
+            // generic API gateway can't service them (it would 401/403). So
+            // subscription traffic stays pinned to the vendor backend even when
+            // a gateway is configured; the gateway only fronts API-key traffic.
+            chatgpt: Upstreams::default().chatgpt,
         },
         None => Upstreams::default(),
     };
@@ -372,7 +422,9 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
     let Some((provider, agent_id, session, upstream_path)) = split_path(parts.uri.path()) else {
         return error_response(StatusCode::NOT_FOUND, "proxy: malformed metering path");
     };
-    let Some(base) = state.upstreams.base_for(provider) else {
+    let Some(Route { base, count_only }) =
+        resolve_route(provider, &parts.headers, &state.upstreams)
+    else {
         return error_response(StatusCode::NOT_FOUND, "proxy: unknown provider");
     };
     let agent_id = agent_id.to_string();
@@ -436,10 +488,14 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
     // wrong partial is worse than a missing one for a cost meter. The gap is
     // bounded to interrupted turns and documented rather than guessed.
     let sink = state.sink.clone();
+    let accumulator = {
+        let acc = UsageAccumulator::with_prices(state.prices.clone());
+        if count_only { acc.counting_only() } else { acc }
+    };
     let stream = futures::stream::unfold(
         (
             upstream.bytes_stream(),
-            UsageAccumulator::with_prices(state.prices.clone()),
+            accumulator,
             Some((sink, agent_id, session)),
         ),
         |(mut bytes, mut acc, mut pending)| async move {
@@ -559,5 +615,45 @@ mod tests {
         assert!(!forwarded.contains_key("connection"));
         // Stripped so the upstream returns a body the usage parser can read.
         assert!(!forwarded.contains_key("accept-encoding"));
+    }
+
+    #[test]
+    fn resolve_route_openai_splits_on_chatgpt_account_header() {
+        let ups = Upstreams::default();
+
+        // API-key Codex: no ChatGPT header → OpenAI, priced.
+        let bare = HeaderMap::new();
+        let r = resolve_route("openai", &bare, &ups).expect("route");
+        assert_eq!(r.base, "https://api.openai.com/v1");
+        assert!(!r.count_only, "api-key traffic is priced");
+
+        // ChatGPT-subscription Codex: header present → ChatGPT backend, $0.
+        let mut sub = HeaderMap::new();
+        sub.insert("chatgpt-account-id", "acct-123".parse().unwrap());
+        let r = resolve_route("openai", &sub, &ups).expect("route");
+        assert_eq!(r.base, "https://chatgpt.com/backend-api/codex");
+        assert!(r.count_only, "a subscription is a flat fee → count-only");
+    }
+
+    #[test]
+    fn resolve_route_anthropic_is_always_priced_and_unknown_is_none() {
+        let ups = Upstreams::default();
+        let mut headers = HeaderMap::new();
+        // Even with the header set, anthropic never routes to the ChatGPT
+        // backend — the header only means something under the openai segment.
+        headers.insert("chatgpt-account-id", "acct-123".parse().unwrap());
+        let r = resolve_route("anthropic", &headers, &ups).expect("route");
+        assert_eq!(r.base, "https://api.anthropic.com");
+        assert!(!r.count_only);
+
+        assert!(resolve_route("gemini", &headers, &ups).is_none());
+    }
+
+    #[test]
+    fn openai_upstream_carries_v1_so_codex_responses_path_is_correct() {
+        // Codex's custom provider appends `/responses` to base_url, and the
+        // proxy forwards `{openai}/responses` — which must land at
+        // `/v1/responses`, so the `/v1` has to live on the upstream default.
+        assert_eq!(Upstreams::default().openai, "https://api.openai.com/v1");
     }
 }

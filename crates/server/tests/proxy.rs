@@ -84,7 +84,8 @@ async fn start_proxy(upstream: String, sink: proxy::UsageSink) -> u16 {
     let port = listener.local_addr().expect("proxy addr").port();
     let upstreams = Upstreams {
         anthropic: upstream.clone(),
-        openai: upstream,
+        openai: upstream.clone(),
+        chatgpt: upstream,
     };
     let quota_sink: proxy::QuotaSink = std::sync::Arc::new(|_, _, _| {});
     let prices = std::sync::Arc::new(std::collections::BTreeMap::new());

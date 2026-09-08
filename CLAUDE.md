@@ -93,8 +93,9 @@ crates/
   ipc/             # Wire types (Command/Event), framing, transport traits
                    #   (in-process channel and Unix-socket variants).
   agents/          # Agent trait + Claude/Codex/Cursor/GenericCli built-ins.
-                   #   Also: per-provider LLM-gateway base-URL env injection
-                   #   (ANTHROPIC_BASE_URL / OPENAI_BASE_URL ← agent.llm_gateway_url).
+                   #   Also: per-agent LLM-gateway / metering-proxy injection
+                   #   (base-URL env for Claude/Cursor, `-c` provider flags for
+                   #   Codex ← Agent::gateway_injection / GatewayInjection).
   server/          # Server library: PTY lifecycle, ring buffers, provider
                    #   polling, agent runs, JSON API gateway, cross-agent
                    #   coordination MCP server (mcp.rs).

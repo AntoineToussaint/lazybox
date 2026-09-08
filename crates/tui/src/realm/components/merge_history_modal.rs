@@ -271,9 +271,7 @@ impl MergeHistoryModal {
             // lines rather than to an arbitrary constant. `render_body`
             // collapses the rest to a "+N more lines" row, and `Enter`
             // opens the whole body in the reader.
-            let body_budget = usize::from(area.height)
-                .saturating_sub(lines.len())
-                .max(1);
+            let body_budget = usize::from(area.height).saturating_sub(lines.len()).max(1);
             crate::components::comment_render::render_body(&row.body, area.width, body_budget)
         };
         lines.extend(body);
@@ -543,7 +541,12 @@ mod tests {
             .map(|i| format!("- item {i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let rows = [task(398, "chore: long body", "someone", Some(body.as_str()))];
+        let rows = [task(
+            398,
+            "chore: long body",
+            "someone",
+            Some(body.as_str()),
+        )];
         let mut m = MergeHistoryModal::resolved("o/r", &rows, None, Utc::now());
         let screen = render(&mut m, 96, 24);
 

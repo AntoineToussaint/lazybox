@@ -384,6 +384,22 @@ relations so the epic renders as an epic in lazybox once P0 ships.
 P0 has value with no new concept at all and de-risks the providers. P1 is the
 one the "give me status" habit needs; it should be the first thing dogfooded.
 
+**P1 delivery (#1522) split at the daemon/client boundary.** The first PR
+ships the *daemon foundation* — the part that has to exist before any client
+can render an epic: the `EpicRecord`/`EpicKey` kv record (`core/src/epic.rs`),
+the `UpsertEpic` / `AssignEpic` / `ArchiveEpic` commands and the
+`EpicResolver` that derives an `EpicSnapshot` + `EpicDelta`s pushed as
+`Event::EpicStatus` (`server/src/epics.rs`), blocker records with
+`report_blocker` / `clear_blocker` (§4k), the `epic_status` / `epic_ready` /
+`report_blocker` / `clear_blocker` MCP tools (`server/src/mcp.rs`), epic
+events landing in the workspace activity feed, and the coordinator briefing
+(`agents/src/session_context.rs`). The TUI ignores `Event::EpicStatus` for
+now. Deferred to a follow-up PR (the step-5 client boundary): the sidebar
+epic tier, the header status line and overview pane, the `collapsed_epics`
+config, and writing the `epic:*` + status projection labels back to the
+tracker (§4j). The desktop protocol version stays at 4 — the desktop DTOs do
+not yet consume `EpicStatus`.
+
 ## 7. Open questions
 
 1. **Epic anchor on GitHub without a parent issue** — require one (the

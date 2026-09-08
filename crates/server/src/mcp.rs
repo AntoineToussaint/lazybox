@@ -247,6 +247,32 @@ fn default_notify_submit() -> bool {
     true
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct EpicStatusArgs {
+    /// Restrict to one epic by key. Omit to return every non-archived epic.
+    #[serde(default)]
+    epic: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct EpicReadyArgs {
+    /// Restrict to one epic by key. Omit to draw the ready queue from every
+    /// non-archived epic.
+    #[serde(default)]
+    epic: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ReportBlockerArgs {
+    /// Why this workspace is blocked, in plain words — shown to the operator and
+    /// carried in the epic's derived status.
+    reason: String,
+    /// Blocker category. One of: dependency, external, decision, credential,
+    /// review, merge-order, contract, cycle, other. Defaults to `decision`.
+    #[serde(default)]
+    kind: Option<String>,
+}
+
 /// One blackboard note, stored as a JSON string in the kv under
 /// `lazybox:note:<scope>:<seq>`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -680,6 +706,144 @@ impl LazyboxMcp {
         self.notify_session_payload(&caller, &args.workspace, &args.text, args.submit)
             .await
     }
+
+    /// Freshly-resolved snapshots for every non-archived epic, optionally
+    /// narrowed to one by key. The read path behind `epic_status`.
+    async fn epic_status_payload(&self, epic: Option<&str>) -> serde_json::Value {
+        let snapshots = crate::epics::all_snapshots(&self.config).await;
+        let epics: Vec<&lazybox_ipc::EpicSnapshot> = snapshots
+            .iter()
+            .filter(|s| epic.is_none_or(|e| s.key == e))
+            .collect();
+        serde_json::json!({ "epics": epics })
+    }
+
+    /// The ready queue — each epic's `Ready` members ranked by how many members
+    /// they transitively unblock. The read path behind `epic_ready`.
+    async fn epic_ready_payload(&self, epic: Option<&str>) -> serde_json::Value {
+        let snapshots = crate::epics::all_snapshots(&self.config).await;
+        let ready: Vec<serde_json::Value> = snapshots
+            .iter()
+            .filter(|s| epic.is_none_or(|e| s.key == e))
+            .map(|s| {
+                let queue: Vec<serde_json::Value> = crate::epics::ready_queue(s)
+                    .into_iter()
+                    .map(|(key, unblocks)| {
+                        serde_json::json!({
+                            "workspace": key.as_str(),
+                            "unblocks": unblocks,
+                        })
+                    })
+                    .collect();
+                serde_json::json!({
+                    "epic": s.key,
+                    "name": s.name,
+                    "queue": queue,
+                })
+            })
+            .collect();
+        serde_json::json!({ "ready": ready })
+    }
+
+    /// Record a declared blocker on the caller's own workspace. `reason` is
+    /// required; `kind` defaults to `decision`; the owner is always the operator
+    /// (a reported blocker is a flag to a human, and surfaces in the epic's
+    /// `blockers_needing_operator`).
+    async fn report_blocker_payload(
+        &self,
+        caller: &SessionKey,
+        reason: &str,
+        kind: Option<&str>,
+    ) -> Result<serde_json::Value, McpError> {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err(McpError::invalid_request(
+                "blocker reason is empty — say what you're blocked on",
+                None,
+            ));
+        }
+        // Missing kind → Decision (the common "I need a human call" case);
+        // an explicit but unrecognized kind parses to Other.
+        let kind = kind.map_or(
+            lazybox_ipc::BlockerKind::Decision,
+            lazybox_ipc::BlockerKind::parse,
+        );
+        let workspace = lazybox_core::WorkspaceKey::new(caller.as_str());
+        crate::epics::report_blocker(
+            &self.config,
+            workspace,
+            reason.to_string(),
+            kind,
+            lazybox_ipc::BlockerOwner::Operator,
+        )
+        .await;
+        Ok(serde_json::json!({
+            "reported": true,
+            "workspace": caller.as_str(),
+            "kind": kind.as_str(),
+            "reason": reason,
+        }))
+    }
+
+    /// Clear the caller's own declared blocker (a no-op if none is set).
+    async fn clear_blocker_payload(&self, caller: &SessionKey) -> serde_json::Value {
+        crate::epics::clear_blocker(&self.config, caller.as_str()).await;
+        serde_json::json!({ "cleared": true, "workspace": caller.as_str() })
+    }
+
+    #[tool(
+        description = "The live derived status of every cross-repo epic (or one, by `epic` key): each member's status, wave, blockers, and the epic's ready/blocked/asking/failing rollup plus critical path. This is the plan of record — answer \"where does the epic stand / what's blocked / what's left\" from here, not by re-deriving from individual PRs."
+    )]
+    async fn epic_status(
+        &self,
+        Parameters(args): Parameters<EpicStatusArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = self.caller(&ctx)?;
+        Ok(json_result(
+            self.epic_status_payload(args.epic.as_deref()).await,
+        ))
+    }
+
+    #[tool(
+        description = "The ready queue for every epic (or one, by `epic` key): the members that are unblocked and workable right now, ranked by how many other members each would transitively unblock. Pick the top row to free the most downstream work."
+    )]
+    async fn epic_ready(
+        &self,
+        Parameters(args): Parameters<EpicReadyArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let _ = self.caller(&ctx)?;
+        Ok(json_result(
+            self.epic_ready_payload(args.epic.as_deref()).await,
+        ))
+    }
+
+    #[tool(
+        description = "Declare that your own workspace is blocked and can't proceed, with a plain-words `reason` and an optional `kind` (dependency, external, decision, credential, review, merge-order, contract, cycle, other; default decision). Surfaces immediately in the epic's derived status as an operator-owned blocker. Use it when you hit something a human must resolve; clear it with clear_blocker once unblocked."
+    )]
+    async fn report_blocker(
+        &self,
+        Parameters(args): Parameters<ReportBlockerArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        Ok(json_result(
+            self.report_blocker_payload(&caller, &args.reason, args.kind.as_deref())
+                .await?,
+        ))
+    }
+
+    #[tool(
+        description = "Clear the blocker you previously declared on your own workspace with report_blocker (a no-op if none is set). Call it once you're unblocked so the epic status stops flagging you for the operator."
+    )]
+    async fn clear_blocker(
+        &self,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let caller = self.caller(&ctx)?;
+        Ok(json_result(self.clear_blocker_payload(&caller).await))
+    }
 }
 
 /// The `notify_session` success payload. `handle_inject_prompt` returns once
@@ -719,7 +883,13 @@ impl ServerHandler for LazyboxMcp {
                  distilled context to the shared blackboard with post_note and \
                  pull it — across repos, persistently — with read_notes. To \
                  actively poke another session, push an instruction into it with \
-                 notify_session."
+                 notify_session. For cross-repo epics: epic_status is the live \
+                 plan of record (each member's derived status, blockers, and the \
+                 ready/blocked rollup) and epic_ready is the ranked queue of \
+                 what's workable now — answer epic questions from these rather \
+                 than re-deriving from individual PRs. If your own workspace hits \
+                 something a human must resolve, flag it with report_blocker and \
+                 clear it with clear_blocker once unblocked."
                     .to_string(),
             )
     }
@@ -1307,6 +1477,142 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    /// Persist a bare workspace so the epic resolver includes it as a member.
+    fn seed_workspace(config: &ServerConfig, key: &str) {
+        let ws = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new(key),
+            "branch",
+            chrono::Utc::now(),
+        );
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: key.to_string(),
+                created_at: chrono::Utc::now(),
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn epic_status_payload_is_empty_without_epics() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let payload = handler.epic_status_payload(None).await;
+        assert_eq!(payload["epics"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[tokio::test]
+    async fn epic_status_payload_lists_members_and_filters_by_key() {
+        let config = ServerConfig::in_memory();
+        seed_workspace(&config, "w");
+        let mut record = lazybox_core::EpicRecord::new(
+            lazybox_core::EpicKey::new("e"),
+            "Epic",
+            chrono::Utc::now(),
+        );
+        record.members = vec![lazybox_core::WorkspaceKey::new("w")];
+        crate::epics::upsert(&config, record).await;
+
+        let handler = LazyboxMcp::new(config);
+        let payload = handler.epic_status_payload(None).await;
+        let epics = payload["epics"].as_array().expect("epics");
+        assert_eq!(epics.len(), 1);
+        assert_eq!(epics[0]["key"], "e");
+        assert_eq!(epics[0]["members"].as_array().map(Vec::len), Some(1));
+
+        // A non-matching filter narrows to nothing.
+        let none = handler.epic_status_payload(Some("other")).await;
+        assert_eq!(none["epics"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[tokio::test]
+    async fn epic_ready_payload_ranks_the_ready_member() {
+        let config = ServerConfig::in_memory();
+        seed_workspace(&config, "w");
+        let mut record = lazybox_core::EpicRecord::new(
+            lazybox_core::EpicKey::new("e"),
+            "Epic",
+            chrono::Utc::now(),
+        );
+        record.members = vec![lazybox_core::WorkspaceKey::new("w")];
+        crate::epics::upsert(&config, record).await;
+
+        let handler = LazyboxMcp::new(config);
+        let payload = handler.epic_ready_payload(None).await;
+        let ready = payload["ready"].as_array().expect("ready");
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0]["epic"], "e");
+        let queue = ready[0]["queue"].as_array().expect("queue");
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue[0]["workspace"], "w");
+    }
+
+    #[tokio::test]
+    async fn report_then_clear_blocker_payload_round_trip() {
+        let config = ServerConfig::in_memory();
+        seed_workspace(&config, "w");
+        let mut record = lazybox_core::EpicRecord::new(
+            lazybox_core::EpicKey::new("e"),
+            "Epic",
+            chrono::Utc::now(),
+        );
+        record.members = vec![lazybox_core::WorkspaceKey::new("w")];
+        crate::epics::upsert(&config, record).await;
+
+        let handler = LazyboxMcp::new(config);
+        let caller = SessionKey::from("w");
+
+        // Report — unspecified kind defaults to decision.
+        let reported = handler
+            .report_blocker_payload(&caller, "waiting on a product call", None)
+            .await
+            .expect("report");
+        assert_eq!(reported["reported"], true);
+        assert_eq!(reported["kind"], "decision");
+
+        let status = handler.epic_status_payload(Some("e")).await;
+        let member = &status["epics"][0]["members"][0];
+        assert_eq!(member["status"], "Blocked");
+        assert!(
+            member["blockers"]
+                .as_array()
+                .expect("blockers")
+                .iter()
+                .any(|b| b["reason"] == "waiting on a product call")
+        );
+
+        // Clear — back to Ready, no blockers.
+        let cleared = handler.clear_blocker_payload(&caller).await;
+        assert_eq!(cleared["cleared"], true);
+        let status = handler.epic_status_payload(Some("e")).await;
+        let member = &status["epics"][0]["members"][0];
+        assert_eq!(member["status"], "Ready");
+        assert_eq!(member["blockers"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[tokio::test]
+    async fn report_blocker_payload_rejects_empty_reason() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let caller = SessionKey::from("w");
+        assert!(
+            handler
+                .report_blocker_payload(&caller, "   ", None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn report_blocker_payload_parses_explicit_kind() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let caller = SessionKey::from("w");
+        let reported = handler
+            .report_blocker_payload(&caller, "need the API key", Some("credential"))
+            .await
+            .expect("report");
+        assert_eq!(reported["kind"], "credential");
     }
 
     #[test]

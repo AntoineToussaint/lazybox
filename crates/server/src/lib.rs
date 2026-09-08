@@ -39,6 +39,7 @@ pub mod chat;
 pub mod client_kv;
 pub mod client_runtime;
 pub mod codex_quota;
+pub mod epics;
 pub mod error_inbox;
 pub mod event_forward;
 pub mod keep_awake;
@@ -1144,6 +1145,9 @@ impl Server {
                         lazybox_ipc::Command::RestartAgentAndContinue { .. } => {
                             "RestartAgentAndContinue"
                         }
+                        lazybox_ipc::Command::UpsertEpic { .. } => "UpsertEpic",
+                        lazybox_ipc::Command::AssignEpic { .. } => "AssignEpic",
+                        lazybox_ipc::Command::ArchiveEpic { .. } => "ArchiveEpic",
                         lazybox_ipc::Command::Shutdown => "Shutdown",
                     };
                     // `Write` and `RecordComposingBuffer` fire on every
@@ -2406,6 +2410,19 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::RecordAction { action_id, via } => {
             client_kv::record_action(config, action_id, via).await;
+        }
+        lazybox_ipc::Command::UpsertEpic { record } => {
+            epics::upsert(config, record).await;
+        }
+        lazybox_ipc::Command::AssignEpic {
+            epic,
+            workspace,
+            member,
+        } => {
+            epics::assign(config, &epic, workspace, member).await;
+        }
+        lazybox_ipc::Command::ArchiveEpic { epic } => {
+            epics::archive(config, &epic).await;
         }
         lazybox_ipc::Command::Shutdown => {
             unreachable!("Shutdown is loop control, intercepted by the serve loop")

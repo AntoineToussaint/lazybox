@@ -8,6 +8,7 @@ pub mod autofix;
 pub mod branch_template;
 pub mod config;
 pub mod conventions;
+pub mod epic;
 pub mod error_class;
 pub mod issue_links;
 pub mod paths;
@@ -36,6 +37,7 @@ pub use config::{
     ProviderConfig,
 };
 pub use conventions::{CommitStyle, Conventions};
+pub use epic::{EpicKey, EpicRecord};
 pub use error_class::{ErrorClass, HttpErrorSignals, classify, classify_message, classify_status};
 pub use issue_links::{IssueLink, extract as extract_issue_links};
 pub use policy::{

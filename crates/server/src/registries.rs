@@ -487,6 +487,44 @@ impl TerminalRegistry {
             .collect()
     }
 
+    /// The representative agent state per workspace, for the epic resolver
+    /// (#1522). A workspace may host several agent terminals; the lowest-id
+    /// one is its primary (mirroring `running_agent_terminal`'s tie-break), so
+    /// its state stands for the workspace. Shells and stateless terminals are
+    /// skipped. `SessionKey` and `WorkspaceKey` share their string form for
+    /// agent terminals, so the key converts directly.
+    pub(crate) async fn agent_states_by_workspace(
+        &self,
+    ) -> HashMap<lazybox_core::WorkspaceKey, AgentState> {
+        let mut primary: HashMap<lazybox_core::WorkspaceKey, (TerminalId, AgentState)> =
+            HashMap::new();
+        for (id, entry) in self.lock_entries().await.iter() {
+            if entry.finishing {
+                continue;
+            }
+            let Some((session_key, kind)) = entry.meta.as_ref() else {
+                continue;
+            };
+            if !matches!(kind, TerminalKind::Agent(_)) {
+                continue;
+            }
+            let Some(state) = entry.agent_state else {
+                continue;
+            };
+            let ws = lazybox_core::WorkspaceKey::new(session_key.as_str());
+            match primary.get(&ws) {
+                Some((existing, _)) if existing.0 <= id.0 => {}
+                _ => {
+                    primary.insert(ws, (*id, state));
+                }
+            }
+        }
+        primary
+            .into_iter()
+            .map(|(ws, (_, state))| (ws, state))
+            .collect()
+    }
+
     /// Agent terminals whose process is, as far as the registry knows,
     /// still alive: registered `Agent(_)` entries that aren't finishing
     /// and aren't already `Exited` (process gone, teardown pending).
@@ -1362,6 +1400,10 @@ pub struct PollState {
     pub(crate) merge_prompts: Arc<Mutex<polling::MergePromptMemory>>,
     /// Auto-merge latches kept outside `tick_state` because commit paths update them.
     pub(crate) auto_merge: Arc<parking_lot::Mutex<polling::AutoMergeMemory>>,
+    /// Epic resolver memory: blocker-age latches and the last snapshot per epic,
+    /// held by the debounced `epics` subscriber across recomputes. A separate
+    /// lock domain because the resolver runs off the bus, not the poll tick.
+    pub(crate) epics: Arc<parking_lot::Mutex<crate::epics::EpicMemory>>,
     /// Removal prompt memory kept outside `tick_state` because upsert paths update it.
     pub(crate) removal_prompts: Arc<Mutex<polling::RemovalPromptMemory>>,
     /// Authenticated logins replayed to reconnecting clients.

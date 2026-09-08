@@ -544,6 +544,21 @@ fn all_commands() -> Vec<Command> {
         Command::RestartAgentAndContinue {
             terminal_id: TerminalId(41),
         },
+        Command::UpsertEpic {
+            record: lazybox_core::EpicRecord::new(
+                lazybox_core::EpicKey::new("auth-refactor"),
+                "Auth refactor",
+                chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap(),
+            ),
+        },
+        Command::AssignEpic {
+            epic: "auth-refactor".into(),
+            workspace: lazybox_core::WorkspaceKey("github:o/r#1".into()),
+            member: true,
+        },
+        Command::ArchiveEpic {
+            epic: "auth-refactor".into(),
+        },
         Command::Shutdown,
     ]
 }
@@ -1227,6 +1242,44 @@ fn all_events() -> Vec<Event> {
                 ("archive".into(), ActionVia::Menu, 1),
             ],
         },
+        Event::EpicStatus {
+            snapshot: lazybox_ipc::EpicSnapshot {
+                key: "auth-refactor".into(),
+                name: "Auth refactor".into(),
+                members: vec![lazybox_ipc::EpicMember {
+                    key: lazybox_core::WorkspaceKey("github:o/r#1".into()),
+                    wave: 0,
+                    status: lazybox_ipc::EpicMemberStatus::Blocked,
+                    blocked_by: vec![lazybox_core::WorkspaceKey("github:o/r#2".into())],
+                    external_blockers: vec![lazybox_core::TaskId {
+                        source: "github".into(),
+                        key: "x/y#9".into(),
+                    }],
+                    blockers: vec![lazybox_ipc::Blocker {
+                        kind: lazybox_ipc::BlockerKind::Review,
+                        reason: "needs sign-off".into(),
+                        owner: lazybox_ipc::BlockerOwner::Operator,
+                        since: 1_700_000_000_000,
+                        holds: 2,
+                    }],
+                }],
+                done: 1,
+                total: 3,
+                ready: 1,
+                blocked: 1,
+                asking: 0,
+                failing: 0,
+                blockers_needing_operator: 1,
+                cycle: false,
+                critical_path: vec![lazybox_core::WorkspaceKey("github:o/r#1".into())],
+                computed_at: 1_700_000_000_000,
+            },
+            delta: vec![lazybox_ipc::EpicDelta::StatusChanged {
+                key: lazybox_core::WorkspaceKey("github:o/r#1".into()),
+                from: lazybox_ipc::EpicMemberStatus::Ready,
+                to: lazybox_ipc::EpicMemberStatus::Blocked,
+            }],
+        },
     ]
 }
 
@@ -1326,6 +1379,9 @@ fn command_tag(command: &Command) -> &'static str {
         Command::SetSnippetKeepMine { .. } => "SetSnippetKeepMine",
         Command::GetStats => "GetStats",
         Command::SetHopperCanceled { .. } => "SetHopperCanceled",
+        Command::UpsertEpic { .. } => "UpsertEpic",
+        Command::AssignEpic { .. } => "AssignEpic",
+        Command::ArchiveEpic { .. } => "ArchiveEpic",
         Command::RecordAction { .. } => "RecordAction",
         Command::RestartAgentAndContinue { .. } => "RestartAgentAndContinue",
     }
@@ -1439,6 +1495,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::GithubDiscoveryBehind { .. } => "GithubDiscoveryBehind",
         Event::KeepAwakeStatus { .. } => "KeepAwakeStatus",
         Event::MasteryLedger { .. } => "MasteryLedger",
+        Event::EpicStatus { .. } => "EpicStatus",
     }
 }
 
@@ -1450,12 +1507,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        93,
+        96,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        101,
+        102,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

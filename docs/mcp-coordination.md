@@ -92,8 +92,9 @@ MCP read is the pull half (new)* — together, a two-way coordination bus.
 
 ## 5. Tool surface
 
-Six tools, namespaced `lazybox_*`. Identity is **implicit from the
-connection** (see §6), so no tool takes a "who am I" argument.
+The core six, namespaced `lazybox_*`. Identity is **implicit from the
+connection** (see §6), so no tool takes a "who am I" argument. (Epic
+coordination adds four more — see the second table below.)
 
 | Tool | Purpose | Backed by |
 |---|---|---|
@@ -103,6 +104,17 @@ connection** (see §6), so no tool takes a "who am I" argument.
 | `lazybox_post_note(text, scope?, tags?)` | Publish to the blackboard. Default `scope` = your own session. | kv `lazybox:note:<scope>:<seq>` |
 | `lazybox_read_notes(scope?, tags?, since?)` | Read the blackboard (defaults to global + your scope). | `list_kv_prefix("lazybox:note:")` |
 | `lazybox_notify_session(workspace, text, submit?)` | Active push into another agent (the existing inject, as a tool). | `/v1/agents/inject` (settle-gated) |
+
+Epic coordination (#1522) adds four more, so an agent answers "what's
+blocked / what's next" from the daemon's *derived* status instead of
+re-reading the dependency graph:
+
+| Tool | Purpose | Backed by |
+|---|---|---|
+| `lazybox_epic_status(epic?)` | The live `EpicSnapshot` — members, per-member status, done/total, blockers needing an operator, critical path — for an epic this workspace joins (or names). | `EpicResolver` snapshot (kv `epic:*`) |
+| `lazybox_epic_ready(epic?)` | Just the members that are ready to start now (unblocked, unclaimed). | same snapshot, `ready` projection |
+| `lazybox_report_blocker(reason, kind?)` | Flag *this* workspace as blocked with a reason siblings can see (`kind` ∈ dependency/external/decision/credential/review/merge-order/contract/cycle/other, default decision); recorded as an operator-owned blocker and folded into derived status. | kv blocker record + recompute |
+| `lazybox_clear_blocker()` | Lift the blocker this workspace reported (no-op if none). | delete blocker record + recompute |
 
 **Note record** (kv value, JSON): `{ author, scope, tags[], ts, text }`.
 **Scope** = a `SessionKey`/`WorkspaceKey` string, or `global`. Because the

@@ -54,7 +54,7 @@ pub const WORKING_CLAIM_TTL_SECS: i64 = 60 * 60;
 
 /// Stable identifier for a workspace. Human-readable so it survives
 /// renames and shows up well in logs / UIs ("fix-auth-2026-04").
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct WorkspaceKey(pub String);
 

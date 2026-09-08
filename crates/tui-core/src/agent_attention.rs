@@ -175,9 +175,10 @@ pub fn workspace_is_asking(
 }
 
 /// True iff the workspace's agent is blocked on a provider usage / rate
-/// limit (#847). Single source of truth for the workspace-level
-/// rate-limited check (sidebar row pill, the jump predicate, the
-/// "rate-limited" filter axis, and the bulk resume target set).
+/// limit (#847) and alerting (`⧗`). Drives the sidebar row pill, the
+/// alert count and the jump predicate. The "rate-limited" filter axis and
+/// the bulk resume (`Shift-K`) use [`workspace_is_limited`], which also
+/// takes the parked `AwaitingReset` agents.
 pub fn workspace_is_limit_reached(
     workspace: &Workspace,
     states: &HashMap<SessionKey, AgentState>,
@@ -199,11 +200,13 @@ pub fn workspace_is_credit_exhausted(
 }
 
 /// True iff the workspace's agent is in the calm auto-waiting block:
-/// lazybox pressed "Wait" on a usage-limit prompt and it is now parked,
-/// sleeping until the limit resets. Distinct from
-/// [`workspace_is_limit_reached`] on purpose — this state is *handled*, so
-/// it drives only the quiet ◌ row glyph and never the alert count, jump,
-/// resume-all, or the "rate-limited" filter axis.
+/// lazybox pressed "Wait" on a usage-limit prompt (or Claude's own
+/// auto-continue is counting down) and it is now parked until the limit
+/// resets. Distinct from [`workspace_is_limit_reached`] on purpose — this
+/// state is *handled*, so it drives the quiet ☾ row glyph and never the
+/// alert count or the `!` jump. It IS rate-limited, though: the
+/// "rate-limited" filter axis and the bulk resume see it through
+/// [`workspace_is_limited`].
 pub fn workspace_is_awaiting_reset(
     workspace: &Workspace,
     states: &HashMap<SessionKey, AgentState>,
@@ -211,6 +214,23 @@ pub fn workspace_is_awaiting_reset(
     matches!(
         workspace_agent_state(workspace, states),
         Some(AgentState::AwaitingReset)
+    )
+}
+
+/// True iff the workspace's agent is on a usage limit in either shape —
+/// alerting (`⧗ LimitReached`) or parked (`☾ AwaitingReset`). Single source
+/// of truth for "which agents does a limit hold right now": the
+/// "rate-limited" filter axis and the `Shift-K` resume-all target set.
+/// Counting only the alerting shape showed `rate-limited (0)` in the filter
+/// menu while eight agents sat parked, and let `Shift-K` answer them with a
+/// hint instead of a `continue` (2026-09-08).
+pub fn workspace_is_limited(
+    workspace: &Workspace,
+    states: &HashMap<SessionKey, AgentState>,
+) -> bool {
+    matches!(
+        workspace_agent_state(workspace, states),
+        Some(AgentState::LimitReached | AgentState::AwaitingReset)
     )
 }
 

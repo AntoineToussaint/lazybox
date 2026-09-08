@@ -289,9 +289,10 @@ impl Filter {
             Filter::Conflict => task.is_some_and(|t| t.mergeable.is_conflicting()),
             Filter::Unread => w.unread_count() > 0,
             Filter::Asking => crate::agent_attention::workspace_is_asking(w, ctx.agents),
-            Filter::RateLimited => {
-                crate::agent_attention::workspace_is_limit_reached(w, ctx.agents)
-            }
+            // Both limit states: the alerting `⧗ LimitReached` block AND the
+            // parked `☾ AwaitingReset` auto-continue wait. Counting only the
+            // former showed `rate-limited (0)` over eight parked agents.
+            Filter::RateLimited => crate::agent_attention::workspace_is_limited(w, ctx.agents),
             Filter::ReviewRequested => task.is_some_and(|t| {
                 matches!(
                     t.review,
@@ -835,6 +836,43 @@ mod tests {
                     now: now()
                 }),
                 "{state:?} must not match the working filter"
+            );
+        }
+    }
+
+    /// The `rate-limited` axis counts BOTH limit shapes: an agent parked on
+    /// the auto-continue wait (`AwaitingReset`) is as rate-limited as one
+    /// alerting on the block (`LimitReached`). Counting only the latter
+    /// showed `rate-limited (0)` in the filter menu over eight parked agents.
+    #[test]
+    fn rate_limited_matches_parked_agents_as_well_as_blocked_ones() {
+        use lazybox_ipc::AgentState;
+        let ws = workspace_with("owner/repo#1", |_| {});
+        let sk = lazybox_core::SessionKey::from(&ws.key);
+        for state in [AgentState::LimitReached, AgentState::AwaitingReset] {
+            let m = HashMap::from([(sk.clone(), state)]);
+            assert!(
+                Filter::RateLimited.matches(&FilterCtx {
+                    w: &ws,
+                    agents: &m,
+                    now: now()
+                }),
+                "{state:?} is rate-limited"
+            );
+        }
+        for state in [
+            AgentState::Working,
+            AgentState::InputNeeded,
+            AgentState::Done,
+        ] {
+            let m = HashMap::from([(sk.clone(), state)]);
+            assert!(
+                !Filter::RateLimited.matches(&FilterCtx {
+                    w: &ws,
+                    agents: &m,
+                    now: now()
+                }),
+                "{state:?} is not rate-limited"
             );
         }
     }

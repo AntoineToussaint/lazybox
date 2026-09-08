@@ -1179,7 +1179,7 @@ impl ActionDef {
                 kind: ActionKind::ResumeRateLimited,
                 default_keys: "Shift-K",
                 label: "resume rate-limited",
-                describe: "Resume every workspace currently blocked on a usage / rate limit at once — a settle-gated 'continue' injected into each limit-blocked agent, for when the limit has reset. If you switched Claude account / API key instead, use `a R` (restart rate-limited): a running process never re-reads its credentials.",
+                describe: "Resume every rate-limited agent at once — a settle-gated 'continue' injected into each one, the blocked (⧗) and the parked-on-auto-continue (☾) alike. An agent whose account is still limited simply parks again and says so. If you switched Claude account / API key, `a R` (restart rate-limited) also swaps in the fresh credentials: a running process never re-reads them.",
                 section: Section::Global,
             },
             ActionKind::RestartRateLimited => &Self {

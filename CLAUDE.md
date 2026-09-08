@@ -485,9 +485,12 @@ usage limit, the daemon stops its process, respawns the same
 conversation in the same pane (`--resume`), and submits the configured
 continuation prompt — the way to pick up fresh credentials after
 switching Claude account / API key externally, since a running process
-never re-reads them. `Shift-K` (resume rate-limited) stays the
-lightweight sibling for when the limit has simply reset: it injects a
-settle-gated `continue` into each `LimitReached` agent. `g` is a leader that
+never re-reads them. `Shift-K` (resume rate-limited) is the
+lightweight sibling: it injects a settle-gated `continue` into EVERY
+limited agent — the blocked `LimitReached` ones and the parked
+`AwaitingReset` ones alike (a parked agent whose account is still
+limited simply parks again and says so). The `f` filter menu's
+`rate-limited` predicate counts both states too. `g` is a leader that
 opens the **github** group the same way: `g m` merge, `g u` update
 branch (the "Update branch" button — merge base into head; only on a
 PR behind its base, #484), `g g` toggle

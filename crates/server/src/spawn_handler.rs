@@ -14672,6 +14672,72 @@ mod tests {
         ));
     }
 
+    /// `Shift-K` (resume rate-limited) delivers its `continue` through the
+    /// client-inject path, whose readiness gate is `inject_must_defer`. A
+    /// parked `AwaitingReset` agent has no live prompt a paste would corrupt,
+    /// so the gate MUST NOT defer it — deferral drops the inject on the floor
+    /// (nothing re-drives it), which is exactly the parked-agent-left-behind
+    /// bug this PR fixes. Only a non-free-text `InputNeeded` reading (a
+    /// chooser / permission / Y-N dialog whose input a pasted answer would
+    /// corrupt) defers; a free-text `InputNeeded` and every non-input state
+    /// deliver immediately. This locks that contract so a future change can't
+    /// silently make Shift-K start deferring (and thus dropping) the parked
+    /// injects it now delivers.
+    #[tokio::test]
+    async fn inject_never_defers_a_parked_or_non_input_agent() {
+        let terminals = TerminalRegistry::default();
+
+        // Parked on the auto-continue wait — no prompt, must deliver now.
+        let parked = TerminalId(1);
+        terminals
+            .record_agent_state(parked, lazybox_ipc::AgentState::AwaitingReset)
+            .await;
+        assert!(
+            !inject_must_defer(&terminals, parked).await,
+            "an AwaitingReset (parked) agent has no live prompt; the inject \
+             must deliver immediately, never defer",
+        );
+
+        // Blocked on a usage limit — also not a prompt, must deliver now.
+        let blocked = TerminalId(2);
+        terminals
+            .record_agent_state(blocked, lazybox_ipc::AgentState::LimitReached)
+            .await;
+        assert!(
+            !inject_must_defer(&terminals, blocked).await,
+            "a LimitReached (blocked) agent has no live prompt; deliver now",
+        );
+
+        // A chooser / permission gate (non-free-text InputNeeded) is the one
+        // reading that defers — a pasted answer would corrupt it.
+        let chooser = TerminalId(3);
+        terminals
+            .record_agent_state(chooser, lazybox_ipc::AgentState::InputNeeded)
+            .await;
+        terminals
+            .record_input_needed_shape(chooser, lazybox_agents::PromptShape::Chooser)
+            .await;
+        assert!(
+            inject_must_defer(&terminals, chooser).await,
+            "a chooser/permission InputNeeded prompt must defer the inject",
+        );
+
+        // A free-text elicitation takes the pasted text as its answer, so it
+        // delivers immediately even though it is InputNeeded.
+        let free_text = TerminalId(4);
+        terminals
+            .record_agent_state(free_text, lazybox_ipc::AgentState::InputNeeded)
+            .await;
+        terminals
+            .record_input_needed_shape(free_text, lazybox_agents::PromptShape::FreeText)
+            .await;
+        assert!(
+            !inject_must_defer(&terminals, free_text).await,
+            "a free-text InputNeeded prompt takes the paste as its answer; \
+             deliver, don't defer",
+        );
+    }
+
     /// The reclassify poke's screen scrape (#869) must NOT fire while a
     /// just-answered prompt's reset is latched. `classify_quiet_screen`'s reset
     /// branch force-settles `Done` on the stale pre-answer buffer — a settle the

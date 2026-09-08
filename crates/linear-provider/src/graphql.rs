@@ -366,31 +366,16 @@ pub fn error_message_from_body(body: &str) -> Option<String> {
 
 // ── Mapper ─────────────────────────────────────────────────────────────
 
-/// Resolve a set of task edges for a Linear issue from two sources: its
-/// native inverse `blocks` relations, and a body marker parsed by `marker`
-/// (`extract_blocked_by` or `extract_merge_after`). Order-preserving,
-/// deduped, skipping relations with no resolved source. A bare same-repo
-/// `#N` in prose is dropped — Linear has no "own repo" to resolve it against,
-/// so only an explicit `owner/repo#N` cross-links to a GitHub task.
-fn linear_edges(issue: &Issue, marker: fn(&str) -> Vec<lazybox_core::IssueLink>) -> Vec<TaskId> {
+/// Task edges from a Linear issue's description marker (`extract_blocked_by` or
+/// `extract_merge_after`) alone — no native relations. Order-preserving and
+/// deduped. A bare same-repo `#N` in prose is dropped — Linear has no "own
+/// repo" to resolve it against, so only an explicit `owner/repo#N` cross-links
+/// to a GitHub task.
+fn linear_body_edges(
+    issue: &Issue,
+    marker: fn(&str) -> Vec<lazybox_core::IssueLink>,
+) -> Vec<TaskId> {
     let mut out: Vec<TaskId> = Vec::new();
-    if let Some(relations) = issue.inverse_relations.as_ref() {
-        for rel in &relations.nodes {
-            if rel.relation_type != "blocks" {
-                continue;
-            }
-            let Some(src) = rel.issue.as_ref() else {
-                continue;
-            };
-            let id = TaskId {
-                source: "linear".into(),
-                key: src.identifier.clone(),
-            };
-            if !out.contains(&id) {
-                out.push(id);
-            }
-        }
-    }
     if let Some(desc) = issue.description.as_deref() {
         for link in marker(desc) {
             let id = match link {
@@ -410,6 +395,38 @@ fn linear_edges(issue: &Issue, marker: fn(&str) -> Vec<lazybox_core::IssueLink>)
             if !out.contains(&id) {
                 out.push(id);
             }
+        }
+    }
+    out
+}
+
+/// Resolve a set of task edges for a Linear issue from two sources: its
+/// native inverse `blocks` relations, and a body marker parsed by `marker`
+/// (`extract_blocked_by` or `extract_merge_after`). Order-preserving, deduped,
+/// skipping relations with no resolved source. Native relations lead; body
+/// markers follow.
+fn linear_edges(issue: &Issue, marker: fn(&str) -> Vec<lazybox_core::IssueLink>) -> Vec<TaskId> {
+    let mut out: Vec<TaskId> = Vec::new();
+    if let Some(relations) = issue.inverse_relations.as_ref() {
+        for rel in &relations.nodes {
+            if rel.relation_type != "blocks" {
+                continue;
+            }
+            let Some(src) = rel.issue.as_ref() else {
+                continue;
+            };
+            let id = TaskId {
+                source: "linear".into(),
+                key: src.identifier.clone(),
+            };
+            if !out.contains(&id) {
+                out.push(id);
+            }
+        }
+    }
+    for id in linear_body_edges(issue, marker) {
+        if !out.contains(&id) {
+            out.push(id);
         }
     }
     out
@@ -565,11 +582,15 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         // Native `blocked_by` edges (inverse "blocks" relations) unioned with
         // the `Blocked by:` / `Depends on:` body marker (#1521).
         blocked_by: linear_edges(issue, lazybox_core::issue_links::extract_blocked_by),
-        // Merge-order edges: the `Merge after:` marker plus, mirroring P0's
-        // blocked_by, the same native "blocks" relations — Linear has no
-        // dedicated merge-order relation, so a blocking issue is treated as a
-        // landing-order predecessor too.
-        merge_after: linear_edges(issue, lazybox_core::issue_links::extract_merge_after),
+        // Merge-order edges: the explicit `Merge after:` body marker only —
+        // mirroring the GitHub provider, which reads merge_after solely from the
+        // body. Native "blocks" relations are deliberately *not* folded in here:
+        // they already populate `blocked_by` above, and the epic resolver
+        // derives the implied landing-order edge from that dependency only when
+        // the epic opts in (`EpicRecord.implied_merge_after`). Folding them here
+        // would bake in an explicit edge the opt-out could never drop, making
+        // `implied_merge_after = false` silently ineffective for Linear issues.
+        merge_after: linear_body_edges(issue, lazybox_core::issue_links::extract_merge_after),
         // Free-text `Blocked on:` reason declared in the description
         // (#1521) — the same prose extractor GitHub issues use.
         blocked_on: issue
@@ -902,6 +923,50 @@ mod tests {
     fn issue_to_task_has_no_blockers_without_relations() {
         let issue = issue_with_attachments(&[]);
         assert!(issue_to_task(&issue, "viewer").blocked_by.is_empty());
+    }
+
+    /// A native "blocks" relation is a *work* dependency — it belongs in
+    /// `blocked_by`, from which the epic resolver derives an implied
+    /// landing-order edge only when the epic opts in. It must NOT be folded into
+    /// `merge_after` as an explicit edge: doing so baked in an order the epic's
+    /// `implied_merge_after = false` opt-out could never drop. `merge_after`
+    /// carries only the explicit `Merge after:` body marker, mirroring GitHub.
+    #[test]
+    fn merge_after_takes_only_the_body_marker_not_native_blocks_relations() {
+        let mut issue = issue_with_attachments(&[]);
+        // Native "blocks" relation (a work dependency) + an explicit
+        // `Merge after:` prose marker to a different issue.
+        issue.description = Some("Merge after ENG-99".into());
+        issue.inverse_relations = Some(Relations {
+            nodes: vec![Relation {
+                relation_type: "blocks".into(),
+                issue: Some(RelationIssue {
+                    id: "n7".into(),
+                    identifier: "ENG-7".into(),
+                }),
+            }],
+        });
+
+        let task = issue_to_task(&issue, "viewer");
+        // The native relation is a blocker…
+        assert_eq!(
+            task.blocked_by,
+            vec![TaskId {
+                source: "linear".into(),
+                key: "ENG-7".into(),
+            }],
+            "the native `blocks` relation is a work dependency",
+        );
+        // …but merge_after carries ONLY the explicit marker, not the relation.
+        assert_eq!(
+            task.merge_after,
+            vec![TaskId {
+                source: "linear".into(),
+                key: "ENG-99".into(),
+            }],
+            "merge_after is the explicit `Merge after:` marker only — the native \
+             `blocks` relation must not leak in as an un-opt-out-able edge",
+        );
     }
 
     #[test]

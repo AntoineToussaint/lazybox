@@ -2218,7 +2218,10 @@ impl<T: TerminalAdapter> Model<T> {
         use lazybox_ipc::EpicMemberStatus;
 
         let short = |k: &lazybox_core::WorkspaceKey| -> String {
-            k.0.split_once(':').map(|(_, r)| r).unwrap_or(&k.0).to_string()
+            k.0.split_once(':')
+                .map(|(_, r)| r)
+                .unwrap_or(&k.0)
+                .to_string()
         };
         snap.merge_order
             .iter()
@@ -2235,9 +2238,7 @@ impl<T: TerminalAdapter> Model<T> {
                 } else {
                     match status {
                         Some(EpicMemberStatus::Done) => MergeRowKind::Merged,
-                        Some(EpicMemberStatus::Mergeable { held_by })
-                            if !held_by.is_empty() =>
-                        {
+                        Some(EpicMemberStatus::Mergeable { held_by }) if !held_by.is_empty() => {
                             MergeRowKind::Held
                         }
                         Some(EpicMemberStatus::Mergeable { .. }) => MergeRowKind::Mergeable,
@@ -2730,11 +2731,18 @@ impl<T: TerminalAdapter> Model<T> {
     /// refused because it is held behind unmerged predecessors comes back as
     /// a `PrMergeFailed` whose reason carries [`MERGE_HELD_REASON_PREFIX`];
     /// this offers the out-of-order override, and Yes re-sends `MergePr {
-    /// force: true }`. Mounts async like [`Self::mount_conflict_resolve`]:
-    /// the refusal can land seconds after the keypress, so a modal already
-    /// on the stack wins and the offer is dropped (the row stays actionable,
-    /// so `g m` re-triggers it). `default_no()` — an out-of-order merge is
-    /// not the safe default, so a buffered Enter can't force it.
+    /// force: true }` for every held PR gathered here.
+    ///
+    /// A bulk `g m` over a selection produces one such refusal per held PR,
+    /// each landing async — so rather than let the first mount win and drop
+    /// the rest (the old behavior, where only one of several held PRs was
+    /// ever confirmable), a refusal that arrives while this same prompt is
+    /// already open *folds into it*: the held set grows and the copy renames
+    /// to cover the whole batch, matching how the other destructive bulk
+    /// actions confirm the full set at once. A *different* modal still wins
+    /// (the row stays actionable, so `g m` re-triggers it). Mounts async like
+    /// [`Self::mount_conflict_resolve`]. `default_no()` — an out-of-order
+    /// merge is not the safe default, so a buffered Enter can't force it.
     pub(super) fn mount_merge_held_confirm(
         &mut self,
         workspace: &lazybox_core::WorkspaceKey,
@@ -2746,6 +2754,21 @@ impl<T: TerminalAdapter> Model<T> {
         if self.sidebar.workspace_by_key(&session_key).is_none() {
             return;
         }
+        // Already showing a held-merge confirm from an earlier PR in this same
+        // bulk merge: fold this PR into it instead of dropping it.
+        if self.modal_stack.last() == Some(&Id::MergeHeldConfirm) {
+            if let Some(ModalFlow::MergeHeldConfirm { mut held }) = self.modal_flow.take() {
+                if !held.iter().any(|(w, _)| w == workspace) {
+                    held.push((workspace.clone(), pr_label.to_string()));
+                }
+                let prompt = Self::merge_held_prompt(&held, held_names);
+                self.set_modal_flow(ModalFlow::MergeHeldConfirm { held });
+                self.mount_modal(Id::MergeHeldConfirm, Confirm::new(prompt).default_no());
+                self.redraw = true;
+            }
+            return;
+        }
+        // A different modal owns the stack — keep it, hint the override path.
         if let Some(top) = self.modal_stack.last() {
             tracing::info!(
                 ?top,
@@ -2754,17 +2777,48 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_hint("held merge — close this dialog and press g m to override");
             return;
         }
-        let prompt = format!(
-            "{pr_label} is held — it must merge after {held_names}, which \
-             haven't landed yet.\n\n\
-             [Y] merges it now anyway, out of the declared order. Esc keeps \
-             the hold. GitHub's own gates (conflicts, required checks) still \
-             apply."
-        );
-        self.set_modal_flow(ModalFlow::MergeHeldConfirm {
-            workspace: workspace.clone(),
-        });
+        let held = vec![(workspace.clone(), pr_label.to_string())];
+        let prompt = Self::merge_held_prompt(&held, held_names);
+        self.set_modal_flow(ModalFlow::MergeHeldConfirm { held });
         self.mount_modal(Id::MergeHeldConfirm, Confirm::new(prompt).default_no());
+    }
+
+    /// Copy for the held-merge override confirm. A single held PR names its
+    /// predecessors (`held_names`, the reason from *its* refusal); a batch
+    /// lists the held PRs and offers to force all of them, since per-PR
+    /// predecessor lists would bury the one thing that matters — which PRs
+    /// land out of order.
+    fn merge_held_prompt(
+        held: &[(lazybox_core::WorkspaceKey, String)],
+        held_names: &str,
+    ) -> String {
+        if held.len() == 1 {
+            let (_, pr_label) = &held[0];
+            return format!(
+                "{pr_label} is held — it must merge after {held_names}, which \
+                 haven't landed yet.\n\n\
+                 [Y] merges it now anyway, out of the declared order. Esc keeps \
+                 the hold. GitHub's own gates (conflicts, required checks) still \
+                 apply."
+            );
+        }
+        const SHOWN: usize = 5;
+        let labels: Vec<&str> = held.iter().map(|(_, l)| l.as_str()).collect();
+        let list = if labels.len() <= SHOWN {
+            labels.join(", ")
+        } else {
+            format!(
+                "{}, +{} more",
+                labels[..SHOWN].join(", "),
+                labels.len() - SHOWN
+            )
+        };
+        let n = held.len();
+        format!(
+            "{n} PRs are held behind unmerged predecessors: {list}.\n\n\
+             [Y] merges all {n} now, out of the declared order. Esc keeps the \
+             holds. GitHub's own gates (conflicts, required checks) still apply."
+        )
     }
 
     /// Turn an action the help agent proposed (#353) into a

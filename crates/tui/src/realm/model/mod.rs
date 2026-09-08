@@ -345,7 +345,8 @@ pub enum Id {
     /// Merge-after-hold override prompt (#1524). Offered when a `g m` is
     /// refused because the PR is held behind unmerged merge-after
     /// predecessors: `Msg::Confirmed(true)` re-sends `MergePr { force:
-    /// true }`. The target workspace lives in `ModalFlow::MergeHeldConfirm`.
+    /// true }` for every held workspace. The accumulated set lives in
+    /// `ModalFlow::MergeHeldConfirm` (a bulk `g m` folds each held PR in).
     MergeHeldConfirm,
     /// Snippet picker mounted from the terminal pane on `]]s<key>`.
     /// Filter input + scrollable snippet list. `Msg::ChoicePicked`
@@ -976,10 +977,16 @@ pub(crate) enum ModalFlow {
     ConflictResolve { workspace: lazybox_core::SessionKey },
     /// Merge-after-hold override prompt (#1524). A `g m` on a PR that is
     /// merge-ready but held behind unmerged predecessors is refused by the
-    /// daemon; confirming re-sends `MergePr { force: true }` to land it out
-    /// of order. The workspace is resolved from the refusal event, so a
-    /// cursor drift under the modal can't redirect the forced merge.
-    MergeHeldConfirm { workspace: lazybox_core::WorkspaceKey },
+    /// daemon; confirming re-sends `MergePr { force: true }` for each held
+    /// workspace to land them out of order. A bulk `g m` produces one refusal
+    /// event per held PR (each arriving async), so the set accumulates here —
+    /// every held PR after the first folds into this one confirm instead of
+    /// being dropped — as `(workspace, pr_label)` pairs. The workspaces are
+    /// resolved from the refusal events, so a cursor drift under the modal
+    /// can't redirect the forced merge.
+    MergeHeldConfirm {
+        held: Vec<(lazybox_core::WorkspaceKey, String)>,
+    },
     /// Action proposed by the Ask Lazybox help agent (#353). For
     /// `scaffold_skill`, `skill_root` is the destination repo resolved
     /// and shown to the user at propose time; apply writes there rather

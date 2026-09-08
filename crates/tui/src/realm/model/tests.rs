@@ -14223,7 +14223,8 @@ mod merge_focus_follow_tests {
             "no red error banner when we can offer the override",
         );
         assert!(
-            matches!(&m.modal_flow, Some(ModalFlow::MergeHeldConfirm { workspace }) if *workspace == key),
+            matches!(&m.modal_flow, Some(ModalFlow::MergeHeldConfirm { held })
+                if held.len() == 1 && held[0].0 == key),
         );
 
         // Accepting re-sends the merge with the hold overridden.
@@ -14235,6 +14236,65 @@ mod merge_focus_follow_tests {
             )),
             "confirming forces the out-of-order merge: {cmds:?}",
         );
+    }
+
+    /// Issue #1524: a bulk `g m` over several held PRs produces one refusal
+    /// event per PR, each arriving async. They must fold into a *single*
+    /// override confirm covering the whole batch — the old behavior mounted
+    /// for the first and silently dropped the rest, so only one of several
+    /// held PRs was ever forceable. Accepting forces every gathered PR.
+    #[test]
+    fn bulk_held_merges_fold_into_one_confirm() {
+        let mut m = build_model();
+        let mut keys = Vec::new();
+        for n in 1..=3 {
+            let ws = workspace(&format!("owner/repo#{n}"), true, Duration::hours(1));
+            keys.push(ws.key.clone());
+            m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        }
+
+        // Three held-merge refusals land back-to-back (bulk `g m`).
+        for key in &keys {
+            m.handle_daemon_event(IpcEvent::PrMergeFailed {
+                workspace_key: key.clone(),
+                pr_label: key.0.split(':').next_back().unwrap_or(&key.0).to_string(),
+                reason: format!("{}owner/repo#9", lazybox_ipc::MERGE_HELD_REASON_PREFIX),
+                conflict: false,
+            });
+        }
+
+        // Exactly one confirm on the stack, holding all three.
+        assert_eq!(m.top_modal(), Some(&Id::MergeHeldConfirm));
+        assert_eq!(
+            m.modal_stack
+                .iter()
+                .filter(|id| **id == Id::MergeHeldConfirm)
+                .count(),
+            1,
+            "the held PRs fold into a single confirm, not one per PR",
+        );
+        let held_keys: Vec<_> = match &m.modal_flow {
+            Some(ModalFlow::MergeHeldConfirm { held }) => {
+                held.iter().map(|(w, _)| w.clone()).collect()
+            }
+            other => panic!("expected a MergeHeldConfirm flow, got {other:?}"),
+        };
+        assert_eq!(held_keys.len(), 3, "all three held PRs gathered");
+        for key in &keys {
+            assert!(held_keys.contains(key), "{key:?} is in the batch");
+        }
+
+        // Accepting forces every gathered PR out of order.
+        let cmds = m.handle_confirmed(true);
+        for key in &keys {
+            assert!(
+                cmds.iter().any(|c| matches!(
+                    c,
+                    IpcCommand::MergePr { workspace_key, force: true } if workspace_key == key
+                )),
+                "confirming forces {key:?}: {cmds:?}",
+            );
+        }
     }
 
     /// Issue #1524: declining the held-merge override leaves the hold in

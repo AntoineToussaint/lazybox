@@ -1232,7 +1232,7 @@ impl Workspace {
     }
 
     /// Every *distinct* merge-after predecessor any task in this workspace
-    /// declares, in first-seen order. Mirrors [`hierarchy_blocked_by`] — a
+    /// declares, in first-seen order. Mirrors [`Self::hierarchy_blocked_by`] — a
     /// landing-order edge de-duplicated across the workspace's tasks — but
     /// carries a weaker meaning: a `MergeAfter` edge does not gate the work
     /// itself, only the *order in which PRs may merge* (this workspace's PR

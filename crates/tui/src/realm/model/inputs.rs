@@ -1486,15 +1486,18 @@ showing keybinding search only",
             }
             Some(Id::MergeHeldConfirm) => {
                 // Merge-after-hold override (#1524). Yes → re-send the merge
-                // with `force: true` to land it out of order. No / Esc →
-                // drop the stash, leaving the hold in place.
-                if let Some(ModalFlow::MergeHeldConfirm { workspace }) = self.modal_flow.take()
+                // with `force: true` for every held PR gathered into this
+                // confirm (a bulk `g m` folds them all in), landing each out
+                // of order. No / Esc → leave every hold in place.
+                if let Some(ModalFlow::MergeHeldConfirm { held }) = self.modal_flow.take()
                     && yes
                 {
-                    cmds.push(IpcCommand::MergePr {
-                        workspace_key: workspace,
-                        force: true,
-                    });
+                    for (workspace, _label) in held {
+                        cmds.push(IpcCommand::MergePr {
+                            workspace_key: workspace,
+                            force: true,
+                        });
+                    }
                     self.redraw = true;
                 }
             }

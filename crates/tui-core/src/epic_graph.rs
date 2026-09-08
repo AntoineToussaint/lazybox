@@ -12,7 +12,7 @@
 //! (`j/k` within a column, `h/l` across).
 
 use lazybox_core::WorkspaceKey;
-use lazybox_ipc::{EdgeKind, EpicMemberStatus, EpicSnapshot};
+use lazybox_ipc::{BlockerKind, EdgeKind, EpicMember, EpicMemberStatus, EpicSnapshot};
 use std::collections::HashMap;
 
 /// Semantic tone for a laid-out span. The render crate maps each to a
@@ -31,8 +31,19 @@ pub enum Tone {
     NodeActive,
     NodeHeld,
     NodeWaiting,
+    /// A node caught in a dependency cycle — it cannot be ordered into a wave,
+    /// so the layered layout would otherwise render it as an innocuous root.
+    NodeCycle,
     /// The node under the cursor.
     Selected,
+}
+
+/// Whether a member is caught in a dependency cycle. `waves()` cannot order
+/// cycle members, so the daemon flags each with a [`BlockerKind::Cycle`]
+/// blocker; the layered layout collapses them all into wave 0 where they'd read
+/// as independent roots, so they must be drawn distinctly.
+pub fn member_in_cycle(m: &EpicMember) -> bool {
+    m.blockers.iter().any(|b| b.kind == BlockerKind::Cycle)
 }
 
 /// One run of same-tone text on a rendered row.
@@ -149,8 +160,7 @@ pub fn layout(snapshot: &EpicSnapshot, width: u16, selected: Option<usize>) -> D
     let mut waves: Vec<u16> = snapshot.members.iter().map(|m| m.wave).collect();
     waves.sort_unstable();
     waves.dedup();
-    let col_of_wave: HashMap<u16, usize> =
-        waves.iter().enumerate().map(|(c, &w)| (w, c)).collect();
+    let col_of_wave: HashMap<u16, usize> = waves.iter().enumerate().map(|(c, &w)| (w, c)).collect();
     let n_cols = waves.len();
 
     // Members per column, in snapshot order (stable), plus each
@@ -259,6 +269,13 @@ pub fn layout(snapshot: &EpicSnapshot, width: u16, selected: Option<usize>) -> D
     for (i, m) in snapshot.members.iter().enumerate() {
         let (c, r) = pos[i];
         let (g, node_tone) = node_glyph(&m.status);
+        // A cycle member reads as a wave-0 root in a layered layout; recolor it
+        // so the cycle is visible at the node even without following an edge.
+        let node_tone = if member_in_cycle(m) {
+            Tone::NodeCycle
+        } else {
+            node_tone
+        };
         let tone = if Some(i) == selected {
             Tone::Selected
         } else {
@@ -319,7 +336,7 @@ pub fn layout(snapshot: &EpicSnapshot, width: u16, selected: Option<usize>) -> D
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lazybox_ipc::{EpicEdge, EpicMember};
+    use lazybox_ipc::{Blocker, BlockerOwner, EpicEdge, EpicMember};
 
     fn key(s: &str) -> WorkspaceKey {
         WorkspaceKey(format!("github:{s}"))
@@ -334,6 +351,19 @@ mod tests {
             external_blockers: vec![],
             blockers: vec![],
         }
+    }
+
+    /// A member the daemon flagged as caught in a dependency cycle.
+    fn cycle_member(k: &str, status: EpicMemberStatus) -> EpicMember {
+        let mut m = member(k, 0, status);
+        m.blockers = vec![Blocker {
+            kind: BlockerKind::Cycle,
+            reason: "dependency cycle".into(),
+            owner: BlockerOwner::Operator,
+            since: 0,
+            holds: 0,
+        }];
+        m
     }
 
     fn snap(members: Vec<EpicMember>, edges: Vec<EpicEdge>) -> EpicSnapshot {
@@ -471,6 +501,73 @@ mod tests {
         assert!(
             !selected.iter().any(|t| t.contains("o/r#1")),
             "only the selected node is tagged"
+        );
+    }
+
+    #[test]
+    fn cycle_member_renders_with_cycle_tone() {
+        // Two members caught in a dependency cycle (each carries a
+        // BlockerKind::Cycle blocker). Both nodes must render with the
+        // dedicated NodeCycle tone so the cycle is visible, not hidden behind
+        // an otherwise-clean DAG.
+        let members = vec![
+            cycle_member("o/r#1", EpicMemberStatus::Ready),
+            cycle_member("o/r#2", EpicMemberStatus::Ready),
+        ];
+        let mut s = snap(members, vec![]);
+        s.cycle = true;
+        let dag = layout(&s, 120, None);
+        let cycled: Vec<&str> = dag
+            .lines
+            .iter()
+            .flat_map(|l| l.iter())
+            .filter(|sp| sp.tone == Tone::NodeCycle)
+            .map(|sp| sp.text.as_str())
+            .collect();
+        assert!(
+            cycled.iter().any(|t| t.contains("o/r#1")),
+            "cycle member #1 carries the cycle tone: {cycled:?}"
+        );
+        assert!(
+            cycled.iter().any(|t| t.contains("o/r#2")),
+            "cycle member #2 carries the cycle tone: {cycled:?}"
+        );
+    }
+
+    #[test]
+    fn selection_marks_focused_cycle_node_others_stay_cycle_toned() {
+        // Selecting a cycle node still shows the selection highlight (so
+        // navigation feedback survives), while the *other* cycle nodes keep the
+        // NodeCycle tone. Between the banner and the recolored siblings the
+        // cycle stays fully visible regardless of where the cursor sits.
+        let members = vec![
+            cycle_member("o/r#1", EpicMemberStatus::Ready),
+            cycle_member("o/r#2", EpicMemberStatus::Ready),
+        ];
+        let mut s = snap(members, vec![]);
+        s.cycle = true;
+        let dag = layout(&s, 120, Some(1));
+        let selected: Vec<&str> = dag
+            .lines
+            .iter()
+            .flat_map(|l| l.iter())
+            .filter(|sp| sp.tone == Tone::Selected)
+            .map(|sp| sp.text.as_str())
+            .collect();
+        let cycled: Vec<&str> = dag
+            .lines
+            .iter()
+            .flat_map(|l| l.iter())
+            .filter(|sp| sp.tone == Tone::NodeCycle)
+            .map(|sp| sp.text.as_str())
+            .collect();
+        assert!(
+            selected.iter().any(|t| t.contains("o/r#2")),
+            "focused node keeps the selection tone: {selected:?}"
+        );
+        assert!(
+            cycled.iter().any(|t| t.contains("o/r#1")),
+            "the other cycle node stays cycle-toned: {cycled:?}"
         );
     }
 

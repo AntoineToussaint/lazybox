@@ -79,6 +79,39 @@ impl EpicGraph {
         self.cursor.map(|(c, r)| self.columns[c][r])
     }
 
+    /// A one-line warning naming the members caught in a dependency cycle, or
+    /// `None` when the graph is acyclic. `waves()` cannot order cycle members,
+    /// so the layered layout collapses them into wave 0 where they'd read as
+    /// independent roots — without this banner the DAG gives no signal that the
+    /// epic is unsatisfiable.
+    fn cycle_banner(&self) -> Option<String> {
+        if !self.snapshot.cycle {
+            return None;
+        }
+        // Drop the provider prefix to match the node labels (`owner/repo#12`).
+        let short = |k: &lazybox_core::WorkspaceKey| -> String {
+            k.0.split_once(':')
+                .map(|(_, r)| r.to_string())
+                .unwrap_or_else(|| k.0.clone())
+        };
+        let members: Vec<String> = self
+            .snapshot
+            .members
+            .iter()
+            .filter(|m| lazybox_tui_core::epic_graph::member_in_cycle(m))
+            .map(|m| short(&m.key))
+            .collect();
+        // `snapshot.cycle` is set but the per-member flags were somehow absent —
+        // still warn generically rather than stay silent.
+        if members.is_empty() {
+            return Some("dependency cycle — members cannot be ordered".to_string());
+        }
+        Some(format!(
+            "dependency cycle: {} — break a dependency to order the epic",
+            members.join(", ")
+        ))
+    }
+
     /// Move within the current wave-column, wrapping top↔bottom.
     fn move_vertical(&mut self, down: bool) {
         let Some((c, r)) = self.cursor else { return };
@@ -122,6 +155,12 @@ impl EpicGraph {
             Tone::NodeActive => Style::default().fg(theme.text_strong),
             Tone::NodeHeld => Style::default().fg(theme.warn),
             Tone::NodeWaiting => Style::default().fg(theme.text_dim),
+            // A dependency cycle is a real fault (the members can't be ordered),
+            // so it earns the error color — the one BAD condition the graph can
+            // show. Bold so it stands out from a merely-waiting node.
+            Tone::NodeCycle => Style::default()
+                .fg(theme.error)
+                .add_modifier(Modifier::BOLD),
             Tone::Selected => Style::default()
                 .fg(theme.text_strong)
                 .bg(theme.fill)
@@ -190,11 +229,34 @@ impl Component for EpicGraph {
             return;
         }
 
+        // A cycle warning steals the top row when present (and there is room).
+        let banner = self.cycle_banner();
+        let banner_h: u16 = u16::from(banner.is_some() && inner.height >= 3);
+        if let Some(text) = &banner
+            && banner_h == 1
+        {
+            let banner_rect = Rect {
+                x: inner.x,
+                y: inner.y,
+                width: inner.width,
+                height: 1,
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!("  {text}"),
+                    Style::default()
+                        .fg(theme.error)
+                        .add_modifier(Modifier::BOLD),
+                ))),
+                banner_rect,
+            );
+        }
+
         let body = Rect {
             x: inner.x,
-            y: inner.y,
+            y: inner.y + banner_h,
             width: inner.width,
-            height: inner.height - 1,
+            height: inner.height - 1 - banner_h,
         };
         let hint = Rect {
             x: inner.x,
@@ -319,9 +381,7 @@ impl AppComponent<Msg, UserEvent> for EpicGraph {
                 .and_then(|i| self.snapshot.members.get(i))
                 .map(|m| Msg::EpicJumpToWorkspace(lazybox_core::SessionKey::from(&m.key)))
                 .or(Some(Msg::ModalDismissed)),
-            KeyEvent {
-                code: Key::Esc, ..
-            } => Some(Msg::ModalDismissed),
+            KeyEvent { code: Key::Esc, .. } => Some(Msg::ModalDismissed),
             _ => None,
         }
     }
@@ -331,8 +391,8 @@ impl AppComponent<Msg, UserEvent> for EpicGraph {
 mod tests {
     use super::*;
     use lazybox_core::WorkspaceKey;
-    use lazybox_ipc::{EpicMember, EpicMemberStatus};
-    use tuirealm::event::{KeyModifiers, KeyEvent as Ke};
+    use lazybox_ipc::{Blocker, BlockerKind, BlockerOwner, EpicMember, EpicMemberStatus};
+    use tuirealm::event::{KeyEvent as Ke, KeyModifiers};
 
     fn member(k: &str, wave: u16) -> EpicMember {
         EpicMember {
@@ -343,6 +403,19 @@ mod tests {
             external_blockers: vec![],
             blockers: vec![],
         }
+    }
+
+    /// A member the daemon flagged as caught in a dependency cycle.
+    fn cycle_member(k: &str) -> EpicMember {
+        let mut m = member(k, 0);
+        m.blockers = vec![Blocker {
+            kind: BlockerKind::Cycle,
+            reason: "dependency cycle".into(),
+            owner: BlockerOwner::Operator,
+            since: 0,
+            holds: 0,
+        }];
+        m
     }
 
     /// 6-node fixture: waves 0/1/2 hold 1/2/3 members → columns
@@ -455,6 +528,49 @@ mod tests {
         assert!(out.contains("o/r#1"), "wave-0 node drawn: {out}");
         assert!(out.contains("o/r#6"), "wave-2 node drawn: {out}");
         assert!(out.contains("Enter jump"), "hint line: {out}");
+    }
+
+    #[test]
+    fn acyclic_epic_shows_no_cycle_banner() {
+        let comp = EpicGraph::new("Epic", snapshot());
+        assert_eq!(comp.cycle_banner(), None);
+    }
+
+    #[test]
+    fn cyclic_epic_banner_names_the_members() {
+        // Two members mutually blocking → `waves()` reports a cycle and flags
+        // both with a BlockerKind::Cycle. The banner must name them so the DAG
+        // — which collapses them to wave 0 and reads as clean — still warns.
+        let mut snap = snapshot();
+        snap.members = vec![cycle_member("o/r#1"), cycle_member("o/r#2")];
+        snap.total = 2;
+        snap.cycle = true;
+        let comp = EpicGraph::new("Epic", snap);
+        let banner = comp.cycle_banner().expect("cycle banner present");
+        assert!(banner.contains("dependency cycle"), "{banner}");
+        assert!(banner.contains("o/r#1"), "names first member: {banner}");
+        assert!(banner.contains("o/r#2"), "names second member: {banner}");
+
+        // And it reaches the rendered frame.
+        let mut comp = EpicGraph::new("Epic", {
+            let mut s = snapshot();
+            s.members = vec![cycle_member("o/r#1"), cycle_member("o/r#2")];
+            s.cycle = true;
+            s
+        });
+        let out = render(&mut comp, 100, 24);
+        assert!(out.contains("dependency cycle"), "banner rendered: {out}");
+    }
+
+    #[test]
+    fn cycle_flag_without_member_markers_still_warns() {
+        // Defensive: `cycle` is set but no member carries the per-member flag.
+        // The banner still warns generically rather than staying silent.
+        let mut snap = snapshot();
+        snap.cycle = true;
+        let comp = EpicGraph::new("Epic", snap);
+        let banner = comp.cycle_banner().expect("generic cycle banner");
+        assert!(banner.contains("dependency cycle"), "{banner}");
     }
 
     #[test]

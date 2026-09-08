@@ -261,7 +261,10 @@ impl AppComponent<Msg, UserEvent> for MergeOrder {
             KeyEvent {
                 code: Key::Enter, ..
             } => {
-                let key = self.cursor.and_then(|c| self.rows.get(c)).map(|r| r.key.clone());
+                let key = self
+                    .cursor
+                    .and_then(|c| self.rows.get(c))
+                    .map(|r| r.key.clone());
                 // Enter with no rows is a no-op close.
                 match key {
                     Some(key) => Some(Msg::EpicJumpToWorkspace(key)),

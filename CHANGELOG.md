@@ -6,26 +6,109 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
-- A hot-target batch the server rejects no longer fails the whole poll tick.
-  GitHub Enterprise Server 3.18 answers lazybox's batched `nodes(ids:)` hot
-  queries with "Something went wrong while executing your query" (a PR node
-  lookup selecting both `mergeStateStatus` and `reviewDecision` trips it); the
-  targeted refresh now falls back to per-target fetches, and after three
-  consecutive rejections skips the batch until the next Shift-R refresh.
-- **Jira rows are real rows, with roles and hierarchy.** Jira tasks were
-  dropped at the workspace door (no slot for a `/browse/KEY` issue), leaving
-  title-only rows with no key, role, or status. They now attach like any
-  issue; the sidebar's identifier column shows the tracker key (`PROJ-42`,
-  and Linear's `ENG-123`) where a GitHub row shows its number; setup offers
-  the same flat roles as Linear (assigned to me / I reported / watching,
-  default assigned + reported) and the JQL follows the ticks; and each
-  issue's ancestors (epic, and whatever Jira Premium stacks above it) are
-  fetched by key so stories nest under their epic under its parent, up to the
-  root. Jira rows group per site (`jira/<site>`) rather than per project,
-  since a hierarchy routinely spans projects. Opening a workspace on a Jira
-  row resolves its repo from `providers.jira.projects.<KEY>`; an unmapped
-  project offers the same repo picker an unmapped Linear team does, instead
-  of trying to clone `jira/<site>` from GitHub.
+## [0.1.15] - 2026-09-07
+
+The onboarding and coordination release. Lazybox stops explaining itself in a
+slide deck and starts teaching in the live UI — a sandboxed practice world you
+can press every key in, a coach that waits for you to actually do the thing,
+and an empty inbox that diagnoses itself instead of dead-ending. Agents learn
+about each other, too: a coordination server lets sessions read, notify, and
+leave notes for one another, and every spawn is now told lazybox's own
+mechanics so it stops treating live coordination state as junk. The agents it
+runs are priced *in view* rather than in a report, triage keeps scaling, and
+the terminal finally selects text the way every other terminal does.
+
+**Licensing:** lazybox is now proprietary — all rights reserved. A Contributor
+License Agreement accompanies the change.
+
+### Highlights
+
+- **Learn lazybox by using it.** A sandboxed, reactive practice simulator boots
+  a living inbox — PRs arriving, agents working, CI flipping — with no
+  credentials, no network, and no writes to your real state, so every key is
+  safe to press. A coach rail replaces the old modal deck: one objective at a
+  time, in the real UI, gated on you actually doing it. An empty inbox now
+  diagnoses *why* it's empty and offers the fix instead of handing you a list
+  of keys. And a mastery ledger records which shortcuts you've actually used,
+  so the Keys screen marks what you've mastered and teaching stops repeating
+  what you know.
+- **Agents that know about each other.** The MCP coordination server grows from
+  a read loop (`list_sessions`, `read_session`, `whoami`) into real cross-agent
+  work: a shared notes blackboard (`post_note` / `read_notes`) and
+  `notify_session` for active push between running agents — documented, and
+  taught to every spawn.
+- **Every spawn is taught lazybox's mechanics.** A `SessionStart` blurb now
+  rides *every* agent launch, not just work prompts: the load-bearing labels an
+  agent must never strip (`working`, `lazybox:w:…`), the opt-outs it can set
+  (`no-auto-fix`, `do-not-lazybox`), the standing policies that can merge or fix
+  a PR without it, the `@lazybox` trigger and its hazard, and the handles beyond
+  `git`/`gh`.
+- **Cost you can see while it accrues.** Per-session spend and plan headroom
+  ride the agent's own terminal header, a `$` marks a metered row in the
+  sidebar, the rate card is current, and an issue→PR transfer folds its cost
+  across rather than losing it.
+- **Triage at scale.** A repo/Space overview renders on group-header rows, a
+  repo-scoped issue browser opens the backlog in place, `g h` shows a repo's
+  merge-history ledger, starred `★ Focused` rows name the repo they were lifted
+  out of, and a PR row now names the issue it was opened from — the issue→PR
+  collapse used to hide it entirely.
+- **Multi-select that behaves.** `V` arms a vim-style visual sweep (`j`/`k` grow
+  the range) for terminals that don't report Shift on arrows, and a bulk action
+  consumes its selection rather than leaving invisible state for the next
+  keypress to act on.
+- **Terminal text selection.** Double-click selects the word under the pointer,
+  triple-click the line, and a drag selects a range — the emulator idioms mouse
+  capture used to swallow. `]]t` now switches an open session between tabs and
+  side-by-side tiles, instead of only governing the next spawn.
+- **The activity pane stops hoarding rows.** It's fitted to its content and
+  capped, so a nearly-empty description hands its blank rows to the agent's
+  terminal instead of reserving a fixed slice of the column. The sidebar header
+  and footer were rebuilt to stay readable: three rows, counters that never
+  wrap, keep-awake moved to the footer.
+
+### Also
+
+- **Jira rows are real rows, with roles and hierarchy.** Jira tasks were dropped
+  at the workspace door, leaving title-only rows with no key, role, or status.
+  They now attach like any issue; the sidebar's identifier column shows the
+  tracker key (`PROJ-42`, and Linear's `ENG-123`); setup offers the same flat
+  roles as Linear and the JQL follows the ticks; and each issue's ancestors are
+  fetched by key so stories nest under their epic, up to the root. Jira rows
+  group per site (`jira/<site>`), since a hierarchy routinely spans projects.
+- GitHub Enterprise Server is steadier: a hot-target batch the server rejects
+  falls back to per-target fetches instead of failing the whole poll tick, and
+  `gh auth token` is scoped to the configured host — without `--hostname` it
+  silently returned the github.com token for a user logged into both, and the
+  credential cache keyed only by scope let two hosts cross-serve each other's
+  tokens.
+- Sync is repo-first: discovery walks repos rather than one global sweep,
+  forced sweeps unstick, config errors are loud rather than swallowed, and
+  self-pacing is no longer mislabelled "GitHub rate-limited". `g a` fetches the
+  real assignable-user pool, setup surfaces actionable provider hints, and
+  mergeability verdicts are timestamped.
+- Performance: `TerminalOutput` moves to `Arc<[u8]>` so the hot path stops
+  cloning, and the polling tick backs off when polls come back empty — both
+  aimed at idle CPU on a large roster.
+- Agent liveness: `a R` restarts a rate-limited agent with fresh credentials;
+  spend-limit, auto-continue and session-limit banners are all detected as
+  `LimitReached` / `AwaitingReset` instead of reading as a hung agent; and
+  keyboard input is held behind spawn-time context injection so a key pressed
+  during a spawn can't leak into the fresh agent.
+- Correctness around deletion and recovery: archived-set tombstones are stored
+  per key, so a deleted workspace can't resurrect after a restart when a
+  concurrent write clobbers the set; an Esc-cancelled `worktree add` no longer
+  leaves a locked corpse behind; a per-terminal resync gate ends the desync
+  storm so a stale pane always converges; and the metering proxy keeps its port
+  across daemon restarts.
+- The repo scope picker no longer drops owners it never offered — a repo you
+  track in an org you don't belong to survived only by luck, and its workspaces
+  were deleted with their notes, read state, and stars. Its confirm now names
+  the repos and per-repo workspace counts it is about to delete.
+- Auto-merge re-probes a transiently blocked head and defers probes through a
+  rate pause. An unknown or `help` subcommand prints usage and exits instead of
+  launching a rogue instance. The `fixall` snippet commits *and* pushes every
+  fix, and `carve` + `dod` decomposition snippets join the catalog. The desktop
+  shell compiles against main again, with its CI check re-enabled.
 
 ## [0.1.14] - 2026-09-01
 

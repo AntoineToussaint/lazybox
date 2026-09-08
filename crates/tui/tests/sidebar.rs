@@ -148,6 +148,7 @@ fn snapshot_hydrates_agent_state() {
             composing_buffer: None,
             agent_state: Some(AgentState::Working),
             authenticating: false,
+            replay_sizes: Vec::new(),
         }],
         projects: vec![],
         recent_snippets: Vec::new(),

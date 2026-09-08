@@ -284,8 +284,7 @@ fn server_option_cmds(history_limit: u32) -> Vec<Vec<String>> {
     cmds
 }
 
-const DEFAULT_COLS: u16 = 120;
-const DEFAULT_ROWS: u16 = 32;
+use super::{DEFAULT_COLS, DEFAULT_ROWS};
 
 /// Wall-clock cap on every tmux subprocess invocation. A tmux server
 /// wedged on a dead socket (or a hung first-start) must surface as an
@@ -1111,6 +1110,7 @@ impl SessionBackend for TmuxBackend {
             let mut sub = pty.subscribe().await;
             let replay = std::mem::take(&mut sub.replay);
             let replay_complete = sub.replay_complete;
+            let replay_sizes = std::mem::take(&mut sub.replay_sizes);
             let last_seq = sub.last_seq;
             // Bounded bridge: a stalled subscriber drops chunks via
             // `try_send` instead of growing an unbounded backlog. The
@@ -1131,6 +1131,8 @@ impl SessionBackend for TmuxBackend {
                                 match tx.try_send(OutputChunk {
                                     seq: c.seq,
                                     bytes: c.bytes.to_vec(),
+                                    cols: c.cols,
+                                    rows: c.rows,
                                 }) {
                                     Ok(()) => {}
                                     Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
@@ -1172,6 +1174,7 @@ impl SessionBackend for TmuxBackend {
             Ok(Subscription {
                 replay,
                 replay_complete,
+                replay_sizes,
                 last_seq,
                 live: rx,
             })

@@ -88,6 +88,8 @@ fn output_event_appends_to_recent_buffer() {
         bytes: b"hello world\n".to_vec().into(),
         first_seq: 1,
         seq: 1,
+        cols: 0,
+        rows: 0,
     });
     let content = t.active_content().unwrap();
     assert_eq!(content, b"hello world\n");
@@ -102,6 +104,8 @@ fn output_for_unknown_terminal_is_dropped() {
         bytes: b"nobody home".to_vec().into(),
         first_seq: 1,
         seq: 1,
+        cols: 0,
+        rows: 0,
     });
     assert_eq!(t.terminal_count(), 0);
 }
@@ -120,6 +124,8 @@ fn output_preserves_raw_escapes_for_inspection() {
         bytes: raw.clone().into(),
         first_seq: 1,
         seq: 1,
+        cols: 0,
+        rows: 0,
     });
     assert_eq!(t.active_content().unwrap(), raw.as_slice());
     // And strip_ansi still works as a standalone helper for callers
@@ -155,6 +161,8 @@ fn recent_buffer_is_capped() {
             bytes: chunk.clone().into(),
             first_seq: seq,
             seq,
+            cols: 0,
+            rows: 0,
         });
     }
     let content = t.active_content().unwrap();
@@ -201,6 +209,7 @@ fn snapshot_replaces_all_terminals() {
             composing_buffer: None,
             agent_state: Some(AgentState::Working),
             authenticating: false,
+            replay_sizes: Vec::new(),
         }],
         projects: vec![],
         recent_snippets: Vec::new(),
@@ -582,6 +591,8 @@ fn render_shows_tab_bar_and_content() {
         bytes: b"first line\nsecond line\n".to_vec().into(),
         first_seq: 1,
         seq: 1,
+        cols: 0,
+        rows: 0,
     });
 
     let out = render_to_string(&mut t, 60, 10, true);
@@ -630,6 +641,8 @@ fn render_shows_scrollbar_when_terminal_has_scrollback() {
         bytes: bytes.into(),
         first_seq: 1,
         seq: 1,
+        cols: 0,
+        rows: 0,
     });
     let out = render_to_string(&mut t, 60, 10, true);
     assert!(
@@ -649,6 +662,8 @@ fn render_hides_scrollbar_when_terminal_fits() {
         bytes: b"just one line\r\n".to_vec().into(),
         first_seq: 1,
         seq: 1,
+        cols: 0,
+        rows: 0,
     });
     let out = render_to_string(&mut t, 60, 10, true);
     assert!(
@@ -676,6 +691,8 @@ fn shift_pageup_scrolls_local_scrollback_without_pty_writes() {
         bytes: bytes.into(),
         first_seq: 1,
         seq: 1,
+        cols: 0,
+        rows: 0,
     });
     let at_bottom = t.scrollbar_summary().expect("scrollbar state");
     assert!(
@@ -757,12 +774,16 @@ fn render_tab_bar_updates_after_cycle() {
         bytes: b"AGENT_OUTPUT".to_vec().into(),
         first_seq: 1,
         seq: 1,
+        cols: 0,
+        rows: 0,
     });
     t.on_event(&Event::TerminalOutput {
         terminal_id: TerminalId(2),
         bytes: b"SHELL_OUTPUT".to_vec().into(),
         first_seq: 1,
         seq: 1,
+        cols: 0,
+        rows: 0,
     });
 
     let out_before = render_to_string(&mut t, 60, 10, true);
@@ -1243,6 +1264,7 @@ fn snapshot_restores_recap_for_agent_terminal() {
             composing_buffer: None,
             agent_state: None,
             authenticating: false,
+            replay_sizes: Vec::new(),
         }],
         projects: vec![],
         recent_snippets: Vec::new(),
@@ -1727,6 +1749,8 @@ fn render_inserts_blank_spacer_between_recap_and_agent_grid() {
         bytes: b"AGENTLINE".to_vec().into(),
         first_seq: 1,
         seq: 1,
+        cols: 0,
+        rows: 0,
     });
     type_str(&mut t, "do the thing");
     let mut cmds = Vec::new();

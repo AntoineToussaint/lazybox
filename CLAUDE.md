@@ -155,7 +155,13 @@ crates/
 - **Terminal**: daemon owns the PTYs (reader on std::thread, per-terminal
   ring buffer for replay on reconnect); the TUI parses the byte stream with
   the vendored `libghostty-vt` bindings (`!Send`, lives on the UI thread —
-  one VT instance per terminal slot in `TerminalStack`).
+  one VT instance per terminal slot in `TerminalStack`). The daemon is the
+  **size authority**: every `TerminalOutput` chunk is stamped with the PTY
+  size it was read at, a resize is announced in stream order as an empty
+  chunk with the new size, and ring replays carry `ReplaySizeSpan`s — the
+  client's VT mirrors the PTY (sized only from those stamps, never from
+  the pane; the pane only drives `Command::Resize`), so bytes always parse
+  at the size they were laid out for (#1547).
 - **Markdown**: comment/description rendering is hand-rolled
   (`components/comment_render.rs` + `right_pane/markdown.rs`) — inline-noise
   stripping and teaser extraction, no markdown crate.

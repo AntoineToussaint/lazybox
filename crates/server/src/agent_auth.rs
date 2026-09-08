@@ -758,6 +758,7 @@ pub(crate) async fn replay_auth_output(
                 terminal_id,
                 replay: snapshot.replay,
                 seq: snapshot.last_seq,
+                sizes: snapshot.sizes,
             });
         }
     }
@@ -1323,12 +1324,32 @@ async fn pump_auth_terminal(
     if !subscription.replay.is_empty()
         && let Some(output) = config.agent_recovery.output(recovery_terminal_id).await
     {
-        let _ = output.send(Event::AgentAuthOutput {
-            terminal_id,
-            bytes: subscription.replay,
-            first_seq: 1,
-            seq: subscription.last_seq,
-        });
+        // Same convention as the terminal pump's `replay_event`: a replay
+        // produced at one size streams as stamped output, one that
+        // straddles a resize needs the spans only the replay event carries.
+        let event = match subscription.replay_sizes.as_slice() {
+            [] | [_] => {
+                let (cols, rows) = subscription
+                    .replay_sizes
+                    .first()
+                    .map_or((0, 0), |span| (span.cols, span.rows));
+                Event::AgentAuthOutput {
+                    terminal_id,
+                    bytes: subscription.replay,
+                    first_seq: 1,
+                    seq: subscription.last_seq,
+                    cols,
+                    rows,
+                }
+            }
+            sizes => Event::AgentAuthReplay {
+                terminal_id,
+                replay: subscription.replay,
+                seq: subscription.last_seq,
+                sizes: sizes.to_vec(),
+            },
+        };
+        let _ = output.send(event);
     }
     while let Some(chunk) = subscription.live.recv().await {
         if let Some(output) = config.agent_recovery.output(recovery_terminal_id).await {
@@ -1337,6 +1358,8 @@ async fn pump_auth_terminal(
                 bytes: chunk.bytes,
                 first_seq: chunk.seq,
                 seq: chunk.seq,
+                cols: chunk.cols,
+                rows: chunk.rows,
             });
         }
     }
@@ -1563,6 +1586,7 @@ mod tests {
                 bytes,
                 first_seq: 1,
                 seq: 1,
+                            ..
             } if id == auth_terminal_id && bytes == b"interactive provider output\r\n"
         ));
         while let Ok(event) = broadcast_events.try_recv() {

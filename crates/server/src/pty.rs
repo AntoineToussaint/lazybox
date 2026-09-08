@@ -13,7 +13,9 @@
 //! stream of new bytes. Dropped subscribers are cleaned up in the
 //! main loop when `send` errors.
 
+use lazybox_ipc::ReplaySizeSpan;
 use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
+use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -201,10 +203,17 @@ async fn enqueue_with_retry(
 
 /// One chunk of PTY output with its monotonic sequence number.
 /// Carried on the broadcast channel so subscribers can detect gaps.
+///
+/// `cols` × `rows` is the PTY size when the reader took `bytes` off the
+/// master — the grid the child laid them out for. A resize is itself a
+/// chunk: empty `bytes` with the new size, sequenced in stream order,
+/// so a consumer's grid changes at exactly the point the PTY's did.
 #[derive(Debug, Clone)]
 pub struct OutputChunk {
     pub seq: u64,
     pub bytes: Arc<[u8]>,
+    pub cols: u16,
+    pub rows: u16,
 }
 
 /// Server-side handle to a running PTY. `Send + Sync`.
@@ -328,6 +337,12 @@ impl Read for RelayReader {
     }
 }
 
+/// Most PTY size changes a [`ReplayRing`] keeps exact offsets for. Every
+/// snapshot and resync clones the whole log, and eviction alone would
+/// only bound it by ring turnover — a size change per few bytes of
+/// output could otherwise grow it without limit.
+const SIZE_LOG_CAP: usize = 1024;
+
 /// Fixed-capacity byte ring. Writes overwrite the oldest bytes; reads
 /// return a logical linear slice of everything currently stored.
 ///
@@ -351,6 +366,14 @@ pub struct ReplayRing {
     /// `[total - buf.len(), total)`. Monotonic — useful for
     /// cross-checking seq numbers in tests.
     pub(crate) total_written: u64,
+    /// PTY size history as `(stream offset, cols, rows)`: from that
+    /// offset on, bytes were produced at that size. Ordered by offset;
+    /// the front entry is the size in effect at the oldest retained
+    /// byte (entries older than that are folded away on push), so a
+    /// snapshot can always name the size its first byte was produced
+    /// at. Empty until the first `note_size` — size unknown, reported
+    /// as `0 × 0`.
+    sizes: VecDeque<(u64, u16, u16)>,
 }
 
 impl Default for ReplayRing {
@@ -379,10 +402,67 @@ impl ReplayRing {
             cap,
             head: 0,
             total_written: 0,
+            sizes: VecDeque::new(),
+        }
+    }
+
+    /// The size bytes pushed from now on are produced at; `(0, 0)` until
+    /// the first [`Self::note_size`].
+    pub fn size(&self) -> (u16, u16) {
+        self.sizes
+            .back()
+            .map_or((0, 0), |&(_, cols, rows)| (cols, rows))
+    }
+
+    /// Record that the PTY is `cols` × `rows` from the next pushed byte
+    /// on. The current size again is a no-op; a change at an offset that
+    /// already has an entry (no bytes since the last change) replaces it.
+    pub fn note_size(&mut self, cols: u16, rows: u16) {
+        if self.size() == (cols, rows) {
+            return;
+        }
+        if let Some(last) = self.sizes.back_mut()
+            && last.0 == self.total_written
+        {
+            *last = (self.total_written, cols, rows);
+        } else {
+            self.sizes.push_back((self.total_written, cols, rows));
+        }
+        // Past the cap, fold the second-oldest change into the baseline:
+        // the oldest retained bytes take the size of the bytes before
+        // them, the cheapest place to be wrong and the first to be
+        // evicted anyway. Bytes newer than that keep exact sizes.
+        while self.sizes.len() > SIZE_LOG_CAP {
+            self.sizes.remove(1);
+        }
+    }
+
+    /// `(cols, rows)` in effect at stream offset `at`: the latest entry
+    /// recorded at or before it.
+    fn size_at(&self, at: u64) -> (u16, u16) {
+        self.sizes
+            .iter()
+            .rev()
+            .find(|&&(offset, _, _)| offset <= at)
+            .map_or((0, 0), |&(_, cols, rows)| (cols, rows))
+    }
+
+    /// Drop size entries the retained window no longer needs: every
+    /// entry before the last one at or below `oldest_offset`, which
+    /// stays as the window's baseline.
+    fn fold_evicted_sizes(&mut self) {
+        let oldest = self.oldest_offset();
+        while self.sizes.len() >= 2 && self.sizes[1].0 <= oldest {
+            self.sizes.pop_front();
         }
     }
 
     pub fn push(&mut self, bytes: &[u8]) {
+        self.push_bytes(bytes);
+        self.fold_evicted_sizes();
+    }
+
+    fn push_bytes(&mut self, bytes: &[u8]) {
         self.total_written += bytes.len() as u64;
         if bytes.len() >= self.cap {
             // Incoming burst alone exceeds capacity — keep only the tail.
@@ -455,18 +535,40 @@ impl ReplayRing {
     /// newline, costing one already-recovered line in the aligned case.
     /// That one-line trade buys never replaying a corrupt partial, and
     /// matches `read_scrollback_tail`'s behavior byte-for-byte.
-    pub fn replay_snapshot_into(&self, out: &mut Vec<u8>) {
+    ///
+    /// Returns the size spans of `out` as a whole: the first span covers
+    /// everything from `out`'s start (any prefix the caller assembled
+    /// ahead of the ring — the durable reattach seed — is content-only
+    /// text, correct at whatever size the ring's first byte was produced
+    /// at) and each size change retained in the ring follows at its
+    /// offset into `out`.
+    pub fn replay_snapshot_into(&self, out: &mut Vec<u8>) -> Vec<ReplaySizeSpan> {
         let start = out.len();
         self.snapshot_into(out);
-        if self.is_complete() {
-            return;
-        }
-        if let Some(rel) = out[start..].iter().position(|&b| b == b'\n') {
+        let mut dropped = 0u64;
+        if !self.is_complete()
+            && let Some(rel) = out[start..].iter().position(|&b| b == b'\n')
+        {
             out.drain(start..=start + rel);
+            dropped = rel as u64 + 1;
         }
+        let first_offset = self.oldest_offset() + dropped;
+        let (cols, rows) = self.size_at(first_offset);
+        let mut spans = vec![ReplaySizeSpan { at: 0, cols, rows }];
+        spans.extend(
+            self.sizes
+                .iter()
+                .filter(|&&(offset, _, _)| offset > first_offset)
+                .map(|&(offset, cols, rows)| ReplaySizeSpan {
+                    at: start as u64 + (offset - first_offset),
+                    cols,
+                    rows,
+                }),
+        );
+        spans
     }
 
-    /// Owned form of [`Self::replay_snapshot_into`].
+    /// Owned form of [`Self::replay_snapshot_into`], bytes only.
     pub fn replay_snapshot(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.buf.len());
         self.replay_snapshot_into(&mut out);
@@ -784,6 +886,7 @@ pub(crate) fn debug_byte_fingerprint(bytes: &[u8]) -> Option<ByteFingerprint> {
 pub struct Subscription {
     pub replay: Vec<u8>,
     pub replay_complete: bool,
+    pub replay_sizes: Vec<ReplaySizeSpan>,
     pub last_seq: u64,
     pub live: broadcast::Receiver<OutputChunk>,
 }
@@ -971,7 +1074,9 @@ impl DaemonPty {
         // full ring capacity to live output.
         let seed: Arc<[u8]> = Arc::from(initial);
         let seeded = !seed.is_empty();
-        let ring = Arc::new(Mutex::new(ReplayRing::with_capacity(REPLAY_RING_BYTES)));
+        let mut ring = ReplayRing::with_capacity(REPLAY_RING_BYTES);
+        ring.note_size(size.cols, size.rows);
+        let ring = Arc::new(Mutex::new(ring));
         let finished = Arc::new(AtomicBool::new(false));
         let finished_notify = Arc::new(Notify::new());
         let last_seq = Arc::new(AtomicU64::new(u64::from(seeded)));
@@ -1027,26 +1132,48 @@ impl DaemonPty {
                                 log.append(&buf[..n]);
                             }
                             let bytes: Arc<[u8]> = Arc::from(&buf[..n]);
-                            // Push to the ring and assign the seq under the
-                            // SAME lock, in that order, so any reader of the
-                            // (ring snapshot, last_seq) pair — `snapshot_only`,
-                            // feeding subscribe + the forwarder's resync — sees
-                            // the ring already containing every chunk through
-                            // last_seq. Bumping the seq before the push left a
-                            // window where last_seq led the ring by one chunk;
-                            // the forwarder's seq dedup would then mistake that
-                            // not-yet-replayed chunk for a duplicate and drop
-                            // it. Ring-ahead-of-seq is harmless (worst case a
-                            // duplicate that dedup catches); seq-ahead-of-ring
-                            // loses data.
-                            let seq = {
+                            // Push to the ring, assign the seq, AND broadcast
+                            // all under the SAME lock, in that order. The push
+                            // before the seq bump means any reader of the (ring
+                            // snapshot, last_seq) pair — `snapshot_only`, feeding
+                            // subscribe + the forwarder's resync — sees the ring
+                            // already containing every chunk through last_seq.
+                            // Bumping the seq before the push left a window where
+                            // last_seq led the ring by one chunk; the forwarder's
+                            // seq dedup would then mistake that not-yet-replayed
+                            // chunk for a duplicate and drop it. Ring-ahead-of-seq
+                            // is harmless (worst case a duplicate that dedup
+                            // catches); seq-ahead-of-ring loses data.
+                            //
+                            // The `send` stays inside the lock too, because this
+                            // channel has a SECOND producer: `resize` also
+                            // sequences-then-broadcasts an empty size chunk. If
+                            // either producer released the lock before sending,
+                            // the two sends could complete in an order that
+                            // disagrees with their allocated seq — broadcast
+                            // delivers in send-completion order, not seq order —
+                            // and the forwarder would see a phantom seq gap and
+                            // fire a spurious full-ring resync (plus a full state
+                            // re-detection) under nothing worse than a splitter
+                            // drag over live output. `broadcast::send` is
+                            // synchronous, non-blocking, and never touches the
+                            // ring lock, so holding the lock across it just
+                            // serializes send-completion into seq order; it
+                            // cannot deadlock.
+                            {
                                 let mut r = reader_ring.blocking_lock();
                                 r.push(&bytes);
-                                reader_seq.fetch_add(1, Ordering::SeqCst) + 1
-                            };
-                            // If no subscribers, broadcast returns error;
-                            // we don't care — the ring holds the data.
-                            let _ = reader_tx.send(OutputChunk { seq, bytes });
+                                let seq = reader_seq.fetch_add(1, Ordering::SeqCst) + 1;
+                                let (cols, rows) = r.size();
+                                // If no subscribers, broadcast returns error;
+                                // we don't care — the ring holds the data.
+                                let _ = reader_tx.send(OutputChunk {
+                                    seq,
+                                    bytes,
+                                    cols,
+                                    rows,
+                                });
+                            }
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                         Err(e) => {
@@ -1166,6 +1293,7 @@ impl DaemonPty {
         Subscription {
             replay: snapshot.replay,
             replay_complete: snapshot.complete,
+            replay_sizes: snapshot.sizes,
             last_seq: snapshot.last_seq,
             live,
         }
@@ -1195,11 +1323,12 @@ impl DaemonPty {
         let ring = self.ring.lock().await;
         let mut replay = Vec::with_capacity(self.seed.len() + ring.len());
         replay.extend_from_slice(&self.seed);
-        ring.replay_snapshot_into(&mut replay);
+        let sizes = ring.replay_snapshot_into(&mut replay);
         crate::backend::ReplaySnapshot {
             replay,
             last_seq: self.last_seq.load(Ordering::SeqCst),
             complete: ring.is_complete(),
+            sizes,
         }
     }
 
@@ -1229,9 +1358,38 @@ impl DaemonPty {
         self.last_seq.load(Ordering::SeqCst)
     }
 
+    /// Resize the PTY and announce its size on the output stream as an
+    /// empty chunk, sequenced under the ring lock like real output, so
+    /// subscribers see the size change at the exact point in the stream
+    /// where the child starts laying out for it (modulo the child's own
+    /// SIGWINCH latency, which no terminal can see). A resize to the
+    /// current size is announced too: every request gets its answer, so
+    /// a client that asked can tell "already that size" from "never
+    /// applied".
     pub async fn resize(&self, size: PtySize) -> Result<(), PtyError> {
         let m = self.master.lock().await;
-        m.resize(size).map_err(|e| PtyError::Open(e.to_string()))
+        m.resize(size).map_err(|e| PtyError::Open(e.to_string()))?;
+        // Sequence AND broadcast the size announcement under the ring
+        // lock, matching the reader thread. This channel has two
+        // producers (the reader and this method); if the send happened
+        // after the lock released, the reader's send and this one could
+        // complete out of seq order — broadcast delivers in
+        // send-completion order, not seq order — and the forwarder would
+        // see a phantom gap and fire a spurious full-ring resync. Holding
+        // the lock across the synchronous, non-blocking `send` serializes
+        // the two producers' send-completion into seq order.
+        {
+            let mut ring = self.ring.lock().await;
+            ring.note_size(size.cols, size.rows);
+            let seq = self.last_seq.fetch_add(1, Ordering::SeqCst) + 1;
+            let _ = self.output_tx.send(OutputChunk {
+                seq,
+                bytes: Arc::from(&[][..]),
+                cols: size.cols,
+                rows: size.rows,
+            });
+        }
+        Ok(())
     }
 
     pub fn is_finished(&self) -> bool {
@@ -1606,6 +1764,109 @@ mod ring_tests {
         assert_eq!(r.len(), 5);
     }
 
+    fn span(at: u64, cols: u16, rows: u16) -> ReplaySizeSpan {
+        ReplaySizeSpan { at, cols, rows }
+    }
+
+    /// The ring records the PTY size per stream offset and reports a
+    /// replay's spans relative to the assembled replay — a prefix the
+    /// caller put ahead of the ring bytes shares the first span.
+    #[test]
+    fn replay_snapshot_reports_size_spans_relative_to_the_replay() {
+        let mut r = ReplayRing::with_capacity(64);
+        assert_eq!(r.size(), (0, 0), "unknown until noted");
+        r.note_size(80, 24);
+        r.note_size(80, 24);
+        r.push(b"first\n");
+        r.note_size(80, 10);
+        r.push(b"second\n");
+        assert_eq!(
+            r.sizes.iter().copied().collect::<Vec<_>>(),
+            vec![(0, 80, 24), (6, 80, 10)],
+            "the same size again leaves no entry"
+        );
+        assert_eq!(r.size(), (80, 10));
+
+        let mut out = b"seed:".to_vec();
+        let spans = r.replay_snapshot_into(&mut out);
+        assert_eq!(out, b"seed:first\nsecond\n");
+        assert_eq!(spans, vec![span(0, 80, 24), span(5 + 6, 80, 10)]);
+    }
+
+    /// A wrapped ring's replay starts after the dropped partial line;
+    /// span offsets are measured from that first replayed byte.
+    #[test]
+    fn size_spans_shift_with_the_dropped_partial_line() {
+        let mut r = ReplayRing::with_capacity(8);
+        r.note_size(80, 24);
+        r.push(b"abc\ndef\n");
+        r.push(b"xy");
+        r.note_size(80, 12);
+        r.push(b"z\n");
+        assert!(!r.is_complete());
+
+        let mut out = Vec::new();
+        let spans = r.replay_snapshot_into(&mut out);
+        assert_eq!(out, b"xyz\n", "the partial `def` line is dropped");
+        assert_eq!(
+            spans,
+            vec![span(0, 80, 24), span(2, 80, 12)],
+            "`xy` was produced at 80×24, `z\\n` at 80×12"
+        );
+    }
+
+    /// The size log is bounded: past the cap the second-oldest change
+    /// folds into the baseline, so the newest changes keep exact offsets
+    /// and the oldest retained bytes inherit their predecessors' size.
+    #[test]
+    fn size_log_is_capped_by_folding_its_oldest_changes() {
+        let mut r = ReplayRing::with_capacity(MAX_RING_SIZE);
+        r.note_size(80, 24);
+        r.push(b"a");
+        for i in 0..(SIZE_LOG_CAP as u16 + 100) {
+            r.note_size(100 + i, 24);
+            r.push(b"a");
+        }
+        assert_eq!(r.sizes.len(), SIZE_LOG_CAP);
+        assert_eq!(r.sizes.front().copied(), Some((0, 80, 24)), "baseline kept");
+        assert_eq!(
+            r.sizes.back().copied(),
+            Some((
+                SIZE_LOG_CAP as u64 + 100,
+                100 + SIZE_LOG_CAP as u16 + 99,
+                24
+            )),
+            "newest change exact"
+        );
+        assert_eq!(
+            r.sizes[1].0, 102,
+            "the 101 oldest changes folded into the baseline, the rest are exact"
+        );
+    }
+
+    /// Size changes with no bytes between them collapse to the last one,
+    /// and entries the window evicted fold into its baseline.
+    #[test]
+    fn size_log_folds_evicted_entries_into_the_baseline() {
+        let mut r = ReplayRing::with_capacity(8);
+        r.note_size(80, 24);
+        r.push(b"aaaa\n");
+        r.note_size(80, 20);
+        r.note_size(80, 30);
+        r.push(b"bbbb\n");
+        r.push(b"cc\n");
+        assert_eq!(r.oldest_offset(), 5);
+        assert_eq!(
+            r.sizes.iter().copied().collect::<Vec<_>>(),
+            vec![(5, 80, 30)]
+        );
+
+        let mut out = Vec::new();
+        let spans = r.replay_snapshot_into(&mut out);
+        assert_eq!(out, b"cc\n");
+        assert_eq!(spans, vec![span(0, 80, 30)]);
+    }
+
     /// A complete ring (nothing evicted) is a clean baseline as-is, so the
     /// replay snapshot keeps its first byte — trimming would wrongly drop
     /// the terminal's real opening line.
@@ -1663,6 +1924,163 @@ mod seed_tests {
     /// it they render degraded/monochrome. Regression for #421. The
     /// forced pair also wins over caller-provided values, matching the
     /// documented override semantics.
+    /// A resize is announced on the output stream as an empty chunk
+    /// carrying the size, sequenced before anything the child writes
+    /// afterwards; later chunks are stamped with it. A resize to the
+    /// current size is announced as well, so every request is answered.
+    #[tokio::test]
+    async fn resize_announces_the_new_size_in_stream_order() {
+        let pty = DaemonPty::spawn(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "sleep 0.3; printf after".to_string(),
+            ],
+            small(),
+            None,
+            Vec::new(),
+            &[],
+        )
+        .expect("spawn");
+        let mut sub = pty.subscribe().await;
+        assert!(sub.replay.is_empty());
+        assert_eq!(
+            sub.replay_sizes,
+            vec![ReplaySizeSpan {
+                at: 0,
+                cols: 80,
+                rows: 24
+            }],
+            "the spawn size is the baseline"
+        );
+
+        let bigger = PtySize {
+            cols: 100,
+            rows: 40,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        pty.resize(bigger).await.expect("resize");
+        pty.resize(bigger).await.expect("same-size resize");
+        let marker = sub.live.recv().await.expect("announcement");
+        assert!(marker.bytes.is_empty());
+        assert_eq!((marker.cols, marker.rows), (100, 40));
+        assert_eq!(marker.seq, sub.last_seq + 1);
+        let again = sub.live.recv().await.expect("same-size announcement");
+        assert!(again.bytes.is_empty());
+        assert_eq!((again.cols, again.rows), (100, 40));
+        assert_eq!(again.seq, marker.seq + 1);
+
+        let out = tokio::time::timeout(std::time::Duration::from_secs(5), sub.live.recv())
+            .await
+            .expect("child output deadline")
+            .expect("child output");
+        assert_eq!(out.bytes.as_ref(), b"after");
+        assert_eq!((out.cols, out.rows), (100, 40));
+        assert_eq!(out.seq, again.seq + 1);
+
+        let snapshot = pty.snapshot_only().await;
+        assert_eq!(
+            snapshot.sizes,
+            vec![ReplaySizeSpan {
+                at: 0,
+                cols: 100,
+                rows: 40
+            }],
+            "nothing was produced at the spawn size, so the resize replaces the baseline"
+        );
+    }
+
+    /// Regression for the two-producer broadcast reorder (finding #1):
+    /// the reader thread and `resize` both allocate their seq under the
+    /// ring lock, but if either broadcast the chunk AFTER releasing the
+    /// lock, the two sends could complete out of seq order — tokio
+    /// broadcast delivers in send-completion order — so a subscriber
+    /// would receive a higher seq before a lower one. The forwarder
+    /// reads that as a phantom gap and fires a spurious full-ring resync
+    /// under nothing worse than a splitter drag over live output. The
+    /// invariant the fix restores is absolute: delivery order equals seq
+    /// order, so received seqs never go backwards. This is a stress
+    /// guard — it cannot false-fail on correct code (the invariant holds
+    /// unconditionally once the send is inside the lock) and catches a
+    /// regression by hammering resizes against a continuous output
+    /// stream across two runtime threads.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_resize_and_output_never_reorder_seqs() {
+        let pty = DaemonPty::spawn(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                // A steady, high-rate byte stream keeps the reader thread
+                // broadcasting while we resize underneath it.
+                "while :; do printf 'xxxxxxxx'; done".to_string(),
+            ],
+            small(),
+            None,
+            Vec::new(),
+            &[],
+        )
+        .expect("spawn");
+        let mut sub = pty.subscribe().await;
+        let pty = std::sync::Arc::new(pty);
+
+        // Resizer: flip between two sizes as fast as possible on another
+        // runtime thread, contending with the reader for the ring lock.
+        let resizer = {
+            let pty = pty.clone();
+            tokio::spawn(async move {
+                let sizes = [(90u16, 30u16), (100u16, 40u16)];
+                for i in 0..4000u32 {
+                    let (cols, rows) = sizes[(i % 2) as usize];
+                    let _ = pty
+                        .resize(PtySize {
+                            cols,
+                            rows,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        })
+                        .await;
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+
+        // Drain the stream and prove seqs only ever increase. `Lagged`
+        // preserves monotonicity: it skips the oldest un-received chunks,
+        // so the next delivered seq is still greater than the last seen.
+        let mut prev = sub.last_seq;
+        let mut received = 0u32;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while received < 3000 && std::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), sub.live.recv()).await
+            {
+                Ok(Ok(chunk)) => {
+                    assert!(
+                        chunk.seq > prev,
+                        "broadcast delivered seq {} after {} — out-of-order producers",
+                        chunk.seq,
+                        prev
+                    );
+                    prev = chunk.seq;
+                    received += 1;
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+                Err(_) => {
+                    if resizer.is_finished() {
+                        break;
+                    }
+                }
+            }
+        }
+        pty.kill();
+        let _ = resizer.await;
+        assert!(
+            received > 100,
+            "expected a meaningful sample of the interleaved stream, got {received}"
+        );
+    }
+
     #[tokio::test]
     async fn spawn_env_forces_term_and_colorterm() {
         let pty = DaemonPty::spawn(

@@ -20,8 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{RwLock, watch};
 
-const DEFAULT_COLS: u16 = 120;
-const DEFAULT_ROWS: u16 = 32;
+use super::{DEFAULT_COLS, DEFAULT_ROWS};
 
 /// How long `kill()` waits for a SIGTERM'd child to exit before
 /// escalating to SIGKILL. A child that traps/ignores SIGTERM would
@@ -443,6 +442,7 @@ impl SessionBackend for RawPtyBackend {
             let mut sub = pty.subscribe().await;
             let replay = std::mem::take(&mut sub.replay);
             let replay_complete = sub.replay_complete;
+            let replay_sizes = std::mem::take(&mut sub.replay_sizes);
             let last_seq = sub.last_seq;
             let (tx, rx) = tokio::sync::mpsc::channel::<OutputChunk>(
                 crate::backend::SUBSCRIPTION_CHANNEL_CAPACITY,
@@ -459,6 +459,8 @@ impl SessionBackend for RawPtyBackend {
                                 match tx.try_send(OutputChunk {
                                     seq: c.seq,
                                     bytes: c.bytes.to_vec(),
+                                    cols: c.cols,
+                                    rows: c.rows,
                                 }) {
                                     Ok(()) => {}
                                     Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
@@ -491,6 +493,7 @@ impl SessionBackend for RawPtyBackend {
             Ok(Subscription {
                 replay,
                 replay_complete,
+                replay_sizes,
                 last_seq,
                 live: rx,
             })

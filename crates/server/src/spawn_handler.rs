@@ -2053,12 +2053,12 @@ async fn handle_spawn_inner(
                 );
                 last_chunk_len = sub.replay.len();
                 if sub.replay_complete {
-                    let _ = bus.send(Event::TerminalOutput {
-                        terminal_id: id_for_pump,
-                        bytes: Arc::<[u8]>::from(sub.replay.clone()),
-                        first_seq: 1,
-                        seq: sub.last_seq,
-                    });
+                    let _ = bus.send(replay_event(
+                        id_for_pump,
+                        sub.replay.clone(),
+                        sub.last_seq,
+                        &sub.replay_sizes,
+                    ));
                 } else {
                     tracing::warn!(
                         terminal_id = ?id_for_pump,
@@ -2208,11 +2208,30 @@ async fn handle_spawn_inner(
                         terminal_id: id_for_pump,
                         replay: snapshot.replay,
                         seq: snapshot.last_seq,
+                        sizes: snapshot.sizes,
                     });
                     last_seq = snapshot.last_seq;
                     continue;
                 }
                 last_seq = chunk.seq;
+                // A resize announcement carries no bytes: publish it in
+                // stream order and skip the detectors, so it neither
+                // counts as agent output nor consumes the view epoch
+                // armed for the repaint it provokes.
+                if chunk.bytes.is_empty() {
+                    terminal_registry
+                        .note_agent_turn_received(id_for_pump, turn_schedule.watchdog_due)
+                        .await;
+                    let _ = bus.send(Event::TerminalOutput {
+                        terminal_id: id_for_pump,
+                        bytes: Arc::<[u8]>::from(chunk.bytes),
+                        first_seq: chunk.seq,
+                        seq: chunk.seq,
+                        cols: chunk.cols,
+                        rows: chunk.rows,
+                    });
+                    continue;
+                }
                 let progress = agent_for_pump.is_some()
                     && watchdog_notes_progress(&mut watchdog_fp, &chunk.bytes);
                 // One registry acquisition for the chunk's whole context
@@ -2317,6 +2336,8 @@ async fn handle_spawn_inner(
                     bytes: Arc::<[u8]>::from(chunk.bytes),
                     first_seq: chunk.seq,
                     seq: chunk.seq,
+                    cols: chunk.cols,
+                    rows: chunk.rows,
                 });
                     }
                     // `unwrap_or_else(now)` only feeds the disabled arm —
@@ -8857,7 +8878,44 @@ fn encode_shell_snippet(body: &str, submit: bool) -> Vec<u8> {
     bytes
 }
 
+/// The event that hands a subscription's replay to clients as the
+/// terminal's first bytes. A replay produced at one PTY size streams as
+/// ordinary output stamped with it; one that straddles a resize needs
+/// its spans, which only the resync event carries.
+fn replay_event(
+    terminal_id: TerminalId,
+    replay: Vec<u8>,
+    last_seq: u64,
+    sizes: &[lazybox_ipc::ReplaySizeSpan],
+) -> Event {
+    match sizes {
+        [] | [_] => {
+            let (cols, rows) = sizes.first().map_or((0, 0), |span| (span.cols, span.rows));
+            Event::TerminalOutput {
+                terminal_id,
+                bytes: Arc::<[u8]>::from(replay),
+                first_seq: 1,
+                seq: last_seq,
+                cols,
+                rows,
+            }
+        }
+        _ => Event::TerminalResync {
+            terminal_id,
+            replay,
+            seq: last_seq,
+            sizes: sizes.to_vec(),
+        },
+    }
+}
+
 pub async fn handle_resize(config: &ServerConfig, terminal_id: TerminalId, cols: u16, rows: u16) {
+    // A zero dimension is not a terminal size; applied, it would stamp
+    // output `0 × 0` — the "unknown size" value clients fall back from.
+    if cols == 0 || rows == 0 {
+        tracing::warn!(?terminal_id, cols, rows, "ignoring zero-sized resize");
+        return;
+    }
     let Some(key) = config.terminal.backend_key_for(terminal_id).await else {
         return;
     };
@@ -9180,12 +9238,12 @@ async fn pump_recovered_session(
             pump_started.elapsed() < CHUNK_SCAN_STARTUP_WINDOW,
         )
         .await;
-        let _ = config.bus.send(Event::TerminalOutput {
+        let _ = config.bus.send(replay_event(
             terminal_id,
-            bytes: Arc::<[u8]>::from(sub.replay.clone()),
-            first_seq: 1,
-            seq: sub.last_seq,
-        });
+            sub.replay.clone(),
+            sub.last_seq,
+            &sub.replay_sizes,
+        ));
     }
 
     let mut last_seq = sub.last_seq;
@@ -9266,11 +9324,27 @@ async fn pump_recovered_session(
                         terminal_id,
                         replay: snapshot.replay,
                         seq: snapshot.last_seq,
+                        sizes: snapshot.sizes,
                     });
                     last_seq = snapshot.last_seq;
                     continue;
                 }
                 last_seq = chunk.seq;
+                if chunk.bytes.is_empty() {
+                    config
+                        .terminal
+                        .note_agent_turn_received(terminal_id, turn_schedule.watchdog_due)
+                        .await;
+                    let _ = config.bus.send(Event::TerminalOutput {
+                        terminal_id,
+                        bytes: Arc::<[u8]>::from(chunk.bytes),
+                        first_seq: chunk.seq,
+                        seq: chunk.seq,
+                        cols: chunk.cols,
+                        rows: chunk.rows,
+                    });
+                    continue;
+                }
                 let progress =
                     agent.is_some() && watchdog_notes_progress(&mut watchdog_fp, &chunk.bytes);
                 // Mirror the primary pump's one-lock chunk context (#1256
@@ -9331,6 +9405,8 @@ async fn pump_recovered_session(
                     bytes: Arc::<[u8]>::from(chunk.bytes),
                     first_seq: chunk.seq,
                     seq: chunk.seq,
+                    cols: chunk.cols,
+                    rows: chunk.rows,
                 });
             }
             _ = tokio::time::sleep_until(
@@ -10967,9 +11043,9 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
             // failure/timeout leaves the client with no replay to adopt; that
             // path alone reports `replay_available: false` (and the client then
             // requests a resync via `handle_terminal_resync_request`).
-            let (replay, last_seq, replay_available) = match snapshot {
-                None => (Vec::new(), 0, true),
-                Some(Ok(Ok(snap))) => (snap.replay, snap.last_seq, true),
+            let (replay, replay_sizes, last_seq, replay_available) = match snapshot {
+                None => (Vec::new(), Vec::new(), 0, true),
+                Some(Ok(Ok(snap))) => (snap.replay, snap.sizes, snap.last_seq, true),
                 Some(Ok(Err(error))) => {
                     tracing::warn!(
                         terminal_id = ?id,
@@ -10977,7 +11053,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                         %error,
                         "snapshot_terminals: backend.snapshot failed — replay unavailable"
                     );
-                    (Vec::new(), 0, false)
+                    (Vec::new(), Vec::new(), 0, false)
                 }
                 Some(Err(_)) => {
                     tracing::warn!(
@@ -10986,7 +11062,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                         timeout_ms = SNAPSHOT_PER_SESSION_TIMEOUT.as_millis() as u64,
                         "snapshot_terminals: backend.snapshot timed out — replay unavailable"
                     );
-                    (Vec::new(), 0, false)
+                    (Vec::new(), Vec::new(), 0, false)
                 }
             };
             if let Some(replay_fingerprint) = crate::pty::debug_byte_fingerprint(&replay) {
@@ -11020,6 +11096,7 @@ pub async fn snapshot_terminals(config: &ServerConfig) -> Vec<TerminalSnapshot> 
                 session_key,
                 kind,
                 replay,
+                replay_sizes,
                 last_seq,
                 replay_available,
                 agent_state,
@@ -11160,6 +11237,7 @@ pub async fn handle_terminal_resync_request(
                 terminal_id,
                 replay: snapshot.replay,
                 seq: snapshot.last_seq,
+                sizes: snapshot.sizes,
             });
         }
         Ok(Ok(snapshot)) => {
@@ -13226,6 +13304,114 @@ mod tests {
         );
     }
 
+    /// The pump publishes a resize announcement as stream-ordered output
+    /// with no bytes and the new size, and stamps the chunks that follow
+    /// with it.
+    #[tokio::test]
+    async fn pump_publishes_resize_announcements_and_stamps_output() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let mut events = config.bus.subscribe();
+        let terminal_id = handle_spawn(
+            &config,
+            SessionKey::from("test:size-stamps"),
+            None,
+            TerminalKind::Shell,
+            SpawnOptions {
+                cwd: Some(
+                    std::env::current_dir()
+                        .expect("current directory")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("spawn");
+        let backend_key = config
+            .terminal
+            .backend_key_for(terminal_id)
+            .await
+            .expect("backend key");
+
+        async fn outputs_for(
+            events: &mut tokio::sync::broadcast::Receiver<Event>,
+            terminal_id: TerminalId,
+            n: usize,
+        ) -> Vec<(Vec<u8>, u16, u16)> {
+            let mut got = Vec::new();
+            while got.len() < n {
+                if let Event::TerminalOutput {
+                    terminal_id: id,
+                    bytes,
+                    cols,
+                    rows,
+                    ..
+                } = events.recv().await.expect("event")
+                    && id == terminal_id
+                {
+                    got.push((bytes.to_vec(), cols, rows));
+                }
+            }
+            got
+        }
+
+        // The pump subscribes asynchronously; wait until it is streaming
+        // before resizing, or the announcement predates its subscription.
+        mock.emit(&backend_key, b"booted").await;
+        let booted = tokio::time::timeout(
+            Duration::from_secs(2),
+            outputs_for(&mut events, terminal_id, 1),
+        )
+        .await
+        .expect("first output deadline");
+        assert_eq!(booted[0].0, b"booted");
+        assert_ne!(
+            (booted[0].1, booted[0].2),
+            (0, 0),
+            "stamped with the spawn size"
+        );
+
+        handle_resize(&config, terminal_id, 100, 40).await;
+        mock.emit(&backend_key, b"laid out at 100x40").await;
+        let next = tokio::time::timeout(
+            Duration::from_secs(2),
+            outputs_for(&mut events, terminal_id, 2),
+        )
+        .await
+        .expect("announcement + output deadline");
+        assert_eq!(
+            next[0],
+            (Vec::new(), 100, 40),
+            "the announcement comes first"
+        );
+        assert_eq!(next[1], (b"laid out at 100x40".to_vec(), 100, 40));
+    }
+
+    #[tokio::test]
+    async fn zero_sized_resize_never_reaches_the_backend() {
+        let (config, mock) = ServerConfig::in_memory_with_mock();
+        let backend_key = mock
+            .spawn(&[], None, &[], "zero-resize")
+            .await
+            .expect("spawn");
+        let terminal_id = TerminalId(698);
+        config
+            .terminal
+            .register_terminal(
+                terminal_id,
+                backend_key.clone(),
+                SessionKey::new("zero-resize"),
+                TerminalKind::Shell,
+            )
+            .await;
+        handle_resize(&config, terminal_id, 0, 40).await;
+        handle_resize(&config, terminal_id, 100, 0).await;
+        assert!(mock.resizes_for(&backend_key).await.is_empty());
+        handle_resize(&config, terminal_id, 100, 40).await;
+        assert_eq!(mock.resizes_for(&backend_key).await, vec![(100, 40)]);
+    }
+
     #[tokio::test]
     async fn view_activity_is_released_only_by_submitted_input() {
         let (config, mock) = ServerConfig::in_memory_with_mock();
@@ -14554,6 +14740,8 @@ mod tests {
             bytes: Arc::<[u8]>::from(b"composer ready".to_vec()),
             first_seq: 1,
             seq: 1,
+            cols: 0,
+            rows: 0,
         });
         wait_for_write_count(&mock, &backend_key, 2).await;
         let _ = config.bus.send(Event::TerminalOutput {
@@ -14561,6 +14749,8 @@ mod tests {
             bytes: Arc::<[u8]>::from(b"Continue the work you were doing.".to_vec()),
             first_seq: 2,
             seq: 2,
+            cols: 0,
+            rows: 0,
         });
         wait_for_write_count(&mock, &backend_key, 3).await;
         assert_eq!(
@@ -14903,6 +15093,8 @@ mod tests {
             bytes: Arc::<[u8]>::from(b"composer ready".to_vec()),
             first_seq: 1,
             seq: 1,
+            cols: 0,
+            rows: 0,
         });
         task.await.expect("failed injection task");
 
@@ -15646,6 +15838,8 @@ mod tests {
                             bytes: Arc::<[u8]>::from(prompt.into_bytes()),
                             first_seq: 1,
                             seq: 1,
+                            cols: 0,
+                            rows: 0,
                         });
                         wait_for_write_count(&mock, &backend_key, 2).await;
                         let _ = config.bus.send(Event::AgentState {
@@ -15827,6 +16021,8 @@ mod tests {
                 bytes: Arc::<[u8]>::from(Vec::new()),
                 first_seq: 0,
                 seq: 0,
+                cols: 0,
+                rows: 0,
             });
         }
         // Subscribed after the flood so this receiver never lags and a
@@ -16537,6 +16733,7 @@ mod tests {
                 terminal_id,
                 replay,
                 seq,
+                ..
             }) => {
                 assert_eq!(terminal_id, id);
                 assert_eq!(replay, b"screen-state");
@@ -17336,6 +17533,8 @@ mod tests {
                     bytes: Arc::<[u8]>::from(b"paint".to_vec()),
                     first_seq: seq,
                     seq,
+                    cols: 0,
+                    rows: 0,
                 });
                 tokio::time::sleep(Duration::from_millis(40)).await;
             }
@@ -17369,6 +17568,8 @@ mod tests {
                     bytes: Arc::<[u8]>::from(b"noise".to_vec()),
                     first_seq: seq,
                     seq,
+                    cols: 0,
+                    rows: 0,
                 });
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -17404,6 +17605,8 @@ mod tests {
                     bytes: Arc::<[u8]>::from(b"spin".to_vec()),
                     first_seq: seq,
                     seq,
+                    cols: 0,
+                    rows: 0,
                 });
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -17452,6 +17655,8 @@ mod tests {
                     bytes: Arc::<[u8]>::from(bytes),
                     first_seq: seq,
                     seq,
+                    cols: 0,
+                    rows: 0,
                 });
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -17495,6 +17700,8 @@ mod tests {
                 ),
                 first_seq: 0,
                 seq: 0,
+                cols: 0,
+                rows: 0,
             });
         });
         let settle = await_paste_settled(

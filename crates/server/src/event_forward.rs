@@ -574,6 +574,7 @@ impl ForwardState {
                 terminal_id,
                 replay: snapshot.replay,
                 seq: snapshot.last_seq,
+                sizes: snapshot.sizes,
             });
         } else if self.resync_unavailable_announced.insert(terminal_id) {
             permit.send(Event::TerminalResyncUnavailable { terminal_id });
@@ -760,6 +761,8 @@ mod tests {
                     bytes: Arc::<[u8]>::from(format!("chunk{seq}").into_bytes()),
                     first_seq: seq,
                     seq,
+                    cols: 0,
+                    rows: 0,
                 })
                 .unwrap();
         }
@@ -790,6 +793,7 @@ mod tests {
                     terminal_id,
                     replay,
                     seq,
+                    ..
                 } if *terminal_id == tid => Some((replay.clone(), *seq)),
                 _ => None,
             })
@@ -853,6 +857,8 @@ mod tests {
                 bytes: Arc::<[u8]>::from(vec![b'x']),
                 first_seq: 1,
                 seq: 1,
+                cols: 0,
+                rows: 0,
             },
         );
         assert!(matches!(cf, ControlFlow::Continue(())));
@@ -864,6 +870,8 @@ mod tests {
                 bytes: Arc::<[u8]>::from(vec![b'y']),
                 first_seq: 2,
                 seq: 2,
+                cols: 0,
+                rows: 0,
             },
         );
         assert!(matches!(cf, ControlFlow::Continue(())));
@@ -909,7 +917,7 @@ mod tests {
         assert!(
             matches!(
                 rx.try_recv(),
-                Ok(Event::TerminalResync { terminal_id, replay, seq })
+                Ok(Event::TerminalResync { terminal_id, replay, seq, .. })
                     if terminal_id == tid && replay == b"screen-state" && seq == 1
             ),
             "a wrapped-but-boundary-clean ring must serve the resync",
@@ -953,6 +961,8 @@ mod tests {
                 bytes: Arc::<[u8]>::from(b"B".to_vec()),
                 first_seq: 2,
                 seq: 2,
+                cols: 0,
+                rows: 0,
             },
         );
         assert!(rx.try_recv().is_err(), "torn output must stay suppressed");
@@ -993,6 +1003,7 @@ mod tests {
                 composing_buffer: None,
                 agent_state: None,
                 authenticating: false,
+                replay_sizes: Vec::new(),
             }],
             projects: Vec::new(),
             recent_snippets: Vec::new(),
@@ -1010,6 +1021,8 @@ mod tests {
                     bytes: Arc::<[u8]>::from(vec![b'z']),
                     first_seq: seq,
                     seq,
+                    cols: 0,
+                    rows: 0,
                 },
             );
         }
@@ -1062,6 +1075,8 @@ mod tests {
                     bytes: vec![b'x'].into(),
                     first_seq: 1,
                     seq: 1,
+                    cols: 0,
+                    rows: 0,
                 },
             );
             assert!(matches!(cf, ControlFlow::Continue(())));
@@ -1147,6 +1162,8 @@ mod tests {
                     bytes: Arc::<[u8]>::from(vec![b'x']),
                     first_seq: seq,
                     seq,
+                    cols: 0,
+                    rows: 0,
                 })
                 .unwrap();
         }

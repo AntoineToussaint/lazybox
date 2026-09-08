@@ -7054,6 +7054,8 @@ mod input_starvation_tests {
                 bytes: Arc::<[u8]>::from(b"streaming output chunk\n".to_vec()),
                 first_seq: seq as u64,
                 seq: seq as u64,
+                cols: 0,
+                rows: 0,
             })
             .expect("bounded channel must have room for the flood");
         }
@@ -7131,6 +7133,7 @@ mod input_starvation_tests {
                     terminal_id: TerminalId(1),
                     replay: b"hello".to_vec(),
                     seq: 7,
+                    sizes: Vec::new(),
                 })
                 .expect("room for resync");
         }
@@ -7234,6 +7237,7 @@ mod input_starvation_tests {
             terminal_id: TerminalId(1),
             replay: b"hello".to_vec(),
             seq: 1,
+            sizes: Vec::new(),
         };
         let mut carried_in = vec![carried];
         let backlog = drain_daemon_events(&mut m, &mut carried_in, || false);
@@ -7346,6 +7350,8 @@ mod wake_tests {
             bytes: Arc::<[u8]>::from(b"echo".to_vec()),
             first_seq: seq,
             seq,
+            cols: 0,
+            rows: 0,
         }
     }
 
@@ -7641,6 +7647,7 @@ mod wake_burst_liveness_tests {
                 terminal_id: TerminalId((i % 4) as u64 + 1),
                 replay: b"recovered grid".to_vec(),
                 seq: i as u64 + 1,
+                sizes: Vec::new(),
             })
             .expect("bounded channel must have room for the burst");
         }
@@ -7858,7 +7865,91 @@ mod coalesce_tests {
             bytes: bytes.to_vec().into(),
             first_seq: seq,
             seq,
+            cols: 0,
+            rows: 0,
         }
+    }
+
+    fn out_at(id: u64, bytes: &[u8], seq: u64, (cols, rows): (u16, u16)) -> Event {
+        Event::TerminalOutput {
+            terminal_id: TerminalId(id),
+            bytes: bytes.to_vec().into(),
+            first_seq: seq,
+            seq,
+            cols,
+            rows,
+        }
+    }
+
+    /// A PTY size change ends a run: the parser has to be resized between
+    /// the two feeds, so bytes produced at two sizes never merge into one.
+    #[test]
+    fn a_size_change_ends_the_run() {
+        let merged = coalesce_adjacent_output(vec![
+            out_at(1, b"tall", 1, (80, 40)),
+            out_at(1, b"tall2", 2, (80, 40)),
+            out_at(1, b"short", 3, (80, 24)),
+            out_at(1, b"short2", 4, (80, 24)),
+        ]);
+        assert_eq!(merged.len(), 2, "{merged:?}");
+        match (&merged[0], &merged[1]) {
+            (
+                Event::TerminalOutput {
+                    bytes: tall,
+                    first_seq: 1,
+                    seq: 2,
+                    cols: 80,
+                    rows: 40,
+                    ..
+                },
+                Event::TerminalOutput {
+                    bytes: short,
+                    first_seq: 3,
+                    seq: 4,
+                    cols: 80,
+                    rows: 24,
+                    ..
+                },
+            ) => {
+                assert_eq!(tall.as_ref(), b"talltall2");
+                assert_eq!(short.as_ref(), b"shortshort2");
+            }
+            other => panic!("unexpected merge: {other:?}"),
+        }
+    }
+
+    /// A resize announcement (empty bytes) survives coalescing on both
+    /// sides even when its size matches the neighbouring output. Merged
+    /// away, the consumer's resize request would stay "unanswered" and be
+    /// re-sent — with two clients on one terminal, forever.
+    #[test]
+    fn a_resize_announcement_is_never_merged_with_same_size_output() {
+        let merged = coalesce_adjacent_output(vec![
+            out_at(1, b"before", 1, (80, 24)),
+            out_at(1, b"", 2, (80, 24)),
+            out_at(1, b"after", 3, (80, 24)),
+        ]);
+        let shape: Vec<(Vec<u8>, u64, u64)> = merged
+            .iter()
+            .map(|e| match e {
+                Event::TerminalOutput {
+                    bytes,
+                    first_seq,
+                    seq,
+                    ..
+                } => (bytes.to_vec(), *first_seq, *seq),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (b"before".to_vec(), 1, 1),
+                (Vec::new(), 2, 2),
+                (b"after".to_vec(), 3, 3),
+            ],
+            "the announcement stays its own event"
+        );
     }
 
     /// A run of same-terminal output merges into ONE event carrying
@@ -7874,6 +7965,7 @@ mod coalesce_tests {
                 bytes,
                 first_seq,
                 seq,
+                ..
             } => {
                 assert_eq!(*terminal_id, TerminalId(1));
                 assert_eq!(bytes.as_ref(), b"hello world");
@@ -8013,6 +8105,7 @@ mod coalesce_tests {
                 composing_buffer: None,
                 agent_state: None,
                 authenticating: false,
+                replay_sizes: Vec::new(),
             }],
             recent_snippets: Vec::new(),
             dismissed_updates: Vec::new(),
@@ -8061,6 +8154,7 @@ mod coalesce_tests {
                 composing_buffer: None,
                 agent_state: None,
                 authenticating: false,
+                replay_sizes: Vec::new(),
             })
             .collect();
 
@@ -14421,6 +14515,8 @@ mod daemon_event_fastpath_tests {
             bytes: Arc::<[u8]>::from(b"background noise".to_vec()),
             first_seq: 1,
             seq: 1,
+            cols: 0,
+            rows: 0,
         });
         assert!(
             !m.redraw,
@@ -14448,6 +14544,8 @@ mod daemon_event_fastpath_tests {
             bytes: Arc::<[u8]>::from(b"$ ls\n".to_vec()),
             first_seq: 1,
             seq: 1,
+            cols: 0,
+            rows: 0,
         });
         assert!(m.redraw, "visible-terminal output must trigger a redraw");
     }
@@ -14653,6 +14751,8 @@ mod wheel_routing_tests {
             bytes: Arc::<[u8]>::from(b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec()),
             first_seq: 1,
             seq: 1,
+            cols: 0,
+            rows: 0,
         });
 
         while server.rx.try_recv().is_ok() {}
@@ -14681,6 +14781,8 @@ mod wheel_routing_tests {
             bytes: bytes.into(),
             first_seq: 1,
             seq: 1,
+            cols: 0,
+            rows: 0,
         });
         let before = scroll_offset(&m);
         while server.rx.try_recv().is_ok() {}
@@ -14725,6 +14827,8 @@ mod wheel_routing_tests {
             bytes: Arc::<[u8]>::from(bytes),
             first_seq: 1,
             seq: 1,
+            cols: 0,
+            rows: 0,
         });
 
         let bottom_offset = scroll_offset(&m);
@@ -14759,6 +14863,8 @@ mod wheel_routing_tests {
                     bytes: Arc::<[u8]>::from(b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec()),
                     first_seq: 1,
                     seq: 1,
+                    cols: 0,
+                    rows: 0,
                 });
                 m.terminals.on_daemon_event(&IpcEvent::TerminalScrollback {
                     terminal_id: TerminalId(7),
@@ -14773,6 +14879,8 @@ mod wheel_routing_tests {
                     bytes: Arc::<[u8]>::from(bytes),
                     first_seq: 1,
                     seq: 1,
+                    cols: 0,
+                    rows: 0,
                 });
             }
             assert!(m.terminals.focused_terminal_tracks_mouse());
@@ -14808,6 +14916,8 @@ mod wheel_routing_tests {
             bytes: Arc::<[u8]>::from(b"\x1b[?1002h\x1b[?1006h".to_vec()),
             first_seq: 1,
             seq: 1,
+            cols: 0,
+            rows: 0,
         });
         assert!(m.terminals.focused_terminal_tracks_mouse());
         while server.rx.try_recv().is_ok() {}
@@ -14828,6 +14938,8 @@ mod wheel_routing_tests {
             bytes: Arc::<[u8]>::from(bytes),
             first_seq: 2,
             seq: 2,
+            cols: 0,
+            rows: 0,
         });
         let bottom_offset = scroll_offset(&m);
         assert!(bottom_offset > 0, "200 lines must produce scrollback");
@@ -15464,6 +15576,8 @@ mod leader_tile_tests {
                 bytes: Arc::<[u8]>::from(bytes),
                 first_seq: 1,
                 seq: 1,
+                cols: 0,
+                rows: 0,
             });
         }
 
@@ -15544,6 +15658,8 @@ mod leader_tile_tests {
             bytes: Arc::<[u8]>::from(b"\x1b[?1049h\x1b[?1002h\x1b[?1006h".to_vec()),
             first_seq: 1,
             seq: 1,
+            cols: 0,
+            rows: 0,
         });
 
         let area = m.layout.last_area;
@@ -15719,6 +15835,8 @@ mod leader_tile_tests {
             ),
             first_seq: 1,
             seq: 1,
+            cols: 0,
+            rows: 0,
         });
         arm_leader(&mut m);
         m.dispatch_key(RealmKey::new(Key::Char('u'), RealmMods::NONE));
@@ -15741,6 +15859,8 @@ mod leader_tile_tests {
             bytes: Arc::<[u8]>::from(b"no links here\r\n".to_vec()),
             first_seq: 1,
             seq: 1,
+            cols: 0,
+            rows: 0,
         });
         arm_leader(&mut m);
         m.dispatch_key(RealmKey::new(Key::Char('u'), RealmMods::NONE));
@@ -15784,6 +15904,7 @@ mod leader_tile_tests {
                 composing_buffer: Some("\n  recover me".into()),
                 agent_state: None,
                 authenticating: false,
+                replay_sizes: Vec::new(),
             }],
             recent_snippets: Vec::new(),
             dismissed_updates: Vec::new(),
@@ -15865,6 +15986,7 @@ mod leader_tile_tests {
                 composing_buffer: None,
                 agent_state: None,
                 authenticating: false,
+                replay_sizes: Vec::new(),
             }],
             recent_snippets: Vec::new(),
             dismissed_updates: Vec::new(),
@@ -16007,6 +16129,8 @@ mod terminal_url_mouse_tests {
             bytes: Arc::<[u8]>::from(bytes),
             first_seq: 1,
             seq: 1,
+            cols: 0,
+            rows: 0,
         });
     }
 
@@ -19008,6 +19132,8 @@ mod focus_mode_tests {
                 bytes: Arc::<[u8]>::from(b"codex spinner churn...\r\n".to_vec()),
                 first_seq: seq,
                 seq,
+                cols: 0,
+                rows: 0,
             });
             m.tick_terminal_leader();
         }
@@ -19879,6 +20005,7 @@ mod worktree_progress_recovery_tests {
             composing_buffer: None,
             agent_state: None,
             authenticating: false,
+            replay_sizes: Vec::new(),
         }
     }
 

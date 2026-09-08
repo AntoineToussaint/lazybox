@@ -13,6 +13,7 @@ pub mod error_class;
 pub mod issue_links;
 pub mod paths;
 pub mod policy;
+pub mod pr_trailers;
 pub mod pricing;
 pub mod priority;
 pub mod project;
@@ -44,6 +45,10 @@ pub use policy::{
     ApprovalPolicy, AutomationPolicies, MergeOnGreenPolicy, NON_AUTHOR_BLOCK, PolicyArm,
     approval_policy_blocks, author_gate_blocks, auto_fix_permitted, auto_merge_block_reason,
     merge_block_reason, should_auto_merge, toggled_arm,
+};
+pub use pr_trailers::{
+    AgentCount, CostTrailer, EffortTrailer, PrTrailers, TimeTrailer,
+    append_to_body as append_pr_trailers, extract as extract_pr_trailers,
 };
 pub use pricing::{ModelPrice, TokenCounts, cost_micros as pricing_cost_micros, price_for};
 pub use priority::{PriorityTier, resolve_priority_tier};

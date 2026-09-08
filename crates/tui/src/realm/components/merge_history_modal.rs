@@ -220,12 +220,6 @@ impl MergeHistoryModal {
     }
 
     /// Render the right preview: the highlighted PR's author + merge time
-    /// Upper bound on the preview's rendered lines. The pane scrolls no
-    /// further than its own height, and a pathological body (a pasted log,
-    /// a giant table) should not cost a full markdown pass every frame —
-    /// `Enter` opens the whole thing in the reader.
-    const MAX_BODY_LINES: usize = 400;
-
     /// and its full wrapped body.
     fn render_preview(&self, frame: &mut Frame, area: Rect, theme: &Theme, row: &MergeRow) {
         let mut lines: Vec<Line> = Vec::new();
@@ -268,13 +262,19 @@ impl MergeHistoryModal {
             // **bold** — and printing it verbatim left `## Summary` and
             // `**path**` on screen as literal punctuation, which is exactly
             // the noise the reader has to look past. `render_body` is the
-            // same pass the activity pane and the reader modal use, so a
-            // body reads identically wherever lazybox shows it.
-            crate::components::comment_render::render_body(
-                &row.body,
-                area.width,
-                Self::MAX_BODY_LINES,
-            )
+            // same pass the activity pane uses, so a body reads the same
+            // here as it does in the feed. (The `Enter` reader is richer
+            // still — tables and links via `render_markdown`.)
+            //
+            // This pane does not scroll, so only the rows below the
+            // heading/meta are ever visible: cap the body to that many
+            // lines rather than to an arbitrary constant. `render_body`
+            // collapses the rest to a "+N more lines" row, and `Enter`
+            // opens the whole body in the reader.
+            let body_budget = usize::from(area.height)
+                .saturating_sub(lines.len())
+                .max(1);
+            crate::components::comment_render::render_body(&row.body, area.width, body_budget)
         };
         lines.extend(body);
         frame.render_widget(Paragraph::new(lines), area);
@@ -529,6 +529,27 @@ mod tests {
         assert!(
             screen.contains("path"),
             "the emphasised word itself survives: {screen}"
+        );
+    }
+
+    /// A body taller than the (non-scrolling) preview pane is capped to the
+    /// pane's visible height, so the truncation marker lands on screen where
+    /// the user can see it and reach for `Enter`. A fixed oversized cap (the
+    /// old `MAX_BODY_LINES = 400`) would clip a 40-line body silently — no
+    /// marker, no cue that the rest exists.
+    #[test]
+    fn long_body_is_capped_to_the_visible_pane_not_a_fixed_constant() {
+        let body = (1..=40)
+            .map(|i| format!("- item {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let rows = [task(398, "chore: long body", "someone", Some(body.as_str()))];
+        let mut m = MergeHistoryModal::resolved("o/r", &rows, None, Utc::now());
+        let screen = render(&mut m, 96, 24);
+
+        assert!(
+            screen.contains("more lines"),
+            "a body taller than the pane shows the `+N more lines` marker: {screen}"
         );
     }
 

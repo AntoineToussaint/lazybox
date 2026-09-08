@@ -2673,16 +2673,26 @@ impl Config {
     /// and silently losing them (#1568). A `default` naming a Fable tier is
     /// never honored — it re-points to the built-in default when that is
     /// eligible, else to the first eligible tier.
+    ///
+    /// `models.replace: true` opts out of the layering entirely and takes
+    /// the block as the whole menu — the only way to express a *restricted*
+    /// menu, since an overlay can add tiers but never remove one.
     pub fn agent_models(&self, agent_id: &str) -> lazybox_core::AgentModels {
         let builtin = lazybox_core::AgentModels::builtin(agent_id).unwrap_or_default();
-        let mut models = builtin.clone();
-        if let Some(entry) = self.agents.get(agent_id) {
-            if let Some(default) = entry.models.default.clone() {
-                models.default = Some(default);
+        let mut models = match self.agents.get(agent_id) {
+            Some(entry) if entry.models.replace => entry.models.clone(),
+            entry => {
+                let mut models = builtin.clone();
+                if let Some(entry) = entry {
+                    if let Some(default) = entry.models.default.clone() {
+                        models.default = Some(default);
+                    }
+                    models.priority.overlay(&entry.models.priority);
+                    models.overlay_tiers(&entry.models.tiers);
+                }
+                models
             }
-            models.priority.overlay(&entry.models.priority);
-            models.overlay_tiers(&entry.models.tiers);
-        }
+        };
         // A default pointing at a Fable tier is re-pointed: creative-class
         // models stay spawnable through an explicit chord but are never
         // what a bare spawn lands on. Prefer the built-in default so the
@@ -2734,10 +2744,56 @@ impl Config {
             })
             .collect()
     }
+    /// Warnings for a configured menu whose *inherited* priority routing
+    /// contradicts the default it pins. A block that declares both a tier
+    /// list and a `default` has decided what runs; if a built-in priority
+    /// mapping it never wrote then routes a labelled task to a tier it
+    /// never declared, that decision is quietly bypassed — a `high` label
+    /// can spend Opus money on a menu the user restricted to Sonnet.
+    ///
+    /// Only the contradicting shape warns: a block that declares tiers but
+    /// no `default` (the common "retune one tier" edit) is asking to
+    /// inherit the routing, so it stays quiet. Silence it for real with an
+    /// explicit `priority:` map, or `replace: true` to own the whole menu.
+    pub fn inherited_priority_warnings(&self) -> Vec<String> {
+        self.agents
+            .iter()
+            .filter(|(_, entry)| {
+                !entry.models.replace
+                    && !entry.models.tiers.is_empty()
+                    && entry.models.default.is_some()
+            })
+            .flat_map(|(agent_id, entry)| {
+                let declared: Vec<&str> = entry
+                    .models
+                    .tiers
+                    .iter()
+                    .map(|t| t.alias.as_str())
+                    .collect();
+                let resolved = self.agent_models(agent_id);
+                let pinned = entry.models.default.clone().unwrap_or_default();
+                resolved
+                    .priority
+                    .declared()
+                    .filter(|(name, _)| entry.models.priority.declared().all(|(d, _)| d != *name))
+                    .filter(|(_, alias)| !declared.contains(alias))
+                    .map(|(name, alias)| {
+                        format!(
+                            "agents.{agent_id}.models pins default {pinned:?} but inherits \
+                             priority.{name} → {alias:?}, a tier it never declares — a \
+                             {name}-priority task spawns {alias:?}, not {pinned:?}. Declare \
+                             priority.{name} explicitly, or set replace: true to own the menu"
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
 
     /// Warnings for a Claude Code `model` setting lazybox's pinned default
     /// tier silently overrides. `ambient` is the `model` value from the
-    /// user's own `~/.claude/settings.json` (see [`Self::ambient_claude_model`]).
+    /// user's own `~/.claude/settings.json`
+    /// (`lazybox_agents::claude_env::ambient_model`).
     ///
     /// A bare spawn appends the default tier's args, and `--model` is the
     /// highest-precedence model source in Claude Code — so whatever the
@@ -2765,18 +2821,6 @@ impl Config {
              agents.claude.models.tiers to \
              [{{ alias: {alias}, args: [--model, {ambient}] }}]"
         )]
-    }
-
-    /// The `model` the user set in their own `~/.claude/settings.json`, if
-    /// any — the value lazybox's pinned default tier overrides on every
-    /// bare Claude spawn. A missing, unreadable, or malformed settings
-    /// file simply means "no ambient model to conflict with".
-    pub fn ambient_claude_model() -> Option<String> {
-        let home = std::env::var_os("HOME")?;
-        let path = PathBuf::from(home).join(".claude").join("settings.json");
-        let text = std::fs::read_to_string(path).ok()?;
-        let root: serde_json::Value = serde_json::from_str(&text).ok()?;
-        root.get("model")?.as_str().map(str::to_owned)
     }
 
     /// Load from `~/.lazybox/config.yaml`, falling back to defaults.
@@ -2853,11 +2897,7 @@ impl Config {
         let contents = std::fs::read_to_string(path)?;
         let config = Self::parse(&contents)?;
         tracing::debug!("Loaded config from {}", path.display());
-        for warning in config
-            .model_alias_warnings()
-            .into_iter()
-            .chain(config.pinned_model_warnings(Self::ambient_claude_model().as_deref()))
-        {
+        for warning in config.model_alias_warnings() {
             tracing::warn!("{warning}");
         }
         // The file can hold Slack tokens — tighten pre-existing
@@ -5784,6 +5824,109 @@ agents:
             vec!["S", "M", "L", "B"]
         );
         assert!(cfg.model_alias_warnings().is_empty());
+    }
+
+    /// Regression for the overlay's sharpest edge: a menu deliberately
+    /// restricted to Sonnet must not silently regain Opus, and must not
+    /// start routing `high`-priority tasks to it. Before `replace`, the
+    /// inherited built-in `priority.high → L` did exactly that.
+    #[test]
+    fn replace_keeps_a_restricted_menu_restricted() {
+        use lazybox_core::PriorityTier;
+        let yaml = r#"
+agents:
+  claude:
+    models:
+      default: M
+      replace: true
+      tiers:
+      - { alias: M, label: Sonnet, args: ["--model", "claude-sonnet-5"] }
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse replace menu");
+        let m = cfg.agent_models("claude");
+        assert_eq!(
+            m.tiers.iter().map(|t| t.alias.as_str()).collect::<Vec<_>>(),
+            vec!["M"],
+            "replace owns the menu — no built-in tiers leak back in"
+        );
+        assert_eq!(
+            m.alias_for_priority(PriorityTier::High),
+            None,
+            "no inherited routing to a tier the user removed"
+        );
+        assert_eq!(
+            m.resolve_args(m.alias_for_priority(PriorityTier::High)),
+            vec!["--model".to_string(), "claude-sonnet-5".to_string()],
+            "a high-priority task falls to the declared default, not Opus"
+        );
+    }
+
+    /// The same config *without* `replace` is the shape that silently
+    /// escalates, so it must say so rather than route around the pinned
+    /// default in silence.
+    #[test]
+    fn inherited_priority_warns_when_it_contradicts_a_pinned_default() {
+        let yaml = r#"
+agents:
+  claude:
+    models:
+      default: M
+      tiers:
+      - { alias: M, label: Sonnet, args: ["--model", "claude-sonnet-5"] }
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse overlay menu");
+        let warnings = cfg.inherited_priority_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("priority.high") && w.contains("\"L\"") && w.contains("\"M\"")),
+            "expected a warning naming the escalation, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn inherited_priority_stays_quiet_for_a_plain_tier_retune() {
+        // The issue's motivating edit: retune one tier, inherit the rest.
+        // Nothing is contradicted, so nothing is said.
+        let yaml = r#"
+agents:
+  claude:
+    models:
+      tiers:
+      - { alias: L, label: Opus, args: ["--model", "claude-opus-5[1m]"] }
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse tier retune");
+        assert!(cfg.inherited_priority_warnings().is_empty());
+        // An explicit priority map silences it for the escalating shape too.
+        let silenced = r#"
+agents:
+  claude:
+    models:
+      default: M
+      tiers:
+      - { alias: M, label: Sonnet, args: ["--model", "claude-sonnet-5"] }
+      priority: { high: M, medium: M, low: M }
+"#;
+        let cfg: Config = serde_yaml::from_str(silenced).expect("parse explicit priority");
+        assert!(cfg.inherited_priority_warnings().is_empty());
+    }
+
+    /// The re-point prefers the built-in default over "first eligible".
+    /// First-eligible would hand this config Haiku — a silent downgrade
+    /// from the Opus tier it actually declares.
+    #[test]
+    fn fable_repoint_prefers_the_builtin_default_over_the_cheapest_tier() {
+        let yaml = r#"
+agents:
+  claude:
+    models:
+      default: F
+      tiers:
+      - { alias: F, label: Fable, args: ["--model", "claude-fable-5"] }
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse fable-only menu");
+        let m = cfg.agent_models("claude");
+        assert_eq!(m.default.as_deref(), Some("L"), "not S (Haiku)");
     }
 
     #[test]

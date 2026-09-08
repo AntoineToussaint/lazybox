@@ -6,6 +6,11 @@
 
 pub mod agent;
 pub(crate) mod claude_env;
+
+/// The user's own Claude settings file — the path plus the one value
+/// outside this crate cares about (`model`). Re-exported so callers
+/// don't rebuild the path or re-parse the file themselves.
+pub use claude_env::{ambient_model as claude_ambient_model, user_settings_path};
 pub mod detect;
 pub mod hook;
 pub mod hook_settings;

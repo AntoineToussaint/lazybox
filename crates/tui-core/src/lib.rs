@@ -18,7 +18,7 @@ pub mod agent_attention;
 /// `{ipc, tui-core, tui-term, config, core}` (#548): agent internals live
 /// one crate away, behind this gateway.
 pub mod agents {
-    pub use lazybox_agents::{Registry, registry, trim_leading_blank_lines};
+    pub use lazybox_agents::{Registry, claude_ambient_model, registry, trim_leading_blank_lines};
 }
 pub mod choice;
 pub mod confirm_latch;

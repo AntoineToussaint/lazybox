@@ -10062,24 +10062,87 @@ mod modal_input_responsiveness_tests {
 
     /// A picker row names the model it pins, not just the tier word:
     /// "Opus" alone can't be checked against what a bare spawn actually
-    /// passes as `--model` (#1568).
+    /// passes as `--model` (#1568). Row 0 is the unpin row — it names the
+    /// model too, but must NOT name an alias it doesn't pin, and must not
+    /// read as a duplicate of the real tier row.
     #[test]
     fn default_model_picker_rows_show_the_resolved_model_id() {
         let claude = lazybox_core::AgentModels::builtin("claude").unwrap();
+        let rows = crate::realm::model::default_model_rows("claude", &claude);
+        let labels: Vec<&str> = rows.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(
-            crate::realm::model::tier_row_label(claude.tier("L").unwrap()),
-            "Opus  ·  L  ·  claude-opus-5"
+            labels,
+            vec![
+                "Built-in default  ·  Opus  ·  claude-opus-5",
+                "Haiku  ·  S  ·  claude-haiku-4-5",
+                "Sonnet  ·  M  ·  claude-sonnet-5",
+                "Opus  ·  L  ·  claude-opus-5",
+            ]
         );
-        // A tier that selects its model some other way keeps a two-part row.
-        assert_eq!(
-            crate::realm::model::tier_row_label(&lazybox_core::ModelTier {
+        // Row 0 unpins (payload `None`) — it must not advertise `L`, and
+        // must not be a suffix-match of the row that really pins `L`.
+        assert_eq!(rows[0].1, None);
+        let (row_zero, row_l) = (rows[0].0.as_str(), rows[3].0.as_str());
+        assert!(
+            !row_zero.contains("·  L  ·"),
+            "row 0 advertises a pin it doesn't apply: {row_zero}"
+        );
+        assert!(
+            !row_zero.ends_with(row_l),
+            "row 0 duplicates the L row: {row_zero}"
+        );
+    }
+
+    /// A tier that selects its model some other way keeps a two-part row
+    /// rather than printing a guessed id.
+    #[test]
+    fn default_model_picker_row_omits_an_unreadable_model() {
+        let models = lazybox_core::AgentModels {
+            default: Some("X".into()),
+            tiers: vec![lazybox_core::ModelTier {
                 alias: "X".into(),
                 label: "House".into(),
                 short: None,
                 args: vec!["--profile".into(), "house".into()],
-            }),
-            "House  ·  X"
+            }],
+            ..Default::default()
+        };
+        let rows = crate::realm::model::default_model_rows("codex", &models);
+        assert_eq!(rows[1].0, "House  ·  X");
+    }
+
+    /// The pin override must reach a user surface, not only the daemon
+    /// log — the invisibility is the bug (#1568).
+    #[test]
+    fn startup_flashes_the_pinned_model_override() {
+        // Sandbox the profile: `flash_model_pin_warning` loads the real
+        // config, and the developer's own tier override would otherwise
+        // decide whether this passes (#1539).
+        let _env = super::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("lazybox-pinwarn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        // SAFETY: ENV_LOCK serializes every LAZYBOX_HOME mutator in
+        // this binary, so this single-writer mutation can't race.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &home) };
+        lazybox_config::Config::invalidate_cache();
+
+        let mut m = build_model();
+        m.flash_model_pin_warning(Some("opus[1m]"));
+        let notice = m.status.notice.as_ref().expect("a notice was raised");
+        assert!(
+            notice.message.contains("opus[1m]") && notice.message.contains("claude-opus-5"),
+            "{}",
+            notice.message
         );
+        // No ambient setting → nothing to say, so no footer noise.
+        let mut quiet = build_model();
+        quiet.flash_model_pin_warning(None);
+        assert!(quiet.status.notice.is_none());
+
+        unsafe { std::env::remove_var("LAZYBOX_HOME") };
+        lazybox_config::Config::invalidate_cache();
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// A tier pinning a Fable-class model is never offered as a

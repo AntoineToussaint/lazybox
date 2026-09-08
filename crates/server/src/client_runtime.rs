@@ -65,6 +65,7 @@ impl ClientRuntime {
         tasks.push(crate::polling::spawn(config.clone(), options.poll_interval));
         tasks.push(crate::working_claims::spawn(config.clone()));
         tasks.push(crate::working_watchdog::spawn(&config));
+        log_model_pin_warnings();
         tasks.push(crate::error_inbox::spawn(&config));
         tasks.push(crate::epics::spawn(&config));
         tasks.push(crate::stats_accumulator::spawn(&config));
@@ -108,6 +109,26 @@ impl Drop for ClientRuntime {
         for task in &self.tasks {
             task.abort();
         }
+    }
+}
+
+/// Say once, at daemon start, when lazybox's pinned model tier overrides
+/// the user's own Claude `model` setting, or when a configured menu
+/// inherits priority routing that contradicts the default it pins.
+///
+/// Deliberately not emitted from `Config::load_from`: every `save_to`
+/// invalidates the `load()` cache, so a routine sidebar collapse or
+/// splitter resize would re-log the same line for the rest of the
+/// session (#1568).
+fn log_model_pin_warnings() {
+    let config = lazybox_config::Config::load().unwrap_or_default();
+    let ambient = lazybox_agents::claude_ambient_model();
+    for warning in config
+        .pinned_model_warnings(ambient.as_deref())
+        .into_iter()
+        .chain(config.inherited_priority_warnings())
+    {
+        tracing::warn!("{warning}");
     }
 }
 

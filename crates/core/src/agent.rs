@@ -106,6 +106,7 @@ mod tests {
         // tier the (empty) menu doesn't define.
         let m = AgentModels {
             default: Some("L".into()),
+            replace: false,
             tiers: vec![],
             priority: PriorityAliases {
                 best: Some("B".into()),
@@ -210,6 +211,8 @@ mod tests {
             Some("claude-opus-5")
         );
         assert_eq!(tier(&["-m", "gpt-5"]).model_id(), Some("gpt-5"));
+        // Attached short form is not parsed — a wrong id is worse than none.
+        assert_eq!(tier(&["-mgpt-5"]).model_id(), None);
         assert_eq!(
             tier(&["--reasoning-effort", "max", "--model", "opus"]).model_id(),
             Some("opus")
@@ -383,18 +386,20 @@ impl ModelTier {
     }
 
     /// The model id this tier pins, read out of its own args — the value
-    /// after a `--model` / `-m` flag, in either the separate-arg or
-    /// `--model=<id>` spelling. `None` for a tier that selects a model
-    /// some other way (or none at all). Surfaced so the *decision* a tier
-    /// encodes is visible where a user picks it, instead of hiding behind
-    /// a label like "Opus" (#1568).
+    /// after `--model` / `-m`, or the `--model=<id>` long-option spelling.
+    /// `None` for a tier that selects a model some other way (or not at
+    /// all), which callers render as "no id to show". Surfaced so the
+    /// *decision* a tier encodes is visible where a user picks it,
+    /// instead of hiding behind a label like "Opus" (#1568).
+    ///
+    /// The attached short form (`-mgpt-5`) is deliberately not parsed: a
+    /// short flag glued to its value can't be told from a different flag
+    /// without knowing the agent's own option table, and guessing would
+    /// print a wrong model id — worse than printing none.
     pub fn model_id(&self) -> Option<&str> {
         let mut args = self.args.iter();
         while let Some(arg) = args.next() {
-            if let Some(id) = arg
-                .strip_prefix("--model=")
-                .or_else(|| arg.strip_prefix("-m="))
-            {
+            if let Some(id) = arg.strip_prefix("--model=") {
                 return Some(id);
             }
             if arg == "--model" || arg == "-m" {
@@ -484,6 +489,14 @@ pub struct AgentModels {
     /// tier chord but the task carries a `high`/`medium`/`low` priority.
     #[serde(default)]
     pub priority: PriorityAliases,
+    /// Take this block as the whole menu instead of layering it over the
+    /// agent's built-in one. Overlay is the default because retuning one
+    /// tier shouldn't cost you the rest of the menu (#1568) — but overlay
+    /// alone can only *add* to the built-in menu, so a user who wants a
+    /// deliberately restricted set (say Sonnet only, with no `L` chord and
+    /// no `high` → Opus routing) has no way to say so. This is that way.
+    #[serde(default)]
+    pub replace: bool,
 }
 
 impl AgentModels {
@@ -575,6 +588,7 @@ impl AgentModels {
             // declares it as a tier of their own.
             "claude" => Some(AgentModels {
                 default: Some("L".into()),
+                replace: false,
                 tiers: vec![
                     ModelTier {
                         alias: "S".into(),

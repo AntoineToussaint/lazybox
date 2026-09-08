@@ -489,7 +489,13 @@ claude-opus-5`) so the pin is checkable (#1568). A `models:` block
 tier replaces the same-alias built-in tier in place and a new alias
 appends, so `tiers: [{alias: L, args: ["--model", "claude-opus-5[1m]"]}]`
 retunes one tier and keeps the rest of the menu plus the built-in
-priority routing. The alias is agent-agnostic at the chord — the daemon
+priority routing. Because an overlay can only add, `replace: true` on
+the block takes it as the whole menu — the way to express a
+*restricted* set (Sonnet only, no `L` chord, no `high` → Opus
+routing); without it, a block that pins a `default` while inheriting a
+priority mapping to a tier it never declared is warned about at daemon
+start, since a labelled task would otherwise route around the pinned
+default in silence. The alias is agent-agnostic at the chord — the daemon
 maps it to whatever agent the spawn targets — and the picked tier's
 label rides a `◆ Opus` tab badge. The `a` leader also carries the bulk
 **rate-limit recovery** chord `a R` (restart rate-limited): for every

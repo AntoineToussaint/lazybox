@@ -243,8 +243,11 @@ fn resolved_graph<'a>(record: &EpicRecord, workspaces: &'a [Workspace]) -> Resol
     }
     let member_set: HashSet<WorkspaceKey> = members.iter().cloned().collect();
 
-    // Edges: each member's tasks' `blocked_by`. A blocker that maps to another
-    // member is an internal edge; anything else is external.
+    // Edges: each member's tasks' `blocked_by`. A blocker owned by another
+    // member is an internal dependency edge; a blocker owned by this member's
+    // own workspace is internal to its own work (not an epic blocker) and is
+    // skipped; anything else (a non-member workspace, or an unknown task) is
+    // external.
     let mut depends_on: HashMap<WorkspaceKey, BTreeSet<WorkspaceKey>> = HashMap::new();
     let mut external: HashMap<WorkspaceKey, BTreeSet<TaskId>> = HashMap::new();
     let mut done: HashMap<WorkspaceKey, bool> = HashMap::new();
@@ -256,7 +259,11 @@ fn resolved_graph<'a>(record: &EpicRecord, workspaces: &'a [Workspace]) -> Resol
         for task in tasks_of(ws) {
             for blocker in &task.blocked_by {
                 match task_ws.get(blocker) {
-                    Some(other) if member_set.contains(other) && other != key => {
+                    Some(other) if other == key => {
+                        // The member's own task blocking another of its tasks
+                        // is internal to its work, not an epic-level wait.
+                    }
+                    Some(other) if member_set.contains(other) => {
                         deps.insert(other.clone());
                     }
                     _ => {
@@ -1591,6 +1598,30 @@ mod tests {
         assert_eq!(m.external_blockers.len(), 1);
         assert!(m.blockers.iter().any(|b| b.kind == BlockerKind::External));
         assert_eq!(m.status, EpicMemberStatus::Blocked);
+    }
+
+    #[test]
+    fn self_owned_blocker_is_not_external() {
+        // A member whose task is `blocked_by` another task in its *own*
+        // workspace must not surface that as an external blocker: it's internal
+        // to the member's own work, not an epic-level wait. Two issues in one
+        // workspace, one blocked by the other, no PR, no agent → Ready with no
+        // blockers (before the fix it resolved as a spurious External → Blocked).
+        let mut w = ws("w");
+        let mut first = task("github", "w#1");
+        let second = task("github", "w#2");
+        first.blocked_by = vec![second.id.clone()];
+        w.gh_issues = vec![first, second];
+
+        let snap = resolve_fresh(&record_with(&["w"]), &[w]);
+        let m = &snap.members[0];
+        assert!(
+            m.external_blockers.is_empty(),
+            "own task must not be an external blocker: {:?}",
+            m.external_blockers
+        );
+        assert!(m.blockers.is_empty(), "no blockers: {:?}", m.blockers);
+        assert_eq!(m.status, EpicMemberStatus::Ready);
     }
 
     #[test]

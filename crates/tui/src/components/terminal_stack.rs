@@ -1132,9 +1132,41 @@ struct TerminalSlot {
     /// the bottom, so parking in scrollback never re-resets the grid
     /// while a fresh visit still re-captures up-to-date history (#393).
     deep_scrollback_requested: bool,
+    /// Live output landed AFTER this visit's deep-scrollback capture was
+    /// adopted, so the local grid's history above the live screen is no
+    /// longer tmux's: it is whatever the tmux client stream scrolled off
+    /// the top since — and tmux scrolls the client view up and down as a
+    /// *paint optimization* while a program redraws a block, pushing the
+    /// same top row into the client VT's scrollback again and again
+    /// (#1547: one row repeated ~27× when scrolling; tmux's own history
+    /// had it once). The next upward scroll re-fetches instead of
+    /// scrolling that junk.
+    scrollback_stale: bool,
+    /// When this visit's capture was adopted — the re-fetch above is
+    /// debounced against it so a streaming agent can't turn every wheel
+    /// notch into a multi-megabyte capture.
+    last_scrollback_fetch: Option<std::time::Instant>,
 }
 
+/// Minimum spacing between two deep-scrollback re-fetches for the same
+/// terminal while its output keeps flowing.
+const SCROLLBACK_REFETCH_MIN: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl TerminalSlot {
+    /// Whether an upward scroll should ship a `FetchScrollback`: the first
+    /// scroll of a visit always does; after that only when live output has
+    /// made the adopted capture stale, and not more often than
+    /// [`SCROLLBACK_REFETCH_MIN`] (#393, #1547).
+    fn wants_scrollback_fetch(&self) -> bool {
+        if !self.deep_scrollback_requested {
+            return true;
+        }
+        self.scrollback_stale
+            && self
+                .last_scrollback_fetch
+                .is_none_or(|at| at.elapsed() >= SCROLLBACK_REFETCH_MIN)
+    }
+
     /// Append one char to the composing buffer when it fits within
     /// [`COMPOSING_CAP`]; silently drop it otherwise. The bound is the
     /// whole point — a runaway auto-typer (or a pathological paste)
@@ -2212,7 +2244,7 @@ impl TerminalStack {
         // Same deep-scrollback arming as an upward `scroll_terminal`
         // (#393) — jumping straight to the top is the strongest
         // possible "show me the history" signal.
-        if slot.exited.is_none() && !slot.deep_scrollback_requested {
+        if slot.exited.is_none() && slot.wants_scrollback_fetch() {
             slot.deep_scrollback_requested = true;
             self.pending_scrollback_fetch = Some(id);
         }
@@ -3084,7 +3116,7 @@ impl TerminalStack {
         // drain the armed id into `Command::FetchScrollback` and the
         // reply rebuilds the grid via `apply_scrollback`.
         if delta < 0 {
-            if slot.exited.is_none() && !slot.deep_scrollback_requested {
+            if slot.exited.is_none() && slot.wants_scrollback_fetch() {
                 slot.deep_scrollback_requested = true;
                 self.pending_scrollback_fetch = Some(id);
             }
@@ -3160,6 +3192,12 @@ impl TerminalStack {
         };
         if seq <= slot.last_seq {
             return;
+        }
+        // Live bytes after this visit's deep-scrollback capture: whatever
+        // the tmux client stream scrolls off the top from here on is paint
+        // traffic, not history (#1547) — the next upward scroll re-fetches.
+        if slot.deep_scrollback_requested {
+            slot.scrollback_stale = true;
         }
         if let TerminalStreamSync::Desynced {
             request,
@@ -3426,6 +3464,9 @@ impl TerminalStack {
         // fetch raced live output) — never move the high-water mark
         // backwards or those chunks would be double-fed on re-delivery.
         slot.last_seq = slot.last_seq.max(seq);
+        // This visit's history is tmux's again, as of now.
+        slot.scrollback_stale = false;
+        slot.last_scrollback_fetch = Some(std::time::Instant::now());
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3468,6 +3509,8 @@ impl TerminalStack {
             spawned_at: std::time::Instant::now(),
             did_work: false,
             deep_scrollback_requested: false,
+            scrollback_stale: false,
+            last_scrollback_fetch: None,
         }
     }
 
@@ -8951,6 +8994,59 @@ mod deep_scrollback_tests {
         let _ = stack.scroll_active(3);
         let _ = stack.scroll_active(-1);
         assert_eq!(stack.take_scrollback_fetch(), Some(TerminalId(1)));
+    }
+
+    /// #1547: live output that lands after the visit's capture was adopted
+    /// makes the local history stale — the tmux client stream scrolls the
+    /// view as a paint optimization and the client VT files each upward
+    /// scroll as history, so one row can end up repeated dozens of times
+    /// above the live screen while tmux's own history has it once. The
+    /// next upward scroll must re-fetch (debounced), while parking in
+    /// scrollback with no new output still fetches once.
+    #[test]
+    fn live_output_after_a_fetch_rearms_the_next_upward_scroll() {
+        let sk = SessionKey::new("s");
+        let id = TerminalId(3);
+        let mut stack = agent_stack(id, &sk);
+        feed(&mut stack, id, b"a couple\r\nof lines", 1, 1);
+
+        let _ = stack.scroll_active(-3);
+        assert_eq!(stack.take_scrollback_fetch(), Some(id));
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: deep_history(200),
+            seq: 1,
+        });
+        // No output since the capture: parked in scrollback, no re-fetch.
+        let _ = stack.scroll_active(-3);
+        assert_eq!(stack.take_scrollback_fetch(), None);
+
+        // Live output arrives while parked. Within the debounce window the
+        // next scroll still does not re-fetch …
+        feed(&mut stack, id, b"more live output\r\n", 2, 2);
+        let _ = stack.scroll_active(-3);
+        assert_eq!(
+            stack.take_scrollback_fetch(),
+            None,
+            "a re-fetch inside the debounce window would thrash on a streaming agent"
+        );
+        // … and once the window has passed, it does.
+        stack.terminals.get_mut(&id).unwrap().last_scrollback_fetch = std::time::Instant::now()
+            .checked_sub(SCROLLBACK_REFETCH_MIN + std::time::Duration::from_secs(1));
+        let _ = stack.scroll_active(-3);
+        assert_eq!(
+            stack.take_scrollback_fetch(),
+            Some(id),
+            "live output after the capture makes the local history stale — re-fetch"
+        );
+        // Adopting the new capture clears the staleness.
+        stack.on_event(&Event::TerminalScrollback {
+            terminal_id: id,
+            replay: deep_history(210),
+            seq: 2,
+        });
+        let _ = stack.scroll_active(-3);
+        assert_eq!(stack.take_scrollback_fetch(), None);
     }
 
     /// `Shift-PageUp` through the real key handler ships the command.

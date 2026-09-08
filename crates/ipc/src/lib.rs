@@ -2027,6 +2027,20 @@ pub enum Command {
         workspace: lazybox_core::WorkspaceKey,
         role: Option<lazybox_core::Role>,
     },
+    /// Take the workspace's records to the branch its checkout actually
+    /// sits on and re-run the spawn (#1572) — the lossless counterpart to
+    /// [`Command::RecreateWorktree`] for a `BranchMismatch`, which instead
+    /// preserves the live checkout aside and rebuilds from zero. `spawn`
+    /// mirrors the failed [`Command::Spawn`] so the adopt lands the exact
+    /// agent / shell the user asked for. Appended last (bincode is
+    /// ordinal-sensitive).
+    AdoptWorktreeBranch {
+        spawn: Box<SpawnFallback>,
+        #[serde(default)]
+        initial_prompt: Option<String>,
+        #[serde(default)]
+        on_main: bool,
+    },
 }
 
 impl Command {
@@ -3776,6 +3790,43 @@ impl WorktreeRecovery {
         )
     }
 
+    /// Whether the modal can offer a one-keypress **adopt**: the checkout
+    /// at the session path sits on another branch, and taking the record
+    /// to that branch is a lossless recovery — the work is right there
+    /// (#1572). The spawn path already adopts silently for a workspace
+    /// with no PR; this is the affordance for the cases that still prompt
+    /// (a PR workspace, where the PR head is normally authoritative).
+    pub fn adopts_branch(&self) -> bool {
+        matches!(self, Self::BranchMismatch)
+    }
+
+    /// The branch a `BranchMismatch` checkout actually sits on, parsed out
+    /// of the daemon's message (`… is checked out on branch '<actual>'…`).
+    /// The modal names it in the hint and the adopt command needs it.
+    pub fn mismatch_branch(message: &str) -> Option<String> {
+        let after = message.split_once("is checked out on branch '")?.1;
+        let name = after.split_once('\'')?.0.trim();
+        (!name.is_empty()).then(|| name.to_string())
+    }
+
+    /// The worktree path a `BranchMismatch` message names (`worktree
+    /// <path> is checked out on branch …`), so the preserve-aside confirm
+    /// can say which checkout it is about to move.
+    pub fn mismatch_path(message: &str) -> Option<String> {
+        let after = message.split_once("worktree ")?.1;
+        let end = after.find(" is checked out on branch ")?;
+        let path = after[..end].trim();
+        (!path.is_empty()).then(|| path.to_string())
+    }
+
+    /// Whether a `BranchMismatch` checkout holds uncommitted changes to
+    /// tracked files. Preserving one aside is the destructive-feeling step
+    /// in the recovery, so the client confirms first rather than acting on
+    /// a single keypress (#1572).
+    pub fn mismatch_is_dirty(message: &str) -> bool {
+        message.contains("with uncommitted changes")
+    }
+
     /// Whether the modal can offer a one-keypress **repo pick**: an
     /// unmapped Linear team, where the fix is to choose the repo its
     /// tickets should use and persist the mapping, then re-provision
@@ -3853,7 +3904,8 @@ impl WorktreeRecovery {
                  Preserve or remove it, then start again."
             }
             Self::BranchMismatch => {
-                "This worktree is on another branch. Preserve or switch it, then start again."
+                "This worktree is on another branch — a adopts it, r preserves it aside \
+                 and starts fresh."
             }
             Self::DirtyLeftover => {
                 "A leftover folder holds uncommitted work. Move it aside, then start again."
@@ -3923,6 +3975,15 @@ impl WorktreeRecovery {
                 "Managed checkout:",
                 self.hint(),
             ),
+            // Name the branch: adopting is only obviously the right call
+            // once you can see which branch you would be adopting (#1572).
+            Self::BranchMismatch => match Self::mismatch_branch(message) {
+                Some(branch) => format!(
+                    "This worktree is on another branch ({branch}) — a adopts it, \
+                     r preserves it aside and starts fresh."
+                ),
+                None => self.hint().to_string(),
+            },
             _ => self.hint().to_string(),
         }
     }
@@ -4704,6 +4765,46 @@ mod worktree_recovery_tests {
         assert_eq!(
             WorktreeRecovery::df_conflict_branch(msg).as_deref(),
             Some("release/v0.2.102"),
+        );
+    }
+
+    /// #1572: the mismatch modal's `a adopt` needs the branch the checkout
+    /// actually sits on, and its `r preserve & recreate` needs to know
+    /// whether that checkout holds uncommitted tracked work (the one
+    /// destructive-feeling step, which then confirms first). Both ride the
+    /// wire message the daemon already emits.
+    #[test]
+    fn branch_mismatch_carries_the_actual_branch_and_its_dirty_state() {
+        let dirty = "worktree /tmp/w is checked out on branch 'feat-1521-deps' with \
+             uncommitted changes, not the requested branch 'issue-1521-epic' — refusing \
+             to reuse it; preserve or switch that checkout, then retry";
+        let class = WorktreeRecovery::classify(dirty);
+        assert_eq!(class, WorktreeRecovery::BranchMismatch);
+        assert!(class.adopts_branch(), "adopting is the lossless recovery");
+        assert_eq!(
+            WorktreeRecovery::mismatch_branch(dirty).as_deref(),
+            Some("feat-1521-deps"),
+        );
+        assert!(WorktreeRecovery::mismatch_is_dirty(dirty));
+
+        let clean = "worktree /tmp/w is checked out on branch 'feat-1521-deps', not the \
+             requested branch 'issue-1521-epic' — refusing to reuse it; preserve or \
+             switch that checkout, then retry";
+        assert_eq!(
+            WorktreeRecovery::classify(clean),
+            WorktreeRecovery::BranchMismatch
+        );
+        assert_eq!(
+            WorktreeRecovery::mismatch_branch(clean).as_deref(),
+            Some("feat-1521-deps"),
+        );
+        assert!(!WorktreeRecovery::mismatch_is_dirty(clean));
+
+        // Every other class has no branch to adopt.
+        assert!(!WorktreeRecovery::BranchHeldLive.adopts_branch());
+        assert_eq!(
+            WorktreeRecovery::mismatch_branch("branch 'feat' is already checked out at /tmp/w"),
+            None,
         );
     }
 

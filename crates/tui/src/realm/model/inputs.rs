@@ -1453,6 +1453,13 @@ showing keybinding search only",
                     });
                 }
             }
+            Some(Id::WorktreeRecreateConfirm) => {
+                if let Some(ModalFlow::WorktreeRecreateConfirm { cmd }) = self.modal_flow.take()
+                    && yes
+                {
+                    cmds.push(*cmd);
+                }
+            }
             Some(Id::ActionConfirm) => {
                 // Unified destructive-action confirm. Yes →
                 // dispatch the queued action against the target

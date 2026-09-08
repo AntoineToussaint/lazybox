@@ -16,6 +16,7 @@ async fn make_worktree(base: &TempDir) -> Worktree {
         name: "o-r-feat".into(),
         path,
         branch: "feat".into(),
+        drift: Default::default(),
     }
 }
 

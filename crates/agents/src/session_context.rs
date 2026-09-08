@@ -53,7 +53,9 @@ a trailing `&` or they block your turn; `lazybox log --close-all` clears them.\n
   - `lazybox workspace create --name \"…\" [--agent claude]` starts a fresh line of \
 work — reach for it instead of filing an issue.\n\
   - Snippets (`]]s`, `~/.lazybox/snippets.yaml`) and skills (`.claude/skills/`) drive \
-you; a prompt you did not type yourself may have come from one."
+you; a prompt you did not type yourself may have come from one.\n\
+  - Work on the branch lazybox checked out for you; if you create another one, lazybox \
+adopts it on the next spawn — do not switch back to `main` inside the worktree."
 }
 
 /// The cross-agent coordination paragraph. Appended to
@@ -136,6 +138,11 @@ mod tests {
             "auto-merge",
             "auto-fix",
             "lazybox workspace create",
+            // #1572: an agent switching branches inside its worktree is a
+            // common habit lazybox now adopts rather than fights — but a
+            // worktree left on `main` still can't be adopted, so the one
+            // rule the agent must know is named here.
+            "lazybox adopts it on the next spawn",
         ] {
             assert!(
                 text.contains(needle),
@@ -219,9 +226,10 @@ mod tests {
         // agent gets. The caps carry the coordination vocabulary (labels,
         // policies, handles, and the MCP tools) with real slack for a word
         // or a tool name, while still failing if the blurb grows into prose:
-        // the text is ~2.6 KB today (P2 roles added the `role:*` label + the
-        // `spawn_worker` clause, #1523), so 3300 bytes / 35 lines is prose-shaped
-        // headroom, not an exact-fit tripwire on the current string.
+        // the text is ~3.4 KB today (P2 roles added the `role:*` label + the
+        // `spawn_worker` clause, #1523; #1572 added the branch-adoption rule),
+        // so 3600 bytes / 35 lines is prose-shaped headroom, not an exact-fit
+        // tripwire on the current string.
         let text = lazybox_session_context_with_mcp();
         assert!(
             text.lines().count() <= 35,
@@ -229,7 +237,7 @@ mod tests {
             text.lines().count()
         );
         assert!(
-            text.len() <= 3300,
+            text.len() <= 3600,
             "session context should stay tight: {} bytes",
             text.len()
         );

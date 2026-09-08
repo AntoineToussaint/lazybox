@@ -359,6 +359,9 @@ pub struct WorktreeProgress {
     /// Whether the failure is an unmapped Linear team, so the modal offers
     /// a repo pick that persists the mapping and re-provisions (#1041).
     picks_repo: bool,
+    /// The branch the checkout actually sits on, when the failure is a
+    /// `BranchMismatch` — `a` takes the workspace's records to it (#1572).
+    adopt_branch: Option<String>,
     warning: Option<String>,
     spinner_idx: usize,
 }
@@ -378,6 +381,11 @@ impl WorktreeProgress {
                 .recovery
                 .is_some_and(|recovery| recovery.jump_to_holder()),
             picks_repo: state.recovery.is_some_and(|recovery| recovery.picks_repo()),
+            adopt_branch: state
+                .recovery
+                .is_some_and(|recovery| recovery.adopts_branch())
+                .then(|| state.error().and_then(WorktreeRecovery::mismatch_branch))
+                .flatten(),
             warning: state.warning.clone(),
             spinner_idx: 0,
         }
@@ -480,6 +488,11 @@ impl Component for WorktreeProgress {
             // jumps to the live session holding a branch we can't take.
             if self.retryable {
                 "  r retry · Esc dismiss"
+            } else if self.adopt_branch.is_some() {
+                // The lossless recovery leads: the work is on the branch
+                // the checkout already sits on, so adopting it keeps it
+                // (#1572). `r` still preserves aside and rebuilds.
+                "  a adopt branch · r preserve & recreate · Esc dismiss"
             } else if self.recreatable {
                 "  r recreate · Esc dismiss"
             } else if self.jump {
@@ -580,6 +593,13 @@ impl AppComponent<Msg, UserEvent> for WorktreeProgress {
                 code: Key::Char('r'),
                 ..
             }) if self.recreatable => Some(Msg::WorktreeRecreate),
+            // `a` on a wrong-branch failure takes the workspace's records
+            // to the branch the checkout sits on (#1572) — lossless,
+            // unlike `r`, which preserves that checkout aside.
+            Event::Keyboard(KeyEvent {
+                code: Key::Char('a'),
+                ..
+            }) if self.adopt_branch.is_some() => Some(Msg::WorktreeAdopt),
             // `g` jumps to the live session already holding the branch.
             Event::Keyboard(KeyEvent {
                 code: Key::Char('g'),
@@ -1020,16 +1040,51 @@ mod tests {
         assert_eq!(st.recovery(), Some(WorktreeRecovery::BranchMismatch));
         let out = render(&mut WorktreeProgress::from_state(&st), 72, 20);
         assert!(out.contains('✗'), "{out}");
-        assert!(out.contains("r recreate"), "recreate affordance: {out}");
+        // #1572: adopting the branch the checkout already sits on is the
+        // lossless recovery, so it leads — and the remediation names the
+        // branch you would be adopting.
+        assert!(out.contains("a adopt branch"), "adopt affordance: {out}");
+        assert!(
+            out.contains("r preserve & recreate"),
+            "recreate affordance: {out}"
+        );
+        assert!(out.contains("issue-1-old"), "the branch is named: {out}");
         assert!(
             !out.contains("r retry"),
             "must not advertise a bare retry: {out}"
         );
         let mut comp = WorktreeProgress::from_state(&st);
         assert!(matches!(
+            comp.on(&Event::Keyboard(KeyEvent::from(Key::Char('a')))),
+            Some(Msg::WorktreeAdopt)
+        ));
+        assert!(matches!(
             comp.on(&Event::Keyboard(KeyEvent::from(Key::Char('r')))),
             Some(Msg::WorktreeRecreate)
         ));
+    }
+
+    /// Only a wrong-branch failure offers `a`: every other recoverable
+    /// class has no branch to adopt, so the key must stay inert there.
+    #[test]
+    fn adopt_key_is_inert_outside_a_branch_mismatch() {
+        let mut st = state();
+        st.apply(WorktreeStep::WorktreeAdd, WorktreeStepStatus::Started);
+        st.apply(
+            WorktreeStep::WorktreeAdd,
+            WorktreeStepStatus::Failed(
+                "/tmp/w exists but is not a worktree of /bare and holds uncommitted work \
+                 — refusing to reuse or overwrite it; move the directory aside and retry"
+                    .into(),
+            ),
+        );
+        assert_eq!(st.recovery(), Some(WorktreeRecovery::DirtyLeftover));
+        let mut comp = WorktreeProgress::from_state(&st);
+        assert!(
+            comp.on(&Event::Keyboard(KeyEvent::from(Key::Char('a'))))
+                .is_none(),
+            "there is no branch to adopt on a dirty leftover"
+        );
     }
 
     /// Issue #787: a `BranchHeldLive` failure offers a jump to the live

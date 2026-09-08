@@ -8505,6 +8505,7 @@ mod stale_input_tests {
                 | Id::ClaimedSpawnConfirm
                 | Id::ScopeRemovalConfirm
                 | Id::EditorRemoveConfirm
+                | Id::WorktreeRecreateConfirm
                 | Id::HelpActionConfirm => false,
                 // Drop — destructive-action menus / delete-routing lists.
                 // (HeaderContext's entries are all local/reversible, but
@@ -21281,6 +21282,114 @@ mod worktree_progress_recovery_tests {
         assert!(matches!(spawn.kind, TerminalKind::Agent(ref id) if id == "claude"));
         // A plain BranchMismatch moves the workspace's own target, not a holder.
         // (holder preservation only applies to BranchHeldManaged.)
+    }
+
+    /// #1572: `a` on a `BranchMismatch` modal dispatches
+    /// `AdoptWorktreeBranch` carrying the remembered spawn — the daemon
+    /// reconciles the records onto the on-disk branch and re-spawns,
+    /// leaving the previous agent's work exactly where it is.
+    #[test]
+    fn adopt_dispatches_adopt_worktree_branch_from_the_remembered_spawn() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let key = WorkspaceKey::new("github:acme/widget#42");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        m.last_spawn = Some(lazybox_ipc::Command::Spawn {
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
+            session_key: session_key.clone(),
+            session_id: None,
+            client_request_id: None,
+            kind: TerminalKind::Agent("claude".into()),
+            cwd: None,
+            initial_prompt: Some("fix it".into()),
+            initial_snippet: None,
+            on_main: false,
+            force_new: false,
+            role: None,
+        });
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key,
+            step: WorktreeStep::WorktreeAdd,
+            status: WorktreeStepStatus::Failed(
+                "checkout_at: worktree /tmp/wt is checked out on branch 'feat-42-work', \
+                 not the requested branch 'issue-42-new' — refusing to reuse it"
+                    .into(),
+            ),
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
+        });
+        while server.rx.try_recv().is_ok() {}
+
+        m.adopt_worktree_branch();
+
+        assert!(!m.modal_stack.contains(&Id::WorktreeProgress));
+        let mut adopt = None;
+        while let Ok(cmd) = server.rx.try_recv() {
+            if let lazybox_ipc::Command::AdoptWorktreeBranch { spawn, .. } = cmd {
+                adopt = Some(spawn);
+            }
+        }
+        let spawn = adopt.expect("adopt must issue an AdoptWorktreeBranch command");
+        assert!(matches!(spawn.kind, TerminalKind::Agent(ref id) if id == "claude"));
+    }
+
+    /// #1572: `r` moves a live checkout into a `.bak-<n>` sibling. When
+    /// that checkout holds uncommitted tracked work, ask first instead of
+    /// acting on the single keypress; the recreate only goes out on Yes.
+    #[test]
+    fn recreate_confirms_before_preserving_a_dirty_checkout_aside() {
+        let (client, mut server) = channel::pair();
+        let mut m = Model::new_for_test(client, Size::new(120, 40)).expect("model init");
+        let key = WorkspaceKey::new("github:acme/widget#42");
+        let session_key: lazybox_core::SessionKey = (&key).into();
+        m.last_spawn = Some(lazybox_ipc::Command::Spawn {
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
+            session_key: session_key.clone(),
+            session_id: None,
+            client_request_id: None,
+            kind: TerminalKind::Agent("claude".into()),
+            cwd: None,
+            initial_prompt: Some("fix it".into()),
+            initial_snippet: None,
+            on_main: false,
+            force_new: false,
+            role: None,
+        });
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key,
+            step: WorktreeStep::WorktreeAdd,
+            status: WorktreeStepStatus::Failed(
+                "checkout_at: worktree /tmp/wt is checked out on branch 'feat-42-work' \
+                 with uncommitted changes, not the requested branch 'issue-42-new' — \
+                 refusing to reuse it"
+                    .into(),
+            ),
+            origin: lazybox_ipc::SpawnOrigin::Interactive,
+        });
+        while server.rx.try_recv().is_ok() {}
+
+        m.recreate_worktree_provision();
+
+        assert_eq!(
+            m.modal_stack.last(),
+            Some(&Id::WorktreeRecreateConfirm),
+            "a dirty checkout is confirmed before it is moved aside",
+        );
+        assert!(
+            !server
+                .rx
+                .try_recv()
+                .is_ok_and(|cmd| matches!(cmd, lazybox_ipc::Command::RecreateWorktree { .. })),
+            "nothing is dispatched until the confirm is answered",
+        );
+
+        let cmds = m.handle_confirmed(true);
+        assert!(
+            cmds.iter()
+                .any(|cmd| matches!(cmd, lazybox_ipc::Command::RecreateWorktree { .. })),
+            "Yes dispatches the recreate: {cmds:?}",
+        );
     }
 
     /// Issue #787: `g` on a `BranchHeldLive` modal reveals the workspace

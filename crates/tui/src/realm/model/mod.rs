@@ -337,6 +337,11 @@ pub enum Id {
     /// modals (MergePrConfirm, the kill latch, …) — one modal id,
     /// one Yes-handler, one place to remember.
     ActionConfirm,
+    /// "Preserve this checkout aside?" confirm shown before `r` on a
+    /// `BranchMismatch` whose checkout holds uncommitted tracked work
+    /// (#1572). The parked command lives in
+    /// `ModalFlow::WorktreeRecreateConfirm`.
+    WorktreeRecreateConfirm,
     /// Merge-conflict resolve prompt (issue #947). Offered when a `g m`
     /// merge is blocked (or rejected) by conflicts: `Msg::Confirmed(true)`
     /// spawns/attaches the workspace's agent with the conflict-resolution
@@ -900,6 +905,11 @@ pub(crate) enum ModalFlow {
     ViewPick {
         views: Vec<lazybox_config::ViewConfig>,
     },
+    /// The `RecreateWorktree` command parked behind the "preserve a dirty
+    /// checkout aside?" confirm (#1572). Moving a checkout with
+    /// uncommitted tracked work into a `.bak-<n>` sibling was a single
+    /// keypress; it now asks first.
+    WorktreeRecreateConfirm { cmd: Box<lazybox_ipc::Command> },
     /// The wizard Finish outcome parked behind the remove-repos
     /// confirm (#scale, proposal F).
     ScopeRemovalConfirm {
@@ -1251,6 +1261,11 @@ pub enum Msg {
     /// dirty-leftover / non-live-managed conflict is one keypress from
     /// unstuck instead of an Esc-only dead end.
     WorktreeRecreate,
+    /// `a` pressed on a `BranchMismatch` `WorktreeProgress` modal (#1572)
+    /// — take the workspace's records to the branch its checkout actually
+    /// sits on and re-run the spawn, keeping the work that is already
+    /// there instead of preserving the checkout aside.
+    WorktreeAdopt,
     /// `g` pressed on a `BranchHeldLive` `WorktreeProgress` modal — jump
     /// to the live session already holding the branch instead of fighting
     /// for it (issue #787).
@@ -7372,6 +7387,7 @@ impl<T: TerminalAdapter> Model<T> {
             Msg::WorktreeProgressTick => self.advance_worktree_progress(),
             Msg::WorktreeRetry => self.retry_worktree_provision(),
             Msg::WorktreeRecreate => self.recreate_worktree_provision(),
+            Msg::WorktreeAdopt => self.adopt_worktree_branch(),
             Msg::WorktreeJumpToHolder => self.jump_to_worktree_holder(),
             Msg::WorktreePickRepo => self.pick_repo_for_linear_team(),
             Msg::Confirmed(yes) => {

@@ -157,18 +157,16 @@ pub async fn handle_start_agent_run(
     // Structured runs speak to the same upstream as PTY spawns, so
     // they need the same LLM-gateway routing (`agent.llm_gateway_url` →
     // base-URL env for most agents, `-c` provider flags for Codex) and the
-    // same per-agent spawn-env defaults (Codex brew suppression). They opt OUT
-    // of the metering proxy (`meter = false`): a structured run already reports
-    // its token usage by parsing its own stream-json, so routing it through the
-    // proxy too would count every turn twice in the header summary (#1109) —
-    // which leaves only the plain-gateway fallback, active when a gateway URL
-    // is configured.
-    let injection = crate::spawn_plan::gateway_injection_for_agent(
+    // same per-agent spawn-env defaults (Codex brew suppression). They must
+    // NOT be routed through the metering proxy: a structured run already
+    // reports its token usage by parsing its own stream-json, so proxying it
+    // too would count every turn twice in the header summary (#1109). Hence the
+    // plain-gateway-only path — which, unlike passing `meter: false` to
+    // `gateway_injection_for_agent`, the global `agent.meter_all` cannot
+    // override into a proxy route.
+    let injection = crate::spawn_plan::plain_gateway_injection_for_agent(
         &yaml,
         Some(agent_impl.as_ref()),
-        false,
-        false,
-        resolved_session_key.as_str(),
     );
     let env = match &injection {
         GatewayInjection::Env(pairs) => pairs.clone(),

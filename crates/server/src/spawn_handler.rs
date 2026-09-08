@@ -11589,8 +11589,8 @@ mod tests {
     use crate::backend::SessionBackend;
     use crate::spawn_plan::{
         argv_for as build_argv, gateway_env_for_agent, gateway_injection_for_agent,
-        skip_permissions_for, with_agent_pty_spawn_env, with_agent_spawn_defaults,
-        with_worktree_cargo_target,
+        plain_gateway_injection_for_agent, skip_permissions_for, with_agent_pty_spawn_env,
+        with_agent_spawn_defaults, with_worktree_cargo_target,
     };
     use lazybox_agents::GatewayInjection;
 
@@ -14038,6 +14038,48 @@ mod tests {
         assert_eq!(
             gateway_injection_for_agent(&cfg, Some(&codex), false, false, "github-acme-widget-7"),
             GatewayInjection::None,
+        );
+    }
+
+    #[test]
+    fn structured_runs_never_metered_even_under_meter_all() {
+        // Regression (#1109 double-count): a structured run reports its own
+        // token usage by parsing its stream-json, so it must never *also* be
+        // routed through the metering proxy — otherwise the proxy's
+        // `AgentSessionUsage` and the run's own `AgentUsage` both add the same
+        // tokens to the sidebar tracker. The structured path takes
+        // `plain_gateway_injection_for_agent`, which has no proxy branch, so the
+        // blanket `meter_all` toggle cannot redirect it. Passing `meter: false`
+        // to `gateway_injection_for_agent` is NOT sufficient: `meter_all` still
+        // routes that path through the proxy (asserted as the contrast below).
+        crate::proxy::set_port(45998);
+        let port = crate::proxy::port().expect("a proxy port is published");
+        let mut cfg = lazybox_config::Config::default();
+        cfg.agent.metering_proxy = true;
+        cfg.agent.meter_all = true;
+        let codex = lazybox_agents::agent::builtins::Codex;
+
+        // Structured path: no gateway configured, so nothing is injected —
+        // critically, NOT the per-session proxy URL, even though meter_all is on.
+        assert_eq!(
+            plain_gateway_injection_for_agent(&cfg, Some(&codex)),
+            GatewayInjection::None,
+            "a structured run must not be routed through the metering proxy",
+        );
+
+        // Contrast: the interactive PTY path DOES honor meter_all even with
+        // meter=false — the exact route the structured path must avoid.
+        let proxy_url = format!("http://127.0.0.1:{port}/openai/codex/github-acme-widget-7");
+        let GatewayInjection::Args(flags) =
+            gateway_injection_for_agent(&cfg, Some(&codex), false, false, "github-acme-widget-7")
+        else {
+            panic!("meter_all must route the PTY path through the proxy even with meter=false");
+        };
+        assert!(
+            flags
+                .join(" ")
+                .contains(&format!("model_providers.lazyboxmeter.base_url=\"{proxy_url}\"")),
+            "meter_all routes the interactive path to the per-session proxy URL",
         );
     }
 

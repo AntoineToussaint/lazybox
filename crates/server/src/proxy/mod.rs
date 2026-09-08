@@ -236,12 +236,28 @@ pub async fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHand
 
     // Chain through a configured gateway when one is set, so the proxy
     // meters traffic that still terminates at the user's own endpoint.
+    //
+    // Path contract: the proxy forwards each provider's wire path appended to
+    // its upstream, and the two agents append DIFFERENT prefixes — Claude adds
+    // `/v1/messages`, Codex adds only `/responses` (no `/v1`; that is why the
+    // vendor default bakes `/v1` onto `openai` but not `anthropic`). A single
+    // `gateway_url` fronting both therefore receives `<url>/v1/messages` for
+    // Claude and `<url>/responses` for Codex, so the gateway must accept BOTH
+    // shapes. In particular, an OpenAI-compatible gateway that expects
+    // `/v1/responses` needs the `/v1` included in the configured URL — the
+    // proxy does not add it here (the vendor default's `/v1` is OpenAI's real
+    // host path, not something to presume onto an arbitrary gateway, and many
+    // gateway URLs already carry their own `/v1`).
     let upstreams = match cfg.agent.gateway_url() {
         Some(url) => Upstreams {
             anthropic: url.to_string(),
             openai: url.to_string(),
-            // A configured gateway is an API-priced endpoint; ChatGPT-mode
-            // routing only applies to the vendor default.
+            // ChatGPT-subscription requests are authenticated by the user's
+            // ChatGPT account session (`chatgpt-account-id` + an OAuth session
+            // token) that ONLY chatgpt.com/backend-api/codex can validate — a
+            // generic API gateway can't service them (it would 401/403). So
+            // subscription traffic stays pinned to the vendor backend even when
+            // a gateway is configured; the gateway only fronts API-key traffic.
             chatgpt: Upstreams::default().chatgpt,
         },
         None => Upstreams::default(),

@@ -1119,6 +1119,7 @@ fn all_events() -> Vec<Event> {
                     category: "Review".into(),
                 },
             }),
+            confirmed: true,
         },
         Event::CommandCompleted {
             client_request_id: "spawn-1".into(),

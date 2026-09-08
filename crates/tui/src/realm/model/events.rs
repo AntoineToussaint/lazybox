@@ -2711,15 +2711,28 @@ impl<T: TerminalAdapter> Model<T> {
             terminal_id,
             snippet_key,
             prompt,
+            confirmed,
             ..
         } = &event
         {
+            // Durable client state reflects what was written, so update it
+            // whether or not the submit was acknowledged: Recent MRU (so
+            // `]]s`+Enter repeats it), recall (`]]r`) and history (`]]h`).
             self.apply_recent_snippet(snippet_key.clone());
             if let Some(prompt) = prompt {
                 self.terminals
                     .apply_delivered_prompt(*terminal_id, prompt.clone());
             }
-            self.flash_info(format!("sent snippet ]{snippet_key}"));
+            // Only announce a fresh "sent" toast when the submit was
+            // confirmed. On an unconfirmed submit the daemon's resend ladder
+            // has already flashed a Retryable give-up notice ("looks parked —
+            // press Enter" / "permission prompt appeared"); a cheerful "sent
+            // snippet" Info flash here is non-sticky and would immediately
+            // replace that warning in the footer, so the user would never see
+            // that their work didn't actually start (#1544).
+            if *confirmed {
+                self.flash_info(format!("sent snippet ]{snippet_key}"));
+            }
             self.redraw = true;
         }
         // Terminal delivery failures are retryable user-input errors, not

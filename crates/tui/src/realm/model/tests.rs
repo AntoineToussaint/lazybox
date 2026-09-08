@@ -3667,6 +3667,7 @@ snippets:
             session_key: "github:o/r#1".into(),
             snippet_key: "ls".into(),
             prompt: None,
+            confirmed: true,
         });
         assert_eq!(m.recent_snippets, vec!["ls"]);
     }
@@ -5103,6 +5104,7 @@ snippets:
                 session_key,
                 snippet_key: "rev".into(),
                 prompt: None,
+                confirmed: true,
             });
         }
         assert_eq!(m.recent_snippets, vec!["rev"], "bulk send de-duplicates");
@@ -23363,6 +23365,76 @@ mod recent_snippets_tests {
         m.apply_recent_snippet("rev".into());
         assert_eq!(m.recent_snippets, vec!["rev".to_string()]);
         assert!(server.rx.try_recv().is_err(), "success is not re-reported");
+    }
+
+    /// A CONFIRMED delivery updates the MRU *and* flashes the "sent
+    /// snippet" footer notice — the acknowledgement path where the toast is
+    /// the right feedback.
+    #[test]
+    fn confirmed_delivery_flashes_sent_notice() {
+        let (mut m, _server) = build_model();
+        m.handle_daemon_event(Event::SnippetDelivered {
+            terminal_id: lazybox_ipc::TerminalId(1),
+            session_key: "github:o/r#1".into(),
+            snippet_key: "rev".into(),
+            prompt: None,
+            confirmed: true,
+        });
+        assert_eq!(m.recent_snippets, vec!["rev".to_string()]);
+        let notice = m.status.notice.as_ref().expect("a confirmed send flashes");
+        assert!(
+            notice.message.contains("sent snippet ]rev"),
+            "message: {}",
+            notice.message
+        );
+    }
+
+    /// Regression (#1544): an UNCONFIRMED delivery must still update the
+    /// durable MRU, but must NOT flash a "sent snippet" toast — the daemon's
+    /// resend ladder has already posted its Retryable "parked — press Enter"
+    /// give-up notice, and a non-sticky Info toast would immediately replace
+    /// it, hiding from the user that their work never actually started.
+    #[test]
+    fn unconfirmed_delivery_updates_mru_without_masking_the_give_up_notice() {
+        use crate::realm::components::footer::{Notice, NoticeSeverity};
+        let (mut m, _server) = build_model();
+        // The resend ladder's give-up notice is already in the footer.
+        m.status.notice = Some(Notice::new(
+            "⚠ terminal input not delivered — looks parked unsubmitted; \
+             open the terminal and press Enter",
+            NoticeSeverity::Retryable,
+        ));
+
+        m.handle_daemon_event(Event::SnippetDelivered {
+            terminal_id: lazybox_ipc::TerminalId(1),
+            session_key: "github:o/r#1".into(),
+            snippet_key: "rev".into(),
+            prompt: None,
+            confirmed: false,
+        });
+
+        // Durable client state still reflects what was written.
+        assert_eq!(
+            m.recent_snippets,
+            vec!["rev".to_string()],
+            "the delivery still records to Recent",
+        );
+        // …but the give-up notice survives — no "sent snippet" toast stomped it.
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .expect("the give-up notice is still present");
+        assert!(
+            notice.message.contains("press Enter"),
+            "the parked-submit warning must remain visible, got: {}",
+            notice.message
+        );
+        assert_eq!(
+            notice.severity,
+            NoticeSeverity::Retryable,
+            "an unconfirmed send does not downgrade the warning to an Info toast",
+        );
     }
 
     #[test]

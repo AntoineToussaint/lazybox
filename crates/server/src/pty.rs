@@ -1132,31 +1132,48 @@ impl DaemonPty {
                                 log.append(&buf[..n]);
                             }
                             let bytes: Arc<[u8]> = Arc::from(&buf[..n]);
-                            // Push to the ring and assign the seq under the
-                            // SAME lock, in that order, so any reader of the
-                            // (ring snapshot, last_seq) pair — `snapshot_only`,
-                            // feeding subscribe + the forwarder's resync — sees
-                            // the ring already containing every chunk through
-                            // last_seq. Bumping the seq before the push left a
-                            // window where last_seq led the ring by one chunk;
-                            // the forwarder's seq dedup would then mistake that
-                            // not-yet-replayed chunk for a duplicate and drop
-                            // it. Ring-ahead-of-seq is harmless (worst case a
-                            // duplicate that dedup catches); seq-ahead-of-ring
-                            // loses data.
-                            let (seq, (cols, rows)) = {
+                            // Push to the ring, assign the seq, AND broadcast
+                            // all under the SAME lock, in that order. The push
+                            // before the seq bump means any reader of the (ring
+                            // snapshot, last_seq) pair — `snapshot_only`, feeding
+                            // subscribe + the forwarder's resync — sees the ring
+                            // already containing every chunk through last_seq.
+                            // Bumping the seq before the push left a window where
+                            // last_seq led the ring by one chunk; the forwarder's
+                            // seq dedup would then mistake that not-yet-replayed
+                            // chunk for a duplicate and drop it. Ring-ahead-of-seq
+                            // is harmless (worst case a duplicate that dedup
+                            // catches); seq-ahead-of-ring loses data.
+                            //
+                            // The `send` stays inside the lock too, because this
+                            // channel has a SECOND producer: `resize` also
+                            // sequences-then-broadcasts an empty size chunk. If
+                            // either producer released the lock before sending,
+                            // the two sends could complete in an order that
+                            // disagrees with their allocated seq — broadcast
+                            // delivers in send-completion order, not seq order —
+                            // and the forwarder would see a phantom seq gap and
+                            // fire a spurious full-ring resync (plus a full state
+                            // re-detection) under nothing worse than a splitter
+                            // drag over live output. `broadcast::send` is
+                            // synchronous, non-blocking, and never touches the
+                            // ring lock, so holding the lock across it just
+                            // serializes send-completion into seq order; it
+                            // cannot deadlock.
+                            {
                                 let mut r = reader_ring.blocking_lock();
                                 r.push(&bytes);
-                                (reader_seq.fetch_add(1, Ordering::SeqCst) + 1, r.size())
-                            };
-                            // If no subscribers, broadcast returns error;
-                            // we don't care — the ring holds the data.
-                            let _ = reader_tx.send(OutputChunk {
-                                seq,
-                                bytes,
-                                cols,
-                                rows,
-                            });
+                                let seq = reader_seq.fetch_add(1, Ordering::SeqCst) + 1;
+                                let (cols, rows) = r.size();
+                                // If no subscribers, broadcast returns error;
+                                // we don't care — the ring holds the data.
+                                let _ = reader_tx.send(OutputChunk {
+                                    seq,
+                                    bytes,
+                                    cols,
+                                    rows,
+                                });
+                            }
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                         Err(e) => {
@@ -1352,17 +1369,26 @@ impl DaemonPty {
     pub async fn resize(&self, size: PtySize) -> Result<(), PtyError> {
         let m = self.master.lock().await;
         m.resize(size).map_err(|e| PtyError::Open(e.to_string()))?;
-        let seq = {
+        // Sequence AND broadcast the size announcement under the ring
+        // lock, matching the reader thread. This channel has two
+        // producers (the reader and this method); if the send happened
+        // after the lock released, the reader's send and this one could
+        // complete out of seq order — broadcast delivers in
+        // send-completion order, not seq order — and the forwarder would
+        // see a phantom gap and fire a spurious full-ring resync. Holding
+        // the lock across the synchronous, non-blocking `send` serializes
+        // the two producers' send-completion into seq order.
+        {
             let mut ring = self.ring.lock().await;
             ring.note_size(size.cols, size.rows);
-            self.last_seq.fetch_add(1, Ordering::SeqCst) + 1
-        };
-        let _ = self.output_tx.send(OutputChunk {
-            seq,
-            bytes: Arc::from(&[][..]),
-            cols: size.cols,
-            rows: size.rows,
-        });
+            let seq = self.last_seq.fetch_add(1, Ordering::SeqCst) + 1;
+            let _ = self.output_tx.send(OutputChunk {
+                seq,
+                bytes: Arc::from(&[][..]),
+                cols: size.cols,
+                rows: size.rows,
+            });
+        }
         Ok(())
     }
 
@@ -1962,6 +1988,96 @@ mod seed_tests {
                 rows: 40
             }],
             "nothing was produced at the spawn size, so the resize replaces the baseline"
+        );
+    }
+
+    /// Regression for the two-producer broadcast reorder (finding #1):
+    /// the reader thread and `resize` both allocate their seq under the
+    /// ring lock, but if either broadcast the chunk AFTER releasing the
+    /// lock, the two sends could complete out of seq order — tokio
+    /// broadcast delivers in send-completion order — so a subscriber
+    /// would receive a higher seq before a lower one. The forwarder
+    /// reads that as a phantom gap and fires a spurious full-ring resync
+    /// under nothing worse than a splitter drag over live output. The
+    /// invariant the fix restores is absolute: delivery order equals seq
+    /// order, so received seqs never go backwards. This is a stress
+    /// guard — it cannot false-fail on correct code (the invariant holds
+    /// unconditionally once the send is inside the lock) and catches a
+    /// regression by hammering resizes against a continuous output
+    /// stream across two runtime threads.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_resize_and_output_never_reorder_seqs() {
+        let pty = DaemonPty::spawn(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                // A steady, high-rate byte stream keeps the reader thread
+                // broadcasting while we resize underneath it.
+                "while :; do printf 'xxxxxxxx'; done".to_string(),
+            ],
+            small(),
+            None,
+            Vec::new(),
+            &[],
+        )
+        .expect("spawn");
+        let mut sub = pty.subscribe().await;
+        let pty = std::sync::Arc::new(pty);
+
+        // Resizer: flip between two sizes as fast as possible on another
+        // runtime thread, contending with the reader for the ring lock.
+        let resizer = {
+            let pty = pty.clone();
+            tokio::spawn(async move {
+                let sizes = [(90u16, 30u16), (100u16, 40u16)];
+                for i in 0..4000u32 {
+                    let (cols, rows) = sizes[(i % 2) as usize];
+                    let _ = pty
+                        .resize(PtySize {
+                            cols,
+                            rows,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        })
+                        .await;
+                    tokio::task::yield_now().await;
+                }
+            })
+        };
+
+        // Drain the stream and prove seqs only ever increase. `Lagged`
+        // preserves monotonicity: it skips the oldest un-received chunks,
+        // so the next delivered seq is still greater than the last seen.
+        let mut prev = sub.last_seq;
+        let mut received = 0u32;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while received < 3000 && std::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(200), sub.live.recv()).await
+            {
+                Ok(Ok(chunk)) => {
+                    assert!(
+                        chunk.seq > prev,
+                        "broadcast delivered seq {} after {} — out-of-order producers",
+                        chunk.seq,
+                        prev
+                    );
+                    prev = chunk.seq;
+                    received += 1;
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+                Err(_) => {
+                    if resizer.is_finished() {
+                        break;
+                    }
+                }
+            }
+        }
+        pty.kill();
+        let _ = resizer.await;
+        assert!(
+            received > 100,
+            "expected a meaningful sample of the interleaved stream, got {received}"
         );
     }
 

@@ -1037,7 +1037,7 @@ pub mod builtins {
         }
         /// Codex ignores `OPENAI_BASE_URL`, so the env-based default would
         /// meter nothing. Point it at the proxy through `-c` provider
-        /// overrides on the argv instead. See [`codex_gateway_provider_flags`].
+        /// overrides on the argv instead. See `codex_gateway_provider_flags`.
         fn gateway_injection(&self, base_url: &str) -> GatewayInjection {
             GatewayInjection::Args(codex_gateway_provider_flags(base_url))
         }

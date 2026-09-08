@@ -561,6 +561,10 @@ fn all_commands() -> Vec<Command> {
         Command::ArchiveEpic {
             epic: "auth-refactor".into(),
         },
+        Command::SetWorkspaceRole {
+            workspace: lazybox_core::WorkspaceKey("github:o/r#1".into()),
+            role: Some(lazybox_core::Role::Coordinator),
+        },
         Command::Shutdown,
     ]
 }
@@ -1424,6 +1428,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::ArchiveEpic { .. } => "ArchiveEpic",
         Command::RecordAction { .. } => "RecordAction",
         Command::RestartAgentAndContinue { .. } => "RestartAgentAndContinue",
+        Command::SetWorkspaceRole { .. } => "SetWorkspaceRole",
     }
 }
 
@@ -1547,7 +1552,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        96,
+        97,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(

@@ -2231,7 +2231,20 @@ pub struct AgentSection {
     /// (agents at normal priority). Clamped to 0..=20.
     #[serde(default)]
     pub nice: Option<i32>,
+    /// Ceiling on how many Worker sessions a Coordinator may spawn into
+    /// one epic through the `spawn_worker` MCP tool (#1523). Counts the
+    /// epic's current members that carry the Worker role; over the cap
+    /// `spawn_worker` refuses (it does not warn-and-proceed like
+    /// `max_live_agents` — a Coordinator fanning out unattended is exactly
+    /// the fleet-runaway path the cap exists to bound). Unset → 6; `0`
+    /// disables spawning entirely.
+    #[serde(default)]
+    pub max_epic_workers: Option<usize>,
 }
+
+/// Default for [`AgentSection::max_epic_workers`] when unset: at most six
+/// concurrent Worker sessions per epic under one Coordinator (#1523).
+pub const DEFAULT_MAX_EPIC_WORKERS: usize = 6;
 
 /// Default for [`AgentSection::max_live_agents`] when unset.
 pub const DEFAULT_MAX_LIVE_AGENTS: usize = 32;

@@ -2922,6 +2922,8 @@ pub(super) fn action_from_kind(
         ActionKind::Reply => Action::Reply,
         ActionKind::EditNotes => Action::EditNotes,
         ActionKind::SetRole => Action::SetRole,
+        ActionKind::SpawnPlanner => Action::SpawnPlanner,
+        ActionKind::SpawnCoordinator => Action::SpawnCoordinator,
         ActionKind::RequestReviewers => Action::RequestReviewers,
         ActionKind::AddAssignees => Action::AddAssignees,
         ActionKind::ManageLabels => Action::ManageLabels,

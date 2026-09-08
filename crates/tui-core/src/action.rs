@@ -454,6 +454,18 @@ pub enum Action {
     /// entry that clears the role. Drives the sidebar badge, the spawn-time
     /// prompt preamble, and the `role:<role>` upstream label projection.
     SetRole,
+    /// Spawn a **Planner** agent on the cursor workspace (`E p`, #1523).
+    /// Stamps the workspace `role:planner`, then starts the default agent
+    /// with the Planner preamble (carve + design-issues briefs + the
+    /// machine-readable-graph instruction). Always a fresh agent
+    /// (`force_new`).
+    SpawnPlanner,
+    /// Spawn a **Coordinator** agent for the cursor epic (`E c`, #1523).
+    /// Creates a fresh local workspace `<epic>-coordinator`, assigns it to
+    /// the epic, stamps `role:coordinator`, then starts the default agent
+    /// with the Coordinator preamble (own the epic, status from
+    /// `epic_status`, brief siblings, start workers with `spawn_worker`).
+    SpawnCoordinator,
     /// Move the sidebar cursor to the previous group header (`{`,
     /// #1502). Clamps at the first.
     JumpPrevGroup,
@@ -670,6 +682,8 @@ pub enum ActionKind {
     EpicMergeOrder,
     EpicGraph,
     SetRole,
+    SpawnPlanner,
+    SpawnCoordinator,
     JumpPrevGroup,
     JumpNextGroup,
     ResumeRateLimited,
@@ -791,6 +805,8 @@ impl ActionKind {
         Self::Reply,
         Self::EditNotes,
         Self::SetRole,
+        Self::SpawnPlanner,
+        Self::SpawnCoordinator,
         // Sidebar list management
         Self::JumpPrevGroup,
         Self::JumpNextGroup,
@@ -977,6 +993,8 @@ impl Action {
             Action::EpicMergeOrder => ActionKind::EpicMergeOrder,
             Action::EpicGraph => ActionKind::EpicGraph,
             Action::SetRole => ActionKind::SetRole,
+            Action::SpawnPlanner => ActionKind::SpawnPlanner,
+            Action::SpawnCoordinator => ActionKind::SpawnCoordinator,
             Action::JumpPrevGroup => ActionKind::JumpPrevGroup,
             Action::JumpNextGroup => ActionKind::JumpNextGroup,
             Action::ResumeRateLimited => ActionKind::ResumeRateLimited,
@@ -1203,6 +1221,20 @@ impl ActionDef {
                 default_keys: "E r",
                 label: "set role",
                 describe: "Set (or clear) the cursor workspace's orchestration role — Planner, Coordinator, Worker, Reviewer, or Integrator (#1523). A Choice modal lists the five roles plus 'none'. The role drives the row badge, the spawn-prompt preamble, and (for Coordinator) the `spawn_worker` MCP gate; it also projects a `role:<name>` label on the upstream issue/PR.",
+                section: Section::Workspace,
+            },
+            ActionKind::SpawnPlanner => &Self {
+                kind: ActionKind::SpawnPlanner,
+                default_keys: "E p",
+                label: "spawn planner",
+                describe: "Stamp the cursor workspace as Planner and start the default agent with the Planner preamble (#1523) — carve the epic into sibling briefs, design the issues, and emit the machine-readable dependency graph. Always a fresh agent.",
+                section: Section::Workspace,
+            },
+            ActionKind::SpawnCoordinator => &Self {
+                kind: ActionKind::SpawnCoordinator,
+                default_keys: "E c",
+                label: "spawn coordinator",
+                describe: "Create a fresh local `<epic>-coordinator` workspace for the cursor epic, assign it, stamp it Coordinator, and start the default agent with the Coordinator preamble (#1523) — own the epic, read status from `epic_status`, brief siblings, and start workers with `spawn_worker`.",
                 section: Section::Workspace,
             },
             ActionKind::JumpPrevGroup => &Self {
@@ -2458,6 +2490,8 @@ impl ActionKind {
             ActionKind::EpicMergeOrder => "epic_merge_order",
             ActionKind::EpicGraph => "epic_graph",
             ActionKind::SetRole => "set_role",
+            ActionKind::SpawnPlanner => "spawn_planner",
+            ActionKind::SpawnCoordinator => "spawn_coordinator",
             ActionKind::JumpPrevGroup => "jump_prev_group",
             ActionKind::JumpNextGroup => "jump_next_group",
             ActionKind::ResumeRateLimited => "resume_rate_limited",
@@ -2706,7 +2740,9 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         ActionKind::JumpToBlocked
         | ActionKind::EpicMergeOrder
         | ActionKind::EpicGraph
-        | ActionKind::SetRole => Some("epic"),
+        | ActionKind::SetRole
+        | ActionKind::SpawnPlanner
+        | ActionKind::SpawnCoordinator => Some("epic"),
         _ => None,
     }
 }
@@ -3406,7 +3442,13 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // Role attaches to any workspace under the cursor — the Choice
         // modal picks one of five roles or clears it (#1523). Gate on
         // the workspace's existence like EditNotes/RenameWorkspace.
-        | ActionKind::SetRole => has_ws,
+        | ActionKind::SetRole
+        // Role-spawn chords (#1523): `E p` stamps the cursor workspace
+        // Planner and spawns; `E c` creates an `<epic>-coordinator`
+        // workspace for the cursor epic and spawns. Both need a workspace
+        // under the cursor (the epic is resolved from it at dispatch).
+        | ActionKind::SpawnPlanner
+        | ActionKind::SpawnCoordinator => has_ws,
         // Needs a source workspace; the dispatcher checks it actually
         // carries a running agent terminal and nudges when it doesn't
         // (the catalog can't see live terminals).

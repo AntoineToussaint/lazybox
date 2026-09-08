@@ -359,6 +359,7 @@ impl<T: TerminalAdapter> Model<T> {
             }
             Intent::NoOp
             | Intent::SpawnAgent { .. }
+            | Intent::SpawnRoleAgent { .. }
             | Intent::SpawnShell { .. }
             | Intent::MountReply { .. }
             | Intent::MountNewWorkspaceInput { .. }
@@ -1632,6 +1633,7 @@ impl<T: TerminalAdapter> Model<T> {
                     // the rest are unreachable from this call.
                     Intent::NoOp
                     | Intent::SpawnAgent { .. }
+                    | Intent::SpawnRoleAgent { .. }
                     | Intent::SpawnShell { .. }
                     | Intent::MountReply { .. }
                     | Intent::MountAdoptPicker { .. }
@@ -1742,6 +1744,7 @@ impl<T: TerminalAdapter> Model<T> {
                     }
                     Intent::NoOp
                     | Intent::SpawnAgent { .. }
+                    | Intent::SpawnRoleAgent { .. }
                     | Intent::SpawnShell { .. }
                     | Intent::MountReply { .. }
                     | Intent::MountNewWorkspaceInput { .. }
@@ -2027,6 +2030,7 @@ impl<T: TerminalAdapter> Model<T> {
                     Intent::Notice(msg) => self.flash_info(msg),
                     Intent::NoOp
                     | Intent::SpawnAgent { .. }
+                    | Intent::SpawnRoleAgent { .. }
                     | Intent::SpawnShell { .. }
                     | Intent::MountReply { .. }
                     | Intent::MountNewWorkspaceInput { .. }
@@ -2156,6 +2160,7 @@ impl<T: TerminalAdapter> Model<T> {
                     Intent::Notice(msg) => self.flash_info(msg),
                     Intent::NoOp
                     | Intent::SpawnAgent { .. }
+                    | Intent::SpawnRoleAgent { .. }
                     | Intent::SpawnShell { .. }
                     | Intent::MountReply { .. }
                     | Intent::MountNewWorkspaceInput { .. }
@@ -2299,6 +2304,52 @@ impl<T: TerminalAdapter> Model<T> {
                 // current role.
                 if let Some(ws) = self.sidebar.selected_workspace() {
                     self.mount_role_picker(ws.key.clone(), ws.role);
+                }
+            }
+            Action::SpawnPlanner | Action::SpawnCoordinator => {
+                // `E p` / `E c` (#1523): stamp the cursor workspace with the
+                // orchestration role, then spawn a *fresh* default agent framed
+                // by that role's preamble. Order matters — `SetWorkspaceRole`
+                // is pushed BEFORE `Spawn` so the daemon (which drains the
+                // command channel in order, awaiting each) has persisted the
+                // role by the time `spawn_handler` reads it; the preamble is
+                // only injected when the role is already set AND the spawn
+                // carries a prompt, so the kickoff line is non-empty.
+                let agent = self.sidebar.default_agent().to_string();
+                let intent = if matches!(action, Action::SpawnPlanner) {
+                    crate::intent::resolve_spawn_planner(self.sidebar.selected_workspace(), &agent)
+                } else {
+                    crate::intent::resolve_spawn_coordinator(
+                        self.sidebar.selected_workspace(),
+                        &agent,
+                    )
+                };
+                if let crate::intent::Intent::SpawnRoleAgent {
+                    workspace_key,
+                    agent_id,
+                    role,
+                    prompt,
+                } = intent
+                {
+                    cmds.push(IpcCommand::SetWorkspaceRole {
+                        workspace: lazybox_core::WorkspaceKey::new(workspace_key.as_str()),
+                        role: Some(role),
+                    });
+                    cmds.push(IpcCommand::Spawn {
+                        model_alias: None,
+                        access: lazybox_ipc::AgentRunAccess::Default,
+                        session_key: workspace_key,
+                        session_id: self.sidebar.selected_session_id(),
+                        client_request_id: None,
+                        kind: lazybox_ipc::TerminalKind::Agent(agent_id),
+                        cwd: None,
+                        initial_prompt: Some(prompt),
+                        initial_snippet: None,
+                        on_main: false,
+                        // Always a fresh agent so the role preamble frames a
+                        // clean session, never injected into a live one.
+                        force_new: true,
+                    });
                 }
             }
             Action::JumpPrevGroup | Action::JumpNextGroup => {

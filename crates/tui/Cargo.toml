@@ -24,7 +24,7 @@ tempfile = "3"
 # binary) and `tests/common/mod.rs` (the integration binaries). Without it,
 # tests that persist `ui.*` state rewrite the developer's real
 # `~/.lazybox/config.yaml` (#1539).
-ctor = "0.8"
+ctor = "1.0"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]

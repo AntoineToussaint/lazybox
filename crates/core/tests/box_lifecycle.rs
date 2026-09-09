@@ -273,11 +273,60 @@ mod behavior {
 
     /// A process-unique name for a fixture's agent argv. The idle-stop script
     /// resolves it with `pgrep -f` against the host's whole process table, so a
-    /// fixed string would let two copies of this suite running on one box (the
+    /// fixed string lets two copies of this suite running on one box (the
     /// normal state of this repo) match each other's fixtures and invert the
-    /// assertions.
+    /// assertions (#1594).
     fn agent_token(base: &str) -> String {
-        format!("{base}-{}", std::process::id())
+        fixture_token(base, &std::process::id().to_string())
+    }
+
+    /// `pgrep -f` matches unanchored, so the pid needs a terminator: a bare
+    /// `…-{pid}` suffix leaves pid 1234's pattern a prefix of pid 12345's argv,
+    /// which is the same cross-run match with a narrower window.
+    fn fixture_token(base: &str, pid: &str) -> String {
+        format!("{base}-{pid}-fixture")
+    }
+
+    /// The kernel's ephemeral port range — the ports it hands out on its own to
+    /// any connection that does not ask for a specific one.
+    fn ephemeral_port_range() -> Option<(u32, u32)> {
+        let pair = match fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range") {
+            Ok(body) => body,
+            Err(_) => {
+                let out = Command::new("sysctl")
+                    .args([
+                        "-n",
+                        "net.inet.ip.portrange.first",
+                        "net.inet.ip.portrange.last",
+                    ])
+                    .output()
+                    .ok()?;
+                String::from_utf8_lossy(&out.stdout).into_owned()
+            }
+        };
+        let mut fields = pair.split_whitespace();
+        let low = fields.next()?.parse().ok()?;
+        let high = fields.next()?.parse().ok()?;
+        Some((low, high))
+    }
+
+    #[test]
+    fn the_pinned_ssh_port_is_one_the_kernel_never_assigns() {
+        // Every stop-path assertion in this module rides on `ssh_connections`
+        // reading zero, and it reads the host's real socket table. Pin a port
+        // inside the ephemeral range and any unrelated connection on a busy box
+        // — either endpoint, the grep matches both columns — becomes a phantom
+        // attached client that suppresses the stop (#1594).
+        let Some((low, high)) = ephemeral_port_range() else {
+            return;
+        };
+        let port: u32 = FAKE_SSH_PORT.parse().expect("pinned port is numeric");
+        assert!(
+            port < low || port > high,
+            "the fixtures' ssh port {port} is inside this host's ephemeral \
+             range {low}-{high}, so the kernel can hand it to an unrelated \
+             connection and every stop-path test here fails at once"
+        );
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -730,9 +779,12 @@ mod behavior {
     #[test]
     fn a_sibling_runs_fixture_is_invisible_to_this_run() {
         // Two copies of this suite share the host's process table, so a fixture
-        // named with a run-independent string lets the other run's CPU burner
-        // read as this run's live agent and the reap never fires. Stand in for
-        // that sibling with a burner carrying the bare base name.
+        // whose name another run can also match lets that run's CPU burner read
+        // as this run's live agent and the reap never fires (#1594). The decoy
+        // is the adversarial sibling: a token built for a pid whose digits have
+        // this run's pid as a prefix, which an unanchored `pgrep -f` still
+        // matches unless the pid is terminated. It subsumes the plain shared
+        // name too — a token that dropped the pid entirely would match here.
         let Ok(bash) = which_bash() else { return };
         let dir = scratch("sibling_fixture");
         let marker = dir.join("idle-since");
@@ -740,19 +792,22 @@ mod behavior {
         let stop_cmd = format!("touch {}", stopped.display());
         let base = "lazybox-test-sibling-agent";
         let token = agent_token(base);
+        let sibling_token = fixture_token(base, &format!("{}0", std::process::id()));
         let env = [
             ("LAZYBOX_IDLE_AGENT_PROCS", token.as_str()),
             ("LAZYBOX_IDLE_AGENT_CPU_SECS", "1"),
             ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
         ];
 
+        // Idle, not spinning: `agent_busy` counts any newly-seen pid in a
+        // matched tree as active, so a sleeper discriminates as well as a
+        // burner without competing for cores with the CPU-threshold tests
+        // running alongside it in this binary. The subshell keeps bash from
+        // exec-ing itself into the `sleep`, which would drop the token — and
+        // with it this test's whole premise — from the process table.
         let mut command = Command::new(&bash);
         command
-            .args([
-                "-c",
-                "end=$((SECONDS+10)); while (( SECONDS < end )); do :; done",
-                base,
-            ])
+            .args(["-c", "( sleep 30 ) & wait", sibling_token.as_str()])
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let sibling = FixtureProcessGroup::spawn(command);

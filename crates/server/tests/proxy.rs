@@ -437,6 +437,7 @@ fn compactor(mode: lazybox_core::CompactionMode) -> Arc<proxy::Compactor> {
         },
         Arc::new(std::collections::BTreeMap::new()),
         Arc::new(|_, _| {}),
+        lazybox_server::context_tag::TagSource::from_secret("fixture-secret"),
     ))
 }
 

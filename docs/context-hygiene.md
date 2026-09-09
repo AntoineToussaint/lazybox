@@ -202,6 +202,26 @@ not part of the cache key. This closes the structural hole — lazybox no longer
 acts on forged markers — but it cannot stop a model from believing a
 plausible-looking line it reads in a file, which no marker scheme can.
 
+The token is **derived, not drawn** (`crates/server/src/context_tag.rs`): one
+random secret per installation, persisted in the store, and
+`TagSource::tag(session)` a one-way function of it. Two reasons, both about
+"constant within a session" being a stronger claim than it looks:
+
+- The condensed text is never written back to the agent's transcript — the proxy
+  rewrites bytes in flight, so every turn re-renders the block from the original,
+  under the token. A token drawn per process would therefore re-render every
+  already-condensed block differently on the first turn after a daemon restart,
+  invalidating exactly the prompt-cache prefix compaction exists to protect.
+- Both enforcement points condense into one conversation, and the hook's output
+  *is* durable — it lives in the transcript and is re-sent on later turns,
+  including after a restart. Under different tokens the proxy would not recognize
+  a block the hook condensed, and would condense the summary again.
+
+Derived means no per-session write on the request path and nothing to lose across
+a restart. `TagSource::load` is called **once per daemon** and the result handed
+to every enforcement point; two concurrent loads on a store with no secret yet
+would race to persist one and then derive different tokens.
+
 ## Slices
 
 | | | |

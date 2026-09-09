@@ -394,6 +394,7 @@ pub async fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHand
         cfg.agent.context_hygiene.clone(),
         prices.clone(),
         notice,
+        crate::context_tag::TagSource::load(config).await,
     ));
 
     tracing::info!("metering proxy listening on 127.0.0.1:{port}");

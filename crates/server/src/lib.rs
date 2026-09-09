@@ -147,6 +147,8 @@ mod spawn_plan;
 pub mod stats_accumulator;
 mod terminal_commands;
 mod terminal_io;
+#[cfg(test)]
+mod test_env;
 mod working_claims;
 mod working_watchdog;
 pub mod workspace;

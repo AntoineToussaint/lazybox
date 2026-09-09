@@ -228,11 +228,12 @@ fn which_bash() -> Result<PathBuf, ()> {
 #[cfg(unix)]
 mod behavior {
     use super::{lifecycle_dir, which_bash};
+    use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Output, Stdio};
     use std::thread::sleep;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// Own a fixture's whole process group. Killing only the shell leaves a
     /// background CPU child reparented to pid 1, which was #1163's leak.
@@ -249,6 +250,10 @@ mod behavior {
             let pgid = child.id() as i32;
             Self { child, pgid }
         }
+
+        fn pid(&self) -> u32 {
+            self.child.id()
+        }
     }
 
     impl Drop for FixtureProcessGroup {
@@ -262,6 +267,10 @@ mod behavior {
         }
     }
 
+    /// Stand-in for the SSH port in every behavioral run. Privileged, so it is
+    /// never handed out as an ephemeral local port (see `run_idle`).
+    const FAKE_SSH_PORT: &str = "1";
+
     fn scratch(name: &str) -> PathBuf {
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
         let _ = fs::remove_dir_all(&dir);
@@ -272,6 +281,12 @@ mod behavior {
     // Run the idle-stop script with a temp marker and a bogus SSH port so no
     // real connection is ever counted as an active tunnel. `env` supplies the
     // per-test knobs; `path_prefix` is prepended to PATH for command stubs.
+    //
+    // The port has to sit *below* the ephemeral range: the connection scan
+    // matches on port number alone, so a fake port up there is eventually
+    // claimed as the local end of some unrelated outbound socket — one
+    // browser connection on 65533 and every test expecting a stop reads the
+    // box as "someone is connected" and fails.
     fn run_idle(
         bash: &Path,
         marker: &Path,
@@ -281,7 +296,7 @@ mod behavior {
         let mut cmd = Command::new(bash);
         cmd.arg(lifecycle_dir().join("lazybox-idle-stop.sh"));
         cmd.env("LAZYBOX_IDLE_MARKER", marker);
-        cmd.env("LAZYBOX_IDLE_SSH_PORT", "65533");
+        cmd.env("LAZYBOX_IDLE_SSH_PORT", FAKE_SSH_PORT);
         // Pin the daemon-liveness file to a path that never exists, so a real
         // `~/.lazybox/run/active` on the dev/CI host (a running lazybox with a
         // terminal open) can't make the script read the box as active and skip
@@ -299,6 +314,94 @@ mod behavior {
             cmd.env("PATH", format!("{}:{}", prefix.display(), base));
         }
         cmd.output().expect("run lazybox-idle-stop.sh")
+    }
+
+    /// `LAZYBOX_IDLE_AGENT_CPU_SECS` the CPU fixtures run the detector at: the
+    /// whole-second tree delta a tick must see to call the box busy.
+    const AGENT_CPU_SECS: u64 = 1;
+
+    /// How long a spinner fixture is given to burn that delta. Generous
+    /// because the box these tests run on is routinely loaded — a full
+    /// `cargo test --workspace` competes with the spinner for cores, and a
+    /// backgrounded subshell gets the thinnest slice of all.
+    const CPU_DELTA_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// Per-pid CPU snapshot of the tree rooted at `root`, taken exactly as
+    /// `lazybox-idle-stop.sh` takes it each tick: `ps`'s cumulative TIME over
+    /// the root and its descendants, truncated to whole seconds.
+    fn tree_cpu_snapshot(root: u32) -> HashMap<u32, u64> {
+        let out = Command::new("ps")
+            .args(["-eo", "pid=,ppid=,time="])
+            .output()
+            .expect("ps process snapshot");
+        let text = String::from_utf8_lossy(&out.stdout);
+        let rows: Vec<(u32, u32, u64)> = text
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let pid = fields.next()?.parse().ok()?;
+                let ppid = fields.next()?.parse().ok()?;
+                Some((pid, ppid, parse_cpu_secs(fields.next()?)))
+            })
+            .collect();
+
+        let mut snapshot = HashMap::new();
+        let mut pending = vec![root];
+        while let Some(pid) = pending.pop() {
+            for (candidate, parent, secs) in &rows {
+                if *candidate == pid {
+                    snapshot.insert(pid, *secs);
+                }
+                if *parent == pid && *candidate != pid {
+                    pending.push(*candidate);
+                }
+            }
+        }
+        snapshot
+    }
+
+    /// `ps`'s `[D-]HH:MM:SS[.ss]` TIME column, truncated to whole seconds the
+    /// way the script's awk does.
+    fn parse_cpu_secs(field: &str) -> u64 {
+        let (days, rest) = match field.split_once('-') {
+            Some((days, rest)) => (days.parse().unwrap_or(0.0), rest),
+            None => (0.0, field),
+        };
+        let secs = rest.split(':').fold(0.0, |acc: f64, part| {
+            acc * 60.0 + part.parse::<f64>().unwrap_or(0.0)
+        });
+        (days * 86_400.0 + secs) as u64
+    }
+
+    /// The tree delta a tick taken now would compute against `prev`: per pid,
+    /// whole seconds, negatives dropped, summed.
+    fn cpu_delta_since(root: u32, prev: &HashMap<u32, u64>) -> u64 {
+        tree_cpu_snapshot(root)
+            .iter()
+            .filter_map(|(pid, cur)| cur.checked_sub(*prev.get(pid)?))
+            .sum()
+    }
+
+    /// Wait until the tree rooted at `root` has burned the delta the detector
+    /// needs, returning what it actually reached.
+    ///
+    /// The tick window has to be a function of CPU burned, not wall clock: on a
+    /// loaded box a fixed sleep elapses with the spinner descheduled, the tick
+    /// reads a sub-threshold delta, and a test about the *tree walk* fails as
+    /// if the walk were broken. Reading the delta the same way the script does
+    /// — whole seconds, per pid — makes the wait end exactly when the tick
+    /// would call the tree busy, and never later. Our baseline is taken after
+    /// the script's own, and per-pid CPU only grows, so a delta we can see is
+    /// one the script can see too.
+    fn burn_cpu_delta(root: u32, prev: &HashMap<u32, u64>) -> u64 {
+        let deadline = Instant::now() + CPU_DELTA_TIMEOUT;
+        loop {
+            let delta = cpu_delta_since(root, prev);
+            if delta >= AGENT_CPU_SECS || Instant::now() >= deadline {
+                return delta;
+            }
+            sleep(Duration::from_millis(100));
+        }
     }
 
     fn write_exec(path: &Path, body: &str) {
@@ -353,20 +456,23 @@ mod behavior {
         let stopped = dir.join("STOPPED");
         let stop_cmd = format!("touch {}", stopped.display());
         let token = "lazybox-test-working-agent";
+        let cpu_secs = AGENT_CPU_SECS.to_string();
         let env = [
             ("LAZYBOX_IDLE_AGENT_PROCS", token),
-            ("LAZYBOX_IDLE_AGENT_CPU_SECS", "1"),
+            ("LAZYBOX_IDLE_AGENT_CPU_SECS", cpu_secs.as_str()),
             ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
         ];
 
         // A bounded CPU spinner, its argv carrying the watched token. The
         // deadline is a second backstop behind the process-group Drop guard:
-        // even a hard-aborted test can never leak an infinite hot loop.
+        // even a hard-aborted test can never leak an infinite hot loop. It has
+        // to outlast `CPU_DELTA_TIMEOUT` — a spinner that exits mid-wait can
+        // never reach the CPU the tick below needs.
         let mut command = Command::new(&bash);
         command
             .args([
                 "-c",
-                "end=$((SECONDS+10)); while (( SECONDS < end )); do :; done",
+                "end=$((SECONDS+60)); while (( SECONDS < end )); do :; done",
                 token,
             ])
             .stdout(Stdio::null())
@@ -381,7 +487,7 @@ mod behavior {
 
         // Tick 2 must keep it alive on the CPU *delta* (not newness): re-stale
         // the marker, let the agent burn CPU, run again.
-        sleep(Duration::from_secs(3));
+        let burned = burn_cpu_delta(agent.pid(), &tree_cpu_snapshot(agent.pid()));
         fs::write(&marker, "1").expect("stale marker");
         run_idle(&bash, &marker, &env, None);
         let stopped_2 = stopped.exists();
@@ -390,6 +496,11 @@ mod behavior {
         // Teardown before assertions; Drop still runs on every earlier panic.
         drop(agent);
 
+        assert!(
+            burned >= AGENT_CPU_SECS,
+            "fixture never burned the CPU the tick needs ({burned}s in \
+             {CPU_DELTA_TIMEOUT:?}) — the box is too loaded to observe the delta"
+        );
         assert!(!stopped_1, "a live agent must not be stopped");
         assert!(
             cleared_1,
@@ -418,9 +529,10 @@ mod behavior {
         let stopped = dir.join("STOPPED");
         let stop_cmd = format!("touch {}", stopped.display());
         let token = "lazybox-test-blocked-agent";
+        let cpu_secs = AGENT_CPU_SECS.to_string();
         let env = [
             ("LAZYBOX_IDLE_AGENT_PROCS", token),
-            ("LAZYBOX_IDLE_AGENT_CPU_SECS", "1"),
+            ("LAZYBOX_IDLE_AGENT_CPU_SECS", cpu_secs.as_str()),
             ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
         ];
 
@@ -431,7 +543,7 @@ mod behavior {
         command
             .args([
                 "-c",
-                "( end=$((SECONDS+10)); while (( SECONDS < end )); do :; done ) & wait",
+                "( end=$((SECONDS+60)); while (( SECONDS < end )); do :; done ) & wait",
                 token,
             ])
             .stdout(Stdio::null())
@@ -446,7 +558,7 @@ mod behavior {
 
         // Tick 2: the agent is idle but its child has burned CPU. The tree
         // delta must keep the box alive across a second consecutive tick.
-        sleep(Duration::from_secs(3));
+        let burned = burn_cpu_delta(agent.pid(), &tree_cpu_snapshot(agent.pid()));
         fs::write(&marker, "1").expect("stale marker");
         run_idle(&bash, &marker, &env, None);
         let stopped_2 = stopped.exists();
@@ -454,6 +566,11 @@ mod behavior {
 
         drop(agent);
 
+        assert!(
+            burned >= AGENT_CPU_SECS,
+            "fixture never burned the CPU the tick needs ({burned}s in \
+             {CPU_DELTA_TIMEOUT:?}) — the box is too loaded to observe the delta"
+        );
         assert!(!stopped_1, "a live agent tree must not be stopped");
         assert!(cleared_1, "a newly-seen agent tree clears the idle marker");
         assert!(
@@ -583,7 +700,7 @@ mod behavior {
         let mut cmd = Command::new(&bash);
         cmd.arg(lifecycle_dir().join("lazybox-idle-stop.sh"));
         cmd.env("LAZYBOX_IDLE_MARKER", &marker);
-        cmd.env("LAZYBOX_IDLE_SSH_PORT", "65533");
+        cmd.env("LAZYBOX_IDLE_SSH_PORT", FAKE_SSH_PORT);
         cmd.env("LAZYBOX_IDLE_AGENT_PROCS", "lazybox-absent-agent");
         cmd.env_remove("HOME");
         cmd.env_remove("LAZYBOX_IDLE_ACTIVE_FILE");

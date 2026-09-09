@@ -392,6 +392,16 @@ fn hook_exe() -> Option<PathBuf> {
 pub const HOOK_HELPER_PROBE_ARG: &str = "--lazybox-hook-helper-probe";
 pub const HOOK_HELPER_PROBE_RESPONSE: &str = "lazybox-hook-helper-v1";
 
+/// How long the hook-capability probe waits for the candidate to answer.
+///
+/// The bound exists only so a wedged candidate can't hang daemon boot — it is
+/// not a performance budget, and it must never be tight enough to *answer* the
+/// question. A timeout is read as "not hook-capable", which disables lifecycle
+/// hooks for the whole daemon run; on a box loaded the way lazybox's own docs
+/// expect (many agents on one machine), a healthy ~80 MB binary that is merely
+/// starved of CPU has to be given room to reply rather than be misjudged.
+const HOOK_HELPER_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub fn hook_helper_probe_requested(args: &[String]) -> bool {
     args.len() == 1 && args[0] == HOOK_HELPER_PROBE_ARG
 }
@@ -446,7 +456,7 @@ fn is_hook_capable_exe(candidate: &Path) -> bool {
     else {
         return false;
     };
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let deadline = std::time::Instant::now() + HOOK_HELPER_PROBE_TIMEOUT;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -460,7 +470,17 @@ fn is_hook_capable_exe(candidate: &Path) -> bool {
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            _ => {
+            outcome => {
+                // A timeout is not an answer, and it costs the daemon its
+                // hooks — say so, so the degradation is traceable to the probe
+                // instead of surfacing later as hooks silently doing nothing.
+                if matches!(outcome, Ok(None)) {
+                    tracing::warn!(
+                        candidate = %candidate.display(),
+                        timeout = ?HOOK_HELPER_PROBE_TIMEOUT,
+                        "hook-helper probe timed out; treating the candidate as not hook-capable"
+                    );
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 return false;

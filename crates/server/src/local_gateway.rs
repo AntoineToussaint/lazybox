@@ -144,53 +144,12 @@ pub async fn publish_local_gateway(config: ServerConfig) -> Result<PublishedGate
 mod tests {
     use super::*;
 
-    /// Serializes the two `LAZYBOX_HOME` mutators below.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Restores `LAZYBOX_HOME` to whatever it was, on drop.
-    ///
-    /// These tests used to end with a bare `remove_var`, which assumed the
-    /// var had been unset to begin with. It is not: the binary's
-    /// `config_sandbox` ctor points it at a throwaway dir so no test reads
-    /// the developer's real `~/.lazybox/config.yaml`. Clearing it instead
-    /// of restoring it un-sandboxed every test that ran afterwards, which
-    /// is how `recovered_agent_restores_resume_metadata_and_detects_auth_failure`
-    /// picked up a machine-local Claude tier label and failed in the full
-    /// suite while passing alone. Restoring on `Drop` also survives a
-    /// panicking test, which would otherwise poison the rest of the run.
-    struct HomeGuard(Option<std::ffi::OsString>);
-
-    impl HomeGuard {
-        fn set(home: &std::path::Path) -> Self {
-            let prior = std::env::var_os("LAZYBOX_HOME");
-            // SAFETY: test-scoped env mutation, serialized by `ENV_LOCK`.
-            unsafe { std::env::set_var("LAZYBOX_HOME", home) };
-            Self(prior)
-        }
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            // SAFETY: as above — still under `ENV_LOCK`.
-            unsafe {
-                match self.0.take() {
-                    Some(prior) => std::env::set_var("LAZYBOX_HOME", prior),
-                    None => std::env::remove_var("LAZYBOX_HOME"),
-                }
-            }
-        }
-    }
-
     /// Discovery round-trips only while its pid owns the pid file; a
     /// mismatched or missing owner invalidates it (crash leftovers must
     /// never point an attach at the wrong process).
     #[test]
     fn discovery_is_gated_on_the_live_pid_owner() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = std::env::temp_dir().join(format!("lazybox-gwdisc-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
-        let _home = HomeGuard::set(&home);
+        let _home = crate::test_env::PinnedHome::enter();
 
         let discovery = GatewayDiscovery {
             pid: std::process::id(),
@@ -223,9 +182,6 @@ mod tests {
         remove_discovery();
         std::fs::write(lifecycle::pid_path(), std::process::id().to_string()).unwrap();
         assert_eq!(read_discovery(), None, "removed file stays gone");
-
-        drop(_home);
-        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// Publishing binds a loopback port, writes trusted discovery, and
@@ -236,11 +192,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn publish_writes_and_shutdown_removes_discovery() {
-        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = std::env::temp_dir().join(format!("lazybox-gwpub-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&home);
-        std::fs::create_dir_all(&home).unwrap();
-        let _home = HomeGuard::set(&home);
+        let _home = crate::test_env::PinnedHome::enter();
         lifecycle::ensure_runtime_dir().unwrap();
         std::fs::write(lifecycle::pid_path(), std::process::id().to_string()).unwrap();
 
@@ -253,8 +205,5 @@ mod tests {
 
         gateway.shutdown().await;
         assert_eq!(read_discovery(), None, "shutdown unpublishes");
-
-        drop(_home);
-        let _ = std::fs::remove_dir_all(&home);
     }
 }

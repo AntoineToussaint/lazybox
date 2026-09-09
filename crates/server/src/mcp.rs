@@ -1693,6 +1693,10 @@ mod tests {
 
     #[test]
     fn provision_writes_config_registers_token_and_respawn_replaces_it() {
+        // The config lands under `runtime_dir()`, which resolves through the
+        // process-global `LAZYBOX_HOME`; pin it so a sibling test redirecting
+        // that variable can't move the directory out from under the write.
+        let _home = crate::test_env::PinnedHome::enter();
         let config = ServerConfig::in_memory();
         config.mcp.set_endpoint("http://127.0.0.1:54321/".into());
         let key = SessionKey::from("test:mcp-provision-write");
@@ -1723,8 +1727,6 @@ mod tests {
         // token per session, so a stale bearer stops resolving.
         provision_for_spawn(&config, &key, claude.as_ref()).expect("re-provisioned");
         assert_eq!(config.mcp.tokens().len(), 1);
-
-        std::fs::remove_file(&path).ok();
     }
 
     #[tokio::test]
@@ -2147,8 +2149,12 @@ mod tests {
         assert_eq!(bearer_from_parts(&basic), None);
     }
 
+    // The pin deliberately spans the awaits: it holds `LAZYBOX_HOME` still for
+    // the whole body, and the current-thread test runtime can't deadlock on it.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn deprovision_revokes_token_and_removes_config() {
+        let _home = crate::test_env::PinnedHome::enter();
         let config = ServerConfig::in_memory();
         config.mcp.set_endpoint("http://127.0.0.1:12345/".into());
         let key = SessionKey::from("test:mcp-deprovision");

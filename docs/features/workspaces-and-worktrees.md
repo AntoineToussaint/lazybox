@@ -484,7 +484,9 @@ lazybox is what armed it; one set on github.com is left alone.
 
 An armed PR also rides the 15-second hot poll tier regardless of the hot-set
 cap, so where the native arm doesn't apply, green-on-GitHub to merged-by-lazybox
-is one tick rather than its repo's ~5-minute rotation slot.
+is one tick rather than its repo's ~5-minute rotation slot. Once GitHub's own
+auto-merge is on, the row leaves that tier again — GitHub lands it, so lazybox
+has nothing to fire and no reason to keep polling it every 15 seconds.
 
 `Shift-A` arms or disarms CI-failure and merge-conflict auto-fix together. The
 per-session auto-fix arm overrides the global `no-auto-fix` /
@@ -500,6 +502,8 @@ per-session auto-fix arm overrides the global `no-auto-fix` /
 - [ ] On a base with required checks, `g g` also turns on GitHub auto-merge; without them it says so and only the lazybox latch arms.
 - [ ] Disarming clears GitHub auto-merge only when lazybox armed it.
 - [ ] An epic member under `E M` (ORDER) never gets GitHub-native auto-merge.
+- [ ] Arming and disarming the same PR in quick succession ends with GitHub auto-merge OFF.
+- [ ] Disarming a PR whose auto-merge GitHub already dropped reports success, not "still on".
 
 ---
 

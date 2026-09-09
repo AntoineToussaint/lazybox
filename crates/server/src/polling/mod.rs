@@ -230,10 +230,17 @@ struct EngagementCandidate {
     cold: bool,
     live_agent: bool,
     own_open_pr: bool,
-    /// Merge-on-green is armed (#1596). The row the user is waiting on
-    /// *right now*: a check-rollup flip doesn't bump the PR's
-    /// `updated_at`, so an armed PR parked on CI drifts out of the
-    /// recent-own-PR window exactly when its freshness matters most.
+    /// Merge-on-green is armed **and lazybox is the one that will fire
+    /// it** (#1596). The row the user is waiting on *right now*: a
+    /// check-rollup flip doesn't bump the PR's `updated_at`, so an armed
+    /// PR parked on CI drifts out of the recent-own-PR window exactly
+    /// when its freshness matters most.
+    ///
+    /// Excludes a PR whose GitHub-native auto-merge is on: precedence
+    /// (`auto_merge_block_reason`) stands lazybox's latch down there, so
+    /// GitHub lands it and 15-second freshness buys nothing. Without that
+    /// exclusion a natively-armed PR waiting days on review held an
+    /// uncapped hot slot for its whole life.
     armed: bool,
     /// Workspace has a persisted session (any [`lazybox_core::SessionKind`],
     /// live process or not). This is the Tier 0 "I'm actively working
@@ -241,6 +248,20 @@ struct EngagementCandidate {
     /// counts a live Agent PTY and misses shells and post-restart idle
     /// sessions.
     sessioned: bool,
+}
+
+/// Whether an armed workspace earns the hot fast lane (#1596):
+/// merge-on-green is armed **and lazybox is the one that will fire it**.
+/// A PR whose GitHub-native auto-merge is on is excluded — precedence
+/// stands lazybox's latch down there ([`lazybox_core::should_auto_merge`]),
+/// so paying 15-second freshness for it buys nothing and costs an
+/// uncapped hot slot for as long as the PR is open.
+fn armed_for_fast_lane(workspace: &Workspace) -> bool {
+    workspace.auto_merge_on_green
+        && !workspace
+            .pr
+            .as_ref()
+            .is_some_and(|pr| pr.auto_merge_enabled)
 }
 
 fn select_engagement_snapshot(
@@ -266,7 +287,6 @@ fn select_engagement_snapshot(
             .cmp(&left_focused)
             .then_with(|| right.sessioned.cmp(&left.sessioned))
             .then_with(|| right.live_agent.cmp(&left.live_agent))
-            .then_with(|| right.armed.cmp(&left.armed))
             .then_with(|| right.own_open_pr.cmp(&left.own_open_pr))
             .then_with(|| right.updated_at.cmp(&left.updated_at))
             .then_with(|| {
@@ -293,7 +313,7 @@ fn select_engagement_snapshot(
     let mut capped_used = 0usize;
     for candidate in eligible {
         let focused = focused_workspace == Some(candidate.workspace_key.as_str());
-        if focused || candidate.live_agent || candidate.armed {
+        if focused || candidate.live_agent || (!candidate.cold && candidate.armed) {
             hot_keys.insert(candidate.workspace_key.as_str().to_string());
         } else if capped_used < HOT_SET_MAX {
             hot_keys.insert(candidate.workspace_key.as_str().to_string());
@@ -472,7 +492,7 @@ pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnaps
             cold,
             live_agent: !muted && live_agent_workspaces.contains(workspace.key.as_str()),
             own_open_pr,
-            armed: workspace.auto_merge_on_green,
+            armed: armed_for_fast_lane(&workspace),
             sessioned: !(muted || digest) && !workspace.sessions.is_empty(),
         });
     }
@@ -795,6 +815,30 @@ mod engagement_tier_tests {
             snapshot.hot_count(),
             5,
             "every armed row is hot, not just HOT_SET_MAX of them"
+        );
+    }
+
+    /// #1596 follow-up: once GitHub's native auto-merge is on, lazybox's
+    /// latch stands down (`auto_merge_block_reason`), so the row has
+    /// nothing to fire and 15-second freshness buys nothing. Holding it
+    /// hot for the days a PR waits on review re-creates exactly the
+    /// always-hot pathology the session-bearing rows were demoted for.
+    #[test]
+    fn natively_armed_pr_leaves_the_fast_lane() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("github:o/r#1"), "b", Utc::now());
+        ws.pr = Some(task(1, TaskRole::Author));
+        assert!(!armed_for_fast_lane(&ws), "an unarmed PR is not hot");
+
+        ws.auto_merge_on_green = true;
+        assert!(
+            armed_for_fast_lane(&ws),
+            "a lazybox-fired arm earns the fast lane"
+        );
+
+        ws.pr.as_mut().unwrap().auto_merge_enabled = true;
+        assert!(
+            !armed_for_fast_lane(&ws),
+            "GitHub owns this merge — lazybox must not pin it to the 15s tier"
         );
     }
 

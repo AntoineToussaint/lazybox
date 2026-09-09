@@ -579,9 +579,13 @@ GitHub can't see: an `E M` (ORDER) epic member, an unlanded
 merge-after predecessor, a blocking Reviewer verdict, a still-open
 stacked parent, or an `approval: human` repo. Disarming disables
 native only when lazybox armed it (`Workspace::native_auto_merge_by_lazybox`);
-one set in the GitHub UI is left alone. An armed PR also rides the 15s
-hot poll tier above `HOT_SET_MAX`, so where native doesn't apply,
-green → merged is one tick instead of the repo's ~5-min rotation slot,
+one set in the GitHub UI is left alone; the arm/disarm pair is
+serialized per workspace (`lock_native_auto_merge`) so a disarm racing
+an in-flight arm can't leave GitHub merging a PR the user cancelled. An
+armed PR also rides the 15s hot poll tier above `HOT_SET_MAX`, so where
+native doesn't apply, green → merged is one tick instead of the repo's
+~5-min rotation slot — and it leaves that tier once native auto-merge is
+on, since GitHub lands it and lazybox has nothing left to fire,
 `g p` policies (the unified automation-policies menu — one surface
 listing merge-on-green, per-session auto-fix arm/disarm, and
 GitHub-native auto-merge status for the focused PR/issue, each toggled

@@ -1246,6 +1246,16 @@ pub struct GhClient {
     /// mutation is rejected.
     repo_merge_methods:
         std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, String>>>,
+    /// `owner/name@branch` → whether that base branch gates merges on
+    /// required status checks. Shared across clones, like
+    /// [`repo_merge_methods`](Self::repo_merge_methods) and for the same
+    /// reason: arming merge-on-green across a multi-select would
+    /// otherwise spend one rules request per PR to re-learn a fact that
+    /// belongs to the *branch*. Never invalidated within a run — a
+    /// ruleset change mid-session is rare, and the cost of missing it is
+    /// one arm that declines (or doesn't) on stale information, which
+    /// the next daemon start corrects.
+    repo_branch_gates: std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, bool>>>,
     /// Consecutive hot batches this server answered with a GraphQL
     /// error. Some GitHub Enterprise Server builds reject the batched
     /// `nodes(ids:)` hot queries outright — GHES 3.18 fails any PR node
@@ -1407,6 +1417,9 @@ impl GhClient {
             repo_merge_methods: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            repo_branch_gates: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             issue_deps_cache: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
@@ -1447,6 +1460,9 @@ impl GhClient {
                 std::collections::HashMap::new(),
             )),
             repo_merge_methods: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            repo_branch_gates: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
             hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -5963,6 +5979,20 @@ impl GhClient {
             .post_graphql_with_retry("enablePullRequestAutoMerge mutation", &body)
             .await?;
         if let Some(errors) = response.errors {
+            // Idempotence guard, exactly as `merge_pr_with_method` needs
+            // one: `post_graphql_with_retry` re-sends the mutation after
+            // a client-side timeout even when the first attempt LANDED.
+            // Reporting that as failure is worse here than for a merge —
+            // the caller would skip recording provenance, leaving GitHub
+            // auto-merge ON with lazybox believing it never armed it, so
+            // disarming could never turn it off again.
+            if gql_errors_all_match(&errors, AUTO_MERGE_ALREADY_ENABLED_MARKERS) {
+                tracing::info!(
+                    "enablePullRequestAutoMerge reported auto-merge already enabled — \
+                     treating as success (likely a timeout-retry re-send)"
+                );
+                return Ok(());
+            }
             return Err(mutation_error_response(
                 "enablePullRequestAutoMerge",
                 &errors,
@@ -5981,6 +6011,19 @@ impl GhClient {
             .post_graphql_with_retry("disablePullRequestAutoMerge mutation", &body)
             .await?;
         if let Some(errors) = response.errors {
+            // "There is nothing enabled to turn off" IS the state this
+            // call wanted. GitHub disables auto-merge on its own (a draft
+            // conversion, the merge landing), and the timeout-retry
+            // re-send hits the same wall, so without this a routine
+            // disarm reports failure and tells the user to go fix
+            // something on github.com that is already fine.
+            if gql_errors_all_match(&errors, AUTO_MERGE_ALREADY_OFF_MARKERS) {
+                tracing::info!(
+                    "disablePullRequestAutoMerge reported auto-merge not enabled — \
+                     treating as success (already off, or a timeout-retry re-send)"
+                );
+                return Ok(());
+            }
             return Err(mutation_error_response(
                 "disablePullRequestAutoMerge",
                 &errors,
@@ -6132,11 +6175,29 @@ impl GhClient {
     /// Fails **closed**: an unreadable rules route (no permission, an
     /// older host, a network blip) reports `false`, so an unknown gate is
     /// never mistaken for a present one.
-    pub async fn base_branch_gates_on_checks(&self, owner: &str, repo: &str, branch: &str) -> bool {
-        self.branch_rules(owner, repo, branch)
+    ///
+    /// Returns `(gated, from_cache)`. The answer is a property of the
+    /// *branch*, so it is cached per `owner/name@branch` — arming across
+    /// a multi-select then costs one rules request, not one per PR — and
+    /// `from_cache` lets the caller announce a missing gate once per base
+    /// branch instead of once per PR.
+    pub async fn base_branch_gates_on_checks(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> (bool, bool) {
+        let cache_key = format!("{owner}/{repo}@{branch}");
+        if let Some(gated) = self.repo_branch_gates.lock().get(&cache_key).copied() {
+            return (gated, true);
+        }
+        let gated = self
+            .branch_rules(owner, repo, branch)
             .await
             .iter()
-            .any(|rule| rule.kind == "required_status_checks" && rule.requires_a_check())
+            .any(|rule| rule.kind == "required_status_checks" && rule.requires_a_check());
+        self.repo_branch_gates.lock().insert(cache_key, gated);
+        (gated, false)
     }
 
     /// Native `blocked_by` edges for one issue, from GitHub's issue
@@ -7073,6 +7134,19 @@ pub(crate) fn should_query_issues(
 /// current api.github.com; older/GHES variants say "already merged".
 /// Matched case-insensitively as substrings.
 const ALREADY_MERGED_MARKERS: &[&str] = &["already merged", "merged state"];
+
+/// GitHub's rejections that mean "auto-merge is already on" — the
+/// end-state `enablePullRequestAutoMerge` wanted. Classified as success
+/// so a timeout-retry re-send of a mutation that landed cannot cost the
+/// caller its provenance record.
+const AUTO_MERGE_ALREADY_ENABLED_MARKERS: &[&str] = &["already enabled", "auto merge is enabled"];
+
+/// GitHub's rejections that mean "there is no auto-merge to turn off" —
+/// the end-state `disablePullRequestAutoMerge` wanted. Covers a
+/// timeout-retry re-send, an auto-merge GitHub disabled itself, and a PR
+/// that has since merged or closed.
+const AUTO_MERGE_ALREADY_OFF_MARKERS: &[&str] =
+    &["not enabled", "already merged", "merged state", "is closed"];
 
 /// GraphQL error messages that mean an `updatePullRequestBranch` has
 /// nothing left to do — the head already contains the base. GitHub:
@@ -8609,6 +8683,9 @@ mod tests {
             repo_merge_methods: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            repo_branch_gates: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             issue_deps_cache: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
@@ -9718,7 +9795,7 @@ mod tests {
         let base_uri = spawn_canned_response_server("200 OK", "application/json", "[]").await;
         let client = make_client(&base_uri);
         assert!(
-            !client.base_branch_gates_on_checks("o", "r", "main").await,
+            !client.base_branch_gates_on_checks("o", "r", "main").await.0,
             "no rules means GitHub would merge without waiting for CI"
         );
     }
@@ -9730,7 +9807,7 @@ mod tests {
         let base_uri =
             spawn_canned_response_server("404 Not Found", "application/json", r#"{}"#).await;
         let client = make_client(&base_uri);
-        assert!(!client.base_branch_gates_on_checks("o", "r", "main").await);
+        assert!(!client.base_branch_gates_on_checks("o", "r", "main").await.0);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -9739,7 +9816,103 @@ mod tests {
             "parameters":{"required_status_checks":[{"context":"test"}]}}]"#;
         let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
         let client = make_client(&base_uri);
-        assert!(client.base_branch_gates_on_checks("o", "r", "main").await);
+        let (gated, from_cache) = client.base_branch_gates_on_checks("o", "r", "main").await;
+        assert!(gated);
+        assert!(!from_cache, "the first probe is a real request");
+    }
+
+    /// The gate is a property of the *branch*, so arming N PRs onto the
+    /// same base must not spend N rules requests. The second lookup is
+    /// served from cache — proven by pointing the client at a server that
+    /// now answers `[]`: an uncached re-probe would flip the verdict.
+    #[tokio::test(flavor = "current_thread")]
+    async fn base_branch_gate_is_cached_per_branch() {
+        const BODY: &str = r#"[{"type":"required_status_checks",
+            "parameters":{"required_status_checks":[{"context":"test"}]}}]"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        assert_eq!(
+            client.base_branch_gates_on_checks("o", "r", "main").await,
+            (true, false)
+        );
+        assert_eq!(
+            client.base_branch_gates_on_checks("o", "r", "main").await,
+            (true, true),
+            "the same base branch is answered from cache"
+        );
+        // A different branch is a different key and probes afresh.
+        assert_eq!(
+            client
+                .base_branch_gates_on_checks("o", "r", "release")
+                .await,
+            (true, false)
+        );
+    }
+
+    /// #1596 regression: `post_graphql_with_retry` re-sends a mutation
+    /// after a client-side timeout even when the first attempt landed.
+    /// Without an idempotence guard the retry's "already enabled" reads
+    /// as failure, the caller skips recording provenance, and GitHub
+    /// auto-merge is left ON with lazybox unable to ever turn it off.
+    #[tokio::test(flavor = "current_thread")]
+    async fn enable_auto_merge_treats_already_enabled_as_success() {
+        const BODY: &str = r#"{"errors":[{"message":"Pull request Auto merge is already enabled",
+            "path":["enablePullRequestAutoMerge"]}]}"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        client
+            .repo_merge_methods
+            .lock()
+            .insert("o/r".into(), "SQUASH".into());
+        client
+            .enable_auto_merge(Some("o/r"), "PR_kwDO")
+            .await
+            .expect("an already-enabled auto-merge IS the desired end state");
+    }
+
+    /// #1596 regression: GitHub disables auto-merge on its own (a draft
+    /// conversion, the merge landing), so a routine disarm hits "not
+    /// enabled". Reporting that as failure told the user to go turn off
+    /// something on github.com that was already off, and stranded the
+    /// provenance flag on `true` forever.
+    #[tokio::test(flavor = "current_thread")]
+    async fn disable_auto_merge_treats_already_off_as_success() {
+        for message in [
+            "Pull request Auto merge is not enabled for this pull request",
+            "Pull request is already merged",
+        ] {
+            let body: &'static str = Box::leak(
+                format!(
+                    r#"{{"errors":[{{"message":"{message}",
+                       "path":["disablePullRequestAutoMerge"]}}]}}"#
+                )
+                .into_boxed_str(),
+            );
+            let base_uri = spawn_canned_response_server("200 OK", "application/json", body).await;
+            let client = make_client(&base_uri);
+            client
+                .disable_auto_merge("PR_kwDO")
+                .await
+                .unwrap_or_else(|e| panic!("{message:?} means nothing to turn off, got {e}"));
+        }
+    }
+
+    /// The guards stay narrow: a genuine refusal must still be an error,
+    /// or a real failure would silently read as a successful arm.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_merge_guards_do_not_swallow_real_failures() {
+        const BODY: &str = r#"{"errors":[{"message":"Auto merge is not allowed for this repository",
+            "path":["enablePullRequestAutoMerge"]}]}"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        client
+            .repo_merge_methods
+            .lock()
+            .insert("o/r".into(), "SQUASH".into());
+        client
+            .enable_auto_merge(Some("o/r"), "PR_kwDO")
+            .await
+            .expect_err("a repo that forbids auto-merge is a real failure");
     }
 
     /// `enablePullRequestAutoMerge` success is mutation-shaped, like

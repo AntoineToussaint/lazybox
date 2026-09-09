@@ -1654,7 +1654,7 @@ pub fn merge_in_order_member(config: &ServerConfig, key: &WorkspaceKey) -> bool 
 
 /// Pure core of [`merge_in_order_member`], split out to unit-test the
 /// membership rule without a `ServerConfig`.
-fn merge_in_order_member_in(
+pub(crate) fn merge_in_order_member_in(
     records: &[EpicRecord],
     workspaces: &[Workspace],
     key: &WorkspaceKey,
@@ -1669,7 +1669,7 @@ fn merge_in_order_member_in(
 /// Pure core of [`held_by`]: the unmerged merge-after predecessors of `key`
 /// across `records`, from already-loaded workspaces. Split out so the hold
 /// logic unit-tests without a `ServerConfig`.
-fn held_by_in(
+pub(crate) fn held_by_in(
     records: &[EpicRecord],
     workspaces: &[Workspace],
     key: &WorkspaceKey,

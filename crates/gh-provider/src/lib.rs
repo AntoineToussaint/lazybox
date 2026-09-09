@@ -11,7 +11,7 @@ pub mod oauth;
 pub mod rate_budget;
 
 pub use client::{
-    BackgroundSweepForecast, GhClient, HotFetch, RepoSweepOutcome, RepoSweepSpec,
+    BackgroundSweepForecast, GhClient, GhError, HotFetch, RepoSweepOutcome, RepoSweepSpec,
     SelectedFetchOutcome, credential_fingerprint,
 };
 pub use graphql::{

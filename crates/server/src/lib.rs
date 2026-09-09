@@ -516,6 +516,13 @@ pub struct ServerConfig {
     /// bounded by the number of distinct workspace keys seen in this
     /// process (inbox-sized), and a `Mutex<()>` is a few dozen bytes.
     pub workspace_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    /// Per-workspace serialization for the GitHub-native auto-merge
+    /// arm/disarm step (#1596). Same shape and GC as
+    /// [`Self::workspace_locks`], but a separate map: the native step
+    /// holds its lock across network round trips and re-enters the
+    /// workspace lock to persist provenance, so the two must not be the
+    /// same mutex. See [`ServerConfig::lock_native_auto_merge`].
+    pub native_auto_merge_locks: Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     /// Serializes ownership changes for managed worktrees. Provisioning
     /// establishes an in-flight claim while holding this lock, then retains
     /// that claim through persistence; adoption and reclaim validate under
@@ -671,6 +678,7 @@ impl ServerConfig {
             undecodable_row_reports: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             event_metrics: Arc::new(metrics::EventMetrics::default()),
             workspace_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+            native_auto_merge_locks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             worktree_ownership_lock: Arc::new(Mutex::new(())),
             provisioning_worktree_claims: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             maintenance_done: Arc::new(parking_lot::Mutex::new(Vec::new())),
@@ -759,27 +767,59 @@ impl ServerConfig {
     /// workspaces must use the internal `lock_workspaces` helper, which sorts
     /// and deduplicates keys before acquisition.
     pub async fn lock_workspace(&self, key: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        let entry = self.workspace_lock_entry(key);
+        let entry = keyed_lock_entry(&self.workspace_locks, key);
+        entry.lock_owned().await
+    }
+
+    /// Serialize a workspace's GitHub-native auto-merge arm/disarm
+    /// (#1596). Deliberately NOT [`lock_workspace`](Self::lock_workspace):
+    /// the native step spans two network round trips, and holding the
+    /// workspace lock across them would stall that row's poll commits —
+    /// and deadlock against the provenance write, which re-takes it.
+    ///
+    /// Without this, `g g` arm and `g g` disarm for the same row race:
+    /// the arm commits its local flag, releases the workspace lock, and
+    /// then spends seconds probing branch rules and firing the mutation.
+    /// A disarm landing inside that window sees no provenance yet, does
+    /// nothing, and the arm goes on to enable GitHub auto-merge — so a
+    /// PR the user cancelled merges itself. Serializing the two, and
+    /// re-reading the workspace *inside* this lock, makes whichever
+    /// intent runs second observe the first's committed result.
+    pub async fn lock_native_auto_merge(&self, key: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let entry = keyed_lock_entry(&self.native_auto_merge_locks, key);
         entry.lock_owned().await
     }
 
     fn workspace_lock_entry(&self, key: &str) -> Arc<Mutex<()>> {
-        {
-            let mut map = self.workspace_locks.lock();
-            // Opportunistic GC (2026-08-19 audit, M10): the map was
-            // insert-only — one entry per workspace key EVER seen,
-            // archived ones included. An entry at strong_count == 1 is
-            // held by nobody (a guard or pending locker always clones
-            // the Arc), and any concurrent locker for the same key is
-            // queued behind this map lock and will re-create it — so
-            // dropping unheld entries is race-free.
-            if map.len() > 512 {
-                map.retain(|_, lock| Arc::strong_count(lock) > 1);
-            }
-            map.entry(key.to_string()).or_default().clone()
-        }
+        keyed_lock_entry(&self.workspace_locks, key)
     }
+}
 
+/// Fetch (or create) the per-key mutex for a keyed-lock map. Shared by
+/// [`ServerConfig::lock_workspace`] and
+/// [`ServerConfig::lock_native_auto_merge`] so both get the same
+/// opportunistic GC rather than one of them growing unbounded.
+fn keyed_lock_entry(
+    locks: &Arc<parking_lot::Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+    key: &str,
+) -> Arc<Mutex<()>> {
+    {
+        let mut map = locks.lock();
+        // Opportunistic GC (2026-08-19 audit, M10): the map was
+        // insert-only — one entry per workspace key EVER seen,
+        // archived ones included. An entry at strong_count == 1 is
+        // held by nobody (a guard or pending locker always clones
+        // the Arc), and any concurrent locker for the same key is
+        // queued behind this map lock and will re-create it — so
+        // dropping unheld entries is race-free.
+        if map.len() > 512 {
+            map.retain(|_, lock| Arc::strong_count(lock) > 1);
+        }
+        map.entry(key.to_string()).or_default().clone()
+    }
+}
+
+impl ServerConfig {
     /// Serialize a load→modify→commit that spans multiple workspace rows.
     /// Keys are sorted and deduplicated before locking, giving every caller
     /// one canonical acquisition order and preventing AB/BA deadlocks.

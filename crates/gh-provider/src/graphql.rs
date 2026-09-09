@@ -2245,6 +2245,7 @@ query($ids: [ID!]!) {
         }
       }
       repository { nameWithOwner }
+      parent { number repository { nameWithOwner } }
     }
   }
   rateLimit {
@@ -4264,6 +4265,27 @@ mod tests {
         assert_eq!(task.parent, None);
         assert!(task.blocked_by.is_empty());
         assert_eq!(task.blocked_on, None);
+    }
+
+    /// Every query that deserializes an issue into `GqlIssue` must select the
+    /// sub-issue `parent`, or the first poll on that path silently erases
+    /// the hierarchy: an engaged issue (one with a session) is refreshed by
+    /// `HOT_TASKS_QUERY`, and while that fragment lacked `parent` the row
+    /// dropped out of the ticket forest the moment an agent started on it —
+    /// exactly the "working on it made it leave the epic" report.
+    #[test]
+    fn every_issue_query_selects_sub_issue_parent() {
+        for (name, query) in [
+            ("ISSUES_QUERY", ISSUES_QUERY),
+            ("SINGLE_ISSUE_QUERY", SINGLE_ISSUE_QUERY),
+            ("HOT_TASKS_QUERY", HOT_TASKS_QUERY),
+        ] {
+            assert!(
+                query.contains("parent {"),
+                "{name} must select the sub-issue parent so a refresh on that path \
+                 keeps the ticket hierarchy"
+            );
+        }
     }
 
     #[test]

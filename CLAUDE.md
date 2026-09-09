@@ -173,15 +173,23 @@ crates/
   with `gh` and `git`. Lazybox does not wrap *repo actions* behind an
   MCP/tool-approval layer — the agent has the same tools it would in any
   other worktree.
-- **The tracker record is the workspace**: every GitHub issue / PR and every
-  Linear / Jira ticket gets exactly one workspace from the poll, and work on
-  it happens *there* — an agent, a coordinator, the CLI, or the JSON gateway
-  must attach to that workspace (or file the issue first and let the poll
-  open it), never create a separate named workspace beside it. Named /
-  local workspaces (`x n`, `lazybox workspace create --name`) are for
-  repo-less scratch only. A side workspace splits the branch, the activity,
-  the cost, and the epic graph across two rows the fleet can't reconcile
-  (#1586).
+- **The tracker record is the workspace**: a tracked item never gets a
+  *second* workspace beside the one it already has — an agent, a
+  coordinator, the CLI, or the JSON gateway attaches to that workspace
+  rather than creating a named one next to it. It is at most one workspace
+  per unit of work, not a bijection over records: the issue→PR fold puts an
+  issue and the PR that closes it on the same row. Named / local workspaces
+  (`x n`, `lazybox workspace create --name`) are for repo-less scratch only.
+  A side workspace splits the branch, the activity, the cost, and the epic
+  graph across two rows the fleet can't reconcile (#1586).
+  Filing the issue is *not* by itself enough to get a row:
+  `ProviderConfig::default_for("github")` ships `pr.*` keys only, so
+  `issue_enabled()` is false on a default install and both the repo
+  sweep's issue half and the `involves:USER is:issue` probe are skipped — and
+  `filter_github_tasks_with_watches` drops an out-of-scope repo besides.
+  Until the create-or-attach path in #1586 lands, agent-facing text must
+  therefore treat the filed issue as the deliverable and must not promise a
+  workspace (`crates/core/tests/agent_work_preamble.rs`).
 - **Cross-agent coordination bus** (`crates/server/src/mcp.rs`, #1420/#1433):
   the one MCP server lazybox *does* ship is a coordination surface, not a
   repo-action wrapper. Each spawned Claude session gets a per-session bearer

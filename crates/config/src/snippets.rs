@@ -1121,8 +1121,11 @@ impl Snippets {
                      with a concise report grouped by repository: the issues created and \
                      their URLs, existing issues reused, the dependency or rollout order, \
                      and any ambiguity that prevented an issue from being created. \
-                     Work then happens in each issue's own lazybox workspace, which the \
-                     poll opens per record — never create a named workspace beside one.",
+                     Work then happens in each issue's own lazybox workspace — never a \
+                     named workspace created beside one. Report the issue URLs and don't \
+                     assume their rows opened: whether lazybox surfaces an issue is the \
+                     operator's filter and scope configuration, not something you can \
+                     see from here.",
                 ),
             ),
             (
@@ -1161,8 +1164,11 @@ impl Snippets {
                      ask one focused question rather than guessing. Finish with a \
                      per-issue report: each created issue's URL, the existing issues \
                      reused, and the concurrency-and-ordering plan. Work then happens \
-                     in each issue's own lazybox workspace, which the poll opens per \
-                     record — never create a named workspace beside one.",
+                     in each issue's own lazybox workspace — never a named workspace \
+                     created beside one. Report the issue URLs and don't assume their \
+                     rows opened: whether lazybox surfaces an issue is the operator's \
+                     filter and scope configuration, not something you can see from \
+                     here.",
                 ),
             ),
             (
@@ -3059,20 +3065,40 @@ snippets:
         assert!(Snippets::builtin_body("no-such-snippet").is_none());
     }
 
-    /// #1586: a tracker record gets exactly one workspace and the work
-    /// happens there. The issue-carving briefs are the built-ins most likely
-    /// to trail off into "…and start a workspace for each", so they must say
-    /// the opposite, and no built-in may hand an agent the named-create
-    /// command — that path is repo-less scratch only.
+    /// #1586: a tracker record is worked in the row it already has, and the
+    /// issue-carving briefs are the built-ins most likely to trail off into
+    /// "…and start a workspace for each", so they must say the opposite.
+    ///
+    /// They must also not repeat the mistake #1586's first pass made in the
+    /// work preamble — promising that "the poll opens" a workspace per
+    /// record. It does not on a default install: `default_for("github")`
+    /// ships `pr.*` keys only, so `issue_enabled()` is false and both the
+    /// repo sweep's issue half and the issue-discovery probe are skipped.
+    /// A brief that promises a row strands the carved work with no error.
+    ///
+    /// Phrases are matched against whitespace-normalized text and kept
+    /// short, the same standard as
+    /// `crates/core/tests/agent_work_preamble.rs` — a guard that pins a
+    /// whole sentence breaks on an incidental reword instead of on the
+    /// regression it exists to catch.
     #[test]
     fn builtins_send_carved_work_to_the_issue_workspace() {
         for key in ["carve", "designissues"] {
             let body = Snippets::builtin_body(key).expect("ships built-in");
+            let flowed = body.split_whitespace().collect::<Vec<_>>().join(" ");
             assert!(
-                body.contains("never create a named workspace beside one"),
+                flowed.contains("each issue's own lazybox workspace"),
                 "`{key}` must send the carved work to each issue's own workspace: {body}"
             );
+            assert!(
+                flowed.contains("don't assume their rows opened"),
+                "`{key}` must not promise a workspace the poll may never open: {body}"
+            );
         }
+        // Unlike the preamble — multi-line markdown, where the guard asks
+        // whether a *line* is the invocation — a snippet body is one flat
+        // paragraph an agent reads as instructions, so there is no
+        // non-runnable way to mention the command here at all.
         for (key, snippet) in Snippets::builtin().all() {
             assert!(
                 !snippet.dispatch_body().contains("lazybox workspace create"),

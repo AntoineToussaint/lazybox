@@ -1921,7 +1921,7 @@ query($owner: String!, $name: String!, $number: Int!) {
           }
         }
       }
-      labels(first: 10) { nodes { name } }
+      labels(first: 10) { nodes { name color } }
       assignees(first: 10) { nodes { login } }
       reviewRequests(first: 10) {
         nodes {
@@ -2030,13 +2030,31 @@ pub struct GqlSinglePrRepository {
     pub pull_request: Option<GqlPr>,
 }
 
-/// Single-node Issue fetch. Symmetric to `SINGLE_PR_QUERY` for issue
-/// notifications. Field set mirrors `ISSUES_QUERY` so `issue_to_task`
-/// reuses without modification.
-const SINGLE_ISSUE_QUERY: &str = r#"
-query($owner: String!, $name: String!, $number: Int!) {
-  repository(owner: $owner, name: $name) {
-    issue(number: $number) {
+/// The one issue selection set, spliced into every query that
+/// deserializes an issue into [`GqlIssue`]: `ISSUES_QUERY` (the search
+/// sweep), `SINGLE_ISSUE_QUERY` (the notification-driven single fetch)
+/// and `HOT_TASKS_QUERY`'s `... on Issue` fragment. They share this
+/// macro instead of repeating the fields so they cannot drift.
+///
+/// Drift here is silent and destructive rather than a deserialization
+/// error: every optional field on [`GqlIssue`] carries
+/// `#[serde(default)]`, so a query that forgets one yields `None`,
+/// [`issue_to_task`] maps that to an empty value, and
+/// `Workspace::attach_task` REPLACES the stored issue task wholesale
+/// (`upsert_by_id`) — unlike the PR slot, which launders a lean fetch
+/// through `preserve_lazy_pr_fields`. A leaner query therefore ERASES
+/// whatever the fatter one already learned, on the very next poll.
+///
+/// Two such divergences shipped before this was centralized:
+/// `HOT_TASKS_QUERY` omitted `parent`, so an issue fell out of its epic
+/// the moment an agent engaged it (engaging a row moves it to the hot
+/// path), and `SINGLE_ISSUE_QUERY` omitted the label `color`, so one
+/// notification greyed out every label chip on the row until the next
+/// full sweep. Both were invisible at compile time. Add a field HERE,
+/// never to one call site.
+macro_rules! issue_task_fields {
+    () => {
+        r#"
       id
       number
       title
@@ -2047,22 +2065,36 @@ query($owner: String!, $name: String!, $number: Int!) {
       closedAt
       state
       author { login }
-      labels(first: 10) { nodes { name } }
+      labels(first: 10) { nodes { name color } }
       assignees(first: 10) { nodes { login } }
+      reactions(content: EYES) { viewerHasReacted }
       comments(first: 15) {
         nodes {
           id
           author { login }
           body
           createdAt
+          reactions(content: EYES) { viewerHasReacted }
         }
       }
       repository { nameWithOwner }
-      parent {
-        number
-        repository { nameWithOwner }
-      }
-    }
+      parent { number repository { nameWithOwner } }
+"#
+    };
+}
+
+/// Single-node Issue fetch. Symmetric to `SINGLE_PR_QUERY` for issue
+/// notifications. Splices [`issue_task_fields`] so `issue_to_task`
+/// reuses it without modification — and, more to the point, so this
+/// path cannot select FEWER fields than the sweep and silently erase
+/// the difference on every refresh.
+const SINGLE_ISSUE_QUERY: &str = concat!(
+    r#"
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {"#,
+    issue_task_fields!(),
+    r#"    }
   }
   rateLimit {
     cost
@@ -2072,7 +2104,8 @@ query($owner: String!, $name: String!, $number: Int!) {
     used
   }
 }
-"#;
+"#
+);
 
 pub fn single_issue_body(owner: &str, name: &str, number: u64) -> serde_json::Value {
     serde_json::json!({
@@ -2101,7 +2134,8 @@ pub struct GqlSingleIssueRepository {
     pub issue: Option<GqlIssue>,
 }
 
-const HOT_TASKS_QUERY: &str = r#"
+const HOT_TASKS_QUERY: &str = concat!(
+    r#"
 query($ids: [ID!]!) {
   nodes(ids: $ids) {
     __typename
@@ -2223,30 +2257,9 @@ query($ids: [ID!]!) {
         }
       }
     }
-    ... on Issue {
-      id
-      number
-      title
-      body
-      url
-      updatedAt
-      createdAt
-      closedAt
-      state
-      author { login }
-      labels(first: 10) { nodes { name color } }
-      assignees(first: 10) { nodes { login } }
-      comments(first: 15) {
-        nodes {
-          id
-          author { login }
-          body
-          createdAt
-        }
-      }
-      repository { nameWithOwner }
-      parent { number repository { nameWithOwner } }
-    }
+    ... on Issue {"#,
+    issue_task_fields!(),
+    r#"    }
   }
   rateLimit {
     cost
@@ -2256,7 +2269,8 @@ query($ids: [ID!]!) {
     used
   }
 }
-"#;
+"#
+);
 
 pub fn hot_tasks_body(node_ids: &[String]) -> serde_json::Value {
     serde_json::json!({
@@ -2268,13 +2282,26 @@ pub fn hot_tasks_body(node_ids: &[String]) -> serde_json::Value {
 /// Lean freshness probe for the hot set (#1218). Everything the full
 /// [`HOT_TASKS_QUERY`] answers that can change *without* bumping
 /// `updatedAt` is here (CI rollup, mergeability, review decision,
-/// merge-queue/auto-merge state, head oid); everything else IS covered
-/// by `updatedAt` (comments, labels, reviews, edits, assignment). A
+/// merge-queue/auto-merge state, head oid, sub-issue parent); everything
+/// else IS covered by `updatedAt` (comments, labels, reviews, edits,
+/// assignment). A
 /// hot target whose probe node is byte-identical to the last one seen
 /// therefore cannot have changed in any way lazybox renders — the
 /// ~700-node full query is only spent on nodes whose probe moved.
 /// ~10 nodes/PR vs ~700: the difference between ~84k GraphQL points/hr
 /// and staying inside the 5k budget at a 15s hot cadence.
+///
+/// `parent` is probed rather than trusted to `updatedAt` because GitHub
+/// does not stamp `updatedAt` for every timeline event — a
+/// `cross-referenced` event demonstrably does not — and whether
+/// `parent_issue_added` does is not documented. If it does not, an issue
+/// added to an epic while an agent is engaged on it would keep
+/// `parent: None` until unrelated activity moved the probe: the windowed
+/// repo sweep is `updated:>=`-floored, so it would skip the row too, and
+/// only the 30-minute unwindowed reconcile (or `Shift-R`) would heal it.
+/// Probing the edge costs nothing measurable — `parent { number }` is a
+/// plain field, not a `first:`-bounded connection, so it adds no nodes to
+/// the query's cost — and removes the question.
 const HOT_FRESHNESS_QUERY: &str = r#"
 query($ids: [ID!]!) {
   nodes(ids: $ids) {
@@ -2305,6 +2332,7 @@ query($ids: [ID!]!) {
       updatedAt
       state
       stateReason
+      parent { number }
     }
   }
   rateLimit {
@@ -3502,43 +3530,16 @@ fn extract_repo_from_url(url: &str) -> String {
 /// comment on `SEARCH_QUERY` for the rate-budget rationale. Issues
 /// are simpler (no reviews / review threads), so the only knob to
 /// turn is `comments`.
-const ISSUES_QUERY: &str = r#"
+const ISSUES_QUERY: &str = concat!(
+    r#"
 query($query: String!, $first: Int!, $after: String) {
   search(query: $query, type: ISSUE, first: $first, after: $after) {
     issueCount
     pageInfo { hasNextPage endCursor }
     nodes {
-      ... on Issue {
-        id
-        number
-        title
-        body
-        url
-        updatedAt
-        createdAt
-        closedAt
-        state
-        author { login }
-        labels(first: 10) { nodes { name color } }
-        assignees(first: 10) { nodes { login } }
-        reactions(content: EYES) { viewerHasReacted }
-        comments(first: 15) {
-          nodes {
-            id
-            author { login }
-            body
-            createdAt
-            reactions(content: EYES) { viewerHasReacted }
-          }
-        }
-        repository {
-          nameWithOwner
-        }
-        parent {
-          number
-          repository { nameWithOwner }
-        }
-      }
+      ... on Issue {"#,
+    issue_task_fields!(),
+    r#"      }
     }
   }
   rateLimit {
@@ -3549,7 +3550,8 @@ query($query: String!, $first: Int!, $after: String) {
     used
   }
 }
-"#;
+"#
+);
 
 #[derive(Deserialize, Debug)]
 pub struct GqlIssue {
@@ -3586,8 +3588,19 @@ pub struct GqlIssue {
     pub reactions: Option<GqlReactionView>,
     /// GitHub sub-issue parent, when this issue is a sub-issue. The edge
     /// is native and authoritative — the child names the parent by
-    /// number and repo. `default` so a host or query that omits `parent`
-    /// (older GHES, PR search) deserializes fine as `None`.
+    /// number and repo.
+    ///
+    /// `default` covers a *response* that carries no `parent` key — the
+    /// PR search, which deserializes into this struct without selecting
+    /// it. It does NOT make an older GHES safe, and the queries must not
+    /// be written as if it did: a GraphQL server that has never heard of
+    /// `Issue.parent` rejects the field at document *validation*, so the
+    /// whole query fails and serde never runs. On such a host the shared
+    /// `nodes(ids:)` hot query — which serves PRs too — fails as a unit
+    /// until `HOT_BATCH_REJECTION_THRESHOLD` consecutive failures
+    /// (`GhClient::hot_batch_rejected`) degrade the hot set to per-target
+    /// fetches. That fallback is what bounds the damage; `serde(default)`
+    /// contributes nothing to it.
     #[serde(default)]
     pub parent: Option<GqlIssueParent>,
 }
@@ -4267,25 +4280,135 @@ mod tests {
         assert_eq!(task.blocked_on, None);
     }
 
-    /// Every query that deserializes an issue into `GqlIssue` must select the
-    /// sub-issue `parent`, or the first poll on that path silently erases
-    /// the hierarchy: an engaged issue (one with a session) is refreshed by
-    /// `HOT_TASKS_QUERY`, and while that fragment lacked `parent` the row
-    /// dropped out of the ticket forest the moment an agent started on it —
-    /// exactly the "working on it made it leave the epic" report.
+    /// The three queries that deserialize an issue into [`GqlIssue`] must
+    /// select ONE selection set, not three that happen to agree today.
+    ///
+    /// Drift is silent: every optional `GqlIssue` field is
+    /// `#[serde(default)]`, so a query that forgets a field yields `None`
+    /// and `attach_task` replaces the stored issue task with the poorer
+    /// one. `HOT_TASKS_QUERY` forgetting `parent` is what dropped an
+    /// engaged issue out of its epic (an engaged row moves to the hot
+    /// path); `SINGLE_ISSUE_QUERY` forgetting the label `color` is what
+    /// greyed out a row's label chips on the next notification. Asserting
+    /// one field over a hand-listed set of queries would not have caught
+    /// the second, so assert the *sharing* instead: each query splices
+    /// `issue_task_fields!()` exactly once and adds nothing of its own.
     #[test]
-    fn every_issue_query_selects_sub_issue_parent() {
+    fn issue_queries_splice_one_shared_selection_set() {
+        let shared = issue_task_fields!();
         for (name, query) in [
             ("ISSUES_QUERY", ISSUES_QUERY),
             ("SINGLE_ISSUE_QUERY", SINGLE_ISSUE_QUERY),
             ("HOT_TASKS_QUERY", HOT_TASKS_QUERY),
         ] {
-            assert!(
-                query.contains("parent {"),
-                "{name} must select the sub-issue parent so a refresh on that path \
-                 keeps the ticket hierarchy"
+            assert_eq!(
+                query.matches(shared).count(),
+                1,
+                "{name} must splice issue_task_fields!() exactly once — a \
+                 hand-written issue selection drifts and erases fields"
+            );
+            // Nothing may be selected for an issue outside the shared
+            // block: a second `parent`/`labels` selection means someone
+            // grew one call site instead of the macro.
+            assert_eq!(
+                query.matches("parent {").count(),
+                1,
+                "{name} selects `parent` outside the shared block"
             );
         }
+    }
+
+    /// The shared block must carry every field `issue_to_task` reads. A
+    /// field dropped here is not a compile error and not a deserialization
+    /// error — it is an empty value written over good stored state.
+    #[test]
+    fn issue_task_fields_covers_everything_issue_to_task_reads() {
+        let shared = issue_task_fields!();
+        for field in [
+            "id",
+            "number",
+            "title",
+            "body",
+            "url",
+            "updatedAt",
+            "createdAt",
+            "closedAt",
+            "state",
+            "author { login }",
+            // Colour included: see `task_queries_select_the_label_colour`
+            // for why `{ name }` alone is a silent data-loss bug.
+            "labels(first: 10) { nodes { name color } }",
+            "assignees(first: 10)",
+            "comments(first: 15)",
+            "repository { nameWithOwner }",
+            // The sub-issue edge — the ticket forest / epic membership.
+            "parent { number repository { nameWithOwner } }",
+        ] {
+            assert!(
+                shared.contains(field),
+                "issue_task_fields! must select `{field}` — issue_to_task reads it"
+            );
+        }
+    }
+
+    /// Every query whose result becomes a `Task` must select the label
+    /// COLOR, not just the name. `GqlLabel::color` is
+    /// `Option<String>` + `serde(default)`, so a query that selects
+    /// `{ name }` deserializes cleanly and `issue_to_task`/`pr_to_task`
+    /// store `color: ""`; the sidebar's `label_text_style` then renders
+    /// every chip on that row dim instead of its GitHub colour, until a
+    /// query that DOES select it re-polls the row. `SINGLE_PR_QUERY` and
+    /// `SINGLE_ISSUE_QUERY` — the notification-driven refreshes, the most
+    /// frequent targeted fetches there are — both shipped that way.
+    ///
+    /// `REPO_LABELS_QUERY` is deliberately absent: it feeds the label
+    /// picker, not a `Task`, and selects its own multi-line shape.
+    #[test]
+    fn task_queries_select_the_label_colour() {
+        for (name, query) in [
+            ("SEARCH_QUERY", SEARCH_QUERY),
+            ("SINGLE_PR_QUERY", SINGLE_PR_QUERY),
+            ("SINGLE_ISSUE_QUERY", SINGLE_ISSUE_QUERY),
+            ("HOT_TASKS_QUERY", HOT_TASKS_QUERY),
+            ("ISSUES_QUERY", ISSUES_QUERY),
+        ] {
+            let selections: Vec<&str> = query
+                .lines()
+                .filter(|line| line.contains("labels(first:"))
+                .collect();
+            assert!(
+                !selections.is_empty(),
+                "{name} selects no labels — did the selection move?"
+            );
+            for selection in selections {
+                assert!(
+                    selection.contains("color"),
+                    "{name} selects labels without `color`: {} — a refresh on \
+                     this path would grey out the row's label chips",
+                    selection.trim()
+                );
+            }
+        }
+    }
+
+    /// The hot freshness probe gates whether the full query runs at all,
+    /// so a field in the full query that the probe cannot see only
+    /// refreshes when something else moves `updatedAt`. GitHub does not
+    /// stamp `updatedAt` for every timeline event (a `cross-referenced`
+    /// event does not), and `parent_issue_added`'s behaviour is not
+    /// documented — so the sub-issue edge is probed explicitly rather
+    /// than assumed to ride along.
+    #[test]
+    fn hot_freshness_probe_sees_a_re_parenting() {
+        let issue_fragment = HOT_FRESHNESS_QUERY
+            .split("... on Issue {")
+            .nth(1)
+            .expect("probe has an Issue fragment");
+        assert!(
+            issue_fragment.contains("parent { number }"),
+            "the probe must select the sub-issue parent, or an issue added to \
+             an epic keeps `parent: None` until unrelated activity bumps updatedAt"
+        );
     }
 
     #[test]

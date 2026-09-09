@@ -304,6 +304,9 @@ pub(super) async fn execute_spawn_plan(
             no_permission: skip_permissions,
             on_main: landed_on_main,
             model_label,
+            // A fresh process has committed no lifecycle state yet; its
+            // first real transition arrives on the PTY path.
+            agent_state: None,
         }
     };
     if let Err(error) = config.bus.send(event) {

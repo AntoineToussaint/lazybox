@@ -190,6 +190,7 @@ fn sidebar_multiple_agent_badges_shows_counts() {
             no_permission: false,
             on_main: false,
             model_label: None,
+            agent_state: None,
         });
     }
 
@@ -265,6 +266,7 @@ fn sidebar_dense_agent_rows_compacts_model_and_keeps_titles() {
             no_permission: false,
             on_main: false,
             model_label: Some(model.into()),
+            agent_state: None,
         });
     }
 

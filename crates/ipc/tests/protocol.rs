@@ -790,6 +790,19 @@ fn all_events() -> Vec<Event> {
             no_permission: false,
             on_main: false,
             model_label: None,
+            agent_state: None,
+        },
+        // A restart reattaching a hydrated agent: the state rides the spawn
+        // announce. Same tag as the row above (the corpus dedups by tag), so
+        // this only adds round-trip coverage for the populated field.
+        Event::TerminalSpawned {
+            terminal_id: TerminalId(2),
+            session_key: key.clone(),
+            kind: TerminalKind::Agent("codex".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            agent_state: Some(lazybox_ipc::AgentState::InputNeeded),
         },
         Event::TerminalReplaced {
             old_terminal_id: TerminalId(2),

@@ -1368,7 +1368,16 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
         lastSeq: 0,
         replayAvailable: true,
         dirty: false,
-        state: "running",
+        // A restart reattaching a hydrated agent carries its state on the
+        // spawn frame. Seed the badge from it exactly as the snapshot path
+        // does (`terminalFromSnapshot`) — silently, with no
+        // `notifier.signal`: a restart is not the agent asking again, and the
+        // notifier's dedupe key embeds the terminal id, which recovery
+        // reallocates on every restart, so it could never suppress a repeat.
+        state:
+          payload.agent_state === null
+            ? "running"
+            : formatAgentState(payload.agent_state),
         modelLabel: payload.model_label ?? null,
         promptHistory: [],
       });

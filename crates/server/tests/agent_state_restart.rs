@@ -484,3 +484,127 @@ async fn recovered_dead_process_exits_and_fresh_spawn_has_no_old_state() {
         "a newly spawned process must not inherit the exited generation's Working state"
     );
 }
+
+/// Recovery must PUBLISH the hydrated state, not just hydrate it into the
+/// cache. Hydration makes every later PTY reading fold to `from == to` — so a
+/// client that subscribed after its own snapshot but before this terminal
+/// registered (recovery walks a fleet over several seconds) would sit
+/// stateless until the state actually moved: the end of the turn for a
+/// mid-turn `Working` agent, and never for a parked `InputNeeded` one, which
+/// emits no output at all.
+///
+/// The state rides `TerminalSpawned` — the streaming twin of a snapshot row —
+/// and NOT a second `Event::AgentState`. A separate state event would be
+/// indistinguishable from a real transition, and the bus's edge-triggered
+/// consumers act on those: `auto_wait` presses Wait into the PTY on a
+/// `LimitReached` edge (and its module doc pins "fires exactly once per
+/// episode"), and `chat` posts to Slack on an `InputNeeded` edge with no
+/// dedupe at all.
+#[tokio::test]
+async fn recovery_carries_the_hydrated_state_on_terminal_spawned() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    for (ordinal, state) in [
+        (50, AgentState::Working),
+        (51, AgentState::InputNeeded),
+        (52, AgentState::Done),
+    ] {
+        let backend = MockBackend::new();
+        let db = temp.path().join(format!("announce-{ordinal}.db"));
+        let (backend_key, session_key) = seed_persisted_state(&db, &backend, state, ordinal).await;
+
+        let restarted = ServerConfig::with_store_and_backend(
+            Arc::new(SqliteStore::open(&db).expect("reopen sqlite store")),
+            backend.as_backend(),
+        );
+        let mut events = restarted.bus.subscribe();
+        recover_sessions(&restarted).await;
+
+        let (spawned, announced_key, announced_state) =
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if let Event::TerminalSpawned {
+                        terminal_id,
+                        session_key,
+                        agent_state,
+                        ..
+                    } = events.recv().await.expect("recovery event bus")
+                    {
+                        break (terminal_id, session_key, agent_state);
+                    }
+                }
+            })
+            .await
+            .expect("terminal spawned deadline");
+        assert_eq!(
+            (announced_key, announced_state),
+            (session_key, Some(state)),
+            "{state:?} must ride the spawn announce for the recovered terminal"
+        );
+
+        // No `Event::AgentState` may follow: the bus's edge-triggered
+        // consumers would read a hydration baseline as a fresh transition.
+        // The mock backend emits no output, so nothing can legitimately
+        // transition here.
+        tokio::task::yield_now().await;
+        while let Ok(event) = events.try_recv() {
+            assert!(
+                !matches!(event, Event::AgentState { .. }),
+                "recovery must not publish a transition for a hydrated state: {event:?}"
+            );
+        }
+
+        // A baseline, not a transition: the cache keeps the hydrated reading
+        // and the persisted row keeps its own generation, so a restart never
+        // rewrites the lifecycle history it just read.
+        assert_eq!(
+            restarted.terminal.agent_state_for(spawned).await,
+            Some(state)
+        );
+        let store = SqliteStore::open(&db).expect("reopen sqlite store");
+        assert_eq!(
+            store
+                .get_kv(&format!("terminal-agent-state-generation:{backend_key}"))
+                .expect("read persisted generation"),
+            Some((10_000 + ordinal).to_string()),
+            "recovery must not re-key the persisted state to the new terminal id"
+        );
+    }
+}
+
+/// A recovered SHELL has no lifecycle state to carry, so the spawn announce
+/// must leave the field empty rather than inventing a resting badge for a
+/// terminal that never had one.
+#[tokio::test]
+async fn recovered_shell_carries_no_agent_state() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let db = temp.path().join("shell.db");
+    let backend = MockBackend::new();
+    let backend_key = backend
+        .spawn(&["bash".into()], None, &[], "shell-60")
+        .await
+        .expect("spawn surviving shell session");
+    let session_key = SessionKey::from("test:shell-60");
+    let store = Arc::new(SqliteStore::open(&db).expect("open sqlite store"));
+    let metadata = serde_json::to_string(&(session_key.as_str(), TerminalKind::Shell))
+        .expect("serialize terminal metadata");
+    store
+        .set_kv(&format!("terminal:{backend_key}"), &metadata)
+        .expect("persist terminal metadata");
+
+    let restarted = ServerConfig::with_store_and_backend(store, backend.as_backend());
+    let mut events = restarted.bus.subscribe();
+    recover_sessions(&restarted).await;
+
+    let announced = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Event::TerminalSpawned { agent_state, .. } =
+                events.recv().await.expect("recovery event bus")
+            {
+                break agent_state;
+            }
+        }
+    })
+    .await
+    .expect("terminal spawned deadline");
+    assert_eq!(announced, None, "a shell has no agent lifecycle state");
+}

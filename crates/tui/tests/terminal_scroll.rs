@@ -122,6 +122,7 @@ fn pane_grid() -> (u16, u16) {
         no_permission: false,
         on_main: false,
         model_label: None,
+        agent_state: None,
     });
     stack.set_active_session(Some(sk("s")));
     render(&mut stack);
@@ -141,6 +142,7 @@ fn fresh_agent() -> TerminalStack {
         no_permission: false,
         on_main: false,
         model_label: None,
+        agent_state: None,
     });
     stack.set_active_session(Some(sk("s")));
     render(&mut stack);
@@ -317,6 +319,7 @@ fn spawn_focused(stack: &mut TerminalStack, w: u16, h: u16) {
         no_permission: false,
         on_main: false,
         model_label: None,
+        agent_state: None,
     });
     stack.set_active_session(Some(sk("s")));
     render_at(stack, w, h);
@@ -402,6 +405,7 @@ fn split_stack() -> TerminalStack {
             no_permission: false,
             on_main: false,
             model_label: None,
+            agent_state: None,
         });
     }
     stack.set_active_session(Some(sk("s")));
@@ -556,6 +560,7 @@ fn empty_terminal_scroll_is_a_typed_reason_not_a_move() {
         no_permission: false,
         on_main: false,
         model_label: None,
+        agent_state: None,
     });
     stack.set_active_session(Some(sk("s")));
     render(&mut stack);

@@ -491,6 +491,7 @@ impl Driver {
                     no_permission: false,
                     on_main: false,
                     model_label: None,
+                    agent_state: None,
                 });
                 return;
             }
@@ -1342,6 +1343,7 @@ mod tests {
                 no_permission: false,
                 on_main: false,
                 model_label: None,
+                agent_state: None,
             })
             .await;
         assert_eq!(reactor.tracked_ids(), vec![tid], "spawn tracks the agent");

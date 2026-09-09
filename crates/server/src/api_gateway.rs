@@ -868,6 +868,11 @@ pub enum DesktopEvent {
         kind: lazybox_ipc::TerminalKind,
         #[serde(default)]
         model_label: Option<String>,
+        /// Lifecycle state this terminal already carries — set when a
+        /// restart reattaches a hydrated agent. A baseline for the client's
+        /// state map, never an attention alert.
+        #[serde(default)]
+        agent_state: Option<lazybox_ipc::AgentState>,
     },
     TerminalExited {
         terminal_id: TerminalId,
@@ -1091,12 +1096,14 @@ pub fn desktop_event(event: Event) -> Option<DesktopEvent> {
             session_key,
             kind,
             model_label,
+            agent_state,
             ..
         } => Some(DesktopEvent::TerminalSpawned {
             terminal_id,
             session_key,
             kind,
             model_label,
+            agent_state,
         }),
         Event::TerminalExited {
             terminal_id,

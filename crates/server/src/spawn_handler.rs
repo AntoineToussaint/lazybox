@@ -10121,6 +10121,13 @@ pub async fn recover_sessions(config: &ServerConfig) {
             crate::working_claims::acquire_pty(config, claim_workspace, &key, claim_session_id)
                 .await;
         }
+        // Carry the hydrated state on the spawn announce itself. Hydration
+        // already put it in the cache, so every later PTY reading folds to
+        // `from == to` and publishes nothing — a client that subscribed after
+        // its own snapshot but before this terminal registered would otherwise
+        // sit stateless until the state actually MOVES, which for an agent
+        // still mid-turn is the end of the turn. This is the same baseline a
+        // snapshot row carries, delivered on the streaming path.
         let _ = config.bus.send(Event::TerminalSpawned {
             terminal_id,
             session_key,
@@ -10128,6 +10135,7 @@ pub async fn recover_sessions(config: &ServerConfig) {
             no_permission,
             on_main,
             model_label: recovered_model_label,
+            agent_state: restored_state,
         });
         tokio::spawn(async move {
             let mut failures = 0u32;

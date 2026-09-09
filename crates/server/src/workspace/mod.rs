@@ -807,25 +807,43 @@ pub async fn record_snippet_delivery(
 /// the `ARM` pill never lights on a PR that could never merge. Only the
 /// author gate refuses — transient CI / conflict / review states are
 /// exactly what arming waits through, so those still arm.
+///
+/// Once the local arm has committed, the **durable half** follows
+/// (issue #1596): GitHub's own auto-merge is turned on — or, on disarm,
+/// back off — where that is safe, so an armed PR lands even with lazybox
+/// closed. That step is best-effort and never blocks the local arm; see
+/// `polling::auto_merge::apply_native_arm` for its gates.
 pub async fn set_auto_merge_on_green(config: &ServerConfig, key: &WorkspaceKey, enabled: bool) {
     let policy = crate::polling::auto_merge::merge_on_green_policy();
-    set_auto_merge_on_green_with_policy(config, key, enabled, &policy).await;
+    if !set_auto_merge_on_green_with_policy(config, key, enabled, &policy).await {
+        return;
+    }
+    crate::polling::auto_merge::apply_native_arm(config, key, enabled).await;
 }
 
 /// Policy-injecting core of [`set_auto_merge_on_green`], split out so a
 /// test can pin the allowlist instead of reading the real config file.
+/// Returns whether the local arm was actually applied — `false` when the
+/// workspace is gone or the author gate refused, so the caller skips the
+/// GitHub-native follow-up.
 async fn set_auto_merge_on_green_with_policy(
     config: &ServerConfig,
     key: &WorkspaceKey,
     enabled: bool,
     policy: &lazybox_core::MergeOnGreenPolicy,
-) {
+) -> bool {
     let _ws_guard = config.lock_workspace(key.as_str()).await;
     let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
-        return;
+        return false;
     };
+    // Every arm request is author-gated, including one for a workspace
+    // that is already armed. The `!auto_merge_on_green` short-circuit this
+    // used to carry made an idempotent re-arm skip the gate — and since
+    // #1596 the return value drives the GitHub-native arm, so skipping it
+    // would hand GitHub a PR `auto_merge_block_reason` refuses to merge
+    // (NON_AUTHOR_BLOCK). Disarms are unaffected: `enabled` gates the whole
+    // check.
     if enabled
-        && !workspace.auto_merge_on_green
         && let Some(pr) = workspace.pr.as_ref()
         && lazybox_core::author_gate_blocks(pr, policy)
     {
@@ -840,10 +858,11 @@ async fn set_auto_merge_on_green_with_policy(
                     lazybox_core::NON_AUTHOR_BLOCK
                 ),
             ));
-        return;
+        return false;
     }
     workspace.auto_merge_on_green = enabled;
     commit_upsert_offloaded_reported(config, key, workspace, "set auto-merge preference").await;
+    true
 }
 
 /// Persist the workspace's "track main" arm (issue #535). Mirrors
@@ -3962,6 +3981,85 @@ mod set_auto_merge_on_green_tests {
             .await;
 
         assert!(stored_arm(&config, &key), "own PRs arm normally");
+    }
+
+    /// The return value is what gates the GitHub-native follow-up
+    /// (#1596): a refused arm never reaches `apply_native_arm`, so an
+    /// author lazybox won't merge for can't get GitHub's auto-merge
+    /// turned on either.
+    #[tokio::test]
+    async fn applied_flag_tracks_whether_the_local_arm_took() {
+        let config = ServerConfig::in_memory();
+        let refused = seed(
+            &config,
+            pr_task("o/r#10", TaskRole::Reviewer, "dependabot[bot]"),
+            false,
+        );
+        assert!(
+            !set_auto_merge_on_green_with_policy(
+                &config,
+                &refused,
+                true,
+                &MergeOnGreenPolicy::default()
+            )
+            .await,
+            "an author-gate refusal reports no arm"
+        );
+
+        let own = seed(&config, pr_task("o/r#11", TaskRole::Author, "me"), false);
+        assert!(
+            set_auto_merge_on_green_with_policy(
+                &config,
+                &own,
+                true,
+                &MergeOnGreenPolicy::default()
+            )
+            .await,
+            "an applied arm reports true"
+        );
+
+        let missing = WorkspaceKey::new("github:o/r#404");
+        assert!(
+            !set_auto_merge_on_green_with_policy(
+                &config,
+                &missing,
+                true,
+                &MergeOnGreenPolicy::default()
+            )
+            .await,
+            "no workspace, no arm"
+        );
+    }
+
+    /// The author gate applies to EVERY arm request, not just the first
+    /// (#1596). The old `!auto_merge_on_green` short-circuit let a re-arm
+    /// of an already-armed row skip it and report success — which now
+    /// drives the GitHub-native arm, handing GitHub a PR
+    /// `auto_merge_block_reason` refuses to merge.
+    #[tokio::test]
+    async fn re_arming_an_already_armed_row_still_author_gates() {
+        let config = ServerConfig::in_memory();
+        let key = seed(
+            &config,
+            pr_task("o/r#12", TaskRole::Reviewer, "dependabot[bot]"),
+            // Already armed — e.g. armed while the allowlist still named
+            // this author, which was then removed from config.
+            true,
+        );
+        assert!(
+            !set_auto_merge_on_green_with_policy(
+                &config,
+                &key,
+                true,
+                &MergeOnGreenPolicy::default()
+            )
+            .await,
+            "an already-armed row must not report an applied arm past the gate"
+        );
+        assert!(
+            stored_arm(&config, &key),
+            "refusing the re-arm leaves the existing local arm as it was"
+        );
     }
 
     #[tokio::test]

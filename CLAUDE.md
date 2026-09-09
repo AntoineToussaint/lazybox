@@ -568,7 +568,8 @@ opens the **github** group the same way: `g m` merge, `g u` update
 branch (the "Update branch" button — merge base into head; only on a
 PR behind its base, #484), `g g` toggle
 auto-merge on green (lazybox merges automatically once CI passes —
-own PR, no conflicts, no changes requested; only while lazybox runs),
+own PR, no conflicts, no changes requested; arming also hands the PR to
+**GitHub-native** auto-merge where that is provably safe — see below),
 `g p` policies (the unified automation-policies menu — one surface
 listing merge-on-green, per-session auto-fix arm/disarm, and
 GitHub-native auto-merge status for the focused PR/issue, each toggled
@@ -582,7 +583,37 @@ closed without merging; #408) — leader chords only, the legacy
 `Shift-{M,V,G,L,O}` direct aliases are gone (#304). Armed policies
 surface as row pills (`ARM` merge-on-green, `FIX` auto-fix); the
 per-session auto-fix arm/disarm overrides the global `no-auto-fix` /
-`do-not-lazybox` label opt-out, which the menu still reflects. `b` is a leader
+`do-not-lazybox` label opt-out, which the menu still reflects.
+
+Arming `g g` also turns on **GitHub-native** auto-merge so the PR lands
+with lazybox closed (#1596) — but only where GitHub's gate provably
+*covers* lazybox's. GitHub's auto-merge waits on *required* checks and
+reviews alone, so a base requiring `build` while the PR also runs a
+failing `test` would land it red. Under the default
+`merge_on_green.github_native: auto` lazybox therefore hands GitHub the
+PR only when every check the PR runs is required on the base (a check
+list it cannot fully enumerate counts as "not proven") and the base
+requires an approving review; `always` accepts the weaker gate, `never`
+keeps `g g` a lazybox-only latch. Native is never armed where lazybox
+holds the PR for a reason GitHub can't see either: an `E M` (ORDER)
+epic member, an unlanded merge-after predecessor, a blocking Reviewer
+verdict, a still-open stacked parent, or an `approval: human` repo.
+Every decline says so in the footer (an `AutoMergeNotice`, not a
+swallowed provider error), and all of it is **re-checked on each poll
+tick** — a hold or an unrequired check appearing *after* the arm revokes
+native and hands the PR back to the local latch. The arm/disarm pair is
+serialized per workspace (`lock_native_auto_merge`) so a disarm racing an
+in-flight arm can't leave GitHub merging a PR the user cancelled, and
+disarming disables native only when lazybox armed it
+(`Workspace::native_auto_merge_by_lazybox`); one set in the GitHub UI is
+left alone. An armed PR also rides the 15s hot poll tier (up to
+`ARMED_HOT_MAX` of them, above `HOT_SET_MAX` — an arm outlives what it
+waits for, so unlike a live agent it is bounded), so where native doesn't
+apply, green → merged is one tick instead of the repo's ~5-min rotation
+slot; it leaves that tier once native auto-merge is on, since GitHub
+lands it and lazybox has nothing left to fire.
+
+`b` is a leader
 for the **on-main** group (which-key popup): `b c` / `b x` / `b u`
 start an agent, `b s` a shell, on the repo's shared **main checkout**
 (default branch) instead of an isolated worktree — confirmed first

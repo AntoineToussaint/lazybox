@@ -22,15 +22,27 @@
 //!    historically opt-*out* per PR via GitHub labels. This module adds
 //!    the per-session [`PolicyArm`] override the audit found missing.
 //! 3. **GitHub-native auto-merge** — GitHub's own server-side "merge when
-//!    ready" ([`crate::Task::auto_merge_enabled`]). lazybox does not set
-//!    it; the surface shows it read-only.
+//!    ready" ([`crate::Task::auto_merge_enabled`]). Arming merge-on-green
+//!    also turns this on where GitHub's gate is *proven*
+//!    equivalent-or-stricter for the PR — its required checks cover every
+//!    check the PR runs, and it requires a review (issue #1596) — so the
+//!    PR lands even with lazybox closed. Whether lazybox was the one to set
+//!    it is recorded on
+//!    [`crate::Workspace::native_auto_merge_by_lazybox`], so disarming
+//!    only clears what lazybox armed; an auto-merge set on github.com is
+//!    left alone.
 //!
 //! ### Precedence
 //!
 //! - **native auto-merge > lazybox merge-on-green.** When GitHub's native
-//!   auto-merge is already enabled on a PR, lazybox's merge-on-green
-//!   stands down (see [`should_auto_merge`]) — GitHub will land it, so a
-//!   second merge fired by lazybox is redundant and racy.
+//!   auto-merge is enabled on a PR, lazybox's merge-on-green stands down
+//!   (see [`should_auto_merge`]) — GitHub will land it, so a second merge
+//!   fired by lazybox is redundant and racy. This holds whether the user
+//!   or lazybox armed it. Standing down is only safe because a native arm
+//!   lazybox owns is re-verified on every poll tick and revoked the
+//!   moment GitHub's gate stops covering lazybox's
+//!   (`polling::auto_merge::revoke_native_if_unsafe`); the rest is
+//!   covered by the armed PR riding the 15-second hot poll tier.
 //! - **auto-fix per-session [`PolicyArm`]** resolves as
 //!   [`auto_fix_permitted`] documents: an explicit `Disarm` beats
 //!   everything, an explicit `Arm` overrides a label opt-out, and
@@ -256,7 +268,9 @@ pub fn merge_block_reason(pr: &Task) -> Option<&'static str> {
 /// 5. GitHub's **native** auto-merge is not already enabled. Precedence
 ///    (issue #363): native auto-merge wins — GitHub will land the PR
 ///    itself once it's ready, so firing lazybox's own merge on top is
-///    redundant and races the server-side merge.
+///    redundant and races the server-side merge. Since #1596 lazybox may
+///    be the one that armed it; the stand-down is the same, only the
+///    phrasing differs.
 ///
 /// Nothing here that `g m` wouldn't also merge — this is a subset.
 pub fn auto_merge_block_reason(
@@ -269,9 +283,16 @@ pub fn auto_merge_block_reason(
     let Some(pr) = workspace.pr.as_ref() else {
         return Some("the workspace has no PR");
     };
-    // Native auto-merge takes precedence — let GitHub land it.
+    // Native auto-merge takes precedence — let GitHub land it. When
+    // *lazybox* armed it (#1596) that is the same arm continuing on the
+    // durable side, so the phrase says so rather than reading as a
+    // foreign policy blocking the user's own.
     if pr.auto_merge_enabled {
-        return Some("GitHub's native auto-merge is already enabled");
+        return Some(if workspace.native_auto_merge_by_lazybox {
+            "GitHub's native auto-merge — armed by lazybox — will land it"
+        } else {
+            "GitHub's native auto-merge is already enabled"
+        });
     }
     if author_gate_blocks(pr, policy) {
         return Some(NON_AUTHOR_BLOCK);
@@ -880,6 +901,49 @@ mod merge_gate_tests {
         assert!(
             !should_auto_merge(&ws, &own()),
             "native auto-merge takes precedence over lazybox merge-on-green"
+        );
+    }
+
+    /// #1596: lazybox may itself be what armed GitHub's native
+    /// auto-merge. The stand-down is unchanged (GitHub lands it), but the
+    /// phrase must not read as a foreign policy blocking the user's own
+    /// arm.
+    #[test]
+    fn native_stand_down_names_lazybox_when_lazybox_armed_it() {
+        let mut ws = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+        ws.auto_merge_on_green = true;
+        ws.pr.as_mut().unwrap().auto_merge_enabled = true;
+
+        let foreign = auto_merge_block_reason(&ws, &own()).expect("native stands lazybox down");
+        assert_eq!(foreign, "GitHub's native auto-merge is already enabled");
+
+        ws.native_auto_merge_by_lazybox = true;
+        let ours = auto_merge_block_reason(&ws, &own()).expect("still stands down");
+        assert_eq!(
+            ours, "GitHub's native auto-merge — armed by lazybox — will land it",
+            "an arm lazybox set must not read as someone else's block"
+        );
+        assert!(!should_auto_merge(&ws, &own()), "precedence is unchanged");
+    }
+
+    /// Provenance is meaningless without a PR to disable auto-merge on,
+    /// so a transfer carries it only where the destination has one —
+    /// the same guard `auto_merge_on_green` rides.
+    #[test]
+    fn native_provenance_transfers_only_onto_a_pr() {
+        let mut source = pr("o/r#1", CiStatus::Success, ReviewStatus::Approved);
+        source.auto_merge_on_green = true;
+        source.native_auto_merge_by_lazybox = true;
+
+        let mut pr_target = pr("o/r#2", CiStatus::Success, ReviewStatus::Approved);
+        pr_target.absorb_user_state_from(&source);
+        assert!(pr_target.native_auto_merge_by_lazybox, "carried onto a PR");
+
+        let mut issue_target = issue("o/r#3");
+        issue_target.absorb_user_state_from(&source);
+        assert!(
+            !issue_target.native_auto_merge_by_lazybox,
+            "a PR-less row has no auto-merge to own"
         );
     }
 

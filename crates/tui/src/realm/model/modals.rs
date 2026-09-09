@@ -93,26 +93,39 @@ pub(crate) fn build_policy_rows(
             //    pill can't (#794): lazybox merges it, but only while
             //    lazybox is running.
             let on = ws.auto_merge_on_green;
-            let detail = if pr.auto_merge_enabled {
-                "  (lazybox · GitHub auto-merge takes over)"
-            } else {
-                "  (lazybox · merges only while lazybox runs)"
+            // "takes over" is right for an auto-merge someone set on
+            // github.com, and wrong for one this very arm turned on
+            // (#1596) — that reads as if the user's own arm had been
+            // overruled by a foreign policy.
+            let detail = match (pr.auto_merge_enabled, ws.native_auto_merge_by_lazybox) {
+                (true, true) => "  (lazybox + GitHub · armed here, lands either way)",
+                (true, false) => "  (lazybox · GitHub auto-merge takes over)",
+                (false, _) => "  (lazybox · merges only while lazybox runs)",
             };
             labels.push(format!("{} merge on green{detail}", glyph(on)));
             toggles.push(PolicyToggle::MergeOnGreen);
 
             // 2. GitHub-native auto-merge — read-only status. Named as the
             //    durable counterpart (#794): GitHub lands the PR server-side,
-            //    so it works even with lazybox closed.
+            //    so it works even with lazybox closed. Since #1596 arming
+            //    merge-on-green may be what turned it on, so the row says
+            //    who owns it: an auto-merge lazybox armed is cleared by
+            //    disarming above, one set on github.com is not.
+            let ours = ws.native_auto_merge_by_lazybox && pr.auto_merge_enabled;
+            let source = if ours { "armed by g g" } else { "GitHub" };
             labels.push(format!(
-                "{} GitHub auto-merge  (GitHub · merges even when lazybox is closed)",
+                "{} GitHub auto-merge  ({source} · merges even when lazybox is closed)",
                 glyph(pr.auto_merge_enabled)
             ));
-            toggles.push(PolicyToggle::Info(
+            toggles.push(PolicyToggle::Info(if ours {
+                "lazybox armed GitHub-native auto-merge alongside merge on green — \
+                 disarming merge on green turns it back off"
+                    .into()
+            } else {
                 "GitHub-native auto-merge is set on github.com, not in lazybox — it merges \
                  server-side even while lazybox is closed"
-                    .into(),
-            ));
+                    .to_string()
+            }));
 
             // 3 + 4. per-session auto-fix arms.
             for kind in [
@@ -4744,6 +4757,47 @@ mod tests {
             "GitHub auto-merge row must name its offline durability: {:?}",
             rows[1]
         );
+    }
+
+    /// #1596: `g g` can be what turned GitHub's auto-merge on, and the two
+    /// provenances behave differently on disarm — one is cleared, the other
+    /// is left alone. The row has to say which it is.
+    #[test]
+    fn native_row_names_who_armed_it() {
+        let mut ws = pr_workspace(&[], lazybox_core::PolicyArm::Default);
+        ws.pr.as_mut().unwrap().auto_merge_enabled = true;
+
+        let (foreign, _) = build_policy_rows(&ws, true, &[], None);
+        assert!(
+            foreign[1].contains("(GitHub ·"),
+            "an auto-merge set on github.com reads as GitHub's: {:?}",
+            foreign[1]
+        );
+
+        ws.native_auto_merge_by_lazybox = true;
+        let (ours, toggles) = build_policy_rows(&ws, true, &[], None);
+        assert!(
+            ours[1].contains("armed by g g"),
+            "an auto-merge lazybox armed must say so: {:?}",
+            ours[1]
+        );
+        assert!(
+            !ours[0].contains("takes over"),
+            "an arm cannot be 'taken over' by the auto-merge it set: {:?}",
+            ours[0]
+        );
+        assert!(
+            foreign[0].contains("takes over"),
+            "a github.com-set auto-merge really does take over: {:?}",
+            foreign[0]
+        );
+        match &toggles[1] {
+            PolicyToggle::Info(detail) => assert!(
+                detail.contains("disarming merge on green turns it back off"),
+                "the detail must name what disarming does: {detail}"
+            ),
+            other => panic!("native row stays read-only, got {other:?}"),
+        }
     }
 
     /// The epic section only appears for a workspace that belongs to one —

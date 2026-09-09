@@ -315,7 +315,12 @@ pub enum CleanupPrompt {
 /// - 11: `Workspace::role` (orchestration role — Planner/Coordinator/
 ///   Worker/Reviewer/Integrator). Optional with `#[serde(default)]`, so
 ///   older records read back cleanly as unroled.
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 11;
+/// - 12: `Workspace::native_auto_merge_by_lazybox` (provenance for
+///   GitHub-native auto-merge, #1596). Optional with
+///   `#[serde(default)]`, so older records read back as "lazybox didn't
+///   set it" — the conservative reading, which leaves a
+///   human-configured auto-merge untouched on disarm.
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 12;
 
 /// How long a workspace counts as "recently woken" after an
 /// event-conditional snooze fires (#scale): within this window the row
@@ -605,6 +610,16 @@ pub struct Workspace {
     /// lazybox's arm that only acts while the lazybox daemon runs.
     #[serde(default)]
     pub auto_merge_on_green: bool,
+    /// Provenance for GitHub's **native** auto-merge on this
+    /// workspace's PR: `true` when *lazybox* turned it on (as the
+    /// durable half of the `g g` arm, issue #1596), `false` when it is
+    /// off or was set by a human on github.com. Disarming `g g` only
+    /// calls `disablePullRequestAutoMerge` while this is set, so an
+    /// auto-merge the user enabled in the GitHub UI is left alone.
+    /// Distinct from `Task::auto_merge_enabled`, which is GitHub's
+    /// observed state regardless of who set it.
+    #[serde(default)]
+    pub native_auto_merge_by_lazybox: bool,
     /// Per-workspace "track main" arm (issue #535). When `true`, the
     /// daemon's background sweep keeps this workspace's worktree
     /// fast-forwarded to `origin/<base_branch>` whenever the tree is
@@ -722,6 +737,7 @@ impl Workspace {
             snooze_wake: None,
             woke_at: None,
             auto_merge_on_green: false,
+            native_auto_merge_by_lazybox: false,
             track_main: false,
             base_branch: None,
             track_main_behind: false,
@@ -891,7 +907,18 @@ impl Workspace {
         let was_empty = self.activity.is_empty();
         match classify(&task) {
             TaskSlot::Pr => {
-                let merged = match self.pr.take() {
+                let previous = self.pr.take();
+                // `native_auto_merge_by_lazybox` describes ONE PR's
+                // auto-merge (#1596). A different PR landing in this slot
+                // — an issue workspace's PR opening, a rebadge — inherits
+                // nothing: carrying it would let a later `g g` disarm call
+                // `disablePullRequestAutoMerge` on an auto-merge a human
+                // set on github.com, which is the exact thing the flag
+                // exists to prevent.
+                if previous.as_ref().is_some_and(|old| old.id != task.id) {
+                    self.native_auto_merge_by_lazybox = false;
+                }
+                let merged = match previous {
                     Some(existing) => preserve_lazy_pr_fields(task.clone(), &existing),
                     None => task.clone(),
                 };
@@ -1232,6 +1259,7 @@ impl Workspace {
             snooze_wake,
             woke_at: _,
             auto_merge_on_green,
+            native_auto_merge_by_lazybox,
             track_main,
             base_branch,
             track_main_behind,
@@ -1266,9 +1294,12 @@ impl Workspace {
         // merge-on-green is a consequential daemon arm; carry it only
         // where there's actually a PR to merge. Mirrors the UI, which
         // refuses to arm it on a PR-less workspace, so a stray arm can't
-        // ride a transfer onto something it could never fire on.
+        // ride a transfer onto something it could never fire on. Its
+        // GitHub-native provenance rides the same guard — it only means
+        // anything where there is a PR whose auto-merge we could disable.
         if self.pr.is_some() {
             self.auto_merge_on_green |= *auto_merge_on_green;
+            self.native_auto_merge_by_lazybox |= *native_auto_merge_by_lazybox;
         }
         // Track-main applies only to a non-PR, non-linked GitHub worktree
         // (`supports_track_main`). Carried onto anything else — e.g. the
@@ -3590,6 +3621,31 @@ mod tests {
         ws.attach_task(issue("linear", "ENG-7"));
         let ids = ws.linked_task_ids();
         assert_eq!(ids.len(), 3);
+    }
+
+    /// #1596: `native_auto_merge_by_lazybox` describes ONE PR's
+    /// auto-merge. A DIFFERENT PR landing in the slot must not inherit
+    /// it — a stale `true` would let a later `g g` disarm fire
+    /// `disablePullRequestAutoMerge` on an auto-merge a human set on
+    /// github.com, the exact thing the flag exists to prevent. An update
+    /// to the SAME PR keeps it, or every poll would forget the claim.
+    #[test]
+    fn native_auto_merge_provenance_does_not_survive_a_different_pr() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("ws-1"), "main", now());
+        ws.attach_task(pr("o/r#1"));
+        ws.native_auto_merge_by_lazybox = true;
+
+        ws.attach_task(pr("o/r#1"));
+        assert!(
+            ws.native_auto_merge_by_lazybox,
+            "re-polling the same PR must not drop the claim"
+        );
+
+        ws.attach_task(pr("o/r#2"));
+        assert!(
+            !ws.native_auto_merge_by_lazybox,
+            "a new PR in the slot is not one lazybox armed"
+        );
     }
 
     #[test]

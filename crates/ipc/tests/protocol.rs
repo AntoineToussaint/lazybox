@@ -686,6 +686,11 @@ fn all_events() -> Vec<Event> {
             reason: "required review".into(),
             conflict: false,
         },
+        Event::AutoMergeNotice {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            message: "armed in lazybox only".into(),
+            level: lazybox_ipc::AutoMergeNoticeLevel::Warn,
+        },
         Event::IssueClosed {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
             issue_label: "o/r#1".into(),
@@ -1499,6 +1504,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::WorkspaceMerged { .. } => "WorkspaceMerged",
         Event::PrMerged { .. } => "PrMerged",
         Event::PrMergeFailed { .. } => "PrMergeFailed",
+        Event::AutoMergeNotice { .. } => "AutoMergeNotice",
         Event::IssueClosed { .. } => "IssueClosed",
         Event::IssueCloseFailed { .. } => "IssueCloseFailed",
         Event::PrClosed { .. } => "PrClosed",
@@ -1603,7 +1609,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        102,
+        103,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

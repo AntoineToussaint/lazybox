@@ -11,8 +11,8 @@ pub mod oauth;
 pub mod rate_budget;
 
 pub use client::{
-    BackgroundSweepForecast, GhClient, HotFetch, RepoSweepOutcome, RepoSweepSpec,
-    SelectedFetchOutcome, credential_fingerprint,
+    BackgroundSweepForecast, BranchMergeGate, GateShortfall, GhClient, GhError, HotFetch,
+    RepoSweepOutcome, RepoSweepSpec, SelectedFetchOutcome, credential_fingerprint,
 };
 pub use graphql::{
     PrDetails, repo_sweep_issue_query, repo_sweep_pr_query, roster_member_qualifier,

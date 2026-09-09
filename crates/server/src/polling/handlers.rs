@@ -2103,6 +2103,7 @@ pub async fn apply_pr_details(
                 config,
                 workspace_key,
                 super::auto_merge::signal_for(&ws),
+                super::auto_merge::native_arm_for(&ws),
                 true,
             );
         }

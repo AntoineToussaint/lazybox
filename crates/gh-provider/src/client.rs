@@ -979,6 +979,186 @@ fn mutation_provider_error(err: GhError) -> lazybox_core::ProviderError {
     }
 }
 
+/// One active branch rule as GitHub's REST rules API reports it
+/// (`GET /repos/{owner}/{repo}/rules/branches/{branch}`).
+#[derive(serde::Deserialize)]
+struct BranchRule {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    parameters: Option<serde_json::Value>,
+}
+
+impl BranchRule {
+    /// The check contexts a `required_status_checks` rule names. Empty for
+    /// every other rule type, and empty when a ruleset enables the control
+    /// without listing a check (GitHub reports that as an empty array) —
+    /// which gates nothing.
+    fn required_contexts(&self) -> Vec<String> {
+        if self.kind != "required_status_checks" {
+            return Vec::new();
+        }
+        self.parameters
+            .as_ref()
+            .and_then(|p| p.get("required_status_checks"))
+            .and_then(serde_json::Value::as_array)
+            .map(|checks| {
+                checks
+                    .iter()
+                    .filter_map(|check| {
+                        check
+                            .get("context")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// How many approving reviews a `pull_request` rule requires. `0` for
+    /// every other rule type, and for a `pull_request` rule that requires
+    /// none — which is the case that lets a CHANGES_REQUESTED review pass.
+    fn required_reviews(&self) -> u64 {
+        if self.kind != "pull_request" {
+            return 0;
+        }
+        self.parameters
+            .as_ref()
+            .and_then(|p| p.get("required_approving_review_count"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    }
+}
+
+/// What a base branch's rules make GitHub wait for before it will merge —
+/// the *only* thing GitHub's server-side auto-merge honors (issue #1596).
+///
+/// lazybox's own merge gate ([`lazybox_core::merge_block_reason`]) waits on
+/// the WHOLE `statusCheckRollup` and refuses any CHANGES_REQUESTED review.
+/// GitHub's waits on the required set alone. So handing GitHub a PR is only
+/// safe where this gate is proven to *cover* lazybox's — which is what
+/// [`BranchMergeGate::shortfall_for`] decides, per PR.
+///
+/// Constructed fail-closed: an unreadable rules route yields
+/// [`BranchMergeGate::unknown`], which covers nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BranchMergeGate {
+    /// Check contexts GitHub will wait for. Order is GitHub's.
+    pub required_contexts: Vec<String>,
+    /// Approving reviews GitHub will wait for.
+    pub required_reviews: u64,
+}
+
+impl BranchMergeGate {
+    /// The fail-closed value: GitHub is known to wait for nothing, so it
+    /// covers no PR. Returned whenever the rules route can't be read.
+    pub fn unknown() -> Self {
+        Self::default()
+    }
+
+    /// Why GitHub's gate does **not** cover lazybox's for `pr` — or `None`
+    /// when handing GitHub this PR can only ever produce a merge lazybox
+    /// would also have made.
+    ///
+    /// Three ways it falls short, each with a merge lazybox refuses and
+    /// GitHub would make:
+    ///
+    /// 1. **No required checks at all.** GitHub merges without waiting for
+    ///    CI; lazybox waits for the whole rollup.
+    /// 2. **A check the PR runs isn't required.** The classic subset trap:
+    ///    base requires `build`, the PR also runs `test`, `test` fails —
+    ///    GitHub sees every *required* check green and merges red.
+    ///    Comparison is against [`lazybox_core::Task::checks`], and it is
+    ///    deliberately *unknowable-is-shortfall*: an empty list (the row
+    ///    came from the inbox scan, which omits contexts) or a full page
+    ///    (`ROLLUP_CONTEXT_PAGE` — the list may be truncated) both decline,
+    ///    because a subset test against an incomplete set proves nothing.
+    /// 3. **No required review.** lazybox refuses a PR with changes
+    ///    requested unconditionally; GitHub only honors that where the base
+    ///    requires approving reviews.
+    pub fn shortfall_for(&self, pr: &lazybox_core::Task) -> Option<GateShortfall> {
+        if self.required_contexts.is_empty() {
+            return Some(GateShortfall::branch(
+                "has no required status checks, so GitHub would merge without waiting for CI",
+            ));
+        }
+        if pr.checks.is_empty() {
+            return Some(GateShortfall::per_pr(
+                "gates on required checks, but this PR's check list isn't known yet, so they \
+                 can't be proven to cover it"
+                    .to_string(),
+            ));
+        }
+        if pr.checks.len() >= crate::graphql::ROLLUP_CONTEXT_PAGE {
+            return Some(GateShortfall::per_pr(format!(
+                "gates on required checks, but this PR runs at least {} of them — more than \
+                 lazybox pages in — so they can't be proven to cover it",
+                crate::graphql::ROLLUP_CONTEXT_PAGE
+            )));
+        }
+        let mut uncovered: Vec<&str> = pr
+            .checks
+            .iter()
+            .map(|check| check.name.as_str())
+            .filter(|name| !self.required_contexts.iter().any(|req| req == name))
+            .collect();
+        uncovered.sort_unstable();
+        uncovered.dedup();
+        if let Some(first) = uncovered.first() {
+            return Some(GateShortfall::per_pr(format!(
+                "doesn't require {} of this PR's checks (e.g. `{first}`), so GitHub would \
+                 merge without waiting for them",
+                uncovered.len()
+            )));
+        }
+        if self.required_reviews == 0 {
+            return Some(GateShortfall::branch(
+                "requires no approving review, so GitHub would merge over a changes-requested \
+                 review lazybox refuses",
+            ));
+        }
+        None
+    }
+}
+
+/// Why [`BranchMergeGate`] does not cover lazybox's own merge gate, and
+/// whether that answer depends on the PR.
+///
+/// `per_pr` drives notice de-duplication: a branch-level shortfall (no
+/// required checks at all, no required review) is identical for every PR
+/// on that base, so arming a multi-select announces it once. A per-PR
+/// shortfall (a check THIS PR runs that the base doesn't require) differs
+/// row by row, so suppressing it would leave the user believing rows
+/// 2..N armed durably when they didn't.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateShortfall {
+    pub message: String,
+    pub per_pr: bool,
+}
+
+impl GateShortfall {
+    fn branch(message: &str) -> Self {
+        Self {
+            message: message.to_string(),
+            per_pr: false,
+        }
+    }
+
+    fn per_pr(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            per_pr: true,
+        }
+    }
+}
+
+impl std::fmt::Display for GateShortfall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 /// Map a GitHub branch-rule `type` (repository rulesets + classic
 /// protection, as reported by `GET /repos/{o}/{r}/rules/branches/{b}`)
 /// to a short human name for the merge-blocked notice (issue #998).
@@ -1128,6 +1308,13 @@ pub enum HotFetch {
     Missing,
 }
 
+/// How long a base branch's [`BranchMergeGate`] stays cached. Rulesets
+/// change on a human timescale; the daemon re-reads the gate on every
+/// poll tick of a natively-armed PR (#1596), so this bounds that to one
+/// REST call per repo-branch per five minutes without letting a loosened
+/// ruleset go unnoticed for long.
+const BRANCH_GATE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// GraphQL `nodes(ids:)` hard-errors past 100 ids — both hot tiers
 /// chunk at this bound (#1218).
 const HOT_BATCH_MAX_IDS: usize = 100;
@@ -1222,6 +1409,23 @@ pub struct GhClient {
     /// mutation is rejected.
     repo_merge_methods:
         std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, String>>>,
+    /// `owner/name@branch` → the branch's [`BranchMergeGate`] and when it
+    /// was read. Shared across clones, like
+    /// [`repo_merge_methods`](Self::repo_merge_methods) and for the same
+    /// reason: arming merge-on-green across a multi-select would
+    /// otherwise spend one rules request per PR to re-learn a fact that
+    /// belongs to the *branch*.
+    ///
+    /// Entries expire after `BRANCH_GATE_TTL` rather than living for the
+    /// run. The gate is now re-read on every poll tick of a natively-armed
+    /// PR (the revoke sweep, #1596), and a cache that never expires would
+    /// keep that sweep blind to a ruleset the user loosened — the one
+    /// change it exists to catch.
+    repo_branch_gates: std::sync::Arc<
+        parking_lot::Mutex<
+            std::collections::HashMap<String, (std::time::Instant, BranchMergeGate)>,
+        >,
+    >,
     /// Consecutive hot batches this server answered with a GraphQL
     /// error. Some GitHub Enterprise Server builds reject the batched
     /// `nodes(ids:)` hot queries outright — GHES 3.18 fails any PR node
@@ -1383,6 +1587,9 @@ impl GhClient {
             repo_merge_methods: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            repo_branch_gates: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             issue_deps_cache: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
@@ -1423,6 +1630,9 @@ impl GhClient {
                 std::collections::HashMap::new(),
             )),
             repo_merge_methods: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            repo_branch_gates: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
             hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -5859,19 +6069,7 @@ impl GhClient {
         pull_request_node_id: &str,
         expected_head_oid: Option<&str>,
     ) -> Result<(), GhError> {
-        let cached = repo.and_then(|repo| self.repo_merge_methods.lock().get(repo).cloned());
-        let (merge_method, from_cache) = match cached {
-            Some(method) => (method, true),
-            None => {
-                let method = self.pr_merge_method(pull_request_node_id).await?;
-                if let Some(repo) = repo {
-                    self.repo_merge_methods
-                        .lock()
-                        .insert(repo.to_string(), method.clone());
-                }
-                (method, false)
-            }
-        };
+        let (merge_method, from_cache) = self.merge_method_for(repo, pull_request_node_id).await?;
         match self
             .merge_pr_with_method(pull_request_node_id, &merge_method, expected_head_oid)
             .await
@@ -5904,6 +6102,104 @@ impl GhClient {
     /// The cached merge method for `repo`, if a merge has learned it.
     pub fn cached_merge_method(&self, repo: &str) -> Option<String> {
         self.repo_merge_methods.lock().get(repo).cloned()
+    }
+
+    /// The merge method to use for a PR, served from (and learned into)
+    /// the per-repo cache. Returns `(method, from_cache)` so a caller
+    /// that can retry — [`merge_pr_in_repo`](Self::merge_pr_in_repo) —
+    /// knows whether a rejection might be a stale cached method.
+    async fn merge_method_for(
+        &self,
+        repo: Option<&str>,
+        pull_request_node_id: &str,
+    ) -> Result<(String, bool), GhError> {
+        if let Some(method) =
+            repo.and_then(|repo| self.repo_merge_methods.lock().get(repo).cloned())
+        {
+            return Ok((method, true));
+        }
+        let method = self.pr_merge_method(pull_request_node_id).await?;
+        if let Some(repo) = repo {
+            self.repo_merge_methods
+                .lock()
+                .insert(repo.to_string(), method.clone());
+        }
+        Ok((method, false))
+    }
+
+    /// Turn on GitHub's server-side auto-merge for a PR (issue #1596) —
+    /// the durable half of lazybox's `g g` arm: GitHub lands the PR once
+    /// its **required** checks and reviews are satisfied, with lazybox
+    /// closed. Uses the repo's own default merge method, like
+    /// [`merge_pr_in_repo`](Self::merge_pr_in_repo).
+    ///
+    /// GitHub refuses this on a PR that is already mergeable ("Pull
+    /// request is in clean status") — with nothing left to wait for
+    /// there is no "when ready" to schedule. That surfaces as an
+    /// ordinary error; the caller decides how loudly to report it.
+    pub async fn enable_auto_merge(
+        &self,
+        repo: Option<&str>,
+        pull_request_node_id: &str,
+    ) -> Result<(), GhError> {
+        let (merge_method, _) = self.merge_method_for(repo, pull_request_node_id).await?;
+        self.acquire_or_block("enablePullRequestAutoMerge mutation")?;
+        let body = graphql::enable_auto_merge_body(pull_request_node_id, &merge_method);
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("enablePullRequestAutoMerge mutation", &body)
+            .await?;
+        if let Some(errors) = response.errors {
+            // Idempotence guard, exactly as `merge_pr_with_method` needs
+            // one: `post_graphql_with_retry` re-sends the mutation after
+            // a client-side timeout even when the first attempt LANDED.
+            // Reporting that as failure is worse here than for a merge —
+            // the caller would skip recording provenance, leaving GitHub
+            // auto-merge ON with lazybox believing it never armed it, so
+            // disarming could never turn it off again.
+            if gql_errors_all_match(&errors, AUTO_MERGE_ALREADY_ENABLED_MARKERS) {
+                tracing::info!(
+                    "enablePullRequestAutoMerge reported auto-merge already enabled — \
+                     treating as success (likely a timeout-retry re-send)"
+                );
+                return Ok(());
+            }
+            return Err(mutation_error_response(
+                "enablePullRequestAutoMerge",
+                &errors,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Turn GitHub's server-side auto-merge back off. Callers fire this
+    /// only for an auto-merge lazybox itself enabled, so a setting made
+    /// on github.com is never cleared underneath the user.
+    pub async fn disable_auto_merge(&self, pull_request_node_id: &str) -> Result<(), GhError> {
+        self.acquire_or_block("disablePullRequestAutoMerge mutation")?;
+        let body = graphql::disable_auto_merge_body(pull_request_node_id);
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("disablePullRequestAutoMerge mutation", &body)
+            .await?;
+        if let Some(errors) = response.errors {
+            // "There is nothing enabled to turn off" IS the state this
+            // call wanted. GitHub disables auto-merge on its own (a draft
+            // conversion, the merge landing), and the timeout-retry
+            // re-send hits the same wall, so without this a routine
+            // disarm reports failure and tells the user to go fix
+            // something on github.com that is already fine.
+            if gql_errors_all_match(&errors, AUTO_MERGE_ALREADY_OFF_MARKERS) {
+                tracing::info!(
+                    "disablePullRequestAutoMerge reported auto-merge not enabled — \
+                     treating as success (already off, or a timeout-retry re-send)"
+                );
+                return Ok(());
+            }
+            return Err(mutation_error_response(
+                "disablePullRequestAutoMerge",
+                &errors,
+            ));
+        }
+        Ok(())
     }
 
     async fn merge_pr_with_method(
@@ -6013,23 +6309,8 @@ impl GhClient {
     /// reports the rules the token can see. Best-effort: any error
     /// yields an empty list (the caller then keeps the generic notice).
     async fn branch_rule_names(&self, owner: &str, repo: &str, branch: &str) -> Vec<String> {
-        #[derive(serde::Deserialize)]
-        struct BranchRule {
-            #[serde(rename = "type")]
-            kind: String,
-            #[serde(default)]
-            parameters: Option<serde_json::Value>,
-        }
-        let route = format!("/repos/{owner}/{repo}/rules/branches/{branch}");
-        let rules: Vec<BranchRule> = match self.inner.get(&route, None::<&()>).await {
-            Ok(rules) => rules,
-            Err(e) => {
-                tracing::debug!("branch-rules lookup for {owner}/{repo}@{branch} failed: {e}");
-                return Vec::new();
-            }
-        };
         let mut names = Vec::new();
-        for rule in &rules {
+        for rule in self.branch_rules(owner, repo, branch).await {
             if let Some(name) = humanize_rule(&rule.kind, rule.parameters.as_ref())
                 && !names.contains(&name)
             {
@@ -6037,6 +6318,73 @@ impl GhClient {
             }
         }
         names
+    }
+
+    /// Raw active branch rules for `branch`, as GitHub's REST rules API
+    /// reports them for the current viewer (repository rulesets *and*
+    /// classic branch protection). Best-effort: any error yields an empty
+    /// list, so a caller degrades rather than fails.
+    async fn branch_rules(&self, owner: &str, repo: &str, branch: &str) -> Vec<BranchRule> {
+        let route = format!("/repos/{owner}/{repo}/rules/branches/{branch}");
+        match self.inner.get(&route, None::<&()>).await {
+            Ok(rules) => rules,
+            Err(e) => {
+                tracing::debug!("branch-rules lookup for {owner}/{repo}@{branch} failed: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// What `branch`'s rules make GitHub wait for before merging — the
+    /// precondition for handing GitHub a PR to auto-merge (issue #1596).
+    /// Pair it with [`BranchMergeGate::shortfall_for`], which decides
+    /// per PR whether that gate actually covers lazybox's.
+    ///
+    /// Fails **closed**: an unreadable rules route (no permission, an
+    /// older host, a network blip) yields [`BranchMergeGate::unknown`],
+    /// so an unknown gate is never mistaken for a present one.
+    ///
+    /// Returns `(gate, from_cache)`. The gate is a property of the
+    /// *branch*, so it is cached per `owner/name@branch` — arming across
+    /// a multi-select then costs one rules request, not one per PR — and
+    /// `from_cache` lets the caller announce a shortfall once per base
+    /// branch instead of once per PR. Entries expire after
+    /// `BRANCH_GATE_TTL`: the gate is re-read on every poll tick of a
+    /// natively-armed PR (the revoke sweep, #1596), and a cache that never
+    /// expired would keep that sweep blind to a loosened ruleset.
+    pub async fn branch_merge_gate(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> (BranchMergeGate, bool) {
+        let cache_key = format!("{owner}/{repo}@{branch}");
+        if let Some((fetched_at, gate)) = self.repo_branch_gates.lock().get(&cache_key)
+            && fetched_at.elapsed() < BRANCH_GATE_TTL
+        {
+            return (gate.clone(), true);
+        }
+        let rules = self.branch_rules(owner, repo, branch).await;
+        let gate = BranchMergeGate {
+            required_contexts: rules
+                .iter()
+                .flat_map(BranchRule::required_contexts)
+                .collect(),
+            required_reviews: rules
+                .iter()
+                .map(BranchRule::required_reviews)
+                .max()
+                .unwrap_or(0),
+        };
+        // Never cache the fail-closed value: it is indistinguishable from a
+        // transient network failure, and caching it would keep declining for
+        // the whole TTL after the blip cleared.
+        if gate != BranchMergeGate::unknown() {
+            self.repo_branch_gates
+                .lock()
+                .insert(cache_key, (std::time::Instant::now(), gate.clone()));
+        }
+        (gate, false)
     }
 
     /// Native `blocked_by` edges for one issue, from GitHub's issue
@@ -6973,6 +7321,19 @@ pub(crate) fn should_query_issues(
 /// current api.github.com; older/GHES variants say "already merged".
 /// Matched case-insensitively as substrings.
 const ALREADY_MERGED_MARKERS: &[&str] = &["already merged", "merged state"];
+
+/// GitHub's rejections that mean "auto-merge is already on" — the
+/// end-state `enablePullRequestAutoMerge` wanted. Classified as success
+/// so a timeout-retry re-send of a mutation that landed cannot cost the
+/// caller its provenance record.
+const AUTO_MERGE_ALREADY_ENABLED_MARKERS: &[&str] = &["already enabled", "auto merge is enabled"];
+
+/// GitHub's rejections that mean "there is no auto-merge to turn off" —
+/// the end-state `disablePullRequestAutoMerge` wanted. Covers a
+/// timeout-retry re-send, an auto-merge GitHub disabled itself, and a PR
+/// that has since merged or closed.
+const AUTO_MERGE_ALREADY_OFF_MARKERS: &[&str] =
+    &["not enabled", "already merged", "merged state", "is closed"];
 
 /// GraphQL error messages that mean an `updatePullRequestBranch` has
 /// nothing left to do — the head already contains the base. GitHub:
@@ -8509,6 +8870,9 @@ mod tests {
             repo_merge_methods: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            repo_branch_gates: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             issue_deps_cache: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
@@ -9578,6 +9942,313 @@ mod tests {
             humanize_rule("code_scanning", None),
             Some("code scanning".to_string())
         );
+    }
+
+    fn pr_running(checks: &[&str]) -> Task {
+        let mut pr = task_without_node_id(TaskKind::Pr);
+        pr.checks = checks
+            .iter()
+            .map(|name| lazybox_core::CheckRun {
+                name: (*name).to_string(),
+                status: CiStatus::Success,
+                url: None,
+            })
+            .collect();
+        pr
+    }
+
+    fn gate(contexts: &[&str], reviews: u64) -> BranchMergeGate {
+        BranchMergeGate {
+            required_contexts: contexts.iter().map(|c| (*c).to_string()).collect(),
+            required_reviews: reviews,
+        }
+    }
+
+    /// #1596, the subset trap. GitHub's auto-merge waits ONLY on required
+    /// checks; lazybox waits on the whole `statusCheckRollup`. A base that
+    /// requires `build` while the PR also runs `test` is strictly WEAKER —
+    /// a red `test` would land. "At least one required check exists" is
+    /// therefore not a safe precondition, and must report a shortfall.
+    #[test]
+    fn a_check_the_pr_runs_but_the_base_does_not_require_is_a_shortfall() {
+        let pr = pr_running(&["build", "test"]);
+        let shortfall = gate(&["build"], 1)
+            .shortfall_for(&pr)
+            .expect("an unrequired check the PR runs must not read as covered");
+        assert!(
+            shortfall.message.contains("doesn't require") && shortfall.message.contains("test"),
+            "the uncovered check must be named: {shortfall}"
+        );
+        assert_eq!(
+            gate(&["build", "test"], 1).shortfall_for(&pr),
+            None,
+            "a required set covering every check the PR runs is safe"
+        );
+    }
+
+    /// An unprotected base (GitHub answers `[]`, as this repo's own `main`
+    /// does) covers nothing — the whole point of the probe.
+    #[test]
+    fn no_required_checks_is_a_shortfall() {
+        let shortfall = gate(&[], 1)
+            .shortfall_for(&pr_running(&["build"]))
+            .expect("an ungated base must not read as covered");
+        assert!(
+            shortfall.message.contains("without waiting for CI"),
+            "{shortfall}"
+        );
+        assert!(
+            !shortfall.per_pr,
+            "a base with no required checks is branch-level"
+        );
+    }
+
+    /// A check set we cannot fully enumerate proves nothing, so both
+    /// "unknown" shapes decline: an inbox-scan row (which omits
+    /// `statusCheckRollup.contexts` entirely) and a row whose context list
+    /// filled its page and may be truncated.
+    #[test]
+    fn an_unknowable_check_set_is_a_shortfall() {
+        let unknown = gate(&["build"], 1)
+            .shortfall_for(&pr_running(&[]))
+            .expect("an empty check list is unknown, not covered");
+        assert!(unknown.message.contains("isn't known yet"), "{unknown}");
+        assert!(
+            unknown.per_pr,
+            "an unknowable check set is a property of THIS PR"
+        );
+
+        let names: Vec<String> = (0..crate::graphql::ROLLUP_CONTEXT_PAGE)
+            .map(|n| format!("check{n}"))
+            .collect();
+        let contexts: Vec<&str> = names.iter().map(String::as_str).collect();
+        let truncated = gate(&contexts, 1)
+            .shortfall_for(&pr_running(&contexts))
+            .expect("a full page may be truncated, so coverage is unproven");
+        assert!(
+            truncated.message.contains("more than"),
+            "a full context page is unproven, not covered: {truncated}"
+        );
+        assert!(truncated.per_pr);
+    }
+
+    /// lazybox refuses a PR with changes requested unconditionally; GitHub
+    /// only honors that where the base requires approving reviews. Without
+    /// one, GitHub's gate is weaker even with full check coverage.
+    #[test]
+    fn no_required_review_is_a_shortfall() {
+        let pr = pr_running(&["build"]);
+        let shortfall = gate(&["build"], 0)
+            .shortfall_for(&pr)
+            .expect("no required review means a changes-requested PR could land");
+        assert!(
+            shortfall.message.contains("changes-requested"),
+            "{shortfall}"
+        );
+        assert!(!shortfall.per_pr, "a missing review rule is branch-level");
+        assert_eq!(gate(&["build"], 1).shortfall_for(&pr), None);
+    }
+
+    /// The gate is read off GitHub's rules payload: required contexts from
+    /// the `required_status_checks` rule, the review count from
+    /// `pull_request`. An empty `required_status_checks` array (the control
+    /// enabled but naming nothing) contributes no context.
+    #[tokio::test(flavor = "current_thread")]
+    async fn branch_merge_gate_reads_contexts_and_reviews() {
+        const BODY: &str = r#"[
+            {"type":"required_status_checks",
+             "parameters":{"required_status_checks":[{"context":"build"},{"context":"test"}]}},
+            {"type":"pull_request","parameters":{"required_approving_review_count":2}}
+        ]"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        let (gate, from_cache) = client.branch_merge_gate("o", "r", "main").await;
+        assert_eq!(gate.required_contexts, vec!["build", "test"]);
+        assert_eq!(gate.required_reviews, 2);
+        assert!(!from_cache, "the first probe is a real request");
+    }
+
+    /// A `required_status_checks` rule that names nothing gates nothing,
+    /// so it must contribute no context — otherwise "the control is on"
+    /// would read as "the checks are covered".
+    #[tokio::test(flavor = "current_thread")]
+    async fn branch_merge_gate_ignores_a_rule_naming_no_check() {
+        const BODY: &str = r#"[{"type":"required_status_checks",
+            "parameters":{"required_status_checks":[]}}]"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        assert_eq!(
+            client.branch_merge_gate("o", "r", "main").await.0,
+            BranchMergeGate::unknown()
+        );
+    }
+
+    /// Fails **closed**: an unreadable rules route (no permission, an older
+    /// host) must not read as "gated" and let native auto-merge past — and
+    /// the fail-closed answer must NOT be cached, or one network blip would
+    /// keep declining for the whole TTL.
+    #[tokio::test(flavor = "current_thread")]
+    async fn branch_merge_gate_fails_closed_without_caching() {
+        let base_uri =
+            spawn_canned_response_server("404 Not Found", "application/json", r#"{}"#).await;
+        let client = make_client(&base_uri);
+        assert_eq!(
+            client.branch_merge_gate("o", "r", "main").await.0,
+            BranchMergeGate::unknown()
+        );
+        assert!(
+            client.repo_branch_gates.lock().is_empty(),
+            "a transient failure must not poison the cache for BRANCH_GATE_TTL"
+        );
+    }
+
+    /// The gate is a property of the *branch*, so arming N PRs onto the
+    /// same base must not spend N rules requests. The second lookup is
+    /// served from cache.
+    #[tokio::test(flavor = "current_thread")]
+    async fn base_branch_gate_is_cached_per_branch() {
+        const BODY: &str = r#"[{"type":"required_status_checks",
+            "parameters":{"required_status_checks":[{"context":"test"}]}}]"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        let gated = BranchMergeGate {
+            required_contexts: vec!["test".to_string()],
+            required_reviews: 0,
+        };
+        assert_eq!(
+            client.branch_merge_gate("o", "r", "main").await,
+            (gated.clone(), false)
+        );
+        assert_eq!(
+            client.branch_merge_gate("o", "r", "main").await,
+            (gated.clone(), true),
+            "the same base branch is answered from cache"
+        );
+        // A different branch is a different key and probes afresh.
+        assert_eq!(
+            client.branch_merge_gate("o", "r", "release").await,
+            (gated, false)
+        );
+    }
+
+    /// #1596 regression: `post_graphql_with_retry` re-sends a mutation
+    /// after a client-side timeout even when the first attempt landed.
+    /// Without an idempotence guard the retry's "already enabled" reads
+    /// as failure, the caller skips recording provenance, and GitHub
+    /// auto-merge is left ON with lazybox unable to ever turn it off.
+    #[tokio::test(flavor = "current_thread")]
+    async fn enable_auto_merge_treats_already_enabled_as_success() {
+        const BODY: &str = r#"{"errors":[{"message":"Pull request Auto merge is already enabled",
+            "path":["enablePullRequestAutoMerge"]}]}"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        client
+            .repo_merge_methods
+            .lock()
+            .insert("o/r".into(), "SQUASH".into());
+        client
+            .enable_auto_merge(Some("o/r"), "PR_kwDO")
+            .await
+            .expect("an already-enabled auto-merge IS the desired end state");
+    }
+
+    /// #1596 regression: GitHub disables auto-merge on its own (a draft
+    /// conversion, the merge landing), so a routine disarm hits "not
+    /// enabled". Reporting that as failure told the user to go turn off
+    /// something on github.com that was already off, and stranded the
+    /// provenance flag on `true` forever.
+    #[tokio::test(flavor = "current_thread")]
+    async fn disable_auto_merge_treats_already_off_as_success() {
+        for message in [
+            "Pull request Auto merge is not enabled for this pull request",
+            "Pull request is already merged",
+        ] {
+            let body: &'static str = Box::leak(
+                format!(
+                    r#"{{"errors":[{{"message":"{message}",
+                       "path":["disablePullRequestAutoMerge"]}}]}}"#
+                )
+                .into_boxed_str(),
+            );
+            let base_uri = spawn_canned_response_server("200 OK", "application/json", body).await;
+            let client = make_client(&base_uri);
+            client
+                .disable_auto_merge("PR_kwDO")
+                .await
+                .unwrap_or_else(|e| panic!("{message:?} means nothing to turn off, got {e}"));
+        }
+    }
+
+    /// The guards stay narrow: a genuine refusal must still be an error,
+    /// or a real failure would silently read as a successful arm.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_merge_guards_do_not_swallow_real_failures() {
+        const BODY: &str = r#"{"errors":[{"message":"Auto merge is not allowed for this repository",
+            "path":["enablePullRequestAutoMerge"]}]}"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        client
+            .repo_merge_methods
+            .lock()
+            .insert("o/r".into(), "SQUASH".into());
+        client
+            .enable_auto_merge(Some("o/r"), "PR_kwDO")
+            .await
+            .expect_err("a repo that forbids auto-merge is a real failure");
+    }
+
+    /// `enablePullRequestAutoMerge` success is mutation-shaped, like
+    /// `merge_pr` — it must parse cleanly rather than leak the raw body
+    /// as a false failure. The repo's merge method is passed in so no
+    /// method lookup round-trip is needed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn enable_auto_merge_success_reports_ok() {
+        const BODY: &str = r#"{"data":{"enablePullRequestAutoMerge":{"pullRequest":
+            {"id":"PR_kwDO","autoMergeRequest":{"enabledAt":"2026-09-09T10:00:00Z"}}}}}"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        client
+            .repo_merge_methods
+            .lock()
+            .insert("o/r".into(), "SQUASH".into());
+        client
+            .enable_auto_merge(Some("o/r"), "PR_kwDO")
+            .await
+            .expect("enable auto-merge success must not report a false failure");
+    }
+
+    /// GitHub refuses auto-merge on an already-mergeable PR. That must
+    /// surface as an error the caller can classify, not silent success.
+    #[tokio::test(flavor = "current_thread")]
+    async fn enable_auto_merge_reports_clean_status_rejection() {
+        const BODY: &str = r#"{"errors":[{"message":"Pull request is in clean status",
+            "path":["enablePullRequestAutoMerge"]}]}"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        client
+            .repo_merge_methods
+            .lock()
+            .insert("o/r".into(), "SQUASH".into());
+        let error = client
+            .enable_auto_merge(Some("o/r"), "PR_kwDO")
+            .await
+            .expect_err("a rejected mutation must not read as success");
+        assert!(
+            error.to_string().contains("clean status"),
+            "the reason must survive for the caller to classify: {error}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn disable_auto_merge_success_reports_ok() {
+        const BODY: &str = r#"{"data":{"disablePullRequestAutoMerge":{"pullRequest":
+            {"id":"PR_kwDO","autoMergeRequest":null}}}}"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        client
+            .disable_auto_merge("PR_kwDO")
+            .await
+            .expect("disable auto-merge success must not report a false failure");
     }
 
     /// `updatePullRequestBranch` success reply is mutation-shaped (no

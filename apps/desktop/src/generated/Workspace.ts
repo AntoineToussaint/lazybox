@@ -112,6 +112,17 @@ woke_at: string | null,
  */
 auto_merge_on_green: boolean,
 /**
+ * Provenance for GitHub's **native** auto-merge on this
+ * workspace's PR: `true` when *lazybox* turned it on (as the
+ * durable half of the `g g` arm, issue #1596), `false` when it is
+ * off or was set by a human on github.com. Disarming `g g` only
+ * calls `disablePullRequestAutoMerge` while this is set, so an
+ * auto-merge the user enabled in the GitHub UI is left alone.
+ * Distinct from `Task::auto_merge_enabled`, which is GitHub's
+ * observed state regardless of who set it.
+ */
+native_auto_merge_by_lazybox: boolean,
+/**
  * Per-workspace "track main" arm (issue #535). When `true`, the
  * daemon's background sweep keeps this workspace's worktree
  * fast-forwarded to `origin/<base_branch>` whenever the tree is

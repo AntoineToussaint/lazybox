@@ -195,6 +195,9 @@ fn maximal_workspace() -> Workspace {
     ws.snooze_wake = Some(lazybox_core::SnoozeWake::CiSettled);
     ws.woke_at = Some(at(12, 30));
     ws.auto_merge_on_green = true;
+    // Schema v12: the GitHub-native auto-merge provenance rides the
+    // maximal fixture so its wire shape is pinned.
+    ws.native_auto_merge_by_lazybox = true;
     ws.track_main = true;
     ws.metered = true;
     ws.base_branch = Some("main".into());

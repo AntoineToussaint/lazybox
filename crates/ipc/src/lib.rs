@@ -2234,6 +2234,19 @@ pub mod stats {
 /// keys follow the prefix.
 pub const MERGE_HELD_REASON_PREFIX: &str = "held: must merge after ";
 
+/// How loudly an [`Event::AutoMergeNotice`] should land.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum AutoMergeNoticeLevel {
+    /// It worked and the user should know the arm is durable — a calm,
+    /// fading confirmation.
+    Info,
+    /// The automation is weaker than the keypress implied: native
+    /// auto-merge was declined or refused, so the arm only lasts as long
+    /// as the daemon. Must be seen, so it is sticky.
+    Warn,
+}
+
 /// Connection → TUI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
@@ -2441,6 +2454,22 @@ pub enum Event {
         pr_label: String,
         reason: String,
         conflict: bool,
+    },
+    /// The GitHub-native half of the merge-on-green arm (#1596) reported
+    /// something the user needs to know: native auto-merge was armed
+    /// alongside the local latch, turned back off, or — the case that
+    /// matters most — **declined**, leaving `g g` a lazybox-only arm that
+    /// stops the moment lazybox does.
+    ///
+    /// Deliberately NOT a `ProviderError`. That channel is for failed sync
+    /// attempts: the TUI files a retryable one in the sync log and shows
+    /// nothing unless a manual refresh is in flight, so every one of these
+    /// notices was invisible at the moment the user pressed `g g` — and the
+    /// two success cases were being recorded as sync *errors*.
+    AutoMergeNotice {
+        workspace_key: lazybox_core::WorkspaceKey,
+        message: String,
+        level: AutoMergeNoticeLevel,
     },
     /// The issue for `workspace_key` was just closed via
     /// `Command::CloseIssue`. The local Task still reads `Open` until

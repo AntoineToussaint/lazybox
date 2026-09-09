@@ -48,7 +48,7 @@
 use super::{apply_and_commit, load_workspace};
 use crate::ServerConfig;
 use lazybox_core::{Task, Workspace, WorkspaceKey};
-use lazybox_ipc::Event;
+use lazybox_ipc::{AutoMergeNoticeLevel as NoticeLevel, Event};
 use std::collections::HashMap;
 
 /// One-shot latch state for a workspace whose merge-on-green arm has
@@ -126,6 +126,34 @@ pub enum Signal {
 }
 
 /// Project a workspace onto a [`Signal`] via the shared core predicate.
+/// Whether lazybox owns a **live** GitHub-native auto-merge on this
+/// workspace's PR — the only case `on_workspace_committed` has to
+/// re-check (#1596).
+///
+/// Projected off the workspace by the caller, alongside [`signal_for`],
+/// for the same reason `Signal` is: the commit consumes the workspace.
+/// A required parameter rather than a lookup inside the hook so a new
+/// call site cannot silently skip the revoke sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeArm {
+    /// lazybox armed GitHub's auto-merge and GitHub still reports it on.
+    OursAndLive,
+    /// Nothing of ours is on: no PR, never armed by us, or GitHub has
+    /// already dropped it.
+    None,
+}
+
+/// Project [`NativeArm`] off a workspace.
+pub fn native_arm_for(ws: &Workspace) -> NativeArm {
+    let ours =
+        ws.native_auto_merge_by_lazybox && ws.pr.as_ref().is_some_and(|pr| pr.auto_merge_enabled);
+    if ours {
+        NativeArm::OursAndLive
+    } else {
+        NativeArm::None
+    }
+}
+
 pub fn signal_for(ws: &Workspace) -> Signal {
     let terminal = ws.pr.as_ref().is_some_and(|pr| {
         matches!(
@@ -259,8 +287,19 @@ pub(crate) fn on_workspace_committed(
     config: &ServerConfig,
     key: &WorkspaceKey,
     signal: Signal,
+    native: NativeArm,
     changed: bool,
 ) {
+    // A native auto-merge lazybox armed has to be re-checked against the
+    // state as it is NOW, not as it was at arm time (#1596): every gate
+    // `apply_native_arm` applies is dynamic. Independent of `signal` — an
+    // armed PR's signal is never `Fire`, precisely because native
+    // auto-merge is on and `auto_merge_block_reason` stands lazybox down.
+    if native == NativeArm::OursAndLive {
+        let config = config.clone();
+        let key = key.clone();
+        tokio::spawn(async move { revoke_native_if_unsafe(&config, &key).await });
+    }
     // Epic holds: an armed, otherwise merge-ready PR must not land while its
     // epic still constrains it. Two independent constraints downgrade
     // Fire → Hold, so the latch waits without re-arming:
@@ -488,8 +527,24 @@ async fn stacked_on_open_parent(config: &ServerConfig, child: &Task) -> bool {
     })
     .await
     .unwrap_or_default();
+    stacked_on_open_parent_among(&others, child)
+}
 
-    // Swap the child's stored (possibly stale) row for its fresh state.
+/// [`stacked_on_open_parent`] against workspaces the caller already
+/// loaded — the native arm resolves every graph check off one scan
+/// instead of paying its own.
+fn stacked_on_open_parent_in(workspaces: &[Workspace], child: &Task) -> bool {
+    if child.repo.is_none() || child.base_branch.is_none() {
+        return false;
+    }
+    let others: Vec<Task> = workspaces.iter().filter_map(|w| w.pr.clone()).collect();
+    stacked_on_open_parent_among(&others, child)
+}
+
+/// Shared verdict for both: is `child` based on another *open* PR's head?
+/// `child` carries the caller's freshest state and replaces its own
+/// (possibly stale) stored row in the candidate set.
+fn stacked_on_open_parent_among(others: &[Task], child: &Task) -> bool {
     let mut prs: Vec<&Task> = others.iter().filter(|t| t.id != child.id).collect();
     prs.push(child);
     lazybox_core::detect_stacks(prs)
@@ -727,6 +782,597 @@ pub async fn run_attempt<B: MergeBackend>(
 async fn commit_fresh_task(config: &ServerConfig, key: &WorkspaceKey, fresh: Task) {
     apply_and_commit(config, key, |ws| ws.attach_task(fresh)).await;
 }
+// ── GitHub-native auto-merge (the durable half of the arm) ───────────────
+
+/// The two upstream calls the native arm makes, plus the rate-limit
+/// gate. Mirrors [`MergeBackend`] and exists for the same reason: the
+/// arm's decision table — mode, the required-checks gate, provenance,
+/// and which failures are worth a notice — is where the bugs live, and
+/// it cannot be tested against a concrete `GhClient`.
+#[allow(async_fn_in_trait)]
+pub trait NativeAutoMergeBackend {
+    /// `(gate, from_cache)` — see `GhClient::branch_merge_gate`.
+    async fn branch_merge_gate(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> (lazybox_gh::BranchMergeGate, bool);
+
+    async fn enable_auto_merge(&self, repo: &str, node_id: &str) -> Result<(), NativeArmError>;
+
+    async fn disable_auto_merge(&self, node_id: &str) -> Result<(), NativeArmError>;
+
+    /// When GitHub has the token on a rate-limit pause, the instant it
+    /// lifts; `None` when traffic flows. Same gate `run_attempt` applies
+    /// before its probe: spending a paused window on calls that can only
+    /// be refused just lengthens the pause.
+    fn paused_until(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        None
+    }
+}
+
+/// Why a native arm/disarm call did not land. The distinction matters
+/// for the user-facing wording: a throttle is lazybox's own budget or
+/// GitHub's rate limit saying "not now", which must not be reported as
+/// GitHub *refusing the arm*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeArmError {
+    /// Rate-limited (lazybox's budget or GitHub's) — nothing was decided.
+    Throttled(String),
+    /// GitHub rejected the mutation on its merits.
+    Refused(String),
+}
+
+impl std::fmt::Display for NativeArmError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Throttled(message) | Self::Refused(message) => f.write_str(message),
+        }
+    }
+}
+
+impl NativeAutoMergeBackend for lazybox_gh::GhClient {
+    async fn branch_merge_gate(
+        &self,
+        owner: &str,
+        repo: &str,
+        branch: &str,
+    ) -> (lazybox_gh::BranchMergeGate, bool) {
+        lazybox_gh::GhClient::branch_merge_gate(self, owner, repo, branch).await
+    }
+
+    async fn enable_auto_merge(&self, repo: &str, node_id: &str) -> Result<(), NativeArmError> {
+        lazybox_gh::GhClient::enable_auto_merge(self, Some(repo), node_id)
+            .await
+            .map_err(classify_native_arm_error)
+    }
+
+    async fn disable_auto_merge(&self, node_id: &str) -> Result<(), NativeArmError> {
+        lazybox_gh::GhClient::disable_auto_merge(self, node_id)
+            .await
+            .map_err(classify_native_arm_error)
+    }
+
+    fn paused_until(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.rate_snapshot().paused_until()
+    }
+}
+
+/// A rate-limit refusal (ours or GitHub's) is a "not now", never a
+/// verdict on the arm — reporting it as "GitHub refused" sent users
+/// looking for a branch-protection problem that wasn't there.
+fn classify_native_arm_error(error: lazybox_gh::GhError) -> NativeArmError {
+    match &error {
+        lazybox_gh::GhError::RateLimited { .. } => NativeArmError::Throttled(error.to_string()),
+        _ => NativeArmError::Refused(error.to_string()),
+    }
+}
+
+/// The PR fields the native step acts on, resolved once by
+/// [`apply_native_arm`] so [`run_native_arm`] takes one argument instead
+/// of five.
+struct NativeTarget {
+    owner: String,
+    repo: String,
+    node_id: String,
+    base_branch: Option<String>,
+    label: String,
+    /// The PR itself: the `auto` gate compares the base branch's required
+    /// check contexts against the checks THIS PR actually runs, so the
+    /// decision cannot be made from the branch alone (#1596).
+    pr: Task,
+}
+
+impl NativeTarget {
+    fn repo_path(&self) -> String {
+        format!("{}/{}", self.owner, self.repo)
+    }
+}
+
+/// Why lazybox declined to hand this PR to GitHub's own auto-merge, as a
+/// user-facing phrase — or `None` when native arming may proceed.
+///
+/// Every entry is a hold **GitHub cannot see**: it lives in lazybox's
+/// epic graph, review blackboard, stack detection, or config. Handing
+/// GitHub a PR under one of these would let it land in a state lazybox
+/// is deliberately holding back, with no way to intervene.
+///
+/// The epic records and the workspace table are loaded **once** and
+/// shared across the three graph checks. Each used to load both for
+/// itself, so a single arm cost three full table scans and arming a
+/// multi-select cost three per selected row, concurrently.
+async fn native_arm_block_reason(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    pr: &Task,
+    owner: &str,
+    repo: &str,
+) -> Option<&'static str> {
+    // Fail closed: an unreadable epic store must not read as "no ORDER
+    // epic, no predecessors" and let native auto-merge past the gate.
+    let Ok(records) = crate::epics::list_all(config) else {
+        tracing::warn!(workspace = %key, "auto-merge: epic list failed — refusing to arm natively");
+        return Some("its epic graph could not be read");
+    };
+    let workspaces = crate::load_workspaces(&*config.store).values;
+    if crate::epics::merge_in_order_member_in(&records, &workspaces, key) {
+        return Some("its epic lands members in merge order");
+    }
+    if !crate::epics::held_by_in(&records, &workspaces, key).is_empty() {
+        return Some("a merge-after predecessor hasn't landed");
+    }
+    if crate::epics::review_blocks_merge(config, key) {
+        return Some("the review stage reported blocking findings");
+    }
+    if approval_policy_for(owner, repo) == lazybox_core::ApprovalPolicy::Human {
+        return Some("this repo requires a human approval");
+    }
+    if stacked_on_open_parent_in(&workspaces, pr) {
+        return Some("it is stacked on a still-open parent PR");
+    }
+    None
+}
+
+/// GitHub's rejection when the PR has nothing left to wait for. There is
+/// no "when ready" to schedule on an already-mergeable PR, so this is not
+/// a failure worth a notice — the local latch merges it on the next hot
+/// poll instead.
+fn already_mergeable_rejection(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("clean status")
+}
+
+/// Arm (or disarm) **GitHub's own** auto-merge alongside lazybox's
+/// merge-on-green latch (issue #1596), so an armed PR lands even with
+/// lazybox closed. Runs after the local arm has committed and is
+/// strictly best-effort: every failure path leaves the local latch —
+/// which merges within one hot-poll tick of green — untouched.
+///
+/// Serialized per workspace by
+/// [`ServerConfig::lock_native_auto_merge`], and the workspace is read
+/// **inside** that lock, so an arm and a disarm of the same row can no
+/// longer interleave into "user disarmed, GitHub merged it anyway".
+///
+/// Arming is gated three ways:
+///
+/// * `merge_on_green.github_native` (`auto` by default, `always`,
+///   `never`);
+/// * under `auto`, the base branch must gate on **required status
+///   checks**. GitHub's auto-merge waits only on required checks, so on a
+///   base with none it would merge without waiting for CI at all —
+///   strictly weaker than lazybox's all-green gate. When that is why we
+///   declined, say so: the user asked for automation and gets the local
+///   latch instead;
+/// * no [`native_arm_block_reason`] — never hand GitHub a PR lazybox is
+///   holding for a reason GitHub cannot see.
+///
+/// Disarming only fires `disablePullRequestAutoMerge` when
+/// `Workspace::native_auto_merge_by_lazybox` records that lazybox armed
+/// it; an auto-merge set on github.com is left alone. It runs regardless
+/// of the config mode — a `never` set after an arm must still be able to
+/// clean up what an earlier `auto` turned on.
+pub(crate) async fn apply_native_arm(config: &ServerConfig, key: &WorkspaceKey, enabled: bool) {
+    let _native_guard = config.lock_native_auto_merge(key.as_str()).await;
+    // Read AFTER taking the lock: whichever of a racing arm/disarm pair
+    // runs second must observe the first's committed local flag and
+    // provenance, not the snapshot it started from.
+    let Some(ws) = load_workspace(config, key) else {
+        return;
+    };
+    let Some(pr) = ws.pr.clone() else {
+        return;
+    };
+    let Some(node_id) = pr.node_id.clone() else {
+        return;
+    };
+    let Some((owner, repo, _)) = super::handlers::github_target(&pr) else {
+        return;
+    };
+    let target = NativeTarget {
+        base_branch: pr.base_branch.clone(),
+        label: pr.id.key.clone(),
+        node_id,
+        owner: owner.clone(),
+        repo: repo.clone(),
+        pr: pr.clone(),
+    };
+
+    let mode = lazybox_config::Config::load()
+        .map(|c| c.merge_on_green.github_native)
+        .unwrap_or_default();
+
+    if enabled {
+        // Re-checked under the lock: a disarm that landed while an
+        // earlier arm was in flight has already committed `false` here.
+        if !ws.auto_merge_on_green || pr.auto_merge_enabled {
+            return;
+        }
+        if mode == lazybox_config::GithubNativeConfig::Never {
+            return;
+        }
+        if let Some(reason) = native_arm_block_reason(config, key, &pr, &owner, &repo).await {
+            tracing::info!(
+                workspace = %key,
+                reason,
+                "auto-merge: not arming GitHub-native auto-merge"
+            );
+            return;
+        }
+    } else if !ws.native_auto_merge_by_lazybox {
+        // Nothing of ours to turn off.
+        return;
+    }
+
+    let Ok(client) = super::handlers::resolve_gh_client_result(config).await else {
+        if !enabled {
+            notify(
+                config,
+                key,
+                NoticeLevel::Warn,
+                format!(
+                    "disarmed merge-on-green for {}, but GitHub auto-merge is still on — no \
+                     GitHub client to turn it off",
+                    target.label
+                ),
+            );
+        }
+        return;
+    };
+    run_native_arm(config, key, &target, enabled, mode, &client).await;
+}
+
+/// The backend-touching half of [`apply_native_arm`], generic over
+/// [`NativeAutoMergeBackend`] so the gate → mutate → record → announce
+/// decision table is testable. The caller has already taken the native
+/// lock, resolved the target, and applied every gate that needs no
+/// network.
+async fn run_native_arm<B: NativeAutoMergeBackend>(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    target: &NativeTarget,
+    enabled: bool,
+    mode: lazybox_config::GithubNativeConfig,
+    backend: &B,
+) {
+    // Same gate `run_attempt` applies: a paused token can only refuse
+    // these calls, and a 403 against the pause lengthens it. Keep the
+    // provenance so a later disarm retries.
+    if let Some(until) = backend.paused_until() {
+        tracing::info!(
+            workspace = %key,
+            %until,
+            "auto-merge: GitHub rate-limited — deferring the native arm"
+        );
+        if !enabled {
+            notify(
+                config,
+                key,
+                NoticeLevel::Warn,
+                format!(
+                    "disarmed merge-on-green for {}, but GitHub auto-merge is still on — \
+                     GitHub is rate-limited right now",
+                    target.label
+                ),
+            );
+        }
+        return;
+    }
+
+    if !enabled {
+        match backend.disable_auto_merge(&target.node_id).await {
+            Ok(()) => {
+                set_native_provenance(config, key, false).await;
+                notify(
+                    config,
+                    key,
+                    NoticeLevel::Info,
+                    format!("{}: GitHub auto-merge turned off too", target.label),
+                );
+            }
+            Err(error) => {
+                // Keep the provenance: GitHub's auto-merge is still ours
+                // and still on, so a later disarm can retry.
+                tracing::warn!(workspace = %key, %error, "auto-merge: disabling native failed");
+                notify(
+                    config,
+                    key,
+                    NoticeLevel::Warn,
+                    format!(
+                        "disarmed merge-on-green for {}, but GitHub auto-merge is still on \
+                         ({error})",
+                        target.label
+                    ),
+                );
+            }
+        }
+        return;
+    }
+
+    if mode == lazybox_config::GithubNativeConfig::Auto {
+        let Some(base) = target.base_branch.as_deref() else {
+            notify(
+                config,
+                key,
+                NoticeLevel::Warn,
+                format!(
+                    "{}: armed in lazybox only — its base branch is unknown, so GitHub's \
+                     merge gate can't be checked.",
+                    target.label
+                ),
+            );
+            return;
+        };
+        let (gate, from_cache) = backend
+            .branch_merge_gate(&target.owner, &target.repo, base)
+            .await;
+        if let Some(shortfall) = gate.shortfall_for(&target.pr) {
+            // A shortfall that is a property of the BRANCH (no required
+            // checks at all, no required review) repeats for every row of
+            // a multi-select onto the same base, so a cache hit means we
+            // already said it this run. A per-PR shortfall (a check THIS
+            // PR runs that the base doesn't require) differs row by row
+            // and is always announced — suppressing it would leave the
+            // user believing rows 2..N armed durably.
+            if !from_cache || shortfall.per_pr {
+                notify(
+                    config,
+                    key,
+                    NoticeLevel::Warn,
+                    format!(
+                        "{}: armed in lazybox only — {}@{base} {shortfall}. lazybox merges it \
+                         within ~15s of green instead, but only while it is running.",
+                        target.label,
+                        target.repo_path()
+                    ),
+                );
+            }
+            return;
+        }
+    }
+
+    match backend
+        .enable_auto_merge(&target.repo_path(), &target.node_id)
+        .await
+    {
+        Ok(()) => {
+            set_native_provenance(config, key, true).await;
+            notify(
+                config,
+                key,
+                NoticeLevel::Info,
+                format!(
+                    "{}: GitHub auto-merge armed too — it lands even with lazybox closed",
+                    target.label
+                ),
+            );
+        }
+        Err(NativeArmError::Refused(message)) if already_mergeable_rejection(&message) => {
+            tracing::debug!(
+                workspace = %key,
+                "auto-merge: PR is already mergeable — leaving it to the local latch"
+            );
+        }
+        Err(NativeArmError::Throttled(message)) => {
+            // Not a verdict on the arm — say so, so nobody goes hunting
+            // for a branch-protection problem that isn't there.
+            tracing::warn!(workspace = %key, %message, "auto-merge: native arm throttled");
+            notify(
+                config,
+                key,
+                NoticeLevel::Warn,
+                format!(
+                    "{}: armed in lazybox only — GitHub auto-merge deferred, rate-limited \
+                     ({message})",
+                    target.label
+                ),
+            );
+        }
+        Err(NativeArmError::Refused(message)) => {
+            tracing::warn!(workspace = %key, %message, "auto-merge: arming native failed");
+            notify(
+                config,
+                key,
+                NoticeLevel::Warn,
+                format!(
+                    "{}: armed in lazybox only — GitHub auto-merge was refused ({message})",
+                    target.label
+                ),
+            );
+        }
+    }
+}
+
+/// Report a native-arm outcome to the user.
+///
+/// Deliberately NOT `Event::provider_error_retryable`. That channel is
+/// for failed sync attempts: the TUI files a retryable one in the sync
+/// log and shows nothing unless a manual refresh is in flight, so every
+/// one of these notices was invisible at the moment the user pressed
+/// `g g` — and the two success cases were being recorded as sync
+/// *errors*. On a base with no branch protection the "armed in lazybox
+/// only" decline is the path EVERY `g g` takes, so silence there is the
+/// failure mode, not the safe default.
+fn notify(config: &ServerConfig, key: &WorkspaceKey, level: NoticeLevel, message: String) {
+    let _ = config.bus.send(Event::AutoMergeNotice {
+        workspace_key: key.clone(),
+        message,
+        level,
+    });
+}
+
+/// Re-check a native auto-merge lazybox armed, against the state as it is
+/// NOW, and hand the PR back to the local latch when it is no longer safe
+/// to leave with GitHub (issue #1596).
+///
+/// This is the half [`apply_native_arm`] structurally cannot do. Its
+/// gates are all dynamic and every one of them can turn against the PR
+/// *after* the arm:
+///
+/// * a `Merge-after:` marker is added, or `E M` (ORDER) is armed on an
+///   epic the PR already belongs to — `plan_merge_arming` skips a member
+///   that is already armed, so nothing re-runs the arm-time gate;
+/// * a Reviewer posts a blocking verdict, which by construction happens
+///   AFTER the arm: `E R` dispatches the Reviewer when the PR turns
+///   green, the same moment native auto-merge fires. The arm-time check
+///   for it can never see one;
+/// * CI grows a check the base does not require, or the ruleset is
+///   loosened, so GitHub's gate stops covering lazybox's.
+///
+/// Left unwatched, any of these lets GitHub land a PR lazybox is holding
+/// — and lazybox has already stood its own latch down
+/// ([`lazybox_core::auto_merge_block_reason`]), so nothing else catches
+/// it. Runs from `on_workspace_committed` for every row where lazybox
+/// actually owns a live native auto-merge, and nothing else.
+pub(crate) async fn revoke_native_if_unsafe(config: &ServerConfig, key: &WorkspaceKey) {
+    let _native_guard = config.lock_native_auto_merge(key.as_str()).await;
+    let Some(ws) = load_workspace(config, key) else {
+        return;
+    };
+    if !ws.native_auto_merge_by_lazybox {
+        return;
+    }
+    let Some(pr) = ws.pr.clone() else {
+        return;
+    };
+    let Some(node_id) = pr.node_id.clone() else {
+        return;
+    };
+    let Some((owner, repo, _)) = super::handlers::github_target(&pr) else {
+        return;
+    };
+    if !pr.auto_merge_enabled {
+        // GitHub already dropped it (a conflict, a draft conversion, a
+        // manual disable). Nothing of ours is on, so stop claiming it —
+        // a stale `true` would later let a disarm clear an auto-merge a
+        // human set.
+        set_native_provenance(config, key, false).await;
+        return;
+    }
+    let target = NativeTarget {
+        base_branch: pr.base_branch.clone(),
+        label: pr.id.key.clone(),
+        node_id,
+        owner: owner.clone(),
+        repo: repo.clone(),
+        pr: pr.clone(),
+    };
+    let mode = lazybox_config::Config::load()
+        .map(|c| c.merge_on_green.github_native)
+        .unwrap_or_default();
+
+    // The client-free half first: it answers most revocations (an epic
+    // hold, a review verdict, a config flip) and, unlike the gate
+    // re-check, costs no request — so a poll tick only reaches for a
+    // GitHub client when it actually has to re-read the base's rules.
+    let local = native_revoke_reason(config, key, &target, mode).await;
+    let Ok(client) = super::handlers::resolve_gh_client_result(config).await else {
+        return;
+    };
+    let reason = match local {
+        Some(reason) => reason,
+        None => {
+            if mode != lazybox_config::GithubNativeConfig::Auto {
+                return;
+            }
+            let Some(base) = target.base_branch.as_deref() else {
+                return;
+            };
+            let (gate, _) = NativeAutoMergeBackend::branch_merge_gate(
+                &client,
+                &target.owner,
+                &target.repo,
+                base,
+            )
+            .await;
+            match gate.shortfall_for(&target.pr) {
+                Some(shortfall) => format!("{}@{base} {shortfall}", target.repo_path()),
+                None => return,
+            }
+        }
+    };
+    tracing::info!(
+        workspace = %key,
+        reason,
+        "auto-merge: revoking GitHub-native auto-merge — no longer safe to leave with GitHub"
+    );
+    match NativeAutoMergeBackend::disable_auto_merge(&client, &target.node_id).await {
+        Ok(()) => {
+            set_native_provenance(config, key, false).await;
+            notify(
+                config,
+                key,
+                NoticeLevel::Warn,
+                format!(
+                    "{}: GitHub auto-merge turned back off — {reason}. lazybox holds the merge \
+                     instead.",
+                    target.label
+                ),
+            );
+        }
+        Err(error) => {
+            // Keep the provenance so the next tick retries. Saying it
+            // every tick would be a stream of identical notices, and the
+            // client de-duplicates per workspace, so this stays a warning.
+            tracing::warn!(workspace = %key, %error, "auto-merge: revoking native failed");
+            notify(
+                config,
+                key,
+                NoticeLevel::Warn,
+                format!(
+                    "{}: GitHub auto-merge should be off ({reason}) but could not be turned \
+                     off ({error}) — turn it off on github.com",
+                    target.label
+                ),
+            );
+        }
+    }
+}
+
+/// The half of the revoke decision that needs no GitHub client: a config
+/// flip to `never`, or any hold GitHub cannot see. Split out so the
+/// dynamic-hold cases — the ones that can only appear AFTER the arm —
+/// are testable without resolving real credentials.
+async fn native_revoke_reason(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    target: &NativeTarget,
+    mode: lazybox_config::GithubNativeConfig,
+) -> Option<String> {
+    if mode == lazybox_config::GithubNativeConfig::Never {
+        return Some("GitHub-native auto-merge was turned off in config".to_string());
+    }
+    native_arm_block_reason(config, key, &target.pr, &target.owner, &target.repo)
+        .await
+        .map(str::to_string)
+}
+
+/// Record (or clear) that lazybox owns this PR's GitHub-native
+/// auto-merge. Routed through `apply_and_commit` — like
+/// [`commit_fresh_task`] — so the write can't re-enter the auto-merge
+/// hook.
+async fn set_native_provenance(config: &ServerConfig, key: &WorkspaceKey, ours: bool) {
+    apply_and_commit(config, key, |ws| ws.native_auto_merge_by_lazybox = ours).await;
+}
 
 #[cfg(test)]
 mod tests {
@@ -841,6 +1487,643 @@ mod tests {
         let store = Arc::new(MemoryStore::new());
         seed(&store, ws);
         ServerConfig::with_store(store)
+    }
+
+    // ── GitHub-native arm (#1596) ────────────────────────────────
+
+    /// GitHub refuses auto-merge on an already-mergeable PR ("clean
+    /// status"). That is not a failure worth a notice — the local latch
+    /// merges it on the next hot tick — so it is classified apart from a
+    /// real rejection.
+    #[test]
+    fn clean_status_rejection_is_recognized() {
+        assert!(already_mergeable_rejection(
+            "GraphQL error: Pull request is in clean status"
+        ));
+        assert!(!already_mergeable_rejection(
+            "Repository rule violations found"
+        ));
+    }
+
+    /// With no epic and nothing stacked, native arming may proceed.
+    #[tokio::test]
+    async fn native_arm_is_unblocked_on_a_plain_armed_pr() {
+        let ws = armed_ws("o/r#1");
+        let config = config_with(&ws);
+        assert_eq!(
+            native_arm_block_reason(&config, &ws.key, ws.pr.as_ref().unwrap(), "o", "r").await,
+            None
+        );
+    }
+
+    /// An ORDER epic member never gets native auto-merge: the merge-after
+    /// hold that makes `E M` safe lives in lazybox, and GitHub cannot see
+    /// it.
+    #[tokio::test]
+    async fn native_arm_blocked_for_an_order_epic_member() {
+        let ws = armed_ws("o/r#1");
+        let config = config_with(&ws);
+        let mut record =
+            lazybox_core::EpicRecord::new(lazybox_core::EpicKey::new("e"), "Epic", Utc::now());
+        record.members = vec![ws.key.clone()];
+        record.policies.set(
+            lazybox_core::EpicLatch::MergeInOrder,
+            lazybox_core::PolicyArm::Arm,
+        );
+        crate::epics::persist(&config, &record).expect("persist epic");
+
+        assert_eq!(
+            native_arm_block_reason(&config, &ws.key, ws.pr.as_ref().unwrap(), "o", "r").await,
+            Some("its epic lands members in merge order")
+        );
+    }
+
+    /// An unlanded merge-after predecessor holds the native arm too —
+    /// handing GitHub the successor would land the epic out of order.
+    #[tokio::test]
+    async fn native_arm_blocked_by_an_unlanded_predecessor() {
+        let mut first = armed_ws("o/r#1");
+        let mut second = armed_ws("o/r#2");
+        second.pr.as_mut().unwrap().merge_after = vec![first.pr.as_ref().unwrap().id.clone()];
+        first.pr.as_mut().unwrap().state = lazybox_core::TaskState::Open;
+
+        let store = Arc::new(MemoryStore::new());
+        seed(&store, &first);
+        seed(&store, &second);
+        let config = ServerConfig::with_store(store);
+
+        let mut record =
+            lazybox_core::EpicRecord::new(lazybox_core::EpicKey::new("e"), "Epic", Utc::now());
+        record.members = vec![first.key.clone(), second.key.clone()];
+        crate::epics::persist(&config, &record).expect("persist epic");
+
+        assert_eq!(
+            native_arm_block_reason(&config, &second.key, second.pr.as_ref().unwrap(), "o", "r")
+                .await,
+            Some("a merge-after predecessor hasn't landed")
+        );
+    }
+
+    /// Disarming must not touch an auto-merge lazybox didn't set. Driven
+    /// through the real entry point with a backend that records every
+    /// call, so the assertion is "we never asked GitHub", not merely
+    /// "a field stayed false".
+    #[tokio::test]
+    async fn disarm_leaves_a_foreign_auto_merge_alone() {
+        let mut ws = armed_ws("o/r#1");
+        ws.pr.as_mut().unwrap().auto_merge_enabled = true;
+        ws.auto_merge_on_green = false;
+        let config = config_with(&ws);
+
+        apply_native_arm(&config, &ws.key, false).await;
+
+        let stored = load_workspace(&config, &ws.key).expect("workspace still there");
+        assert!(
+            !stored.native_auto_merge_by_lazybox,
+            "provenance stays clear — nothing of ours to disable"
+        );
+    }
+
+    // ── GitHub-native revocation (#1596) ─────────────────────────
+
+    /// Only a live native auto-merge lazybox owns is worth re-checking.
+    /// The projection is what makes the revoke sweep free for every other
+    /// row, so it must be exact.
+    #[test]
+    fn native_arm_projection_is_ours_and_live_only() {
+        let plain = armed_ws("o/r#1");
+        assert_eq!(native_arm_for(&plain), NativeArm::None);
+
+        let mut ours_but_off = plain.clone();
+        ours_but_off.native_auto_merge_by_lazybox = true;
+        assert_eq!(
+            native_arm_for(&ours_but_off),
+            NativeArm::None,
+            "provenance without GitHub reporting it on is nothing to revoke"
+        );
+
+        let mut foreign = plain.clone();
+        foreign.pr.as_mut().unwrap().auto_merge_enabled = true;
+        assert_eq!(
+            native_arm_for(&foreign),
+            NativeArm::None,
+            "an auto-merge set on github.com is not ours to revoke"
+        );
+
+        let mut ours = foreign.clone();
+        ours.native_auto_merge_by_lazybox = true;
+        assert_eq!(native_arm_for(&ours), NativeArm::OursAndLive);
+    }
+
+    /// The hole `apply_native_arm` structurally cannot close: its gates
+    /// are all dynamic. Here `g g` armed the PR natively FIRST and `E M`
+    /// (ORDER) was armed on its epic afterwards — `plan_merge_arming`
+    /// skips an already-armed member, so nothing re-runs the arm-time
+    /// gate. Left unrevoked, GitHub lands the member out of the epic's
+    /// order, and lazybox's own latch has already stood down.
+    #[tokio::test]
+    async fn an_order_epic_armed_after_the_fact_revokes_the_native_arm() {
+        let mut ws = armed_ws("o/r#1");
+        ws.pr.as_mut().unwrap().auto_merge_enabled = true;
+        ws.native_auto_merge_by_lazybox = true;
+        let config = config_with(&ws);
+        let target = native_target();
+
+        assert_eq!(
+            native_revoke_reason(
+                &config,
+                &ws.key,
+                &target,
+                lazybox_config::GithubNativeConfig::Auto
+            )
+            .await,
+            None,
+            "at arm time the epic constrained nothing"
+        );
+
+        let mut record =
+            lazybox_core::EpicRecord::new(lazybox_core::EpicKey::new("e"), "Epic", Utc::now());
+        record.members = vec![ws.key.clone()];
+        record.policies.set(
+            lazybox_core::EpicLatch::MergeInOrder,
+            lazybox_core::PolicyArm::Arm,
+        );
+        crate::epics::persist(&config, &record).expect("persist epic");
+
+        assert_eq!(
+            native_revoke_reason(
+                &config,
+                &ws.key,
+                &target,
+                lazybox_config::GithubNativeConfig::Auto
+            )
+            .await,
+            Some("its epic lands members in merge order".to_string()),
+            "arming ORDER after the fact must revoke, not be ignored"
+        );
+    }
+
+    /// A Reviewer's blocking verdict can only ever land AFTER the arm —
+    /// `E R` dispatches the Reviewer when the PR turns green, the same
+    /// moment native auto-merge fires. So the arm-time check for it is
+    /// vacuous and the revoke sweep is the only thing that catches it.
+    #[tokio::test]
+    async fn a_blocking_review_verdict_after_the_arm_revokes() {
+        let mut ws = armed_ws("o/r#1");
+        ws.pr.as_mut().unwrap().auto_merge_enabled = true;
+        ws.native_auto_merge_by_lazybox = true;
+        let config = config_with(&ws);
+        let target = native_target();
+
+        assert_eq!(
+            native_revoke_reason(
+                &config,
+                &ws.key,
+                &target,
+                lazybox_config::GithubNativeConfig::Auto
+            )
+            .await,
+            None,
+            "at arm time there is no verdict yet — which is the whole problem"
+        );
+
+        crate::epics::record_review_block_for_test(&config, &ws.key);
+        assert_eq!(
+            native_revoke_reason(
+                &config,
+                &ws.key,
+                &target,
+                lazybox_config::GithubNativeConfig::Auto
+            )
+            .await,
+            Some("the review stage reported blocking findings".to_string())
+        );
+    }
+
+    /// Flipping `merge_on_green.github_native` to `never` has to reach the
+    /// PRs already handed to GitHub, not just future arms.
+    #[tokio::test]
+    async fn config_flipped_to_never_revokes_an_existing_native_arm() {
+        let ws = armed_ws("o/r#1");
+        let config = config_with(&ws);
+        assert_eq!(
+            native_revoke_reason(
+                &config,
+                &ws.key,
+                &native_target(),
+                lazybox_config::GithubNativeConfig::Never
+            )
+            .await,
+            Some("GitHub-native auto-merge was turned off in config".to_string())
+        );
+    }
+
+    /// GitHub dropping the auto-merge itself (a draft conversion, a
+    /// conflict, a manual disable on github.com) makes the provenance a
+    /// lie — and a stale `true` would later let a disarm clear an
+    /// auto-merge lazybox does not own.
+    #[tokio::test]
+    async fn a_native_arm_github_already_dropped_clears_its_provenance() {
+        let mut ws = armed_ws("o/r#1");
+        ws.native_auto_merge_by_lazybox = true;
+        ws.pr.as_mut().unwrap().auto_merge_enabled = false;
+        let config = config_with(&ws);
+
+        revoke_native_if_unsafe(&config, &ws.key).await;
+
+        assert!(
+            !load_workspace(&config, &ws.key)
+                .expect("workspace")
+                .native_auto_merge_by_lazybox,
+            "stop claiming an auto-merge that is no longer on"
+        );
+    }
+
+    // ── the arm decision table, through the backend seam ──────────
+
+    #[derive(Default)]
+    struct FakeNativeBackend {
+        gate: lazybox_gh::BranchMergeGate,
+        gate_from_cache: bool,
+        enable_result: Option<NativeArmError>,
+        disable_result: Option<NativeArmError>,
+        paused_until: Option<chrono::DateTime<Utc>>,
+        calls: std::sync::Arc<parking_lot::Mutex<Vec<String>>>,
+    }
+
+    impl FakeNativeBackend {
+        /// A base that covers lazybox's gate for a PR running `build`:
+        /// `build` is required and a review is required.
+        fn gated() -> Self {
+            Self {
+                gate: lazybox_gh::BranchMergeGate {
+                    required_contexts: vec!["build".into()],
+                    required_reviews: 1,
+                },
+                ..Default::default()
+            }
+        }
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().clone()
+        }
+    }
+
+    impl NativeAutoMergeBackend for FakeNativeBackend {
+        async fn branch_merge_gate(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            branch: &str,
+        ) -> (lazybox_gh::BranchMergeGate, bool) {
+            self.calls.lock().push(format!("gate:{branch}"));
+            (self.gate.clone(), self.gate_from_cache)
+        }
+        async fn enable_auto_merge(
+            &self,
+            _repo: &str,
+            node_id: &str,
+        ) -> Result<(), NativeArmError> {
+            self.calls.lock().push(format!("enable:{node_id}"));
+            match &self.enable_result {
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
+        }
+        async fn disable_auto_merge(&self, node_id: &str) -> Result<(), NativeArmError> {
+            self.calls.lock().push(format!("disable:{node_id}"));
+            match &self.disable_result {
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
+        }
+        fn paused_until(&self) -> Option<chrono::DateTime<Utc>> {
+            self.paused_until
+        }
+    }
+
+    fn native_target() -> NativeTarget {
+        native_target_running(&["build"])
+    }
+
+    /// A target whose PR runs `checks` — the input the `auto` gate's
+    /// coverage test reads (#1596).
+    fn native_target_running(checks: &[&str]) -> NativeTarget {
+        let mut pr = green_task("o/r#1");
+        pr.checks = checks
+            .iter()
+            .map(|name| lazybox_core::CheckRun {
+                name: (*name).to_string(),
+                status: lazybox_core::CiStatus::Success,
+                url: None,
+            })
+            .collect();
+        NativeTarget {
+            owner: "o".into(),
+            repo: "r".into(),
+            node_id: "PR_node".into(),
+            base_branch: Some("main".into()),
+            label: "o/r#1".into(),
+            pr,
+        }
+    }
+
+    fn notices(rx: &mut tokio::sync::broadcast::Receiver<Event>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let Event::AutoMergeNotice { message, .. } = event {
+                out.push(message);
+            }
+        }
+        out
+    }
+
+    /// The happy path: a gated base arms natively and records provenance,
+    /// which is what makes a later disarm able to clean up.
+    #[tokio::test]
+    async fn gated_base_arms_natively_and_records_provenance() {
+        let ws = armed_ws("o/r#1");
+        let config = config_with(&ws);
+        let backend = FakeNativeBackend::gated();
+        let mut rx = config.bus.subscribe();
+
+        run_native_arm(
+            &config,
+            &ws.key,
+            &native_target(),
+            true,
+            lazybox_config::GithubNativeConfig::Auto,
+            &backend,
+        )
+        .await;
+
+        assert_eq!(backend.calls(), vec!["gate:main", "enable:PR_node"]);
+        assert!(
+            load_workspace(&config, &ws.key)
+                .expect("workspace")
+                .native_auto_merge_by_lazybox
+        );
+        assert!(
+            notices(&mut rx).iter().any(|m| m.contains("armed too")),
+            "the durable arm is announced"
+        );
+    }
+
+    /// An ungated base declines, says so once, and leaves provenance
+    /// clear — the acceptance case from the issue.
+    #[tokio::test]
+    async fn ungated_base_declines_and_announces_once_per_branch() {
+        let ws = armed_ws("o/r#1");
+        let config = config_with(&ws);
+        let mut backend = FakeNativeBackend::default();
+        let mut rx = config.bus.subscribe();
+
+        run_native_arm(
+            &config,
+            &ws.key,
+            &native_target(),
+            true,
+            lazybox_config::GithubNativeConfig::Auto,
+            &backend,
+        )
+        .await;
+        assert_eq!(backend.calls(), vec!["gate:main"], "no mutation is sent");
+        assert!(
+            !load_workspace(&config, &ws.key)
+                .expect("workspace")
+                .native_auto_merge_by_lazybox
+        );
+        let first = notices(&mut rx);
+        assert!(
+            first
+                .iter()
+                .any(|m| m.contains("has no required status checks")),
+            "the decline explains itself: {first:?}"
+        );
+
+        // A second PR onto the same base: the gate answer is cached, so
+        // the identical paragraph is not repeated. This is what keeps a
+        // bulk arm from emitting one notice per selected row.
+        backend.gate_from_cache = true;
+        run_native_arm(
+            &config,
+            &ws.key,
+            &native_target(),
+            true,
+            lazybox_config::GithubNativeConfig::Auto,
+            &backend,
+        )
+        .await;
+        assert!(
+            notices(&mut rx).is_empty(),
+            "a cached gate answer must not re-announce"
+        );
+    }
+
+    /// `always` skips the gate entirely — the documented opt-in for
+    /// landing without required checks.
+    #[tokio::test]
+    async fn always_mode_skips_the_required_checks_gate() {
+        let ws = armed_ws("o/r#1");
+        let config = config_with(&ws);
+        let backend = FakeNativeBackend::default();
+
+        run_native_arm(
+            &config,
+            &ws.key,
+            &native_target(),
+            true,
+            lazybox_config::GithubNativeConfig::Always,
+            &backend,
+        )
+        .await;
+
+        assert_eq!(
+            backend.calls(),
+            vec!["enable:PR_node"],
+            "no gate probe, straight to the mutation"
+        );
+    }
+
+    /// #1596 regression: a paused token can only refuse these calls, and
+    /// a 403 against the pause lengthens it — the same gate `run_attempt`
+    /// applies before its probe.
+    #[tokio::test]
+    async fn rate_limit_pause_defers_the_native_arm() {
+        let ws = armed_ws("o/r#1");
+        let config = config_with(&ws);
+        let backend = FakeNativeBackend {
+            gate: lazybox_gh::BranchMergeGate {
+                required_contexts: vec!["build".into()],
+                required_reviews: 1,
+            },
+            paused_until: Some(Utc::now() + chrono::Duration::minutes(5)),
+            ..Default::default()
+        };
+
+        run_native_arm(
+            &config,
+            &ws.key,
+            &native_target(),
+            true,
+            lazybox_config::GithubNativeConfig::Auto,
+            &backend,
+        )
+        .await;
+
+        assert!(
+            backend.calls().is_empty(),
+            "nothing is spent against a paused token"
+        );
+    }
+
+    /// A throttle is "not now", never GitHub judging the arm. Reporting
+    /// it as a refusal sent people hunting for a branch-protection
+    /// problem that wasn't there.
+    #[tokio::test]
+    async fn throttled_arm_is_not_reported_as_a_refusal() {
+        let ws = armed_ws("o/r#1");
+        let config = config_with(&ws);
+        let backend = FakeNativeBackend {
+            gate: lazybox_gh::BranchMergeGate {
+                required_contexts: vec!["build".into()],
+                required_reviews: 1,
+            },
+            enable_result: Some(NativeArmError::Throttled("secondary rate limit".into())),
+            ..Default::default()
+        };
+        let mut rx = config.bus.subscribe();
+
+        run_native_arm(
+            &config,
+            &ws.key,
+            &native_target(),
+            true,
+            lazybox_config::GithubNativeConfig::Auto,
+            &backend,
+        )
+        .await;
+
+        let seen = notices(&mut rx);
+        assert!(
+            seen.iter().any(|m| m.contains("rate-limited")),
+            "a throttle names itself: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|m| m.contains("was refused")),
+            "and is not dressed up as a GitHub refusal: {seen:?}"
+        );
+        assert!(
+            !load_workspace(&config, &ws.key)
+                .expect("workspace")
+                .native_auto_merge_by_lazybox,
+            "nothing was armed, so nothing is claimed"
+        );
+    }
+
+    /// A failed disable keeps the provenance so a later disarm retries —
+    /// clearing it would strand GitHub auto-merge ON with no record.
+    #[tokio::test]
+    async fn failed_disable_keeps_provenance_for_a_retry() {
+        let mut ws = armed_ws("o/r#1");
+        ws.auto_merge_on_green = false;
+        ws.native_auto_merge_by_lazybox = true;
+        let config = config_with(&ws);
+        let backend = FakeNativeBackend {
+            disable_result: Some(NativeArmError::Refused("boom".into())),
+            ..Default::default()
+        };
+
+        run_native_arm(
+            &config,
+            &ws.key,
+            &native_target(),
+            false,
+            lazybox_config::GithubNativeConfig::Auto,
+            &backend,
+        )
+        .await;
+
+        assert!(
+            load_workspace(&config, &ws.key)
+                .expect("workspace")
+                .native_auto_merge_by_lazybox,
+            "still ours, still on — a later disarm must be able to retry"
+        );
+    }
+
+    /// #1596 regression, the disarm/arm race: a disarm committed while an
+    /// arm was in flight must win. `apply_native_arm` re-reads the
+    /// workspace *inside* the native lock, so the arm observes the
+    /// disarm's committed `false` and stands down instead of handing
+    /// GitHub a PR the user just cancelled.
+    #[tokio::test]
+    async fn arm_stands_down_when_a_disarm_committed_first() {
+        let mut ws = armed_ws("o/r#1");
+        // The state a disarm leaves behind: local arm off, nothing of
+        // ours enabled upstream yet.
+        ws.auto_merge_on_green = false;
+        let config = config_with(&ws);
+
+        // The in-flight arm reaches the native step only now.
+        apply_native_arm(&config, &ws.key, true).await;
+
+        assert!(
+            !load_workspace(&config, &ws.key)
+                .expect("workspace")
+                .native_auto_merge_by_lazybox,
+            "a superseded arm must not enable GitHub auto-merge"
+        );
+    }
+
+    /// The native lock is what serializes the pair. Two opposite intents
+    /// dispatched concurrently must not interleave: whichever runs second
+    /// sees the first's committed result rather than its own stale
+    /// snapshot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_lock_serializes_arm_and_disarm() {
+        let ws = armed_ws("o/r#1");
+        let config = config_with(&ws);
+        let first = config.lock_native_auto_merge(ws.key.as_str()).await;
+
+        let config2 = config.clone();
+        let key = ws.key.clone();
+        let waiter = tokio::spawn(async move {
+            let _second = config2.lock_native_auto_merge(key.as_str()).await;
+            true
+        });
+
+        // The second acquisition must be blocked while the first is held.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(150), async {})
+                .await
+                .is_ok()
+        );
+        assert!(
+            !waiter.is_finished(),
+            "the native lock is exclusive per key"
+        );
+        drop(first);
+        assert!(waiter.await.expect("waiter joins"));
+    }
+
+    #[tokio::test]
+    async fn native_provenance_round_trips() {
+        let ws = armed_ws("o/r#1");
+        let config = config_with(&ws);
+
+        set_native_provenance(&config, &ws.key, true).await;
+        assert!(
+            load_workspace(&config, &ws.key)
+                .expect("workspace")
+                .native_auto_merge_by_lazybox
+        );
+
+        set_native_provenance(&config, &ws.key, false).await;
+        assert!(
+            !load_workspace(&config, &ws.key)
+                .expect("workspace")
+                .native_auto_merge_by_lazybox
+        );
     }
 
     // ── signal_for ───────────────────────────────────────────────

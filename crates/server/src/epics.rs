@@ -1626,10 +1626,50 @@ pub fn held_by(config: &ServerConfig, key: &WorkspaceKey) -> Vec<WorkspaceKey> {
     held_by_in(&records, &workspaces, key)
 }
 
+/// Is `key` a member of a live epic whose merge-in-order (`E M`) latch is
+/// armed (#1525)? Gates the GitHub-native half of the merge-on-green arm
+/// (#1596): ORDER's safety argument is that lazybox's merge-after hold
+/// supplies the landing sequence, and that invariant breaks the instant
+/// GitHub is the one merging — GitHub cannot see the epic graph. So an
+/// ORDER member's arm stays lazybox-only, predecessors or not.
+///
+/// Cheap in the common case: with no epic records the prefix scan returns
+/// before any workspace load.
+pub fn merge_in_order_member(config: &ServerConfig, key: &WorkspaceKey) -> bool {
+    let records = match list_all(config) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("epics: merge_in_order_member list failed: {e}");
+            // Fail closed: an unreadable epic store must not be read as
+            // "no ORDER epic" and let native auto-merge past the gate.
+            return true;
+        }
+    };
+    if records.is_empty() {
+        return false;
+    }
+    let workspaces = crate::load_workspaces(&*config.store).values;
+    merge_in_order_member_in(&records, &workspaces, key)
+}
+
+/// Pure core of [`merge_in_order_member`], split out to unit-test the
+/// membership rule without a `ServerConfig`.
+pub(crate) fn merge_in_order_member_in(
+    records: &[EpicRecord],
+    workspaces: &[Workspace],
+    key: &WorkspaceKey,
+) -> bool {
+    records.iter().any(|record| {
+        !record.archived
+            && record.policies.armed(lazybox_core::EpicLatch::MergeInOrder)
+            && resolved_graph(record, workspaces).members.contains(key)
+    })
+}
+
 /// Pure core of [`held_by`]: the unmerged merge-after predecessors of `key`
 /// across `records`, from already-loaded workspaces. Split out so the hold
 /// logic unit-tests without a `ServerConfig`.
-fn held_by_in(
+pub(crate) fn held_by_in(
     records: &[EpicRecord],
     workspaces: &[Workspace],
     key: &WorkspaceKey,
@@ -1683,7 +1723,8 @@ pub fn on_pr_merged(config: &ServerConfig, merged: &WorkspaceKey) {
         // counts it; if that was the last predecessor and the PR is armed +
         // mergeable, the hold lifts and the attempt fires.
         let signal = crate::polling::auto_merge::signal_for(ws);
-        crate::polling::auto_merge::on_workspace_committed(config, &succ, signal, true);
+        let native = crate::polling::auto_merge::native_arm_for(ws);
+        crate::polling::auto_merge::on_workspace_committed(config, &succ, signal, native, true);
     }
 }
 
@@ -1966,6 +2007,25 @@ pub struct ReviewState {
 
 fn review_storage_key(workspace: &str) -> String {
     format!("{REVIEW_STATE_PREFIX}{workspace}")
+}
+
+/// Plant a Reviewer's `blocking` verdict for `workspace`, as
+/// [`on_note_posted`] would. Exists so the GitHub-native revoke sweep
+/// (#1596) can be tested against the state that, in production, can only
+/// ever appear AFTER the arm it has to revoke.
+#[cfg(test)]
+pub(crate) fn record_review_block_for_test(config: &ServerConfig, workspace: &WorkspaceKey) {
+    persist_review(
+        config,
+        &ReviewState {
+            workspace: workspace.clone(),
+            epic: "e".to_string(),
+            dispatched: true,
+            blocking: true,
+            since: 0,
+        },
+    )
+    .expect("persist review state");
 }
 
 fn persist_review(config: &ServerConfig, state: &ReviewState) -> Result<(), String> {
@@ -4039,6 +4099,39 @@ mod tests {
         let mut p = lazybox_core::EpicPolicies::default();
         p.set(latch, lazybox_core::PolicyArm::Arm);
         p
+    }
+
+    /// #1596: ORDER's safety argument is that lazybox's merge-after hold
+    /// supplies the landing sequence — an invariant that breaks the
+    /// instant GitHub is the one merging, because GitHub cannot see the
+    /// epic graph. So membership in an ORDER epic (with or without
+    /// predecessors) blocks the GitHub-native half of the arm.
+    #[test]
+    fn merge_in_order_membership_gates_native_auto_merge() {
+        let (mut record, workspaces) = ready_epic();
+        let member = WorkspaceKey::new("a");
+        let outsider = WorkspaceKey::new("z");
+
+        assert!(
+            !merge_in_order_member_in(&[record.clone()], &workspaces, &member),
+            "an unarmed epic constrains no merge order"
+        );
+
+        record.policies = armed(lazybox_core::EpicLatch::MergeInOrder);
+        assert!(
+            merge_in_order_member_in(&[record.clone()], &workspaces, &member),
+            "every ORDER member is gated, predecessors or not"
+        );
+        assert!(
+            !merge_in_order_member_in(&[record.clone()], &workspaces, &outsider),
+            "a workspace outside the epic is untouched"
+        );
+
+        record.archived = true;
+        assert!(
+            !merge_in_order_member_in(&[record], &workspaces, &member),
+            "an archived epic constrains nothing"
+        );
     }
 
     fn dispatch_ctx() -> DispatchContext {

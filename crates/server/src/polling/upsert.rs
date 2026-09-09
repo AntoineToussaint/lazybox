@@ -379,6 +379,9 @@ pub(super) async fn upsert_into_workspace_key(
     // commit + broadcast below, so an attempt can never observe — or
     // race — a workspace state clients haven't seen.
     let auto_merge_signal = auto_merge::signal_for(&workspace);
+    // Same reason: the native-arm projection has to be read before the
+    // commit consumes the workspace (#1596).
+    let native_arm = auto_merge::native_arm_for(&workspace);
 
     // 2. COMMIT: migrate worktree dirs to the (possibly new) PR slug,
     //    atomically persist the PR, terminal rebadges, and absorbed-issue
@@ -395,6 +398,7 @@ pub(super) async fn upsert_into_workspace_key(
         config,
         key,
         auto_merge_signal,
+        native_arm,
         commit_outcome == CommitOutcome::Changed,
     );
 

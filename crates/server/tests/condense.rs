@@ -189,8 +189,14 @@ async fn the_condense_call_reuses_the_served_requests_credentials() {
 
     let request = seen.last.lock().expect("lock").clone();
     assert!(request.starts_with("POST /v1/messages "), "{request}");
-    assert!(request.contains("authorization: Bearer session-token"), "{request}");
-    assert!(request.contains("anthropic-version: 2023-06-01"), "{request}");
+    assert!(
+        request.contains("authorization: Bearer session-token"),
+        "{request}"
+    );
+    assert!(
+        request.contains("anthropic-version: 2023-06-01"),
+        "{request}"
+    );
     assert!(
         request.contains("\"model\":\"claude-haiku-4-5\""),
         "the cheap tier, not the session's own model: {request}"
@@ -310,7 +316,10 @@ async fn a_silent_upstream_ends_on_the_configured_budget() {
         .expect_err("the upstream never answers");
     assert!(matches!(error, SummarizeError::Timeout(_)), "{error:?}");
     assert!(
-        store.list_kv_prefix(KV_PREFIX_CONDENSE).expect("list").is_empty(),
+        store
+            .list_kv_prefix(KV_PREFIX_CONDENSE)
+            .expect("list")
+            .is_empty(),
         "a timed-out condensation leaves no cache entry"
     );
 }

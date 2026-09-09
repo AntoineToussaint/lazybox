@@ -402,6 +402,12 @@ pub const HOOK_HELPER_PROBE_RESPONSE: &str = "lazybox-hook-helper-v1";
 /// starved of CPU has to be given room to reply rather than be misjudged.
 const HOOK_HELPER_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long to wait for the probe's answer once the candidate has *exited*
+/// successfully. The line is already in the pipe by then, so this only covers
+/// scheduling the reader — and it bounds the call when a descendant that
+/// inherited the candidate's stdout keeps the pipe from ever reaching EOF.
+const HOOK_HELPER_PROBE_ANSWER_GRACE: Duration = Duration::from_secs(2);
+
 pub fn hook_helper_probe_requested(args: &[String]) -> bool {
     args.len() == 1 && args[0] == HOOK_HELPER_PROBE_ARG
 }
@@ -451,7 +457,7 @@ fn is_hook_capable_exe(candidate: &Path) -> bool {
 }
 
 fn is_hook_capable_exe_within(candidate: &Path, timeout: Duration) -> bool {
-    use std::io::Read;
+    use std::io::BufRead;
 
     let Ok(mut child) = std::process::Command::new(candidate)
         .arg(HOOK_HELPER_PROBE_ARG)
@@ -463,17 +469,28 @@ fn is_hook_capable_exe_within(candidate: &Path, timeout: Duration) -> bool {
         return false;
     };
 
-    // Drain stdout on its own thread. The probe's answer is one short line,
-    // but a candidate that writes past the pipe buffer with nobody reading
-    // blocks in `write` and never exits — turning an immediate "no" into the
-    // full `timeout`, on the daemon's boot path.
-    let mut stdout = child.stdout.take();
-    let reader = std::thread::spawn(move || {
-        let mut answer = Vec::new();
-        if let Some(stdout) = stdout.as_mut() {
-            let _ = stdout.read_to_end(&mut answer);
-        }
-        answer
+    // Read stdout on its own thread and hand the answer back over a channel
+    // rather than by joining. Two hazards, either of which ends in this call
+    // outliving its deadline on the daemon's boot path:
+    //
+    //   * the pipe holds ~64 KB, so a candidate that writes more blocks in
+    //     `write` with nobody draining and never reaches its own exit — hence
+    //     the drain-to-EOF after the answer line;
+    //   * EOF arrives only once *every* writer closes, and a grandchild that
+    //     inherited the descriptor (`sh -c "sleep 120"` leaves exactly that)
+    //     holds it open long after the candidate is killed — so the answer is
+    //     published at the first newline and never waited on by joining.
+    let stdout = child.stdout.take();
+    let (answers, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Some(stdout) = stdout else {
+            return;
+        };
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut line = String::new();
+        let _ = reader.read_line(&mut line);
+        let _ = answers.send(line);
+        let _ = std::io::copy(&mut reader, &mut std::io::sink());
     });
 
     let deadline = std::time::Instant::now() + timeout;
@@ -501,10 +518,15 @@ fn is_hook_capable_exe_within(candidate: &Path, timeout: Duration) -> bool {
         }
     };
 
-    // The child is gone either way, so the pipe is at EOF and this joins.
-    let answer = reader.join().unwrap_or_default();
-    status.is_some_and(|status| status.success())
-        && String::from_utf8_lossy(&answer).trim() == HOOK_HELPER_PROBE_RESPONSE
+    let Some(status) = status else {
+        return false;
+    };
+    if !status.success() {
+        return false;
+    }
+    answer
+        .recv_timeout(HOOK_HELPER_PROBE_ANSWER_GRACE)
+        .is_ok_and(|answer| answer.trim() == HOOK_HELPER_PROBE_RESPONSE)
 }
 
 /// Copy `current` to the stable `stable` path when the copy is missing or
@@ -18920,6 +18942,12 @@ mod tests {
     /// A candidate that never answers has to be abandoned at the deadline, not
     /// waited on forever — the probe runs synchronously on the daemon's boot
     /// path, so a wedged one stalls startup.
+    ///
+    /// `sh -c "sleep …"` is the shape that matters: killing the candidate does
+    /// not close the stdout pipe, because the `sleep` it forked inherited the
+    /// descriptor. A probe that reads that pipe to EOF — by joining its reader
+    /// thread — ends up waiting on the *grandchild*, so its own deadline stops
+    /// bounding the call.
     #[cfg(unix)]
     #[test]
     fn hook_probe_gives_up_at_its_deadline() {
@@ -18935,8 +18963,11 @@ mod tests {
             !capable,
             "a candidate that never answers is not hook-capable"
         );
+        // Bounded well inside the suite's 10s per-test ceiling, so a
+        // regression fails with this message rather than as an opaque kill
+        // from the runner.
         assert!(
-            elapsed < Duration::from_secs(30),
+            elapsed < Duration::from_secs(5),
             "the probe waited {elapsed:?} past a 200ms deadline"
         );
     }
@@ -18961,11 +18992,14 @@ mod tests {
         );
 
         let started = std::time::Instant::now();
-        let capable = is_hook_capable_exe_within(&noisy, Duration::from_secs(20));
+        let capable = is_hook_capable_exe_within(&noisy, Duration::from_secs(6));
         let elapsed = started.elapsed();
 
+        // Both bounds sit under the suite's 10s per-test ceiling: an undrained
+        // pipe stalls to the 6s deadline and trips this assertion, instead of
+        // the runner killing the test without a word.
         assert!(
-            elapsed < Duration::from_secs(15),
+            elapsed < Duration::from_secs(4),
             "the probe blocked on a full stdout pipe for {elapsed:?}"
         );
         assert!(

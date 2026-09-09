@@ -52,6 +52,16 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 filter = 'test(/^continuously_ready_(codex_repaints_do_not_starve_the_working_watchdog|meaningful_codex_output_advances_the_watchdog_anchor)$/)'
 slow-timeout = { period = "60s", terminate-after = 1 }
 
+[[profile.default.overrides]]
+# The idle-detector CPU fixtures (#1597) wait for a spinner's process tree to
+# accrue a whole second of CPU, which is a physical quantity, not a fixed
+# sleep: on a loaded runner the same second of CPU takes several seconds of
+# wall clock. Each carries its own bounded deadline and fails with the
+# observation it made — a runner kill at 10s would replace that with a bare
+# "timed out", which is the diagnosis-free failure these tests exist to end.
+filter = 'binary(box_lifecycle) and test(/^behavior::a_(working_agent_|pid_missing_)/)'
+slow-timeout = { period = "60s", terminate-after = 1 }
+
 [profile.ci]
 # CI uses the same bound and fails on the first broken test.
 slow-timeout = { period = "10s", terminate-after = 1 }

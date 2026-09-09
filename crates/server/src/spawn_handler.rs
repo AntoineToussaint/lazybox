@@ -392,6 +392,22 @@ fn hook_exe() -> Option<PathBuf> {
 pub const HOOK_HELPER_PROBE_ARG: &str = "--lazybox-hook-helper-probe";
 pub const HOOK_HELPER_PROBE_RESPONSE: &str = "lazybox-hook-helper-v1";
 
+/// How long the hook-capability probe waits for the candidate to answer.
+///
+/// The bound exists only so a wedged candidate can't hang daemon boot — it is
+/// not a performance budget, and it must never be tight enough to *answer* the
+/// question. A timeout is read as "not hook-capable", which disables lifecycle
+/// hooks for the whole daemon run; on a box loaded the way lazybox's own docs
+/// expect (many agents on one machine), a healthy ~80 MB binary that is merely
+/// starved of CPU has to be given room to reply rather than be misjudged.
+const HOOK_HELPER_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long to wait for the probe's answer once the candidate has *exited*
+/// successfully. The line is already in the pipe by then, so this only covers
+/// scheduling the reader — and it bounds the call when a descendant that
+/// inherited the candidate's stdout keeps the pipe from ever reaching EOF.
+const HOOK_HELPER_PROBE_ANSWER_GRACE: Duration = Duration::from_secs(2);
+
 pub fn hook_helper_probe_requested(args: &[String]) -> bool {
     args.len() == 1 && args[0] == HOOK_HELPER_PROBE_ARG
 }
@@ -437,6 +453,12 @@ fn ensure_stable_hook_exe_from(current: &Path, stable: &Path) -> Option<PathBuf>
 }
 
 fn is_hook_capable_exe(candidate: &Path) -> bool {
+    is_hook_capable_exe_within(candidate, HOOK_HELPER_PROBE_TIMEOUT)
+}
+
+fn is_hook_capable_exe_within(candidate: &Path, timeout: Duration) -> bool {
+    use std::io::BufRead;
+
     let Ok(mut child) = std::process::Command::new(candidate)
         .arg(HOOK_HELPER_PROBE_ARG)
         .stdin(std::process::Stdio::null())
@@ -446,27 +468,65 @@ fn is_hook_capable_exe(candidate: &Path) -> bool {
     else {
         return false;
     };
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    loop {
+
+    // Read stdout on its own thread and hand the answer back over a channel
+    // rather than by joining. Two hazards, either of which ends in this call
+    // outliving its deadline on the daemon's boot path:
+    //
+    //   * the pipe holds ~64 KB, so a candidate that writes more blocks in
+    //     `write` with nobody draining and never reaches its own exit — hence
+    //     the drain-to-EOF after the answer line;
+    //   * EOF arrives only once *every* writer closes, and a grandchild that
+    //     inherited the descriptor (`sh -c "sleep 120"` leaves exactly that)
+    //     holds it open long after the candidate is killed — so the answer is
+    //     published at the first newline and never waited on by joining.
+    let stdout = child.stdout.take();
+    let (answers, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let Some(stdout) = stdout else {
+            return;
+        };
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut line = String::new();
+        let _ = reader.read_line(&mut line);
+        let _ = answers.send(line);
+        let _ = std::io::copy(&mut reader, &mut std::io::sink());
+    });
+
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                let Ok(output) = child.wait_with_output() else {
-                    return false;
-                };
-                return status.success()
-                    && String::from_utf8_lossy(&output.stdout).trim()
-                        == HOOK_HELPER_PROBE_RESPONSE;
-            }
+            Ok(Some(status)) => break Some(status),
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            _ => {
+            outcome => {
+                // A timeout is not an answer, and it costs the daemon its
+                // hooks — say so, so the degradation is traceable to the probe
+                // instead of surfacing later as hooks silently doing nothing.
+                if matches!(outcome, Ok(None)) {
+                    tracing::warn!(
+                        candidate = %candidate.display(),
+                        ?timeout,
+                        "hook-helper probe timed out; treating the candidate as not hook-capable"
+                    );
+                }
                 let _ = child.kill();
                 let _ = child.wait();
-                return false;
+                break None;
             }
         }
+    };
+
+    let Some(status) = status else {
+        return false;
+    };
+    if !status.success() {
+        return false;
     }
+    answer
+        .recv_timeout(HOOK_HELPER_PROBE_ANSWER_GRACE)
+        .is_ok_and(|answer| answer.trim() == HOOK_HELPER_PROBE_RESPONSE)
 }
 
 /// Copy `current` to the stable `stable` path when the copy is missing or
@@ -18883,6 +18943,75 @@ mod tests {
         assert!(stable.is_file());
     }
 
+    /// A candidate that never answers has to be abandoned at the deadline, not
+    /// waited on forever — the probe runs synchronously on the daemon's boot
+    /// path, so a wedged one stalls startup.
+    ///
+    /// `sh -c "sleep …"` is the shape that matters: killing the candidate does
+    /// not close the stdout pipe, because the `sleep` it forked inherited the
+    /// descriptor. A probe that reads that pipe to EOF — by joining its reader
+    /// thread — ends up waiting on the *grandchild*, so its own deadline stops
+    /// bounding the call.
+    #[cfg(unix)]
+    #[test]
+    fn hook_probe_gives_up_at_its_deadline() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let wedged = directory.path().join("lazybox");
+        write_fake_exe(&wedged, "#!/bin/sh\nsleep 120\n");
+
+        let started = std::time::Instant::now();
+        let capable = is_hook_capable_exe_within(&wedged, Duration::from_millis(200));
+        let elapsed = started.elapsed();
+
+        assert!(
+            !capable,
+            "a candidate that never answers is not hook-capable"
+        );
+        // Bounded well inside the suite's 10s per-test ceiling, so a
+        // regression fails with this message rather than as an opaque kill
+        // from the runner.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the probe waited {elapsed:?} past a 200ms deadline"
+        );
+    }
+
+    /// The answer is read while the candidate runs, not after it exits. A
+    /// candidate that writes past the pipe buffer would otherwise block in
+    /// `write` with nobody draining, never exit, and burn the whole deadline
+    /// on the boot path before reporting a "no" it could have reported at once.
+    #[cfg(unix)]
+    #[test]
+    fn hook_probe_does_not_deadlock_on_a_candidate_that_floods_stdout() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let noisy = directory.path().join("lazybox");
+        // 4096 × 64 B = 256 KB, comfortably past the 64 KB pipe buffer.
+        write_fake_exe(
+            &noisy,
+            &format!(
+                "#!/bin/sh\ni=0\nwhile [ $i -lt 4096 ]; do\n  echo \"{}\"\n  i=$((i + 1))\ndone\necho {}\n",
+                "x".repeat(63),
+                HOOK_HELPER_PROBE_RESPONSE
+            ),
+        );
+
+        let started = std::time::Instant::now();
+        let capable = is_hook_capable_exe_within(&noisy, Duration::from_secs(6));
+        let elapsed = started.elapsed();
+
+        // Both bounds sit under the suite's 10s per-test ceiling: an undrained
+        // pipe stalls to the 6s deadline and trips this assertion, instead of
+        // the runner killing the test without a word.
+        assert!(
+            elapsed < Duration::from_secs(4),
+            "the probe blocked on a full stdout pipe for {elapsed:?}"
+        );
+        assert!(
+            !capable,
+            "stdout that is not exactly the probe response is not an answer"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn stable_hook_exe_reports_a_copy_failure_as_none() {
@@ -19093,9 +19222,13 @@ mod tests {
 
     #[test]
     fn expand_tilde_replaces_leading_tilde_with_home() {
-        // SAFETY: tests in this crate run with --test-threads default.
-        // We don't read HOME elsewhere in this test file, and we
-        // restore it on exit.
+        // The binary is the scope that matters, not this file: `HOME` backs
+        // `paths::home()` and the machine-wide credential/codex homes, which
+        // sibling tests in other modules resolve. Hold the shared env lock so
+        // the redirect can't land under one of them.
+        let _env = crate::test_env::lock();
+        // SAFETY: the lock excludes every other environment reader and writer
+        // in this test binary, and HOME is restored below.
         let prior = std::env::var_os("HOME");
         unsafe {
             std::env::set_var("HOME", "/tmp/fake-home");

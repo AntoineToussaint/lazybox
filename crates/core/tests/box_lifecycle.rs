@@ -228,11 +228,12 @@ fn which_bash() -> Result<PathBuf, ()> {
 #[cfg(unix)]
 mod behavior {
     use super::{lifecycle_dir, which_bash};
+    use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Output, Stdio};
     use std::thread::sleep;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     /// Own a fixture's whole process group. Killing only the shell leaves a
     /// background CPU child reparented to pid 1, which was #1163's leak.
@@ -249,6 +250,10 @@ mod behavior {
             let pgid = child.id() as i32;
             Self { child, pgid }
         }
+
+        fn pid(&self) -> u32 {
+            self.child.id()
+        }
     }
 
     impl Drop for FixtureProcessGroup {
@@ -262,6 +267,10 @@ mod behavior {
         }
     }
 
+    /// Stand-in for the SSH port in every behavioral run. Privileged, so it is
+    /// never handed out as an ephemeral local port (see `run_idle`).
+    const FAKE_SSH_PORT: &str = "1";
+
     fn scratch(name: &str) -> PathBuf {
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
         let _ = fs::remove_dir_all(&dir);
@@ -272,6 +281,12 @@ mod behavior {
     // Run the idle-stop script with a temp marker and a bogus SSH port so no
     // real connection is ever counted as an active tunnel. `env` supplies the
     // per-test knobs; `path_prefix` is prepended to PATH for command stubs.
+    //
+    // The port has to sit *below* the ephemeral range: the connection scan
+    // matches on port number alone, so a fake port up there is eventually
+    // claimed as the local end of some unrelated outbound socket — one
+    // browser connection on 65533 and every test expecting a stop reads the
+    // box as "someone is connected" and fails.
     fn run_idle(
         bash: &Path,
         marker: &Path,
@@ -281,7 +296,7 @@ mod behavior {
         let mut cmd = Command::new(bash);
         cmd.arg(lifecycle_dir().join("lazybox-idle-stop.sh"));
         cmd.env("LAZYBOX_IDLE_MARKER", marker);
-        cmd.env("LAZYBOX_IDLE_SSH_PORT", "65533");
+        cmd.env("LAZYBOX_IDLE_SSH_PORT", FAKE_SSH_PORT);
         // Pin the daemon-liveness file to a path that never exists, so a real
         // `~/.lazybox/run/active` on the dev/CI host (a running lazybox with a
         // terminal open) can't make the script read the box as active and skip
@@ -299,6 +314,187 @@ mod behavior {
             cmd.env("PATH", format!("{}:{}", prefix.display(), base));
         }
         cmd.output().expect("run lazybox-idle-stop.sh")
+    }
+
+    /// `LAZYBOX_IDLE_AGENT_CPU_SECS` the CPU fixtures run the detector at: the
+    /// whole-second tree delta a tick must see to call the box busy.
+    const AGENT_CPU_SECS: u64 = 1;
+
+    /// How long a spinner fixture is given to burn that delta. Generous
+    /// because the box these tests run on is routinely loaded — a full
+    /// `cargo test --workspace` competes with the spinner for cores, and a
+    /// backgrounded subshell gets the thinnest slice of all.
+    const CPU_DELTA_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// Sampling interval while waiting. Each sample is a full `ps` of the box
+    /// (~25 ms on a 1200-process host), so a tight loop would spend a quarter
+    /// of a core bidding against the very fixture it is waiting for — on the
+    /// loaded box these tests exist to survive. The wait is for whole
+    /// CPU-seconds; half a second of resolution costs nothing.
+    const CPU_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+    /// The previous tick's per-pid CPU snapshot, read from the detector's own
+    /// `${MARKER}.agent-cpu` file rather than taken independently.
+    ///
+    /// This is the baseline the next tick will actually diff against, so the
+    /// wait can never disagree with the tick about where the window starts,
+    /// and the file is the script's output — no second copy of its bookkeeping
+    /// to keep in step.
+    fn detector_snapshot(marker: &Path) -> HashMap<u32, u64> {
+        let path = PathBuf::from(format!("{}.agent-cpu", marker.display()));
+        let Ok(body) = fs::read_to_string(&path) else {
+            return HashMap::new();
+        };
+        body.lines()
+            .filter_map(|line| {
+                let (pid, secs) = line.split_once(' ')?;
+                Some((pid.trim().parse().ok()?, secs.trim().parse().ok()?))
+            })
+            .collect()
+    }
+
+    /// What a tick taken right now would read from the fixture's process tree,
+    /// carrying the raw observation so a failure can tell a starved fixture
+    /// from a `ps` that never answered.
+    struct TreeReading {
+        /// Rows `ps` returned for the whole box. `Err` is the command failing
+        /// to run at all; `Ok(0)` is it running but emitting nothing in the
+        /// `pid ppid time` shape asked for.
+        ps_rows: Result<usize, String>,
+        /// `(pid, previous, current)` in whole CPU-seconds. A `None` previous
+        /// is a pid the detector's last tick never recorded.
+        tree: Vec<(u32, Option<u64>, u64)>,
+        delta: u64,
+    }
+
+    impl TreeReading {
+        /// Whether the next tick is guaranteed to read this tree as busy.
+        ///
+        /// Deliberately stricter than the detector: for a pid it has a
+        /// baseline for, the tick diffs against the same snapshot and reads it
+        /// no earlier than we did, so its delta is at least ours; for a pid the
+        /// snapshot lacks, the tick calls the tree active outright while we
+        /// still make it earn the seconds from zero.
+        fn reads_busy(&self) -> bool {
+            self.delta >= AGENT_CPU_SECS
+        }
+
+        /// Whether the detector's snapshot covered any of the tree. Without
+        /// this the wait would still terminate, but against a zero baseline —
+        /// it would be measuring lifetime CPU, not the delta the tick uses.
+        fn has_baseline(&self) -> bool {
+            self.tree.iter().any(|(_, prev, _)| prev.is_some())
+        }
+    }
+
+    impl std::fmt::Display for TreeReading {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match &self.ps_rows {
+                Err(error) => return write!(f, "`ps` did not run: {error}"),
+                Ok(0) => {
+                    return write!(
+                        f,
+                        "`ps -eo pid=,ppid=,time=` returned no usable rows — nothing to do with                          load, this `ps` does not speak those flags"
+                    );
+                }
+                Ok(rows) => write!(f, "{rows} processes on the box; tree [")?,
+            }
+            for (index, (pid, prev, cur)) in self.tree.iter().enumerate() {
+                if index > 0 {
+                    write!(f, ", ")?;
+                }
+                match prev {
+                    Some(prev) => write!(f, "{pid}: {prev}s→{cur}s")?,
+                    None => write!(f, "{pid}: absent from the last tick→{cur}s")?,
+                }
+            }
+            write!(f, "]; delta {}s, need {AGENT_CPU_SECS}s", self.delta)
+        }
+    }
+
+    /// Read the tree rooted at `root` and diff it against the detector's
+    /// snapshot. A pid the snapshot lacks counts from zero rather than being
+    /// dropped: the fixture's CPU lives in a subshell that appears a few tens
+    /// of milliseconds after the shell, so a pid can legitimately be younger
+    /// than the tick that established the baseline, and dropping it would make
+    /// the only process burning CPU invisible to the wait.
+    fn read_tree(root: u32, prev: &HashMap<u32, u64>) -> TreeReading {
+        let stdout = match Command::new("ps")
+            .args(["-eo", "pid=,ppid=,time="])
+            .output()
+        {
+            Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+            Err(error) => {
+                return TreeReading {
+                    ps_rows: Err(error.to_string()),
+                    tree: Vec::new(),
+                    delta: 0,
+                };
+            }
+        };
+        let rows: Vec<(u32, u32, u64)> = stdout
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let pid = fields.next()?.parse().ok()?;
+                let ppid = fields.next()?.parse().ok()?;
+                Some((pid, ppid, parse_cpu_secs(fields.next()?)))
+            })
+            .collect();
+
+        let mut tree = Vec::new();
+        let mut pending = vec![root];
+        while let Some(pid) = pending.pop() {
+            for (candidate, parent, secs) in &rows {
+                if *candidate == pid {
+                    tree.push((pid, prev.get(&pid).copied(), *secs));
+                }
+                if *parent == pid && *candidate != pid {
+                    pending.push(*candidate);
+                }
+            }
+        }
+        let delta = tree
+            .iter()
+            .filter_map(|(_, prev, cur)| cur.checked_sub(prev.unwrap_or(0)))
+            .sum();
+        TreeReading {
+            ps_rows: Ok(rows.len()),
+            tree,
+            delta,
+        }
+    }
+
+    /// `ps`'s `[D-]HH:MM:SS[.ss]` TIME column, truncated to whole seconds the
+    /// way the script's awk does.
+    fn parse_cpu_secs(field: &str) -> u64 {
+        let (days, rest) = match field.split_once('-') {
+            Some((days, rest)) => (days.parse().unwrap_or(0.0), rest),
+            None => (0.0, field),
+        };
+        let secs = rest.split(':').fold(0.0, |acc: f64, part| {
+            acc * 60.0 + part.parse::<f64>().unwrap_or(0.0)
+        });
+        (days * 86_400.0 + secs) as u64
+    }
+
+    /// Wait until a tick would read the fixture's tree as busy, returning the
+    /// final reading either way.
+    ///
+    /// The tick window has to be a function of CPU burned, not wall clock: on a
+    /// loaded box a fixed sleep elapses with the spinner descheduled, the tick
+    /// reads a sub-threshold delta, and a test about the *tree walk* fails as
+    /// if the walk were broken.
+    fn wait_until_a_tick_reads_busy(root: u32, marker: &Path) -> TreeReading {
+        let prev = detector_snapshot(marker);
+        let deadline = Instant::now() + CPU_DELTA_TIMEOUT;
+        loop {
+            let reading = read_tree(root, &prev);
+            if reading.reads_busy() || Instant::now() >= deadline {
+                return reading;
+            }
+            sleep(CPU_POLL_INTERVAL);
+        }
     }
 
     fn write_exec(path: &Path, body: &str) {
@@ -345,6 +541,111 @@ mod behavior {
         );
     }
 
+    /// A pid the detector's snapshot never recorded must count from zero, not
+    /// vanish from the delta.
+    ///
+    /// The blocked-agent fixture keeps all its CPU in a subshell that becomes
+    /// visible tens of milliseconds after the shell — the same order as the
+    /// tick that establishes the baseline. Dropping snapshot-less pids made the
+    /// only process burning CPU invisible to the wait, which then spun out its
+    /// whole deadline on a perfectly idle box and blamed the load.
+    #[test]
+    fn a_pid_missing_from_the_snapshot_still_counts_toward_the_delta() {
+        let Ok(bash) = which_bash() else { return };
+        let mut command = Command::new(&bash);
+        command
+            .args([
+                "-c",
+                "( end=$((SECONDS+30)); while (( SECONDS < end )); do :; done ) & wait",
+                "lazybox-test-unsnapshotted-child",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let agent = FixtureProcessGroup::spawn(command);
+
+        // A baseline that knows the shell but not the child it forked — what a
+        // tick that ran before the fork leaves behind.
+        let prev = HashMap::from([(agent.pid(), 0)]);
+        let deadline = Instant::now() + CPU_DELTA_TIMEOUT;
+        let mut reading = read_tree(agent.pid(), &prev);
+        while !reading.reads_busy() && Instant::now() < deadline {
+            sleep(CPU_POLL_INTERVAL);
+            reading = read_tree(agent.pid(), &prev);
+        }
+        let saw_unsnapshotted_child = reading
+            .tree
+            .iter()
+            .any(|(pid, prev, _)| *pid != agent.pid() && prev.is_none());
+        let busy = reading.reads_busy();
+
+        drop(agent);
+
+        assert!(
+            saw_unsnapshotted_child,
+            "the fixture's child must show up in the tree with no baseline: {reading}"
+        );
+        assert!(
+            busy,
+            "a child the snapshot never saw must still carry the tree past the \
+             threshold: {reading}"
+        );
+    }
+
+    /// A wait that ends empty-handed has to report what it saw. The same zero
+    /// delta is produced by a starved fixture, by a tree that vanished, and by
+    /// a `ps` that never answered — naming one of them in the failure sends
+    /// the next reader down the wrong path, which is the cost this whole
+    /// fixture exists to avoid.
+    #[test]
+    fn a_reading_reports_the_observation_rather_than_diagnosing_load() {
+        let unavailable = TreeReading {
+            ps_rows: Err("No such file or directory (os error 2)".into()),
+            tree: Vec::new(),
+            delta: 0,
+        };
+        assert!(
+            unavailable.to_string().contains("`ps` did not run"),
+            "{unavailable}"
+        );
+
+        let wrong_flags = TreeReading {
+            ps_rows: Ok(0),
+            tree: Vec::new(),
+            delta: 0,
+        };
+        assert!(
+            wrong_flags
+                .to_string()
+                .contains("does not speak those flags"),
+            "{wrong_flags}"
+        );
+
+        let starved = TreeReading {
+            ps_rows: Ok(900),
+            tree: vec![(7, Some(3), 3), (8, None, 0)],
+            delta: 0,
+        };
+        let rendered = starved.to_string();
+        assert!(rendered.contains("7: 3s→3s"), "{rendered}");
+        assert!(
+            rendered.contains("8: absent from the last tick→0s"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("delta 0s, need 1s"), "{rendered}");
+        assert!(starved.has_baseline(), "pid 7 carried a baseline");
+        assert!(!starved.reads_busy());
+
+        let idle_tree_with_no_baseline = TreeReading {
+            ps_rows: Ok(900),
+            tree: vec![(8, None, 0)],
+            delta: 0,
+        };
+        assert!(
+            !idle_tree_with_no_baseline.has_baseline(),
+            "a tree the snapshot never covered is not a baseline"
+        );
+    }
+
     #[test]
     fn a_working_agent_is_not_reaped_mid_task() {
         let Ok(bash) = which_bash() else { return };
@@ -353,20 +654,23 @@ mod behavior {
         let stopped = dir.join("STOPPED");
         let stop_cmd = format!("touch {}", stopped.display());
         let token = "lazybox-test-working-agent";
+        let cpu_secs = AGENT_CPU_SECS.to_string();
         let env = [
             ("LAZYBOX_IDLE_AGENT_PROCS", token),
-            ("LAZYBOX_IDLE_AGENT_CPU_SECS", "1"),
+            ("LAZYBOX_IDLE_AGENT_CPU_SECS", cpu_secs.as_str()),
             ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
         ];
 
         // A bounded CPU spinner, its argv carrying the watched token. The
         // deadline is a second backstop behind the process-group Drop guard:
-        // even a hard-aborted test can never leak an infinite hot loop.
+        // even a hard-aborted test can never leak an infinite hot loop. It has
+        // to outlast `CPU_DELTA_TIMEOUT` — a spinner that exits mid-wait can
+        // never reach the CPU the tick below needs.
         let mut command = Command::new(&bash);
         command
             .args([
                 "-c",
-                "end=$((SECONDS+10)); while (( SECONDS < end )); do :; done",
+                "end=$((SECONDS+60)); while (( SECONDS < end )); do :; done",
                 token,
             ])
             .stdout(Stdio::null())
@@ -381,7 +685,7 @@ mod behavior {
 
         // Tick 2 must keep it alive on the CPU *delta* (not newness): re-stale
         // the marker, let the agent burn CPU, run again.
-        sleep(Duration::from_secs(3));
+        let reading = wait_until_a_tick_reads_busy(agent.pid(), &marker);
         fs::write(&marker, "1").expect("stale marker");
         run_idle(&bash, &marker, &env, None);
         let stopped_2 = stopped.exists();
@@ -390,6 +694,15 @@ mod behavior {
         // Teardown before assertions; Drop still runs on every earlier panic.
         drop(agent);
 
+        assert!(
+            reading.has_baseline(),
+            "tick 1 left no CPU snapshot covering the fixture tree, so the wait had \
+             nothing to diff against: {reading}"
+        );
+        assert!(
+            reading.reads_busy(),
+            "no tick would have read this tree as busy within {CPU_DELTA_TIMEOUT:?}: {reading}"
+        );
         assert!(!stopped_1, "a live agent must not be stopped");
         assert!(
             cleared_1,
@@ -418,9 +731,10 @@ mod behavior {
         let stopped = dir.join("STOPPED");
         let stop_cmd = format!("touch {}", stopped.display());
         let token = "lazybox-test-blocked-agent";
+        let cpu_secs = AGENT_CPU_SECS.to_string();
         let env = [
             ("LAZYBOX_IDLE_AGENT_PROCS", token),
-            ("LAZYBOX_IDLE_AGENT_CPU_SECS", "1"),
+            ("LAZYBOX_IDLE_AGENT_CPU_SECS", cpu_secs.as_str()),
             ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
         ];
 
@@ -431,7 +745,7 @@ mod behavior {
         command
             .args([
                 "-c",
-                "( end=$((SECONDS+10)); while (( SECONDS < end )); do :; done ) & wait",
+                "( end=$((SECONDS+60)); while (( SECONDS < end )); do :; done ) & wait",
                 token,
             ])
             .stdout(Stdio::null())
@@ -446,7 +760,7 @@ mod behavior {
 
         // Tick 2: the agent is idle but its child has burned CPU. The tree
         // delta must keep the box alive across a second consecutive tick.
-        sleep(Duration::from_secs(3));
+        let reading = wait_until_a_tick_reads_busy(agent.pid(), &marker);
         fs::write(&marker, "1").expect("stale marker");
         run_idle(&bash, &marker, &env, None);
         let stopped_2 = stopped.exists();
@@ -454,6 +768,15 @@ mod behavior {
 
         drop(agent);
 
+        assert!(
+            reading.has_baseline(),
+            "tick 1 left no CPU snapshot covering the fixture tree, so the wait had \
+             nothing to diff against: {reading}"
+        );
+        assert!(
+            reading.reads_busy(),
+            "no tick would have read this tree as busy within {CPU_DELTA_TIMEOUT:?}: {reading}"
+        );
         assert!(!stopped_1, "a live agent tree must not be stopped");
         assert!(cleared_1, "a newly-seen agent tree clears the idle marker");
         assert!(
@@ -477,9 +800,10 @@ mod behavior {
         let stopped = dir.join("STOPPED");
         let stop_cmd = format!("touch {}", stopped.display());
         let token = "lazybox-test-idle-tree-agent";
+        let cpu_secs = AGENT_CPU_SECS.to_string();
         let env = [
             ("LAZYBOX_IDLE_AGENT_PROCS", token),
-            ("LAZYBOX_IDLE_AGENT_CPU_SECS", "1"),
+            ("LAZYBOX_IDLE_AGENT_CPU_SECS", cpu_secs.as_str()),
             ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
         ];
 
@@ -583,7 +907,7 @@ mod behavior {
         let mut cmd = Command::new(&bash);
         cmd.arg(lifecycle_dir().join("lazybox-idle-stop.sh"));
         cmd.env("LAZYBOX_IDLE_MARKER", &marker);
-        cmd.env("LAZYBOX_IDLE_SSH_PORT", "65533");
+        cmd.env("LAZYBOX_IDLE_SSH_PORT", FAKE_SSH_PORT);
         cmd.env("LAZYBOX_IDLE_AGENT_PROCS", "lazybox-absent-agent");
         cmd.env_remove("HOME");
         cmd.env_remove("LAZYBOX_IDLE_ACTIVE_FILE");

@@ -19773,31 +19773,12 @@ mod tests {
 
     #[tokio::test]
     async fn active_provision_claim_prevents_sessionless_reclaim() {
-        fn git(cwd: &Path, args: &[&str]) {
-            let output = std::process::Command::new("git")
-                .current_dir(cwd)
-                .args(args)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .env("GIT_AUTHOR_NAME", "test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
         let root = tempfile::tempdir().unwrap();
         let upstream = tempfile::tempdir().unwrap();
-        git(upstream.path(), &["init", "-q", "-b", "main"]);
+        test_git(upstream.path(), &["init", "-q", "-b", "main"]);
         std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
-        git(upstream.path(), &["add", "."]);
-        git(upstream.path(), &["commit", "-q", "-m", "base"]);
+        test_git(upstream.path(), &["add", "."]);
+        test_git(upstream.path(), &["commit", "-q", "-m", "base"]);
 
         let config = ServerConfig::with_store_backend_and_worktree_root(
             std::sync::Arc::new(lazybox_store::MemoryStore::new()),
@@ -19807,7 +19788,7 @@ mod tests {
         let manager = config.worktree_manager();
         let bare = manager.bare_path("acme", "core");
         std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
-        git(
+        test_git(
             root.path(),
             &[
                 "clone",
@@ -19817,10 +19798,10 @@ mod tests {
                 &bare.to_string_lossy(),
             ],
         );
-        git(&bare, &["branch", "feature", "main"]);
+        test_git(&bare, &["branch", "feature", "main"]);
         let holder = root.path().join("worktrees").join("in-flight");
         std::fs::create_dir_all(holder.parent().unwrap()).unwrap();
-        git(
+        test_git(
             &bare,
             &[
                 "worktree",
@@ -19878,31 +19859,12 @@ mod tests {
     /// dead-ended every re-spawn of the workspace in the recovery modal.
     #[tokio::test]
     async fn own_claim_on_the_intended_path_does_not_preserve_the_holder() {
-        fn git(cwd: &Path, args: &[&str]) {
-            let output = std::process::Command::new("git")
-                .current_dir(cwd)
-                .args(args)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .env("GIT_AUTHOR_NAME", "test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
         let root = tempfile::tempdir().unwrap();
         let upstream = tempfile::tempdir().unwrap();
-        git(upstream.path(), &["init", "-q", "-b", "main"]);
+        test_git(upstream.path(), &["init", "-q", "-b", "main"]);
         std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
-        git(upstream.path(), &["add", "."]);
-        git(upstream.path(), &["commit", "-q", "-m", "base"]);
+        test_git(upstream.path(), &["add", "."]);
+        test_git(upstream.path(), &["commit", "-q", "-m", "base"]);
         let config = ServerConfig::with_store_backend_and_worktree_root(
             std::sync::Arc::new(lazybox_store::MemoryStore::new()),
             std::sync::Arc::new(crate::backend::MockBackend::new()),
@@ -19911,7 +19873,7 @@ mod tests {
         let manager = config.worktree_manager();
         let bare = manager.bare_path("acme", "core");
         std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
-        git(
+        test_git(
             root.path(),
             &[
                 "clone",
@@ -19921,10 +19883,10 @@ mod tests {
                 &bare.to_string_lossy(),
             ],
         );
-        git(&bare, &["branch", "feature", "main"]);
+        test_git(&bare, &["branch", "feature", "main"]);
         let holder = root.path().join("worktrees").join("self");
         std::fs::create_dir_all(holder.parent().unwrap()).unwrap();
-        git(
+        test_git(
             &bare,
             &[
                 "worktree",
@@ -19951,7 +19913,7 @@ mod tests {
 
         // A claim by a spawn targeting a *different* path still preserves.
         let other = root.path().join("worktrees").join("other");
-        git(
+        test_git(
             &bare,
             &[
                 "worktree",
@@ -19980,31 +19942,12 @@ mod tests {
     /// discounted but the second spawn's claim still preserves the holder.
     #[tokio::test]
     async fn a_second_spawn_racing_the_same_path_is_not_reclaimed() {
-        fn git(cwd: &Path, args: &[&str]) {
-            let output = std::process::Command::new("git")
-                .current_dir(cwd)
-                .args(args)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .env("GIT_AUTHOR_NAME", "test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
         let root = tempfile::tempdir().unwrap();
         let upstream = tempfile::tempdir().unwrap();
-        git(upstream.path(), &["init", "-q", "-b", "main"]);
+        test_git(upstream.path(), &["init", "-q", "-b", "main"]);
         std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
-        git(upstream.path(), &["add", "."]);
-        git(upstream.path(), &["commit", "-q", "-m", "base"]);
+        test_git(upstream.path(), &["add", "."]);
+        test_git(upstream.path(), &["commit", "-q", "-m", "base"]);
         let config = ServerConfig::with_store_backend_and_worktree_root(
             std::sync::Arc::new(lazybox_store::MemoryStore::new()),
             std::sync::Arc::new(crate::backend::MockBackend::new()),
@@ -20013,7 +19956,7 @@ mod tests {
         let manager = config.worktree_manager();
         let bare = manager.bare_path("acme", "core");
         std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
-        git(
+        test_git(
             root.path(),
             &[
                 "clone",
@@ -20023,10 +19966,10 @@ mod tests {
                 &bare.to_string_lossy(),
             ],
         );
-        git(&bare, &["branch", "feature", "main"]);
+        test_git(&bare, &["branch", "feature", "main"]);
         let holder = root.path().join("worktrees").join("self");
         std::fs::create_dir_all(holder.parent().unwrap()).unwrap();
-        git(
+        test_git(
             &bare,
             &[
                 "worktree",
@@ -20189,31 +20132,12 @@ mod tests {
     /// `BranchMismatch` against a workspace's own prior attempt.
     #[tokio::test]
     async fn reprovision_reuses_own_worktree_branch_across_title_drift() {
-        fn git(cwd: &Path, args: &[&str]) {
-            let output = std::process::Command::new("git")
-                .current_dir(cwd)
-                .args(args)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .env("GIT_AUTHOR_NAME", "test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
         let root = tempfile::tempdir().unwrap();
         let upstream = tempfile::tempdir().unwrap();
-        git(upstream.path(), &["init", "-q", "-b", "main"]);
+        test_git(upstream.path(), &["init", "-q", "-b", "main"]);
         std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
-        git(upstream.path(), &["add", "."]);
-        git(upstream.path(), &["commit", "-q", "-m", "base"]);
+        test_git(upstream.path(), &["add", "."]);
+        test_git(upstream.path(), &["commit", "-q", "-m", "base"]);
 
         let config = ServerConfig::with_store_backend_and_worktree_root(
             std::sync::Arc::new(lazybox_store::MemoryStore::new()),
@@ -20222,7 +20146,7 @@ mod tests {
         );
         let bare = config.worktree_manager().bare_path("acme", "core");
         std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
-        git(
+        test_git(
             root.path(),
             &[
                 "clone",
@@ -20464,31 +20388,12 @@ mod tests {
     /// the in-modal recreate.
     #[tokio::test]
     async fn preserve_stuck_worktree_moves_the_named_holder_and_frees_its_branch() {
-        fn git(cwd: &Path, args: &[&str]) {
-            let output = std::process::Command::new("git")
-                .current_dir(cwd)
-                .args(args)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .env("GIT_AUTHOR_NAME", "test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
         let root = tempfile::tempdir().unwrap();
         let upstream = tempfile::tempdir().unwrap();
-        git(upstream.path(), &["init", "-q", "-b", "main"]);
+        test_git(upstream.path(), &["init", "-q", "-b", "main"]);
         std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
-        git(upstream.path(), &["add", "."]);
-        git(upstream.path(), &["commit", "-q", "-m", "base"]);
+        test_git(upstream.path(), &["add", "."]);
+        test_git(upstream.path(), &["commit", "-q", "-m", "base"]);
 
         let config = ServerConfig::with_store_backend_and_worktree_root(
             std::sync::Arc::new(lazybox_store::MemoryStore::new()),
@@ -20498,7 +20403,7 @@ mod tests {
         let mgr = config.worktree_manager();
         let bare = mgr.bare_path("acme", "core");
         std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
-        git(
+        test_git(
             root.path(),
             &[
                 "clone",
@@ -20554,31 +20459,12 @@ mod tests {
     /// live) worktree moved aside while the stuck one stayed put.
     #[tokio::test]
     async fn preserve_stuck_worktree_targets_the_default_session_not_index_zero() {
-        fn git(cwd: &Path, args: &[&str]) {
-            let output = std::process::Command::new("git")
-                .current_dir(cwd)
-                .args(args)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .env("GIT_AUTHOR_NAME", "test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
         let root = tempfile::tempdir().unwrap();
         let upstream = tempfile::tempdir().unwrap();
-        git(upstream.path(), &["init", "-q", "-b", "main"]);
+        test_git(upstream.path(), &["init", "-q", "-b", "main"]);
         std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
-        git(upstream.path(), &["add", "."]);
-        git(upstream.path(), &["commit", "-q", "-m", "base"]);
+        test_git(upstream.path(), &["add", "."]);
+        test_git(upstream.path(), &["commit", "-q", "-m", "base"]);
 
         let config = ServerConfig::with_store_backend_and_worktree_root(
             std::sync::Arc::new(lazybox_store::MemoryStore::new()),
@@ -20588,7 +20474,7 @@ mod tests {
         let mgr = config.worktree_manager();
         let bare = mgr.bare_path("acme", "core");
         std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
-        git(
+        test_git(
             root.path(),
             &[
                 "clone",
@@ -20931,6 +20817,72 @@ mod tests {
         assert_eq!(branch, "feat-1521-deps");
     }
 
+    /// The guard has to be *wired into* the command, not merely exist
+    /// beside it: `handle_adopt_worktree_branch` is what the `a` key
+    /// reaches. `workspace.branch` persists in the store and feeds the
+    /// workspace-removal safety gate, so a refusal must leave the record
+    /// byte-identical — reverting the binary would not undo a rewrite.
+    #[tokio::test]
+    async fn adopt_command_leaves_the_record_untouched_when_it_refuses() {
+        let root = tempfile::tempdir().unwrap();
+        let config = ServerConfig::with_store_backend_and_worktree_root(
+            std::sync::Arc::new(lazybox_store::MemoryStore::new()),
+            std::sync::Arc::new(crate::backend::MockBackend::new()),
+            root.path().to_path_buf(),
+        );
+        let wt = drifted_worktree_fixture(root.path(), &config, "issue-1521-epic-p0").await;
+        test_git(&wt, &["switch", "-q", "main"]);
+
+        let mut task = titled_task("github", "acme/core#1521", "epic P0");
+        task.repo = Some("acme/core".into());
+        task.kind = Some(lazybox_core::TaskKind::Issue);
+        let mut ws = Workspace::from_task(task, Utc::now());
+        let mut session = lazybox_core::WorkspaceSession::new(
+            ws.key.clone(),
+            lazybox_core::SessionKind::Agent {
+                agent_id: "claude".into(),
+            },
+            wt.clone(),
+            Utc::now(),
+        );
+        session.worktree_branch = Some("issue-1521-epic-p0".into());
+        ws.add_session(session);
+        let session_key = SessionKey::new(ws.key.as_str());
+        persist_and_broadcast(&config, &ws).await.unwrap();
+        let before = load_workspace(&config, &ws.key).expect("baseline");
+
+        handle_adopt_worktree_branch(
+            &config,
+            lazybox_ipc::SpawnFallback {
+                session_key,
+                session_id: None,
+                client_request_id: None,
+                kind: TerminalKind::Agent("claude".into()),
+                cwd: None,
+                model_alias: None,
+                access: lazybox_ipc::AgentRunAccess::Default,
+            },
+            None,
+            false,
+        )
+        .await;
+
+        let after = load_workspace(&config, &ws.key).expect("reload");
+        assert_eq!(
+            after.branch, before.branch,
+            "a refused adopt must not rewrite the workspace branch",
+        );
+        assert_eq!(
+            after.sessions[0].worktree_branch, before.sessions[0].worktree_branch,
+            "nor the session's recorded branch",
+        );
+        assert_eq!(
+            head_branch(&wt),
+            "main",
+            "and it must not touch the checkout either",
+        );
+    }
+
     /// #1572 review: a local (repo-less) workspace takes the standalone
     /// provisioning arm, which never reported drift — so its record stayed
     /// stale forever and every later spawn re-ran the full provision,
@@ -21081,31 +21033,12 @@ mod tests {
     /// would dead-end on the mismatch (#1199 review).
     #[tokio::test]
     async fn missing_shell_worktree_rebuilds_on_the_session_branch_not_the_task_branch() {
-        fn git(cwd: &Path, args: &[&str]) {
-            let output = std::process::Command::new("git")
-                .current_dir(cwd)
-                .args(args)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .env("GIT_AUTHOR_NAME", "test")
-                .env("GIT_AUTHOR_EMAIL", "test@example.com")
-                .env("GIT_COMMITTER_NAME", "test")
-                .env("GIT_COMMITTER_EMAIL", "test@example.com")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "git {args:?} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
         let root = tempfile::tempdir().unwrap();
         let upstream = tempfile::tempdir().unwrap();
-        git(upstream.path(), &["init", "-q", "-b", "main"]);
+        test_git(upstream.path(), &["init", "-q", "-b", "main"]);
         std::fs::write(upstream.path().join("README.md"), "base\n").unwrap();
-        git(upstream.path(), &["add", "."]);
-        git(upstream.path(), &["commit", "-q", "-m", "base"]);
+        test_git(upstream.path(), &["add", "."]);
+        test_git(upstream.path(), &["commit", "-q", "-m", "base"]);
 
         let config = ServerConfig::with_store_backend_and_worktree_root(
             std::sync::Arc::new(lazybox_store::MemoryStore::new()),
@@ -21115,7 +21048,7 @@ mod tests {
         let mgr = config.worktree_manager();
         let bare = mgr.bare_path("acme", "core");
         std::fs::create_dir_all(bare.parent().unwrap()).unwrap();
-        git(
+        test_git(
             root.path(),
             &[
                 "clone",
@@ -21133,7 +21066,7 @@ mod tests {
         mgr.checkout_new_branch_at(&wt, "acme", "core", "solutions", "main")
             .await
             .expect("provision worktree");
-        git(
+        test_git(
             &bare,
             &["update-ref", "refs/heads/feat-other", "refs/heads/main"],
         );

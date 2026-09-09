@@ -21404,7 +21404,35 @@ mod worktree_progress_recovery_tests {
             "declining returns to the recovery modal, `a adopt` included",
         );
 
-        // And `a` is still reachable from there.
+        // And `a` is still genuinely bound, not merely back on the stack:
+        // rebuild the component from the retained state and feed it the
+        // key. Asserting the stack alone would still pass if the refusal
+        // had cleared `worktree_progress`, leaving a modal that renders
+        // empty and answers no keys. (Re-activating the component itself
+        // is `pop_modal`'s `app.active(top)`, shared by every modal.)
+        {
+            use crate::realm::components::worktree_progress::WorktreeProgress;
+            use tuirealm::component::AppComponent;
+            let state = m
+                .worktree_progress
+                .as_ref()
+                .expect("the checklist state survives a declined recreate");
+            let mut comp = WorktreeProgress::from_state(state);
+            assert!(
+                matches!(
+                    comp.on(&tuirealm::event::Event::Keyboard(
+                        tuirealm::event::KeyEvent::new(
+                            tuirealm::event::Key::Char('a'),
+                            tuirealm::event::KeyModifiers::NONE,
+                        )
+                    )),
+                    Some(crate::realm::Msg::WorktreeAdopt)
+                ),
+                "`a` must still reach the lossless alternative after a refusal",
+            );
+        }
+
+        // …and the handler behind it still dispatches.
         m.adopt_worktree_branch();
         let mut adopted = false;
         while let Ok(cmd) = server.rx.try_recv() {

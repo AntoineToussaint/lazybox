@@ -447,6 +447,12 @@ fn ensure_stable_hook_exe_from(current: &Path, stable: &Path) -> Option<PathBuf>
 }
 
 fn is_hook_capable_exe(candidate: &Path) -> bool {
+    is_hook_capable_exe_within(candidate, HOOK_HELPER_PROBE_TIMEOUT)
+}
+
+fn is_hook_capable_exe_within(candidate: &Path, timeout: Duration) -> bool {
+    use std::io::Read;
+
     let Ok(mut child) = std::process::Command::new(candidate)
         .arg(HOOK_HELPER_PROBE_ARG)
         .stdin(std::process::Stdio::null())
@@ -456,17 +462,24 @@ fn is_hook_capable_exe(candidate: &Path) -> bool {
     else {
         return false;
     };
-    let deadline = std::time::Instant::now() + HOOK_HELPER_PROBE_TIMEOUT;
-    loop {
+
+    // Drain stdout on its own thread. The probe's answer is one short line,
+    // but a candidate that writes past the pipe buffer with nobody reading
+    // blocks in `write` and never exits — turning an immediate "no" into the
+    // full `timeout`, on the daemon's boot path.
+    let mut stdout = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut answer = Vec::new();
+        if let Some(stdout) = stdout.as_mut() {
+            let _ = stdout.read_to_end(&mut answer);
+        }
+        answer
+    });
+
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                let Ok(output) = child.wait_with_output() else {
-                    return false;
-                };
-                return status.success()
-                    && String::from_utf8_lossy(&output.stdout).trim()
-                        == HOOK_HELPER_PROBE_RESPONSE;
-            }
+            Ok(Some(status)) => break Some(status),
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -477,16 +490,21 @@ fn is_hook_capable_exe(candidate: &Path) -> bool {
                 if matches!(outcome, Ok(None)) {
                     tracing::warn!(
                         candidate = %candidate.display(),
-                        timeout = ?HOOK_HELPER_PROBE_TIMEOUT,
+                        ?timeout,
                         "hook-helper probe timed out; treating the candidate as not hook-capable"
                     );
                 }
                 let _ = child.kill();
                 let _ = child.wait();
-                return false;
+                break None;
             }
         }
-    }
+    };
+
+    // The child is gone either way, so the pipe is at EOF and this joins.
+    let answer = reader.join().unwrap_or_default();
+    status.is_some_and(|status| status.success())
+        && String::from_utf8_lossy(&answer).trim() == HOOK_HELPER_PROBE_RESPONSE
 }
 
 /// Copy `current` to the stable `stable` path when the copy is missing or
@@ -18899,6 +18917,63 @@ mod tests {
         assert!(stable.is_file());
     }
 
+    /// A candidate that never answers has to be abandoned at the deadline, not
+    /// waited on forever — the probe runs synchronously on the daemon's boot
+    /// path, so a wedged one stalls startup.
+    #[cfg(unix)]
+    #[test]
+    fn hook_probe_gives_up_at_its_deadline() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let wedged = directory.path().join("lazybox");
+        write_fake_exe(&wedged, "#!/bin/sh\nsleep 120\n");
+
+        let started = std::time::Instant::now();
+        let capable = is_hook_capable_exe_within(&wedged, Duration::from_millis(200));
+        let elapsed = started.elapsed();
+
+        assert!(
+            !capable,
+            "a candidate that never answers is not hook-capable"
+        );
+        assert!(
+            elapsed < Duration::from_secs(30),
+            "the probe waited {elapsed:?} past a 200ms deadline"
+        );
+    }
+
+    /// The answer is read while the candidate runs, not after it exits. A
+    /// candidate that writes past the pipe buffer would otherwise block in
+    /// `write` with nobody draining, never exit, and burn the whole deadline
+    /// on the boot path before reporting a "no" it could have reported at once.
+    #[cfg(unix)]
+    #[test]
+    fn hook_probe_does_not_deadlock_on_a_candidate_that_floods_stdout() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let noisy = directory.path().join("lazybox");
+        // 4096 × 64 B = 256 KB, comfortably past the 64 KB pipe buffer.
+        write_fake_exe(
+            &noisy,
+            &format!(
+                "#!/bin/sh\ni=0\nwhile [ $i -lt 4096 ]; do\n  echo \"{}\"\n  i=$((i + 1))\ndone\necho {}\n",
+                "x".repeat(63),
+                HOOK_HELPER_PROBE_RESPONSE
+            ),
+        );
+
+        let started = std::time::Instant::now();
+        let capable = is_hook_capable_exe_within(&noisy, Duration::from_secs(20));
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(15),
+            "the probe blocked on a full stdout pipe for {elapsed:?}"
+        );
+        assert!(
+            !capable,
+            "stdout that is not exactly the probe response is not an answer"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn stable_hook_exe_reports_a_copy_failure_as_none() {
@@ -19109,9 +19184,13 @@ mod tests {
 
     #[test]
     fn expand_tilde_replaces_leading_tilde_with_home() {
-        // SAFETY: tests in this crate run with --test-threads default.
-        // We don't read HOME elsewhere in this test file, and we
-        // restore it on exit.
+        // The binary is the scope that matters, not this file: `HOME` backs
+        // `paths::home()` and the machine-wide credential/codex homes, which
+        // sibling tests in other modules resolve. Hold the shared env lock so
+        // the redirect can't land under one of them.
+        let _env = crate::test_env::lock();
+        // SAFETY: the lock excludes every other environment reader and writer
+        // in this test binary, and HOME is restored below.
         let prior = std::env::var_os("HOME");
         unsafe {
             std::env::set_var("HOME", "/tmp/fake-home");

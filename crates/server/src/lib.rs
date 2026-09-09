@@ -82,14 +82,13 @@ mod config_sandbox {
             home.contains("lazybox-server-config-sandbox-"),
             "server tests must run against a sandboxed config home, got {home}",
         );
-        // The built-in Claude menu is what a defaulted config yields; a
-        // machine-local `models:` override would replace this label.
-        let models = lazybox_config::Config::load()
-            .unwrap_or_default()
-            .agent_models("claude");
+        // A defaulted config yields the built-in menu verbatim; any
+        // machine-local `models:` block would show up as a difference.
         assert_eq!(
-            models.tier("L").map(|tier| tier.label.as_str()),
-            Some("Opus"),
+            lazybox_config::Config::load()
+                .unwrap_or_default()
+                .agent_models("claude"),
+            lazybox_core::AgentModels::builtin("claude").expect("claude has a built-in menu"),
             "a sandboxed load must yield the built-in tier menu",
         );
     }

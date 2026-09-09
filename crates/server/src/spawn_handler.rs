@@ -12976,7 +12976,13 @@ mod tests {
         let snapshot = snapshot_terminals(&restarted).await;
         assert_eq!(snapshot.len(), 1);
         assert!(snapshot[0].on_main);
-        assert_eq!(snapshot[0].model_label.as_deref(), Some("Opus"));
+        // Resolved from the built-in menu rather than spelled out: this
+        // test covers label resolution through the recovered alias, and a
+        // model rename must not land on it.
+        let l_tier_label = lazybox_core::AgentModels::builtin("claude")
+            .and_then(|models| models.tier("L").map(|tier| tier.label.clone()))
+            .expect("claude's built-in L tier");
+        assert_eq!(snapshot[0].model_label, Some(l_tier_label));
         let context = restarted
             .agent_recovery
             .context(terminal_id)

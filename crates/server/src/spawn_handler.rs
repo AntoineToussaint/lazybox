@@ -213,47 +213,63 @@ pub(crate) fn alloc_terminal_id(store: &dyn lazybox_store::Store) -> TerminalId 
     TerminalId(id)
 }
 
-/// How a workspace task's declared priority routes onto an agent's model
-/// menu. Keeps "no priority declared" distinct from "declared but this
-/// agent maps it to nothing": the latter silently falls back to the
-/// default model, and looks from the outside exactly like the label was
-/// ignored, so the spawn path logs it (issue #748).
+/// How a workspace task's declared capability tier routes onto an
+/// agent's model menu. Keeps "nothing declared" distinct from "declared
+/// but this agent routes it nowhere": the latter silently falls back to
+/// the default model, and looks from the outside exactly like the label
+/// was ignored, so the spawn path reports it (issues #748, #1598).
 #[derive(Debug, PartialEq, Eq)]
-enum PriorityRoute {
-    /// The task declared no priority — nothing to route.
+enum CapabilityRoute {
+    /// The task declared no capability tier — nothing to route.
     None,
-    /// The declared priority maps to this tier alias.
+    /// The declared tier maps to this tier alias.
     Mapped(String),
-    /// The priority is declared, but this agent's menu maps it to no
-    /// tier — the spawn keeps its default tier / model.
-    Unmapped(lazybox_core::PriorityTier),
+    /// The tier is declared, but this agent's menu maps it to nothing —
+    /// the spawn keeps its default tier / model. The built-in Claude
+    /// menu leaves `best` unmapped, so this is the shape a `best` label
+    /// lands in until the user defines a max tier.
+    Unmapped(lazybox_core::CapabilityTier),
+    /// The declared tier maps to a model tier lazybox refuses to route a
+    /// coding task to — a creative-class (Fable) model. The spawn keeps
+    /// its default.
+    Excluded {
+        tier: lazybox_core::CapabilityTier,
+        alias: String,
+    },
 }
 
-/// Pure decision behind [`priority_alias_for`]: route the (optional)
-/// declared priority onto `models`, without touching the store, so the
-/// three outcomes are individually testable.
-fn route_declared_priority(
-    tier: Option<lazybox_core::PriorityTier>,
+/// Pure decision behind [`capability_alias_for`]: route the (optional)
+/// declared capability tier onto `models`, without touching the store,
+/// so the outcomes are individually testable.
+fn route_declared_capability(
+    tier: Option<lazybox_core::CapabilityTier>,
     models: &lazybox_core::AgentModels,
-) -> PriorityRoute {
-    match tier {
-        None => PriorityRoute::None,
-        Some(tier) => match models.alias_for_priority(tier) {
-            Some(alias) => PriorityRoute::Mapped(alias.to_string()),
-            None => PriorityRoute::Unmapped(tier),
+) -> CapabilityRoute {
+    let Some(tier) = tier else {
+        return CapabilityRoute::None;
+    };
+    match (
+        models.alias_for_capability(tier),
+        models.capability.alias_for(tier),
+    ) {
+        (Some(alias), _) => CapabilityRoute::Mapped(alias.to_string()),
+        (None, Some(alias)) => CapabilityRoute::Excluded {
+            tier,
+            alias: alias.to_string(),
         },
+        (None, None) => CapabilityRoute::Unmapped(tier),
     }
 }
 
-/// The tier alias the workspace task's declared priority
+/// The tier alias the workspace task's declared capability tier
 /// (`best`/`high`/`medium`/`low` label or `@best`/`@high`/`@medium`/`@low`
-/// body marker) maps to for `models`. `None` when the task declares no
-/// priority, the workspace/task can't be loaded, or this agent maps that
-/// priority to nothing — the spawn then keeps its default tier / model.
-/// The declared-but-unmapped case is logged so it doesn't look like the
-/// priority was silently ignored. Used only as the fallback when no
-/// explicit tier chord was passed.
-fn priority_alias_for(
+/// body marker) maps to for `models`. `None` when the task declares
+/// nothing, the workspace/task can't be loaded, or this agent routes that
+/// tier nowhere — the spawn then keeps its default tier / model. The
+/// declared-but-unrouted cases are logged *and* announced, so a label
+/// that buys nothing never looks like one that worked. Used only as the
+/// fallback when no explicit tier chord was passed.
+fn capability_alias_for(
     config: &ServerConfig,
     session_key: &SessionKey,
     models: &lazybox_core::AgentModels,
@@ -262,20 +278,36 @@ fn priority_alias_for(
         .ok()
         .and_then(|w| {
             w.primary_task()
-                .and_then(lazybox_core::resolve_priority_tier)
+                .and_then(lazybox_core::resolve_capability_tier)
         });
-    match route_declared_priority(tier, models) {
-        PriorityRoute::None => None,
-        PriorityRoute::Mapped(alias) => Some(alias),
-        PriorityRoute::Unmapped(tier) => {
-            tracing::info!(
-                priority = tier.as_str(),
-                "spawn: task declares `{}` priority but this agent maps it to no model tier — falling back to the default model",
+    let (body, alias) = match route_declared_capability(tier, models) {
+        CapabilityRoute::None => return None,
+        CapabilityRoute::Mapped(alias) => return Some(alias),
+        CapabilityRoute::Unmapped(tier) => (
+            format!(
+                "`{}` selects a model tier, but this agent maps it to none — running the default model",
                 tier.as_str()
-            );
-            None
-        }
-    }
+            ),
+            None,
+        ),
+        CapabilityRoute::Excluded { tier, alias } => (
+            format!(
+                "`{}` maps to tier {alias:?}, which is not a coding model — running the default model",
+                tier.as_str()
+            ),
+            Some(alias),
+        ),
+    };
+    tracing::warn!(
+        capability = tier.map(lazybox_core::CapabilityTier::as_str),
+        alias,
+        "spawn: {body}"
+    );
+    let _ = config.bus.send(Event::Notification {
+        title: "Model tier not applied".to_string(),
+        body,
+    });
+    None
 }
 
 /// Absolute path to the per-terminal Claude settings file lazybox writes
@@ -1569,9 +1601,9 @@ async fn handle_spawn_inner(
     // text's privileges (#1392).
     let would_skip_permissions =
         crate::spawn_plan::skip_permissions_for(autonomous, &cfg, untrusted);
-    let priority_model_alias = match &kind {
+    let capability_model_alias = match &kind {
         TerminalKind::Agent(agent_id) if model_alias.is_none() => {
-            priority_alias_for(config, &session_key, &cfg.agent_models(agent_id))
+            capability_alias_for(config, &session_key, &cfg.agent_models(agent_id))
         }
         _ => None,
     };
@@ -2034,7 +2066,7 @@ async fn handle_spawn_inner(
             hook_settings,
             hook_command: argv_hook_command,
             repo_env,
-            priority_model_alias,
+            capability_model_alias,
             autonomous,
             autonomous_untrusted: untrusted,
             landed_on_main,
@@ -12317,22 +12349,53 @@ mod tests {
     }
 
     #[test]
-    fn route_declared_priority_distinguishes_unmapped_from_absent() {
-        use lazybox_core::PriorityTier;
+    fn route_declared_capability_distinguishes_unmapped_from_absent() {
+        use lazybox_core::CapabilityTier;
         let models = lazybox_core::AgentModels::builtin("claude").unwrap();
-        // No priority declared → nothing to route.
-        assert_eq!(route_declared_priority(None, &models), PriorityRoute::None);
-        // A mapped priority yields its tier alias.
+        // Nothing declared → nothing to route.
         assert_eq!(
-            route_declared_priority(Some(PriorityTier::High), &models),
-            PriorityRoute::Mapped("L".into())
+            route_declared_capability(None, &models),
+            CapabilityRoute::None
+        );
+        // A mapped tier yields its tier alias.
+        assert_eq!(
+            route_declared_capability(Some(CapabilityTier::High), &models),
+            CapabilityRoute::Mapped("L".into())
         );
         // `best` is declared but the built-in menu maps it to nothing —
-        // this must be distinct from `None` so the fallback is logged,
-        // not silently indistinguishable from "no priority".
+        // this must be distinct from `None` so the fallback is reported,
+        // not silently indistinguishable from "declared nothing".
         assert_eq!(
-            route_declared_priority(Some(PriorityTier::Best), &models),
-            PriorityRoute::Unmapped(PriorityTier::Best)
+            route_declared_capability(Some(CapabilityTier::Best), &models),
+            CapabilityRoute::Unmapped(CapabilityTier::Best)
+        );
+    }
+
+    #[test]
+    fn route_declared_capability_refuses_a_fable_tier() {
+        use lazybox_core::CapabilityTier;
+        // A capability map aimed at a creative-class model is reported as
+        // excluded, not routed: a `high` label must never spawn a coding
+        // task on Fable (#1598).
+        let models = lazybox_core::AgentModels {
+            tiers: vec![lazybox_core::ModelTier {
+                alias: "F".into(),
+                label: "Fable".into(),
+                short: None,
+                args: vec!["--model".into(), "claude-fable-5".into()],
+            }],
+            capability: lazybox_core::CapabilityAliases {
+                high: Some("F".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            route_declared_capability(Some(CapabilityTier::High), &models),
+            CapabilityRoute::Excluded {
+                tier: CapabilityTier::High,
+                alias: "F".into(),
+            }
         );
     }
 
@@ -12900,7 +12963,7 @@ mod tests {
                 hook_settings: None,
                 hook_command: None,
                 repo_env: vec![("PROJECT_ENV".into(), "test".into())],
-                priority_model_alias: None,
+                capability_model_alias: None,
                 autonomous: false,
                 autonomous_untrusted: false,
                 landed_on_main: true,
@@ -18688,7 +18751,7 @@ mod tests {
         );
     }
 
-    /// Persist a workspace built from `task` so `priority_alias_for`
+    /// Persist a workspace built from `task` so `capability_alias_for`
     /// (which loads it by session key) can read its primary task.
     fn persist_task_workspace(config: &ServerConfig, task: Task) -> SessionKey {
         let ws = Workspace::from_task(task, Utc::now());
@@ -18705,7 +18768,7 @@ mod tests {
     }
 
     #[test]
-    fn priority_alias_for_maps_label_to_builtin_tier_alias() {
+    fn capability_alias_for_maps_label_to_builtin_tier_alias() {
         let config =
             ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
         let models = lazybox_core::AgentModels::builtin("claude").unwrap();
@@ -18715,7 +18778,7 @@ mod tests {
         let key = persist_task_workspace(&config, high);
         // high → Claude's `L` (Opus) tier.
         assert_eq!(
-            priority_alias_for(&config, &key, &models).as_deref(),
+            capability_alias_for(&config, &key, &models).as_deref(),
             Some("L")
         );
 
@@ -18724,22 +18787,22 @@ mod tests {
         low.body = Some("please handle this @low".into());
         let key = persist_task_workspace(&config, low);
         assert_eq!(
-            priority_alias_for(&config, &key, &models).as_deref(),
+            capability_alias_for(&config, &key, &models).as_deref(),
             Some("S")
         );
     }
 
     #[test]
-    fn priority_alias_for_none_without_priority_or_mapping() {
+    fn capability_alias_for_none_without_a_declared_tier_or_mapping() {
         let config =
             ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
-        // No priority declared → no alias, even for an agent with a map.
+        // Nothing declared → no alias, even for an agent with a map.
         let key = persist_task_workspace(&config, task_for("github", "acme/widget#7"));
         let claude = lazybox_core::AgentModels::builtin("claude").unwrap();
-        assert_eq!(priority_alias_for(&config, &key, &claude), None);
+        assert_eq!(capability_alias_for(&config, &key, &claude), None);
 
-        // A high-priority task, but an agent menu with no priority map →
-        // no alias (agent keeps its default model).
+        // A `high`-labelled task, but an agent menu with no capability map
+        // → no alias (agent keeps its default model).
         let mut high = task_for("github", "acme/widget#8");
         high.labels = vec![lazybox_core::Label::new("high")];
         let key = persist_task_workspace(&config, high);
@@ -18747,7 +18810,33 @@ mod tests {
             tiers: claude.tiers.clone(),
             ..Default::default()
         };
-        assert_eq!(priority_alias_for(&config, &key, &no_map), None);
+        assert_eq!(capability_alias_for(&config, &key, &no_map), None);
+    }
+
+    #[test]
+    fn an_unrouted_capability_label_announces_itself() {
+        // A `best` label the built-in menu maps to nothing must not look
+        // like a label that worked — the run silently uses the default
+        // model, so say so where the user can see it (#1598).
+        let config =
+            ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
+        let mut events = config.bus.subscribe();
+        let models = lazybox_core::AgentModels::builtin("claude").unwrap();
+
+        let mut best = task_for("github", "acme/widget#9");
+        best.labels = vec![lazybox_core::Label::new("best")];
+        let key = persist_task_workspace(&config, best);
+        assert_eq!(capability_alias_for(&config, &key, &models), None);
+
+        let event = events.try_recv().expect("a notification was published");
+        let Event::Notification { title, body } = event else {
+            panic!("expected a notification, got {event:?}");
+        };
+        assert_eq!(title, "Model tier not applied");
+        assert!(
+            body.contains("best") && body.contains("default model"),
+            "the notice must name the label and what ran instead: {body}"
+        );
     }
 
     #[cfg(unix)]

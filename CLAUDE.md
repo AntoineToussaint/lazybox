@@ -553,13 +553,27 @@ claude-opus-5`) so the pin is checkable (#1568). A `models:` block
 tier replaces the same-alias built-in tier in place and a new alias
 appends, so `tiers: [{alias: L, args: ["--model", "claude-opus-5[1m]"]}]`
 retunes one tier and keeps the rest of the menu plus the built-in
-priority routing. Because an overlay can only add, `replace: true` on
+capability routing. Because an overlay can only add, `replace: true` on
 the block takes it as the whole menu — the way to express a
 *restricted* set (Sonnet only, no `L` chord, no `high` → Opus
 routing); without it, a block that pins a `default` while inheriting a
-priority mapping to a tier it never declared is warned about at daemon
+capability mapping to a tier it never declared is warned about at daemon
 start, since a labelled task would otherwise route around the pinned
-default in silence. The alias is agent-agnostic at the chord — the daemon
+default in silence. A task can also *ask* for a tier: a `best`/`high`/
+`medium`/`low` label (or an `@best`/`@high`/`@medium`/`@low` body
+marker) resolves through `CapabilityTier`
+(`crates/core/src/capability.rs`) and `agents.<id>.models.capability`
+to a model. That is its **only** effect — it is a model-capability
+tier, not a priority: nothing ranks, queues, orders, or schedules work
+by it, and the genuinely-ranking `Priority` on `Task` (Linear's field)
+is a different type that merely shares the word (#1598). The config key
+was `models.priority` before the rename; the old spelling still parses,
+loses to `capability` where both name a tier, and warns at daemon
+start. A declared tier this agent routes nowhere — `best` on the
+built-in Claude menu, or a mapping onto a Fable tier, which capability
+routing refuses outright so a label can never put a coding task on a
+writing model — flashes a footer notice instead of quietly running the
+default. The alias is agent-agnostic at the chord — the daemon
 maps it to whatever agent the spawn targets — and the picked tier's
 label rides a `◆ Opus` tab badge. The `a` leader also carries the bulk
 **rate-limit recovery** chord `a R` (restart rate-limited): for every

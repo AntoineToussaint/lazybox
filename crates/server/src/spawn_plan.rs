@@ -61,7 +61,7 @@ pub(crate) struct SpawnPlanInput {
     pub hook_settings: Option<PathBuf>,
     pub hook_command: Option<String>,
     pub repo_env: Vec<(String, String)>,
-    pub priority_model_alias: Option<String>,
+    pub capability_model_alias: Option<String>,
     pub autonomous: bool,
     /// Whether a *foreign* actor triggered this autonomous spawn (a
     /// mention from someone other than the viewer, or a label on an
@@ -151,7 +151,7 @@ pub(crate) fn build_spawn_plan(
         hook_settings,
         hook_command,
         repo_env,
-        priority_model_alias,
+        capability_model_alias,
         autonomous,
         autonomous_untrusted,
         landed_on_main,
@@ -179,7 +179,9 @@ pub(crate) fn build_spawn_plan(
         ),
         _ => None,
     };
-    let mut resolved_model_alias = model_alias.clone().or_else(|| priority_model_alias.clone());
+    let mut resolved_model_alias = model_alias
+        .clone()
+        .or_else(|| capability_model_alias.clone());
     let (model_args, model_label) = match &kind {
         TerminalKind::Agent(agent_id) => {
             let models = cfg.agent_models(agent_id);
@@ -657,7 +659,7 @@ mod tests {
             hook_settings: None,
             hook_command: None,
             repo_env: Vec::new(),
-            priority_model_alias: None,
+            capability_model_alias: None,
             autonomous: false,
             autonomous_untrusted: false,
             landed_on_main: false,
@@ -871,11 +873,11 @@ mod tests {
     }
 
     #[test]
-    fn explicit_model_alias_wins_over_priority_fallback() {
+    fn explicit_model_alias_wins_over_the_capability_fallback() {
         let cfg = lazybox_config::Config::default();
         let mut input = input(TerminalKind::Agent("claude".into()));
         input.model_alias = Some("S".into());
-        input.priority_model_alias = Some("L".into());
+        input.capability_model_alias = Some("L".into());
 
         let plan =
             build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("valid plan");

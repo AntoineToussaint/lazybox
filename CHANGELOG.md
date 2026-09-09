@@ -6,6 +6,30 @@ contain explicitly documented compatibility changes.
 
 ## [Unreleased]
 
+### Changed
+
+- **`best`/`high`/`medium`/`low` labels are model tiers, not priorities**
+  (#1598). They only ever chose which model a spawned agent runs on, but the
+  naming said otherwise and readers — humans and agents alike — kept inventing
+  a ranking lazybox does not have. The concept is now named for what it does:
+  `CapabilityTier` in the code, and `agents.<id>.models.capability` in YAML.
+  The old `agents.<id>.models.priority` key still parses, loses to
+  `capability` where both map the same tier, and warns at daemon start naming
+  the rename. `Task.priority` (Linear's genuine ranking field) is untouched,
+  and the labels themselves are unchanged.
+
+### Fixed
+
+- **A model tier that buys nothing now says so** (#1598). A declared tier this
+  agent routes nowhere — `best`, which the built-in Claude menu deliberately
+  leaves unmapped — used to fall back to the default model with only a debug
+  log to show for it, indistinguishable from a label that worked. It now
+  flashes a notice naming the label and what ran instead.
+- **A capability mapping can no longer route a coding task to Fable** (#1598).
+  Fable was already excluded from *default* resolution, but a
+  `capability.high: <fable tier>` mapping walked straight past that guard. The
+  tier stays reachable through an explicit chord.
+
 ## [0.1.15] - 2026-09-07
 
 The onboarding and coordination release. Lazybox stops explaining itself in a

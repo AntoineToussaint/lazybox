@@ -37,9 +37,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn priority_aliases_is_unset_only_when_all_empty() {
-        assert!(PriorityAliases::default().is_unset());
-        let set = PriorityAliases {
+    fn capability_aliases_is_unset_only_when_all_empty() {
+        assert!(CapabilityAliases::default().is_unset());
+        let set = CapabilityAliases {
             high: Some("L".into()),
             ..Default::default()
         };
@@ -48,13 +48,13 @@ mod tests {
 
     #[test]
     fn overlay_replaces_set_fields_and_keeps_the_rest() {
-        let mut base = PriorityAliases {
+        let mut base = CapabilityAliases {
             best: None,
             high: Some("L".into()),
             medium: Some("M".into()),
             low: Some("S".into()),
         };
-        base.overlay(&PriorityAliases {
+        base.overlay(&CapabilityAliases {
             best: Some("B".into()),
             high: Some("X".into()),
             ..Default::default()
@@ -68,8 +68,8 @@ mod tests {
     }
 
     #[test]
-    fn best_priority_maps_to_its_alias() {
-        use crate::PriorityTier;
+    fn best_capability_maps_to_its_alias() {
+        use crate::CapabilityTier;
         let m = AgentModels {
             tiers: vec![ModelTier {
                 alias: "B".into(),
@@ -82,15 +82,15 @@ mod tests {
                     "max".into(),
                 ],
             }],
-            priority: PriorityAliases {
+            capability: CapabilityAliases {
                 best: Some("B".into()),
                 ..Default::default()
             },
             ..Default::default()
         };
-        assert_eq!(m.alias_for_priority(PriorityTier::Best), Some("B"));
+        assert_eq!(m.alias_for_capability(CapabilityTier::Best), Some("B"));
         assert_eq!(
-            m.resolve_args(m.alias_for_priority(PriorityTier::Best)),
+            m.resolve_args(m.alias_for_capability(CapabilityTier::Best)),
             vec![
                 "--model".to_string(),
                 "opus".to_string(),
@@ -102,24 +102,25 @@ mod tests {
 
     #[test]
     fn dangling_aliases_flags_every_undefined_reference() {
-        // Default names an absent alias, and each priority points at a
-        // tier the (empty) menu doesn't define.
+        // Default names an absent alias, and each capability tier points
+        // at a tier the (empty) menu doesn't define.
         let m = AgentModels {
             default: Some("L".into()),
             replace: false,
             tiers: vec![],
-            priority: PriorityAliases {
+            capability: CapabilityAliases {
                 best: Some("B".into()),
                 high: Some("H".into()),
                 ..Default::default()
             },
+            deprecated_priority: CapabilityAliases::default(),
         };
         assert_eq!(
             m.dangling_aliases(),
             vec![
                 ("default".to_string(), "L".to_string()),
-                ("priority.best".to_string(), "B".to_string()),
-                ("priority.high".to_string(), "H".to_string()),
+                ("capability.best".to_string(), "B".to_string()),
+                ("capability.high".to_string(), "H".to_string()),
             ]
         );
     }
@@ -279,34 +280,69 @@ mod tests {
     }
 
     #[test]
-    fn builtin_claude_maps_priority_to_tier_and_model() {
-        use crate::PriorityTier;
+    fn builtin_claude_maps_capability_to_tier_and_model() {
+        use crate::CapabilityTier;
         let m = AgentModels::builtin("claude").unwrap();
         // high → Opus, medium → Sonnet, low → Haiku.
-        assert_eq!(m.alias_for_priority(PriorityTier::High), Some("L"));
-        assert_eq!(m.alias_for_priority(PriorityTier::Medium), Some("M"));
-        assert_eq!(m.alias_for_priority(PriorityTier::Low), Some("S"));
+        assert_eq!(m.alias_for_capability(CapabilityTier::High), Some("L"));
+        assert_eq!(m.alias_for_capability(CapabilityTier::Medium), Some("M"));
+        assert_eq!(m.alias_for_capability(CapabilityTier::Low), Some("S"));
         // And each alias resolves to that tier's model args.
         assert_eq!(
-            m.resolve_args(m.alias_for_priority(PriorityTier::High)),
+            m.resolve_args(m.alias_for_capability(CapabilityTier::High)),
             vec!["--model".to_string(), "claude-opus-5".to_string()]
         );
         assert_eq!(
-            m.resolve_args(m.alias_for_priority(PriorityTier::Low)),
+            m.resolve_args(m.alias_for_capability(CapabilityTier::Low)),
             vec!["--model".to_string(), "claude-haiku-4-5".to_string()]
         );
     }
 
     #[test]
-    fn unmapped_priority_yields_no_alias() {
-        use crate::PriorityTier;
-        // An agent menu with no priority map (the default) never routes
-        // a priority to a tier — the spawn keeps the agent's default.
+    fn unmapped_capability_yields_no_alias() {
+        use crate::CapabilityTier;
+        // An agent menu with no capability map (the default) never routes
+        // a declared tier to a model — the spawn keeps the agent's default.
         let m = AgentModels {
             tiers: AgentModels::builtin("claude").unwrap().tiers,
             ..Default::default()
         };
-        assert_eq!(m.alias_for_priority(PriorityTier::High), None);
+        assert_eq!(m.alias_for_capability(CapabilityTier::High), None);
+    }
+
+    #[test]
+    fn a_capability_mapped_onto_a_fable_tier_never_routes() {
+        use crate::CapabilityTier;
+        // Whatever the config says, a `best`/`high` label must not land a
+        // coding task on a creative-class model (#1598).
+        let m = AgentModels {
+            tiers: vec![ModelTier {
+                alias: "F".into(),
+                label: "Fable".into(),
+                short: None,
+                args: vec!["--model".into(), "claude-fable-5".into()],
+            }],
+            capability: CapabilityAliases {
+                best: Some("F".into()),
+                high: Some("F".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(m.alias_for_capability(CapabilityTier::Best), None);
+        assert_eq!(m.alias_for_capability(CapabilityTier::High), None);
+        assert!(
+            m.resolve_args(m.alias_for_capability(CapabilityTier::High))
+                .is_empty()
+        );
+        // The raw mapping is still readable, so the spawn path can say
+        // *why* the label routed nowhere.
+        assert_eq!(m.capability.alias_for(CapabilityTier::High), Some("F"));
+        // And the tier stays selectable by an explicit chord.
+        assert_eq!(
+            m.resolve_args(Some("F")),
+            vec!["--model".to_string(), "claude-fable-5".to_string()]
+        );
     }
 }
 
@@ -410,17 +446,21 @@ impl ModelTier {
     }
 }
 
-/// Which tier alias each declared task priority (`best` / `high` /
+/// Which tier alias each declared capability tier (`best` / `high` /
 /// `medium` / `low`) maps to for an **autonomous** or bare-`w` spawn.
-/// This is the config-driven bridge between the priority a task declares
+/// This is the config-driven bridge between the tier a task declares
 /// (a label or an `@best`/`@high`/`@medium`/`@low` body marker; see
-/// [`resolve_priority_tier`](crate::resolve_priority_tier)) and this
+/// [`resolve_capability_tier`](crate::resolve_capability_tier)) and this
 /// agent's own alias menu — so `high` can mean `L` (Opus) for Claude
-/// but a different alias for another agent. An unset priority (or one
+/// but a different alias for another agent. An unset tier (or one
 /// pointing at an alias the menu doesn't define) picks no model, so the
 /// spawn falls back to the agent's default tier / default model.
+///
+/// The tokens are model-capability names, not priorities: they choose
+/// which model runs the task and nothing else — no ranking, no queue,
+/// no ordering (#1598).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct PriorityAliases {
+pub struct CapabilityAliases {
     #[serde(default)]
     pub best: Option<String>,
     #[serde(default)]
@@ -431,14 +471,27 @@ pub struct PriorityAliases {
     pub low: Option<String>,
 }
 
-impl PriorityAliases {
-    /// True when no priority maps to an alias — the map is absent from
-    /// config and every priority falls through to the default tier.
+impl CapabilityAliases {
+    /// True when no tier maps to an alias — the map is absent from
+    /// config and every tier falls through to the default tier.
     pub fn is_unset(&self) -> bool {
         self.best.is_none() && self.high.is_none() && self.medium.is_none() && self.low.is_none()
     }
 
-    /// Each `(priority-token, mapped-alias)` pair the user actually set,
+    /// The alias `tier` maps to, verbatim — no eligibility filtering.
+    /// [`AgentModels::alias_for_capability`] is the resolver callers
+    /// want; this is the raw mapping, for diagnostics that need to say
+    /// *what* a tier pointed at even when it isn't routable.
+    pub fn alias_for(&self, tier: crate::CapabilityTier) -> Option<&str> {
+        match tier {
+            crate::CapabilityTier::Best => self.best.as_deref(),
+            crate::CapabilityTier::High => self.high.as_deref(),
+            crate::CapabilityTier::Medium => self.medium.as_deref(),
+            crate::CapabilityTier::Low => self.low.as_deref(),
+        }
+    }
+
+    /// Each `(tier-token, mapped-alias)` pair the user actually set,
     /// in strongest-first order. Feeds config-load validation that warns
     /// on an alias the tier menu doesn't define.
     pub fn declared(&self) -> impl Iterator<Item = (&'static str, &str)> {
@@ -452,12 +505,12 @@ impl PriorityAliases {
         .filter_map(|(name, alias)| alias.as_deref().map(|a| (name, a)))
     }
 
-    /// Overlay `other`'s set fields onto `self`, per priority: a priority
+    /// Overlay `other`'s set fields onto `self`, per tier: a tier
     /// `other` maps replaces `self`'s mapping for it; one `other` leaves
-    /// unset keeps `self`'s. Used to layer a user's partial `priority:`
-    /// map onto an inherited built-in map without wiping the priorities
+    /// unset keeps `self`'s. Used to layer a user's partial `capability:`
+    /// map onto an inherited built-in map without wiping the tiers
     /// the user didn't mention.
-    pub fn overlay(&mut self, other: &PriorityAliases) {
+    pub fn overlay(&mut self, other: &CapabilityAliases) {
         if other.best.is_some() {
             self.best = other.best.clone();
         }
@@ -485,10 +538,23 @@ pub struct AgentModels {
     /// which-key popup / help display order.
     #[serde(default)]
     pub tiers: Vec<ModelTier>,
-    /// Priority → tier-alias map used when a spawn declares no explicit
-    /// tier chord but the task carries a `high`/`medium`/`low` priority.
+    /// Capability-tier → tier-alias map used when a spawn declares no
+    /// explicit tier chord but the task carries a `best`/`high`/`medium`/
+    /// `low` label or body marker.
     #[serde(default)]
-    pub priority: PriorityAliases,
+    pub capability: CapabilityAliases,
+    /// Deprecated spelling of [`Self::capability`], still accepted so a
+    /// config written before the rename keeps routing (#1598). Folded
+    /// under `capability` — which wins where both map the same tier —
+    /// by `Config::agent_models`, and warned about at daemon start.
+    /// Serialized only when the user actually wrote it, so a save
+    /// never invents the dead key.
+    #[serde(
+        default,
+        rename = "priority",
+        skip_serializing_if = "CapabilityAliases::is_unset"
+    )]
+    pub deprecated_priority: CapabilityAliases,
     /// Take this block as the whole menu instead of layering it over the
     /// agent's built-in one. Overlay is the default because retuning one
     /// tier shouldn't cost you the rest of the menu (#1568) — but overlay
@@ -505,27 +571,43 @@ impl AgentModels {
         self.tiers.iter().find(|t| t.alias == alias)
     }
 
-    /// The tier alias this agent maps a declared task priority to, if
-    /// any. Feeds [`Self::resolve_args`] on the autonomous / bare-`w`
-    /// spawn path (an explicit `w S` chord bypasses it).
-    pub fn alias_for_priority(&self, tier: crate::PriorityTier) -> Option<&str> {
-        match tier {
-            crate::PriorityTier::Best => self.priority.best.as_deref(),
-            crate::PriorityTier::High => self.priority.high.as_deref(),
-            crate::PriorityTier::Medium => self.priority.medium.as_deref(),
-            crate::PriorityTier::Low => self.priority.low.as_deref(),
-        }
+    /// The capability map this block declares: the deprecated `priority`
+    /// key folded under the current `capability` one, which wins where
+    /// both name the same tier (#1598). Config's menu merge reads this
+    /// so no downstream reader ever has to know the old key existed.
+    pub fn declared_capability(&self) -> CapabilityAliases {
+        let mut folded = self.deprecated_priority.clone();
+        folded.overlay(&self.capability);
+        folded
     }
 
-    /// Aliases named by `default` or any `priority.*` that no tier in the
+    /// The tier alias this agent maps a declared capability tier to, if
+    /// any. Feeds [`Self::resolve_args`] on the autonomous / bare-`w`
+    /// spawn path (an explicit `w S` chord bypasses it).
+    ///
+    /// A mapping onto a tier that [`ModelTier::excluded_from_default`]
+    /// rejects — a creative-class model like Fable — resolves to `None`:
+    /// a label on a coding task must never land it on a writing model,
+    /// however the capability map is configured. The tier stays reachable
+    /// through an explicit chord, the same escape hatch the default
+    /// resolution leaves open.
+    pub fn alias_for_capability(&self, tier: crate::CapabilityTier) -> Option<&str> {
+        self.capability.alias_for(tier).filter(|alias| {
+            !self
+                .tier(alias)
+                .is_some_and(ModelTier::excluded_from_default)
+        })
+    }
+
+    /// Aliases named by `default` or any `capability.*` that no tier in the
     /// menu defines. Each is a dangling reference that resolves to no
     /// args — the spawn silently keeps the agent's own hard-coded model
     /// instead of the tier the config appears to request. Config load
     /// surfaces these as warnings so the no-op is discoverable.
     ///
     /// Returns `(source, alias)` pairs where `source` is `"default"` or a
-    /// `"priority.<tier>"` token, in a stable order (`default` first,
-    /// then priorities strongest-first).
+    /// `"capability.<tier>"` token, in a stable order (`default` first,
+    /// then capability tiers strongest-first).
     pub fn dangling_aliases(&self) -> Vec<(String, String)> {
         let sources = self
             .default
@@ -533,9 +615,9 @@ impl AgentModels {
             .map(|a| ("default".to_string(), a))
             .into_iter()
             .chain(
-                self.priority
+                self.capability
                     .declared()
-                    .map(|(name, alias)| (format!("priority.{name}"), alias)),
+                    .map(|(name, alias)| (format!("capability.{name}"), alias)),
             );
         sources
             .filter(|(_, alias)| self.tier(alias).is_none())
@@ -558,7 +640,7 @@ impl AgentModels {
     /// the same-alias tier in place (keeping menu order), an unknown
     /// alias appends. So a user can retune one tier without re-declaring
     /// the built-in menu around it — and without silently dropping the
-    /// tiers and priority mappings they didn't mention (#1568).
+    /// tiers and capability mappings they didn't mention (#1568).
     pub fn overlay_tiers(&mut self, tiers: &[ModelTier]) {
         for tier in tiers {
             match self.tiers.iter_mut().find(|t| t.alias == tier.alias) {
@@ -611,17 +693,20 @@ impl AgentModels {
                         args: vec!["--model".into(), "claude-opus-5".into()],
                     },
                 ],
-                // A declared priority routes to the matching tier:
-                // high → Opus, medium → Sonnet, low → Haiku. `best` is
-                // left unmapped: the built-in menu has no max-reasoning
+                // A declared capability tier routes to the matching model
+                // tier: high → Opus, medium → Sonnet, low → Haiku. `best`
+                // is left unmapped: the built-in menu has no max-reasoning
                 // tier, so a `best` run is opt-in — define a best tier
-                // (model + effort) and `priority.best` in YAML (#748).
-                priority: PriorityAliases {
+                // (model + effort) and `capability.best` in YAML (#748).
+                // The spawn path says so out loud rather than quietly
+                // running the default (#1598).
+                capability: CapabilityAliases {
                     best: None,
                     high: Some("L".into()),
                     medium: Some("M".into()),
                     low: Some("S".into()),
                 },
+                deprecated_priority: CapabilityAliases::default(),
             }),
             _ => None,
         }

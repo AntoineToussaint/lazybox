@@ -7,6 +7,7 @@ pub mod agent;
 pub mod autofix;
 pub mod branch_template;
 pub mod config;
+pub mod context_hygiene;
 pub mod conventions;
 pub mod epic;
 pub mod error_class;
@@ -36,6 +37,10 @@ pub use config::{
     KV_KEY_ARCHIVED, KV_KEY_LAYOUT, KV_KEY_SESSION_TOMBSTONES, KV_KEY_SETUP, KV_KEY_THEME,
     KV_PREFIX_ARCHIVED, KV_PREFIX_SESSION_TOMBSTONE, LinearScope, PaneLayout, PersistedSetup,
     ProviderConfig,
+};
+pub use context_hygiene::{
+    CONDENSED_MARKER, CompactionMode, CondenseKind, CondenseTag, ContextHygiene, Eligibility,
+    KV_PREFIX_CONDENSE, SkipReason, ToolResultFacts, is_condensed, render_condensed,
 };
 pub use conventions::{CommitStyle, Conventions};
 pub use epic::{EpicKey, EpicRecord};

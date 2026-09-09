@@ -42,24 +42,24 @@ Claude, and an unknown model alias falls back to that agent's default.
 ## Let the issue choose the tier
 
 You can choose the compute profile without putting a model alias in the
-`@lazybox` directive. Add a `high`, `medium`, or `low` GitHub label, or put the
-matching `@high`, `@medium`, or `@low` marker in the **issue body**:
+`@lazybox` directive. Add a `model:<tier>` GitHub label, or put the matching
+`@model:<tier>` marker in the **issue body**:
 
 ```text
-@high
+@model:l
 @lazybox codex
 ```
 
 When the next full GitHub sweep finds the trigger, lazybox opens the issue
-workspace and maps `high` through Codex's configured
-`agents.codex.models.priority` table. The selected tier's arguments can set
-both the concrete model and its reasoning effort. This is an end-to-end GitHub
-handoff: the issue declares the task and compute profile, and the mention
-starts it without opening the TUI.
+workspace and resolves `l` against Codex's configured `agents.codex.models`
+menu. The selected tier's arguments can set both the concrete model and its
+reasoning effort. This is an end-to-end GitHub handoff: the issue declares the
+task and compute profile, and the mention starts it without opening the TUI.
 
 An explicit model alias in the directive, such as `@lazybox codex S`, overrides
-the issue priority. Priority labels take precedence over body markers; when
-several labels or markers are present, the strongest one wins.
+the issue's own declaration. Labels take precedence over body markers. The
+deprecated `best` / `high` / `medium` / `low` keys still resolve through
+`models.priority`; a `model:` declaration on the same task outranks them.
 
 See [Run an agent per workspace → Let GitHub choose the model and
 effort](/docs/how-to/run-an-agent-per-workspace/#let-github-choose-the-model-and-effort)

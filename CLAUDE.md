@@ -539,9 +539,12 @@ on the contextual agent at the small / medium / large model, and
 `a S`/`a M`/`a L` spawn the default agent at that tier. Tiers are
 declared per agent under `agents.<id>.models` in YAML (an ordered
 `alias → { label, args }` menu plus a `default` tier for bare spawns);
-Claude ships a built-in Haiku/Sonnet/Opus menu (`claude-haiku-4-5` /
-`claude-sonnet-5` / `claude-opus-5`, `L` the default), other agents
-define their own. The ids are pinned bare — no `[1m]` long-context
+Claude ships a built-in Haiku/Sonnet/Opus/Fable menu (`claude-haiku-4-5` /
+`claude-sonnet-5` / `claude-opus-5` / `claude-fable-5-1`, `L` the
+default), other agents define their own. `XL` (Fable) is two chars, so
+it claims no chord and `excluded_from_default` keeps it off every bare
+spawn — the top of the ladder is reached by asking for it, with a
+`model:xl` label or the legacy `best` key (#1600). The ids are pinned bare — no `[1m]` long-context
 suffix, whose premium past 200k tokens a bare spawn must not opt into;
 a user who wants it declares a tier of their own. Because a bare spawn
 always passes an explicit `--model` (the highest-precedence source in
@@ -575,7 +578,26 @@ outright, so a label can never put a coding task on a writing model —
 and a tier the agent routes nowhere (`best`, unmapped by default)
 reports itself at spawn instead of quietly running the default. The alias is agent-agnostic at the chord — the daemon
 maps it to whatever agent the spawn targets — and the picked tier's
-label rides a `◆ Opus` tab badge. The `a` leader also carries the bulk
+label rides a `◆ Opus` tab badge. A task picks its own tier with a
+**`model:<token>` label** (or an `@model:<token>` body marker), the
+token matched against each tier's alias, label, then pinned model id
+(`model:l` / `model:opus` / `model:claude-opus-5` all reach `L`).
+`best` / `high` / `medium` / `low` are the deprecated spelling of the
+same axis — they name urgency but select a model — and still route
+through `agents.<id>.models.priority` (`best → XL`, `high → L`,
+`medium → M`, `low → S` for Claude), with a deprecation logged at
+spawn; a `model:` declaration on the same task outranks them (#1600).
+Declarations are resolved as **precedence ranks**, not a single winner:
+a token this agent has no tier for falls through to the next rank
+(so an unrelated `model:*` label can't swallow a `high` that would
+have resolved), and a rank whose members name *different* tiers
+selects nothing rather than let GitHub's unpromised label order pick
+the model. An **untrusted** spawn (a trigger from someone other than
+the viewer) reads labels only — a label is write-gated, an issue body
+is not, so the body can't choose the tier on the unattended path.
+Symmetrically, a user-written `models:` block never *inherits* a
+mapping onto a Fable-class tier it didn't declare (`excluded_from_default`
+gates implicit reach), so a menu restricted to Sonnet stays there. The `a` leader also carries the bulk
 **rate-limit recovery** chord `a R` (restart rate-limited): for every
 agent blocked (`⧗ LimitReached`) or parked (`☾ AwaitingReset`) on a
 usage limit, the daemon stops its process, respawns the same

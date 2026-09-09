@@ -28,12 +28,14 @@ mod task;
 pub mod time;
 mod workspace;
 
-pub use agent::{AgentConfig, AgentModels, CapabilityAliases, ModelTier};
+pub use agent::{AgentConfig, AgentModels, CapabilityAliases, ModelChoice, ModelTier};
 pub use autofix::{
     AutoFixKind, AutoFixSettings, auto_fix_candidate, auto_fix_enabled_and_permitted,
     evaluate_auto_fix, is_auto_fix_opted_out, resolve_auto_fix,
 };
-pub use capability::{CapabilityTier, resolve_capability_tier};
+pub use capability::{
+    CapabilityTier, DeclarationScope, ModelRequest, resolve_capability_tier, resolve_model_requests,
+};
 pub use config::{
     KV_KEY_ARCHIVED, KV_KEY_LAYOUT, KV_KEY_SESSION_TOMBSTONES, KV_KEY_SETUP, KV_KEY_THEME,
     KV_PREFIX_ARCHIVED, KV_PREFIX_SESSION_TOMBSTONE, LinearScope, PaneLayout, PersistedSetup,

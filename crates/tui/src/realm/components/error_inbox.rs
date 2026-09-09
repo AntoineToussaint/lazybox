@@ -217,7 +217,9 @@ fn sort_by_frequency(records: &mut [ErrorInboxRecord]) {
 
 fn severity_color(severity: &str, theme: &crate::theme::Theme) -> Color {
     match severity {
-        "retryable" | "exhausted" => theme.warn,
+        // `advisory` is not a failure — something started fine but the
+        // user has to change something on the tracker. Never red.
+        "retryable" | "exhausted" | "advisory" => theme.warn,
         _ => theme.error,
     }
 }
@@ -428,6 +430,13 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn an_advisory_is_never_a_red_row() {
+        let theme = crate::theme::current();
+        assert_eq!(severity_color("advisory", theme), theme.warn);
+        assert_eq!(severity_color("permanent", theme), theme.error);
     }
 
     #[test]

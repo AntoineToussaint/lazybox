@@ -45,7 +45,7 @@ use lazybox_agents::LlmProvider;
 use lazybox_ipc::{AgentUsage, ProviderQuota};
 use tokio::net::{TcpListener, TcpStream};
 
-pub use compaction::{Compactor, NoticeSink};
+pub use compaction::{Compactor, ModeResolver, NoticeSink};
 pub use usage_parse::UsageAccumulator;
 
 /// The loopback port the running proxy bound, published once at startup so
@@ -297,11 +297,17 @@ pub async fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHand
     let notice: NoticeSink = Arc::new(move |title: String, body: String| {
         let _ = notice_bus.send(lazybox_ipc::Event::Notification { title, body });
     });
-    let compactor = Arc::new(Compactor::new(
-        cfg.agent.context_hygiene.clone(),
-        prices.clone(),
-        notice,
-    ));
+    // The mode is resolved per request, not latched here (#1622): the
+    // canary is a per-workspace flag the user flips from the sidebar, and
+    // the session segment of the request path names that workspace. Reading
+    // it once here would pin every session to whatever the dial said when
+    // the daemon started. `Config::load` is stamp-cached, so the per-request
+    // cost is a stat and a clone, and both the flag and the Space set stay
+    // live. The compactor consults this exactly once per request.
+    let policy = cfg.agent.context_hygiene.clone();
+    let mode_resolver = crate::workspace::compaction_mode_resolver(config, policy.mode);
+    let compactor =
+        Arc::new(Compactor::new(policy, prices.clone(), notice).with_mode_resolver(mode_resolver));
 
     tracing::info!("metering proxy listening on 127.0.0.1:{port}");
     Some(tokio::spawn(serve(

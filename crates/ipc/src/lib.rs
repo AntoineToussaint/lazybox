@@ -2077,6 +2077,19 @@ pub enum Command {
         epic: String,
         policies: lazybox_core::EpicPolicies,
     },
+    /// Set the workspace's context-compaction opt-in (#1622) — the canary
+    /// that runs one workspace's proxied traffic under
+    /// `agent.context_hygiene.mode: on` while the fleet stays on the
+    /// configured mode. The daemon persists the flag on the `Workspace`
+    /// (like [`Command::SetMetered`]) and re-broadcasts; the metering proxy
+    /// reads it back per request, so a flip lands on the next turn without
+    /// respawning. Inert on a workspace that isn't proxied, and a configured
+    /// `mode: off` still overrides it. Appended last (bincode is
+    /// ordinal-sensitive).
+    SetContextCompaction {
+        session_key: SessionKey,
+        enabled: bool,
+    },
 }
 
 impl Command {

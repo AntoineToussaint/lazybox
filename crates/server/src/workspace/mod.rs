@@ -896,6 +896,85 @@ pub async fn set_metered(config: &ServerConfig, key: &WorkspaceKey, enabled: boo
     commit_upsert_offloaded_reported(config, key, workspace, "set metering preference").await;
 }
 
+/// The context-compaction mode in force for one workspace (#1622).
+///
+/// The membership half of the canary — the per-workspace opt-in OR a
+/// compacted Space (`agent.compacted_spaces`) — handed to
+/// [`ContextHygiene::mode_for`], which owns what an opt-in may and may not
+/// promote. The two halves live apart on purpose: membership is a config and
+/// store question the daemon answers, promotion is policy the `PreToolUse`
+/// hook enforcement point reads too, so only the policy half is shared.
+///
+/// This lives beside [`set_context_compaction`] rather than in the spawn
+/// path: the metering proxy asks it on the request path, and the request
+/// path has no business importing spawn internals.
+pub fn compaction_mode(
+    cfg: &lazybox_config::Config,
+    workspace: &lazybox_core::Workspace,
+) -> lazybox_core::CompactionMode {
+    let in_space = workspace
+        .repo_slug()
+        .map(|label| cfg.source_compacts_context(label.as_ref()))
+        .unwrap_or(false);
+    cfg.agent
+        .context_hygiene
+        .mode_for(workspace.compact_context || in_space)
+}
+
+/// The per-session mode resolver the metering proxy consults once per
+/// request (#1622).
+///
+/// `fallback` is the mode as it parsed when the proxy started. It is used
+/// whenever the current config cannot be read, which matters because this is
+/// the daemon's only *per-request* config reader: a user who edits
+/// `config.yaml` while the daemon runs — or whose editor saves a partial
+/// file mid-write — makes `Config::load` return `Err` on every call until the
+/// file parses again. Falling back to `Config::default()` there would replace
+/// a configured `mode: off` with the `shadow` default and silently start
+/// evaluating traffic the user had switched the pass off for.
+pub fn compaction_mode_resolver(
+    config: &ServerConfig,
+    fallback: lazybox_core::CompactionMode,
+) -> std::sync::Arc<dyn Fn(&str) -> lazybox_core::CompactionMode + Send + Sync> {
+    let config = config.clone();
+    std::sync::Arc::new(move |session: &str| {
+        let Ok(cfg) = lazybox_config::Config::load() else {
+            return fallback;
+        };
+        let global = cfg.agent.context_hygiene.mode;
+        // An unknown or unreadable workspace has no opt-in to honour: fall
+        // back to the configured mode rather than guessing a session into a
+        // rewrite. (An empty session key never reaches here — the compactor
+        // refuses those outright, since compaction it cannot attribute is
+        // compaction its kill switch cannot guard.)
+        let key = lazybox_core::WorkspaceKey::new(session);
+        let Ok(Some(record)) = config.store.get_workspace(&key) else {
+            return global;
+        };
+        let Some(json) = record.workspace_json else {
+            return global;
+        };
+        match serde_json::from_str::<lazybox_core::Workspace>(&json) {
+            Ok(workspace) => compaction_mode(&cfg, &workspace),
+            Err(_) => global,
+        }
+    })
+}
+
+/// Persist the workspace's context-compaction opt-in (#1622). Mirrors
+/// [`set_metered`]: load, set the flag, commit (persists + broadcasts
+/// `WorkspaceUpserted`). The metering proxy reads it back per request rather
+/// than at spawn, so the flip lands on the workspace's next turn.
+pub async fn set_context_compaction(config: &ServerConfig, key: &WorkspaceKey, enabled: bool) {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return;
+    };
+    workspace.compact_context = enabled;
+    commit_upsert_offloaded_reported(config, key, workspace, "set context-compaction preference")
+        .await;
+}
+
 /// Persist the workspace's orchestration role (#1523). Mirrors
 /// [`set_metered`]: load, set the field, commit (persists + broadcasts
 /// `WorkspaceUpserted` so the sidebar role badge refreshes). `role: None`
@@ -4388,5 +4467,70 @@ mod orphan_backend_session_tests {
             "a failed non-archiving delete must clear the deleted_workspaces guard \
              even when the tombstone rollback write also fails"
         );
+    }
+}
+
+#[cfg(test)]
+mod compaction_canary_tests {
+    use super::*;
+    use lazybox_core::Task;
+
+    /// A GitHub-backed task, built through serde so this fixture does not
+    /// have to track every field on `Task`.
+    fn repo_task(key: &str, repo: &str) -> Task {
+        serde_json::from_value(serde_json::json!({
+            "author": "",
+            "id": { "source": "github", "key": key },
+            "title": "t",
+            "state": "open",
+            "role": "author",
+            "url": "",
+            "repo": repo,
+            "updated_at": chrono::Utc::now(),
+        }))
+        .expect("task fixture")
+    }
+
+    /// #1622: the compaction canary composes the same way metering does —
+    /// per-workspace flag OR compacted Space — and promotes only that
+    /// workspace, leaving the fleet on the configured mode.
+    #[test]
+    fn the_compaction_canary_promotes_one_workspace_at_a_time() {
+        use lazybox_core::CompactionMode;
+
+        let task = repo_task("obin-ai/platform#1", "obin-ai/platform");
+        let mut ws = lazybox_core::Workspace::from_task(task, chrono::Utc::now());
+        let other = repo_task("acme/widget#1", "acme/widget");
+        let other_ws = lazybox_core::Workspace::from_task(other, chrono::Utc::now());
+
+        let mut cfg = lazybox_config::Config::default();
+        assert_eq!(
+            compaction_mode(&cfg, &ws),
+            CompactionMode::Shadow,
+            "a fresh install compacts nothing",
+        );
+
+        ws.compact_context = true;
+        assert_eq!(compaction_mode(&cfg, &ws), CompactionMode::On);
+        assert_eq!(
+            compaction_mode(&cfg, &other_ws),
+            CompactionMode::Shadow,
+            "the canary does not spread to its neighbours",
+        );
+
+        // Space tier: the source auto-seeds into the "obin-ai" Space, so
+        // compacting that name promotes the workspace without its own flag.
+        ws.compact_context = false;
+        cfg.agent.compacted_spaces.insert("obin-ai".into());
+        assert_eq!(compaction_mode(&cfg, &ws), CompactionMode::On);
+        assert_eq!(
+            compaction_mode(&cfg, &other_ws),
+            CompactionMode::Shadow,
+        );
+
+        // A configured `off` is the kill switch and outranks both.
+        cfg.agent.context_hygiene.mode = CompactionMode::Off;
+        ws.compact_context = true;
+        assert_eq!(compaction_mode(&cfg, &ws), CompactionMode::Off);
     }
 }

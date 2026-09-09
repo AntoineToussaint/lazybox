@@ -439,7 +439,16 @@ into PR, `x z` long snooze, `x x` archive, `x c` close issue
 `x k` close & kill — the combined `g d` + `x x`: delete/close the
 issue or PR upstream AND archive the workspace (killing its sessions)
 in one confirm, for ending a finished line of work (only when there's
-an open issue/PR; confirmed first) —
+an open issue/PR; confirmed first), `x h` compact context — the
+per-workspace context-compaction canary (#1622): this workspace's
+proxied traffic runs under `agent.context_hygiene.mode: on` (old,
+large tool results condensed before the upstream sees them) while the
+fleet stays on the configured mode. Off until chosen, and it composes
+by OR exactly as metering does — the flag, a compacted Space
+(`agent.compacted_spaces`, toggled by the same chord on a Space
+header), or the global mode — except that a configured `mode: off`
+outranks both, being the kill switch. The proxy reads it per request,
+so a flip lands on the next turn rather than the next spawn —
 the legacy `Shift-{N,A,J,X,C,Z}` direct aliases are gone (#304).
 `r` reply (works from the sidebar as well as the activity pane —
 it's a Workspace-section action). With a `sandbox:` box configured

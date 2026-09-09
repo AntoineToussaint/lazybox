@@ -200,6 +200,7 @@ fn maximal_workspace() -> Workspace {
     ws.native_auto_merge_by_lazybox = true;
     ws.track_main = true;
     ws.metered = true;
+    ws.compact_context = true;
     ws.base_branch = Some("main".into());
     ws.track_main_behind = true;
     ws.policies.set(AutoFixKind::CiFailure, PolicyArm::Arm);

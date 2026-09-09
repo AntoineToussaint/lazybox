@@ -178,6 +178,10 @@ pub enum Action {
     /// its agent spawns through the local metering proxy so cost/tokens/rate
     /// accrue per session, without affecting any other workspace.
     ToggleMetering,
+    /// Toggle the workspace's context-compaction opt-in (#1622): run this
+    /// workspace's proxied traffic under `agent.context_hygiene.mode: on`
+    /// while the rest of the fleet stays on the configured mode.
+    ToggleContextCompaction,
     /// Open the unified automation-policies menu for the focused
     /// PR/issue (issue #363): one surface listing every policy
     /// (merge-on-green, per-session auto-fix arm/disarm, GitHub-native
@@ -611,6 +615,7 @@ pub enum ActionKind {
     ToggleAutoFix,
     ToggleTrackMain,
     ToggleMetering,
+    ToggleContextCompaction,
     ManagePolicies,
     AdoptSessions,
     SendToSession,
@@ -798,6 +803,7 @@ impl ActionKind {
         Self::ToggleAutoFix,
         Self::ToggleTrackMain,
         Self::ToggleMetering,
+        Self::ToggleContextCompaction,
         Self::ManagePolicies,
         Self::RequestReviewers,
         Self::AddAssignees,
@@ -932,6 +938,7 @@ impl Action {
             Action::ToggleAutoFix => ActionKind::ToggleAutoFix,
             Action::ToggleTrackMain => ActionKind::ToggleTrackMain,
             Action::ToggleMetering => ActionKind::ToggleMetering,
+            Action::ToggleContextCompaction => ActionKind::ToggleContextCompaction,
             Action::ManagePolicies => ActionKind::ManagePolicies,
             Action::AdoptSessions => ActionKind::AdoptSessions,
             Action::SendToSession => ActionKind::SendToSession,
@@ -1604,6 +1611,13 @@ impl ActionDef {
                 default_keys: "x $",
                 label: "meter",
                 describe: "Toggle metering ($ meter) for this workspace: route its agent spawns through lazybox's local metering proxy so cost, tokens, and rate-limit headroom accrue per session. On by default for new workspaces — use this to turn one off (or back on) without affecting any other. Requires agent.metering_proxy enabled.",
+                section: Section::Workspace,
+            },
+            ActionKind::ToggleContextCompaction => &Self {
+                kind: ActionKind::ToggleContextCompaction,
+                default_keys: "x h",
+                label: "compact context",
+                describe: "Toggle context compaction for this workspace: run its proxied agent traffic under agent.context_hygiene.mode: on — old, large tool results condensed before the upstream sees them — while the rest of the fleet stays on the configured mode. The canary for a pass that rewrites what the model sees, so prove the saving on one workspace first. Needs the workspace metered (the proxy is the enforcement point); a configured mode: off still wins.",
                 section: Section::Workspace,
             },
             ActionKind::ManagePolicies => &Self {
@@ -2452,6 +2466,7 @@ impl ActionKind {
             ActionKind::ToggleAutoFix => "toggle_auto_fix",
             ActionKind::ToggleTrackMain => "toggle_track_main",
             ActionKind::ToggleMetering => "toggle_metering",
+            ActionKind::ToggleContextCompaction => "toggle_context_compaction",
             ActionKind::ManagePolicies => "manage_policies",
             ActionKind::AdoptSessions => "adopt_sessions",
             ActionKind::SendToSession => "send_to_session",
@@ -2768,6 +2783,7 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::AddRepo
         | ActionKind::ResetAgentContext
         | ActionKind::ToggleMetering
+        | ActionKind::ToggleContextCompaction
         | ActionKind::CollapseIntoPr => Some("workspace"),
         // The `E` epic leader (#1521): dependency-graph navigation. `E j`
         // jumps to the next blocked workspace; the group grows as later
@@ -3300,6 +3316,13 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // routes is a daemon-side gate (metering_proxy + proxy running), so the
         // toggle stays available even when the proxy is off: it records intent.
         ActionKind::ToggleMetering => workspace
+            .map(|w| w.project_key.is_some() || w.pr.is_some() || !w.gh_issues.is_empty())
+            .unwrap_or(true),
+        // Context compaction rides the same surface as metering — the proxy
+        // is its enforcement point, so anywhere a spawn could be metered a
+        // rewrite could apply — and the same Space-header fallback: with no
+        // selected workspace the chord toggles the Space under the cursor.
+        ActionKind::ToggleContextCompaction => workspace
             .map(|w| w.project_key.is_some() || w.pr.is_some() || !w.gh_issues.is_empty())
             .unwrap_or(true),
         // The policies menu surfaces on any workspace carrying a PR or a

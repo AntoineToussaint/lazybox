@@ -320,7 +320,11 @@ pub enum CleanupPrompt {
 ///   `#[serde(default)]`, so older records read back as "lazybox didn't
 ///   set it" — the conservative reading, which leaves a
 ///   human-configured auto-merge untouched on disarm.
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 12;
+/// - 13: `Workspace::compact_context` (per-workspace context-compaction
+///   canary). Optional with `#[serde(default)]`, so older records read
+///   back cleanly as not opted in — the canary is never inherited, only
+///   chosen.
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 13;
 
 /// How long a workspace counts as "recently woken" after an
 /// event-conditional snooze fires (#scale): within this window the row
@@ -642,6 +646,18 @@ pub struct Workspace {
     /// running; otherwise inert.
     #[serde(default)]
     pub metered: bool,
+    /// Run this workspace's proxied agent traffic under context compaction
+    /// `on` while the fleet stays in the configured mode (#1622). The
+    /// per-workspace half of the same OR the meter has: this flag, a
+    /// compacted Space (`agent.compacted_spaces`), or the global
+    /// `agent.context_hygiene.mode`. Off for every workspace until chosen —
+    /// unlike [`Workspace::metered`], which is on by default, a canary for a
+    /// pass that *rewrites what the model sees* is opted into one row at a
+    /// time. Read per request by the metering proxy, so a flip takes effect
+    /// on the next turn without respawning. Inert unless the workspace is
+    /// actually proxied, and an explicit global `mode: off` still wins.
+    #[serde(default)]
+    pub compact_context: bool,
     /// The resolved default branch this workspace is based on
     /// (`main` / `master` / …), persisted so "track main" doesn't
     /// re-derive it every sweep and so the exact branch survives a
@@ -719,6 +735,9 @@ impl Workspace {
             // default deserialize as unmetered (serde default `false`) —
             // an existing workspace's choice is never flipped underneath it.
             metered: true,
+            // The compaction canary is never on by default: it rewrites what
+            // the model sees, so it is chosen per row rather than inherited.
+            compact_context: false,
             name: key.as_str().to_string(),
             key,
             project_key: None,
@@ -1251,6 +1270,16 @@ impl Workspace {
             // Carried below (OR'd) so an issue→PR rebadge doesn't silently
             // stop the meter mid-line-of-work.
             metered,
+            // The compaction canary does NOT follow the line of work, and
+            // this is where it parts company with `metered` directly above.
+            // Metering only counts; compaction rewrites what the model
+            // sees. OR-ing it would let a folded issue silently start
+            // rewriting the context of a PR whose owner had opted out —
+            // the exact blast-radius leak a per-row canary exists to
+            // prevent. Failing toward "not rewriting" is the epic's
+            // pass-through-on-doubt rule, and re-arming is one keypress
+            // and visible; the OR's failure is neither.
+            compact_context: _,
             // ── user-owned state: one explicit merge rule each ──
             snoozed_until,
             // The wake condition rides the snooze it belongs to (below);
@@ -4255,6 +4284,64 @@ mod tests {
         let round: Workspace =
             serde_json::from_str(&serde_json::to_string(&persisted).unwrap()).unwrap();
         assert!(!round.metered);
+    }
+
+    /// #1622: the compaction canary is the mirror image of metering's
+    /// default — never on until chosen, because it rewrites what the model
+    /// sees rather than merely counting what it costs. A record written
+    /// before the field existed reads back opted out.
+    #[test]
+    fn the_compaction_canary_is_off_by_default_and_survives_a_round_trip() {
+        assert!(!Workspace::empty(WorkspaceKey::new("scratch"), "main", now()).compact_context);
+        assert!(!Workspace::from_task(pr("o/r#1"), now()).compact_context);
+
+        let mut persisted = Workspace::empty(WorkspaceKey::new("ws"), "main", now());
+        persisted.compact_context = true;
+        let mut json = serde_json::to_value(&persisted).unwrap();
+        assert!(
+            serde_json::from_value::<Workspace>(json.clone())
+                .unwrap()
+                .compact_context
+        );
+
+        json.as_object_mut().unwrap().remove("compact_context");
+        let legacy: Workspace = serde_json::from_value(json).unwrap();
+        assert!(
+            !legacy.compact_context,
+            "a record without the field stays opted out"
+        );
+    }
+
+    /// #1622: the compaction canary is NOT portable across a rebadge, which
+    /// is exactly where it differs from `metered`. Metering counts;
+    /// compaction rewrites what the model sees, so a folded issue must not
+    /// be able to start rewriting a destination its owner opted out of.
+    /// The destination keeps its own setting in both directions.
+    #[test]
+    fn absorb_user_state_never_transfers_the_compaction_canary() {
+        // An opted-in source must NOT impose the canary on a destination
+        // that is not carrying it — the blast-radius leak.
+        let mut source = Workspace::empty(WorkspaceKey::new("issue-src"), "scratch", now());
+        source.compact_context = true;
+        let mut pr_target = Workspace::from_task(pr("o/r#1"), now());
+        pr_target.compact_context = false;
+        pr_target.absorb_user_state_from(&source);
+        assert!(
+            !pr_target.compact_context,
+            "a folded issue must not start rewriting the destination's context",
+        );
+
+        // And the destination's own opt-in survives an un-opted source:
+        // not carrying is not the same as clearing.
+        let mut plain_source = Workspace::empty(WorkspaceKey::new("src2"), "scratch", now());
+        plain_source.compact_context = false;
+        let mut opted_in = Workspace::from_task(pr("o/r#2"), now());
+        opted_in.compact_context = true;
+        opted_in.absorb_user_state_from(&plain_source);
+        assert!(
+            opted_in.compact_context,
+            "a transfer never clears the destination's own canary",
+        );
     }
 
     /// #1389: a workspace metered while worked as an issue must keep

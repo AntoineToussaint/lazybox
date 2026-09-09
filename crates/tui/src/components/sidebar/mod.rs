@@ -164,6 +164,16 @@ pub struct Sidebar {
     /// header render for the `$` badge. The daemon derives the same set at
     /// spawn (`Config::source_is_metered`) — this copy only drives the UI.
     metered_spaces: BTreeSet<String>,
+    /// Spaces the user opted into context compaction (#1622): every
+    /// workspace under one of these runs the rewrite while the fleet stays
+    /// on `agent.context_hygiene.mode`. Persisted to
+    /// `agent.compacted_spaces`, toggled by `x h` on a Space header. Mirrored
+    /// here — rather than read back from `Config::load` inside the toggle —
+    /// because that loader is stamp-cached: two presses inside one mtime
+    /// granule would both read the pre-toggle value and the second would
+    /// invert the wrong way. The daemon derives the same set independently
+    /// (`Config::source_compacts_context`); this copy is the UI's.
+    compacted_spaces: BTreeSet<String>,
     /// Space name → the session keys of every workspace under it, rebuilt
     /// once per `recompute_visible` (#1389). The per-Space meter figure sums
     /// live per-session cost over these keys — keeping the `group_label` +
@@ -622,6 +632,7 @@ impl Sidebar {
             spaces: Vec::new(),
             collapsed_spaces: BTreeSet::new(),
             metered_spaces: BTreeSet::new(),
+            compacted_spaces: BTreeSet::new(),
             space_members: BTreeMap::new(),
             source_attention: BTreeMap::new(),
             config_seeded: false,
@@ -1378,6 +1389,7 @@ impl Sidebar {
         spaces: Vec<lazybox_config::SpaceConfig>,
         collapsed_spaces: BTreeSet<String>,
         metered_spaces: BTreeSet<String>,
+        compacted_spaces: BTreeSet<String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
     ) {
@@ -1397,6 +1409,7 @@ impl Sidebar {
         self.spaces = spaces;
         self.collapsed_spaces = collapsed_spaces;
         self.metered_spaces = metered_spaces;
+        self.compacted_spaces = compacted_spaces;
         if let Some(agent) = default_agent.filter(|s| !s.is_empty()) {
             self.default_agent = agent;
         }
@@ -3676,6 +3689,33 @@ impl Sidebar {
         };
         lazybox_config::Config::mutate_ui_list(|c| &mut c.agent.metered_spaces, op);
         Some((space, !was_metered))
+    }
+
+    /// Toggle context compaction for the Space at or above the cursor
+    /// (#1622): add/remove its name in `agent.compacted_spaces`, the Space
+    /// tier of the same canary the per-workspace flag provides. Returns
+    /// `(space_name, now_compacting)` for the caller's notice, or `None` when
+    /// the cursor isn't on a Space header. Mirrors
+    /// [`Sidebar::toggle_space_metering_at_cursor`] exactly, including
+    /// inverting the mirrored set rather than a stamp-cached config read.
+    pub fn toggle_space_compaction_at_cursor(&mut self) -> Option<(String, bool)> {
+        let space = self.cursor_space()?;
+        let was_on = self.compacted_spaces.contains(&space);
+        let op = if was_on {
+            self.compacted_spaces.remove(&space);
+            lazybox_config::UiListOp::Remove(space.clone())
+        } else {
+            self.compacted_spaces.insert(space.clone());
+            lazybox_config::UiListOp::Add(space.clone())
+        };
+        lazybox_config::Config::mutate_ui_list(|c| &mut c.agent.compacted_spaces, op);
+        Some((space, !was_on))
+    }
+
+    /// True when the Space opted into context compaction
+    /// (`agent.compacted_spaces`, #1622).
+    pub fn is_space_compacting(&self, name: &str) -> bool {
+        self.compacted_spaces.contains(name)
     }
 
     /// True when the Space is metered (`agent.metered_spaces`) — drives the

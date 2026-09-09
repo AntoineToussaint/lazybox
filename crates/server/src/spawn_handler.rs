@@ -6102,6 +6102,7 @@ fn workspace_in_metered_space(cfg: &lazybox_config::Config, workspace: &Workspac
         .unwrap_or(false)
 }
 
+
 fn load_workspace(
     config: &ServerConfig,
     key: &WorkspaceKey,
@@ -14796,6 +14797,7 @@ mod tests {
             "a source outside the metered Space stays direct",
         );
     }
+
 
     #[test]
     fn cargo_target_dir_is_pinned_under_the_worktree() {

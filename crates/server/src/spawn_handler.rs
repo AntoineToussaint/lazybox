@@ -13094,7 +13094,9 @@ mod tests {
                     assert_eq!(spawned_key, session_key);
                     carried = agent_state;
                 }
-                Event::AgentState { terminal_id: id, .. } if id == terminal_id => {
+                Event::AgentState {
+                    terminal_id: id, ..
+                } if id == terminal_id => {
                     panic!("recovery must not publish a transition for a hydrated state");
                 }
                 _ => {}

@@ -2138,6 +2138,23 @@ pub enum Command {
         epic: String,
         policies: lazybox_core::EpicPolicies,
     },
+    /// Decide, synchronously, whether an agent's about-to-run tool call may
+    /// proceed (#1610). Sent by `lazybox hook-ingest` from Claude's
+    /// `PreToolUse` hook, which then blocks — briefly — on the matching
+    /// [`Event::ToolUseDecided`]. Unlike [`Command::IngestHook`], which is a
+    /// fire-and-forget state signal, this one has a *reply* the agent waits
+    /// for, so the daemon must answer fast or not at all: the helper prints
+    /// nothing and exits 0 when the answer misses its deadline. Appended last
+    /// (bincode is ordinal-sensitive).
+    DecideToolUse {
+        /// The stable backend session key baked into the hook command at
+        /// spawn — the same correlation handle [`Command::IngestHook`] uses.
+        backend_key: Option<String>,
+        request: ToolUseRequest,
+        /// Correlates the reply on a connection that carries unrelated bus
+        /// traffic.
+        client_request_id: String,
+    },
 }
 
 impl Command {
@@ -2316,6 +2333,30 @@ pub enum AutoMergeNoticeLevel {
     /// auto-merge was declined or refused, so the arm only lasts as long
     /// as the daemon. Must be seen, so it is sticky.
     Warn,
+}
+
+/// The tool call a `PreToolUse` hook is asking the daemon to rule on
+/// (#1610). Only the calls the large-read intercept can act on ever reach
+/// the daemon: the helper filters out everything else locally, so this
+/// carries just what the policy needs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct ToolUseRequest {
+    /// The tool about to run, verbatim (`Read`).
+    pub tool_name: String,
+    /// `tool_input.file_path`, resolved against the hook's `cwd` so the
+    /// daemon can stat it without knowing where the agent is running.
+    pub file_path: String,
+}
+
+/// The daemon's ruling on a [`ToolUseRequest`] (#1610). `Deny` carries the
+/// text Claude surfaces to the model *instead of* running the tool — the
+/// condensed file plus the affordance for getting the real bytes back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum ToolUseDecision {
+    Allow,
+    Deny { reason: String },
 }
 
 /// Connection → TUI.
@@ -3452,6 +3493,13 @@ pub enum Event {
     EpicStatus {
         snapshot: EpicSnapshot,
         delta: Vec<EpicDelta>,
+    },
+    /// Answer to [`Command::DecideToolUse`], correlated by
+    /// `client_request_id` (#1610). Appended last (bincode is
+    /// ordinal-sensitive).
+    ToolUseDecided {
+        client_request_id: String,
+        decision: ToolUseDecision,
     },
 }
 

@@ -188,11 +188,129 @@ async fn ingest_hook_inner(args: &[String]) {
     let command = lazybox_ipc::Command::IngestHook {
         terminal_id: lazybox_ipc::TerminalId(terminal_id.unwrap_or_default()),
         hook,
-        backend_key,
+        backend_key: backend_key.clone(),
     };
+    // A `PreToolUse` payload the large-read intercept could act on takes the
+    // synchronous path instead: the same state signal plus a decision request,
+    // on one connection, with the agent's turn blocked on the answer (#1610).
+    if let Some(request) = intercept_request(&payload) {
+        let deadline = decision_deadline();
+        if let Some(reason) =
+            request_tool_use_decision(&socket_path(), command, backend_key, request, deadline).await
+        {
+            print!("{}", deny_output(&reason));
+            let _ = std::io::stdout().flush();
+        }
+        return;
+    }
     if let Err(error) = lazybox_ipc::socket::send_command(&socket_path(), &command).await {
         tracing::warn!("hook-ingest IPC send failed: {error}");
     }
+}
+
+/// How long the hook waits for a decision. The agent's turn is stopped for
+/// this whole window on every candidate read, so it is a latency budget, not
+/// a correctness one: past it the helper prints nothing and the read happens,
+/// exactly as if lazybox were not installed. A stopped, restarting, or wedged
+/// daemon therefore costs one bounded pause, never a stalled turn.
+const DECISION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Deadline override, for tests only. 200 ms is generous for a local socket
+/// but not for a test box already running a fleet of agents, where process
+/// spawn plus handshake can outrun it — and a deny test that times out passes
+/// vacuously, since a timeout also prints nothing.
+fn decision_deadline() -> std::time::Duration {
+    std::env::var("LAZYBOX_HOOK_DECISION_TIMEOUT_MS")
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(DECISION_TIMEOUT)
+}
+
+/// The intercept candidate in this payload, or `None` when the daemon must
+/// not even be asked.
+///
+/// The structural gate lives in [`lazybox_agents::hook`]; the config gate is
+/// here because it is what keeps the feature free when it is off. `hook-ingest`
+/// runs on EVERY tool call, so a round-trip taken while the policy could
+/// never fire would put a bounded-but-real pause on every full-file read of
+/// every session — including, when the daemon is down, the full deadline.
+fn intercept_request(payload: &str) -> Option<lazybox_ipc::ToolUseRequest> {
+    let request = lazybox_agents::hook::read_intercept_candidate(payload)?;
+    let config = lazybox_config::Config::load().ok()?;
+    let policy = &config.agent.context_hygiene;
+    (policy.hook_intercept && policy.mode.rewrites()).then_some(request)
+}
+
+/// Send the hook's state signal and its decision request on one connection,
+/// then wait — bounded — for the daemon's ruling. `Some(reason)` is a deny.
+///
+/// Deliberately not a subscribing client: a `Subscribe` would make the daemon
+/// build a full workspace + terminal snapshot before it could answer, which is
+/// far more than this deadline allows. Unrelated bus traffic on the connection
+/// is skipped over until the correlated reply arrives.
+async fn request_tool_use_decision(
+    socket: &Path,
+    ingest: lazybox_ipc::Command,
+    backend_key: Option<String>,
+    request: lazybox_ipc::ToolUseRequest,
+    deadline: std::time::Duration,
+) -> Option<String> {
+    let client_request_id = uuid::Uuid::new_v4().hyphenated().to_string();
+    let decide = lazybox_ipc::Command::DecideToolUse {
+        backend_key,
+        request,
+        client_request_id: client_request_id.clone(),
+    };
+    let exchange = async {
+        let (mut rd, mut wr) = lazybox_ipc::transport::connect(socket).await.ok()?;
+        lazybox_ipc::socket::client_handshake(&mut rd, &mut wr)
+            .await
+            .ok()?;
+        lazybox_ipc::socket::write_frame(&mut wr, &ingest)
+            .await
+            .ok()?;
+        lazybox_ipc::socket::write_frame(&mut wr, &decide)
+            .await
+            .ok()?;
+        loop {
+            match lazybox_ipc::socket::read_frame::<_, lazybox_ipc::Event>(&mut rd).await {
+                Ok(Some(lazybox_ipc::Event::ToolUseDecided {
+                    client_request_id: id,
+                    decision,
+                })) if id == client_request_id => {
+                    return match decision {
+                        lazybox_ipc::ToolUseDecision::Deny { reason } => Some(reason),
+                        lazybox_ipc::ToolUseDecision::Allow => None,
+                    };
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) | Err(_) => return None,
+            }
+        }
+    };
+    match tokio::time::timeout(deadline, exchange).await {
+        Ok(decision) => decision,
+        Err(_) => {
+            tracing::debug!("hook-ingest: tool-use decision timed out, allowing the tool through");
+            None
+        }
+    }
+}
+
+/// The stdout JSON Claude reads a `PreToolUse` verdict from. Anything else on
+/// stdout — including nothing at all — lets the tool run.
+fn deny_output(reason: &str) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        })
+    )
 }
 
 /// Read the hook payload with its own timeout, off the async runtime

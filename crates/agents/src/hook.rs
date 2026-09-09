@@ -69,6 +69,48 @@ fn str_field<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str)
 }
 
+/// The full-file `Read` a `PreToolUse` payload is about to perform, when it
+/// is a candidate for the large-read intercept (#1610) — `None` for every
+/// other payload.
+///
+/// This is the helper-side structural gate, deliberately kept off the
+/// daemon: `hook-ingest` runs on EVERY tool call, and a decision round-trip
+/// it can rule out locally is a round-trip the agent's turn never waits on.
+/// The gate is also where the intercept's escape hatch lives — a `Read` that
+/// names an explicit `offset` or `limit` is never asked about, so a model
+/// handed condensed text always has a way back to the real bytes (and an
+/// `Edit`/`Write`, which needs those bytes, is never in scope at all).
+///
+/// `file_path` is resolved against the payload's `cwd` so the daemon can
+/// stat it without knowing where the agent runs. Claude sends an absolute
+/// path today; a relative one would otherwise resolve against the daemon's
+/// working directory rather than the agent's.
+pub fn read_intercept_candidate(json: &str) -> Option<lazybox_ipc::ToolUseRequest> {
+    let value: Value = serde_json::from_str(json.trim()).ok()?;
+    if str_field(&value, "hook_event_name") != Some("PreToolUse") {
+        return None;
+    }
+    let tool_name = str_field(&value, "tool_name")?;
+    if tool_name != "Read" {
+        return None;
+    }
+    let input = value.get("tool_input")?;
+    if !input.get("offset").unwrap_or(&Value::Null).is_null()
+        || !input.get("limit").unwrap_or(&Value::Null).is_null()
+    {
+        return None;
+    }
+    let path = std::path::Path::new(input.get("file_path").and_then(Value::as_str)?);
+    let file_path = match str_field(&value, "cwd") {
+        Some(cwd) if path.is_relative() => std::path::Path::new(cwd).join(path),
+        _ => path.to_path_buf(),
+    };
+    Some(lazybox_ipc::ToolUseRequest {
+        tool_name: tool_name.to_string(),
+        file_path: file_path.to_string_lossy().into_owned(),
+    })
+}
+
 /// Map a hook event to the [`AgentState`] it implies, or `None` when
 /// the event carries no state change. `current` is the terminal's
 /// cached state at the moment the hook arrived — only the unrecognized-
@@ -538,6 +580,88 @@ mod tests {
             hook_to_state(&ev, Some(AgentState::Idle)),
             Some(AgentState::Working)
         );
+    }
+
+    fn candidate(json: &str) -> Option<String> {
+        read_intercept_candidate(json).map(|request| request.file_path)
+    }
+
+    #[test]
+    fn full_file_read_is_an_intercept_candidate() {
+        assert_eq!(
+            candidate(
+                r#"{"hook_event_name":"PreToolUse","tool_name":"Read","cwd":"/w",
+                    "tool_input":{"file_path":"/w/src/big.rs"}}"#
+            )
+            .as_deref(),
+            Some("/w/src/big.rs")
+        );
+    }
+
+    #[test]
+    fn relative_read_path_resolves_against_the_agent_cwd() {
+        // The daemon stats this path from its own working directory, which
+        // is not the agent's.
+        assert_eq!(
+            candidate(
+                r#"{"hook_event_name":"PreToolUse","tool_name":"Read","cwd":"/w",
+                    "tool_input":{"file_path":"src/big.rs"}}"#
+            )
+            .as_deref(),
+            Some("/w/src/big.rs")
+        );
+    }
+
+    #[test]
+    fn ranged_read_is_never_a_candidate() {
+        // The explicit range is the escape hatch back to the real bytes —
+        // denying it would trap a model that took the redirect.
+        for input in [
+            r#"{"file_path":"/w/big.rs","limit":80}"#,
+            r#"{"file_path":"/w/big.rs","offset":400}"#,
+            r#"{"file_path":"/w/big.rs","offset":400,"limit":80}"#,
+        ] {
+            let json = format!(
+                r#"{{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{input}}}"#
+            );
+            assert_eq!(candidate(&json), None, "{input} must pass through");
+        }
+    }
+
+    #[test]
+    fn only_read_is_a_candidate() {
+        // An edit needs the real bytes, and a tool with no file to stat has
+        // nothing to condense.
+        for tool in ["Edit", "Write", "Bash", "Glob", "NotebookEdit"] {
+            let json = format!(
+                r#"{{"hook_event_name":"PreToolUse","tool_name":"{tool}",
+                     "tool_input":{{"file_path":"/w/big.rs"}}}}"#
+            );
+            assert_eq!(candidate(&json), None, "{tool} must pass through");
+        }
+    }
+
+    #[test]
+    fn only_pre_tool_use_is_a_candidate() {
+        assert_eq!(
+            candidate(
+                r#"{"hook_event_name":"PostToolUse","tool_name":"Read",
+                    "tool_input":{"file_path":"/w/big.rs"}}"#
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn malformed_payloads_are_not_candidates() {
+        for json in [
+            "not json",
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Read"}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{}}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":7}}"#,
+        ] {
+            assert_eq!(candidate(json), None, "{json} must pass through");
+        }
     }
 
     #[test]

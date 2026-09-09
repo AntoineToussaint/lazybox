@@ -10137,27 +10137,6 @@ pub async fn recover_sessions(config: &ServerConfig) {
             model_label: recovered_model_label,
             agent_state: restored_state,
         });
-        // Announce the hydrated lifecycle state right behind `TerminalSpawned`
-        // (#1574). Recovery registers survivors one at a time on a background
-        // task — seconds, for a fleet — so a client that subscribed mid-pass
-        // received its `Snapshot` before this terminal existed and learns of it
-        // only through `TerminalSpawned`, which carries no state. And because
-        // the daemon's cache ALREADY holds the restored state, every later PTY
-        // reading folds to `from == to` and commits nothing, so
-        // `fold_and_broadcast_agent_state` never emits an `AgentState` event:
-        // an agent recovered mid-turn would sit with a blank row until its turn
-        // ENDED, the one moment its state finally changed. This is an announce,
-        // not a transition — the cache and the persisted row are untouched, and
-        // a client that did get the state in its snapshot folds it as a no-op
-        // (`agent_attention::state_change` is edge-triggered), so no restart
-        // re-alerts an already-known asking agent.
-        if let Some(state) = restored_state {
-            let _ = config.bus.send(Event::AgentState {
-                session_key: session_key_for_pump.clone(),
-                terminal_id,
-                state,
-            });
-        }
         tokio::spawn(async move {
             let mut failures = 0u32;
             loop {
@@ -13049,15 +13028,17 @@ mod tests {
         ));
     }
 
-    // Regression (#1574): recovery must ANNOUNCE the state it hydrated, not
-    // just cache it. Recovery registers survivors on a background task, so a
-    // client subscribing mid-pass snapshots before this terminal exists and
-    // then only sees `TerminalSpawned` (stateless). With the state already in
-    // the daemon's cache, every later PTY reading folds to `from == to` and
-    // commits nothing — so without this announce a mid-turn agent shows a blank
-    // row until the turn ends.
+    // Regression (#1590/#1619): recovery must deliver the state it hydrated on
+    // the `TerminalSpawned` announce and NOT as a second `Event::AgentState`.
+    // The state has to reach a client that snapshotted before this terminal
+    // registered — recovery walks a fleet on a background task — but
+    // `Event::AgentState` is the transition signal, and its consumers are
+    // edge-triggered (`auto_wait` fires once per `LimitReached` episode,
+    // `chat` pings Slack on an `InputNeeded` edge with no dedupe). A
+    // hydration baseline sent there is indistinguishable from the agent
+    // actually moving.
     #[tokio::test]
-    async fn recovery_announces_the_hydrated_agent_state() {
+    async fn recovery_carries_the_hydrated_state_without_a_transition() {
         let backend = crate::backend::MockBackend::new();
         let backend_key = backend
             .spawn(
@@ -13071,7 +13052,7 @@ mod tests {
         let store: std::sync::Arc<dyn lazybox_store::Store> =
             std::sync::Arc::new(lazybox_store::MemoryStore::new());
         let seed = ServerConfig::with_store_and_backend(store.clone(), backend.as_backend());
-        let session_key = SessionKey::new("github:owner/repo#1574");
+        let session_key = SessionKey::new("github:owner/repo#1590");
         let kind = TerminalKind::Agent("claude".into());
         persist_terminal_meta(&seed, &backend_key, &session_key, &kind).await;
         store
@@ -13099,33 +13080,32 @@ mod tests {
             .expect("recovered terminal id");
 
         // Drain what recovery emitted synchronously (the pump task hasn't run
-        // yet on this single-threaded runtime), and require the announce to
-        // follow `TerminalSpawned` — a client folds state onto a terminal it
-        // already knows about.
-        let mut spawned_seen = false;
-        let mut announced = None;
+        // yet on this single-threaded runtime). The mock backend produces no
+        // output, so nothing can legitimately transition here.
+        let mut carried = None;
         while let Ok(event) = events.try_recv() {
             match event {
                 Event::TerminalSpawned {
-                    terminal_id: id, ..
-                } if id == terminal_id => spawned_seen = true,
-                Event::AgentState {
                     terminal_id: id,
-                    session_key: announced_key,
-                    state,
+                    session_key: spawned_key,
+                    agent_state,
+                    ..
                 } if id == terminal_id => {
-                    assert!(spawned_seen, "AgentState announced before TerminalSpawned");
-                    assert_eq!(announced_key, session_key);
-                    announced = Some(state);
-                    break;
+                    assert_eq!(spawned_key, session_key);
+                    carried = agent_state;
+                }
+                Event::AgentState {
+                    terminal_id: id, ..
+                } if id == terminal_id => {
+                    panic!("recovery must not publish a transition for a hydrated state");
                 }
                 _ => {}
             }
         }
         assert_eq!(
-            announced,
+            carried,
             Some(lazybox_ipc::AgentState::Working),
-            "recovery hydrated Working but never announced it on the bus"
+            "recovery hydrated Working but the spawn announce did not carry it"
         );
     }
 

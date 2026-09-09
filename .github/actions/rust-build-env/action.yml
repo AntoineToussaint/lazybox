@@ -62,6 +62,31 @@ runs:
       # CI must provision them, so this runs before bootstrap.sh.
       shell: bash
       run: |
+        # The runner image preinstalls third-party apt repos (Google
+        # Chrome, for the browser testing tools) that we never install
+        # from. `apt-get update` exits non-zero when ANY configured
+        # index fails, so a corrupt file served by one of them takes
+        # down every compiling job here — before Rust is even
+        # installed. That is exactly what happened on 2026-09-09:
+        # dl.google.com served a `Packages.gz` whose hash did not match
+        # its own `InRelease`, and test/clippy/rustdoc/benches all died
+        # with `E: Failed to fetch ... Hash Sum mismatch` / exit 100.
+        # Drop the repos we do not depend on rather than tolerating
+        # errors from the ones we do — `apt-get update` still fails the
+        # job if an index we actually need is broken.
+        # Match on the URL rather than a filename: the image has moved
+        # these between `.list` and deb822 `.sources` files, so deleting
+        # `google-chrome.list` by name silently no-ops. Whole-file delete
+        # for sources.list.d (a deb822 stanza cannot survive losing just
+        # its URI line); line delete for the one-line-per-repo main file.
+        # `|| true` because these steps run under `pipefail` and grep
+        # exits 1 when it matches nothing — which is the good case here,
+        # not a failure.
+        { sudo grep -rlE 'dl\.google\.com|packages\.microsoft\.com' \
+            /etc/apt/sources.list.d/ 2>/dev/null || true; } \
+          | sudo xargs -r rm -fv
+        sudo sed -i -E '/dl\.google\.com|packages\.microsoft\.com/d' \
+          /etc/apt/sources.list
         sudo apt-get update
         sudo apt-get install -y build-essential pkg-config libc++-dev libc++abi-dev
 

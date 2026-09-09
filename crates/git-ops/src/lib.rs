@@ -310,10 +310,10 @@ pub struct Worktree {
     pub name: String,
     pub path: PathBuf,
     pub branch: String,
-    /// What [`ensure_worktree_branch`] found when reusing an existing
-    /// checkout at this path. [`BranchDrift::Drifted`] means `branch`
-    /// above is the branch the checkout is actually on — not the one the
-    /// caller asked for — so the caller can reconcile its records to it.
+    /// What reusing an existing checkout at this path found about the
+    /// branch it sits on. [`BranchDrift::Drifted`] means `branch` above is
+    /// the branch the checkout is actually on — not the one the caller
+    /// asked for — so the caller can reconcile its records to it.
     pub drift: BranchDrift,
 }
 

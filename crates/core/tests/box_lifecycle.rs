@@ -271,6 +271,15 @@ mod behavior {
     /// never handed out as an ephemeral local port (see `run_idle`).
     const FAKE_SSH_PORT: &str = "1";
 
+    /// A process-unique name for a fixture's agent argv. The idle-stop script
+    /// resolves it with `pgrep -f` against the host's whole process table, so a
+    /// fixed string would let two copies of this suite running on one box (the
+    /// normal state of this repo) match each other's fixtures and invert the
+    /// assertions.
+    fn agent_token(base: &str) -> String {
+        format!("{base}-{}", std::process::id())
+    }
+
     fn scratch(name: &str) -> PathBuf {
         let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
         let _ = fs::remove_dir_all(&dir);
@@ -653,10 +662,10 @@ mod behavior {
         let marker = dir.join("idle-since");
         let stopped = dir.join("STOPPED");
         let stop_cmd = format!("touch {}", stopped.display());
-        let token = "lazybox-test-working-agent";
+        let token = agent_token("lazybox-test-working-agent");
         let cpu_secs = AGENT_CPU_SECS.to_string();
         let env = [
-            ("LAZYBOX_IDLE_AGENT_PROCS", token),
+            ("LAZYBOX_IDLE_AGENT_PROCS", token.as_str()),
             ("LAZYBOX_IDLE_AGENT_CPU_SECS", cpu_secs.as_str()),
             ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
         ];
@@ -671,7 +680,7 @@ mod behavior {
             .args([
                 "-c",
                 "end=$((SECONDS+60)); while (( SECONDS < end )); do :; done",
-                token,
+                token.as_str(),
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -719,6 +728,51 @@ mod behavior {
     }
 
     #[test]
+    fn a_sibling_runs_fixture_is_invisible_to_this_run() {
+        // Two copies of this suite share the host's process table, so a fixture
+        // named with a run-independent string lets the other run's CPU burner
+        // read as this run's live agent and the reap never fires. Stand in for
+        // that sibling with a burner carrying the bare base name.
+        let Ok(bash) = which_bash() else { return };
+        let dir = scratch("sibling_fixture");
+        let marker = dir.join("idle-since");
+        let stopped = dir.join("STOPPED");
+        let stop_cmd = format!("touch {}", stopped.display());
+        let base = "lazybox-test-sibling-agent";
+        let token = agent_token(base);
+        let env = [
+            ("LAZYBOX_IDLE_AGENT_PROCS", token.as_str()),
+            ("LAZYBOX_IDLE_AGENT_CPU_SECS", "1"),
+            ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
+        ];
+
+        let mut command = Command::new(&bash);
+        command
+            .args([
+                "-c",
+                "end=$((SECONDS+10)); while (( SECONDS < end )); do :; done",
+                base,
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let sibling = FixtureProcessGroup::spawn(command);
+
+        fs::write(&marker, "1").expect("stale marker");
+        let out = run_idle(&bash, &marker, &env, None);
+        let succeeded = out.status.success();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        let stopped_now = stopped.exists();
+
+        drop(sibling);
+
+        assert!(succeeded, "idle-stop exited non-zero: {stderr}");
+        assert!(
+            stopped_now,
+            "another run's fixture must not register as this run's agent"
+        );
+    }
+
+    #[test]
     fn a_working_agent_blocked_on_a_child_is_not_reaped() {
         // The core #978 fix: `pgrep -f claude` matches the agent, not the
         // `cargo build` child it spawned and is blocking on. The agent itself
@@ -730,10 +784,10 @@ mod behavior {
         let marker = dir.join("idle-since");
         let stopped = dir.join("STOPPED");
         let stop_cmd = format!("touch {}", stopped.display());
-        let token = "lazybox-test-blocked-agent";
+        let token = agent_token("lazybox-test-blocked-agent");
         let cpu_secs = AGENT_CPU_SECS.to_string();
         let env = [
-            ("LAZYBOX_IDLE_AGENT_PROCS", token),
+            ("LAZYBOX_IDLE_AGENT_PROCS", token.as_str()),
             ("LAZYBOX_IDLE_AGENT_CPU_SECS", cpu_secs.as_str()),
             ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
         ];
@@ -746,7 +800,7 @@ mod behavior {
             .args([
                 "-c",
                 "( end=$((SECONDS+60)); while (( SECONDS < end )); do :; done ) & wait",
-                token,
+                token.as_str(),
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -799,17 +853,17 @@ mod behavior {
         let marker = dir.join("idle-since");
         let stopped = dir.join("STOPPED");
         let stop_cmd = format!("touch {}", stopped.display());
-        let token = "lazybox-test-idle-tree-agent";
+        let token = agent_token("lazybox-test-idle-tree-agent");
         let cpu_secs = AGENT_CPU_SECS.to_string();
         let env = [
-            ("LAZYBOX_IDLE_AGENT_PROCS", token),
+            ("LAZYBOX_IDLE_AGENT_PROCS", token.as_str()),
             ("LAZYBOX_IDLE_AGENT_CPU_SECS", cpu_secs.as_str()),
             ("LAZYBOX_IDLE_STOP_CMD", stop_cmd.as_str()),
         ];
 
         // Agent and child both sleep — no CPU accrues anywhere in the tree.
         let mut agent = Command::new(&bash)
-            .args(["-c", "( sleep 30 ) & sleep 30", token])
+            .args(["-c", "( sleep 30 ) & sleep 30", token.as_str()])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()

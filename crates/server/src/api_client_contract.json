@@ -186,6 +186,7 @@
           "local": false,
           "metered": true,
           "name": "PR o/r#42",
+          "native_auto_merge_by_lazybox": false,
           "notes": "",
           "policies": {
             "auto_fix_ci": "Default",
@@ -244,7 +245,7 @@
           "read_indices": [],
           "remote": null,
           "role": null,
-          "schema": 11,
+          "schema": 12,
           "seen_count": 0,
           "sent_snippets": {
             "recent": [],

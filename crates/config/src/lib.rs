@@ -3329,9 +3329,13 @@ impl AutoFixConfig {
 /// passes. Logins match case-insensitively and a trailing `[bot]` is
 /// ignored, so `dependabot` covers `dependabot[bot]` too.
 ///
+/// `github_native` decides whether arming also turns on **GitHub's own**
+/// auto-merge (issue #1596), so the PR lands even with lazybox closed.
+///
 /// ```yaml
 /// merge_on_green:
 ///   allow_authors: [dependabot, renovate]
+///   github_native: auto
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -3339,6 +3343,9 @@ pub struct MergeOnGreenConfig {
     /// Non-author logins whose green PRs may auto-merge. Empty (the
     /// default) keeps the safe own-PRs-only behavior.
     pub allow_authors: Vec<String>,
+    /// Whether arming merge-on-green also enables GitHub-native
+    /// auto-merge on the PR.
+    pub github_native: GithubNativeConfig,
 }
 
 impl MergeOnGreenConfig {
@@ -3347,6 +3354,29 @@ impl MergeOnGreenConfig {
     pub fn to_policy(&self) -> lazybox_core::MergeOnGreenPolicy {
         lazybox_core::MergeOnGreenPolicy::from_allow_authors(&self.allow_authors)
     }
+}
+
+/// When arming merge-on-green (`g g`) should also enable GitHub's
+/// server-side auto-merge (`merge_on_green.github_native`, issue #1596).
+///
+/// GitHub's auto-merge only waits on checks its branch protection /
+/// ruleset marks **required**. On a base branch with none, GitHub would
+/// merge without waiting for CI at all — strictly weaker than lazybox's
+/// all-green gate — so the default only arms it where the base actually
+/// gates on required checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GithubNativeConfig {
+    /// Arm native auto-merge only when the PR's base branch has required
+    /// status checks — i.e. only where GitHub's gate is
+    /// equivalent-or-stricter than lazybox's. The default.
+    #[default]
+    Auto,
+    /// Always arm native auto-merge, required checks or not. Opt in only
+    /// if landing without CI on an ungated base is acceptable.
+    Always,
+    /// Never arm native auto-merge; `g g` stays a lazybox-only latch.
+    Never,
 }
 
 // ─── Provider configs ──────────────────────────────────────────────────────
@@ -3924,6 +3954,32 @@ mod tests {
             "unset inherits the global box"
         );
         assert_eq!(disabled.len(), 1);
+    }
+
+    /// `merge_on_green.github_native` parses its three modes and
+    /// defaults to `auto` — arm GitHub's own auto-merge only where the
+    /// base branch actually gates on required checks (#1596).
+    #[test]
+    fn github_native_mode_parses_and_defaults_to_auto() {
+        assert_eq!(
+            MergeOnGreenConfig::default().github_native,
+            GithubNativeConfig::Auto,
+            "an unset section must not widen who GitHub may merge unattended"
+        );
+        for (yaml, expected) in [
+            ("auto", GithubNativeConfig::Auto),
+            ("always", GithubNativeConfig::Always),
+            ("never", GithubNativeConfig::Never),
+        ] {
+            let cfg: Config = Config::parse(&format!("merge_on_green:\n  github_native: {yaml}\n"))
+                .expect("parse github_native");
+            assert_eq!(cfg.merge_on_green.github_native, expected, "{yaml}");
+        }
+        // The section is independent: setting one key leaves the other's
+        // default intact.
+        let cfg: Config = Config::parse("merge_on_green:\n  github_native: never\n")
+            .expect("parse github_native alone");
+        assert!(cfg.merge_on_green.allow_authors.is_empty());
     }
 
     /// The default merge-on-green config keeps own-PRs-only; a

@@ -230,6 +230,11 @@ struct EngagementCandidate {
     cold: bool,
     live_agent: bool,
     own_open_pr: bool,
+    /// Merge-on-green is armed (#1596). The row the user is waiting on
+    /// *right now*: a check-rollup flip doesn't bump the PR's
+    /// `updated_at`, so an armed PR parked on CI drifts out of the
+    /// recent-own-PR window exactly when its freshness matters most.
+    armed: bool,
     /// Workspace has a persisted session (any [`lazybox_core::SessionKind`],
     /// live process or not). This is the Tier 0 "I'm actively working
     /// in this repo" signal — stronger than `live_agent`, which only
@@ -247,6 +252,7 @@ fn select_engagement_snapshot(
         .iter()
         .filter(|candidate| {
             candidate.live_agent
+                || (!candidate.cold && candidate.armed)
                 || focused_workspace == Some(candidate.workspace_key.as_str())
                 || (!candidate.cold
                     && candidate.own_open_pr
@@ -260,6 +266,7 @@ fn select_engagement_snapshot(
             .cmp(&left_focused)
             .then_with(|| right.sessioned.cmp(&left.sessioned))
             .then_with(|| right.live_agent.cmp(&left.live_agent))
+            .then_with(|| right.armed.cmp(&left.armed))
             .then_with(|| right.own_open_pr.cmp(&left.own_open_pr))
             .then_with(|| right.updated_at.cmp(&left.updated_at))
             .then_with(|| {
@@ -270,9 +277,13 @@ fn select_engagement_snapshot(
     });
 
     // Hot = the rows whose freshness the user is waiting on RIGHT NOW:
-    // the focused row and every row with a live agent (uncapped — they
-    // ride one batched `nodes(ids:)` query), plus recent own PRs capped
-    // at `HOT_SET_MAX`. A merely session-bearing workspace (an idle
+    // the focused row, every row with a live agent, and every armed row
+    // (all uncapped — they ride one batched `nodes(ids:)` query), plus
+    // recent own PRs capped at `HOT_SET_MAX`. Armed rows are few and are
+    // precisely "land this the moment it goes green"; below the cap an
+    // armed PR waited out its repo's slot in the ~5-minute rotation, so
+    // green-on-GitHub to merged-by-lazybox was minutes instead of one
+    // 15-second tick (#1596). A merely session-bearing workspace (an idle
     // worktree / shell) is NOT hot on its own any more: with 20-40 open
     // worktrees that pinned the whole loop on the 15s hot cadence around
     // the clock. Its repo is still force-included in every repo-first
@@ -282,7 +293,7 @@ fn select_engagement_snapshot(
     let mut capped_used = 0usize;
     for candidate in eligible {
         let focused = focused_workspace == Some(candidate.workspace_key.as_str());
-        if focused || candidate.live_agent {
+        if focused || candidate.live_agent || candidate.armed {
             hot_keys.insert(candidate.workspace_key.as_str().to_string());
         } else if capped_used < HOT_SET_MAX {
             hot_keys.insert(candidate.workspace_key.as_str().to_string());
@@ -461,6 +472,7 @@ pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnaps
             cold,
             live_agent: !muted && live_agent_workspaces.contains(workspace.key.as_str()),
             own_open_pr,
+            armed: workspace.auto_merge_on_green,
             sessioned: !(muted || digest) && !workspace.sessions.is_empty(),
         });
     }
@@ -599,6 +611,7 @@ mod engagement_tier_tests {
             cold: false,
             live_agent: false,
             own_open_pr: true,
+            armed: false,
             sessioned: false,
         }
     }
@@ -760,6 +773,56 @@ mod engagement_tier_tests {
         let snapshot = select_engagement_snapshot(live, None, Utc::now());
         // 4 live agents (uncapped) + 3 capped own-PR = 7 hot.
         assert_eq!(snapshot.hot_count(), 7);
+    }
+
+    /// #1596: an armed PR is the row the user is waiting on right now,
+    /// so it rides above `HOT_SET_MAX` alongside focus and live agents —
+    /// otherwise it waits out its repo's ~5-minute rotation slot and
+    /// green-to-merged is minutes, not one 15-second tick.
+    #[test]
+    fn armed_prs_are_hot_above_the_cap() {
+        let armed: Vec<_> = (1..=5)
+            .map(|n| {
+                let mut c = candidate(n);
+                c.own_open_pr = false;
+                c.armed = true;
+                c.repo = format!("o/a{n}");
+                c
+            })
+            .collect();
+        let snapshot = select_engagement_snapshot(armed, None, Utc::now());
+        assert_eq!(
+            snapshot.hot_count(),
+            5,
+            "every armed row is hot, not just HOT_SET_MAX of them"
+        );
+    }
+
+    /// A check-rollup flip doesn't bump `updated_at`, so an armed PR
+    /// parked on CI ages out of the own-PR hot window exactly when its
+    /// freshness matters most. The arm alone must keep it hot.
+    #[test]
+    fn stale_armed_pr_stays_hot() {
+        let mut armed = candidate(1);
+        armed.updated_at = Utc::now() - OWN_PR_HOT_WINDOW - chrono::Duration::hours(1);
+        armed.armed = true;
+        let key = armed.workspace_key.clone();
+        let snapshot = select_engagement_snapshot(vec![armed], None, Utc::now());
+        assert_eq!(snapshot.tier_for(&key), EngagementTier::Hot);
+    }
+
+    /// The arm never resurrects a row the user parked: unlike a live
+    /// agent, it does not override the cold classification a snooze, a
+    /// closed PR, or a muted source produces.
+    #[test]
+    fn cold_armed_pr_is_not_hot() {
+        let mut armed = candidate(1);
+        armed.cold = true;
+        armed.own_open_pr = false;
+        armed.armed = true;
+        let key = armed.workspace_key.clone();
+        let snapshot = select_engagement_snapshot(vec![armed], None, Utc::now());
+        assert_eq!(snapshot.tier_for(&key), EngagementTier::Cold);
     }
 
     #[test]

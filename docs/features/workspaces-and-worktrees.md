@@ -453,21 +453,39 @@ only surfaces when the PR is actually behind its base.
 
 **Status:** stable
 **Crate(s):** `tui-core` (`ManagePolicies` in `src/action.rs`), `tui`, `server`
-**Config / flags:** `auto_fix.*` (global auto-fix), `auto_fix.opt_out_labels` (default `no-auto-fix`, `do-not-lazybox`)
+**Config / flags:** `auto_fix.*` (global auto-fix), `auto_fix.opt_out_labels` (default `no-auto-fix`, `do-not-lazybox`), `merge_on_green.github_native` (`auto` | `always` | `never`)
 **Key bindings:** `g p` (menu), `g g` (toggle merge-on-green directly),
 `Shift-A` (toggle both auto-fix kinds directly)
 
 ### What it does
 One surface for the focused PR/issue's automation (#363): lazybox's
 merge-on-green arm, the per-session auto-fix arm/disarm, and GitHub-native
-auto-merge status — each toggled in place. Armed policies surface as sidebar
+auto-merge — each toggled in place. Armed policies surface as sidebar
 row pills: `ARM` (merge-on-green) and `FIX` (auto-fix); the focused auto-fix
 row expands the pill to name whether CI failures, conflicts, or both are armed.
 
 ### How to use it
 Press `g p` on a workspace and toggle entries in place. `g g` flips
 merge-on-green without opening the menu (own PR, no conflicts, no changes
-requested; lazybox merges once CI passes, and only while lazybox runs).
+requested; lazybox merges once CI passes).
+
+Arming also turns on **GitHub's own** auto-merge (#1596), so the PR lands even
+with lazybox closed. GitHub's auto-merge waits only on checks a ruleset or
+branch protection marks *required*, so on a base branch with none it would
+merge without waiting for CI at all — weaker than lazybox's all-green gate.
+The default `merge_on_green.github_native: auto` therefore arms it only where
+the base actually gates on required checks, and says so plainly when it
+declines; `always` arms it regardless, `never` keeps `g g` a lazybox-only
+latch. lazybox also never hands GitHub a PR it is holding for a reason GitHub
+cannot see — an epic under `E M` (ORDER), an unlanded merge-after
+predecessor, a blocking Reviewer verdict, a still-open stacked parent, or an
+`approval: human` repo. Disarming turns native auto-merge back off only when
+lazybox is what armed it; one set on github.com is left alone.
+
+An armed PR also rides the 15-second hot poll tier regardless of the hot-set
+cap, so where the native arm doesn't apply, green-on-GitHub to merged-by-lazybox
+is one tick rather than its repo's ~5-minute rotation slot.
+
 `Shift-A` arms or disarms CI-failure and merge-conflict auto-fix together. The
 per-session auto-fix arm overrides the global `no-auto-fix` /
 `do-not-lazybox` label opt-out, which the menu still reflects.
@@ -479,6 +497,9 @@ per-session auto-fix arm overrides the global `no-auto-fix` /
 - [ ] A per-session auto-fix arm wins over the label opt-out.
 - [ ] A red PR waits for an existing agent to reach Done before auto-fix injects.
 - [ ] Merge-on-green only fires on a green, conflict-free, own PR while lazybox runs.
+- [ ] On a base with required checks, `g g` also turns on GitHub auto-merge; without them it says so and only the lazybox latch arms.
+- [ ] Disarming clears GitHub auto-merge only when lazybox armed it.
+- [ ] An epic member under `E M` (ORDER) never gets GitHub-native auto-merge.
 
 ---
 

@@ -988,6 +988,30 @@ fn mutation_provider_error(err: GhError) -> lazybox_core::ProviderError {
 /// "can't merge" notice would be noise. Unknown types fall through to a
 /// prettified form of the raw type so a new merge-relevant rule still
 /// gets surfaced rather than silently dropped.
+/// One active branch rule as GitHub's REST rules API reports it
+/// (`GET /repos/{owner}/{repo}/rules/branches/{branch}`).
+#[derive(serde::Deserialize)]
+struct BranchRule {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    parameters: Option<serde_json::Value>,
+}
+
+impl BranchRule {
+    /// Whether a `required_status_checks` rule actually names at least one
+    /// check. GitHub reports the rule with an empty `required_status_checks`
+    /// array when a ruleset enables the control without listing a check —
+    /// which gates nothing.
+    fn requires_a_check(&self) -> bool {
+        self.parameters
+            .as_ref()
+            .and_then(|p| p.get("required_status_checks"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|checks| !checks.is_empty())
+    }
+}
+
 fn humanize_rule(kind: &str, params: Option<&serde_json::Value>) -> Option<String> {
     match kind {
         "creation"
@@ -5859,19 +5883,7 @@ impl GhClient {
         pull_request_node_id: &str,
         expected_head_oid: Option<&str>,
     ) -> Result<(), GhError> {
-        let cached = repo.and_then(|repo| self.repo_merge_methods.lock().get(repo).cloned());
-        let (merge_method, from_cache) = match cached {
-            Some(method) => (method, true),
-            None => {
-                let method = self.pr_merge_method(pull_request_node_id).await?;
-                if let Some(repo) = repo {
-                    self.repo_merge_methods
-                        .lock()
-                        .insert(repo.to_string(), method.clone());
-                }
-                (method, false)
-            }
-        };
+        let (merge_method, from_cache) = self.merge_method_for(repo, pull_request_node_id).await?;
         match self
             .merge_pr_with_method(pull_request_node_id, &merge_method, expected_head_oid)
             .await
@@ -5904,6 +5916,77 @@ impl GhClient {
     /// The cached merge method for `repo`, if a merge has learned it.
     pub fn cached_merge_method(&self, repo: &str) -> Option<String> {
         self.repo_merge_methods.lock().get(repo).cloned()
+    }
+
+    /// The merge method to use for a PR, served from (and learned into)
+    /// the per-repo cache. Returns `(method, from_cache)` so a caller
+    /// that can retry — [`merge_pr_in_repo`](Self::merge_pr_in_repo) —
+    /// knows whether a rejection might be a stale cached method.
+    async fn merge_method_for(
+        &self,
+        repo: Option<&str>,
+        pull_request_node_id: &str,
+    ) -> Result<(String, bool), GhError> {
+        if let Some(method) =
+            repo.and_then(|repo| self.repo_merge_methods.lock().get(repo).cloned())
+        {
+            return Ok((method, true));
+        }
+        let method = self.pr_merge_method(pull_request_node_id).await?;
+        if let Some(repo) = repo {
+            self.repo_merge_methods
+                .lock()
+                .insert(repo.to_string(), method.clone());
+        }
+        Ok((method, false))
+    }
+
+    /// Turn on GitHub's server-side auto-merge for a PR (issue #1596) —
+    /// the durable half of lazybox's `g g` arm: GitHub lands the PR once
+    /// its **required** checks and reviews are satisfied, with lazybox
+    /// closed. Uses the repo's own default merge method, like
+    /// [`merge_pr_in_repo`](Self::merge_pr_in_repo).
+    ///
+    /// GitHub refuses this on a PR that is already mergeable ("Pull
+    /// request is in clean status") — with nothing left to wait for
+    /// there is no "when ready" to schedule. That surfaces as an
+    /// ordinary error; the caller decides how loudly to report it.
+    pub async fn enable_auto_merge(
+        &self,
+        repo: Option<&str>,
+        pull_request_node_id: &str,
+    ) -> Result<(), GhError> {
+        let (merge_method, _) = self.merge_method_for(repo, pull_request_node_id).await?;
+        self.acquire_or_block("enablePullRequestAutoMerge mutation")?;
+        let body = graphql::enable_auto_merge_body(pull_request_node_id, &merge_method);
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("enablePullRequestAutoMerge mutation", &body)
+            .await?;
+        if let Some(errors) = response.errors {
+            return Err(mutation_error_response(
+                "enablePullRequestAutoMerge",
+                &errors,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Turn GitHub's server-side auto-merge back off. Callers fire this
+    /// only for an auto-merge lazybox itself enabled, so a setting made
+    /// on github.com is never cleared underneath the user.
+    pub async fn disable_auto_merge(&self, pull_request_node_id: &str) -> Result<(), GhError> {
+        self.acquire_or_block("disablePullRequestAutoMerge mutation")?;
+        let body = graphql::disable_auto_merge_body(pull_request_node_id);
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("disablePullRequestAutoMerge mutation", &body)
+            .await?;
+        if let Some(errors) = response.errors {
+            return Err(mutation_error_response(
+                "disablePullRequestAutoMerge",
+                &errors,
+            ));
+        }
+        Ok(())
     }
 
     async fn merge_pr_with_method(
@@ -6013,23 +6096,8 @@ impl GhClient {
     /// reports the rules the token can see. Best-effort: any error
     /// yields an empty list (the caller then keeps the generic notice).
     async fn branch_rule_names(&self, owner: &str, repo: &str, branch: &str) -> Vec<String> {
-        #[derive(serde::Deserialize)]
-        struct BranchRule {
-            #[serde(rename = "type")]
-            kind: String,
-            #[serde(default)]
-            parameters: Option<serde_json::Value>,
-        }
-        let route = format!("/repos/{owner}/{repo}/rules/branches/{branch}");
-        let rules: Vec<BranchRule> = match self.inner.get(&route, None::<&()>).await {
-            Ok(rules) => rules,
-            Err(e) => {
-                tracing::debug!("branch-rules lookup for {owner}/{repo}@{branch} failed: {e}");
-                return Vec::new();
-            }
-        };
         let mut names = Vec::new();
-        for rule in &rules {
+        for rule in self.branch_rules(owner, repo, branch).await {
             if let Some(name) = humanize_rule(&rule.kind, rule.parameters.as_ref())
                 && !names.contains(&name)
             {
@@ -6037,6 +6105,38 @@ impl GhClient {
             }
         }
         names
+    }
+
+    /// Raw active branch rules for `branch`, as GitHub's REST rules API
+    /// reports them for the current viewer (repository rulesets *and*
+    /// classic branch protection). Best-effort: any error yields an empty
+    /// list, so a caller degrades rather than fails.
+    async fn branch_rules(&self, owner: &str, repo: &str, branch: &str) -> Vec<BranchRule> {
+        let route = format!("/repos/{owner}/{repo}/rules/branches/{branch}");
+        match self.inner.get(&route, None::<&()>).await {
+            Ok(rules) => rules,
+            Err(e) => {
+                tracing::debug!("branch-rules lookup for {owner}/{repo}@{branch} failed: {e}");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Does `branch` gate merges on **required status checks**? The
+    /// precondition for handing GitHub a PR to auto-merge (issue #1596):
+    /// GitHub's auto-merge only waits on checks a ruleset or branch
+    /// protection marks required, so on a branch with none it would land
+    /// the PR without waiting for CI at all — strictly weaker than
+    /// lazybox's all-green gate.
+    ///
+    /// Fails **closed**: an unreadable rules route (no permission, an
+    /// older host, a network blip) reports `false`, so an unknown gate is
+    /// never mistaken for a present one.
+    pub async fn base_branch_gates_on_checks(&self, owner: &str, repo: &str, branch: &str) -> bool {
+        self.branch_rules(owner, repo, branch)
+            .await
+            .iter()
+            .any(|rule| rule.kind == "required_status_checks" && rule.requires_a_check())
     }
 
     /// Native `blocked_by` edges for one issue, from GitHub's issue
@@ -9578,6 +9678,122 @@ mod tests {
             humanize_rule("code_scanning", None),
             Some("code scanning".to_string())
         );
+    }
+
+    /// #1596: the required-checks probe is what decides whether GitHub's
+    /// auto-merge is equivalent-or-stricter than lazybox's all-green
+    /// gate. A ruleset that lists at least one required check gates; an
+    /// empty list (the control enabled but naming nothing) does not.
+    #[test]
+    fn branch_rule_gates_on_checks_only_with_a_named_check() {
+        let gating: BranchRule = serde_json::from_value(serde_json::json!({
+            "type": "required_status_checks",
+            "parameters": { "required_status_checks": [{ "context": "test" }] },
+        }))
+        .expect("rule parses");
+        assert!(gating.requires_a_check());
+
+        let empty: BranchRule = serde_json::from_value(serde_json::json!({
+            "type": "required_status_checks",
+            "parameters": { "required_status_checks": [] },
+        }))
+        .expect("rule parses");
+        assert!(
+            !empty.requires_a_check(),
+            "a rule naming no check gates nothing"
+        );
+
+        let paramless: BranchRule = serde_json::from_value(serde_json::json!({
+            "type": "required_status_checks",
+        }))
+        .expect("rule parses");
+        assert!(!paramless.requires_a_check());
+    }
+
+    /// The whole point of the probe is refusing to hand GitHub a PR it
+    /// would land red: an unprotected base (GitHub answers `[]`, as this
+    /// repo's own `main` does) must report "does not gate".
+    #[tokio::test(flavor = "current_thread")]
+    async fn base_branch_without_required_checks_does_not_gate() {
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", "[]").await;
+        let client = make_client(&base_uri);
+        assert!(
+            !client.base_branch_gates_on_checks("o", "r", "main").await,
+            "no rules means GitHub would merge without waiting for CI"
+        );
+    }
+
+    /// Fails **closed**: an unreadable rules route (no permission, an
+    /// older host) must not read as "gated" and let native auto-merge past.
+    #[tokio::test(flavor = "current_thread")]
+    async fn base_branch_probe_fails_closed_on_error() {
+        let base_uri =
+            spawn_canned_response_server("404 Not Found", "application/json", r#"{}"#).await;
+        let client = make_client(&base_uri);
+        assert!(!client.base_branch_gates_on_checks("o", "r", "main").await);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn base_branch_with_required_checks_gates() {
+        const BODY: &str = r#"[{"type":"required_status_checks",
+            "parameters":{"required_status_checks":[{"context":"test"}]}}]"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        assert!(client.base_branch_gates_on_checks("o", "r", "main").await);
+    }
+
+    /// `enablePullRequestAutoMerge` success is mutation-shaped, like
+    /// `merge_pr` — it must parse cleanly rather than leak the raw body
+    /// as a false failure. The repo's merge method is passed in so no
+    /// method lookup round-trip is needed.
+    #[tokio::test(flavor = "current_thread")]
+    async fn enable_auto_merge_success_reports_ok() {
+        const BODY: &str = r#"{"data":{"enablePullRequestAutoMerge":{"pullRequest":
+            {"id":"PR_kwDO","autoMergeRequest":{"enabledAt":"2026-09-09T10:00:00Z"}}}}}"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        client
+            .repo_merge_methods
+            .lock()
+            .insert("o/r".into(), "SQUASH".into());
+        client
+            .enable_auto_merge(Some("o/r"), "PR_kwDO")
+            .await
+            .expect("enable auto-merge success must not report a false failure");
+    }
+
+    /// GitHub refuses auto-merge on an already-mergeable PR. That must
+    /// surface as an error the caller can classify, not silent success.
+    #[tokio::test(flavor = "current_thread")]
+    async fn enable_auto_merge_reports_clean_status_rejection() {
+        const BODY: &str = r#"{"errors":[{"message":"Pull request is in clean status",
+            "path":["enablePullRequestAutoMerge"]}]}"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        client
+            .repo_merge_methods
+            .lock()
+            .insert("o/r".into(), "SQUASH".into());
+        let error = client
+            .enable_auto_merge(Some("o/r"), "PR_kwDO")
+            .await
+            .expect_err("a rejected mutation must not read as success");
+        assert!(
+            error.to_string().contains("clean status"),
+            "the reason must survive for the caller to classify: {error}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn disable_auto_merge_success_reports_ok() {
+        const BODY: &str = r#"{"data":{"disablePullRequestAutoMerge":{"pullRequest":
+            {"id":"PR_kwDO","autoMergeRequest":null}}}}"#;
+        let base_uri = spawn_canned_response_server("200 OK", "application/json", BODY).await;
+        let client = make_client(&base_uri);
+        client
+            .disable_auto_merge("PR_kwDO")
+            .await
+            .expect("disable auto-merge success must not report a false failure");
     }
 
     /// `updatePullRequestBranch` success reply is mutation-shaped (no

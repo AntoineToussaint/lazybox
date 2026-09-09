@@ -1073,6 +1073,51 @@ pub fn remove_assignees_body(
     })
 }
 
+/// GraphQL mutation that turns on GitHub's server-side auto-merge
+/// ("merge when ready") for a PR — the durable half of lazybox's `g g`
+/// arm (issue #1596). GitHub then lands the PR itself once every
+/// **required** check and review is satisfied, with lazybox closed.
+///
+/// `mergeMethod` is the repo's own default (resolved exactly as the
+/// direct merge resolves it) so the auto-merge lands the same shape a
+/// manual merge would.
+const ENABLE_AUTO_MERGE_MUTATION: &str = r#"
+mutation($id: ID!, $method: PullRequestMergeMethod!) {
+  enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: $method }) {
+    pullRequest { id autoMergeRequest { enabledAt } }
+  }
+}
+"#;
+
+pub fn enable_auto_merge_body(pull_request_node_id: &str, merge_method: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": ENABLE_AUTO_MERGE_MUTATION,
+        "variables": {
+            "id": pull_request_node_id,
+            "method": merge_method,
+        },
+    })
+}
+
+/// The inverse of [`ENABLE_AUTO_MERGE_MUTATION`]. Fired only when
+/// lazybox is the one that armed it (`Workspace::native_auto_merge_by_lazybox`),
+/// so disarming `g g` never clears an auto-merge a human set on
+/// github.com.
+const DISABLE_AUTO_MERGE_MUTATION: &str = r#"
+mutation($id: ID!) {
+  disablePullRequestAutoMerge(input: { pullRequestId: $id }) {
+    pullRequest { id autoMergeRequest { enabledAt } }
+  }
+}
+"#;
+
+pub fn disable_auto_merge_body(pull_request_node_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": DISABLE_AUTO_MERGE_MUTATION,
+        "variables": { "id": pull_request_node_id },
+    })
+}
+
 pub fn merge_pr_body(
     pull_request_node_id: &str,
     merge_method: &str,

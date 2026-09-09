@@ -241,6 +241,7 @@ mod tests {
             no_permission: false,
             on_main: false,
             model_label: None,
+            agent_state: None,
         };
         assert!(stat_events_from_event(&spawned, DAY).is_empty());
     }
@@ -327,6 +328,7 @@ mod tests {
             no_permission: false,
             on_main: false,
             model_label: None,
+            agent_state: None,
         })
         .unwrap();
         tx.send(Event::PrMerged {

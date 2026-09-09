@@ -4149,8 +4149,9 @@ impl TerminalStack {
                 no_permission,
                 on_main,
                 model_label,
+                agent_state,
             } => {
-                let slot = Self::make_slot(
+                let mut slot = Self::make_slot(
                     session_key.clone(),
                     kind.clone(),
                     0,
@@ -4160,6 +4161,12 @@ impl TerminalStack {
                     Vec::new(),
                     String::new(),
                 );
+                // A restart reattaching a hydrated agent carries its state on
+                // the spawn announce; seed the tab badge from it exactly as
+                // the snapshot path does.
+                if let Some(state) = agent_state {
+                    slot.agent_state = *state;
+                }
                 self.invalidate_visible();
                 self.terminals.insert(*terminal_id, slot);
                 // A fresh terminal arrived for the active session —
@@ -8612,6 +8619,50 @@ mod resync_tests {
     const ROW0: (u16, u16) = (1, 3);
     const ROW1: (u16, u16) = (1, 4);
 
+    /// A restart reattaching a hydrated agent carries its state on the spawn
+    /// announce, so the tab badge is right immediately — not blank until the
+    /// agent's next real transition (the end of the turn for a mid-turn
+    /// agent, and never for one parked on a prompt).
+    #[test]
+    fn hydrated_state_on_spawn_seeds_the_tab_badge() {
+        let sk = SessionKey::from("github:o/r#1");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            agent_state: Some(lazybox_ipc::AgentState::InputNeeded),
+        });
+        assert_eq!(
+            stack.terminal_agent_state(TerminalId(1)),
+            Some(lazybox_ipc::AgentState::InputNeeded),
+        );
+    }
+
+    /// A fresh spawn has committed no state yet — it must not inherit a badge.
+    #[test]
+    fn a_fresh_spawn_carries_no_hydrated_state() {
+        let sk = SessionKey::from("github:o/r#1");
+        let mut stack = TerminalStack::new(PaneId::new(0));
+        stack.on_event(&Event::TerminalSpawned {
+            terminal_id: TerminalId(1),
+            session_key: sk.clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            agent_state: None,
+        });
+        assert_eq!(
+            stack.terminal_agent_state(TerminalId(1)),
+            Some(lazybox_ipc::AgentState::Idle),
+            "no hydrated state means the default resting badge",
+        );
+    }
+
     fn shell_stack(id: TerminalId, sk: &SessionKey) -> TerminalStack {
         let mut stack = TerminalStack::new(PaneId::new(0));
         stack.on_event(&Event::TerminalSpawned {
@@ -8621,6 +8672,7 @@ mod resync_tests {
             kind: TerminalKind::Shell,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         stack.set_active_session(Some(sk.clone()));
         stack
@@ -9087,6 +9139,7 @@ mod deep_scrollback_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         stack.set_active_session(Some(sk.clone()));
         stack
@@ -9257,6 +9310,7 @@ mod deep_scrollback_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         stack.set_active_session(Some(sk.clone()));
 
@@ -9296,6 +9350,7 @@ mod deep_scrollback_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         stack.set_active_session(Some(sk.clone()));
         // Widen the pane well past the default 120 cols; the deep-scrollback
@@ -9713,6 +9768,7 @@ mod hidden_feed_tests {
             kind: TerminalKind::Shell,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
     }
 
@@ -9977,6 +10033,7 @@ mod hidden_feed_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         stack.set_active_session(Some(sk));
         render(&mut stack);
@@ -10972,6 +11029,7 @@ mod agent_badge_tests {
             kind: TerminalKind::Agent(agent.into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
     }
 
@@ -11079,6 +11137,7 @@ mod rebadge_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         stack.set_active_session(Some(sk.clone()));
         stack
@@ -11151,6 +11210,7 @@ mod rebadge_tests {
             kind: TerminalKind::Shell,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         stack.on_event(&Event::TerminalSpawned {
             model_label: None,
@@ -11159,6 +11219,7 @@ mod rebadge_tests {
             kind: TerminalKind::Shell,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
 
         stack.on_event(&Event::TerminalsRebadged {
@@ -11221,6 +11282,7 @@ mod rebadge_tests {
                 no_permission: false,
                 on_main: false,
                 model_label: None,
+                agent_state: None,
             });
             stack.set_active_session(Some(current.clone()));
             let rendered = format!(
@@ -11429,6 +11491,7 @@ mod set_layout_tests {
             kind: TerminalKind::Shell,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         stack.set_active_session(Some(sk.clone()));
         stack
@@ -11457,6 +11520,7 @@ mod set_layout_tests {
             kind: TerminalKind::Shell,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         assert!(stack.pending_split.is_none(), "spawn consumed the split");
         assert!(
@@ -11499,6 +11563,7 @@ mod set_layout_tests {
             kind: TerminalKind::Shell,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         let two_leaves = |focused: Vec<u8>| lazybox_core::SessionLayout::Splits {
             tree: lazybox_core::TileTree::HSplit {
@@ -11552,6 +11617,7 @@ mod pending_split_tests {
             kind: TerminalKind::Shell,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         stack.set_active_session(Some(sk.clone()));
         stack
@@ -11565,6 +11631,7 @@ mod pending_split_tests {
             kind: TerminalKind::Shell,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
     }
 
@@ -11640,6 +11707,7 @@ mod spawn_focus_tests {
             kind,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
     }
 
@@ -11731,6 +11799,7 @@ mod new_terminal_layout_tests {
             kind,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
     }
 
@@ -11863,6 +11932,7 @@ mod terminal_availability_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         stack.set_active_session(Some(sk));
         stack
@@ -12061,6 +12131,7 @@ mod terminal_availability_tests {
             kind: TerminalKind::Shell,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         stack.set_active_session(Some(sk));
         assert_eq!(stack.recall_prompt(), None);
@@ -12082,6 +12153,7 @@ mod spawn_projection_tests {
             kind,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
     }
 
@@ -12150,6 +12222,7 @@ mod agent_crash_tests {
             kind,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         stack
     }
@@ -12381,6 +12454,7 @@ mod agent_crash_tests {
             kind: TerminalKind::Shell,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         stack.set_layout(lazybox_core::SessionLayout::Splits {
             tree: lazybox_core::TileTree::HSplit {
@@ -12644,6 +12718,7 @@ mod agent_crash_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
 
         assert!(stack.terminals.get(&TerminalId(1)).is_some());
@@ -12783,6 +12858,7 @@ mod zoom_and_tile_header_tests {
                 kind: TerminalKind::Agent("claude".into()),
                 no_permission: false,
                 on_main: false,
+                agent_state: None,
             });
         }
         stack.set_active_session(Some(sk.clone()));
@@ -12837,6 +12913,7 @@ mod zoom_and_tile_header_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         tabs.set_active_session(Some(sk));
         assert_eq!(tabs.toggle_zoom(), None);
@@ -12969,6 +13046,7 @@ mod zoom_and_tile_header_tests {
                 kind: TerminalKind::Agent("claude".into()),
                 no_permission: false,
                 on_main: false,
+                agent_state: None,
             });
         }
         stack.set_active_session(Some(sk));
@@ -13020,6 +13098,7 @@ mod zoom_and_tile_header_tests {
             kind: TerminalKind::Shell,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         assert!(
             stack.is_zoomed(),

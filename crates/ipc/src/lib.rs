@@ -2648,6 +2648,20 @@ pub enum Event {
         /// `None` for a default-model / shell spawn (no badge).
         #[serde(default)]
         model_label: Option<String>,
+        /// Authoritative lifecycle state this terminal already carries at
+        /// the moment it is announced — the streaming twin of
+        /// [`TerminalSnapshot::agent_state`]. Set when a restart reattaches
+        /// an agent whose state was hydrated from the store; `None` for
+        /// shells and for a fresh spawn that has not committed its first
+        /// state yet.
+        ///
+        /// Clients seed their per-terminal state map from this the same way
+        /// they seed it from a snapshot row: silently. It is a baseline, not
+        /// a transition, so it must NOT arm the one-shot attention alerts
+        /// (`now_asking` / `now_done` / `now_limit_reached`) — a restart is
+        /// not the agent asking again.
+        #[serde(default)]
+        agent_state: Option<AgentState>,
     },
     TerminalOutput {
         terminal_id: TerminalId,

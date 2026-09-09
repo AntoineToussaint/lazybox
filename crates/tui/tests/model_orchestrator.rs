@@ -1071,6 +1071,7 @@ fn w_on_issue_with_running_claude_injects_implement_prompt() {
         kind: TerminalKind::Agent("claude".into()),
         no_permission: false,
         on_main: false,
+        agent_state: None,
     });
 
     // TerminalSpawned auto-focuses the terminal pane. In real usage
@@ -1160,6 +1161,7 @@ fn w_on_issue_from_right_pane_also_injects() {
         kind: TerminalKind::Agent("claude".into()),
         no_permission: false,
         on_main: false,
+        agent_state: None,
     });
 
     // Get to the right pane. TerminalSpawned auto-focused terminals;
@@ -2329,6 +2331,7 @@ fn terminal_spawned_mid_checklist_walks_every_step_before_dismissing() {
         kind: TerminalKind::Agent("claude".into()),
         no_permission: false,
         on_main: false,
+        agent_state: None,
     });
     assert!(
         m.modal_stack.contains(&Id::WorktreeProgress),
@@ -2457,6 +2460,7 @@ fn instant_resume_does_not_flash_the_progress_modal() {
         kind: TerminalKind::Agent("claude".into()),
         no_permission: false,
         on_main: false,
+        agent_state: None,
     });
     assert!(
         !m.modal_stack.contains(&Id::WorktreeProgress),
@@ -2483,6 +2487,7 @@ fn failed_step_keeps_the_checklist_up_past_terminal_spawned() {
         kind: TerminalKind::Shell,
         no_permission: false,
         on_main: false,
+        agent_state: None,
     });
     assert_eq!(
         m.modal_stack.last(),

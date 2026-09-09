@@ -397,6 +397,7 @@
     },
     {
       "TerminalSpawned": {
+        "agent_state": "InputNeeded",
         "kind": "Shell",
         "model_label": null,
         "session_key": "github:o/r#42",
@@ -560,6 +561,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 314741775,
+  "protocol_fingerprint": 137813362,
   "protocol_version": 4
 }

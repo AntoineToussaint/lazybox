@@ -97,6 +97,7 @@ mod multi_agent_state_tests {
             no_permission: false,
             on_main: false,
             model_label: None,
+            agent_state: None,
         });
         sidebar.on_event(&Event::TerminalSpawned {
             terminal_id: TerminalId(2),
@@ -105,6 +106,7 @@ mod multi_agent_state_tests {
             no_permission: false,
             on_main: false,
             model_label: None,
+            agent_state: None,
         });
         sidebar.on_event(&Event::AgentState {
             session_key: session_key.clone(),
@@ -2408,6 +2410,7 @@ mod search_tests {
             no_permission: false,
             on_main: false,
             model_label: None,
+            agent_state: None,
         });
     }
 
@@ -4550,6 +4553,7 @@ mod broadcast_select_tests {
                 kind,
                 no_permission: false,
                 on_main: false,
+                agent_state: None,
             });
         };
         spawn(&mut sb, 3, TerminalKind::Shell);
@@ -4860,6 +4864,7 @@ mod spawning_tests {
             no_permission: false,
             on_main: false,
             model_label: None,
+            agent_state: None,
         });
         assert!(!sb.is_spawning(&key));
     }
@@ -4947,6 +4952,7 @@ mod spawning_tests {
             no_permission: false,
             on_main: false,
             model_label: None,
+            agent_state: None,
         });
         sb.on_event(&Event::AgentState {
             session_key: key.clone(),
@@ -5186,6 +5192,7 @@ mod work_target_kill_tests {
             no_permission: false,
             on_main: false,
             model_label: None,
+            agent_state: None,
         });
         sb.on_event(&Event::AgentState {
             session_key: key.clone(),
@@ -5214,6 +5221,7 @@ mod work_target_kill_tests {
                 no_permission: false,
                 on_main: false,
                 model_label: None,
+                agent_state: None,
             });
         }
         sb.on_event(&Event::AgentState {
@@ -5514,6 +5522,77 @@ mod done_alert_tests {
                 .any(|n| n.contains("finished")),
             "footer notice on done",
         );
+    }
+
+    /// A restart reattaching a hydrated agent must show the pill WITHOUT
+    /// alerting. `recover_sessions` carries the state on `TerminalSpawned`,
+    /// and that is a baseline — the same one a snapshot row carries — not the
+    /// agent asking, finishing, or hitting the limit again.
+    ///
+    /// Regression: recovery used to publish the hydrated state as a second
+    /// `Event::AgentState`. For a client that connected mid-recovery the
+    /// terminal was absent from its snapshot, so `previous` was `None` and
+    /// every hydrated state read as a RISING edge — a restart fired an OS
+    /// banner + footer notice per parked or finished agent, including a
+    /// "finished" alert for a turn that had ended before the restart.
+    #[test]
+    fn hydrated_state_on_spawn_shows_the_pill_without_alerting() {
+        for state in [
+            AgentState::InputNeeded,
+            AgentState::Done,
+            AgentState::LimitReached,
+        ] {
+            let (mut sb, key) = sidebar_with_one_workspace();
+            sb.on_event(&Event::TerminalSpawned {
+                terminal_id: lazybox_ipc::TerminalId(1),
+                session_key: key.clone(),
+                kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
+                no_permission: false,
+                on_main: false,
+                model_label: None,
+                agent_state: Some(state),
+            });
+            assert_eq!(
+                sb.agent_state(&key),
+                Some(state),
+                "{state:?} must reach the row so the pill renders after a restart",
+            );
+            assert!(
+                sb.drain_pending_notifications().is_empty(),
+                "{state:?} hydrated on a restart must not queue an OS banner",
+            );
+            assert!(
+                sb.drain_pending_asking_notices().is_empty(),
+                "{state:?} hydrated on a restart must not queue a footer notice",
+            );
+        }
+    }
+
+    /// The seed is a baseline, not a latch: once the agent really does
+    /// transition, the ordinary edge still alerts. Without this, suppressing
+    /// the restart banner would also swallow the real one.
+    #[test]
+    fn a_real_transition_after_a_hydrated_seed_still_alerts() {
+        let (mut sb, key) = sidebar_with_one_workspace();
+        sb.on_event(&Event::TerminalSpawned {
+            terminal_id: lazybox_ipc::TerminalId(1),
+            session_key: key.clone(),
+            kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            model_label: None,
+            agent_state: Some(AgentState::Working),
+        });
+        assert!(sb.drain_pending_notifications().is_empty());
+
+        sb.on_event(&agent_state(&key, AgentState::Done));
+        let notifs = sb.drain_pending_notifications();
+        assert_eq!(
+            notifs.len(),
+            1,
+            "the agent genuinely finishing still alerts"
+        );
+        assert!(notifs[0].title.contains("finished"));
     }
 
     /// A usage-limit block alerts the user on its rising edge — an OS
@@ -5988,6 +6067,7 @@ mod agent_model_badge_tests {
             no_permission: false,
             on_main: false,
             model_label: model.map(str::to_string),
+            agent_state: None,
         });
     }
 

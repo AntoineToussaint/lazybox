@@ -48,6 +48,7 @@ fn spawned(id: u64, session: &str, kind: TerminalKind) -> Event {
         kind,
         no_permission: false,
         on_main: false,
+        agent_state: None,
     }
 }
 
@@ -738,6 +739,7 @@ fn render_shows_no_perms_badge_for_autonomous_session() {
         kind: TerminalKind::Agent("claude".into()),
         no_permission: true,
         on_main: false,
+        agent_state: None,
     });
     t.set_active_session(Some(sk("o/r#1")));
     let out = render_to_string(&mut t, 60, 10, true);

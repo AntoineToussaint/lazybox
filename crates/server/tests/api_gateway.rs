@@ -446,6 +446,7 @@ fn desktop_compatibility_fixture_is_current() {
             session_key: session_key.clone(),
             kind: TerminalKind::Shell,
             model_label: None,
+            agent_state: Some(lazybox_ipc::AgentState::InputNeeded),
         },
         DesktopEvent::TerminalExited {
             terminal_id: TerminalId(7),

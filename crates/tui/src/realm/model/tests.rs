@@ -416,6 +416,7 @@ mod effects_tests {
             no_permission: false,
             on_main: false,
             model_label: None,
+            agent_state: None,
         });
 
         let commands = model.dispatch_diff_review(
@@ -477,6 +478,7 @@ mod effects_tests {
                 no_permission: false,
                 on_main: false,
                 model_label: None,
+                agent_state: None,
             });
         }
 
@@ -3115,6 +3117,7 @@ mod effects_tests {
             kind: TerminalKind::Shell,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(1)));
         m
@@ -3155,6 +3158,7 @@ mod effects_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         // Weekly window at 62% used → 38% headroom, reset far in the future so
         // it is unambiguously live for the wall clock.
@@ -3479,6 +3483,7 @@ snippets:
             kind,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         assert_eq!(
             m.terminals.active_terminal_id(),
@@ -3918,6 +3923,7 @@ snippets:
                     kind: kind.clone(),
                     no_permission: false,
                     on_main: false,
+                    agent_state: None,
                 });
             }
         }
@@ -4010,6 +4016,7 @@ snippets:
                     kind: kind.clone(),
                     no_permission: false,
                     on_main: false,
+                    agent_state: None,
                 });
             }
         }
@@ -4193,6 +4200,7 @@ snippets:
             kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         m.modal_flow = Some(super::super::ModalFlow::Broadcast {
             draft: BroadcastDraft {
@@ -4787,6 +4795,7 @@ snippets:
             kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         // Lower-id agent is working; only the higher-id one is blocked.
         m.handle_daemon_event(IpcEvent::AgentState {
@@ -5630,6 +5639,7 @@ snippets:
             no_permission: false,
             on_main,
             model_label: None,
+            agent_state: None,
         });
         assert!(model.sidebar.focus_workspace_key(&key));
         (model, server, key)
@@ -5764,6 +5774,7 @@ snippets:
             no_permission: true,
             on_main: false,
             model_label: None,
+            agent_state: None,
         });
         assert!(
             model.conversion.is_some(),
@@ -5951,6 +5962,7 @@ snippets:
             no_permission: false,
             on_main: false,
             model_label: None,
+            agent_state: None,
         });
         model.handle_daemon_event(IpcEvent::CommandFailed {
             client_request_id: "another-spawn".into(),
@@ -6287,6 +6299,7 @@ snippets:
             kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         m.focus = PaneFocus::Terminals;
         m.set_focus_attr();
@@ -6481,6 +6494,7 @@ snippets:
             kind: lazybox_ipc::TerminalKind::Shell,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         assert!(
             m.setup.pending_open_with_launch.is_none(),
@@ -6646,6 +6660,7 @@ snippets:
                 kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
                 no_permission: false,
                 on_main: false,
+                agent_state: None,
             });
         }
         m.set_focus(PaneFocus::Sidebar);
@@ -8070,6 +8085,7 @@ mod coalesce_tests {
             no_permission: false,
             on_main: false,
             model_label: None,
+            agent_state: None,
         });
 
         model.handle_daemon_event(out(1, b"one", 1));
@@ -8227,6 +8243,7 @@ mod coalesce_tests {
                 no_permission: false,
                 on_main: false,
                 model_label: None,
+                agent_state: None,
             });
             model.handle_daemon_event(out(id, b"coherent-and-possibly-wrong", 1));
         }
@@ -11912,6 +11929,7 @@ mod merge_focus_follow_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
 
         // Focus snapped back to the issue, new agent as the active tab.
@@ -11997,6 +12015,7 @@ mod merge_focus_follow_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         assert!(m.sidebar.focus_workspace_key(&issue_sk));
         while cmd_rx.try_recv().is_ok() {}
@@ -12216,6 +12235,7 @@ mod merge_focus_follow_tests {
             kind: TerminalKind::Agent("codex".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         assert!(m.sidebar.focus_workspace_key(&sk));
 
@@ -12252,6 +12272,7 @@ mod merge_focus_follow_tests {
             kind: TerminalKind::Agent("codex".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         m.handle_daemon_event(IpcEvent::AgentState {
             session_key: sk.clone(),
@@ -12307,6 +12328,7 @@ mod merge_focus_follow_tests {
                 kind: TerminalKind::Agent(agent.into()),
                 no_permission: false,
                 on_main: false,
+                agent_state: None,
             });
         }
         m.focus = PaneFocus::Sidebar;
@@ -12377,6 +12399,7 @@ mod merge_focus_follow_tests {
                 kind: TerminalKind::Agent(agent.into()),
                 no_permission: false,
                 on_main: false,
+                agent_state: None,
             });
         }
         m.focus = PaneFocus::Sidebar;
@@ -12425,6 +12448,7 @@ mod merge_focus_follow_tests {
                 kind: TerminalKind::Agent("codex".into()),
                 no_permission: false,
                 on_main: false,
+                agent_state: None,
             });
         }
         m.focus = PaneFocus::Sidebar;
@@ -12472,6 +12496,7 @@ mod merge_focus_follow_tests {
                 kind: TerminalKind::Agent(agent.into()),
                 no_permission: false,
                 on_main: false,
+                agent_state: None,
             });
         }
         m.focus = PaneFocus::Sidebar;
@@ -12508,6 +12533,7 @@ mod merge_focus_follow_tests {
                 kind: TerminalKind::Agent(agent.into()),
                 no_permission: false,
                 on_main: false,
+                agent_state: None,
             });
         }
         m.focus = PaneFocus::Sidebar;
@@ -12597,6 +12623,7 @@ mod merge_focus_follow_tests {
             kind: TerminalKind::Agent("codex".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         // `TerminalSpawned` auto-focuses the terminal pane; return to the
         // sidebar (cursor on the PR) so the catalog resolves `w`.
@@ -12650,6 +12677,7 @@ mod merge_focus_follow_tests {
             kind: TerminalKind::Agent("codex".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         m.focus = PaneFocus::Sidebar;
         m.set_focus_attr();
@@ -13064,6 +13092,7 @@ mod merge_focus_follow_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         assert_eq!(m.focus, PaneFocus::Terminals, "spawn pulls focus");
         // The fix, isolated: the involuntary jump took the selection with
@@ -13107,6 +13136,7 @@ mod merge_focus_follow_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         assert_eq!(m.sidebar.broadcast_selected_count(), 2, "not our spawn");
 
@@ -13441,6 +13471,7 @@ mod merge_focus_follow_tests {
                 kind: TerminalKind::Agent("claude".into()),
                 no_permission: false,
                 on_main: false,
+                agent_state: None,
             });
             assert!(m.sidebar.focus_workspace_key(&key));
             m.sidebar.toggle_broadcast_select();
@@ -13554,6 +13585,7 @@ mod merge_focus_follow_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         // Two rows with no agent → spawn targets (and `spawned > 0` gates
         // the fan-out behind the confirm).
@@ -13651,6 +13683,7 @@ mod merge_focus_follow_tests {
                 kind: TerminalKind::Agent("claude".into()),
                 no_permission: false,
                 on_main: false,
+                agent_state: None,
             });
             keys.push(key);
         }
@@ -14316,6 +14349,7 @@ mod merge_focus_follow_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         // … and a row with no agent (a spawn target), so `spawned > 0`
         // forces the confirm gate.
@@ -15073,6 +15107,7 @@ mod daemon_event_fastpath_tests {
             kind: lazybox_ipc::TerminalKind::Shell,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         m.redraw = false;
         m.handle_daemon_event(IpcEvent::TerminalOutput {
@@ -15137,6 +15172,7 @@ mod daemon_event_fastpath_tests {
             kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         m.handle_daemon_event(IpcEvent::AgentState {
             terminal_id: TerminalId(1),
@@ -15153,6 +15189,7 @@ mod daemon_event_fastpath_tests {
             kind: lazybox_ipc::TerminalKind::Agent("codex".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
 
         m.redraw = false;
@@ -15202,6 +15239,7 @@ mod wheel_routing_tests {
             kind,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         m.focus = PaneFocus::Terminals;
 
@@ -15652,6 +15690,7 @@ mod input_priority_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         assert_eq!(m.terminals.active_terminal_id(), Some(TID));
         m.focus = PaneFocus::Terminals;
@@ -15862,6 +15901,7 @@ mod leader_tile_tests {
                 kind: TerminalKind::Shell,
                 no_permission: false,
                 on_main: false,
+                agent_state: None,
             });
         }
         m.focus = PaneFocus::Terminals;
@@ -16589,6 +16629,7 @@ mod leader_tile_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         // A single-leaf split so `focused_terminal_id` resolves via the
         // tile tree (the model harness doesn't drive the tab/active-session
@@ -16633,6 +16674,7 @@ mod terminal_url_mouse_tests {
                 kind: TerminalKind::Shell,
                 no_permission: false,
                 on_main: false,
+                agent_state: None,
             });
         }
         model.set_focus(PaneFocus::Terminals);
@@ -18297,6 +18339,7 @@ mod collapse_into_pr_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         assert!(
             m.terminals.active_terminal_id() == Some(TerminalId(7)),
@@ -18384,6 +18427,7 @@ mod collapse_into_pr_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         m.handle_daemon_event(IpcEvent::AgentState {
             session_key: issue_sk.clone(),
@@ -19067,6 +19111,7 @@ mod workspace_focus_memory_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
     }
 
@@ -19511,6 +19556,7 @@ mod focus_mode_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
     }
 
@@ -19684,6 +19730,7 @@ mod focus_mode_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         m.tick_terminal_leader();
 
@@ -19984,6 +20031,7 @@ mod terminal_section_dispatch_tests {
             kind: TerminalKind::Shell,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         m.focus = PaneFocus::Terminals;
         m.set_focus_attr();
@@ -20109,6 +20157,7 @@ mod spawn_spinner_projection_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         // Light the spinner for that same target.
         m.status.note_spawning(
@@ -20143,6 +20192,7 @@ mod spawn_spinner_projection_tests {
             kind: TerminalKind::Shell,
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         // Shell spawn whose baseline (0) is below the current count (1).
         m.status
@@ -20177,6 +20227,7 @@ mod spawn_spinner_projection_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         assert!(
             m.status.spawning.is_some(),
@@ -20191,6 +20242,7 @@ mod spawn_spinner_projection_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         assert!(
             m.status.spawning.is_none(),
@@ -20336,6 +20388,7 @@ mod spawn_spinner_projection_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(1)));
         // The single live terminal (id 1) is the recovered old-build one.
@@ -20385,6 +20438,7 @@ mod spawn_spinner_projection_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: true,
             on_main: false,
+            agent_state: None,
         });
         assert_eq!(m.terminals.active_terminal_id(), Some(TerminalId(1)));
         m.status.notice = None;
@@ -20420,6 +20474,7 @@ mod spawn_spinner_projection_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         m.handle_daemon_event(IpcEvent::TerminalSpawned {
             model_label: None,
@@ -20428,6 +20483,7 @@ mod spawn_spinner_projection_tests {
             kind: TerminalKind::Agent("codex".into()),
             no_permission: true,
             on_main: false,
+            agent_state: None,
         });
         m.terminals.set_active_session(Some(sk));
         m.terminals.set_layout(SessionLayout::Tabs { active: 0 });
@@ -20483,6 +20539,7 @@ mod spawn_spinner_projection_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: true,
             on_main: false,
+            agent_state: None,
         });
         m.handle_daemon_event(IpcEvent::RecoveredTerminalsRequireRestart {
             terminal_ids: vec![TerminalId(1)],
@@ -25375,6 +25432,7 @@ mod worktree_progress_dismiss_tests {
             no_permission: false,
             on_main: false,
             model_label: None,
+            agent_state: None,
         });
         assert!(
             m.worktree_progress_dismissed.is_none(),
@@ -25576,6 +25634,7 @@ mod worktree_progress_dismiss_tests {
             no_permission: true,
             on_main: false,
             model_label: None,
+            agent_state: None,
         });
         assert!(
             !m.autonomous_spawn_notified.contains(&key),
@@ -25642,6 +25701,7 @@ mod spawn_focus_steal_tests {
             no_permission: false,
             on_main: false,
             model_label: None,
+            agent_state: None,
         }
     }
 
@@ -26209,6 +26269,7 @@ mod focus_mode_terminal_exit_tests {
             no_permission: false,
             on_main: false,
             model_label: None,
+            agent_state: None,
         });
         assert!(m.terminals.active_terminal_id().is_some());
         m.focus_mode = true;
@@ -26249,6 +26310,7 @@ mod focus_mode_terminal_exit_tests {
             no_permission: false,
             on_main: false,
             model_label: None,
+            agent_state: None,
         });
         assert!(m.terminals.active_terminal_id().is_some());
         m.focus_mode = true;
@@ -26291,6 +26353,7 @@ mod focus_mode_terminal_exit_tests {
                 no_permission: false,
                 on_main: false,
                 model_label: None,
+                agent_state: None,
             });
         }
         m.focus_mode = true;
@@ -28749,6 +28812,7 @@ mod focus_indicator_and_burst_guard_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         m.set_focus(PaneFocus::Terminals);
 
@@ -28980,6 +29044,7 @@ mod focus_layout_tests {
             kind: TerminalKind::Agent("claude".into()),
             no_permission: false,
             on_main: false,
+            agent_state: None,
         });
         key
     }

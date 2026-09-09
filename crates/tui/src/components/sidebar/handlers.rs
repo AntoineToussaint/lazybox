@@ -282,6 +282,7 @@ impl Sidebar {
                 session_key,
                 kind,
                 model_label,
+                agent_state,
                 ..
             } => {
                 self.running_terminals
@@ -293,6 +294,18 @@ impl Sidebar {
                 // the "spawning" arc; the agent's own `AgentState` takes
                 // over the row's state slot from here (#1069).
                 self.spawning.remove(session_key);
+                // A restart reattaching a hydrated agent carries its state
+                // here. Seed it exactly as the `Snapshot` arm does — fold the
+                // aggregate and DISCARD the resulting `StateChange` — so the
+                // row's pill is correct immediately without the rising edge
+                // firing a desktop banner or footer notice. A restart is not
+                // the agent asking, finishing, or hitting the limit again.
+                if let Some(state) = agent_state {
+                    self.agent_terminal_states
+                        .insert(*terminal_id, (session_key.clone(), *state));
+                    let _ = self.refresh_agent_aggregate(session_key);
+                    self.recompute_visible();
+                }
             }
             Event::TerminalModelChanged {
                 terminal_id,

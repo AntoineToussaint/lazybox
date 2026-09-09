@@ -1153,6 +1153,7 @@ mod tests {
                 no_permission: false,
                 on_main: false,
                 model_label: None,
+                agent_state: None,
             })
             .unwrap();
         for seq in 1..=10 {

@@ -61,8 +61,8 @@ drift, and nothing else:
 | | |
 |---|---|
 | `ContextHygiene::eligibility(&ToolResultFacts) -> Eligibility` | the verdict |
-| `cache_key(input, kind, model, prompt_version)` | the cache identity |
-| `render_condensed(kind, original_lines, summary)` | the bytes |
+| `ContextHygiene::cache_key(input, kind, model)` | the cache identity |
+| `render_condensed(kind, original_lines, summary, tag) -> Option<String>` | the bytes |
 
 Each enforcement point owns its own mechanics — the proxy owns the request-body
 parser and the rewrite, the hook owns the decision round-trip, the summarizer
@@ -90,8 +90,7 @@ agent:
 - **`mode`** — `shadow` (the default) decides everything `on` decides, logs what
   it *would* rewrite and what that would save, and sends the original bytes.
   Rewriting an agent's context is load-bearing for correctness, not just
-  accounting, so it earns its way from evidence rather than starting on. Note
-  `on` is a YAML 1.1 boolean and must be quoted: `mode: 'on'`.
+  accounting, so it earns its way from evidence rather than starting on.
 
   There is a trap here worth stating once. `eligibility()` returns `Condense` in
   shadow mode — deliberately, because #1606's instrumentation needs the real
@@ -117,6 +116,15 @@ agent:
   part of the cache key, so a new prompt yields new keys rather than silently
   different output under old ones.
 
+Zero is refused at load for `keep_recent`, `min_lines`, `condense_input_cap_bytes`
+and `condense_timeout_ms`. Each of those zeros silently disarms something rather
+than failing loudly: `keep_recent: 0` makes the *newest* tool result eligible —
+the block the model is mid-edit on; `min_lines: 0` sends every one-line command
+result to a model; `condense_input_cap_bytes: 0` truncates every input to
+nothing; `condense_timeout_ms: 0` expires every call, disabling compaction while
+the config still reads `mode: on`. `Config::parse` rejects them the same way it
+rejects an out-of-range `server.ring_buffer_bytes`.
+
 Only sessions actually routed through the proxy are affected: `metering_proxy`
 plus the per-workspace / Space / `meter_all` routing. On an unmetered fleet this
 is inert — which also means a `0%` on the stats screen means "not measured
@@ -134,7 +142,12 @@ hold the line:
   makes our own output ineligible, so the rewrite is idempotent.
 - *Byte-stable rendering.* `render_condensed` is a pure function of its
   arguments, and the cached summary behind it is content-addressed, so the same
-  block renders identically from either enforcement point forever.
+  block renders identically from either enforcement point forever. It returns
+  `Option`, and `None` is a guard against silent data loss rather than a
+  formatting nicety: an empty or whitespace-only summary arrives through the
+  summarizer's *success* path, so pass-through-on-error never fires. Rendering it
+  would replace a real file with a header and nothing — permanently, since
+  condensation is monotone and content-addressed. On `None`, send the original.
 - *Measured, with a kill switch.* Turn *k* itself is one deliberate cache miss
   per block. The proxy already parses `cache_read_input_tokens` and
   `core/pricing.rs` prices it, so the miss is visible in dollars — and #1609
@@ -169,6 +182,25 @@ Entries live in the store kv under `condense:`, not in memory, because agent
 processes survive a daemon restart and keep sending the same blocks. Both
 enforcement points read and write that one space, so a file condensed by the hook
 is never re-condensed by the proxy.
+
+The cache holds the **summary**, not the rendered block, because the rendered
+block carries a per-session tag (below) while the summary does not — which is
+what lets two sessions share an entry.
+
+## The marker is keyed, because it is a trust boundary
+
+Recognizing our own output is what makes rewriting monotone. But tool results are
+exactly the material an attacker controls — a repo file, a command's output, a
+diff — so an unkeyed `[condensed by lazybox: …]` prefix would let any file whose
+first line mimics it both evade condensation and present arbitrary text under
+lazybox's provenance.
+
+So the marker carries a `CondenseTag`: a token the daemon generates per session
+and untrusted content cannot guess. Within a session it is constant, so rendered
+bytes stay stable across turns; across sessions it differs, which is why it is
+not part of the cache key. This closes the structural hole — lazybox no longer
+acts on forged markers — but it cannot stop a model from believing a
+plausible-looking line it reads in a file, which no marker scheme can.
 
 ## Slices
 

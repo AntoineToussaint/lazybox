@@ -39,9 +39,8 @@ pub use config::{
     ProviderConfig,
 };
 pub use context_hygiene::{
-    CONDENSED_MARKER, CompactionMode, CondenseKind, ContextHygiene, Eligibility,
-    KV_PREFIX_CONDENSE, SkipReason, ToolResultFacts, cache_key as condense_cache_key, is_condensed,
-    render_condensed,
+    CONDENSED_MARKER, CompactionMode, CondenseKind, CondenseTag, ContextHygiene, Eligibility,
+    KV_PREFIX_CONDENSE, SkipReason, ToolResultFacts, is_condensed, render_condensed,
 };
 pub use conventions::{CommitStyle, Conventions};
 pub use epic::{EpicKey, EpicRecord};

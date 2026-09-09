@@ -2660,6 +2660,15 @@ impl Config {
                 format!("server section validation failed: {msg}"),
             ))
         })?;
+        // Same contract for the context-hygiene policy: every knob it refuses
+        // is a zero that would silently disarm a guarantee at run time rather
+        // than fail here.
+        config.agent.context_hygiene.validate().map_err(|msg| {
+            ConfigError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("agent section validation failed: {msg}"),
+            ))
+        })?;
         Ok(config)
     }
 
@@ -5329,6 +5338,49 @@ repos:
         let written = serde_yaml::to_string(&cfg).expect("serialize");
         let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
         assert_eq!(reparsed.agent.context_hygiene, cfg.agent.context_hygiene);
+    }
+
+    /// A zeroed context-hygiene knob must be refused at *parse* time, like the
+    /// server ranges — the wiring is what makes a bad config fail at load
+    /// rather than silently disarm a guarantee at run time.
+    #[test]
+    fn parse_refuses_a_zeroed_context_hygiene_knob() {
+        let err = Config::parse("agent:\n  context_hygiene:\n    keep_recent: 0\n")
+            .expect_err("must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("agent.context_hygiene.keep_recent"),
+            "error must name the YAML path the user has to edit: {msg}"
+        );
+        assert!(Config::parse("agent:\n  context_hygiene:\n    keep_recent: 1\n").is_ok());
+    }
+
+    /// Bare `on` / `off` are plain strings under serde_yaml's YAML 1.2 core
+    /// schema, not booleans, so no quoting is required. Pinned because the
+    /// docs previously claimed the opposite.
+    #[test]
+    fn bare_on_and_off_parse_as_modes_without_quoting() {
+        for (raw, expected) in [
+            (
+                "agent:\n  context_hygiene:\n    mode: on\n",
+                lazybox_core::CompactionMode::On,
+            ),
+            (
+                "agent:\n  context_hygiene:\n    mode: off\n",
+                lazybox_core::CompactionMode::Off,
+            ),
+            (
+                "agent:\n  context_hygiene:\n    mode: 'on'\n",
+                lazybox_core::CompactionMode::On,
+            ),
+            (
+                "agent:\n  context_hygiene:\n    mode: shadow\n",
+                lazybox_core::CompactionMode::Shadow,
+            ),
+        ] {
+            let cfg: Config = serde_yaml::from_str(raw).expect("parse");
+            assert_eq!(cfg.agent.context_hygiene.mode, expected, "for {raw:?}");
+        }
     }
 
     /// The knobs are addressable individually: setting one leaves the rest at

@@ -74,8 +74,15 @@ runs:
         # Drop the repos we do not depend on rather than tolerating
         # errors from the ones we do — `apt-get update` still fails the
         # job if an index we actually need is broken.
-        sudo rm -f /etc/apt/sources.list.d/google-chrome.list \
-                   /etc/apt/sources.list.d/microsoft-prod.list
+        # Match on the URL rather than a filename: the image has moved
+        # these between `.list` and deb822 `.sources` files, so deleting
+        # `google-chrome.list` by name silently no-ops. Whole-file delete
+        # for sources.list.d (a deb822 stanza cannot survive losing just
+        # its URI line); line delete for the one-line-per-repo main file.
+        sudo grep -rlE 'dl\.google\.com|packages\.microsoft\.com' \
+          /etc/apt/sources.list.d/ 2>/dev/null | sudo xargs -r rm -fv
+        sudo sed -i -E '/dl\.google\.com|packages\.microsoft\.com/d' \
+          /etc/apt/sources.list
         sudo apt-get update
         sudo apt-get install -y build-essential pkg-config libc++-dev libc++abi-dev
 

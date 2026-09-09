@@ -1198,7 +1198,7 @@ pub(crate) fn bind_loopback(desired_port: Option<u16>) -> std::io::Result<tokio:
     bind_loopback_port(0)
 }
 
-fn bind_loopback_port(port: u16) -> std::io::Result<tokio::net::TcpListener> {
+pub(crate) fn bind_loopback_port(port: u16) -> std::io::Result<tokio::net::TcpListener> {
     use socket2::{Domain, Protocol, Socket, Type};
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
     socket.set_reuse_address(true)?;

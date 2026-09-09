@@ -49,6 +49,8 @@ pub use handlers::{
     remove_merged_workspace,
 };
 pub use mutate::{MutationOutcome, apply_and_commit, fetch_and_apply};
+pub(crate) use sources::dispatch_action;
+use sources::sources_for_with_engagement;
 #[cfg(test)]
 use sources::{GhFetchPlan, gh_fetch_plan, partition_targeted_requests, rank_targeted_requests};
 pub use sources::{
@@ -58,7 +60,6 @@ pub use sources::{
     github_scopes_from_filters, github_watch_repos_from_filters, label_spawn_actions,
     readmit_mentioned_tasks, repo_roster, sources_for,
 };
-use sources::{dispatch_action, sources_for_with_engagement};
 pub use upsert::upsert;
 pub(crate) use upsert::{
     CommitError, CommitOutcome, commit_upsert, commit_upsert_offloaded_reported,
@@ -649,6 +650,7 @@ mod engagement_tier_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }
@@ -4801,6 +4803,7 @@ fn issue_id_to_workspace_key(issue_id: &lazybox_core::TaskId) -> WorkspaceKey {
         state_label: None,
         blocked_by: vec![],
         merge_after: vec![],
+        contracts: vec![],
         blocked_on: None,
     };
     WorkspaceKey::new(lazybox_core::workspace_key_for(&stub))
@@ -5024,6 +5027,7 @@ mod workspace_lock_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }
@@ -5258,6 +5262,7 @@ mod merge_detection_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }
@@ -5577,6 +5582,7 @@ mod rescope_collapse_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }
@@ -6745,6 +6751,7 @@ mod unreadable_row_preservation_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }
@@ -7118,6 +7125,7 @@ mod tick_noop_skip_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }

@@ -381,6 +381,12 @@ pub struct Sidebar {
     /// ("finished") (#80). Surfaces in lazybox's footer alongside the OS
     /// notification so users with notifications muted still see it.
     pending_asking_notices: Vec<String>,
+    /// Epic keys whose "ready work is piling up" banner has already fired
+    /// (#1525). Unlike the other two epic triggers — which ride a delta and
+    /// so fire once by construction — that one reads a *standing* state, so
+    /// it needs a latch or every recompute would re-notify. Cleared when the
+    /// epic's queue drains or its `AUTO` latch is armed.
+    epic_ready_notified: std::collections::HashSet<String>,
     /// Per-terminal source states mirrored from daemon snapshots and
     /// deltas. Keeping the terminal id prevents one of several agents in
     /// a workspace from overwriting another based on HashMap iteration
@@ -545,6 +551,10 @@ pub enum NotificationKind {
     /// A workspace gained a non-agent attention signal (CI failing,
     /// review requested, new activity, mention).
     Activity,
+    /// An epic-level event the operator has to triage (#1525): ready work
+    /// nobody is starting, an epic that finished, or a review that found
+    /// blocking findings.
+    Epic,
 }
 
 /// A queued user-facing notification that the outer (IO-aware) layer
@@ -653,6 +663,7 @@ impl Sidebar {
             action_key_overrides: std::collections::BTreeMap::new(),
             pending_notifications: Vec::new(),
             pending_asking_notices: Vec::new(),
+            epic_ready_notified: std::collections::HashSet::new(),
             agents: std::collections::HashMap::new(),
             spawning: std::collections::HashMap::new(),
             agent_terminal_states: std::collections::HashMap::new(),

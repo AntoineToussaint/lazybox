@@ -379,7 +379,7 @@ relations so the epic renders as an epic in lazybox once P0 ships.
 | **P1 — Epic + live status** | Epic record (kv), sidebar tier from a tracker parent, header status line, overview pane, `EpicResolver` + `Event::EpicStatus`, epic events in the inbox, MCP `epic_status` / `epic_ready`, coordinator briefing, blockers as records + `report_blocker` (§4k), `epic:*` + status labels (§4j) | `epic:<key>` | **"give me status"** without a model |
 | **P2 — roles** | `Workspace.role`, badges, role prompt preambles, `E r`, `spawn_worker` MCP tool for Coordinators, Planner spawn with machine-readable-graph instruction, `role:*` labels | `role` field | who does what, enforced |
 | **P3 — graph + merge order** | full-screen DAG, `MergeAfter` edges, merge-order readout, merge-on-green hold | edge kinds | landing order across repos |
-| **P4 — autonomy dial** | `AUTO` latch (assisted dispatch on ready), Reviewer stage, held-merge auto-release | policy latch | the fleet runs the plan; you triage |
+| **P4 — autonomy dial** | `AUTO` / `REVIEW` / `ORDER` latches (assisted dispatch on ready, Reviewer stage, epic-wide merge-on-green), `Contract` edges | policy latch on the record | the fleet runs the plan; you triage |
 
 P0 has value with no new concept at all and de-risks the providers. P1 is the
 one the "give me status" habit needs; it should be the first thing dogfooded.
@@ -446,6 +446,109 @@ nav, `Enter` jumps, `Esc` closes) over a pure `layout()` in tui-core
 additions (`Task.merge_after`, held merge status, `Command::MergePr { force }`)
 bump the desktop contract; the sentinel const is not a schema change.
 
+**P4 delivery (#1525) shipped — the autonomy dial.** Three latches ride the
+epic record as `EpicRecord.policies: EpicPolicies` (`core/src/policy.rs`), each
+a `PolicyArm` in the shape of the existing `ARM` / `FIX` policies and **off
+until explicitly armed**. Unlike auto-fix, `Default` follows no global switch —
+there is no "autonomy" setting to follow — so `Default` and `Disarm` both read
+as off and the toggle is a two-state `Arm ⇄ Default` cycle
+(`EpicPolicies::toggled`); `Disarm` survives as the decisive off that
+`absorb_from` keeps.
+
+| Pill | Latch | What it does |
+|---|---|---|
+| `AUTO` | `auto_dispatch` | A member becomes `Ready` → spawn a Worker on it (P2 preamble), ranked so the member unblocking the most others goes first, capped at `agent.max_epic_workers` |
+| `REVIEW` | `auto_review` | A member's PR turns green with no review → spawn a Reviewer; a `blocking` verdict shows the member `ReviewBlocked` and holds its merge |
+| `ORDER` | `merge_in_order` | Every member gets `auto_merge_on_green` armed as its PR opens, so the epic lands itself — P3's merge-after hold supplies the sequence |
+
+Every decision is a pure function over already-loaded data — `plan_dispatch`,
+`plan_reviews`, `plan_merge_arming` in `server/src/epics.rs` — and
+`run_latches` is the thin async shell that gathers the inputs, calls them, and
+performs the effects after the snapshot has been broadcast. Latches read the
+snapshot's **standing state**, deliberately *not* the accompanying
+`EpicDelta`s: gating on the delta reads as the safer "act only on a
+transition" rule and is in fact a dead latch, because `diff` yields no member
+deltas either for a first-sight snapshot (every epic after a daemon restart)
+or for a policy-only change (arming moves no member's status) — the two
+moments a latch most needs to act. Re-entry is safe because each latch carries
+its own idempotency (the dispatch marker, the review row, the already-armed
+check), and `recompute_all` updates its `last` snapshot under the `EpicMemory`
+lock before calling in, so one transition reaches the latches once. Dispatch
+runs through the same
+`ProviderAction::AutoSpawnAgent` path the `@lazybox` / label spawns use — one
+`epic_role` field carries the role in-band and tags the run
+`AutonomousTrigger::EpicAuto` — so the SpawnCoordinator collapse, the
+working-claim exclusion, and the store-backed `autospawn-epic:<epic>:<member>`
+dedup marker all apply unchanged. **The `no-auto-fix` / `do-not-lazybox`
+labels are honored as "do not auto-dispatch / auto-review" too**: they have
+always meant "lazybox, keep your hands off this row", and unattended dispatch
+is exactly that.
+
+**Arming `AUTO` is the confirmation.** The issue asked for the *first spawn*
+per epic to confirm; the client-side confirm on the arm delivers the same
+promise — you are asked once, with the epic and the cap named, before any
+automatic spawn can happen — without needing a daemon-initiated modal (a
+mechanism lazybox does not have) that could fire while you are away. Standing
+a latch down never asks.
+
+The **Reviewer stage** keys off a persisted `epic-review:<workspace>` row
+rather than a PR head sha (which `Task` does not carry): the row opens when the
+PR turns green, and is dropped the moment the member stops being green — which
+is what makes a re-green after fixes review exactly once more. The row also
+records the epic that opened the run, and a verdict is accepted only if it
+carries that epic's tag — otherwise the `epic:<key>` tag would be decorative
+and any live epic's tag could flip a hold a different epic raised. Because
+`review_blocks_merge` is keyed on the workspace alone, `recompute_all` prunes
+every row whose workspace no longer belongs to a live epic: without that a
+member unassigned, removed, or archived out of its epic would strand a
+`blocking: true` row and hold that PR's merge forever, citing an epic that no
+longer exists. The Reviewer's
+brief instructs it to end with `post_note(tags=["review", "epic:<key>",
+"blocking"|"clean"])`; `epics::on_note_posted`, hooked into `post_note` itself,
+records the verdict, so the latch reacts at the write instead of polling the
+blackboard. A blocking verdict holds the merge on the same terms as an unlanded
+merge-after predecessor (`epics::review_blocks_merge`, checked beside
+`held_by` in both `auto_merge::on_workspace_committed` and `merge_pr_task`),
+and `g m --force` overrides it the same way.
+
+**Contracts** (§4i) land as `EdgeKind::Contract`, parsed from a
+`Contract: owner/repo#N` body marker onto `Task.contracts`. Unlike every other
+edge, it is satisfied by the producer *publishing the interface* — a blackboard
+note tagged `contract` + `epic:<key>` from its session — not by its task
+closing, so a consumer starts as soon as the interface is agreed and a producer
+that merged without ever publishing still gates. An unsatisfied contract makes
+the consumer `Blocked` with `blocked_reason: Some("contract")`, no
+`blocked_by` and no `external_blockers`; the satisfied set is read once per
+recompute into `LatchInputs` so `resolve` stays a pure function of plain data.
+That read is a **single** blackboard scan bucketed by epic tag — scanning per
+epic would re-parse every note in the store once per record, and notes are
+capped per scope while scopes are not (one per session), so a fleet-sized
+blackboard would turn an N-epic recompute into N full scans on the 300 ms
+debounce path. The buckets are keyed by epic because a contract published for
+one epic says nothing about another epic's interface.
+The consumer's Worker preamble quotes the newest note per producer inside an
+`<untrusted-content source="agent-authored contract">` fence — a specification
+to satisfy, never instructions to follow.
+
+**Surfaces.** `E A` / `E R` / `E M` toggle the latches on the cursor
+workspace's epic, and the `g p` policies menu grows an epic section (three
+rows, each naming the epic it governs) when the cursor sits inside one. Armed
+pills append to the epic readouts' frame titles (`Auth refactor · AUTO ORDER`)
+— the sidebar epic tier is still deferred, so those are the epic header rows
+this build has. Three desktop notifications fire, each debounced on a state
+change: ready work with `AUTO` off and nothing currently Working (latched per
+epic, since that one reads a standing state — and keyed on the *absence* of a
+running agent rather than the presence of a parked one, so it still fires on a
+fresh install where no agent has ever reported a state), an epic completing,
+and a review finding blocking findings.
+
+Wire additions: `EpicPolicies` on the record and mirrored onto `EpicSnapshot`,
+`Command::SetEpicPolicies`, `EpicMemberStatus::ReviewBlocked`,
+`EpicDelta::Reviewed`, `EdgeKind::Contract`, `EpicMember.blocked_reason`,
+`Task.contracts`, `AutonomousTrigger::EpicAuto`. **Not shipped** (explicit
+non-goals): no account pool / spillover (#1173 Pillar A), and no remote-box
+dispatch — `spawn_worker` across boxes still needs the remote-spawn path.
+
 ## 7. Open questions
 
 1. **Epic anchor on GitHub without a parent issue** — require one (the
@@ -454,11 +557,21 @@ bump the desktop contract; the sentinel const is not a schema change.
 2. **`Blocked by:` marker syntax** — reuse a line the `designissues` prompt
    already emits, and accept `Depends on:`; decide whether lazybox also
    posts it as a comment for visibility.
-3. **Concurrency cap for assisted dispatch** — per epic, global, or per
-   account (ties to the #1173 account-pool idea)?
+3. ~~**Concurrency cap for assisted dispatch** — per epic, global, or per
+   account?~~ **Decided (P4): per epic**, reusing `agent.max_epic_workers`
+   (default 6) — the same cap the `spawn_worker` MCP tool enforces, so a
+   Coordinator fanning out by hand and the `AUTO` latch fanning out on its own
+   are bounded by one number. `0` disables both. Per-account spillover stays
+   with the #1173 account-pool idea.
 4. **Status write-back** — mirror derived status to Linear `AgentActivity`
    / a GitHub tracking-issue comment on a cadence, or leave lazybox as the
    only view? Lean: opt-in, later.
 5. **Remote / multi-user** — an epic spanning boxes (#965 sandboxes) is fine
    for status (the daemon sees all sessions) but `spawn_worker` across boxes
-   needs the remote-spawn path; defer.
+   needs the remote-spawn path; still deferred after P4, which dispatches
+   locally only.
+6. **Contract granularity** — P4 satisfies a `Contract` edge on the *existence*
+   of a `contract` + `epic:<key>` note from the producer, not on its content
+   matching anything. A producer that posts a placeholder unblocks its
+   consumer. Tightening that (a versioned contract, a Reviewer check against
+   it) is deliberately out of scope until the loose form has been dogfooded.

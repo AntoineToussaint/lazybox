@@ -178,7 +178,10 @@ impl<T: TerminalAdapter> Model<T> {
                         .map(|(_, workspace)| Box::new(workspace.clone())),
                     _ => None,
                 };
-                PickFlow::Policy { workspace }
+                PickFlow::Policy {
+                    workspace,
+                    epic: self.focused_epic_policy_ctx(),
+                }
             }
             Id::WorkAgentPicker => {
                 let picker = match &self.modal_flow {
@@ -336,6 +339,15 @@ impl<T: TerminalAdapter> Model<T> {
 
         let mut cmds = Vec::new();
         match outcome {
+            PickOutcome::EpicLatch {
+                epic,
+                epic_name,
+                latch,
+                next,
+                policies,
+            } => {
+                return self.move_epic_latch(&epic, &epic_name, latch, next, policies);
+            }
             PickOutcome::NoOp | PickOutcome::Pop => {}
             PickOutcome::MountBroadcastComposer { snippet_key, body } => {
                 if let Some(ModalFlow::Broadcast { draft }) = self.modal_flow.as_mut() {
@@ -826,6 +838,7 @@ mod optimistic_assignee_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }

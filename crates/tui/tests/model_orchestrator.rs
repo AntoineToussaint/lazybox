@@ -1036,6 +1036,7 @@ fn task_with_issue(key: &str, title: &str, body: Option<&str>) -> lazybox_core::
         state_label: None,
         blocked_by: vec![],
         merge_after: vec![],
+        contracts: vec![],
         blocked_on: None,
     }
 }
@@ -1309,6 +1310,7 @@ fn task_with_pr(key: &str) -> lazybox_core::Task {
         state_label: None,
         blocked_by: vec![],
         merge_after: vec![],
+        contracts: vec![],
         blocked_on: None,
     }
 }

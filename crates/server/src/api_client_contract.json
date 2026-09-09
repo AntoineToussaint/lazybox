@@ -207,6 +207,7 @@
             "ci": "Success",
             "closed_at": null,
             "closes_issues": [],
+            "contracts": [],
             "created_at": null,
             "deletions": 0,
             "id": {

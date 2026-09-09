@@ -210,6 +210,7 @@ fn make_task(key: &str) -> Task {
         state_label: None,
         blocked_by: vec![],
         merge_after: vec![],
+        contracts: vec![],
         blocked_on: None,
     }
 }
@@ -1639,6 +1640,7 @@ fn spawn_agent_fields(
 ) -> (String, Option<String>, Option<String>) {
     match action {
         polling::ProviderAction::AutoSpawnAgent {
+            epic_role: None,
             agent_id,
             model_alias,
             dedup_key,
@@ -6644,6 +6646,7 @@ async fn tick_dispatches_auto_spawn_action_after_upsert() {
     task.repo = None;
     let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(&task));
     let action = polling::ProviderAction::AutoSpawnAgent {
+        epic_role: None,
         session_key: session_key.clone(),
         agent_id: "claude".to_string(),
         model_alias: None,
@@ -6699,6 +6702,7 @@ async fn tick_auto_spawn_honors_requested_agent_and_model() {
     task.repo = None;
     let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(&task));
     let action = polling::ProviderAction::AutoSpawnAgent {
+        epic_role: None,
         session_key: session_key.clone(),
         agent_id: "claude".to_string(),
         model_alias: Some("S".to_string()),
@@ -6752,6 +6756,7 @@ async fn tick_auto_spawn_falls_back_to_default_for_unknown_agent() {
     task.repo = None;
     let session_key = lazybox_core::SessionKey::new(lazybox_core::workspace_key_for(&task));
     let action = polling::ProviderAction::AutoSpawnAgent {
+        epic_role: None,
         session_key: session_key.clone(),
         agent_id: "codx".to_string(),
         model_alias: None,

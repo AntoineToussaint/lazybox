@@ -168,6 +168,12 @@
         "key": "acme/widget#3"
       }
     ],
+    "contracts": [
+      {
+        "source": "github",
+        "key": "acme/api#12"
+      }
+    ],
     "blocked_on": "waiting on the infra rollout",
     "parent": null,
     "kind": "Pr",
@@ -261,6 +267,12 @@
         {
           "source": "github",
           "key": "acme/widget#3"
+        }
+      ],
+      "contracts": [
+        {
+          "source": "github",
+          "key": "acme/api#12"
         }
       ],
       "blocked_on": "waiting on the infra rollout",
@@ -357,6 +369,12 @@
         {
           "source": "github",
           "key": "acme/widget#3"
+        }
+      ],
+      "contracts": [
+        {
+          "source": "github",
+          "key": "acme/api#12"
         }
       ],
       "blocked_on": "waiting on the infra rollout",

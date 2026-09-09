@@ -99,6 +99,7 @@ fn node_glyph(status: &EpicMemberStatus) -> (&'static str, Tone) {
         EpicMemberStatus::PrOpen { .. } => ("○", Tone::NodeActive),
         EpicMemberStatus::Claimed => ("◦", Tone::NodeWaiting),
         EpicMemberStatus::Blocked => ("⊘", Tone::NodeWaiting),
+        EpicMemberStatus::ReviewBlocked => ("⚠", Tone::NodeHeld),
         EpicMemberStatus::Ready => ("·", Tone::NodeWaiting),
     }
 }
@@ -350,6 +351,7 @@ mod tests {
             blocked_by: vec![],
             external_blockers: vec![],
             blockers: vec![],
+            blocked_reason: None,
         }
     }
 
@@ -382,6 +384,7 @@ mod tests {
             critical_path: vec![],
             edges,
             merge_order: vec![],
+            policies: lazybox_core::EpicPolicies::default(),
             computed_at: 0,
         }
     }

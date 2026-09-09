@@ -139,6 +139,10 @@ fn maximal_pr_task() -> Task {
             source: "github".into(),
             key: "acme/widget#3".into(),
         }],
+        contracts: vec![TaskId {
+            source: "github".into(),
+            key: "acme/api#12".into(),
+        }],
         blocked_on: Some("waiting on the infra rollout".into()),
     }
 }
@@ -375,7 +379,7 @@ fn v3_tasks_without_parent_deserialize_as_roots() {
 #[test]
 fn tasks_without_dependency_edges_deserialize_as_unblocked() {
     let mut legacy = serde_json::to_value(maximal_workspace()).expect("serialize fixture");
-    for field in ["blocked_by", "merge_after", "blocked_on"] {
+    for field in ["blocked_by", "merge_after", "contracts", "blocked_on"] {
         legacy["pr"]
             .as_object_mut()
             .expect("pr object")
@@ -386,6 +390,7 @@ fn tasks_without_dependency_edges_deserialize_as_unblocked() {
             let task = task.as_object_mut().expect("task object");
             task.remove("blocked_by");
             task.remove("merge_after");
+            task.remove("contracts");
             task.remove("blocked_on");
         }
     }
@@ -393,7 +398,10 @@ fn tasks_without_dependency_edges_deserialize_as_unblocked() {
     let ws = Workspace::decode_persisted(&serde_json::to_string(&legacy).unwrap())
         .expect("pre-#1521 workspace remains readable");
     fn unblocked(task: &Task) -> bool {
-        task.blocked_by.is_empty() && task.merge_after.is_empty() && task.blocked_on.is_none()
+        task.blocked_by.is_empty()
+            && task.merge_after.is_empty()
+            && task.contracts.is_empty()
+            && task.blocked_on.is_none()
     }
     assert!(ws.pr.as_ref().is_some_and(unblocked));
     assert!(ws.gh_issues.iter().all(unblocked));

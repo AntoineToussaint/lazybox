@@ -1216,6 +1216,7 @@ impl Server {
                             "RestartAgentAndContinue"
                         }
                         lazybox_ipc::Command::UpsertEpic { .. } => "UpsertEpic",
+                        lazybox_ipc::Command::SetEpicPolicies { .. } => "SetEpicPolicies",
                         lazybox_ipc::Command::AssignEpic { .. } => "AssignEpic",
                         lazybox_ipc::Command::ArchiveEpic { .. } => "ArchiveEpic",
                         lazybox_ipc::Command::SetWorkspaceRole { .. } => "SetWorkspaceRole",
@@ -2523,6 +2524,9 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::SetWorkspaceRole { workspace, role } => {
             workspace::set_role(config, &workspace, role).await;
+        }
+        lazybox_ipc::Command::SetEpicPolicies { epic, policies } => {
+            epics::set_policies(config, &epic, policies).await;
         }
         lazybox_ipc::Command::Shutdown => {
             unreachable!("Shutdown is loop control, intercepted by the serve loop")

@@ -261,13 +261,24 @@ pub(crate) fn on_workspace_committed(
     signal: Signal,
     changed: bool,
 ) {
-    // Merge-after hold: an armed, otherwise merge-ready PR whose epic names an
-    // unmerged merge-after predecessor must not land yet. Downgrade Fire → Hold
-    // so the latch waits without re-arming; the predecessor's own merge
-    // re-probes this key via `crate::epics::on_pr_merged`, and the hold lifts
-    // once `held_by` comes back empty. Only Fire pays the lookup, which is
-    // cheap when no epics exist.
-    let signal = if signal == Signal::Fire {
+    // Epic holds: an armed, otherwise merge-ready PR must not land while its
+    // epic still constrains it. Two independent constraints downgrade
+    // Fire → Hold, so the latch waits without re-arming:
+    //   * a blocking review (#1525) — the PR is green but the Reviewer found
+    //     something, and the findings stand until a `clean` verdict lands;
+    //   * an unmerged merge-after predecessor (#1524) — the predecessor's own
+    //     merge re-probes this key via `crate::epics::on_pr_merged`, and the
+    //     hold lifts once `held_by` comes back empty.
+    // Only Fire pays either lookup; both are cheap when no epics exist.
+    let signal = if signal != Signal::Fire {
+        signal
+    } else if crate::epics::review_blocks_merge(config, key) {
+        tracing::info!(
+            workspace = %key,
+            "auto-merge: holding — the review stage reported blocking findings"
+        );
+        Signal::Hold
+    } else {
         let held = crate::epics::held_by(config, key);
         if held.is_empty() {
             Signal::Fire
@@ -279,8 +290,6 @@ pub(crate) fn on_workspace_committed(
             );
             Signal::Hold
         }
-    } else {
-        signal
     };
     let ticket = {
         let mut memory = config.poll.auto_merge.lock();
@@ -777,6 +786,7 @@ mod tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }

@@ -250,6 +250,7 @@
               "ci": "Success",
               "closed_at": null,
               "closes_issues": [],
+              "contracts": [],
               "created_at": null,
               "deletions": 0,
               "id": {
@@ -340,6 +341,7 @@
           "ci": "Success",
           "closed_at": null,
           "closes_issues": [],
+          "contracts": [],
           "created_at": null,
           "deletions": 0,
           "id": {
@@ -558,6 +560,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 2373535969,
+  "protocol_fingerprint": 314741775,
   "protocol_version": 4
 }

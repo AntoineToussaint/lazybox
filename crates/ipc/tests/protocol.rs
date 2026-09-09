@@ -78,6 +78,7 @@ fn sample_task() -> lazybox_core::Task {
         state_label: None,
         blocked_by: vec![],
         merge_after: vec![],
+        contracts: vec![],
         blocked_on: None,
     }
 }
@@ -580,6 +581,14 @@ fn all_commands() -> Vec<Command> {
             }),
             initial_prompt: Some("keep going".into()),
             on_main: false,
+        },
+        Command::SetEpicPolicies {
+            epic: "auth-refactor".into(),
+            policies: lazybox_core::EpicPolicies {
+                auto_dispatch: lazybox_core::PolicyArm::Arm,
+                auto_review: lazybox_core::PolicyArm::Disarm,
+                merge_in_order: lazybox_core::PolicyArm::Default,
+            },
         },
         Command::Shutdown,
     ]
@@ -1291,6 +1300,7 @@ fn all_events() -> Vec<Event> {
                         since: 1_700_000_000_000,
                         holds: 2,
                     }],
+                    blocked_reason: Some("contract".into()),
                 }],
                 done: 1,
                 total: 3,
@@ -1299,6 +1309,11 @@ fn all_events() -> Vec<Event> {
                 asking: 0,
                 failing: 0,
                 blockers_needing_operator: 1,
+                policies: lazybox_core::EpicPolicies {
+                    auto_dispatch: lazybox_core::PolicyArm::Arm,
+                    auto_review: lazybox_core::PolicyArm::Default,
+                    merge_in_order: lazybox_core::PolicyArm::Disarm,
+                },
                 cycle: false,
                 critical_path: vec![lazybox_core::WorkspaceKey("github:o/r#1".into())],
                 edges: vec![
@@ -1446,6 +1461,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::RestartAgentAndContinue { .. } => "RestartAgentAndContinue",
         Command::SetWorkspaceRole { .. } => "SetWorkspaceRole",
         Command::AdoptWorktreeBranch { .. } => "AdoptWorktreeBranch",
+        Command::SetEpicPolicies { .. } => "SetEpicPolicies",
     }
 }
 
@@ -1569,7 +1585,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        98,
+        99,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(

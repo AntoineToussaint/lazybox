@@ -3946,6 +3946,7 @@ mod tests {
             parent: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
             priority: None,
             state_label: None,

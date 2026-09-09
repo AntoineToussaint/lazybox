@@ -623,8 +623,125 @@ impl Sidebar {
                 self.rebuild_agent_aggregates();
                 self.recompute_visible();
             }
+            Event::EpicStatus { snapshot, delta } => {
+                self.on_epic_status(snapshot, delta);
+            }
             _ => {}
         }
+    }
+
+    /// Raise the three epic-level banners (#1525) — the moments where the
+    /// fleet needs the operator rather than the other way round:
+    ///
+    /// 1. **ready work nobody is starting**: the epic has ready members, its
+    ///    `AUTO` latch is off, and no agent is Working. Latched per epic so a
+    ///    standing queue notifies once, not once per recompute.
+    /// 2. **the epic finished**.
+    /// 3. **a review found blocking findings**, so a PR that looks green is
+    ///    actually held.
+    ///
+    /// Deltas 2 and 3 are transitions already, so they self-debounce.
+    fn on_epic_status(
+        &mut self,
+        snapshot: &lazybox_ipc::EpicSnapshot,
+        delta: &[lazybox_ipc::EpicDelta],
+    ) {
+        if !self.attention.desktop_notify {
+            return;
+        }
+        for d in delta {
+            match d {
+                lazybox_ipc::EpicDelta::Completed => self.push_epic_notification(
+                    snapshot,
+                    snapshot.members.first().map(|m| &m.key),
+                    format!("lazybox — {} is done", snapshot.name),
+                    format!("all {} members landed", snapshot.total),
+                ),
+                lazybox_ipc::EpicDelta::Reviewed {
+                    key,
+                    blocking: true,
+                } => self.push_epic_notification(
+                    snapshot,
+                    Some(key),
+                    format!("lazybox — review blocked {}", snapshot.name),
+                    format!(
+                        "{} has blocking findings; its merge is held",
+                        Self::epic_member_short(key)
+                    ),
+                ),
+                _ => {}
+            }
+        }
+
+        let armed = snapshot
+            .policies
+            .armed(lazybox_core::EpicLatch::AutoDispatch);
+        // "Spare capacity" is the absence of work in flight, not the presence
+        // of a parked agent. `agents` only holds workspaces that have
+        // *reported* a state, so testing for an `Idle`/`Done` entry is empty
+        // on a fresh install and after every agent exits — silencing the nudge
+        // in exactly the two situations it exists for. Asking whether anything
+        // is Working covers those and still stays quiet mid-run.
+        let capacity_free = !self
+            .agents
+            .values()
+            .any(|state| matches!(state, lazybox_ipc::AgentState::Working));
+        if snapshot.ready > 0 && !armed && capacity_free {
+            if self.epic_ready_notified.insert(snapshot.key.clone()) {
+                let ready = snapshot
+                    .members
+                    .iter()
+                    .find(|m| m.status == lazybox_ipc::EpicMemberStatus::Ready)
+                    .map(|m| &m.key);
+                self.push_epic_notification(
+                    snapshot,
+                    ready,
+                    format!("lazybox — {} has work ready", snapshot.name),
+                    format!(
+                        "{} member(s) ready and nothing running · E A arms auto-dispatch",
+                        snapshot.ready
+                    ),
+                );
+            }
+        } else {
+            self.epic_ready_notified.remove(&snapshot.key);
+        }
+    }
+
+    /// `github:owner/repo#12` → `owner/repo#12` — the provider prefix is
+    /// noise in a banner body.
+    fn epic_member_short(key: &lazybox_core::WorkspaceKey) -> &str {
+        key.as_str()
+            .split_once(':')
+            .map_or(key.as_str(), |(_, r)| r)
+    }
+
+    /// Queue one epic banner against `key` (or, with none, the epic's first
+    /// member) so clicking it lands somewhere useful. Silently skipped when
+    /// the epic has no loaded member — a notification with nowhere to go.
+    fn push_epic_notification(
+        &mut self,
+        snapshot: &lazybox_ipc::EpicSnapshot,
+        key: Option<&lazybox_core::WorkspaceKey>,
+        title: String,
+        body: String,
+    ) {
+        let Some(key) = key else {
+            return;
+        };
+        let workspace_key: SessionKey = key.into();
+        let name = self
+            .workspaces
+            .get(&workspace_key)
+            .map(|w| w.name.clone())
+            .unwrap_or_else(|| snapshot.name.clone());
+        self.pending_notifications.push(PendingNotification {
+            title,
+            body,
+            workspace_key,
+            name,
+            kind: NotificationKind::Epic,
+        });
     }
 
     fn refresh_agent_aggregate(

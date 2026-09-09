@@ -714,6 +714,23 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey, force
     // `force` (the confirm's "merge anyway") overrides the hold entirely, the
     // user having accepted the out-of-order landing.
     if !force {
+        // A blocking review holds the merge like an unlanded predecessor does,
+        // and `force` overrides it the same way (#1525).
+        if crate::epics::review_blocks_merge(config, &workspace_key) {
+            let label = pr_label
+                .clone()
+                .unwrap_or_else(|| workspace_key.as_str().to_string());
+            let _ = config.bus.send(Event::PrMergeFailed {
+                workspace_key: workspace_key.clone(),
+                pr_label: label,
+                reason: format!(
+                    "{}the review stage found blocking findings",
+                    lazybox_ipc::MERGE_HELD_REASON_PREFIX
+                ),
+                conflict: false,
+            });
+            return;
+        }
         let held = crate::epics::held_by(config, &workspace_key);
         if !held.is_empty() {
             let names = held
@@ -2191,6 +2208,7 @@ mod merge_pr_details_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }
@@ -3507,6 +3525,7 @@ mod github_target_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }
@@ -3622,6 +3641,7 @@ mod prefetch_score_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }
@@ -3915,6 +3935,7 @@ mod inspect_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         };
         let mut workspace = Workspace::from_task(task, chrono::Utc::now());
@@ -4405,6 +4426,7 @@ mod inspect_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         };
         let mut workspace = Workspace::from_task(task, chrono::Utc::now());
@@ -4475,6 +4497,7 @@ mod inspect_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         };
         let workspace = Workspace::from_task(task, chrono::Utc::now());
@@ -4540,6 +4563,7 @@ mod inspect_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }
@@ -5457,6 +5481,7 @@ mod inspect_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         };
         let workspace = Workspace::from_task(task, chrono::Utc::now());
@@ -6420,6 +6445,7 @@ mod post_mutation_refresh_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }
@@ -6607,6 +6633,7 @@ mod sync_workspace_discovery_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }

@@ -591,6 +591,10 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         // would bake in an explicit edge the opt-out could never drop, making
         // `implied_merge_after = false` silently ineffective for Linear issues.
         merge_after: linear_body_edges(issue, lazybox_core::issue_links::extract_merge_after),
+        // Interface contracts (#1525) come from the same description-marker
+        // grammar as the two edge kinds above. A Linear issue scopes work
+        // exactly as a GitHub issue does, so `Contract:` is read here too.
+        contracts: linear_body_edges(issue, lazybox_core::issue_links::extract_contracts),
         // Free-text `Blocked on:` reason declared in the description
         // (#1521) — the same prose extractor GitHub issues use.
         blocked_on: issue
@@ -966,6 +970,34 @@ mod tests {
             }],
             "merge_after is the explicit `Merge after:` marker only — the native \
              `blocks` relation must not leak in as an un-opt-out-able edge",
+        );
+    }
+
+    /// `Contract:` is read from a Linear description exactly like its two
+    /// sibling markers (#1525). Hardcoding `contracts: vec![]` here dropped a
+    /// declared interface silently — no edge, no error, no log — even though a
+    /// Linear issue scopes work the same way a GitHub issue does.
+    #[test]
+    fn contract_markers_are_read_from_a_linear_description() {
+        let mut issue = issue_with_attachments(&[]);
+        issue.description = Some("Contract: acme/api#12\nBlocked by ENG-3".into());
+
+        let task = issue_to_task(&issue, "viewer");
+        assert_eq!(
+            task.contracts,
+            vec![TaskId {
+                source: "github".into(),
+                key: "acme/api#12".into(),
+            }],
+            "an explicit cross-repo `Contract:` marker becomes a contract edge",
+        );
+        assert_eq!(
+            task.blocked_by,
+            vec![TaskId {
+                source: "linear".into(),
+                key: "ENG-3".into(),
+            }],
+            "the contract marker must not bleed into the blocking edges",
         );
     }
 

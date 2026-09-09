@@ -443,6 +443,7 @@ fn issue_to_task(issue: &Issue, base: &str, viewer_account_id: &str) -> Task {
         // provider compiling with empty edges.
         blocked_by: vec![],
         merge_after: vec![],
+        contracts: vec![],
         blocked_on: None,
         parent: f.parent.as_ref().map(|p| TaskId {
             source: SOURCE.into(),

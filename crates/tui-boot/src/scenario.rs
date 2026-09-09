@@ -292,6 +292,7 @@ fn build_workspace(spec: &WsSpec, worktree: &Path) -> Workspace {
         state_label: None,
         blocked_by: vec![],
         merge_after: vec![],
+        contracts: vec![],
         blocked_on: None,
     };
     let mut workspace = Workspace::from_task(task, Utc::now());

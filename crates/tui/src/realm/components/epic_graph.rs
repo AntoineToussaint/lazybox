@@ -402,6 +402,7 @@ mod tests {
             blocked_by: vec![],
             external_blockers: vec![],
             blockers: vec![],
+            blocked_reason: None,
         }
     }
 
@@ -443,6 +444,7 @@ mod tests {
             critical_path: vec![],
             edges: vec![],
             merge_order: vec![],
+            policies: lazybox_core::EpicPolicies::default(),
             computed_at: 0,
         }
     }

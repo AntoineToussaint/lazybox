@@ -77,8 +77,11 @@ const CREDENTIAL_HEADERS: &[&str] = &[
 pub struct Condensed {
     /// The replacement text: the header from
     /// [`lazybox_core::context_hygiene::render_condensed`] followed by the
-    /// summary, rendered under *this* request's [`CondenseTag`]. Rendered per
-    /// call, never cached — see [`CachedSummary`].
+    /// summary, rendered under *this* request's [`CondenseTag`].
+    ///
+    /// Rendered per call and never cached — the store holds the summary
+    /// alone, because these bytes carry a session-scoped marker and the
+    /// cache is shared across sessions.
     pub text: String,
     /// Size of the input this replaced, so a caller can report what it saved.
     pub original_bytes: usize,

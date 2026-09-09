@@ -24076,6 +24076,31 @@ mod dismiss_and_messages_tests {
         assert_eq!(logged[1].severity, NoticeSeverity::Info);
     }
 
+    /// A daemon-pushed notice reports something the daemon DID, so it
+    /// must survive in `Shift-M` rather than fading as an ephemeral
+    /// hint. As a Hint it was displaced by the very next flash and
+    /// recorded nowhere, which made every daemon notice — including
+    /// "your model tier bought nothing" — effectively silent (#1598).
+    #[test]
+    fn a_daemon_notification_lands_in_the_durable_message_log() {
+        let mut m = build_model();
+        m.handle_daemon_event(lazybox_ipc::Event::Notification {
+            title: "Model tier not applied".into(),
+            body: "`best` selects a model tier, but this agent maps it to none".into(),
+        });
+        // Displaced immediately by the spawn's own notice, as it is on a
+        // cold spawn that provisions a worktree.
+        m.flash_info("starting agent on acme/widget#7 (@lazybox)");
+
+        let logged: Vec<_> = m.status.messages.recent().collect();
+        assert!(
+            logged.iter().any(
+                |e| e.message.contains("maps it to none") && e.severity == NoticeSeverity::Info
+            ),
+            "the daemon notice must outlive the footer: {logged:?}"
+        );
+    }
+
     /// Esc clears the current notice whatever its severity — the whole
     /// point of #309. A sticky Permanent error (which never auto-fades)
     /// is the case that motivated it.

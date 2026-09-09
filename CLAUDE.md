@@ -566,14 +566,14 @@ marker) resolves through `CapabilityTier`
 to a model. That is its **only** effect — it is a model-capability
 tier, not a priority: nothing ranks, queues, orders, or schedules work
 by it, and the genuinely-ranking `Priority` on `Task` (Linear's field)
-is a different type that merely shares the word (#1598). The config key
-was `models.priority` before the rename; the old spelling still parses,
-loses to `capability` where both name a tier, and warns at daemon
-start. A declared tier this agent routes nowhere — `best` on the
-built-in Claude menu, or a mapping onto a Fable tier, which capability
-routing refuses outright so a label can never put a coding task on a
-writing model — flashes a footer notice instead of quietly running the
-default. The alias is agent-agnostic at the chord — the daemon
+is a different type that merely shares the word (#1598). The key was
+`models.priority` before the rename; `Config::parse` folds the old
+spelling into `capability` and warns, so the file migrates itself on
+the next save. Config load also names an unrecognized `models` key and
+a capability mapping aimed at a Fable tier — which routing refuses
+outright, so a label can never put a coding task on a writing model —
+and a tier the agent routes nowhere (`best`, unmapped by default)
+reports itself at spawn instead of quietly running the default. The alias is agent-agnostic at the chord — the daemon
 maps it to whatever agent the spawn targets — and the picked tier's
 label rides a `◆ Opus` tab badge. The `a` leader also carries the bulk
 **rate-limit recovery** chord `a R` (restart rate-limited): for every

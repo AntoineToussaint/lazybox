@@ -114,6 +114,7 @@ mod tests {
                 ..Default::default()
             },
             deprecated_priority: CapabilityAliases::default(),
+            unknown: Default::default(),
         };
         assert_eq!(
             m.dangling_aliases(),
@@ -257,6 +258,30 @@ mod tests {
             args: vec!["--model".into(), "claude-fable-5".into()],
         };
         assert!(fable.excluded_from_default());
+        // A coding tier whose unrelated args merely contain the
+        // substring is not a Fable tier — before #1598 this lost both
+        // its default eligibility and its capability mapping.
+        let opus_with_a_fable_path = ModelTier {
+            alias: "L".into(),
+            label: "Opus".into(),
+            short: None,
+            args: vec![
+                "--model".into(),
+                "claude-opus-5".into(),
+                "--settings".into(),
+                "/Users/me/fable/settings.json".into(),
+            ],
+        };
+        assert!(!opus_with_a_fable_path.excluded_from_default());
+        // A tier that names no model is still judged on its argv — the
+        // only evidence available.
+        let implicit_fable = ModelTier {
+            alias: "F".into(),
+            label: "Fable".into(),
+            short: None,
+            args: vec!["--profile".into(), "fable-writing".into()],
+        };
+        assert!(implicit_fable.excluded_from_default());
         for tier in &AgentModels::builtin("claude").unwrap().tiers {
             assert!(
                 !tier.excluded_from_default(),
@@ -412,13 +437,27 @@ pub struct ModelTier {
 
 impl ModelTier {
     /// True when this tier pins a creative/writing-class model (Fable)
-    /// that must never be a coding agent's *default*. The tier stays
-    /// spawnable through an explicit chord; only the default-tier
-    /// resolution and the default-model picker exclude it.
+    /// that must never be a coding agent's *default*, nor the target a
+    /// declared capability tier routes to. The tier stays spawnable
+    /// through an explicit chord; only the default-tier resolution, the
+    /// default-model picker, and capability routing exclude it.
+    ///
+    /// Judged on the model id this tier actually pins
+    /// ([`Self::model_id`]), not on the whole argv: a tier is identified
+    /// by the model it names, and scanning every arg misread any tier
+    /// whose unrelated flags happened to contain the substring — a
+    /// `--settings /home/me/fable/x.json` on an Opus tier read as Fable
+    /// and lost its mapping. A tier that names no `--model` at all still
+    /// falls back to the argv scan, because there the args are the only
+    /// evidence of which model it selects.
     pub fn excluded_from_default(&self) -> bool {
-        self.args
-            .iter()
-            .any(|a| a.to_ascii_lowercase().contains("fable"))
+        match self.model_id() {
+            Some(id) => id.to_ascii_lowercase().contains("fable"),
+            None => self
+                .args
+                .iter()
+                .any(|a| a.to_ascii_lowercase().contains("fable")),
+        }
     }
 
     /// The model id this tier pins, read out of its own args — the value
@@ -491,6 +530,19 @@ impl CapabilityAliases {
         }
     }
 
+    /// The alias mapped to the tier named by `name` (`"best"` /
+    /// `"high"` / `"medium"` / `"low"`), for callers that hold the token
+    /// rather than the enum. Any other name maps to nothing.
+    pub fn alias_for_name(&self, name: &str) -> Option<&str> {
+        match name {
+            "best" => self.best.as_deref(),
+            "high" => self.high.as_deref(),
+            "medium" => self.medium.as_deref(),
+            "low" => self.low.as_deref(),
+            _ => None,
+        }
+    }
+
     /// Each `(tier-token, mapped-alias)` pair the user actually set,
     /// in strongest-first order. Feeds config-load validation that warns
     /// on an alias the tier menu doesn't define.
@@ -555,6 +607,23 @@ pub struct AgentModels {
         skip_serializing_if = "CapabilityAliases::is_unset"
     )]
     pub deprecated_priority: CapabilityAliases,
+    /// Keys under `models:` that lazybox does not recognize, kept
+    /// verbatim so a save never drops what the user wrote.
+    ///
+    /// `deny_unknown_fields` would be the obvious guard and is the wrong
+    /// one: a parse error propagates to `Config::load()`, whose callers
+    /// `unwrap_or_default()`, so one typo would silently replace the
+    /// user's ENTIRE config with defaults. Capturing instead lets config
+    /// load name the stray key while everything else keeps working — the
+    /// difference between "your `capabilty:` block does nothing" and a
+    /// `high` label silently routing to Opus because the block it was
+    /// renamed into never parsed (#1598).
+    #[serde(
+        flatten,
+        default,
+        skip_serializing_if = "std::collections::BTreeMap::is_empty"
+    )]
+    pub unknown: std::collections::BTreeMap<String, serde_json::Value>,
     /// Take this block as the whole menu instead of layering it over the
     /// agent's built-in one. Overlay is the default because retuning one
     /// tier shouldn't cost you the rest of the menu (#1568) — but overlay
@@ -622,6 +691,24 @@ impl AgentModels {
         sources
             .filter(|(_, alias)| self.tier(alias).is_none())
             .map(|(source, alias)| (source, alias.to_string()))
+            .collect()
+    }
+
+    /// Each `(tier-token, alias)` the capability map points at a tier
+    /// [`ModelTier::excluded_from_default`] rejects. The mapping parses,
+    /// names a tier that really exists, and is then refused at spawn —
+    /// so [`Self::dangling_aliases`] (which only knows about aliases no
+    /// tier *defines*) says nothing about it. Config load surfaces these
+    /// so the refusal is discoverable at startup rather than only in a
+    /// footer notice at spawn time (#1598).
+    pub fn excluded_capability_aliases(&self) -> Vec<(&'static str, String)> {
+        self.capability
+            .declared()
+            .filter(|(_, alias)| {
+                self.tier(alias)
+                    .is_some_and(ModelTier::excluded_from_default)
+            })
+            .map(|(name, alias)| (name, alias.to_string()))
             .collect()
     }
 
@@ -707,6 +794,7 @@ impl AgentModels {
                     low: Some("S".into()),
                 },
                 deprecated_priority: CapabilityAliases::default(),
+                unknown: Default::default(),
             }),
             _ => None,
         }

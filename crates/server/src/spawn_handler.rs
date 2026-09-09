@@ -18829,10 +18829,13 @@ mod tests {
         assert_eq!(capability_alias_for(&config, &key, &models), None);
 
         let event = events.try_recv().expect("a notification was published");
-        let Event::Notification { title, body } = event else {
+        let Event::Notification { body, .. } = event else {
             panic!("expected a notification, got {event:?}");
         };
-        assert_eq!(title, "Model tier not applied");
+        // Assert on `body` only: the TUI destructures
+        // `Notification { body, .. }` and drops `title`, so the body must
+        // stand alone — a test pinning the title would pass while the
+        // user-visible text said nothing (#1598).
         assert!(
             body.contains("best") && body.contains("default model"),
             "the notice must name the label and what ran instead: {body}"

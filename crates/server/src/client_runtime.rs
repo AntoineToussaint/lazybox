@@ -116,7 +116,7 @@ impl Drop for ClientRuntime {
 /// the user's own Claude `model` setting, when a configured menu inherits
 /// capability routing that contradicts the default it pins, or when a
 /// menu still spells its capability map with the deprecated `priority`
-/// key (#1598).
+/// key — or misspells the key it was renamed to (#1598).
 ///
 /// Deliberately not emitted from `Config::load_from`: every `save_to`
 /// invalidates the `load()` cache, so a routine sidebar collapse or
@@ -130,6 +130,8 @@ fn log_model_pin_warnings() {
         .into_iter()
         .chain(config.inherited_capability_warnings())
         .chain(config.deprecated_model_key_warnings())
+        .chain(config.unknown_model_key_warnings())
+        .chain(config.excluded_capability_warnings())
     {
         tracing::warn!("{warning}");
     }

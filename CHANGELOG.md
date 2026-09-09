@@ -23,12 +23,28 @@ contain explicitly documented compatibility changes.
 - **A model tier that buys nothing now says so** (#1598). A declared tier this
   agent routes nowhere — `best`, which the built-in Claude menu deliberately
   leaves unmapped — used to fall back to the default model with only a debug
-  log to show for it, indistinguishable from a label that worked. It now
-  flashes a notice naming the label and what ran instead.
+  log to show for it, indistinguishable from a label that worked. It now names
+  the label and what ran instead, in the footer and in the `Shift-M` log.
+- **Daemon notices survive long enough to read** (#1598). Every daemon-pushed
+  notice — a branch adopted, worktrees cleaned, a session reaped, an agent CLI
+  updated — arrived as an ephemeral *hint*: it faded in three seconds, was
+  displaced by the next message of any kind, and was the one severity the
+  `Shift-M` log deliberately drops. They are now recorded like every other
+  notice.
 - **A capability mapping can no longer route a coding task to Fable** (#1598).
   Fable was already excluded from *default* resolution, but a
-  `capability.high: <fable tier>` mapping walked straight past that guard. The
+  `capability.high: <fable tier>` mapping walked straight past that guard, and
+  config load now says so rather than leaving the refusal to spawn time. The
   tier stays reachable through an explicit chord.
+- **A tier is judged Fable by the model it names, not by its whole argv**
+  (#1598). The old substring scan read any tier with `fable` anywhere in its
+  arguments — a `--settings /home/me/fable/x.json` on an Opus tier — as a
+  writing model, and silently dropped both its default eligibility and its
+  capability mapping.
+- **An unrecognized key under `agents.<id>.models` is named at startup**
+  (#1598). A misspelling (`capabilty:`) parses fine and does nothing, silently
+  reverting that part of the menu to built-in routing — the sharp edge of a
+  release that asks you to rename a key by hand.
 
 ## [0.1.15] - 2026-09-07
 

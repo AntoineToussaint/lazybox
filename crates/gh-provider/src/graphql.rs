@@ -1073,6 +1073,13 @@ pub fn remove_assignees_body(
     })
 }
 
+/// How many `statusCheckRollup` contexts every PR query pages in. A PR
+/// running MORE checks than this yields a **truncated** `Task::checks`
+/// list — which is why the GitHub-native auto-merge gate (issue #1596)
+/// treats a full page as "the check set is unknown" and declines rather
+/// than concluding coverage from a partial list.
+pub(crate) const ROLLUP_CONTEXT_PAGE: usize = 20;
+
 /// GraphQL mutation that turns on GitHub's server-side auto-merge
 /// ("merge when ready") for a PR — the durable half of lazybox's `g g`
 /// arm (issue #1596). GitHub then lands the PR itself once every
@@ -4170,6 +4177,25 @@ mod tests {
             assert!(
                 !query.contains(heavy_connection),
                 "probe must not fetch {heavy_connection}",
+            );
+        }
+    }
+
+    /// `ROLLUP_CONTEXT_PAGE` is what the native auto-merge gate uses to
+    /// decide a check list may be truncated (#1596). If a query's page
+    /// size drifts from the const, the gate silently starts trusting a
+    /// partial list — so pin them together.
+    #[test]
+    fn rollup_context_page_matches_every_query() {
+        let needle = format!("contexts(first: {ROLLUP_CONTEXT_PAGE})");
+        for (name, query) in [
+            ("PR_DETAILS_QUERY", PR_DETAILS_QUERY),
+            ("SINGLE_PR_QUERY", SINGLE_PR_QUERY),
+            ("HOT_TASKS_QUERY", HOT_TASKS_QUERY),
+        ] {
+            assert!(
+                query.contains(&needle),
+                "{name} must page rollup contexts at ROLLUP_CONTEXT_PAGE"
             );
         }
     }

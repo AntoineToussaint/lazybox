@@ -907,7 +907,18 @@ impl Workspace {
         let was_empty = self.activity.is_empty();
         match classify(&task) {
             TaskSlot::Pr => {
-                let merged = match self.pr.take() {
+                let previous = self.pr.take();
+                // `native_auto_merge_by_lazybox` describes ONE PR's
+                // auto-merge (#1596). A different PR landing in this slot
+                // — an issue workspace's PR opening, a rebadge — inherits
+                // nothing: carrying it would let a later `g g` disarm call
+                // `disablePullRequestAutoMerge` on an auto-merge a human
+                // set on github.com, which is the exact thing the flag
+                // exists to prevent.
+                if previous.as_ref().is_some_and(|old| old.id != task.id) {
+                    self.native_auto_merge_by_lazybox = false;
+                }
+                let merged = match previous {
                     Some(existing) => preserve_lazy_pr_fields(task.clone(), &existing),
                     None => task.clone(),
                 };
@@ -3610,6 +3621,31 @@ mod tests {
         ws.attach_task(issue("linear", "ENG-7"));
         let ids = ws.linked_task_ids();
         assert_eq!(ids.len(), 3);
+    }
+
+    /// #1596: `native_auto_merge_by_lazybox` describes ONE PR's
+    /// auto-merge. A DIFFERENT PR landing in the slot must not inherit
+    /// it — a stale `true` would let a later `g g` disarm fire
+    /// `disablePullRequestAutoMerge` on an auto-merge a human set on
+    /// github.com, the exact thing the flag exists to prevent. An update
+    /// to the SAME PR keeps it, or every poll would forget the claim.
+    #[test]
+    fn native_auto_merge_provenance_does_not_survive_a_different_pr() {
+        let mut ws = Workspace::empty(WorkspaceKey::new("ws-1"), "main", now());
+        ws.attach_task(pr("o/r#1"));
+        ws.native_auto_merge_by_lazybox = true;
+
+        ws.attach_task(pr("o/r#1"));
+        assert!(
+            ws.native_auto_merge_by_lazybox,
+            "re-polling the same PR must not drop the claim"
+        );
+
+        ws.attach_task(pr("o/r#2"));
+        assert!(
+            !ws.native_auto_merge_by_lazybox,
+            "a new PR in the slot is not one lazybox armed"
+        );
     }
 
     #[test]

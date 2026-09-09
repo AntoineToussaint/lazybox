@@ -3359,21 +3359,28 @@ impl MergeOnGreenConfig {
 /// When arming merge-on-green (`g g`) should also enable GitHub's
 /// server-side auto-merge (`merge_on_green.github_native`, issue #1596).
 ///
-/// GitHub's auto-merge only waits on checks its branch protection /
-/// ruleset marks **required**. On a base branch with none, GitHub would
-/// merge without waiting for CI at all — strictly weaker than lazybox's
-/// all-green gate — so the default only arms it where the base actually
-/// gates on required checks.
+/// GitHub's auto-merge only waits on the checks and reviews its branch
+/// protection / ruleset marks **required**; lazybox waits on the whole
+/// check rollup and refuses any changes-requested review. A base that
+/// requires `build` while the PR also runs a failing `test` is therefore
+/// strictly *weaker*, not merely different — GitHub sees every required
+/// check green and lands it red. So the default arms native auto-merge
+/// only where GitHub's required set is proven to cover the checks this
+/// PR actually runs and a review is required too (see
+/// `lazybox_gh::BranchMergeGate::shortfall_for`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GithubNativeConfig {
-    /// Arm native auto-merge only when the PR's base branch has required
-    /// status checks — i.e. only where GitHub's gate is
-    /// equivalent-or-stricter than lazybox's. The default.
+    /// Arm native auto-merge only where GitHub's gate is *proven*
+    /// equivalent-or-stricter for this PR: every check it runs is
+    /// required on the base, and the base requires a review. A check set
+    /// lazybox cannot fully enumerate counts as unproven. The default.
     #[default]
     Auto,
-    /// Always arm native auto-merge, required checks or not. Opt in only
-    /// if landing without CI on an ungated base is acceptable.
+    /// Always arm native auto-merge, whatever the base requires. Opt in
+    /// only if landing on GitHub's weaker gate — possibly with a
+    /// non-required check red, or over a changes-requested review — is
+    /// acceptable.
     Always,
     /// Never arm native auto-merge; `g g` stays a lazybox-only latch.
     Never,

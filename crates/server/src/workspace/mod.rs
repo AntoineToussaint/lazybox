@@ -836,8 +836,14 @@ async fn set_auto_merge_on_green_with_policy(
     let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
         return false;
     };
+    // Every arm request is author-gated, including one for a workspace
+    // that is already armed. The `!auto_merge_on_green` short-circuit this
+    // used to carry made an idempotent re-arm skip the gate — and since
+    // #1596 the return value drives the GitHub-native arm, so skipping it
+    // would hand GitHub a PR `auto_merge_block_reason` refuses to merge
+    // (NON_AUTHOR_BLOCK). Disarms are unaffected: `enabled` gates the whole
+    // check.
     if enabled
-        && !workspace.auto_merge_on_green
         && let Some(pr) = workspace.pr.as_ref()
         && lazybox_core::author_gate_blocks(pr, policy)
     {
@@ -4022,6 +4028,37 @@ mod set_auto_merge_on_green_tests {
             )
             .await,
             "no workspace, no arm"
+        );
+    }
+
+    /// The author gate applies to EVERY arm request, not just the first
+    /// (#1596). The old `!auto_merge_on_green` short-circuit let a re-arm
+    /// of an already-armed row skip it and report success — which now
+    /// drives the GitHub-native arm, handing GitHub a PR
+    /// `auto_merge_block_reason` refuses to merge.
+    #[tokio::test]
+    async fn re_arming_an_already_armed_row_still_author_gates() {
+        let config = ServerConfig::in_memory();
+        let key = seed(
+            &config,
+            pr_task("o/r#12", TaskRole::Reviewer, "dependabot[bot]"),
+            // Already armed — e.g. armed while the allowlist still named
+            // this author, which was then removed from config.
+            true,
+        );
+        assert!(
+            !set_auto_merge_on_green_with_policy(
+                &config,
+                &key,
+                true,
+                &MergeOnGreenPolicy::default()
+            )
+            .await,
+            "an already-armed row must not report an applied arm past the gate"
+        );
+        assert!(
+            stored_arm(&config, &key),
+            "refusing the re-arm leaves the existing local arm as it was"
         );
     }
 

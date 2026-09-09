@@ -1723,7 +1723,8 @@ pub fn on_pr_merged(config: &ServerConfig, merged: &WorkspaceKey) {
         // counts it; if that was the last predecessor and the PR is armed +
         // mergeable, the hold lifts and the attempt fires.
         let signal = crate::polling::auto_merge::signal_for(ws);
-        crate::polling::auto_merge::on_workspace_committed(config, &succ, signal, true);
+        let native = crate::polling::auto_merge::native_arm_for(ws);
+        crate::polling::auto_merge::on_workspace_committed(config, &succ, signal, native, true);
     }
 }
 
@@ -2006,6 +2007,25 @@ pub struct ReviewState {
 
 fn review_storage_key(workspace: &str) -> String {
     format!("{REVIEW_STATE_PREFIX}{workspace}")
+}
+
+/// Plant a Reviewer's `blocking` verdict for `workspace`, as
+/// [`on_note_posted`] would. Exists so the GitHub-native revoke sweep
+/// (#1596) can be tested against the state that, in production, can only
+/// ever appear AFTER the arm it has to revoke.
+#[cfg(test)]
+pub(crate) fn record_review_block_for_test(config: &ServerConfig, workspace: &WorkspaceKey) {
+    persist_review(
+        config,
+        &ReviewState {
+            workspace: workspace.clone(),
+            epic: "e".to_string(),
+            dispatched: true,
+            blocking: true,
+            since: 0,
+        },
+    )
+    .expect("persist review state");
 }
 
 fn persist_review(config: &ServerConfig, state: &ReviewState) -> Result<(), String> {

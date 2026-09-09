@@ -23,9 +23,10 @@
 //!    the per-session [`PolicyArm`] override the audit found missing.
 //! 3. **GitHub-native auto-merge** — GitHub's own server-side "merge when
 //!    ready" ([`crate::Task::auto_merge_enabled`]). Arming merge-on-green
-//!    also turns this on where it is equivalent-or-stricter — the base
-//!    branch actually gates on required checks (issue #1596) — so the PR
-//!    lands even with lazybox closed. Whether lazybox was the one to set
+//!    also turns this on where GitHub's gate is *proven*
+//!    equivalent-or-stricter for the PR — its required checks cover every
+//!    check the PR runs, and it requires a review (issue #1596) — so the
+//!    PR lands even with lazybox closed. Whether lazybox was the one to set
 //!    it is recorded on
 //!    [`crate::Workspace::native_auto_merge_by_lazybox`], so disarming
 //!    only clears what lazybox armed; an auto-merge set on github.com is
@@ -37,9 +38,11 @@
 //!   auto-merge is enabled on a PR, lazybox's merge-on-green stands down
 //!   (see [`should_auto_merge`]) — GitHub will land it, so a second merge
 //!   fired by lazybox is redundant and racy. This holds whether the user
-//!   or lazybox armed it: lazybox only arms native where GitHub's gate is
-//!   equivalent-or-stricter, and the rest is covered by the armed PR
-//!   riding the 15-second hot poll tier.
+//!   or lazybox armed it. Standing down is only safe because a native arm
+//!   lazybox owns is re-verified on every poll tick and revoked the
+//!   moment GitHub's gate stops covering lazybox's
+//!   (`polling::auto_merge::revoke_native_if_unsafe`); the rest is
+//!   covered by the armed PR riding the 15-second hot poll tier.
 //! - **auto-fix per-session [`PolicyArm`]** resolves as
 //!   [`auto_fix_permitted`] documents: an explicit `Disarm` beats
 //!   everything, an explicit `Arm` overrides a label opt-out, and

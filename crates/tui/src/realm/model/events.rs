@@ -1233,6 +1233,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::PrMergeFailed { .. }
                 | IpcEvent::BranchUpdated { .. }
                 | IpcEvent::BranchUpdateFailed { .. }
+                | IpcEvent::AutoMergeNotice { .. }
                 | IpcEvent::IssueClosed { .. }
                 | IpcEvent::IssueCloseFailed { .. }
                 | IpcEvent::PrClosed { .. }
@@ -1774,6 +1775,28 @@ impl<T: TerminalAdapter> Model<T> {
             self.redraw = true;
             return;
         }
+        // The GitHub-native half of `g g` (#1596) reported back. This is
+        // a first-class notice, NOT a `ProviderError`: a retryable
+        // provider error is filed in the sync log and shown only while a
+        // manual refresh is in flight, so routing these there meant the
+        // user pressed `g g`, got a lazybox-only arm, and was never told.
+        // A decline is sticky — it says the automation is weaker than the
+        // keypress implied, which the user must actually see.
+        if let IpcEvent::AutoMergeNotice {
+            workspace_key,
+            message,
+            level,
+        } = &event
+        {
+            match level {
+                lazybox_ipc::AutoMergeNoticeLevel::Info => self.flash_info(message.clone()),
+                lazybox_ipc::AutoMergeNoticeLevel::Warn => {
+                    self.flash_action_error(workspace_key, format!("⚠ {message}"))
+                }
+            }
+            self.redraw = true;
+            return;
+        }
         // `x c` reached GitHub and the issue was closed. The local
         // Task still reads `Open` until the next poll, so flash a notice
         // now; the daemon's open→closed detection (which the close
@@ -2298,6 +2321,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::PrMergeFailed { .. }
             | IpcEvent::BranchUpdated { .. }
             | IpcEvent::BranchUpdateFailed { .. }
+            | IpcEvent::AutoMergeNotice { .. }
             | IpcEvent::IssueClosed { .. }
             | IpcEvent::IssueCloseFailed { .. }
             | IpcEvent::PrClosed { .. }
@@ -2637,6 +2661,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::PrMergeFailed { .. }
                 | IpcEvent::BranchUpdated { .. }
                 | IpcEvent::BranchUpdateFailed { .. }
+                | IpcEvent::AutoMergeNotice { .. }
                 | IpcEvent::IssueClosed { .. }
                 | IpcEvent::IssueCloseFailed { .. }
                 | IpcEvent::PrClosed { .. }

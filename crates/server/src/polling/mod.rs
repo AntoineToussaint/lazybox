@@ -84,6 +84,16 @@ use std::pin::Pin;
 use std::time::Duration;
 
 pub const HOT_SET_MAX: usize = 3;
+
+/// How many merge-on-green-armed rows may ride the hot tier at once
+/// (#1596). Armed rows are hot because "land this the moment it goes
+/// green" is exactly a freshness need — but unlike a live agent, which
+/// ends, an arm persists: an open PR armed and then stuck (changes
+/// requested, red, conflicting) is never `cold`, so an unbounded rule
+/// would pin it to the 15-second cadence forever, and `g g` under a `v`
+/// multi-select can arm dozens in one keypress. Above this many, the
+/// most recently updated win and the rest fall back to the normal tiers.
+pub const ARMED_HOT_MAX: usize = 12;
 pub const HOT_POLL_INTERVAL: Duration = Duration::from_secs(15);
 const OWN_PR_HOT_WINDOW: chrono::Duration = chrono::Duration::hours(24);
 
@@ -299,8 +309,11 @@ fn select_engagement_snapshot(
     // Hot = the rows whose freshness the user is waiting on RIGHT NOW:
     // the focused row, every row with a live agent, and every armed row
     // (all uncapped — they ride one batched `nodes(ids:)` query), plus
-    // recent own PRs capped at `HOT_SET_MAX`. Armed rows are few and are
-    // precisely "land this the moment it goes green"; below the cap an
+    // recent own PRs capped at `HOT_SET_MAX`. Armed rows get their own,
+    // larger `ARMED_HOT_MAX` budget — they are precisely "land this the
+    // moment it goes green", but an arm outlives the thing it waits for
+    // (a stuck PR stays armed and non-cold indefinitely), so they are
+    // bounded where a live agent isn't; below the cap an
     // armed PR waited out its repo's slot in the ~5-minute rotation, so
     // green-on-GitHub to merged-by-lazybox was minutes instead of one
     // 15-second tick (#1596). A merely session-bearing workspace (an idle
@@ -311,9 +324,13 @@ fn select_engagement_snapshot(
     // cadence rather than every 15 seconds.
     let mut hot_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut capped_used = 0usize;
+    let mut armed_used = 0usize;
     for candidate in eligible {
         let focused = focused_workspace == Some(candidate.workspace_key.as_str());
-        if focused || candidate.live_agent || (!candidate.cold && candidate.armed) {
+        if focused || candidate.live_agent {
+            hot_keys.insert(candidate.workspace_key.as_str().to_string());
+        } else if !candidate.cold && candidate.armed && armed_used < ARMED_HOT_MAX {
+            armed_used += 1;
             hot_keys.insert(candidate.workspace_key.as_str().to_string());
         } else if capped_used < HOT_SET_MAX {
             hot_keys.insert(candidate.workspace_key.as_str().to_string());
@@ -796,9 +813,9 @@ mod engagement_tier_tests {
     }
 
     /// #1596: an armed PR is the row the user is waiting on right now,
-    /// so it rides above `HOT_SET_MAX` alongside focus and live agents —
-    /// otherwise it waits out its repo's ~5-minute rotation slot and
-    /// green-to-merged is minutes, not one 15-second tick.
+    /// so it rides above `HOT_SET_MAX` — otherwise it waits out its
+    /// repo's ~5-minute rotation slot and green-to-merged is minutes,
+    /// not one 15-second tick.
     #[test]
     fn armed_prs_are_hot_above_the_cap() {
         let armed: Vec<_> = (1..=5)
@@ -840,6 +857,57 @@ mod engagement_tier_tests {
             !armed_for_fast_lane(&ws),
             "GitHub owns this merge — lazybox must not pin it to the 15s tier"
         );
+    }
+
+    /// ...but bounded, unlike a live agent. An arm outlives what it waits
+    /// for — an open PR that never goes green (changes requested, red,
+    /// conflicting) is never `cold`, so it would sit on the 15-second
+    /// cadence forever — and `g g` under a `v` multi-select arms dozens in
+    /// one keypress.
+    #[test]
+    fn armed_prs_are_capped_at_armed_hot_max() {
+        let armed: Vec<_> = (1..=(ARMED_HOT_MAX as u64 + 7))
+            .map(|n| {
+                let mut c = candidate(n);
+                c.own_open_pr = false;
+                c.armed = true;
+                c.repo = format!("o/a{n}");
+                c
+            })
+            .collect();
+        let snapshot = select_engagement_snapshot(armed, None, Utc::now());
+        // Armed rows over budget aren't privileged any more, but they are
+        // still eligible rows, so `HOT_SET_MAX` of them can take the
+        // ordinary capped slots. The property that matters is that the
+        // total is bounded by the two caps rather than by how many the
+        // user armed.
+        assert_eq!(
+            snapshot.hot_count(),
+            ARMED_HOT_MAX + HOT_SET_MAX,
+            "armed rows get a bounded budget, not an unbounded pass"
+        );
+    }
+
+    /// The armed budget is its own: it must not eat the recent-own-PR
+    /// slots, or one bulk arm would starve the rows the user is reading.
+    #[test]
+    fn the_armed_budget_does_not_consume_the_own_pr_cap() {
+        let mut candidates: Vec<_> = (1..=(ARMED_HOT_MAX as u64))
+            .map(|n| {
+                let mut c = candidate(n);
+                c.own_open_pr = false;
+                c.armed = true;
+                c.repo = format!("o/a{n}");
+                c
+            })
+            .collect();
+        candidates.extend((100..100 + HOT_SET_MAX as u64).map(|n| {
+            let mut c = candidate(n);
+            c.repo = format!("o/b{n}");
+            c
+        }));
+        let snapshot = select_engagement_snapshot(candidates, None, Utc::now());
+        assert_eq!(snapshot.hot_count(), ARMED_HOT_MAX + HOT_SET_MAX);
     }
 
     /// A check-rollup flip doesn't bump `updated_at`, so an armed PR

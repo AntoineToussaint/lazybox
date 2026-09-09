@@ -108,6 +108,7 @@ pub mod chat;
 pub mod client_kv;
 pub mod client_runtime;
 pub mod codex_quota;
+pub mod condense;
 pub mod epics;
 pub mod error_inbox;
 pub mod event_forward;

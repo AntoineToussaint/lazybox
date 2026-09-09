@@ -2144,16 +2144,33 @@ mod tests {
     async fn bind_loopback_reuses_a_freed_port_and_falls_back_when_taken() {
         // A freed port rebinds (the restart case: old daemon gone), so a
         // reattached agent's baked `http://127.0.0.1:PORT/` keeps resolving.
-        let first = bind_loopback(None).expect("ephemeral bind");
-        let port = first.local_addr().unwrap().port();
-        drop(first);
-        let reused = bind_loopback(Some(port)).expect("reuse freed port");
-        assert_eq!(reused.local_addr().unwrap().port(), port);
+        //
+        // The freed port is only ours to reclaim if nothing takes it in the
+        // window between the drop and the rebind — and a just-released
+        // ephemeral port is exactly what another test thread's
+        // `bind_loopback(None)` is handed next. `bind_loopback` answers a
+        // lost race by falling back to a fresh port, which is correct
+        // behaviour but indistinguishable here from "reuse is broken", so
+        // the suite failed on load while the test passed alone. Retry on a
+        // fresh port instead of asserting we win the race.
+        let mut reclaimed = None;
+        for _ in 0..16 {
+            let first = bind_loopback(None).expect("ephemeral bind");
+            let port = first.local_addr().unwrap().port();
+            drop(first);
+            let reused = bind_loopback(Some(port)).expect("reuse freed port");
+            if reused.local_addr().unwrap().port() == port {
+                reclaimed = Some((reused, port));
+                break;
+            }
+        }
+        let (held, port) = reclaimed.expect("a freed loopback port must rebind");
 
         // A still-held port can't be reused: fall back to a fresh one rather
-        // than fail to start.
+        // than fail to start. `held` keeps it occupied for this half.
         let fallback = bind_loopback(Some(port)).expect("fallback binds");
         assert_ne!(fallback.local_addr().unwrap().port(), port);
+        drop(held);
     }
 
     #[tokio::test]

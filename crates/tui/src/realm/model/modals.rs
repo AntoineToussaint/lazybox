@@ -4018,6 +4018,7 @@ impl<T: TerminalAdapter> Model<T> {
     /// for. `BranchHeldManaged` names a different-path holder to move; the
     /// other recoverable classes move the workspace's own target worktree.
     pub(super) fn recreate_worktree_provision(&mut self) {
+        use crate::realm::components::confirm::Confirm;
         let is_failed = self.worktree_progress.as_ref().is_some_and(|s| s.failed());
         if !is_failed {
             return;
@@ -4062,8 +4063,21 @@ impl<T: TerminalAdapter> Model<T> {
             })
             .flatten()
         });
-        self.force_dismiss_worktree_progress();
-        self.worktree_progress_dismissed = None;
+        // Moving a live checkout into a `.bak-<n>` sibling and rebuilding
+        // from zero is the one destructive step in this flow, and it used
+        // to be a single keypress (#1572). Confirm it on a wrong-branch
+        // failure, where the lossless alternative (`a` adopt) is sitting
+        // right there — whether or not the tree is dirty, since that is
+        // exactly what the user cannot see from the modal.
+        let confirm_preserve = matches!(
+            self.worktree_progress.as_ref().and_then(|s| s.recovery()),
+            Some(lazybox_ipc::WorktreeRecovery::BranchMismatch)
+        );
+        let preserved_path = self
+            .worktree_progress
+            .as_ref()
+            .and_then(|state| state.error())
+            .and_then(lazybox_ipc::WorktreeRecovery::mismatch_path);
         let cmd = lazybox_ipc::Command::RecreateWorktree {
             spawn: Box::new(lazybox_ipc::SpawnFallback {
                 session_key,
@@ -4077,6 +4091,70 @@ impl<T: TerminalAdapter> Model<T> {
             initial_prompt,
             on_main,
             preserve_holder,
+        };
+        if confirm_preserve {
+            let target = preserved_path.unwrap_or_else(|| "this worktree".to_string());
+            self.set_modal_flow(ModalFlow::WorktreeRecreateConfirm { cmd: Box::new(cmd) });
+            // The checklist stays mounted underneath: declining must land
+            // the user back on the recovery modal with `a adopt` still
+            // reachable, not on an empty screen with the spawn dead.
+            self.mount_modal(
+                Id::WorktreeRecreateConfirm,
+                Confirm::new(format!(
+                    "Preserve {target} aside as .bak-N and start a fresh worktree? \
+                     Uncommitted work stays in the .bak copy."
+                ))
+                .destructive(),
+            );
+            return;
+        }
+        self.force_dismiss_worktree_progress();
+        self.worktree_progress_dismissed = None;
+        self.flush_dispatched_cmds(vec![cmd]);
+    }
+
+    /// `a` on a `BranchMismatch` `WorktreeProgress` modal (#1572): keep
+    /// the checkout exactly where it is and take the workspace's records
+    /// to the branch it sits on, then re-run the spawn. The lossless
+    /// counterpart to `recreate_worktree_provision`, which instead moves
+    /// that checkout into a `.bak-<n>` sibling and rebuilds from zero.
+    pub(super) fn adopt_worktree_branch(&mut self) {
+        let is_failed = self.worktree_progress.as_ref().is_some_and(|s| s.failed());
+        if !is_failed {
+            return;
+        }
+        let Some(lazybox_ipc::Command::Spawn {
+            session_key,
+            session_id,
+            client_request_id,
+            kind,
+            cwd,
+            initial_prompt,
+            initial_snippet: _,
+            on_main,
+            model_alias,
+            access,
+            force_new: _,
+            role: _,
+        }) = self.last_spawn.clone()
+        else {
+            self.flash_hint("nothing to adopt");
+            return;
+        };
+        self.force_dismiss_worktree_progress();
+        self.worktree_progress_dismissed = None;
+        let cmd = lazybox_ipc::Command::AdoptWorktreeBranch {
+            spawn: Box::new(lazybox_ipc::SpawnFallback {
+                session_key,
+                session_id,
+                client_request_id,
+                kind,
+                cwd,
+                model_alias,
+                access,
+            }),
+            initial_prompt,
+            on_main,
         };
         self.flush_dispatched_cmds(vec![cmd]);
     }

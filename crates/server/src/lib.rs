@@ -26,6 +26,75 @@
     clippy::unwrap_or_default
 )]
 
+// A server test that reaches `Config::load()` must not read the
+// developer's real `~/.lazybox/config.yaml`. `recover_sessions` resolves a
+// recovered terminal's model label through the live config, so on a
+// machine whose config declares its own Claude `L` tier the label comes
+// back as that tier's label instead of the built-in one — and
+// `recovered_agent_restores_resume_metadata_and_detects_auth_failure`
+// fails locally while passing in CI, where no user config exists.
+//
+// Mirrors `lazybox_tui`'s `config_sandbox` (#1539). The body is duplicated
+// rather than shared because `cfg(test)` is never active in
+// `lazybox-config` for another crate's test run, so the redirect has to be
+// installed by each test binary itself; sharing it would put an
+// env-mutating helper on a production API surface. Keep the two copies in
+// step.
+#[cfg(test)]
+mod config_sandbox {
+    /// Point `LAZYBOX_HOME` at a throwaway dir so every `Config::load()` in
+    /// this test binary resolves to defaults instead of the developer's
+    /// real config. Installed from a before-main `#[ctor]`, the one hook
+    /// that beats the test harness to every test.
+    ///
+    /// The dir is unique per process run (pid + start nanos) so a recycled
+    /// pid can never make a later run read a stale sandbox.
+    fn install() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!(
+            "lazybox-server-config-sandbox-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        // SAFETY: a `#[ctor]` runs before `main`, while the process is
+        // still single-threaded and no other initializer in this binary
+        // spawns a thread — so nothing can race this env write.
+        unsafe { std::env::set_var("LAZYBOX_HOME", &dir) };
+        lazybox_config::Config::invalidate_cache();
+    }
+
+    #[ctor::ctor]
+    unsafe fn redirect_config_home() {
+        install();
+    }
+
+    /// The redirect must actually be in force: a `Config::load()` from this
+    /// binary has to see the sandbox, not the developer's config. Proved
+    /// hermetically — the real file is never read.
+    #[test]
+    fn config_load_resolves_to_the_sandbox_not_the_real_home() {
+        let home = std::env::var("LAZYBOX_HOME").expect("ctor set LAZYBOX_HOME");
+        assert!(
+            home.contains("lazybox-server-config-sandbox-"),
+            "server tests must run against a sandboxed config home, got {home}",
+        );
+        // The built-in Claude menu is what a defaulted config yields; a
+        // machine-local `models:` override would replace this label.
+        let models = lazybox_config::Config::load()
+            .unwrap_or_default()
+            .agent_models("claude");
+        assert_eq!(
+            models.tier("L").map(|tier| tier.label.as_str()),
+            Some("Opus"),
+            "a sandboxed load must yield the built-in tier menu",
+        );
+    }
+}
+
 mod agent_auth;
 pub mod agent_runs;
 pub mod agent_stream;
@@ -1136,6 +1205,7 @@ impl Server {
                         }
                         lazybox_ipc::Command::RenameWorkspace { .. } => "RenameWorkspace",
                         lazybox_ipc::Command::RecreateWorktree { .. } => "RecreateWorktree",
+                        lazybox_ipc::Command::AdoptWorktreeBranch { .. } => "AdoptWorktreeBranch",
                         lazybox_ipc::Command::ListErrors => "ListErrors",
                         lazybox_ipc::Command::ClearErrors => "ClearErrors",
                         lazybox_ipc::Command::DeleteError { .. } => "DeleteError",
@@ -2153,6 +2223,14 @@ pub async fn dispatch_command(
                 preserve_holder,
             )
             .await;
+        }
+        lazybox_ipc::Command::AdoptWorktreeBranch {
+            spawn,
+            initial_prompt,
+            on_main,
+        } => {
+            spawn_handler::handle_adopt_worktree_branch(config, *spawn, initial_prompt, on_main)
+                .await;
         }
         lazybox_ipc::Command::SetUpdateDismissal { target } => {
             client_kv::set_update_dismissal(config, target).await;

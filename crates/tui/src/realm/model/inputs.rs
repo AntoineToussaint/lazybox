@@ -1453,6 +1453,17 @@ showing keybinding search only",
                     });
                 }
             }
+            Some(Id::WorktreeRecreateConfirm) => {
+                if let Some(ModalFlow::WorktreeRecreateConfirm { cmd }) = self.modal_flow.take()
+                    && yes
+                {
+                    // Only a Yes tears the checklist down; the pop above
+                    // already returned a No to it, `a adopt` included.
+                    self.force_dismiss_worktree_progress();
+                    self.worktree_progress_dismissed = None;
+                    cmds.push(*cmd);
+                }
+            }
             Some(Id::ActionConfirm) => {
                 // Unified destructive-action confirm. Yes →
                 // dispatch the queued action against the target

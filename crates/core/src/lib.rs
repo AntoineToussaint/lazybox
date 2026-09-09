@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod autofix;
 pub mod branch_template;
+pub mod capability;
 pub mod config;
 pub mod context_hygiene;
 pub mod conventions;
@@ -16,7 +17,6 @@ pub mod paths;
 pub mod policy;
 pub mod pr_trailers;
 pub mod pricing;
-pub mod priority;
 pub mod project;
 pub mod prompts;
 pub mod provider;
@@ -28,11 +28,12 @@ mod task;
 pub mod time;
 mod workspace;
 
-pub use agent::{AgentConfig, AgentModels, ModelTier};
+pub use agent::{AgentConfig, AgentModels, CapabilityAliases, ModelTier};
 pub use autofix::{
     AutoFixKind, AutoFixSettings, auto_fix_candidate, auto_fix_enabled_and_permitted,
     evaluate_auto_fix, is_auto_fix_opted_out, resolve_auto_fix,
 };
+pub use capability::{CapabilityTier, resolve_capability_tier};
 pub use config::{
     KV_KEY_ARCHIVED, KV_KEY_LAYOUT, KV_KEY_SESSION_TOMBSTONES, KV_KEY_SETUP, KV_KEY_THEME,
     KV_PREFIX_ARCHIVED, KV_PREFIX_SESSION_TOMBSTONE, LinearScope, PaneLayout, PersistedSetup,
@@ -56,7 +57,6 @@ pub use pr_trailers::{
     append_to_body as append_pr_trailers, extract as extract_pr_trailers,
 };
 pub use pricing::{ModelPrice, TokenCounts, cost_micros as pricing_cost_micros, price_for};
-pub use priority::{PriorityTier, resolve_priority_tier};
 pub use project::{Project, ProjectKey, github_owner_repo_from_url};
 pub use provider::{
     DEFAULT_MAX_PAGES, FetchCoverage, FetchOutcome, FetchPage, FetchPageInfo, GITHUB_SOURCE,

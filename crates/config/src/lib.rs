@@ -104,6 +104,16 @@ pub struct Config {
     /// `codex`, …). See [`AgentEntry`].
     #[serde(default)]
     pub agents: std::collections::BTreeMap<String, AgentEntry>,
+    /// Per agent, the capability tiers whose mapping came from the
+    /// pre-rename `priority:` key — recorded by
+    /// `migrate_legacy_model_priority_key` as it folds them into
+    /// `capability`, so warnings can still quote the key the user's file
+    /// actually contains instead of the one they were folded onto.
+    /// Derived from the file on every parse, never read from or written
+    /// to it (#1598).
+    #[serde(skip)]
+    pub legacy_model_priority_agents:
+        std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     /// Daemon-level tuning parameters: ring buffer size, credential cache TTL,
     /// polling backoff cap, and other performance knobs. See [`ServerSection`].
     #[serde(default)]
@@ -2652,6 +2662,7 @@ impl Config {
     pub fn parse(contents: &str) -> Result<Self, ConfigError> {
         let mut config: Self = serde_yaml::from_str(contents)?;
         config.migrate_legacy_shell_default();
+        config.migrate_legacy_model_priority_key();
         // Validate server-section ranges at parse time so an invalid config
         // fails fast with a clear error message (not a silent fallback).
         config.server.validate().map_err(|msg| {
@@ -2670,6 +2681,36 @@ impl Config {
             ))
         })?;
         Ok(config)
+    }
+
+    /// Fold the pre-rename `agents.<id>.models.priority` key into
+    /// `capability` and clear it, recording which agents used it so
+    /// `deprecated_model_key_warnings` can still name them (#1598).
+    ///
+    /// Done here, at parse, rather than in `agent_models`: leaving both
+    /// fields populated let `AgentModels` represent a half-migrated menu
+    /// whose correct reading depended on remembering to call
+    /// `declared_capability` instead of `capability`. Folding once on the
+    /// way in makes that state unrepresentable downstream — and means a
+    /// later `save()` writes only `capability:`, so the file migrates
+    /// itself instead of accumulating both keys.
+    fn migrate_legacy_model_priority_key(&mut self) {
+        for (agent_id, entry) in &mut self.agents {
+            if entry.models.deprecated_priority.is_unset() {
+                continue;
+            }
+            let from_legacy: std::collections::BTreeSet<String> = entry
+                .models
+                .deprecated_priority
+                .declared()
+                .filter(|(name, _)| entry.models.capability.alias_for_name(name).is_none())
+                .map(|(name, _)| name.to_string())
+                .collect();
+            entry.models.capability = entry.models.declared_capability();
+            entry.models.deprecated_priority = Default::default();
+            self.legacy_model_priority_agents
+                .insert(agent_id.clone(), from_legacy);
+        }
     }
 
     fn migrate_legacy_shell_default(&mut self) {
@@ -2703,11 +2744,11 @@ impl Config {
     /// agent (an empty menu otherwise — the agent's own default model, no
     /// tier chords) with the user's `agents.<id>.models` block layered on
     /// top, field by field. `default` replaces the inherited default; each
-    /// `priority` the user maps replaces just that priority's inherited
+    /// `capability` tier the user maps replaces just that tier's inherited
     /// mapping; and each declared tier replaces the same-alias built-in
     /// tier in place, appending if the alias is new. So retuning one tier
     /// (`tiers: [{alias: L, args: [...]}]`) keeps the rest of the menu and
-    /// the built-in priority routing, instead of replacing the whole menu
+    /// the built-in capability routing, instead of replacing the whole menu
     /// and silently losing them (#1568). A `default` naming a Fable tier is
     /// never honored — it re-points to the built-in default when that is
     /// eligible, else to the first eligible tier.
@@ -2715,6 +2756,9 @@ impl Config {
     /// `models.replace: true` opts out of the layering entirely and takes
     /// the block as the whole menu — the only way to express a *restricted*
     /// menu, since an overlay can add tiers but never remove one.
+    ///
+    /// The deprecated `models.priority` key is already folded into
+    /// `capability` by `Config::parse` (#1598), so this reads one map.
     pub fn agent_models(&self, agent_id: &str) -> lazybox_core::AgentModels {
         let builtin = lazybox_core::AgentModels::builtin(agent_id).unwrap_or_default();
         let mut models = match self.agents.get(agent_id) {
@@ -2725,7 +2769,7 @@ impl Config {
                     if let Some(default) = entry.models.default.clone() {
                         models.default = Some(default);
                     }
-                    models.priority.overlay(&entry.models.priority);
+                    models.capability.overlay(&entry.models.capability);
                     models.overlay_tiers(&entry.models.tiers);
                 }
                 models
@@ -2759,8 +2803,77 @@ impl Config {
         models
     }
 
+    /// Warnings for every agent whose model menu still uses the
+    /// deprecated `models.priority` key. It was never a priority — it
+    /// picks which model runs a `best`/`high`/`medium`/`low` task and
+    /// nothing else — and the name led readers, humans and agents alike,
+    /// to invent a ranking lazybox does not have (#1598). The old key
+    /// keeps working; saying so at daemon start is how it stops being
+    /// the spelling people copy.
+    pub fn deprecated_model_key_warnings(&self) -> Vec<String> {
+        self.legacy_model_priority_agents
+            .keys()
+            .map(|agent_id| {
+                format!(
+                    "agents.{agent_id}.models.priority is deprecated — rename it to \
+                     agents.{agent_id}.models.capability. It maps a task's \
+                     best/high/medium/low label to a model tier; it is not a priority \
+                     and does not rank, queue, or order anything. The old key still works"
+                )
+            })
+            .collect()
+    }
+
+    /// Warnings for a capability mapping aimed at a creative-class
+    /// (Fable) tier. Such a mapping parses and names a real tier, so
+    /// nothing else flags it — but a label must never put a coding task
+    /// on a writing model, so the spawn refuses it and runs the default.
+    /// Saying so at daemon start keeps that refusal from being a
+    /// surprise the user only meets mid-spawn (#1598).
+    pub fn excluded_capability_warnings(&self) -> Vec<String> {
+        self.agents
+            .keys()
+            .flat_map(|agent_id| {
+                self.agent_models(agent_id)
+                    .excluded_capability_aliases()
+                    .into_iter()
+                    .map(move |(name, alias)| {
+                        format!(
+                            "agents.{agent_id}.models.capability.{name} names tier {alias:?}, \
+                             which pins a creative-class model — lazybox will not route a \
+                             {name}-labelled coding task there and runs the default tier \
+                             instead. Select it with an explicit tier chord if that is what \
+                             you want"
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    /// Warnings for keys under `agents.<id>.models` lazybox does not
+    /// recognize. A stray key parses fine and then does nothing, so the
+    /// menu silently falls back to built-in routing — and the rename
+    /// this release asks for (`priority` → `capability`) is exactly the
+    /// moment a user hand-types that key and can misspell it. Without
+    /// this, `capabilty: { high: S }` reverts a pinned Haiku mapping to
+    /// the built-in `high → Opus` with no signal anywhere (#1598).
+    pub fn unknown_model_key_warnings(&self) -> Vec<String> {
+        self.agents
+            .iter()
+            .flat_map(|(agent_id, entry)| {
+                entry.models.unknown.keys().map(move |key| {
+                    format!(
+                        "agents.{agent_id}.models.{key} is not a key lazybox knows — it is \
+                         being ignored, so that part of the menu falls back to the built-in \
+                         one. Did you mean capability, tiers, default, or replace?"
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// Human-readable warnings for every configured agent whose model
-    /// menu names an alias no tier defines — a `default` or `priority.*`
+    /// menu names an alias no tier defines — a `default` or `capability.*`
     /// that dangles. Such a reference resolves to no args, so the spawn
     /// silently keeps the agent's own hard-coded model instead of the
     /// tier the config appears to request; surfacing it makes that no-op
@@ -2769,10 +2882,22 @@ impl Config {
         self.agents
             .keys()
             .flat_map(|agent_id| {
+                let from_legacy = self.legacy_model_priority_agents.get(agent_id);
                 self.agent_models(agent_id)
                     .dangling_aliases()
                     .into_iter()
                     .map(move |(source, alias)| {
+                        // Quote the key the user's file contains. The
+                        // parse-time fold moves a legacy `priority.high`
+                        // onto `capability.high`, so reporting the folded
+                        // token sent the reader grepping for a key that
+                        // isn't in their config (#1598).
+                        let source = match source.strip_prefix("capability.") {
+                            Some(tier) if from_legacy.is_some_and(|t| t.contains(tier)) => {
+                                format!("priority.{tier}")
+                            }
+                            _ => source,
+                        };
                         format!(
                             "agents.{agent_id}.models.{source} names alias {alias:?}, \
                              which no tier defines — the spawn will silently keep \
@@ -2782,9 +2907,9 @@ impl Config {
             })
             .collect()
     }
-    /// Warnings for a configured menu whose *inherited* priority routing
+    /// Warnings for a configured menu whose *inherited* capability routing
     /// contradicts the default it pins. A block that declares both a tier
-    /// list and a `default` has decided what runs; if a built-in priority
+    /// list and a `default` has decided what runs; if a built-in capability
     /// mapping it never wrote then routes a labelled task to a tier it
     /// never declared, that decision is quietly bypassed — a `high` label
     /// can spend Opus money on a menu the user restricted to Sonnet.
@@ -2792,8 +2917,8 @@ impl Config {
     /// Only the contradicting shape warns: a block that declares tiers but
     /// no `default` (the common "retune one tier" edit) is asking to
     /// inherit the routing, so it stays quiet. Silence it for real with an
-    /// explicit `priority:` map, or `replace: true` to own the whole menu.
-    pub fn inherited_priority_warnings(&self) -> Vec<String> {
+    /// explicit `capability:` map, or `replace: true` to own the whole menu.
+    pub fn inherited_capability_warnings(&self) -> Vec<String> {
         self.agents
             .iter()
             .filter(|(_, entry)| {
@@ -2808,19 +2933,20 @@ impl Config {
                     .iter()
                     .map(|t| t.alias.as_str())
                     .collect();
+                let written = &entry.models.capability;
                 let resolved = self.agent_models(agent_id);
                 let pinned = entry.models.default.clone().unwrap_or_default();
                 resolved
-                    .priority
+                    .capability
                     .declared()
-                    .filter(|(name, _)| entry.models.priority.declared().all(|(d, _)| d != *name))
+                    .filter(|(name, _)| written.declared().all(|(d, _)| d != *name))
                     .filter(|(_, alias)| !declared.contains(alias))
                     .map(|(name, alias)| {
                         format!(
                             "agents.{agent_id}.models pins default {pinned:?} but inherits \
-                             priority.{name} → {alias:?}, a tier it never declares — a \
-                             {name}-priority task spawns {alias:?}, not {pinned:?}. Declare \
-                             priority.{name} explicitly, or set replace: true to own the menu"
+                             capability.{name} → {alias:?}, a tier it never declares — a \
+                             {name}-labelled task spawns {alias:?}, not {pinned:?}. Declare \
+                             capability.{name} explicitly, or set replace: true to own the menu"
                         )
                     })
                     .collect::<Vec<_>>()
@@ -5938,12 +6064,41 @@ agents:
     }
 
     #[test]
-    fn agent_models_priority_overlays_per_field_without_wiping_the_builtin() {
-        use lazybox_core::PriorityTier;
+    fn agent_models_capability_overlays_per_field_without_wiping_the_builtin() {
+        use lazybox_core::CapabilityTier;
         // The user remaps only `high`; the built-in tiers are inherited,
-        // so the priorities they didn't mention must keep their built-in
+        // so the tiers they didn't mention must keep their built-in
         // mappings (medium → Sonnet, low → Haiku) rather than fall to
         // nothing and silently upgrade every medium/low task.
+        let yaml = r#"
+agents:
+  claude:
+    models:
+      capability:
+        high: S
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse capability-only models");
+        let m = cfg.agent_models("claude");
+        assert!(!m.tiers.is_empty(), "builtin tiers are inherited");
+        assert_eq!(
+            m.alias_for_capability(CapabilityTier::High),
+            Some("S"),
+            "the user's mapping wins for the tier they set"
+        );
+        assert_eq!(
+            m.alias_for_capability(CapabilityTier::Medium),
+            Some("M"),
+            "an unmentioned tier keeps its built-in mapping"
+        );
+        assert_eq!(m.alias_for_capability(CapabilityTier::Low), Some("S"));
+    }
+
+    #[test]
+    fn the_deprecated_priority_key_still_routes_and_says_so() {
+        use lazybox_core::CapabilityTier;
+        // A config written before the rename keeps working (#1598) — but
+        // the daemon says the key is dead so it stops being the spelling
+        // people copy.
         let yaml = r#"
 agents:
   claude:
@@ -5951,27 +6106,165 @@ agents:
       priority:
         high: S
 "#;
-        let cfg: Config = serde_yaml::from_str(yaml).expect("parse priority-only models");
+        let cfg = Config::parse(yaml).expect("parse legacy priority models");
         let m = cfg.agent_models("claude");
-        assert!(!m.tiers.is_empty(), "builtin tiers are inherited");
+        assert_eq!(m.alias_for_capability(CapabilityTier::High), Some("S"));
+        assert_eq!(m.alias_for_capability(CapabilityTier::Medium), Some("M"));
+        assert!(
+            cfg.agents["claude"].models.deprecated_priority.is_unset(),
+            "parse folds the legacy key away, so no reader can see two maps"
+        );
         assert_eq!(
-            m.alias_for_priority(PriorityTier::High),
+            cfg.agents["claude"].models.capability.high.as_deref(),
             Some("S"),
-            "the user's mapping wins for the priority they set"
+            "the fold moved the mapping onto the current key"
         );
+        let warnings = cfg.deprecated_model_key_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("agents.claude.models.priority")
+                    && w.contains("agents.claude.models.capability")),
+            "expected a rename warning naming both keys, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_save_migrates_the_deprecated_key_instead_of_duplicating_it() {
+        // Parse folds `priority:` into `capability:` and clears it, so a
+        // save rewrites the file onto the current key. Before the fold
+        // moved to parse time, a save emitted an empty `capability:`
+        // block NEXT TO the live `priority:` one — two blocks with one
+        // meaning, the empty one first (#1598).
+        let yaml = r#"
+agents:
+  claude:
+    models:
+      priority:
+        high: S
+"#;
+        let cfg = Config::parse(yaml).expect("parse legacy priority models");
+        let saved = serde_yaml::to_string(&cfg).expect("serialize");
+        assert!(
+            !saved.contains("priority:"),
+            "the dead key does not survive a save: {saved}"
+        );
+        assert!(
+            saved.contains("capability:"),
+            "the mapping moved to the current key: {saved}"
+        );
+        // And the saved file re-reads to the same routing.
+        let reloaded = Config::parse(&saved).expect("re-parse the saved file");
         assert_eq!(
-            m.alias_for_priority(PriorityTier::Medium),
-            Some("M"),
-            "an unmentioned priority keeps its built-in mapping"
+            reloaded
+                .agent_models("claude")
+                .alias_for_capability(lazybox_core::CapabilityTier::High),
+            Some("S"),
+            "round-trip preserves the user's mapping"
         );
-        assert_eq!(m.alias_for_priority(PriorityTier::Low), Some("S"));
+        // The provenance that drives the warning is derived per parse,
+        // so the re-read file no longer nags.
+        assert!(reloaded.deprecated_model_key_warnings().is_empty());
+    }
+
+    #[test]
+    fn a_dangling_alias_is_reported_under_the_key_the_file_uses() {
+        // The parse-time fold moves `priority.best` onto
+        // `capability.best`; reporting the folded token sent the reader
+        // grepping for a key their config does not contain (#1598).
+        let legacy = r#"
+agents:
+  claude:
+    models:
+      replace: true
+      tiers: []
+      priority:
+        best: B
+"#;
+        let cfg = Config::parse(legacy).expect("parse legacy dangling alias");
+        let warnings = cfg.model_alias_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("agents.claude.models.priority.best")),
+            "a legacy-keyed mapping must be quoted as priority.best, got {warnings:?}"
+        );
+
+        // The same shape written with the current key reports that key.
+        let modern = legacy.replace("priority:", "capability:");
+        let cfg = Config::parse(&modern).expect("parse modern dangling alias");
+        let warnings = cfg.model_alias_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("agents.claude.models.capability.best")),
+            "a currently-keyed mapping must be quoted as capability.best, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_misspelled_models_key_is_kept_and_named() {
+        // The rename asks users to hand-type `capability:`; a typo parses
+        // fine and silently reverts a pinned Haiku mapping to the
+        // built-in `high -> Opus`. It must not also be silent (#1598).
+        let yaml = r#"
+agents:
+  claude:
+    models:
+      capabilty:
+        high: S
+"#;
+        let cfg = Config::parse(yaml).expect("a stray key must never fail the whole config");
+        let warnings = cfg.unknown_model_key_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("agents.claude.models.capabilty") && w.contains("capability")),
+            "expected a warning naming the stray key and the real one, got {warnings:?}"
+        );
+        // Everything else still parses — the whole config must not
+        // collapse to defaults over one typo.
+        assert!(cfg.agents.contains_key("claude"));
+        // And a save keeps what the user wrote, so the fix is a rename,
+        // not a retype from memory.
+        let saved = serde_yaml::to_string(&cfg).expect("serialize");
+        assert!(saved.contains("capabilty:"), "stray key preserved: {saved}");
+    }
+
+    #[test]
+    fn a_fable_pointed_capability_warns_at_config_load() {
+        // The spawn refuses this mapping; `dangling_aliases` cannot see
+        // it (the tier exists), so without this the user's only signal
+        // was a footer notice mid-spawn (#1598).
+        let yaml = r#"
+agents:
+  claude:
+    models:
+      tiers:
+      - { alias: F, label: Fable, args: ["--model", "claude-fable-5"] }
+      capability:
+        high: F
+"#;
+        let cfg = Config::parse(yaml).expect("parse fable capability map");
+        let warnings = cfg.excluded_capability_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("capability.high") && w.contains("\"F\"")),
+            "expected a warning naming the refused mapping, got {warnings:?}"
+        );
+        assert!(
+            cfg.model_alias_warnings().is_empty(),
+            "the tier is defined, so the dangling-alias check stays quiet — \
+             which is exactly why this needed its own warning"
+        );
     }
 
     #[test]
     fn agent_models_tiers_overlay_the_builtin_menu_by_alias() {
-        use lazybox_core::PriorityTier;
+        use lazybox_core::CapabilityTier;
         // Retuning one tier must not cost the user the rest of the menu
-        // or the built-in priority routing (#1568).
+        // or the built-in capability routing (#1568).
         let yaml = r#"
 agents:
   claude:
@@ -5994,8 +6287,8 @@ agents:
             "the built-in default alias now resolves the user's args"
         );
         assert_eq!(m.tier("M").unwrap().model_id(), Some("claude-sonnet-5"));
-        assert_eq!(m.alias_for_priority(PriorityTier::Medium), Some("M"));
-        assert_eq!(m.alias_for_priority(PriorityTier::Low), Some("S"));
+        assert_eq!(m.alias_for_capability(CapabilityTier::Medium), Some("M"));
+        assert_eq!(m.alias_for_capability(CapabilityTier::Low), Some("S"));
     }
 
     #[test]
@@ -6008,7 +6301,7 @@ agents:
         - alias: B
           label: "Opus · max"
           args: ["--model", "claude-opus-5", "--reasoning-effort", "max"]
-      priority:
+      capability:
         best: B
 "#;
         let cfg: Config = serde_yaml::from_str(yaml).expect("parse appended tier");
@@ -6022,11 +6315,11 @@ agents:
 
     /// Regression for the overlay's sharpest edge: a menu deliberately
     /// restricted to Sonnet must not silently regain Opus, and must not
-    /// start routing `high`-priority tasks to it. Before `replace`, the
-    /// inherited built-in `priority.high → L` did exactly that.
+    /// start routing `high`-labelled tasks to it. Before `replace`, the
+    /// inherited built-in `capability.high → L` did exactly that.
     #[test]
     fn replace_keeps_a_restricted_menu_restricted() {
-        use lazybox_core::PriorityTier;
+        use lazybox_core::CapabilityTier;
         let yaml = r#"
 agents:
   claude:
@@ -6044,14 +6337,14 @@ agents:
             "replace owns the menu — no built-in tiers leak back in"
         );
         assert_eq!(
-            m.alias_for_priority(PriorityTier::High),
+            m.alias_for_capability(CapabilityTier::High),
             None,
             "no inherited routing to a tier the user removed"
         );
         assert_eq!(
-            m.resolve_args(m.alias_for_priority(PriorityTier::High)),
+            m.resolve_args(m.alias_for_capability(CapabilityTier::High)),
             vec!["--model".to_string(), "claude-sonnet-5".to_string()],
-            "a high-priority task falls to the declared default, not Opus"
+            "a high-labelled task falls to the declared default, not Opus"
         );
     }
 
@@ -6059,7 +6352,7 @@ agents:
     /// escalates, so it must say so rather than route around the pinned
     /// default in silence.
     #[test]
-    fn inherited_priority_warns_when_it_contradicts_a_pinned_default() {
+    fn inherited_capability_warns_when_it_contradicts_a_pinned_default() {
         let yaml = r#"
 agents:
   claude:
@@ -6069,17 +6362,17 @@ agents:
       - { alias: M, label: Sonnet, args: ["--model", "claude-sonnet-5"] }
 "#;
         let cfg: Config = serde_yaml::from_str(yaml).expect("parse overlay menu");
-        let warnings = cfg.inherited_priority_warnings();
+        let warnings = cfg.inherited_capability_warnings();
         assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("priority.high") && w.contains("\"L\"") && w.contains("\"M\"")),
+            warnings.iter().any(|w| w.contains("capability.high")
+                && w.contains("\"L\"")
+                && w.contains("\"M\"")),
             "expected a warning naming the escalation, got {warnings:?}"
         );
     }
 
     #[test]
-    fn inherited_priority_stays_quiet_for_a_plain_tier_retune() {
+    fn inherited_capability_stays_quiet_for_a_plain_tier_retune() {
         // The issue's motivating edit: retune one tier, inherit the rest.
         // Nothing is contradicted, so nothing is said.
         let yaml = r#"
@@ -6090,8 +6383,8 @@ agents:
       - { alias: L, label: Opus, args: ["--model", "claude-opus-5[1m]"] }
 "#;
         let cfg: Config = serde_yaml::from_str(yaml).expect("parse tier retune");
-        assert!(cfg.inherited_priority_warnings().is_empty());
-        // An explicit priority map silences it for the escalating shape too.
+        assert!(cfg.inherited_capability_warnings().is_empty());
+        // An explicit capability map silences it for the escalating shape too.
         let silenced = r#"
 agents:
   claude:
@@ -6099,10 +6392,10 @@ agents:
       default: M
       tiers:
       - { alias: M, label: Sonnet, args: ["--model", "claude-sonnet-5"] }
-      priority: { high: M, medium: M, low: M }
+      capability: { high: M, medium: M, low: M }
 "#;
-        let cfg: Config = serde_yaml::from_str(silenced).expect("parse explicit priority");
-        assert!(cfg.inherited_priority_warnings().is_empty());
+        let cfg: Config = serde_yaml::from_str(silenced).expect("parse explicit capability");
+        assert!(cfg.inherited_capability_warnings().is_empty());
     }
 
     /// The re-point prefers the built-in default over "first eligible".
@@ -6164,7 +6457,7 @@ agents:
     }
 
     #[test]
-    fn best_priority_spawns_a_model_and_effort_tier() {
+    fn best_capability_spawns_a_model_and_effort_tier() {
         let yaml = r#"
 agents:
   claude:
@@ -6177,18 +6470,18 @@ agents:
         - alias: "L"
           label: "Opus"
           args: ["--model", "claude-opus-5"]
-      priority:
+      capability:
         best: B
         high: L
 "#;
         let cfg: Config = serde_yaml::from_str(yaml).expect("parse best-tier models");
         let m = cfg.agent_models("claude");
         assert_eq!(
-            m.alias_for_priority(lazybox_core::PriorityTier::Best),
+            m.alias_for_capability(lazybox_core::CapabilityTier::Best),
             Some("B")
         );
         assert_eq!(
-            m.resolve_args(m.alias_for_priority(lazybox_core::PriorityTier::Best)),
+            m.resolve_args(m.alias_for_capability(lazybox_core::CapabilityTier::Best)),
             vec![
                 "--model".to_string(),
                 "opus".to_string(),
@@ -6207,16 +6500,16 @@ agents:
     models:
       default: L
       tiers: []
-      priority:
+      capability:
         best: B
 "#;
         let cfg: Config = serde_yaml::from_str(yaml).expect("parse dangling-alias models");
         let warnings = cfg.model_alias_warnings();
         assert!(
-            warnings.iter().any(|w| w.contains("priority.best")
+            warnings.iter().any(|w| w.contains("capability.best")
                 && w.contains("\"B\"")
                 && w.contains("claude")),
-            "expected a warning naming the dangling priority.best alias, got {warnings:?}"
+            "expected a warning naming the dangling capability.best alias, got {warnings:?}"
         );
     }
 

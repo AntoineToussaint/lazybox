@@ -31,8 +31,17 @@ slow-timeout = { period = "150s", terminate-after = 1 }
 [[profile.default.overrides]]
 # This boundary test drives a real PTY through sustained output, disconnect,
 # replay, and resync, so its own bounded phases can legitimately exceed 10s.
+#
+# The period must stay ABOVE the test's own in-test bounds
+# (`PTY_OUTPUT_TOTAL_TIMEOUT` + the post-wait phases, see
+# `crates/server/tests/api_gateway.rs`). `terminate-after = 1` SIGKILLs the
+# process, and a killed test never unwinds, so whichever bound fires first
+# decides whether the failure names its cause or reads `TIMED OUT`. Measured
+# 36s under a loaded `nextest run -p lazybox-server`; the headroom here is for
+# the box, not for the fixture, which is bounded at 4000 paced lines.
+# `nextest_budget_outlasts_the_in_test_pty_bounds` pins the ordering.
 filter = 'test(/^desktop_runtime_real_pty_handles_backpressure_reconnect_replay_and_resync$/)'
-slow-timeout = { period = "60s", terminate-after = 1 }
+slow-timeout = { period = "180s", terminate-after = 1 }
 
 [[profile.default.overrides]]
 # The PTY-watchdog starvation tests drive a continuously-repainting Codex

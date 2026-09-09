@@ -1377,6 +1377,13 @@ fn all_events() -> Vec<Event> {
                 },
             ],
         },
+        Event::AgentCompaction {
+            agent_id: "claude".into(),
+            session_key: Some(lazybox_core::SessionKey::from("github:o/r#1")),
+            blocks: 4,
+            saved_cost_micros: 61_000,
+            regressions: 0,
+        },
     ]
 }
 
@@ -1598,6 +1605,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::KeepAwakeStatus { .. } => "KeepAwakeStatus",
         Event::MasteryLedger { .. } => "MasteryLedger",
         Event::EpicStatus { .. } => "EpicStatus",
+        Event::AgentCompaction { .. } => "AgentCompaction",
     }
 }
 

@@ -145,6 +145,19 @@ impl Stats {
             .sum()
     }
 
+    /// Whether the shipped window saw the context-hygiene pass at all.
+    /// Read over the whole window rather than the active tab so the rows
+    /// don't appear and vanish as the reader toggles Today⇄Week.
+    fn has_compaction(&self) -> bool {
+        [
+            stats::COMPACTION_BLOCKS,
+            stats::COMPACTION_SAVED_MICROS,
+            stats::COMPACTION_REGRESSIONS,
+        ]
+        .iter()
+        .any(|metric| self.grand_total(metric) > 0)
+    }
+
     /// Distinct local days that saw any activity, over the shipped window.
     /// The basis for both streak numbers and the active-day count.
     fn active_days(&self) -> BTreeSet<NaiveDate> {
@@ -254,6 +267,25 @@ impl Stats {
             fmt_compact(self.total(stats::OUTPUT_TOKENS)),
         ));
         lines.push(row("Cost", fmt_cost(self.total(stats::COST_MICROS))));
+        // The context-hygiene saving, next to the cost it is claiming to
+        // reduce (#1621) — that adjacency is the point, since shadow mode
+        // exists to prove the number before a workspace is flipped to `on`.
+        // Shown only once the rollup has seen compaction at all, so a
+        // daemon running without the metering proxy carries no dead rows.
+        if self.has_compaction() {
+            lines.push(row(
+                "Compaction",
+                format!(
+                    "−{} · {} blocks",
+                    fmt_cost(self.total(stats::COMPACTION_SAVED_MICROS)),
+                    fmt_int(self.total(stats::COMPACTION_BLOCKS)),
+                ),
+            ));
+            lines.push(row(
+                "Regressions",
+                fmt_int(self.total(stats::COMPACTION_REGRESSIONS)),
+            ));
+        }
         lines.push(Line::from(""));
 
         // ── Streaks — always over the shipped window, not the tab, since
@@ -543,6 +575,42 @@ mod tests {
         // The sparkline bars keep a gap from their label rather than
         // butting straight against the "7d".
         assert!(out.contains("Sessions · 7d ▁"), "{out}");
+        // A daemon that never ran the context-hygiene pass carries no dead
+        // compaction rows.
+        assert!(!out.contains("Compaction"), "{out}");
+    }
+
+    #[test]
+    fn the_compaction_saving_sits_next_to_the_cost_it_reduces() {
+        let mut comp = Stats::new(
+            vec![
+                bucket("2026-08-25", stats::COST_MICROS, 12_400_000),
+                bucket("2026-08-25", stats::COMPACTION_SAVED_MICROS, 1_840_000),
+                bucket("2026-08-25", stats::COMPACTION_BLOCKS, 12),
+                // Six days back — inside the shipped window, outside today.
+                bucket("2026-08-19", stats::COMPACTION_REGRESSIONS, 1),
+            ],
+            today(),
+            false,
+        );
+        let out = render(&mut comp, 50, 40);
+        let cost = out.lines().position(|l| l.contains("Cost")).expect("cost");
+        let saving = out
+            .lines()
+            .position(|l| l.contains("Compaction"))
+            .expect("compaction");
+        assert_eq!(saving, cost + 1, "{out}");
+        assert!(out.contains("−$1.84 · 12 blocks"), "{out}");
+        // Today saw no back-out even though the window did — the row reports
+        // the active tab, not the whole window.
+        assert!(out.contains("Regressions  0"), "{out}");
+
+        // A regression anywhere in the shipped window keeps the rows
+        // present, so toggling Today⇄Week never makes them appear and
+        // vanish under the reader.
+        comp.toggle_view();
+        let week = render(&mut comp, 50, 40);
+        assert!(week.contains("Regressions  1"), "{week}");
     }
 
     #[test]

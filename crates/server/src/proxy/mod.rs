@@ -45,7 +45,7 @@ use lazybox_agents::LlmProvider;
 use lazybox_ipc::{AgentUsage, ProviderQuota};
 use tokio::net::{TcpListener, TcpStream};
 
-pub use compaction::{Compactor, ModeResolver, NoticeSink};
+pub use compaction::{Compactor, ModeResolver, NoticeSink, Pending, Rewritten, Saving, SavingSink};
 pub use usage_parse::UsageAccumulator;
 
 /// The loopback port the running proxy bound, published once at startup so
@@ -306,8 +306,22 @@ pub async fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHand
     // live. The compactor consults this exactly once per request.
     let policy = cfg.agent.context_hygiene.clone();
     let mode_resolver = crate::workspace::compaction_mode_resolver(config, policy.mode);
-    let compactor =
-        Arc::new(Compactor::new(policy, prices.clone(), notice).with_mode_resolver(mode_resolver));
+    let saving_bus = config.bus.clone();
+    let saving: SavingSink = Arc::new(move |agent_id: &str, session: &str, saving: Saving| {
+        let _ = saving_bus.send(lazybox_ipc::Event::AgentCompaction {
+            agent_id: agent_id.to_string(),
+            session_key: session_key_opt(session),
+            blocks: saving.blocks,
+            saved_bytes: saving.saved_bytes,
+            saved_cost_micros: saving.saved_micros,
+            regressions: saving.regressions,
+        });
+    });
+    let compactor = Arc::new(
+        Compactor::new(policy, prices.clone(), notice)
+            .with_mode_resolver(mode_resolver)
+            .with_saving_sink(saving),
+    );
 
     tracing::info!("metering proxy listening on 127.0.0.1:{port}");
     Some(tokio::spawn(serve(
@@ -475,8 +489,14 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
     // The one place the proxy is not transparent: old, large tool results
     // are condensed before the expensive model ever sees them (#1609).
     // `off` and `shadow` hand the original bytes straight back.
-    let compacted = state.compactor.rewrite(&session, &agent_id, body_bytes);
+    // The accounting rides `pending` to the end of the response instead of
+    // landing here (#1621): this request may be a retry of a turn already
+    // counted, or may never complete at all.
+    let compacted = state
+        .compactor
+        .rewrite(&session, &agent_id, !count_only, body_bytes);
     let body_bytes = compacted.body;
+    let saving = compacted.pending;
 
     let upstream = state
         .client
@@ -532,7 +552,14 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
         (
             upstream.bytes_stream(),
             accumulator,
-            Some((sink, compactor, agent_id, session, compacted.measured)),
+            Some((
+                sink,
+                compactor,
+                agent_id,
+                session,
+                compacted.measured,
+                saving,
+            )),
         ),
         |(mut bytes, mut acc, mut pending)| async move {
             match bytes.next().await {
@@ -545,11 +572,21 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
                     Some((Err(BoxErr::from(error)), (bytes, acc, pending)))
                 }
                 None => {
-                    if let Some((sink, compactor, agent_id, session, measured)) = pending.take()
-                        && let Some(usage) = acc.finish()
+                    if let Some((sink, compactor, agent_id, session, measured, saving)) =
+                        pending.take()
                     {
-                        compactor.observe_usage(&session, &agent_id, &usage, measured);
-                        sink(&agent_id, &session, usage);
+                        // The saving commits on a clean stream end even when
+                        // the body carried no parseable usage — the bytes
+                        // were still elided from a turn that completed.
+                        // `commit` precedes `observe_usage` so the turn that
+                        // rewrote is marked before the kill switch judges it.
+                        if let Some(saving) = saving {
+                            compactor.commit(&session, &agent_id, saving);
+                        }
+                        if let Some(usage) = acc.finish() {
+                            compactor.observe_usage(&session, &agent_id, &usage, measured);
+                            sink(&agent_id, &session, usage);
+                        }
                     }
                     None
                 }

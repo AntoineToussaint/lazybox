@@ -541,20 +541,36 @@ mod tests {
     async fn bind_listener_reuses_the_persisted_port_across_a_restart() {
         let config = crate::ServerConfig::in_memory();
 
-        // First daemon: nothing persisted → ephemeral port, now persisted.
-        let (first, port) = bind_listener(&config).await.expect("first bind");
+        // The freed port is only ours to reclaim if nothing else on the host
+        // takes it in the window between the drop and the rebind — and a
+        // just-released ephemeral port is exactly what the next ephemeral
+        // bind anywhere on the box is handed. `bind_listener` answers a lost
+        // race by falling back to a fresh port, which is correct behaviour
+        // but indistinguishable here from "reuse is broken", so retry on a
+        // fresh port instead of asserting we win the race.
+        let mut reclaimed = None;
+        for _ in 0..16 {
+            // First daemon: ephemeral port, now persisted.
+            let (first, port) = bind_listener(&config).await.expect("first bind");
+            assert_eq!(restore_port(&config).await, Some(port));
+            drop(first);
+
+            // Second daemon on the same store: same port comes back.
+            let (second, reused) = bind_listener(&config).await.expect("rebind");
+            if reused == port {
+                reclaimed = Some((second, port));
+                break;
+            }
+        }
+        let (held, port) = reclaimed.expect("the persisted port is reused after a restart");
         assert_eq!(restore_port(&config).await, Some(port));
-        drop(first);
 
-        // Second daemon on the same store: same port comes back.
-        let (second, reused) = bind_listener(&config).await.expect("rebind");
-        assert_eq!(reused, port, "the persisted port is reused after a restart");
-
-        // Port still held (daemon didn't release it) → fresh port, persisted.
+        // Port still held (the prior daemon didn't release it) → fresh port,
+        // persisted so the next restart converges on it.
         let (_third, fallback) = bind_listener(&config).await.expect("fallback bind");
         assert_ne!(fallback, port, "a held port falls back to a fresh one");
         assert_eq!(restore_port(&config).await, Some(fallback));
-        drop(second);
+        drop(held);
     }
 
     #[test]

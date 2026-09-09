@@ -54,6 +54,8 @@ mod setup_detect;
 mod setup_persist;
 mod slack_init;
 mod slack_prune;
+#[cfg(test)]
+mod test_env;
 mod test_mode;
 mod tunnel;
 mod worktree_gc;
@@ -3040,8 +3042,12 @@ mod argv_tests {
 
     #[test]
     fn scan_expand_tilde_only_touches_leading_tilde_slash() {
+        // `HOME` feeds `paths::home()` too, so redirecting it would flip the
+        // state root under any sibling test asserting against it.
+        let _guard = crate::test_env::lock();
         let prev = std::env::var("HOME").ok();
-        // SAFETY: single-threaded test body; HOME is restored below.
+        // SAFETY: single-threaded test body, guarded by the env lock; HOME is
+        // restored below.
         unsafe { std::env::set_var("HOME", "/home/tester") };
         assert_eq!(
             scan_expand_tilde(std::path::Path::new("~/code")),

@@ -79,8 +79,12 @@ runs:
         # `google-chrome.list` by name silently no-ops. Whole-file delete
         # for sources.list.d (a deb822 stanza cannot survive losing just
         # its URI line); line delete for the one-line-per-repo main file.
-        sudo grep -rlE 'dl\.google\.com|packages\.microsoft\.com' \
-          /etc/apt/sources.list.d/ 2>/dev/null | sudo xargs -r rm -fv
+        # `|| true` because these steps run under `pipefail` and grep
+        # exits 1 when it matches nothing — which is the good case here,
+        # not a failure.
+        { sudo grep -rlE 'dl\.google\.com|packages\.microsoft\.com' \
+            /etc/apt/sources.list.d/ 2>/dev/null || true; } \
+          | sudo xargs -r rm -fv
         sudo sed -i -E '/dl\.google\.com|packages\.microsoft\.com/d' \
           /etc/apt/sources.list
         sudo apt-get update

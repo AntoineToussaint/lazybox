@@ -63,6 +63,7 @@ http-body-util   = { version = "0.1", features = ["channel"] }
 reqwest          = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 
 [dev-dependencies]
+ctor = "0.8"
 tokio          = { workspace = true, features = ["full", "test-util"] }
 tempfile       = "3"
 # Frame-size regression tests: assert an assembled Snapshot stays

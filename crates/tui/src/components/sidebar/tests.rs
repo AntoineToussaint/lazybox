@@ -2421,6 +2421,7 @@ mod search_tests {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             cost_usd_micros: None,
+            context: None,
         }
     }
 

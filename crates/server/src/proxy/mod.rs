@@ -11,6 +11,11 @@
 //! no structured `AgentUsage`) and the one that finally captures Codex
 //! (#1109).
 //!
+//! The request side is read too, but only for accounting: `context_parse`
+//! measures how much of each request body is tool output and how much of
+//! that the session had already sent (#1606), and that measurement rides
+//! the same usage event. Nothing about the body is rewritten.
+//!
 //! Attribution rides the URL path: the injected base URL carries
 //! `/<provider>/<agent-id>`, so the proxy knows which agent a request
 //! belongs to and which upstream to forward it to without inspecting the
@@ -18,6 +23,7 @@
 //! through untouched and never buffers a streaming response, so the
 //! agent's own credentials and incremental output are unaffected.
 
+mod context_parse;
 mod quota_parse;
 mod usage_parse;
 
@@ -217,6 +223,13 @@ struct ProxyState {
     /// Per-model price overrides (`agent.pricing`), layered over the built-in
     /// rate card when pricing a response's tokens.
     prices: usage_parse::PriceOverrides,
+    /// Tool-result blocks each session has already sent, so a repeat is
+    /// recognizable as a re-send (#1606). Bounded per session and across
+    /// sessions.
+    seen_blocks: std::sync::Mutex<context_parse::SeenStore>,
+    /// Line count above which a tool result counts as large
+    /// (`agent.context_hygiene.min_lines`).
+    large_tool_result_lines: usize,
 }
 
 /// Start the metering proxy when `agent.metering_proxy` is on: bind a
@@ -284,7 +297,16 @@ pub async fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHand
 
     tracing::info!("metering proxy listening on 127.0.0.1:{port}");
     Some(tokio::spawn(serve(
-        listener, upstreams, sink, quota_sink, prices,
+        listener,
+        upstreams,
+        sink,
+        quota_sink,
+        prices,
+        // The line floor comes from the shared context-hygiene policy
+        // (#1611), which is also what the compaction pass gates its rewrite
+        // on — so "large" means one thing, and the count of candidates can't
+        // drift from the set that gets rewritten.
+        cfg.agent.context_hygiene.min_lines,
     )))
 }
 
@@ -302,6 +324,7 @@ pub async fn serve(
     sink: UsageSink,
     quota_sink: QuotaSink,
     prices: usage_parse::PriceOverrides,
+    large_tool_result_lines: usize,
 ) {
     let state = Arc::new(ProxyState {
         client: reqwest::Client::new(),
@@ -309,6 +332,8 @@ pub async fn serve(
         sink,
         quota_sink,
         prices,
+        seen_blocks: std::sync::Mutex::new(context_parse::SeenStore::default()),
+        large_tool_result_lines,
     });
     loop {
         let (stream, _) = match listener.accept().await {
@@ -443,6 +468,13 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
         }
     };
 
+    // What this request is *made of* (#1606), parsed off the body already
+    // buffered for forwarding. Only the parse happens here; the blocks are
+    // folded into the session's seen-set at the far end, together with the
+    // usage report, so that only a *billed* request consumes a block's first
+    // send — see the fold below.
+    let measured = context_parse::measure(&body_bytes, state.large_tool_result_lines);
+
     let upstream = state
         .client
         .request(parts.method.clone(), url.as_str())
@@ -496,7 +528,7 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
         (
             upstream.bytes_stream(),
             accumulator,
-            Some((sink, agent_id, session)),
+            Some((state, sink, agent_id, session, measured)),
         ),
         |(mut bytes, mut acc, mut pending)| async move {
             match bytes.next().await {
@@ -509,9 +541,25 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
                     Some((Err(BoxErr::from(error)), (bytes, acc, pending)))
                 }
                 None => {
-                    if let Some((sink, agent_id, session)) = pending.take()
-                        && let Some(usage) = acc.finish()
+                    if let Some((state, sink, agent_id, session, measured)) = pending.take()
+                        && let Some(mut usage) = acc.finish()
                     {
+                        // Fold the request's blocks into the session's
+                        // seen-set only now, on the same condition that
+                        // reports usage: a request the provider never billed
+                        // must not consume a block's first send. Claude Code
+                        // preflights `count_tokens` with the whole transcript
+                        // and retries the same body after a 429 — neither
+                        // reports usage, and folding those would make the
+                        // *first* real send of every block read as a
+                        // mechanical re-send.
+                        usage.context = measured.map(|measured| {
+                            let mut store = state
+                                .seen_blocks
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            measured.against(store.entry(&format!("{agent_id}/{session}")))
+                        });
                         sink(&agent_id, &session, usage);
                     }
                     None

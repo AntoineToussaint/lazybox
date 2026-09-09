@@ -2200,7 +2200,8 @@ impl<T: TerminalAdapter> Model<T> {
         }
         self.mount_modal(
             Id::Stats,
-            Stats::new(Vec::new(), chrono::Local::now().date_naive(), true),
+            Stats::new(Vec::new(), chrono::Local::now().date_naive(), true)
+                .with_agent_context(self.sidebar.agent_context()),
         );
         self.send_cmd(lazybox_ipc::Command::GetStats);
     }
@@ -2230,7 +2231,8 @@ impl<T: TerminalAdapter> Model<T> {
             }
             _ => (false, 0),
         };
-        let mut stats = Stats::new(buckets, chrono::Local::now().date_naive(), false);
+        let mut stats = Stats::new(buckets, chrono::Local::now().date_naive(), false)
+            .with_agent_context(self.sidebar.agent_context());
         stats.set_week(week);
         stats.set_scroll(scroll);
         self.mount_modal(Id::Stats, stats);

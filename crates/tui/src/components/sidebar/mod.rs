@@ -835,6 +835,16 @@ impl Sidebar {
             .observe_session_usage(agent_id, session_key.map(|k| k.as_str()), usage);
     }
 
+    /// Per-agent context accounting (#1606) — how much of each agent's
+    /// payload was tool output and how much of that it had already sent.
+    /// Only proxied agents appear.
+    pub fn agent_context(&self) -> Vec<(String, lazybox_ipc::ContextAccounting)> {
+        self.usage
+            .context_by_agent()
+            .map(|(agent, context)| (agent.to_string(), *context))
+            .collect()
+    }
+
     /// Hydrate the live cost tracker from the daemon's persisted per-session
     /// totals (`Event::SessionCosts`, #1389), so the per-workspace
     /// `$ METER · $cost` figure survives a restart. Each entry overwrites its

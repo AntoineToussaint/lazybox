@@ -749,6 +749,67 @@ pub struct AgentUsage {
     /// Cost in millionths of a USD. Integer wire value avoids float
     /// compatibility issues across languages.
     pub cost_usd_micros: Option<u64>,
+    /// What the *request* that earned this usage was made of (#1606), read
+    /// off the request body by the metering proxy. `None` for usage from a
+    /// structured runtime (which reports no request body) and for any
+    /// request whose body wasn't a recognized wire shape.
+    #[serde(default)]
+    pub context: Option<ContextAccounting>,
+}
+
+/// How much of one request's conversation payload was tool output, and how
+/// much of that had already been sent (#1606).
+///
+/// Bytes, not tokens: the proxy sees the wire body, and a ratio of bytes is
+/// a faithful enough proxy for a ratio of tokens. Only the metering proxy
+/// produces this, so it covers proxied agents alone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct ContextAccounting {
+    /// Serialized bytes of the whole conversation array (`messages[]` /
+    /// Responses `input[]`) — the denominator.
+    pub message_bytes: u64,
+    /// Of those, bytes carried by tool-result blocks.
+    pub tool_result_bytes: u64,
+    /// Of the tool-result bytes, those in blocks byte-identical to a block
+    /// this session already sent in an earlier request — the mechanical
+    /// re-send share.
+    pub tool_result_resent_bytes: u64,
+    /// Tool-result blocks whose text ran past the large-result line floor,
+    /// counted on the send that introduced them. A block re-sent every turn
+    /// is one candidate, not one per turn, so this counts oversized output
+    /// rather than the turns that carried it.
+    pub large_tool_results: u32,
+}
+
+impl ContextAccounting {
+    /// Fold another request's accounting in, for a running per-agent or
+    /// per-day total.
+    pub fn add(&mut self, other: &Self) {
+        self.message_bytes += other.message_bytes;
+        self.tool_result_bytes += other.tool_result_bytes;
+        self.tool_result_resent_bytes += other.tool_result_resent_bytes;
+        self.large_tool_results += other.large_tool_results;
+    }
+
+    /// Percent of the conversation payload that is tool output, rounded.
+    /// `None` when nothing has been measured, so a caller shows "—" rather
+    /// than a confident `0%`.
+    pub fn tool_result_share_pct(&self) -> Option<u32> {
+        percent(self.tool_result_bytes, self.message_bytes)
+    }
+
+    /// Percent of the tool output that had already been sent, rounded.
+    /// `None` when no tool output has been measured.
+    pub fn resent_share_pct(&self) -> Option<u32> {
+        percent(self.tool_result_resent_bytes, self.tool_result_bytes)
+    }
+}
+
+/// `numerator / denominator` as a rounded percent, or `None` on a zero
+/// denominator (nothing measured — not "0%").
+fn percent(numerator: u64, denominator: u64) -> Option<u32> {
+    (denominator > 0).then(|| ((numerator as f64 / denominator as f64) * 100.0).round() as u32)
 }
 
 /// One rolling rate-limit window's utilization, as the provider reports it
@@ -2222,6 +2283,16 @@ pub mod stats {
     pub const OUTPUT_TOKENS: &str = "output_tokens";
     /// Cost in USD micros (millionths of a dollar) metered across responses.
     pub const COST_MICROS: &str = "cost_micros";
+    /// Bytes of conversation payload (`messages[]`) sent by proxied agents
+    /// — the denominator of the context ratios (#1606).
+    pub const CONTEXT_MESSAGE_BYTES: &str = "context_message_bytes";
+    /// Of those, bytes carried by tool-result blocks.
+    pub const CONTEXT_TOOL_RESULT_BYTES: &str = "context_tool_result_bytes";
+    /// Of the tool-result bytes, those already sent in an earlier request.
+    pub const CONTEXT_RESENT_BYTES: &str = "context_resent_bytes";
+    /// Tool-result blocks past the large-result line floor, counted once
+    /// each on the send that introduced them.
+    pub const CONTEXT_LARGE_TOOL_RESULTS: &str = "context_large_tool_results";
 }
 
 /// Sentinel prefix on [`Event::PrMergeFailed`]'s `reason` marking the one

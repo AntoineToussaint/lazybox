@@ -1441,6 +1441,7 @@ pub async fn recompute_all(config: &ServerConfig) {
         // through to the prune (rather than returning) is what stops a hold
         // outliving the epic that created it when every record is deleted.
         prune_review_rows(config, &HashSet::new());
+        prune_contract_rows(config, &HashSet::new());
         return;
     }
 
@@ -1506,6 +1507,13 @@ pub async fn recompute_all(config: &ServerConfig) {
     // longer exists. Prune to the live member set so a hold cannot outlive the
     // epic that raised it.
     prune_review_rows(config, &live_members);
+    prune_contract_rows(
+        config,
+        &records
+            .iter()
+            .map(|r| r.key.as_str().to_string())
+            .collect::<HashSet<String>>(),
+    );
 
     // Land each workspace-keyed delta as an unread `StatusChange` row on its
     // workspace's activity feed *before* the `EpicStatus` events fire, so a
@@ -1780,16 +1788,18 @@ pub async fn role_prompt_ctx(
             .filter(|b| done.contains(*b))
             .map(|b| b.as_str().to_string())
             .collect();
-        // Quote the epic's published contracts, newest note per producer, so
-        // the Worker starts with the interface in hand rather than having to
-        // go and read the blackboard for it (#1525).
-        let tag = crate::mcp::epic_tag(&snapshot.key);
-        let mut seen: HashSet<String> = HashSet::new();
-        ctx.contract_notes = crate::mcp::notes_with_tags(config, &[CONTRACT_TAG, &tag])
+        // Quote the epic's published contracts, newest revision per producer,
+        // so the Worker starts with the interface in hand rather than having to
+        // go and read the blackboard for it (#1525). Read from the latch rows,
+        // not the blackboard: the note that carried a contract is evicted once
+        // its author has posted fifty more, and a Worker dispatched after that
+        // would otherwise be briefed with no interface at all (#1577).
+        let mut rows: Vec<PublishedContract> = list_published_contracts(config)
             .into_iter()
-            .filter(|note| seen.insert(note.author.clone()))
-            .map(|note| note.text)
+            .filter(|row| row.epic == snapshot.key)
             .collect();
+        rows.sort_by_key(|row| std::cmp::Reverse(row.published_at));
+        ctx.contract_notes = rows.into_iter().map(|row| row.text).collect();
     }
 
     // Integrator: land members in wave order (the snapshot is pre-sorted by wave
@@ -2013,6 +2023,158 @@ pub fn list_reviews(config: &ServerConfig) -> HashMap<WorkspaceKey, ReviewState>
         .collect()
 }
 
+// ── published contracts (#1577) ──────────────────────────────────────────
+
+/// kv key prefix for a latched contract, one row per (epic, producer).
+const CONTRACT_LATCH_PREFIX: &str = "epic-contract:";
+
+/// A contract a producer has published for one epic, recorded the moment it
+/// was first seen on the blackboard.
+///
+/// The blackboard is a rolling buffer — `post_note` prunes each scope to its
+/// newest `NOTES_PER_SCOPE` entries — so the note that satisfied a `Contract`
+/// edge is evicted once its author has posted fifty more, and `global` fills
+/// faster still. Re-deriving satisfaction from the notes alone therefore
+/// un-satisfies an interface that was genuinely agreed: the consumer flips
+/// back to `Blocked` with reason `contract` long after the fact, and with
+/// `AUTO` armed a Worker already dispatched on it now sits behind a blocker
+/// nobody raised. So the row, not the note, is the record of the publication;
+/// the note is only how it arrives.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PublishedContract {
+    pub epic: String,
+    pub producer: WorkspaceKey,
+    /// Bumped each time the producer publishes again (a strictly newer
+    /// `contract` note for this epic). Satisfaction stays keyed on the row
+    /// existing rather than on the revision — §7.6 keeps the loose form until
+    /// it has been dogfooded — so this is the version a later content-aware
+    /// gate reads, and today it is what makes a re-published interface visible
+    /// in the log instead of changing under its consumers in silence.
+    pub revision: u32,
+    /// `ts` of the note this revision reflects.
+    pub published_at: i64,
+    /// Unix ms the first publication was observed.
+    pub since: i64,
+    /// The published interface itself, so a consumer's Worker preamble can
+    /// still quote it once the note is gone.
+    pub text: String,
+}
+
+fn contract_storage_key(epic: &str, producer: &str) -> String {
+    format!("{CONTRACT_LATCH_PREFIX}{epic}:{producer}")
+}
+
+/// Every latched contract. A row that fails to decode is skipped rather than
+/// sinking the whole read.
+pub fn list_published_contracts(config: &ServerConfig) -> Vec<PublishedContract> {
+    let rows = match config.store.list_kv_prefix(CONTRACT_LATCH_PREFIX) {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "epics: listing published contracts failed");
+            return Vec::new();
+        }
+    };
+    rows.into_iter()
+        .filter_map(|(_, json)| serde_json::from_str::<PublishedContract>(&json).ok())
+        .collect()
+}
+
+/// Record every contract note currently on the blackboard, one row per (epic,
+/// producer), taking the latch the first time and bumping the revision when a
+/// producer publishes again. `tags` maps each live epic's `epic:<key>` tag to
+/// its key, so a note naming an epic that is archived or gone records nothing.
+fn latch_published_contracts(config: &ServerConfig, tags: &HashMap<String, String>) {
+    let existing: HashMap<(String, WorkspaceKey), PublishedContract> =
+        list_published_contracts(config)
+            .into_iter()
+            .map(|row| ((row.epic.clone(), row.producer.clone()), row))
+            .collect();
+    let now = chrono::Utc::now().timestamp_millis();
+    // Notes arrive newest-first, so the first one seen for a pair is the
+    // current interface and the rest are its history.
+    let mut seen: HashSet<(String, WorkspaceKey)> = HashSet::new();
+    for note in crate::mcp::notes_with_tags(config, &[CONTRACT_TAG]) {
+        let producer = WorkspaceKey::new(note.author.clone());
+        for tag in &note.tags {
+            let Some(epic) = tags.get(tag) else { continue };
+            if !seen.insert((epic.clone(), producer.clone())) {
+                continue;
+            }
+            let row = match existing.get(&(epic.clone(), producer.clone())) {
+                Some(prev) if note.ts <= prev.published_at => continue,
+                Some(prev) => {
+                    tracing::info!(
+                        epic = %epic,
+                        producer = %producer,
+                        revision = prev.revision + 1,
+                        "epics: producer re-published its contract"
+                    );
+                    PublishedContract {
+                        revision: prev.revision + 1,
+                        published_at: note.ts,
+                        text: note.text.clone(),
+                        ..prev.clone()
+                    }
+                }
+                None => {
+                    tracing::info!(
+                        epic = %epic,
+                        producer = %producer,
+                        "epics: latched a published contract"
+                    );
+                    PublishedContract {
+                        epic: epic.clone(),
+                        producer: producer.clone(),
+                        revision: 1,
+                        published_at: note.ts,
+                        since: now,
+                        text: note.text.clone(),
+                    }
+                }
+            };
+            persist_published_contract(config, &row);
+        }
+    }
+}
+
+fn persist_published_contract(config: &ServerConfig, row: &PublishedContract) {
+    let key = contract_storage_key(&row.epic, row.producer.as_str());
+    let write = serde_json::to_string(row)
+        .map_err(|e| e.to_string())
+        .and_then(|json| config.store.set_kv(&key, &json).map_err(|e| e.to_string()));
+    if let Err(error) = write {
+        tracing::warn!(
+            %error,
+            epic = %row.epic,
+            producer = %row.producer,
+            "epics: persisting a published contract failed"
+        );
+    }
+}
+
+/// Drop every contract row whose epic no longer exists. Deliberately keyed on
+/// the epic alone, not on the epic still listing the producer as a member: a
+/// row is a few hundred bytes, while a prune that fires a beat too eagerly
+/// re-blocks a consumer on an interface that was published — the very failure
+/// the latch exists to stop. An archived epic keeps its rows too, so
+/// unarchiving does not demand every contract be published again.
+fn prune_contract_rows(config: &ServerConfig, live_epics: &HashSet<String>) {
+    for row in list_published_contracts(config) {
+        if live_epics.contains(&row.epic) {
+            continue;
+        }
+        let key = contract_storage_key(&row.epic, row.producer.as_str());
+        tracing::info!(
+            epic = %row.epic,
+            producer = %row.producer,
+            "epics: dropping a contract row whose epic no longer exists"
+        );
+        if let Err(error) = config.store.delete_kv(&key) {
+            tracing::warn!(%error, epic = %row.epic, "epics: clearing a contract row failed");
+        }
+    }
+}
+
 /// Cross-cutting latch state the resolver *reads* but does not derive: which
 /// producers have published their interface contract, and which members a
 /// blocking review is holding. Both live in the kv (the blackboard and the
@@ -2021,11 +2183,11 @@ pub fn list_reviews(config: &ServerConfig) -> HashMap<WorkspaceKey, ReviewState>
 /// pure function of plain data.
 #[derive(Debug, Default)]
 pub struct LatchInputs {
-    /// Per epic key, the members that have posted a note tagged `contract` +
-    /// `epic:<key>`, so their `Contract` edges in *that* epic are satisfied.
-    /// Keyed by epic rather than flattened: a contract published for one epic
-    /// says nothing about a different epic's interface, so a flat set would
-    /// let a producer satisfy an edge it never published for.
+    /// Per epic key, the members that have published an interface contract, so
+    /// their `Contract` edges in *that* epic are satisfied. Keyed by epic
+    /// rather than flattened: a contract published for one epic says nothing
+    /// about a different epic's interface, so a flat set would let a producer
+    /// satisfy an edge it never published for.
     pub published_contracts: HashMap<String, HashSet<WorkspaceKey>>,
     /// Members whose latest review reported `blocking` findings.
     pub review_blocking: HashSet<WorkspaceKey>,
@@ -2039,6 +2201,9 @@ impl LatchInputs {
     /// each record — notes are capped per scope but scopes are not (one per
     /// session), so a fleet-sized blackboard turns an N-epic recompute into N
     /// full table scans on the 300 ms debounce path.
+    ///
+    /// Satisfaction itself comes from the latch rows, not that scan: the scan
+    /// only *takes* the latch (#1577). See [`PublishedContract`].
     pub fn load(config: &ServerConfig, records: &[EpicRecord]) -> Self {
         let tags: HashMap<String, String> = records
             .iter()
@@ -2050,15 +2215,15 @@ impl LatchInputs {
                 )
             })
             .collect();
+        latch_published_contracts(config, &tags);
+        let live: HashSet<&String> = tags.values().collect();
         let mut published_contracts: HashMap<String, HashSet<WorkspaceKey>> = HashMap::new();
-        for note in crate::mcp::notes_with_tags(config, &[CONTRACT_TAG]) {
-            for tag in &note.tags {
-                if let Some(epic) = tags.get(tag) {
-                    published_contracts
-                        .entry(epic.clone())
-                        .or_default()
-                        .insert(WorkspaceKey::new(note.author.clone()));
-                }
+        for row in list_published_contracts(config) {
+            if live.contains(&row.epic) {
+                published_contracts
+                    .entry(row.epic)
+                    .or_default()
+                    .insert(row.producer);
             }
         }
         let review_blocking = list_reviews(config)
@@ -2267,15 +2432,21 @@ pub fn review_blocks_merge(config: &ServerConfig, key: &WorkspaceKey) -> bool {
 
 /// A blackboard note just landed. When it is a Reviewer's verdict for a member
 /// of a live epic, record it: `blocking` holds the member's merge and flips it
-/// to `ReviewBlocked`; `clean` releases. Hooked into `post_note` so the latch
-/// reacts at the write rather than polling the blackboard.
+/// to `ReviewBlocked`; `clean` releases. When it is a published contract, the
+/// recompute both latches it ([`latch_published_contracts`]) and unblocks the
+/// consumers waiting on it. Hooked into `post_note` so the latches react at the
+/// write rather than polling the blackboard.
 ///
 /// Note text is agent-authored and never parsed — only the tag vocabulary is
-/// read. Two gates, both derived from state lazybox itself wrote: the author
-/// must have an open review row (so only a member the `REVIEW` latch actually
-/// dispatched on can report), and the note must carry that row's own
-/// `epic:<key>` tag (so a verdict cannot flip a hold a different epic raised).
+/// read. Two gates on the verdict, both derived from state lazybox itself
+/// wrote: the author must have an open review row (so only a member the
+/// `REVIEW` latch actually dispatched on can report), and the note must carry
+/// that row's own `epic:<key>` tag (so a verdict cannot flip a hold a different
+/// epic raised).
 pub(crate) async fn on_note_posted(config: &ServerConfig, note: &crate::mcp::Note) {
+    if note.tags.iter().any(|t| t == CONTRACT_TAG) {
+        recompute_all(config).await;
+    }
     if !note.tags.iter().any(|t| t == REVIEW_TAG) {
         return;
     }
@@ -4543,6 +4714,14 @@ mod tests {
     async fn a_non_verdict_note_leaves_the_hold_alone() {
         let config = ServerConfig::in_memory();
         let key = WorkspaceKey::new("w");
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: "w".to_string(),
+                created_at: Utc::now(),
+                workspace_json: Some(serde_json::to_string(&ws("w")).unwrap()),
+            })
+            .unwrap();
         upsert(&config, record_with(&["w"])).await;
         persist_review(
             &config,
@@ -4582,6 +4761,35 @@ mod tests {
         .unwrap();
         on_note_posted(&config, &review_note(&["review", "epic:nope", "blocking"])).await;
         assert!(!review_blocks_merge(&config, &key));
+    }
+
+    /// Post a `contract` note the way the blackboard does: write the kv row,
+    /// then run the `post_note` hook that latches it.
+    async fn post_contract(config: &ServerConfig, seq: u64, author: &str, ts: i64, text: &str) {
+        let note = crate::mcp::Note {
+            author: author.into(),
+            scope: "global".into(),
+            tags: vec!["contract".into(), "epic:e".into()],
+            ts,
+            text: text.into(),
+        };
+        config
+            .store
+            .set_kv(
+                &format!("lazybox:note:global:{seq:012}"),
+                &serde_json::to_string(&note).unwrap(),
+            )
+            .unwrap();
+        on_note_posted(config, &note).await;
+    }
+
+    /// Retention evicting a note, the way `post_note` does once a chatty scope
+    /// passes its cap.
+    fn evict_note(config: &ServerConfig, seq: u64) {
+        config
+            .store
+            .delete_kv(&format!("lazybox:note:global:{seq:012}"))
+            .unwrap();
     }
 
     fn review_note(tags: &[&str]) -> crate::mcp::Note {
@@ -4649,20 +4857,14 @@ mod tests {
             })
             .unwrap();
         upsert(&config, record_with(&["w"])).await;
-        config
-            .store
-            .set_kv(
-                "lazybox:note:global:000000000001",
-                &serde_json::to_string(&crate::mcp::Note {
-                    author: "producer".into(),
-                    scope: "global".into(),
-                    tags: vec!["contract".into(), "epic:e".into()],
-                    ts: 1,
-                    text: "POST /v1/tokens returns {id, expires_at}".into(),
-                })
-                .unwrap(),
-            )
-            .unwrap();
+        post_contract(
+            &config,
+            1,
+            "producer",
+            1,
+            "POST /v1/tokens returns {id, expires_at}",
+        )
+        .await;
 
         let (role, ctx) = role_prompt_ctx(&config, &member).await.expect("a role");
         assert_eq!(role, Role::Worker);
@@ -4959,6 +5161,123 @@ mod tests {
                 &HashSet::new()
             )
             .is_empty()
+        );
+    }
+
+    /// **The bug (#1577).** The blackboard is a rolling buffer, so a producer
+    /// that keeps posting evicts its own contract note. Re-deriving
+    /// satisfaction from the notes alone re-blocks a consumer whose interface
+    /// was agreed — and, under `AUTO`, one a Worker is already running on.
+    /// Satisfaction is latched at the first observation instead.
+    #[tokio::test]
+    async fn an_evicted_contract_note_leaves_the_consumer_unblocked() {
+        let config = ServerConfig::in_memory();
+        let (record, workspaces) = contract_epic();
+        upsert(&config, record.clone()).await;
+        post_contract(&config, 1, "a", 1, "GET /v1/things -> [{id}]").await;
+
+        let satisfied = LatchInputs::load(&config, std::slice::from_ref(&record));
+        assert_eq!(
+            satisfied.contracts_for("e"),
+            Some(&HashSet::from([WorkspaceKey::new("a")]))
+        );
+
+        evict_note(&config, 1);
+        let after = LatchInputs::load(&config, std::slice::from_ref(&record));
+        assert_eq!(
+            after.contracts_for("e"),
+            Some(&HashSet::from([WorkspaceKey::new("a")])),
+            "the latch outlives the note that took it"
+        );
+        let b = resolve_with_latches(&record, &workspaces, &after);
+        let b = b.members.iter().find(|m| m.key.as_str() == "b").unwrap();
+        assert_eq!(b.blocked_reason, None);
+        assert_ne!(b.status, EpicMemberStatus::Blocked);
+    }
+
+    /// The consumer's Worker preamble reads the latched contract too, so a
+    /// Worker dispatched after the note aged out is still briefed with the
+    /// interface rather than with nothing.
+    #[tokio::test]
+    async fn an_evicted_contract_is_still_quoted_to_a_worker() {
+        let config = ServerConfig::in_memory();
+        let mut member = ws("w");
+        member.role = Some(Role::Worker);
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: "w".to_string(),
+                created_at: Utc::now(),
+                workspace_json: Some(serde_json::to_string(&member).unwrap()),
+            })
+            .unwrap();
+        upsert(&config, record_with(&["w"])).await;
+        post_contract(&config, 1, "producer", 1, "POST /v1/tokens -> {id}").await;
+        evict_note(&config, 1);
+
+        let (_, ctx) = role_prompt_ctx(&config, &member).await.expect("a role");
+        assert_eq!(ctx.contract_notes, vec!["POST /v1/tokens -> {id}"]);
+    }
+
+    /// Publishing again bumps the revision and replaces the quoted interface;
+    /// a note that is not newer than the latched one changes nothing. The
+    /// revision is the version a content-aware gate would read — satisfaction
+    /// itself still turns on the row existing (§7.6).
+    #[tokio::test]
+    async fn re_publishing_a_contract_bumps_its_revision() {
+        let config = ServerConfig::in_memory();
+        upsert(&config, record_with(&["a"])).await;
+        post_contract(&config, 1, "a", 10, "v1").await;
+        post_contract(&config, 2, "a", 20, "v2").await;
+
+        let row = || {
+            list_published_contracts(&config)
+                .into_iter()
+                .find(|r| r.producer.as_str() == "a")
+                .expect("a latched contract")
+        };
+        let bumped = row();
+        assert_eq!(bumped.revision, 2);
+        assert_eq!(bumped.text, "v2");
+        assert_eq!(bumped.published_at, 20);
+
+        post_contract(&config, 3, "a", 5, "stale").await;
+        let unchanged = row();
+        assert_eq!(
+            unchanged.revision, 2,
+            "an older note is not a re-publication"
+        );
+        assert_eq!(unchanged.text, "v2");
+        assert_eq!(
+            unchanged.since, bumped.since,
+            "the latch keeps the age of the first publication"
+        );
+    }
+
+    /// A contract row is scoped to its epic: deleting the epic drops it, while
+    /// archiving keeps it, so unarchiving does not demand every interface be
+    /// published again.
+    #[tokio::test]
+    async fn contract_rows_follow_their_epic() {
+        let config = ServerConfig::in_memory();
+        let mut record = record_with(&["a"]);
+        upsert(&config, record.clone()).await;
+        post_contract(&config, 1, "a", 1, "v1").await;
+        assert_eq!(list_published_contracts(&config).len(), 1);
+
+        record.archived = true;
+        upsert(&config, record).await;
+        assert_eq!(
+            list_published_contracts(&config).len(),
+            1,
+            "an archived epic keeps its contracts"
+        );
+
+        config.store.delete_kv("epic:e").unwrap();
+        recompute_all(&config).await;
+        assert!(
+            list_published_contracts(&config).is_empty(),
+            "a deleted epic takes its contracts with it"
         );
     }
 }

@@ -13,6 +13,11 @@
 # driver cannot do this — it runs mid-merge, before the merged source reaches the
 # working tree, so it would regenerate from the un-merged (ours) side.
 #
+# Re-runnable mid-rebase: when it finds a rebase already in progress (you
+# hand-resolved the conflict it bailed on), it skips the fetch/start and rejoins
+# the resolve loop instead of tripping over the detached HEAD a stopped rebase
+# leaves behind.
+#
 # Run via `make rebase-main` (which puts pinned zig on PATH).
 
 set -euo pipefail
@@ -32,19 +37,43 @@ rebase_in_progress() {
 	}
 }
 
-if ! on_our_branch; then
-	echo "✗ detached HEAD — check out a branch before rebasing." >&2
-	exit 1
-fi
-branch="$(git rev-parse --abbrev-ref HEAD)"
+# The branch a stopped rebase will return to. HEAD is detached while the rebase
+# runs, so the name only lives in the rebase state dir.
+rebase_branch() {
+	local dir name
+	for dir in "$(git rev-parse --git-path rebase-merge)" \
+		"$(git rev-parse --git-path rebase-apply)"; do
+		[ -f "$dir/head-name" ] || continue
+		name="$(cat "$dir/head-name")"
+		printf '%s\n' "${name#refs/heads/}"
+		return
+	done
+	printf 'HEAD\n'
+}
 
-echo "▸ fetching origin/main…"
-git fetch origin main
+# True when we joined a rebase that was already stopped; consumed by the first
+# pass of the resolve loop, which may legitimately find nothing left to resolve.
+resumed=false
 
-echo "▸ rebasing ${branch} onto origin/main…"
-if git rebase origin/main; then
-	echo "✓ ${branch} rebased cleanly onto origin/main"
-	exit 0
+if rebase_in_progress; then
+	resumed=true
+	branch="$(rebase_branch)"
+	echo "▸ rejoining the rebase of ${branch} already in progress…"
+else
+	if ! on_our_branch; then
+		echo "✗ detached HEAD — check out a branch before rebasing." >&2
+		exit 1
+	fi
+	branch="$(git rev-parse --abbrev-ref HEAD)"
+
+	echo "▸ fetching origin/main…"
+	git fetch origin main
+
+	echo "▸ rebasing ${branch} onto origin/main…"
+	if git rebase origin/main; then
+		echo "✓ ${branch} rebased cleanly onto origin/main"
+		exit 0
+	fi
 fi
 
 # The rebase stopped. Resolve contract-only conflicts by regenerating; bail on
@@ -58,6 +87,16 @@ while rebase_in_progress; do
 	# Bail instead of looping — every iteration must resolve real conflicts or
 	# stop, so `git rebase --continue` is never retried against unchanged state.
 	if [ -z "$unmerged" ]; then
+		# Unless we joined a rebase that had already been resolved by hand: this
+		# run has not tried --continue yet, so that is not a retry against
+		# unchanged state. Consume the flag so only one such attempt is made.
+		if $resumed; then
+			resumed=false
+			if GIT_EDITOR=true git rebase --continue; then
+				break
+			fi
+			continue
+		fi
 		echo "✗ rebase stopped without a contract conflict to auto-resolve." \
 			"Sort it out by hand, then 'git rebase --continue' (or --skip / --abort):" >&2
 		git status --short >&2
@@ -66,8 +105,9 @@ while rebase_in_progress; do
 
 	# Every unmerged path must live under the generated contract dir.
 	if printf '%s\n' "$unmerged" | grep -qv "^${CONTRACT_PREFIX}"; then
-		echo "✗ conflict outside the generated contract — resolve by hand," \
-			"then run 'git rebase --continue' (or 'make rebase-main' again):" >&2
+		echo "✗ conflict outside the generated contract — resolve by hand and" \
+			"'git add' them, then run 'make rebase-main' again (it picks the" \
+			"stopped rebase back up) or 'git rebase --continue' yourself:" >&2
 		printf '%s\n' "$unmerged" | grep -v "^${CONTRACT_PREFIX}" | sed 's/^/    /' >&2
 		exit 1
 	fi

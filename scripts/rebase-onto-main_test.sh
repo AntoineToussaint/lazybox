@@ -56,6 +56,13 @@ setup_repo() {
 
 run_script() { ( cd "$CLONE" && ${TIMEOUT[@]+"${TIMEOUT[@]}"} bash "$SCRIPT" ); }
 
+# `git rev-parse --git-path` answers relative to the repo, so resolve it against
+# $CLONE — otherwise the test looks for the rebase state dir in its own cwd and
+# the assertion passes no matter what the script did.
+rebase_in_progress() {
+	[ -d "$CLONE/$(git -C "$CLONE" rev-parse --git-path rebase-merge)" ]
+}
+
 # ── Case 1: a contract-only conflict is auto-resolved and the script finishes ──
 t1="$WORK/t1"; mkdir -p "$t1"; setup_repo "$t1"
 git -C "$CLONE" checkout -q -b feature
@@ -70,8 +77,7 @@ git -C "$CLONE" checkout -q feature
 if ! run_script >/dev/null 2>&1; then
 	fail "case 1: script exited non-zero on a contract-only conflict"
 fi
-[ -d "$(git -C "$CLONE" rev-parse --git-path rebase-merge)" ] && \
-	fail "case 1: rebase left in progress"
+rebase_in_progress && fail "case 1: rebase left in progress"
 got="$(cat "$CLONE/$GEN/contract.txt")"
 [ "$got" = "GEN merged" ] || fail "case 1: contract not regenerated (got '$got')"
 echo "PASS case 1: contract-only conflict auto-resolved, rebase completed"
@@ -92,5 +98,72 @@ if run_script >/dev/null 2>&1; then
 fi
 git -C "$CLONE" rebase --abort >/dev/null 2>&1 || true
 echo "PASS case 2: non-contract conflict bails with non-zero exit"
+
+
+# ── Case 3: re-running mid-rebase rejoins it and finishes the contract half ────
+# The mixed conflict from the issue: a real code conflict alongside the
+# generated one. The first run bails; after hand-resolving the code half the
+# script must pick the stopped rebase back up rather than trip over its
+# detached HEAD.
+t3="$WORK/t3"; mkdir -p "$t3"; setup_repo "$t3"
+git -C "$CLONE" checkout -q -b feature
+printf 'src feat\n' > "$CLONE/src.txt"
+printf 'GEN feat\n' > "$CLONE/$GEN/contract.txt"
+git -C "$CLONE" commit -qam feat
+git -C "$CLONE" checkout -q main
+printf 'src main\n' > "$CLONE/src.txt"
+printf 'GEN main\n' > "$CLONE/$GEN/contract.txt"
+git -C "$CLONE" commit -qam main
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feature
+
+if run_script >/dev/null 2>&1; then
+	fail "case 3: first run should bail on the non-contract conflict"
+fi
+rebase_in_progress || \
+	fail "case 3: first run should leave the rebase stopped, not abort it"
+printf 'src resolved\n' > "$CLONE/src.txt"        # hand-resolve the code half
+git -C "$CLONE" add src.txt
+if ! run_script >/dev/null 2>&1; then
+	fail "case 3: re-run should rejoin the stopped rebase and finish it"
+fi
+rebase_in_progress && fail "case 3: rebase left in progress"
+[ "$(git -C "$CLONE" rev-parse --abbrev-ref HEAD)" = feature ] || \
+	fail "case 3: not back on the feature branch"
+got="$(cat "$CLONE/$GEN/contract.txt")"
+[ "$got" = "GEN merged" ] || fail "case 3: contract not regenerated (got '$got')"
+[ "$(cat "$CLONE/src.txt")" = "src resolved" ] || \
+	fail "case 3: hand-resolved file was not preserved"
+echo "PASS case 3: re-run mid-rebase resumes and auto-resolves the contract"
+
+# ── Case 4: re-running with every conflict already staged just continues ───────
+t4="$WORK/t4"; mkdir -p "$t4"; setup_repo "$t4"
+git -C "$CLONE" checkout -q -b feature
+printf 'src feat\n' > "$CLONE/src.txt"
+git -C "$CLONE" commit -qam feat
+git -C "$CLONE" checkout -q main
+printf 'src main\n' > "$CLONE/src.txt"
+git -C "$CLONE" commit -qam main
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feature
+
+run_script >/dev/null 2>&1 || true               # bails on the code conflict
+printf 'src resolved\n' > "$CLONE/src.txt"
+git -C "$CLONE" add src.txt                      # nothing unmerged left
+if ! run_script >/dev/null 2>&1; then
+	fail "case 4: re-run with everything staged should continue the rebase"
+fi
+rebase_in_progress && fail "case 4: rebase left in progress"
+[ "$(cat "$CLONE/src.txt")" = "src resolved" ] || \
+	fail "case 4: hand-resolved file was not preserved"
+echo "PASS case 4: re-run with no unmerged paths continues the rebase"
+
+# ── Case 5: a detached HEAD with no rebase in progress still refuses ───────────
+t5="$WORK/t5"; mkdir -p "$t5"; setup_repo "$t5"
+git -C "$CLONE" checkout -q --detach
+if run_script >/dev/null 2>&1; then
+	fail "case 5: detached HEAD without a rebase should still exit non-zero"
+fi
+echo "PASS case 5: detached HEAD without a rebase still refuses"
 
 echo "OK: rebase-onto-main.sh regression tests passed"

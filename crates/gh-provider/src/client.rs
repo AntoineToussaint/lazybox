@@ -6046,7 +6046,7 @@ impl GhClient {
     /// own all-green gate. So lazybox arms native only where this is
     /// true, and keeps the PR itself otherwise.
     ///
-    /// Reads the same rules route as [`Self::branch_rule_names`], which
+    /// Reads the same rules route as `branch_rule_names`, which
     /// reports repository rulesets *and* classic branch protection.
     /// A `merge_queue` rule counts too: a queued merge re-tests before
     /// landing. Cached per `repo@branch`. Fails **closed** — any lookup

@@ -4740,18 +4740,33 @@ mod tests {
     /// the durability difference.
     #[test]
     fn merge_rows_spell_out_durability() {
-        let (rows, _) = build_policy_rows(
-            &pr_workspace(&[], lazybox_core::PolicyArm::Default),
-            true,
-            &["no-auto-fix".into()],
-            None,
-        );
+        // #1596 added a fourth, *unarmed* row-0 branch that advertises what
+        // arming will do. #794's contract is about the guarantee that is
+        // actually live, so it has to be asserted against the state that has
+        // one — an armed PR whose native auto-merge is not (yet) on.
+        let mut armed = pr_workspace(&[], lazybox_core::PolicyArm::Default);
+        armed.auto_merge_on_green = true;
+        let (rows, _) = build_policy_rows(&armed, true, &["no-auto-fix".into()], None);
         // Row 0: lazybox client-side merge-on-green.
         assert!(rows[0].contains("merge on green"), "{:?}", rows[0]);
         assert!(
             rows[0].contains("lazybox") && rows[0].contains("only while lazybox runs"),
             "merge-on-green row must name lazybox and its while-running limit: {:?}",
             rows[0]
+        );
+
+        // Unarmed, the row has no guarantee to describe yet — it names
+        // lazybox and what arming would additionally ask GitHub to do.
+        let (unarmed, _) = build_policy_rows(
+            &pr_workspace(&[], lazybox_core::PolicyArm::Default),
+            true,
+            &["no-auto-fix".into()],
+            None,
+        );
+        assert!(
+            unarmed[0].contains("lazybox") && unarmed[0].contains("GitHub"),
+            "an unarmed row still names both halves of what arming does: {:?}",
+            unarmed[0]
         );
         // Row 1: GitHub-native, durable.
         assert!(rows[1].contains("GitHub auto-merge"), "{:?}", rows[1]);

@@ -2452,8 +2452,13 @@ mod tests {
         let handler = LazyboxMcp::new(ServerConfig::in_memory());
         let config = handler.config.clone();
         let producer = SessionKey::from("a");
-        let mut record =
-            lazybox_core::EpicRecord::new(lazybox_core::EpicKey::new("e"), "E", chrono::Utc::now());
+        // Created at the epoch: the latch ignores a note older than its epic
+        // record, and these notes carry small readable `ts` values.
+        let mut record = lazybox_core::EpicRecord::new(
+            lazybox_core::EpicKey::new("e"),
+            "E",
+            chrono::DateTime::from_timestamp_millis(0).expect("epoch"),
+        );
         record.members = vec![lazybox_core::WorkspaceKey::new("a")];
         crate::epics::upsert(&config, record.clone()).await;
 

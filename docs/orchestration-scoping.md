@@ -536,19 +536,41 @@ the consumer flips back to `Blocked` long after the fact, and with `AUTO` armed
 a Worker already dispatched on it sits behind a blocker nobody raised. So the
 first sighting writes an `epic-contract:<epic>:<producer>` row
 (`PublishedContract`) and satisfaction reads the rows; the note is only how a
-contract arrives. Rows are **never deleted** — the difference between them and
-the review rows next door, which are a cache the next green run rebuilds. Once
-the note is evicted the row holds the only copy of an interface another agent
-wrote, and an epic key is `slugify(name)`, so an epic-scoped prune meant that
-deleting an epic and recreating it under the same name re-blocked every
-consumer on a contract nobody could republish. "Is this note newer?" is decided
-by comparing the interface text, never `ts`: notes are ordered by `(ts, seq)`
-and a row carries no `seq`, so a `ts` test dropped a correction posted in the
-same millisecond as its first draft and pinned the row to the superseded text.
-Posting a contract recomputes at the write, gated on the note naming a live
-epic — `post_note` holds the blackboard's process-wide write lock across that
-call and `recompute_all` spawns agents and calls GitHub, so an ungated tag let
-one agent stall every other agent's `post_note`.
+contract arrives. A row is **never dropped because its epic went away** — the
+difference between it and the review rows next door, which are a cache the next
+green run rebuilds. Once the note is evicted the row holds the only copy of an
+interface another agent wrote, so an epic-lifecycle prune destroyed it
+irrecoverably. Latching is likewise blind to archival: an interface published
+while its epic happens to be archived still has to leave a row, or retention
+takes the only other copy and the consumer blocks on `contract` forever with
+nothing left to republish it. Liveness gates *satisfaction*, never the record.
+
+Two comparisons decide what a row holds. `published_at` is a **watermark**: the
+row never moves backwards, because retention prunes per scope while the scan
+reads every scope, so the newest note can be evicted while an older one
+survives elsewhere — without the watermark the row silently reverted to the
+superseded interface and bumped its revision as though the producer had
+republished. Among notes that pass the watermark the **interface text** decides,
+not the clock: notes are ordered by `(ts, seq)`, a row carries no `seq`, so a
+pure `ts` test dropped a correction posted in the same millisecond as its first
+draft.
+
+The one row that *is* dropped is one first seen before its epic record existed.
+An epic key is `slugify(name)`, so a later, unrelated epic created under the
+same name is the same key and used to inherit its predecessor's interfaces —
+satisfying a consumer's edge and quoting another project's spec into its
+Worker. `since` against the record's `created_at` tells the two apart (notes
+older than the record are ignored for the same reason, or the dropped row would
+simply re-latch), and dropping the loser is also the only bound on the rows.
+The cost is that re-creating an epic under a name it held before asks each
+producer to republish — one `post_note`, and a visible `contract` blocker until
+they do, which is the cheap failure next to a Worker silently building against
+another project's interface.
+
+Posting a contract latches and recomputes at the write, the recompute gated on
+the note naming a live epic — `post_note` holds the blackboard's process-wide
+write lock across that call and `recompute_all` spawns agents and calls GitHub,
+so an ungated tag let one agent stall every other agent's `post_note`.
 The consumer's Worker preamble quotes each producer's latest contract inside an
 `<untrusted-content source="agent-authored contract">` fence — a specification
 to satisfy, never instructions to follow. It reads the rows too, so a Worker

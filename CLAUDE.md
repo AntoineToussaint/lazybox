@@ -341,10 +341,14 @@ quoted into the consumer's Worker preamble behind an
 `<untrusted-content>` fence. The first sighting of that note is
 **latched** into an `epic-contract:<epic>:<producer>` row (#1577), so
 the blackboard's rolling retention evicting it neither re-blocks the
-consumer nor empties the Worker's brief. The row is never deleted (it
-is the only surviving copy of the interface), publishing a *changed*
-interface bumps its `revision`, and a `contract` note only drives a
-recompute when it names a live epic. `Shift-P` cycle
+consumer nor empties the Worker's brief. The row outlives its epic
+disappearing (it is the only surviving copy of the interface) and is
+written even when the epic is archived at the time; a surviving *older*
+note never overwrites it, since retention prunes per scope while the
+scan reads every scope. Publishing a *changed* interface bumps its
+`revision`; a row or note predating the epic record is dropped, so a
+later epic reusing a name inherits nothing from the earlier one; and a
+`contract` note only drives a recompute when it names a live epic. `Shift-P` cycle
 the activity pane full → summary (a slim one-line count of new activity /
 failing CI) → hidden → full, remembered per workspace with a
 `ui.activity_pane_default` starting mode (auto-hidden when the workspace

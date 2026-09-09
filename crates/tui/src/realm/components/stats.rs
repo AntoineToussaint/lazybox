@@ -309,13 +309,24 @@ impl Stats {
                 dim,
             ))),
         }
-        for (agent, context) in &self.agent_context {
-            let share = context.tool_result_share_pct().unwrap_or(0);
-            let resent = match context.resent_share_pct() {
-                Some(pct) => format!("{pct}% re-sent"),
-                None => "no tool output".to_string(),
-            };
-            lines.push(row(agent, format!("{share}% tool · {resent}")));
+        // The per-agent half is a DIFFERENT window: it comes from this
+        // client's live tracker, which accumulates from launch and is not
+        // moved by the Today⇄Week tab above. Unlabelled and stacked under
+        // the window figures, a reader takes the two as comparable — so the
+        // rows carry their own window.
+        if !self.agent_context.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  per agent · since launch".to_string(),
+                dim,
+            )));
+            for (agent, context) in &self.agent_context {
+                let share = context.tool_result_share_pct().unwrap_or(0);
+                let resent = match context.resent_share_pct() {
+                    Some(pct) => format!("{pct}% re-sent"),
+                    None => "no tool output".to_string(),
+                };
+                lines.push(row(agent, format!("{share}% tool · {resent}")));
+            }
         }
         lines.push(Line::from(Span::styled(
             "  proxied agents only — unmetered work isn't counted".to_string(),
@@ -642,6 +653,10 @@ mod tests {
         assert!(out.contains("58% of that"), "{out}");
         assert!(out.contains("claude"), "{out}");
         assert!(out.contains("40% tool · 75% re-sent"), "{out}");
+        // The per-agent rows track this client's launch, not the Today/Week
+        // tab that moves the figures above them — so they say which window
+        // they are, rather than reading as a breakdown of the fleet row.
+        assert!(out.contains("per agent · since launch"), "{out}");
         assert!(out.contains("proxied agents only"), "{out}");
     }
 
@@ -657,6 +672,8 @@ mod tests {
         let out = render(&mut comp, 50, 44);
         assert!(out.contains("no metered requests in this window"), "{out}");
         assert!(!out.contains("0% of payload"), "{out}");
+        // With no metered agent there is no per-agent group to label.
+        assert!(!out.contains("per agent"), "{out}");
     }
 
     #[test]

@@ -775,8 +775,10 @@ pub struct ContextAccounting {
     /// this session already sent in an earlier request — the mechanical
     /// re-send share.
     pub tool_result_resent_bytes: u64,
-    /// Tool-result blocks whose text ran over the configured line threshold
-    /// (`agent.large_tool_result_lines`).
+    /// Tool-result blocks whose text ran past the large-result line floor,
+    /// counted on the send that introduced them. A block re-sent every turn
+    /// is one candidate, not one per turn, so this counts oversized output
+    /// rather than the turns that carried it.
     pub large_tool_results: u32,
 }
 
@@ -2288,7 +2290,8 @@ pub mod stats {
     pub const CONTEXT_TOOL_RESULT_BYTES: &str = "context_tool_result_bytes";
     /// Of the tool-result bytes, those already sent in an earlier request.
     pub const CONTEXT_RESENT_BYTES: &str = "context_resent_bytes";
-    /// Tool-result blocks over the configured line threshold.
+    /// Tool-result blocks past the large-result line floor, counted once
+    /// each on the send that introduced them.
     pub const CONTEXT_LARGE_TOOL_RESULTS: &str = "context_large_tool_results";
 }
 

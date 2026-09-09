@@ -22,12 +22,12 @@
 //! stands in faithfully for a ratio of tokens. Nothing here rewrites the
 //! body — the measurement is pure accounting.
 //!
-//! [`conversation`], [`tool_result_units`] and [`payload_text`] are the
+//! [`conversation`], [`tool_result_units`] and [`payload_lines`] are the
 //! shape-handling half, kept separable from the accounting so a second
 //! pass over the same blocks reads them the same way this one counted them.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::hash::{DefaultHasher, Hasher};
 
 use lazybox_ipc::ContextAccounting;
 use serde_json::Value;
@@ -96,9 +96,20 @@ impl SeenStore {
 /// shared seen-set lock.
 pub(crate) struct Measured {
     accounting: ContextAccounting,
-    /// `(content hash, serialized bytes)` per tool-output block, in the
-    /// order they appear in the request.
-    blocks: Vec<(u64, u64)>,
+    /// One entry per tool-output block, in the order they appear in the
+    /// request.
+    blocks: Vec<Block>,
+}
+
+/// What the parse learned about one tool-output block, before the session's
+/// history says whether it is new.
+struct Block {
+    /// Content hash — the identity a re-send is recognized by.
+    hash: u64,
+    /// Serialized bytes of the block.
+    bytes: u64,
+    /// Its text ran past the large-result line floor.
+    large: bool,
 }
 
 impl Measured {
@@ -106,9 +117,16 @@ impl Measured {
     /// session had already sent to the re-send share. Cheap enough to run
     /// under the proxy-wide lock.
     pub(crate) fn against(mut self, seen: &mut SeenBlocks) -> ContextAccounting {
-        for (hash, bytes) in &self.blocks {
-            if seen.observe(*hash) {
-                self.accounting.tool_result_resent_bytes += bytes;
+        for block in &self.blocks {
+            if seen.observe(block.hash) {
+                self.accounting.tool_result_resent_bytes += block.bytes;
+            } else if block.large {
+                // Counted on a block's first send only, so the figure is
+                // "oversized results this session produced" — a count of
+                // compaction candidates. Counting every send instead would
+                // multiply one 900-line result by the number of turns that
+                // carried it, which says more about turn count than size.
+                self.accounting.large_tool_results += 1;
             }
         }
         self.accounting
@@ -130,19 +148,46 @@ pub(crate) fn measure(body: &[u8], large_lines: usize) -> Option<Measured> {
         blocks: Vec::new(),
     };
     for unit in tool_result_units(array) {
-        let Ok(serialized) = serde_json::to_string(unit) else {
+        let mut digest = Digest::default();
+        if serde_json::to_writer(&mut digest, unit).is_err() {
             continue;
-        };
-        let bytes = serialized.len() as u64;
-        out.accounting.tool_result_bytes += bytes;
-        let mut hasher = DefaultHasher::new();
-        serialized.hash(&mut hasher);
-        out.blocks.push((hasher.finish(), bytes));
-        if payload_text(unit).lines().count() > large_lines {
-            out.accounting.large_tool_results += 1;
         }
+        out.accounting.tool_result_bytes += digest.bytes;
+        out.blocks.push(Block {
+            hash: digest.hasher.finish(),
+            bytes: digest.bytes,
+            large: payload_lines(unit) > large_lines,
+        });
     }
     Some(out)
+}
+
+/// Hashes a block's serialized form as it is written and counts its bytes,
+/// so measuring a request never copies its tool output. Every proxied request
+/// runs this over every block it carries, and those blocks are the largest
+/// thing in the body.
+///
+/// Hashing the *re-serialized* form (rather than the raw wire bytes) is what
+/// makes a re-send recognizable: `serde_json::Value` holds objects in a
+/// `BTreeMap` here — the `preserve_order` feature is off — so key order is
+/// normalized and a client that re-emits the same block with its keys in a
+/// different order still hashes equal.
+#[derive(Default)]
+struct Digest {
+    hasher: DefaultHasher,
+    bytes: u64,
+}
+
+impl std::io::Write for Digest {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.hasher.write(buf);
+        self.bytes += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// The conversation array in a request body, whichever name the wire shape
@@ -176,29 +221,30 @@ pub(crate) fn tool_result_units(array: &[Value]) -> Vec<&Value> {
     out
 }
 
-/// The human-readable text a tool-output unit carries — what the line
-/// threshold counts. The Responses API names it `output`; Anthropic and
-/// OpenAI both name it `content`.
-pub(crate) fn payload_text(unit: &Value) -> String {
+/// Lines in the human-readable text a tool-output unit carries — what the
+/// large-result floor is compared against. The Responses API names that text
+/// `output`; Anthropic and OpenAI both name it `content`.
+pub(crate) fn payload_lines(unit: &Value) -> usize {
     match unit.get("output").or_else(|| unit.get("content")) {
-        Some(value) => text_of(value),
-        None => String::new(),
+        Some(value) => lines_of(value),
+        None => 0,
     }
 }
 
-/// Flatten a text payload that may be a bare string, a list of content
-/// blocks, or a single block object.
-fn text_of(value: &Value) -> String {
+/// Count lines in a text payload that may be a bare string, a list of content
+/// blocks, or a single block object — without materializing it, since the
+/// payload is the biggest thing in the request.
+fn lines_of(value: &Value) -> usize {
     match value {
-        Value::String(text) => text.clone(),
-        Value::Array(items) => items.iter().map(text_of).collect::<Vec<_>>().join("\n"),
+        Value::String(text) => text.lines().count(),
+        Value::Array(items) => items.iter().map(lines_of).sum(),
         Value::Object(map) => map
             .get("text")
             .or_else(|| map.get("content"))
             .or_else(|| map.get("output"))
-            .map(text_of)
-            .unwrap_or_default(),
-        other => other.to_string(),
+            .map_or(0, lines_of),
+        Value::Null => 0,
+        other => other.to_string().lines().count(),
     }
 }
 
@@ -350,6 +396,25 @@ mod tests {
                 .expect("measured");
             assert_eq!(got.large_tool_results, expected);
         }
+    }
+
+    /// A large block is a compaction *candidate*, so it is counted when the
+    /// session first sends it. Re-sending it every turn must not multiply the
+    /// figure — that would measure turn count, not oversized output.
+    #[test]
+    fn a_large_block_counts_once_however_often_it_is_re_sent() {
+        let mut seen = SeenBlocks::default();
+        let body = anthropic_body(&"line\n".repeat(12));
+
+        let first = measure_against(body.as_bytes(), &mut seen, 10).expect("first");
+        assert_eq!(first.large_tool_results, 1, "counted on its first send");
+
+        let second = measure_against(body.as_bytes(), &mut seen, 10).expect("second");
+        assert_eq!(
+            second.large_tool_results, 0,
+            "the same block re-sent is a re-send, not a second large block"
+        );
+        assert_eq!(second.tool_result_resent_bytes, second.tool_result_bytes);
     }
 
     /// A block whose content is a list of blocks (Anthropic's richer

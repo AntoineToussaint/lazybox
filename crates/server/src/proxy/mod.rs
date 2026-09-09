@@ -477,19 +477,12 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
         }
     };
 
-    // What this request is *made of* (#1606) — measured here, on the body
-    // already buffered for forwarding, so a re-send is recorded in request
-    // order rather than in whatever order responses happen to finish. The
-    // body parse stays outside the shared seen-set lock, which then only
-    // sees hash lookups. The measurement rides the response's usage event.
-    let context =
-        context_parse::measure(&body_bytes, state.large_tool_result_lines).map(|measured| {
-            let mut store = state
-                .seen_blocks
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            measured.against(store.entry(&format!("{agent_id}/{session}")))
-        });
+    // What this request is *made of* (#1606), parsed off the body already
+    // buffered for forwarding. Only the parse happens here; the blocks are
+    // folded into the session's seen-set at the far end, together with the
+    // usage report, so that only a *billed* request consumes a block's first
+    // send — see the fold below.
+    let measured = context_parse::measure(&body_bytes, state.large_tool_result_lines);
 
     let upstream = state
         .client
@@ -544,7 +537,7 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
         (
             upstream.bytes_stream(),
             accumulator,
-            Some((sink, agent_id, session, context)),
+            Some((state, sink, agent_id, session, measured)),
         ),
         |(mut bytes, mut acc, mut pending)| async move {
             match bytes.next().await {
@@ -557,10 +550,25 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
                     Some((Err(BoxErr::from(error)), (bytes, acc, pending)))
                 }
                 None => {
-                    if let Some((sink, agent_id, session, context)) = pending.take()
+                    if let Some((state, sink, agent_id, session, measured)) = pending.take()
                         && let Some(mut usage) = acc.finish()
                     {
-                        usage.context = context;
+                        // Fold the request's blocks into the session's
+                        // seen-set only now, on the same condition that
+                        // reports usage: a request the provider never billed
+                        // must not consume a block's first send. Claude Code
+                        // preflights `count_tokens` with the whole transcript
+                        // and retries the same body after a 429 — neither
+                        // reports usage, and folding those would make the
+                        // *first* real send of every block read as a
+                        // mechanical re-send.
+                        usage.context = measured.map(|measured| {
+                            let mut store = state
+                                .seen_blocks
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            measured.against(store.entry(&format!("{agent_id}/{session}")))
+                        });
                         sink(&agent_id, &session, usage);
                     }
                     None

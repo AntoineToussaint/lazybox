@@ -227,8 +227,8 @@ struct ProxyState {
     /// recognizable as a re-send (#1606). Bounded per session and across
     /// sessions.
     seen_blocks: std::sync::Mutex<context_parse::SeenStore>,
-    /// Line count above which a tool result counts as large — see
-    /// [`large_tool_result_lines`].
+    /// Line count above which a tool result counts as large
+    /// (`agent.context_hygiene.min_lines`).
     large_tool_result_lines: usize,
 }
 
@@ -302,21 +302,12 @@ pub async fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHand
         sink,
         quota_sink,
         prices,
-        large_tool_result_lines(),
+        // The line floor comes from the shared context-hygiene policy
+        // (#1611), which is also what the compaction pass gates its rewrite
+        // on — so "large" means one thing, and the count of candidates can't
+        // drift from the set that gets rewritten.
+        cfg.agent.context_hygiene.min_lines,
     )))
-}
-
-/// Line count above which a tool result counts as "large" in the context
-/// accounting (#1606).
-///
-/// The epic's shared policy owns this floor as `agent.context_hygiene
-/// .min_lines` (`lazybox_core::context_hygiene`, #1611) — the same floor the
-/// compaction pass gates its rewrite on, so the two can't disagree about what
-/// "large" means. That policy isn't on `main` yet; this is its default, read
-/// through one call site so adopting the configured value is a one-line change
-/// here rather than a second knob shipped in the meantime.
-fn large_tool_result_lines() -> usize {
-    350
 }
 
 /// The session key parsed from a proxy path, as an `Option` — an empty

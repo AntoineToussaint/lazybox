@@ -133,9 +133,10 @@ impl Measured {
     }
 }
 
-/// Measure one request body. `None` when the body isn't JSON carrying a
-/// recognized conversation array — a token-count request, a health probe, a
-/// shape lazybox doesn't know.
+/// Measure one request body against `large_lines`, the shared
+/// context-hygiene line floor (`agent.context_hygiene.min_lines`). `None`
+/// when the body isn't JSON carrying a recognized conversation array — a
+/// health probe, a shape lazybox doesn't know.
 pub(crate) fn measure(body: &[u8], large_lines: usize) -> Option<Measured> {
     let value: Value = serde_json::from_slice(body).ok()?;
     let array = conversation(&value)?;

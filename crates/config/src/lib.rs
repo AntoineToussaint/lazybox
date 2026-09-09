@@ -2156,6 +2156,22 @@ pub struct AgentSection {
     /// live from the sidebar with `x $` on a Space header.
     #[serde(default)]
     pub metered_spaces: std::collections::BTreeSet<String>,
+    /// Context hygiene (#1611): the one policy both enforcement points read.
+    ///
+    /// A large share of an agent's input-token bill is mechanical re-sends — a
+    /// 900-line file read on turn 3 rides in every request for the rest of the
+    /// session. lazybox condenses that material with a cheap model at two
+    /// points: the metering proxy rewrites old, large tool results for every
+    /// agent it fronts, and Claude's `PreToolUse` hook denies the read before it
+    /// happens. Both consult these knobs, so they cannot reach different
+    /// verdicts on the same block.
+    ///
+    /// Ships in `shadow`: decided and logged, never rewritten. Only applies to
+    /// sessions actually routed through the proxy (`metering_proxy` plus the
+    /// per-workspace / Space / `meter_all` routing), so it is inert on an
+    /// unmetered fleet.
+    #[serde(default)]
+    pub context_hygiene: lazybox_core::ContextHygiene,
     /// Apply EVERY updatable agent's CLI updates automatically when the
     /// scheduled out-of-band check finds a newer version — the global
     /// switch over the per-agent `agents.<id>.auto_update` opt-in. Off by
@@ -5289,6 +5305,53 @@ repos:
         let written = serde_yaml::to_string(&cfg).expect("serialize");
         let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
         assert!(reparsed.agent.metered_spaces.contains("Obin"));
+    }
+
+    /// The whole context-hygiene policy defaults in on a config that never
+    /// mentions it, and ships in `shadow` — decided and logged, never
+    /// rewritten. A fresh install must not start rewriting agent context.
+    #[test]
+    fn context_hygiene_defaults_to_shadow_and_round_trips() {
+        let cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert_eq!(
+            cfg.agent.context_hygiene,
+            lazybox_core::ContextHygiene::default()
+        );
+        assert_eq!(
+            cfg.agent.context_hygiene.mode,
+            lazybox_core::CompactionMode::Shadow
+        );
+
+        let mut cfg = Config::default();
+        cfg.agent.context_hygiene.mode = lazybox_core::CompactionMode::On;
+        cfg.agent.context_hygiene.min_lines = 500;
+        cfg.agent.context_hygiene.condense_model = Some("claude-haiku-4-5".into());
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert_eq!(reparsed.agent.context_hygiene, cfg.agent.context_hygiene);
+    }
+
+    /// The knobs are addressable individually: setting one leaves the rest at
+    /// their defaults, so a user pinning `min_lines` doesn't silently disarm
+    /// the recency window.
+    #[test]
+    fn a_partial_context_hygiene_block_keeps_the_other_defaults() {
+        let cfg: Config = serde_yaml::from_str(
+            "agent:\n  context_hygiene:\n    mode: 'on'\n    min_lines: 120\n",
+        )
+        .expect("parse");
+        let defaults = lazybox_core::ContextHygiene::default();
+        assert_eq!(cfg.agent.context_hygiene.mode, lazybox_core::CompactionMode::On);
+        assert_eq!(cfg.agent.context_hygiene.min_lines, 120);
+        assert_eq!(cfg.agent.context_hygiene.keep_recent, defaults.keep_recent);
+        assert_eq!(
+            cfg.agent.context_hygiene.hook_intercept,
+            defaults.hook_intercept
+        );
+        assert_eq!(
+            cfg.agent.context_hygiene.prompt_version,
+            defaults.prompt_version
+        );
     }
 
     /// `source_is_metered` resolves a source label through `ui.spaces` and

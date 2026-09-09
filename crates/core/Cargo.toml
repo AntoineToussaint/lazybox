@@ -16,6 +16,11 @@ serde = { workspace = true, features = ["derive", "rc"] }
 # decoder (`Workspace::decode_persisted`) lives next to the schema
 # version it enforces, so the JSON codec is a real dependency here.
 serde_json = { workspace = true }
+# Content-addressed cache keys for condensed tool results
+# (`context_hygiene::cache_key`). A cache hit is served straight back into an
+# agent's context, so the digest has to be collision-resistant over unbounded
+# tool output, not merely fast.
+sha2 = "0.11"
 thiserror = { workspace = true }
 ts-rs = { workspace = true, optional = true }
 uuid = { version = "1", features = ["serde", "v4"] }

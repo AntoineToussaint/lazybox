@@ -13965,6 +13965,64 @@ mod merge_focus_follow_tests {
         );
     }
 
+    /// Regression (#1633): the same `g s`, but on a repo whose owner or name
+    /// contains a hyphen — `codefly-dev/cli`, `obin-ai/infra-base`, which is
+    /// nearly every real repo. The gate used to require that the flat
+    /// `github-{owner}-{repo}` project key split back into a slug, which is
+    /// impossible once either half has a hyphen, so `g s` refused with
+    /// "nothing to sync — this workspace has no PR, issue, or repo" for a repo
+    /// that plainly exists. The daemon resolves the exact slug from the stored
+    /// project record; the client must not be the stricter of the two.
+    #[test]
+    fn sync_on_a_hyphenated_repo_workspace_still_syncs_the_repo() {
+        use lazybox_ipc::Event as IpcEvent;
+        use lazybox_tui_core::action::Action;
+
+        let key = lazybox_core::ProjectKey::github("codefly-dev", "cli");
+        assert!(
+            key.unambiguous_github_slug().is_none(),
+            "precondition: the flat key cannot be split back into a slug",
+        );
+
+        let mut m = build_model();
+        let mut ws = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new("github:codefly-dev/cli#scratch"),
+            "main",
+            chrono::Utc::now(),
+        );
+        ws.project_key = Some(key);
+        let session_key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+
+        let cmds = m.dispatch_action(&Action::SyncWorkspace);
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [IpcCommand::SyncWorkspace { workspace_key }]
+                    if workspace_key.as_str() == "github:codefly-dev/cli#scratch"
+            ),
+            "a hyphenated repo scope must still sync, got {cmds:?}",
+        );
+
+        // And under a `v` multi-select: the bulk predicate counted only rows
+        // with their own PR/issue, so a selection sync skipped every pre-PR
+        // row as "nothing to sync".
+        m.sidebar.toggle_broadcast_select();
+        assert_eq!(m.sidebar.broadcast_selected_count(), 1);
+        let cmds = m.dispatch_action(&Action::SyncWorkspace);
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::SyncWorkspace { workspace_key }
+                    if workspace_key.as_str() == "github:codefly-dev/cli#scratch"
+            )),
+            "a repo-scoped row must sync under a multi-select too, got {cmds:?}",
+        );
+    }
+
     /// The combined close & kill (`x k`): one confirm issues BOTH the
     /// upstream `DeleteOrClose` and the local `Kill` for the target row,
     /// and the row drops optimistically — the `g d` + `x x` pair in one

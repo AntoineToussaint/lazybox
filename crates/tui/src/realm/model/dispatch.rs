@@ -9,6 +9,26 @@ use super::{ActionConfirmTarget, Model, PaneFocus};
 use lazybox_ipc::Command as IpcCommand;
 use tuirealm::terminal::TerminalAdapter;
 
+/// Whether this workspace is scoped to a GitHub repo — the condition under
+/// which `g s` syncs the repo's open issues + PRs even with no PR/issue of
+/// its own (#1390).
+///
+/// Deliberately only checks that the project is a *GitHub* project, not that
+/// the flat `github-{owner}-{repo}` key can be split back into a slug: that
+/// parse fails for every repo whose owner or name contains a hyphen
+/// (`codefly-dev/cli`, `obin-ai/infra-base`), and gating on it told the user
+/// "nothing to sync — this workspace has no PR, issue, or repo" for a repo
+/// that plainly exists (#1633). The daemon resolves the exact slug from the
+/// user's configured scopes, which the client cannot see, so the client must
+/// not be the stricter of the two — the worst case is a sync that finds
+/// nothing, which is far better than refusing to look.
+fn github_repo_scoped(workspace: &lazybox_core::Workspace) -> bool {
+    workspace
+        .project_key
+        .as_ref()
+        .is_some_and(|key| key.source_prefix() == "github")
+}
+
 /// The ` #N` suffix parsed from a task id key
 /// (`"github:o/r#42"` → `" #42"`), or empty when the key carries no
 /// number. Feeds the pending close footer notices. (The
@@ -2615,9 +2635,15 @@ impl<T: TerminalAdapter> Model<T> {
                 // and counted.
                 if self.bulk_active() {
                     return self.bulk_dispatch("synced", "nothing to sync", |ws| {
+                        // Repo-scoped rows count too (#1633): a taskless
+                        // workspace under a GitHub project syncs its repo's
+                        // open issues + PRs, exactly as the single-row path
+                        // does. Before this, a selection sync skipped every
+                        // pre-PR row as "nothing to sync".
                         (ws.pr.is_some()
                             || !ws.gh_issues.is_empty()
-                            || !ws.linear_issues.is_empty())
+                            || !ws.linear_issues.is_empty()
+                            || github_repo_scoped(ws))
                         .then(|| IpcCommand::SyncWorkspace {
                             workspace_key: ws.key.clone(),
                         })
@@ -2635,10 +2661,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // repo (a taskless / pre-PR workspace), sync discovers that
                 // repo's open issues + PRs daemon-side; only a workspace with
                 // no repo scope at all has genuinely nothing to sync.
-                let has_repo_scope = ws
-                    .project_key
-                    .as_ref()
-                    .is_some_and(|key| key.unambiguous_github_slug().is_some());
+                let has_repo_scope = github_repo_scoped(ws);
                 if ws.pr.is_none()
                     && ws.gh_issues.is_empty()
                     && ws.linear_issues.is_empty()

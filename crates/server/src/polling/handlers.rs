@@ -1805,6 +1805,39 @@ async fn refresh_pr_after_mutation(config: &ServerConfig, ws: &Workspace) {
     }
 }
 
+/// The `owner/repo` whose open issues + PRs a `g s` on this workspace should
+/// discover, or `None` when it isn't a GitHub-scoped workspace at all.
+///
+/// Resolution order, most authoritative first:
+///   1. the stored `Project` record's `github_repo` — the exact slug, written
+///      when the project was created, needing neither a task nor config;
+///   2. the primary task's own `repo`, then the user's configured
+///      `github:owner/repo` scopes, then the flat key
+///      (`upsert::github_slug_for_workspace`).
+///
+/// The flat `github-{owner}-{repo}` project key alone is NOT sufficient
+/// (#1633): it cannot be split back once the owner or repo contains a hyphen,
+/// so resolving through `unambiguous_github_slug` returned `None` for
+/// `codefly-dev/cli`, `obin-ai/infra-base` and nearly every other real repo —
+/// `g s` silently skipped repo discovery there, and on a taskless workspace
+/// the client refused outright with "nothing to sync". Only single-segment
+/// owner AND repo ever worked.
+fn sync_repo_slug(config: &ServerConfig, workspace: &Workspace) -> Option<String> {
+    let key = workspace.project_key.as_ref()?;
+    if key.source_prefix() != "github" {
+        return None;
+    }
+    let from_record = config
+        .store
+        .get_project(key)
+        .ok()
+        .flatten()
+        .and_then(|record| record.project_json)
+        .and_then(|json| serde_json::from_str::<lazybox_core::Project>(&json).ok())
+        .and_then(|project| project.github_repo().map(str::to_string));
+    from_record.or_else(|| super::upsert::github_slug_for_workspace(key, workspace))
+}
+
 /// Handle `Command::SyncWorkspace`: a targeted re-poll of one
 /// workspace's own GitHub entities — the "sync this" action. Instead
 /// of the global `Refresh` sweep, deep-fetch the workspace's PR and
@@ -1875,11 +1908,16 @@ pub async fn handle_sync_workspace(config: &ServerConfig, workspace_key: Workspa
         // workspace could only ever re-fetch the one item you're looking at
         // and never surface a newly-filed issue (#1390). This is the
         // explicit "sync this thing and its repo" the user expects.
-        if let Some(slug) = workspace
-            .project_key
-            .as_ref()
-            .and_then(|key| key.unambiguous_github_slug())
-        {
+        //
+        // Resolve the slug the same way ingestion does — primary task's repo,
+        // then the user's configured `github:owner/repo` scopes, then the flat
+        // key — NOT `unambiguous_github_slug` alone (#1633). The flat
+        // `github-{owner}-{repo}` key can't be split back once the owner or
+        // repo contains a hyphen, so the old parse returned `None` for
+        // `codefly-dev/cli`, `obin-ai/infra-base` and every sibling: `g s`
+        // silently skipped repo discovery on nearly every repo, and a taskless
+        // workspace there reported "nothing to sync" outright.
+        if let Some(slug) = sync_repo_slug(config, &workspace) {
             match client.fetch_repo_open_tasks(&slug).await {
                 Ok(tasks) => {
                     let discovered = tasks.len();
@@ -6585,6 +6623,57 @@ mod sync_workspace_discovery_tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    /// Regression (#1633): `g s`'s repo discovery must resolve the slug for a
+    /// repo whose owner or name contains a hyphen. The flat
+    /// `github-{owner}-{repo}` project key cannot be split back once either
+    /// half has one, so resolving through `unambiguous_github_slug` alone
+    /// returned `None` for `codefly-dev/cli`, `obin-ai/infra-base` and nearly
+    /// every real repo — discovery silently did nothing there. The stored
+    /// `Project` record carries the exact slug and needs neither a task nor a
+    /// config read.
+    #[tokio::test]
+    async fn sync_resolves_the_repo_slug_for_a_hyphenated_taskless_workspace() {
+        let config = ServerConfig::in_memory();
+        let project_key = lazybox_core::ProjectKey::github("codefly-dev", "cli");
+        assert!(
+            project_key.unambiguous_github_slug().is_none(),
+            "precondition: the flat key alone cannot recover the slug",
+        );
+
+        let mut project =
+            lazybox_core::Project::new(project_key.clone(), "codefly-dev/cli", chrono::Utc::now());
+        assert!(project.set_github_repo("codefly-dev/cli"));
+        config
+            .store
+            .save_project(&lazybox_store::ProjectRecord {
+                key: project_key.to_string(),
+                created_at: chrono::Utc::now(),
+                project_json: Some(serde_json::to_string(&project).expect("serialize project")),
+            })
+            .expect("save project");
+
+        let mut workspace = lazybox_core::Workspace::empty(
+            WorkspaceKey::new("github:codefly-dev/cli#scratch"),
+            "main",
+            chrono::Utc::now(),
+        );
+        workspace.project_key = Some(project_key);
+        assert!(
+            workspace.pr.is_none() && workspace.gh_issues.is_empty(),
+            "precondition: taskless workspace",
+        );
+
+        assert_eq!(
+            sync_repo_slug(&config, &workspace).as_deref(),
+            Some("codefly-dev/cli"),
+        );
+
+        // A non-GitHub project stays out of repo discovery entirely.
+        let mut local = workspace.clone();
+        local.project_key = Some(lazybox_core::ProjectKey::local("scratch"));
+        assert_eq!(sync_repo_slug(&config, &local), None);
     }
 
     fn open_pr_task() -> Task {

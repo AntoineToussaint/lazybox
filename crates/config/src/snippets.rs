@@ -1120,7 +1120,9 @@ impl Snippets {
                      ambiguity and ask one focused question rather than guessing. Finish \
                      with a concise report grouped by repository: the issues created and \
                      their URLs, existing issues reused, the dependency or rollout order, \
-                     and any ambiguity that prevented an issue from being created.",
+                     and any ambiguity that prevented an issue from being created. \
+                     Work then happens in each issue's own lazybox workspace, which the \
+                     poll opens per record — never create a named workspace beside one.",
                 ),
             ),
             (
@@ -1158,7 +1160,9 @@ impl Snippets {
                      unclear scope, a decision that changes what gets built — stop and \
                      ask one focused question rather than guessing. Finish with a \
                      per-issue report: each created issue's URL, the existing issues \
-                     reused, and the concurrency-and-ordering plan.",
+                     reused, and the concurrency-and-ordering plan. Work then happens \
+                     in each issue's own lazybox workspace, which the poll opens per \
+                     record — never create a named workspace beside one.",
                 ),
             ),
             (
@@ -3053,6 +3057,28 @@ snippets:
         );
         assert!(Snippets::builtin_body("designissues").is_some());
         assert!(Snippets::builtin_body("no-such-snippet").is_none());
+    }
+
+    /// #1586: a tracker record gets exactly one workspace and the work
+    /// happens there. The issue-carving briefs are the built-ins most likely
+    /// to trail off into "…and start a workspace for each", so they must say
+    /// the opposite, and no built-in may hand an agent the named-create
+    /// command — that path is repo-less scratch only.
+    #[test]
+    fn builtins_send_carved_work_to_the_issue_workspace() {
+        for key in ["carve", "designissues"] {
+            let body = Snippets::builtin_body(key).expect("ships built-in");
+            assert!(
+                body.contains("never create a named workspace beside one"),
+                "`{key}` must send the carved work to each issue's own workspace: {body}"
+            );
+        }
+        for (key, snippet) in Snippets::builtin().all() {
+            assert!(
+                !snippet.dispatch_body().contains("lazybox workspace create"),
+                "built-in `{key}` must not steer an agent into a named workspace"
+            );
+        }
     }
 
     /// `dod` ships as a provider-scoped GitHub workflow (#1434): a lightweight

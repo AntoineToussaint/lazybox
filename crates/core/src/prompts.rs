@@ -632,6 +632,7 @@ mod tests {
             "## PR hygiene",
             "## Untrusted content",
             "## Reversibility and safety",
+            "## The tracker record is the workspace",
             "## Workflow",
         ] {
             assert!(
@@ -639,6 +640,30 @@ mod tests {
                 "missing principle section: {header}"
             );
         }
+    }
+
+    #[test]
+    fn preamble_starts_new_work_from_the_tracker_record() {
+        // #1586: the preamble used to tell every agent to run `lazybox
+        // workspace create --name …` "instead of filing an issue", which is
+        // exactly the split this rule forbids — the branch, activity, cost,
+        // claim, and epic graph end up on a second row beside the issue's own.
+        // It rides in *every* work prompt, so it is the loudest voice an agent
+        // hears on the subject and must name the issue-first path.
+        assert!(
+            AGENT_WORK_PREAMBLE.contains("gh issue create"),
+            "preamble must name the issue-first path for new work"
+        );
+        // The create command may still be *named* — the rule spells out what
+        // not to do — but never handed over as a copy-pasteable command. A
+        // line that is itself the invocation is the fenced block this fix
+        // removed, so guard the shape rather than the removed prose.
+        assert!(
+            !AGENT_WORK_PREAMBLE
+                .lines()
+                .any(|line| line.trim_start().starts_with("lazybox workspace create")),
+            "preamble must not offer `lazybox workspace create` as a command to run"
+        );
     }
 
     /// Index of `needle` in `haystack`, panicking with context when

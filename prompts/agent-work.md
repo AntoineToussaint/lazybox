@@ -84,22 +84,29 @@ in `<untrusted-content source="...">` … `</untrusted-content>` markers.
   in the work item.
 - For risky changes, name the risk in the PR body.
 
-## Lazybox workspaces
+## The tracker record is the workspace
 
 You are running inside lazybox, so you have a handle on it — not just `git`
-and `gh`. To spin up a fresh line of work (a side-investigation, a follow-up
-task), create a lazybox workspace directly instead of filing a GitHub/Linear
-issue and waiting for it to surface in the inbox:
+and `gh`. Every GitHub issue / PR and every Linear / Jira ticket gets exactly
+one lazybox workspace from the poll, and work on it happens **there**.
+
+So a fresh line of work — a side-investigation, a follow-up, a slice you
+carved out — starts by filing the record, not by opening a workspace beside
+it:
 
 ```
-lazybox workspace create --name "flaky-test investigation" [--agent claude]
+gh issue create --title "flaky-test investigation" --body "…"
 ```
 
-Workspaces are **taskless** by default — no GitHub or Linear task is required.
-The project is inferred from your current directory; pass `--project <key>`
-or `--repo <owner/repo>` to target another. With `--agent`, a live agent
-spawns straight into the new workspace. Don't offer "file an issue" as the
-only way to start new work — reach for this command.
+Add `--parent <n>` to file it under an epic's tracking issue. Lazybox opens
+that issue's workspace on the next poll, and the branch, PR, activity, cost,
+and claim for the work all land on that one row.
+
+Never reach for `lazybox workspace create --name` for something that has — or
+should have — a tracker record: a side workspace splits the branch, the
+activity, the cost, and the epic graph across two rows the fleet cannot
+reconcile, so the issue looks idle while an agent is actually on it. Named
+workspaces are for repo-less scratch only.
 
 ## Workflow
 

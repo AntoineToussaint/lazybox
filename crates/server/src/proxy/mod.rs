@@ -17,7 +17,15 @@
 //! body. The proxy is otherwise transparent — it copies auth headers
 //! through untouched and never buffers a streaming response, so the
 //! agent's own credentials and incremental output are unaffected.
+//!
+//! One exception, and it is deliberate: with `agent.context_hygiene.mode`
+//! set to `on`, the [`Compactor`] rewrites old, large tool results out of the
+//! request body before it is forwarded (#1609). That makes the proxy
+//! load-bearing for correctness rather than only for accounting, which is
+//! why it ships in `shadow` — deciding and logging, changing nothing — and
+//! why the rewrite carries its own kill switch.
 
+mod compaction;
 mod quota_parse;
 mod usage_parse;
 
@@ -37,6 +45,7 @@ use lazybox_agents::LlmProvider;
 use lazybox_ipc::{AgentUsage, ProviderQuota};
 use tokio::net::{TcpListener, TcpStream};
 
+pub use compaction::{Compactor, NoticeSink};
 pub use usage_parse::UsageAccumulator;
 
 /// The loopback port the running proxy bound, published once at startup so
@@ -217,6 +226,8 @@ struct ProxyState {
     /// Per-model price overrides (`agent.pricing`), layered over the built-in
     /// rate card when pricing a response's tokens.
     prices: usage_parse::PriceOverrides,
+    /// The context-hygiene pass over request bodies (#1609).
+    compactor: Arc<Compactor>,
 }
 
 /// Start the metering proxy when `agent.metering_proxy` is on: bind a
@@ -282,9 +293,19 @@ pub async fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHand
 
     let prices: usage_parse::PriceOverrides = Arc::new(cfg.agent.pricing.clone());
 
+    let notice_bus = config.bus.clone();
+    let notice: NoticeSink = Arc::new(move |title: String, body: String| {
+        let _ = notice_bus.send(lazybox_ipc::Event::Notification { title, body });
+    });
+    let compactor = Arc::new(Compactor::new(
+        cfg.agent.context_hygiene.clone(),
+        prices.clone(),
+        notice,
+    ));
+
     tracing::info!("metering proxy listening on 127.0.0.1:{port}");
     Some(tokio::spawn(serve(
-        listener, upstreams, sink, quota_sink, prices,
+        listener, upstreams, sink, quota_sink, prices, compactor,
     )))
 }
 
@@ -302,6 +323,7 @@ pub async fn serve(
     sink: UsageSink,
     quota_sink: QuotaSink,
     prices: usage_parse::PriceOverrides,
+    compactor: Arc<Compactor>,
 ) {
     let state = Arc::new(ProxyState {
         client: reqwest::Client::new(),
@@ -309,6 +331,7 @@ pub async fn serve(
         sink,
         quota_sink,
         prices,
+        compactor,
     });
     loop {
         let (stream, _) = match listener.accept().await {
@@ -443,6 +466,12 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
         }
     };
 
+    // The one place the proxy is not transparent: old, large tool results
+    // are condensed before the expensive model ever sees them (#1609).
+    // `off` and `shadow` hand the original bytes straight back.
+    let compacted = state.compactor.rewrite(&session, &agent_id, body_bytes);
+    let body_bytes = compacted.body;
+
     let upstream = state
         .client
         .request(parts.method.clone(), url.as_str())
@@ -488,6 +517,7 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
     // wrong partial is worse than a missing one for a cost meter. The gap is
     // bounded to interrupted turns and documented rather than guessed.
     let sink = state.sink.clone();
+    let compactor = state.compactor.clone();
     let accumulator = {
         let acc = UsageAccumulator::with_prices(state.prices.clone());
         if count_only { acc.counting_only() } else { acc }
@@ -496,7 +526,7 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
         (
             upstream.bytes_stream(),
             accumulator,
-            Some((sink, agent_id, session)),
+            Some((sink, compactor, agent_id, session, compacted.measured)),
         ),
         |(mut bytes, mut acc, mut pending)| async move {
             match bytes.next().await {
@@ -509,9 +539,10 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
                     Some((Err(BoxErr::from(error)), (bytes, acc, pending)))
                 }
                 None => {
-                    if let Some((sink, agent_id, session)) = pending.take()
+                    if let Some((sink, compactor, agent_id, session, measured)) = pending.take()
                         && let Some(usage) = acc.finish()
                     {
+                        compactor.observe_usage(&session, &agent_id, &usage, measured);
                         sink(&agent_id, &session, usage);
                     }
                     None

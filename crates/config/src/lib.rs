@@ -5341,7 +5341,10 @@ repos:
         )
         .expect("parse");
         let defaults = lazybox_core::ContextHygiene::default();
-        assert_eq!(cfg.agent.context_hygiene.mode, lazybox_core::CompactionMode::On);
+        assert_eq!(
+            cfg.agent.context_hygiene.mode,
+            lazybox_core::CompactionMode::On
+        );
         assert_eq!(cfg.agent.context_hygiene.min_lines, 120);
         assert_eq!(cfg.agent.context_hygiene.keep_recent, defaults.keep_recent);
         assert_eq!(

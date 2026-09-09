@@ -264,10 +264,7 @@ impl ContextHygiene {
 
     /// Full store key, ready for the kv.
     pub fn cache_kv_key(&self, input: &str, kind: &CondenseKind, model: &str) -> String {
-        format!(
-            "{KV_PREFIX_CONDENSE}{}",
-            self.cache_key(input, kind, model)
-        )
+        format!("{KV_PREFIX_CONDENSE}{}", self.cache_key(input, kind, model))
     }
 }
 
@@ -282,12 +279,7 @@ impl ContextHygiene {
 pub fn cache_key(input: &str, kind: &CondenseKind, model: &str, prompt_version: u32) -> String {
     let mut hasher = Sha256::new();
     hasher.update(prompt_version.to_le_bytes());
-    for field in [
-        model,
-        kind.discriminant(),
-        kind.label(),
-        input,
-    ] {
+    for field in [model, kind.discriminant(), kind.label(), input] {
         hasher.update((field.len() as u64).to_le_bytes());
         hasher.update(field.as_bytes());
     }
@@ -482,7 +474,10 @@ mod tests {
             "[condensed by lazybox: src/lib.rs, 900 lines → 2 lines; \
              re-read the file for full content]\nfn main() {}\n// two lines"
         );
-        assert_eq!(rendered, render_condensed(&kind, 900, "fn main() {}\n// two lines"));
+        assert_eq!(
+            rendered,
+            render_condensed(&kind, 900, "fn main() {}\n// two lines")
+        );
         assert!(is_condensed(&rendered));
     }
 
@@ -547,18 +542,8 @@ mod tests {
     #[test]
     fn adjacent_fields_cannot_be_confused() {
         assert_ne!(
-            cache_key(
-                "b",
-                &CondenseKind::FileRead { path: "ab".into() },
-                "m",
-                1
-            ),
-            cache_key(
-                "b",
-                &CondenseKind::FileRead { path: "a".into() },
-                "mb",
-                1
-            ),
+            cache_key("b", &CondenseKind::FileRead { path: "ab".into() }, "m", 1),
+            cache_key("b", &CondenseKind::FileRead { path: "a".into() }, "mb", 1),
         );
     }
 

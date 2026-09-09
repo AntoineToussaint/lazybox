@@ -24,7 +24,7 @@ use crate::realm::components::scrollable::{
 };
 use crate::realm::{Msg, UserEvent};
 use chrono::{Duration, NaiveDate};
-use lazybox_ipc::{StatBucket, stats};
+use lazybox_ipc::{ContextAccounting, StatBucket, stats};
 use std::collections::BTreeSet;
 use tuirealm::command::{Cmd, CmdResult};
 use tuirealm::component::{AppComponent, Component};
@@ -60,6 +60,10 @@ pub(crate) struct Stats {
     scroll: u16,
     /// Body viewport height, cached in `view` for page jumps.
     body_height: u16,
+    /// Live per-agent context accounting (#1606), agent-id ordered. Comes
+    /// from the client's usage tracker rather than the daily rollup, so it
+    /// covers this process's metered traffic.
+    agent_context: Vec<(String, ContextAccounting)>,
 }
 
 impl Stats {
@@ -76,7 +80,18 @@ impl Stats {
             loading,
             scroll: 0,
             body_height: 0,
+            agent_context: Vec::new(),
         }
+    }
+
+    /// Attach the live per-agent context accounting (#1606) the client's
+    /// usage tracker has observed.
+    pub(crate) fn with_agent_context(
+        mut self,
+        agent_context: Vec<(String, ContextAccounting)>,
+    ) -> Self {
+        self.agent_context = agent_context;
+        self
     }
 
     /// Preserve the Today⇄Week selection across a data refresh. The daemon
@@ -143,6 +158,18 @@ impl Stats {
             .filter(|b| b.metric == metric)
             .map(|b| b.value)
             .sum()
+    }
+
+    /// The active window's context accounting (#1606), reassembled from
+    /// the daily rollup so the two ratios follow the Today⇄Week tab.
+    fn window_context(&self) -> ContextAccounting {
+        let total = |metric: &str| self.total(metric).max(0) as u64;
+        ContextAccounting {
+            message_bytes: total(stats::CONTEXT_MESSAGE_BYTES),
+            tool_result_bytes: total(stats::CONTEXT_TOOL_RESULT_BYTES),
+            tool_result_resent_bytes: total(stats::CONTEXT_RESENT_BYTES),
+            large_tool_results: total(stats::CONTEXT_LARGE_TOOL_RESULTS) as u32,
+        }
     }
 
     /// Distinct local days that saw any activity, over the shipped window.
@@ -254,6 +281,46 @@ impl Stats {
             fmt_compact(self.total(stats::OUTPUT_TOKENS)),
         ));
         lines.push(row("Cost", fmt_cost(self.total(stats::COST_MICROS))));
+        lines.push(Line::from(""));
+
+        // ── Context — what the input bill is made of (#1606). Only
+        // proxied traffic is measured, so the section says so outright:
+        // an empty section (or a 0%) means "not measured", never "no
+        // re-send".
+        lines.push(header("Context · metered only"));
+        let fleet = self.window_context();
+        match (fleet.tool_result_share_pct(), fleet.resent_share_pct()) {
+            (Some(share), resent) => {
+                lines.push(row("Tool results", format!("{share}% of payload")));
+                lines.push(row(
+                    "Re-sent",
+                    match resent {
+                        Some(pct) => format!("{pct}% of that"),
+                        None => "—".to_string(),
+                    },
+                ));
+                lines.push(row(
+                    "Large blocks",
+                    fmt_int(fleet.large_tool_results as i64),
+                ));
+            }
+            (None, _) => lines.push(Line::from(Span::styled(
+                "  no metered requests in this window".to_string(),
+                dim,
+            ))),
+        }
+        for (agent, context) in &self.agent_context {
+            let share = context.tool_result_share_pct().unwrap_or(0);
+            let resent = match context.resent_share_pct() {
+                Some(pct) => format!("{pct}% re-sent"),
+                None => "no tool output".to_string(),
+            };
+            lines.push(row(agent, format!("{share}% tool · {resent}")));
+        }
+        lines.push(Line::from(Span::styled(
+            "  proxied agents only — unmetered work isn't counted".to_string(),
+            dim,
+        )));
         lines.push(Line::from(""));
 
         // ── Streaks — always over the shipped window, not the tab, since
@@ -543,6 +610,53 @@ mod tests {
         // The sparkline bars keep a gap from their label rather than
         // butting straight against the "7d".
         assert!(out.contains("Sessions · 7d ▁"), "{out}");
+    }
+
+    /// The context ratios (#1606): the fleet-wide pair from the daily
+    /// rollup, a per-agent pair from the live tracker, and the caveat that
+    /// only proxied traffic is measured.
+    #[test]
+    fn renders_context_ratios_fleet_wide_and_per_agent() {
+        let mut comp = Stats::new(
+            vec![
+                bucket("2026-08-25", stats::CONTEXT_MESSAGE_BYTES, 100_000),
+                bucket("2026-08-25", stats::CONTEXT_TOOL_RESULT_BYTES, 71_000),
+                bucket("2026-08-25", stats::CONTEXT_RESENT_BYTES, 41_180),
+                bucket("2026-08-25", stats::CONTEXT_LARGE_TOOL_RESULTS, 9),
+            ],
+            today(),
+            false,
+        )
+        .with_agent_context(vec![(
+            "claude".to_string(),
+            ContextAccounting {
+                message_bytes: 1_000,
+                tool_result_bytes: 400,
+                tool_result_resent_bytes: 300,
+                large_tool_results: 2,
+            },
+        )]);
+        let out = render(&mut comp, 50, 44);
+        assert!(out.contains("Context · metered only"), "{out}");
+        assert!(out.contains("71% of payload"), "{out}");
+        assert!(out.contains("58% of that"), "{out}");
+        assert!(out.contains("claude"), "{out}");
+        assert!(out.contains("40% tool · 75% re-sent"), "{out}");
+        assert!(out.contains("proxied agents only"), "{out}");
+    }
+
+    /// With no metered traffic the section says so, rather than showing a
+    /// confident 0% that would read as "no waste".
+    #[test]
+    fn unmetered_context_reads_as_unmeasured_not_zero() {
+        let mut comp = Stats::new(
+            vec![bucket("2026-08-25", stats::SESSIONS, 1)],
+            today(),
+            false,
+        );
+        let out = render(&mut comp, 50, 44);
+        assert!(out.contains("no metered requests in this window"), "{out}");
+        assert!(!out.contains("0% of payload"), "{out}");
     }
 
     #[test]

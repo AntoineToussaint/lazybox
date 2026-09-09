@@ -168,6 +168,9 @@ impl UsageAccumulator {
             cache_creation_input_tokens: self.merged.cache_creation,
             cache_read_input_tokens: self.merged.cache_read,
             cost_usd_micros,
+            // Filled in by the proxy from the *request* body (#1606); this
+            // parser only ever sees the response.
+            context: None,
         })
     }
 

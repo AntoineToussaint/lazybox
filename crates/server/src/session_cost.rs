@@ -75,6 +75,7 @@ mod tests {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             cost_usd_micros: Some(cost_micros),
+            context: None,
         }
     }
 

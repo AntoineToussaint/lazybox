@@ -2060,11 +2060,11 @@ pub struct PublishedContract {
     /// into a Worker preamble, and is the watermark that stops a *surviving
     /// older* note from overwriting the row once retention has taken the newer
     /// one. It never orders two notes inside one millisecond — the text
-    /// comparison in [`latch_published_contracts`] does that.
+    /// comparison in `latch_published_contracts` does that.
     pub published_at: i64,
     /// Unix ms the first publication was observed, compared against the epic
     /// record's `created_at` to tell this epic apart from an earlier one that
-    /// shared its name (see [`latch_published_contracts`]).
+    /// shared its name (see `latch_published_contracts`).
     pub since: i64,
     /// The published interface itself, so a consumer's Worker preamble can
     /// still quote it once the note is gone.
@@ -2534,8 +2534,7 @@ pub fn review_blocks_merge(config: &ServerConfig, key: &WorkspaceKey) -> bool {
 /// one agent stall every other agent's `post_note` behind a full recompute
 /// just by posting.
 pub(crate) async fn on_note_posted(config: &ServerConfig, note: &crate::mcp::Note) {
-    let contract =
-        note.tags.iter().any(|t| t == CONTRACT_TAG) && latch_note_contract(config, note);
+    let contract = note.tags.iter().any(|t| t == CONTRACT_TAG) && latch_note_contract(config, note);
     // Recorded before the branch, not inside it: a note carrying both a
     // contract and a verdict must land the verdict and then recompute once,
     // rather than recomputing on the contract with the verdict still unwritten
@@ -4941,11 +4940,23 @@ mod tests {
         };
         // v1 -> the producer's own scope.
         let v1 = mk("a", 100, "GET /v1/thing -> {id}");
-        config.store.set_kv("lazybox:note:a:000000000001", &serde_json::to_string(&v1).unwrap()).unwrap();
+        config
+            .store
+            .set_kv(
+                "lazybox:note:a:000000000001",
+                &serde_json::to_string(&v1).unwrap(),
+            )
+            .unwrap();
         on_note_posted(&config, &v1).await;
         // v2 -> global, the correction.
         let v2 = mk("global", 200, "GET /v1/thing -> {id, etag}");
-        config.store.set_kv("lazybox:note:global:000000000001", &serde_json::to_string(&v2).unwrap()).unwrap();
+        config
+            .store
+            .set_kv(
+                "lazybox:note:global:000000000001",
+                &serde_json::to_string(&v2).unwrap(),
+            )
+            .unwrap();
         on_note_posted(&config, &v2).await;
 
         let before = latched_row(&config, "a");
@@ -4953,7 +4964,10 @@ mod tests {
         assert_eq!(before.revision, 2);
 
         // global rolls over; v2 is evicted, v1 survives in scope "a".
-        config.store.delete_kv("lazybox:note:global:000000000001").unwrap();
+        config
+            .store
+            .delete_kv("lazybox:note:global:000000000001")
+            .unwrap();
         recompute_all(&config).await;
 
         let after = latched_row(&config, "a");
@@ -4961,10 +4975,7 @@ mod tests {
             after.text, "GET /v1/thing -> {id, etag}",
             "the latched interface must not revert to the superseded note"
         );
-        assert_eq!(
-            after.revision, 2,
-            "and an eviction is not a re-publication"
-        );
+        assert_eq!(after.revision, 2, "and an eviction is not a re-publication");
     }
 
     /// The single latched row for `producer`, whatever epic it belongs to.

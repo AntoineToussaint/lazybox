@@ -75,7 +75,9 @@ to hand-regenerate. Any conflict outside the generated dir stops the rebase for
 manual resolution — the tool only ever automates the mechanical regenerate step,
 never a real code merge. Running `make rebase-main` again once you have resolved
 and staged that conflict rejoins the stopped rebase and finishes the generated
-half, so the mechanical step never falls back to you.
+half. It only rejoins a rebase it could have started itself — one replaying onto
+`origin/main` with plain picks left — and refuses to touch any other rebase you
+have in flight.
 
 ## Terminal transport
 

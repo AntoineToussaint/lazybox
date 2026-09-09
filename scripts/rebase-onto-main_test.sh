@@ -63,6 +63,12 @@ rebase_in_progress() {
 	[ -d "$CLONE/$(git -C "$CLONE" rev-parse --git-path rebase-merge)" ]
 }
 
+OUT=""
+# Run and keep the output, for assertions about what the script *claims*.
+run_script_capture() { OUT="$WORK/out.txt"; run_script > "$OUT" 2>&1; }
+
+said() { grep -q "$1" "$OUT"; }
+
 # ── Case 1: a contract-only conflict is auto-resolved and the script finishes ──
 t1="$WORK/t1"; mkdir -p "$t1"; setup_repo "$t1"
 git -C "$CLONE" checkout -q -b feature
@@ -124,9 +130,10 @@ rebase_in_progress || \
 	fail "case 3: first run should leave the rebase stopped, not abort it"
 printf 'src resolved\n' > "$CLONE/src.txt"        # hand-resolve the code half
 git -C "$CLONE" add src.txt
-if ! run_script >/dev/null 2>&1; then
+if ! run_script_capture; then
 	fail "case 3: re-run should rejoin the stopped rebase and finish it"
 fi
+said "auto-regenerated" || fail "case 3: should report the contract regeneration"
 rebase_in_progress && fail "case 3: rebase left in progress"
 [ "$(git -C "$CLONE" rev-parse --abbrev-ref HEAD)" = feature ] || \
 	fail "case 3: not back on the feature branch"
@@ -147,12 +154,17 @@ git -C "$CLONE" commit -qam main
 git -C "$CLONE" push -q origin main
 git -C "$CLONE" checkout -q feature
 
-run_script >/dev/null 2>&1 || true               # bails on the code conflict
+if run_script >/dev/null 2>&1; then
+	fail "case 4: first run should bail on the code conflict"
+fi
+rebase_in_progress || fail "case 4: first run should leave the rebase stopped"
 printf 'src resolved\n' > "$CLONE/src.txt"
 git -C "$CLONE" add src.txt                      # nothing unmerged left
-if ! run_script >/dev/null 2>&1; then
+if ! run_script_capture; then
 	fail "case 4: re-run with everything staged should continue the rebase"
 fi
+said "auto-regenerated" && \
+	fail "case 4: claimed a contract regeneration that never happened"
 rebase_in_progress && fail "case 4: rebase left in progress"
 [ "$(cat "$CLONE/src.txt")" = "src resolved" ] || \
 	fail "case 4: hand-resolved file was not preserved"
@@ -165,5 +177,125 @@ if run_script >/dev/null 2>&1; then
 	fail "case 5: detached HEAD without a rebase should still exit non-zero"
 fi
 echo "PASS case 5: detached HEAD without a rebase still refuses"
+
+
+# ── Case 6: a rebase this script did not start is refused, not hijacked ───────
+# Before the ownership guard the resume path joined *any* stopped rebase, drove
+# it to completion and reported "rebased onto origin/main" — for a branch that
+# was not on origin/main at all.
+t6="$WORK/t6"; mkdir -p "$t6"; setup_repo "$t6"
+git -C "$CLONE" checkout -q -b sidebranch
+printf 'src side\n' > "$CLONE/src.txt"; git -C "$CLONE" commit -qam side
+git -C "$CLONE" checkout -q main; git -C "$CLONE" checkout -q -b feature
+printf 'src feat\n' > "$CLONE/src.txt"; git -C "$CLONE" commit -qam feat
+git -C "$CLONE" checkout -q main
+printf 'MAIN\n' > "$CLONE/moved.txt"                # origin/main is somewhere else
+git -C "$CLONE" add -A; git -C "$CLONE" commit -qm mainmoved
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feature
+git -C "$CLONE" rebase sidebranch >/dev/null 2>&1 || true   # someone else's rebase
+rebase_in_progress || fail "case 6: setup did not stop a rebase onto sidebranch"
+printf 'src resolved\n' > "$CLONE/src.txt"; git -C "$CLONE" add src.txt
+before="$(git -C "$CLONE" rev-parse feature)"
+if run_script_capture; then
+	fail "case 6: script hijacked a rebase it did not start"
+fi
+said "did not start" || fail "case 6: should say whose rebase it is"
+rebase_in_progress || fail "case 6: script disturbed the other rebase"
+[ "$(git -C "$CLONE" rev-parse feature)" = "$before" ] || \
+	fail "case 6: script moved the branch of someone else's rebase"
+git -C "$CLONE" rebase --abort >/dev/null 2>&1 || true
+echo "PASS case 6: a foreign rebase is refused and left untouched"
+
+# ── Case 7: an interactive rebase onto origin/main is refused too ─────────────
+# Same `onto`, so only the todo distinguishes it: driving it on would run the
+# remaining `reword` under GIT_EDITOR=true and silently keep the old message.
+cat > "$WORK/seq-reword.sh" <<'EOS'
+#!/bin/sh
+awk 'NR==2 && /^pick/ { sub(/^pick/, "reword") } { print }' "$1" > "$1.new"
+mv "$1.new" "$1"
+EOS
+chmod +x "$WORK/seq-reword.sh"
+t7="$WORK/t7"; mkdir -p "$t7"; setup_repo "$t7"
+git -C "$CLONE" checkout -q -b feature
+printf 'src feat\n' > "$CLONE/src.txt"; git -C "$CLONE" commit -qam feat1
+printf 'more\n' > "$CLONE/extra.txt"; git -C "$CLONE" add -A
+git -C "$CLONE" commit -qm feat2
+git -C "$CLONE" checkout -q main
+printf 'src main\n' > "$CLONE/src.txt"; git -C "$CLONE" commit -qam main
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feature
+GIT_SEQUENCE_EDITOR="$WORK/seq-reword.sh" \
+	git -C "$CLONE" rebase -i origin/main >/dev/null 2>&1 || true
+rebase_in_progress || fail "case 7: setup did not stop an interactive rebase"
+printf 'src resolved\n' > "$CLONE/src.txt"; git -C "$CLONE" add src.txt
+if run_script_capture; then
+	fail "case 7: script drove an interactive rebase with a pending reword"
+fi
+said "plain picks" || fail "case 7: should say why the todo disqualifies it"
+git -C "$CLONE" rebase --abort >/dev/null 2>&1 || true
+echo "PASS case 7: an interactive rebase onto origin/main is refused"
+
+# ── Case 8: origin/main moving mid-resolve does not lock us out of our own ────
+# The rebase's `onto` is the origin/main of when it started. A fetch landing
+# while you resolve must not turn the resume into "not my rebase".
+t8="$WORK/t8"; mkdir -p "$t8"; setup_repo "$t8"
+git -C "$CLONE" checkout -q -b feature
+printf 'src feat\n' > "$CLONE/src.txt"
+printf 'GEN feat\n' > "$CLONE/$GEN/contract.txt"
+git -C "$CLONE" commit -qam feat
+git -C "$CLONE" checkout -q main
+printf 'src main\n' > "$CLONE/src.txt"
+printf 'GEN main\n' > "$CLONE/$GEN/contract.txt"
+git -C "$CLONE" commit -qam main
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feature
+run_script >/dev/null 2>&1 && fail "case 8: first run should bail"
+# a sibling checkout pushes while we resolve, then our tracking ref catches up
+git clone -q "$ORIGIN" "$t8/pusher" 2>/dev/null
+git -C "$t8/pusher" config user.email t@t.com; git -C "$t8/pusher" config user.name t
+printf 'later\n' > "$t8/pusher/later.txt"
+git -C "$t8/pusher" add -A; git -C "$t8/pusher" commit -qm later
+git -C "$t8/pusher" push -q origin HEAD:main
+git -C "$CLONE" fetch -q origin
+printf 'src resolved\n' > "$CLONE/src.txt"; git -C "$CLONE" add src.txt
+if ! run_script_capture; then
+	fail "case 8: a moved origin/main locked us out of our own rebase"
+fi
+said "has moved on" || fail "case 8: should warn the base is stale"
+rebase_in_progress && fail "case 8: rebase left in progress"
+echo "PASS case 8: resume survives a moved origin/main, and says the base is stale"
+
+# ── Case 9: --continue is never retried against unchanged state ───────────────
+# Fault-injected: a git shim fails every `rebase --continue` and counts them.
+# One pass regenerates the contract and continues (attempt 1); the next pass
+# finds nothing unmerged and must bail, not spend the resume allowance again.
+t9="$WORK/t9"; mkdir -p "$t9"; setup_repo "$t9"
+REAL_GIT="$(command -v git)"
+SHIM="$t9/shim"; mkdir -p "$SHIM"; COUNT="$t9/continues"; : > "$COUNT"
+cat > "$SHIM/git" <<EOS
+#!/bin/sh
+if [ "\$1" = rebase ] && [ "\$2" = --continue ]; then
+	echo attempt >> "$COUNT"
+	exit 1
+fi
+exec "$REAL_GIT" "\$@"
+EOS
+chmod +x "$SHIM/git"
+git -C "$CLONE" checkout -q -b feature
+printf 'GEN feat\n' > "$CLONE/$GEN/contract.txt"; git -C "$CLONE" commit -qam feat
+git -C "$CLONE" checkout -q main
+printf 'GEN main\n' > "$CLONE/$GEN/contract.txt"; git -C "$CLONE" commit -qam main
+git -C "$CLONE" push -q origin main
+git -C "$CLONE" checkout -q feature
+git -C "$CLONE" rebase origin/main >/dev/null 2>&1 || true   # stop, then resume
+rebase_in_progress || fail "case 9: setup did not stop on the contract conflict"
+( cd "$CLONE" && PATH="$SHIM:$PATH" ${TIMEOUT[@]+"${TIMEOUT[@]}"} bash "$SCRIPT" ) \
+	>/dev/null 2>&1 && fail "case 9: script should bail once --continue fails"
+attempts="$(wc -l < "$COUNT" | tr -d ' ')"
+[ "$attempts" = 1 ] || \
+	fail "case 9: --continue attempted $attempts times, expected exactly 1"
+git -C "$CLONE" rebase --abort >/dev/null 2>&1 || true
+echo "PASS case 9: --continue is attempted once, never retried unchanged"
 
 echo "OK: rebase-onto-main.sh regression tests passed"

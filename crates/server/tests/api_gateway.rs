@@ -1468,6 +1468,10 @@ async fn next_terminal_frame(body: &mut api_gateway::Body) -> DecodedTerminalFra
     }
 }
 
+/// How long the sustained-output wait tolerates a real PTY emitting nothing
+/// at all before calling the fixture broken.
+const PTY_OUTPUT_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
@@ -1566,25 +1570,37 @@ async fn desktop_runtime_real_pty_handles_backpressure_reconnect_replay_and_resy
     assert_eq!(response.status(), StatusCode::OK);
     let _command_stream = response.into_body();
 
-    let output_snapshot = tokio::time::timeout(std::time::Duration::from_secs(30), async {
-        loop {
-            let snapshot = config
-                .backend
-                .snapshot(&backend_key)
-                .await
-                .expect("snapshot real PTY");
-            if snapshot.last_seq > lazybox_ipc::EVENT_CHANNEL_CAPACITY as u64
-                && contains_bytes(&snapshot.replay, b"__LB_END__")
-                && contains_bytes(&snapshot.replay, b"__LB_INPUT__desktop-input")
-            {
-                break snapshot;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // The fixture paces 4000 lines through an external `sleep` apiece, so how
+    // long it takes to fill the ring is a property of the box, not of the code
+    // under test — a budget sized off an idle run expires under a loaded one
+    // while the PTY is still healthily producing. Wait on progress instead:
+    // only a PTY that has stopped emitting chunks fails, and it says which of
+    // the three conditions it stopped short of.
+    let mut observed_seq = 0;
+    let mut idle_since = std::time::Instant::now();
+    loop {
+        let snapshot = config
+            .backend
+            .snapshot(&backend_key)
+            .await
+            .expect("snapshot real PTY");
+        let saw_end = contains_bytes(&snapshot.replay, b"__LB_END__");
+        let saw_input = contains_bytes(&snapshot.replay, b"__LB_INPUT__desktop-input");
+        if snapshot.last_seq > lazybox_ipc::EVENT_CHANNEL_CAPACITY as u64 && saw_end && saw_input {
+            break;
         }
-    })
-    .await
-    .expect("sustained PTY command completes");
-    assert!(output_snapshot.last_seq > lazybox_ipc::EVENT_CHANNEL_CAPACITY as u64);
+        if snapshot.last_seq > observed_seq {
+            observed_seq = snapshot.last_seq;
+            idle_since = std::time::Instant::now();
+        }
+        assert!(
+            idle_since.elapsed() < PTY_OUTPUT_STALL_TIMEOUT,
+            "real PTY stopped producing at seq {observed_seq} (needs > {}); \
+             end marker: {saw_end}, input echo: {saw_input}",
+            lazybox_ipc::EVENT_CHANNEL_CAPACITY,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 
     let mut saw_size = false;
     let mut saw_begin = false;

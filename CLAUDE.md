@@ -173,6 +173,15 @@ crates/
   with `gh` and `git`. Lazybox does not wrap *repo actions* behind an
   MCP/tool-approval layer — the agent has the same tools it would in any
   other worktree.
+- **The tracker record is the workspace**: every GitHub issue / PR and every
+  Linear / Jira ticket gets exactly one workspace from the poll, and work on
+  it happens *there* — an agent, a coordinator, the CLI, or the JSON gateway
+  must attach to that workspace (or file the issue first and let the poll
+  open it), never create a separate named workspace beside it. Named /
+  local workspaces (`x n`, `lazybox workspace create --name`) are for
+  repo-less scratch only. A side workspace splits the branch, the activity,
+  the cost, and the epic graph across two rows the fleet can't reconcile
+  (#1586).
 - **Cross-agent coordination bus** (`crates/server/src/mcp.rs`, #1420/#1433):
   the one MCP server lazybox *does* ship is a coordination surface, not a
   repo-action wrapper. Each spawned Claude session gets a per-session bearer

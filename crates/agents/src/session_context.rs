@@ -50,8 +50,11 @@ Handles beyond `git`/`gh`:\n\
   - `lazybox log` streams a noisy command to its own window instead of your context \
 — `cargo test 2>&1 | lazybox log --title tests`. Background long-running pipes with \
 a trailing `&` or they block your turn; `lazybox log --close-all` clears them.\n\
-  - `lazybox workspace create --name \"…\" [--agent claude]` starts a fresh line of \
-work — reach for it instead of filing an issue.\n\
+  - The tracker record IS the workspace: each GitHub issue / PR or Linear / Jira \
+ticket already has one lazybox workspace, and work on it happens there. To start new \
+work, file the issue (`gh issue create`, `--parent <n>` under an epic); never \
+`lazybox workspace create --name` beside a tracked item — that is repo-less scratch \
+only.\n\
   - Snippets (`]]s`, `~/.lazybox/snippets.yaml`) and skills (`.claude/skills/`) drive \
 you; a prompt you did not type yourself may have come from one.\n\
   - Work on the branch lazybox checked out for you; if you create another one, lazybox \
@@ -138,6 +141,8 @@ mod tests {
             "auto-merge",
             "auto-fix",
             "lazybox workspace create",
+            "gh issue create",
+            "tracker record IS the workspace",
             // #1572: an agent switching branches inside its worktree is a
             // common habit lazybox now adopts rather than fights — but a
             // worktree left on `main` still can't be adopted, so the one

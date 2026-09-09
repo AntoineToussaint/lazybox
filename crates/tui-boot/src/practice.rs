@@ -102,17 +102,10 @@ const ENV: &str = "LAZYBOX_HOME";
 mod tests {
     use super::*;
 
-    /// Guards the shared `LAZYBOX_HOME` env var so these tests don't race each
-    /// other or the config-crate suites.
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
     #[test]
     fn sandbox_redirects_paths_then_restores() {
-        let _guard = env_lock();
-        // SAFETY: single-threaded test, guarded by env_lock.
+        let _guard = crate::test_env::lock();
+        // SAFETY: single-threaded test, guarded by the env lock.
         unsafe { std::env::set_var(ENV, "/tmp/lazybox-practice-real-home") };
 
         let sandbox = PracticeSandbox::enter().expect("enter sandbox");
@@ -144,8 +137,8 @@ mod tests {
 
     #[test]
     fn sandbox_restores_an_unset_var_to_unset() {
-        let _guard = env_lock();
-        // SAFETY: single-threaded test, guarded by env_lock.
+        let _guard = crate::test_env::lock();
+        // SAFETY: single-threaded test, guarded by the env lock.
         unsafe { std::env::remove_var(ENV) };
 
         let sandbox = PracticeSandbox::enter().expect("enter sandbox");

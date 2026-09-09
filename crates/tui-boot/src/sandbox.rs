@@ -1099,6 +1099,9 @@ mod tests {
 
     #[test]
     fn resolve_provider_takes_flags_over_config() {
+        // The tfstate path is derived from the process-global state root and
+        // asserted against it below — pin it against a sibling redirect.
+        let _root = crate::test_env::PinnedStateRoot::enter();
         let sc = SandboxConfig {
             terraform_dir: Some(PathBuf::from("/cfg/tf")),
             remote_socket: Some("/cfg.sock".into()),
@@ -1155,6 +1158,10 @@ mod tests {
 
     #[test]
     fn resolve_auth_is_ambient_by_default_and_scopes_when_configured() {
+        // The scoped gcloud config dir is derived from the process-global
+        // state root and asserted against it below — pin it against a
+        // sibling redirect.
+        let _root = crate::test_env::PinnedStateRoot::enter();
         // Nothing configured → ambient: no scoped config dir (gcloud stays on
         // the user's own config), the legacy path.
         let ambient = resolve_auth(&SandboxConfig::default(), &mut vec![]);

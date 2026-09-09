@@ -672,6 +672,10 @@ mod tests {
 
     #[test]
     fn provider_derives_a_dedicated_local_and_convention_remote_socket() {
+        // Both the derivation and the assertions below read the
+        // process-global state root; pin it so a sibling test redirecting
+        // `LAZYBOX_HOME` between them can't flip the answer.
+        let _root = crate::test_env::PinnedStateRoot::enter();
         // The product path leaves remote_socket unset → the box-relative
         // convention; the local socket is dedicated under the state root,
         // never the `--connect` socket.

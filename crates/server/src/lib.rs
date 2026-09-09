@@ -137,6 +137,7 @@ pub mod metrics;
 pub mod polling;
 pub mod proxy;
 pub mod pty;
+pub mod read_intercept;
 pub mod registries;
 mod resource_limits;
 pub mod session_cost;
@@ -540,6 +541,11 @@ pub struct ServerConfig {
     /// worktree removals) so shutdown can wait for them — see
     /// `register_maintenance_latch` / `drain_maintenance_tasks`.
     pub(crate) maintenance_done: Arc<parking_lot::Mutex<Vec<tokio::sync::oneshot::Receiver<()>>>>,
+    /// Cheap-model condenser for the context-hygiene enforcement points
+    /// (#1611). Registered at daemon start once the summarizer service
+    /// (#1608) is available; `None` means the `PreToolUse` large-read
+    /// intercept has nothing to redirect a read to and always allows.
+    pub condenser: Option<Arc<dyn read_intercept::Condense>>,
     /// MCP cross-agent coordination runtime (#1420): the per-session bearer
     /// → `SessionKey` registry the MCP server reads to identify a tool caller,
     /// and the bound endpoint URL set once [`mcp::start`] runs. Shared (Arc)
@@ -685,6 +691,7 @@ impl ServerConfig {
             worktree_ownership_lock: Arc::new(Mutex::new(())),
             provisioning_worktree_claims: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             maintenance_done: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            condenser: None,
             mcp: Arc::new(mcp::McpRuntime::default()),
         }
     }
@@ -1145,6 +1152,7 @@ impl Server {
                         lazybox_ipc::Command::CancelSpawn { .. } => "CancelSpawn",
                         lazybox_ipc::Command::Close { .. } => "Close",
                         lazybox_ipc::Command::IngestHook { .. } => "IngestHook",
+                        lazybox_ipc::Command::DecideToolUse { .. } => "DecideToolUse",
                         lazybox_ipc::Command::CreateSession { .. } => "CreateSession",
                         lazybox_ipc::Command::Subscribe => "Subscribe",
                         lazybox_ipc::Command::Refresh => "Refresh",
@@ -2056,6 +2064,20 @@ pub async fn dispatch_command(
             backend_key,
         } => {
             spawn_handler::handle_ingest_hook(config, terminal_id, backend_key, hook).await;
+        }
+        lazybox_ipc::Command::DecideToolUse {
+            backend_key,
+            request,
+            client_request_id,
+        } => {
+            read_intercept::handle_decide_tool_use(
+                config,
+                tx,
+                backend_key,
+                request,
+                client_request_id,
+            )
+            .await;
         }
         lazybox_ipc::Command::StartAgentRun {
             request_id,

@@ -336,9 +336,19 @@ as "do not act on this row unattended", the working-claim exclusion, and
 the SpawnCoordinator. A `Contract: owner/repo#N` marker adds a
 `Contract` edge satisfied by the producer posting a `contract` +
 `epic:<key>` note (not by its task closing) — an unsatisfied one keeps
-the consumer blocked with reason `contract`, and the newest note is
+the consumer blocked with reason `contract`, and the contract is
 quoted into the consumer's Worker preamble behind an
-`<untrusted-content>` fence. `Shift-P` cycle
+`<untrusted-content>` fence. The first sighting of that note is
+**latched** into an `epic-contract:<epic>:<producer>` row (#1577), so
+the blackboard's rolling retention evicting it neither re-blocks the
+consumer nor empties the Worker's brief. The row outlives its epic
+disappearing (it is the only surviving copy of the interface) and is
+written even when the epic is archived at the time; a surviving *older*
+note never overwrites it, since retention prunes per scope while the
+scan reads every scope. Publishing a *changed* interface bumps its
+`revision`; a row or note predating the epic record is dropped, so a
+later epic reusing a name inherits nothing from the earlier one; and a
+`contract` note only drives a recompute when it names a live epic. `Shift-P` cycle
 the activity pane full → summary (a slim one-line count of new activity /
 failing CI) → hidden → full, remembered per workspace with a
 `ui.activity_pane_default` starting mode (auto-hidden when the workspace

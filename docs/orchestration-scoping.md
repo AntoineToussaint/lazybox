@@ -526,9 +526,56 @@ capped per scope while scopes are not (one per session), so a fleet-sized
 blackboard would turn an N-epic recompute into N full scans on the 300 ms
 debounce path. The buckets are keyed by epic because a contract published for
 one epic says nothing about another epic's interface.
-The consumer's Worker preamble quotes the newest note per producer inside an
+
+That scan does not *decide* satisfaction, it only **latches** it (#1577). The
+blackboard is a rolling buffer — `post_note` prunes each scope to its newest
+`NOTES_PER_SCOPE` entries — so a producer that keeps posting evicts its own
+contract note, and `global` fills faster still. Re-deriving satisfaction from
+the notes alone therefore un-satisfies an interface that was genuinely agreed:
+the consumer flips back to `Blocked` long after the fact, and with `AUTO` armed
+a Worker already dispatched on it sits behind a blocker nobody raised. So the
+first sighting writes an `epic-contract:<epic>:<producer>` row
+(`PublishedContract`) and satisfaction reads the rows; the note is only how a
+contract arrives. A row is **never dropped because its epic went away** — the
+difference between it and the review rows next door, which are a cache the next
+green run rebuilds. Once the note is evicted the row holds the only copy of an
+interface another agent wrote, so an epic-lifecycle prune destroyed it
+irrecoverably. Latching is likewise blind to archival: an interface published
+while its epic happens to be archived still has to leave a row, or retention
+takes the only other copy and the consumer blocks on `contract` forever with
+nothing left to republish it. Liveness gates *satisfaction*, never the record.
+
+Two comparisons decide what a row holds. `published_at` is a **watermark**: the
+row never moves backwards, because retention prunes per scope while the scan
+reads every scope, so the newest note can be evicted while an older one
+survives elsewhere — without the watermark the row silently reverted to the
+superseded interface and bumped its revision as though the producer had
+republished. Among notes that pass the watermark the **interface text** decides,
+not the clock: notes are ordered by `(ts, seq)`, a row carries no `seq`, so a
+pure `ts` test dropped a correction posted in the same millisecond as its first
+draft.
+
+The one row that *is* dropped is one first seen before its epic record existed.
+An epic key is `slugify(name)`, so a later, unrelated epic created under the
+same name is the same key and used to inherit its predecessor's interfaces —
+satisfying a consumer's edge and quoting another project's spec into its
+Worker. `since` against the record's `created_at` tells the two apart (notes
+older than the record are ignored for the same reason, or the dropped row would
+simply re-latch), and dropping the loser is also the only bound on the rows.
+The cost is that re-creating an epic under a name it held before asks each
+producer to republish — one `post_note`, and a visible `contract` blocker until
+they do, which is the cheap failure next to a Worker silently building against
+another project's interface.
+
+Posting a contract latches and recomputes at the write, the recompute gated on
+the note naming a live epic — `post_note` holds the blackboard's process-wide
+write lock across that call and `recompute_all` spawns agents and calls GitHub,
+so an ungated tag let one agent stall every other agent's `post_note`.
+The consumer's Worker preamble quotes each producer's latest contract inside an
 `<untrusted-content source="agent-authored contract">` fence — a specification
-to satisfy, never instructions to follow.
+to satisfy, never instructions to follow. It reads the rows too, so a Worker
+dispatched after the note aged out is still briefed with the interface rather
+than with nothing.
 
 **Surfaces.** `E A` / `E R` / `E M` toggle the latches on the cursor
 workspace's epic, and the `g p` policies menu grows an epic section (three
@@ -570,8 +617,12 @@ dispatch — `spawn_worker` across boxes still needs the remote-spawn path.
    for status (the daemon sees all sessions) but `spawn_worker` across boxes
    needs the remote-spawn path; still deferred after P4, which dispatches
    locally only.
-6. **Contract granularity** — P4 satisfies a `Contract` edge on the *existence*
-   of a `contract` + `epic:<key>` note from the producer, not on its content
-   matching anything. A producer that posts a placeholder unblocks its
-   consumer. Tightening that (a versioned contract, a Reviewer check against
-   it) is deliberately out of scope until the loose form has been dogfooded.
+6. **Contract granularity** — a `Contract` edge is satisfied by the *existence*
+   of a published contract, not by its content matching anything. A producer
+   that posts a placeholder unblocks its consumer. **Partly decided (#1577):**
+   the persisted `PublishedContract` row carries a `revision` (bumped whenever
+   the producer publishes a *changed* interface) and the interface text, so a
+   re-published contract is visible in the log instead of changing under its
+   consumers in silence, and a later content-aware gate has a version to read.
+   The gate itself stays loose — satisfaction still turns on the row existing —
+   until the loose form has been dogfooded.

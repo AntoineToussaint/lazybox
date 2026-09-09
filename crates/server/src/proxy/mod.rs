@@ -541,20 +541,66 @@ mod tests {
     async fn bind_listener_reuses_the_persisted_port_across_a_restart() {
         let config = crate::ServerConfig::in_memory();
 
-        // First daemon: nothing persisted → ephemeral port, now persisted.
-        let (first, port) = bind_listener(&config).await.expect("first bind");
-        assert_eq!(restore_port(&config).await, Some(port));
-        drop(first);
+        // The freed port is only ours to reclaim if nothing else on the host
+        // takes it in the window between the drop and the rebind — and a
+        // just-released ephemeral port is exactly what the next ephemeral
+        // bind anywhere on the box is handed. `bind_listener` answers a lost
+        // race by falling back to a fresh port, which is correct behaviour
+        // but indistinguishable here from "reuse is broken", so retry on a
+        // fresh port instead of asserting we win the race.
+        //
+        // The budget is larger than the sibling `mcp::bind_loopback` test's:
+        // that one closes its window with a bare syscall, while
+        // `bind_listener` reads the store before binding, so a
+        // `spawn_blocking` hop sits inside this window and widens it under
+        // exactly the load that loses the race.
+        //
+        // Each round demands the port back twice. Reuse that works wins both
+        // rebinds; a `bind_listener` that stopped threading the persisted
+        // value through would have to be handed the same ephemeral port by
+        // coincidence twice over, so retrying cannot buy a regression a
+        // lucky draw.
+        let mut reclaimed = None;
+        for _ in 0..32 {
+            // Whatever is persisted now is what this binds and re-persists:
+            // nothing on the first round, the previous round's fallback on
+            // every round after it.
+            let (first, port) = bind_listener(&config).await.expect("first bind");
+            assert_eq!(
+                restore_port(&config).await,
+                Some(port),
+                "the bound port must be persisted for the next restart"
+            );
+            drop(first);
 
-        // Second daemon on the same store: same port comes back.
-        let (second, reused) = bind_listener(&config).await.expect("rebind");
-        assert_eq!(reused, port, "the persisted port is reused after a restart");
+            // Second daemon on the same store: same port comes back.
+            let (second, reused) = bind_listener(&config).await.expect("rebind");
+            if reused != port {
+                continue;
+            }
+            drop(second);
+            let (third, again) = bind_listener(&config).await.expect("second rebind");
+            if again == port {
+                reclaimed = Some((third, port));
+                break;
+            }
+        }
+        let (held, port) = reclaimed.expect(
+            "the persisted port was never reused across a restart — either \
+             bind_listener stopped threading it through, or every attempt \
+             lost the freed port to another process on this host",
+        );
+        assert_eq!(
+            restore_port(&config).await,
+            Some(port),
+            "the reused port must be re-persisted so the next restart converges"
+        );
 
         // Port still held (daemon didn't release it) → fresh port, persisted.
-        let (_third, fallback) = bind_listener(&config).await.expect("fallback bind");
+        let (_fourth, fallback) = bind_listener(&config).await.expect("fallback bind");
         assert_ne!(fallback, port, "a held port falls back to a fresh one");
         assert_eq!(restore_port(&config).await, Some(fallback));
-        drop(second);
+        drop(held);
     }
 
     #[test]

@@ -632,11 +632,15 @@ pub struct GqlComment {
     pub original_line: Option<u32>,
     #[serde(default, rename = "diffHunk")]
     pub diff_hunk: Option<String>,
-    /// Eyes-reaction state for the authenticated viewer. Populated
-    /// by the issues-search query (which selects `reactions(content:
-    /// EYES) { viewerHasReacted }`); other queries leave it `None`.
+    /// Eyes-reaction state for the authenticated viewer. Populated on
+    /// every issue query, which all splice `issue_task_fields!()` and so
+    /// all select `reactions(content: EYES) { viewerHasReacted }`; the PR
+    /// queries leave it `None`, as nothing scans a PR for mentions.
     /// Drives `@lazybox` mention idempotency: lazybox reacts 👀 on first
-    /// sight, then skips comments where this is `Some(true)`.
+    /// sight, then skips comments where this is `Some(true)`. Note the
+    /// failure direction — `None` reads as "unacknowledged", so an issue
+    /// query that stopped selecting this would re-spawn on every poll
+    /// rather than go quiet.
     #[serde(default)]
     pub reactions: Option<GqlReactionView>,
 }
@@ -2299,9 +2303,23 @@ pub fn hot_tasks_body(node_ids: &[String]) -> serde_json::Value {
 /// `parent: None` until unrelated activity moved the probe: the windowed
 /// repo sweep is `updated:>=`-floored, so it would skip the row too, and
 /// only the 30-minute unwindowed reconcile (or `Shift-R`) would heal it.
-/// Probing the edge costs nothing measurable — `parent { number }` is a
-/// plain field, not a `first:`-bounded connection, so it adds no nodes to
-/// the query's cost — and removes the question.
+/// The probe selects the parent's repository as well as its number,
+/// because `issue_to_task` keys the edge on BOTH (`owner/repo#number`).
+/// Watching only the number would leave the probe blind to a cross-repo
+/// re-parent that keeps it: moving a child from `acme/web#7` to
+/// `acme/api#7` produces a byte-identical fingerprint, the full query
+/// never runs, and the store keeps pointing at the old epic — the exact
+/// staleness the paragraph above exists to prevent, in the one place
+/// (#1517's cross-repo epics) where it matters most. A probe must never
+/// be *narrower* than the value it gates; narrower means a wrong value
+/// is written, while wider only means a wasted refetch (`stateReason`
+/// above is deliberately on that safe side).
+///
+/// Probing the edge costs nothing measurable — `parent` and its
+/// `repository` are plain fields, not `first:`-bounded connections, so
+/// they add no nodes to the query's cost. Measured against the live API
+/// over 100 real issue ids: cost 1 with no parent selection, 1 with
+/// `parent { number }`, and 1 with the repository added.
 const HOT_FRESHNESS_QUERY: &str = r#"
 query($ids: [ID!]!) {
   nodes(ids: $ids) {
@@ -2332,7 +2350,7 @@ query($ids: [ID!]!) {
       updatedAt
       state
       stateReason
-      parent { number }
+      parent { number repository { nameWithOwner } }
     }
   }
   rateLimit {
@@ -3593,17 +3611,37 @@ pub struct GqlIssue {
     /// is native and authoritative — the child names the parent by
     /// number and repo.
     ///
-    /// `default` covers a *response* that carries no `parent` key — the
-    /// PR search, which deserializes into this struct without selecting
-    /// it. It does NOT make an older GHES safe, and the queries must not
-    /// be written as if it did: a GraphQL server that has never heard of
+    /// `default` is pure belt-and-braces today: it covers a *response*
+    /// that carries no `parent` key, and no live response is one — all
+    /// three queries that deserialize a `GqlIssue` splice
+    /// `issue_task_fields!()`, and every issue search is
+    /// `is:issue`-qualified, so no PR ever lands in this struct.
+    ///
+    /// It does NOT make an older GHES safe, and the queries must not be
+    /// written as if it did: a GraphQL server that has never heard of
     /// `Issue.parent` rejects the field at document *validation*, so the
-    /// whole query fails and serde never runs. On such a host the shared
-    /// `nodes(ids:)` hot query — which serves PRs too — fails as a unit
-    /// until `HOT_BATCH_REJECTION_THRESHOLD` consecutive failures
-    /// (`GhClient::hot_batch_rejected`) degrade the hot set to per-target
-    /// fetches. That fallback is what bounds the damage; `serde(default)`
-    /// contributes nothing to it.
+    /// whole query fails and serde never runs.
+    ///
+    /// Be precise about what that costs, because the obvious reassurance
+    /// is wrong. `GhClient::hot_batch_rejected` does NOT rescue issues:
+    /// it degrades the hot set to per-target fetches, and the per-target
+    /// issue fetch is `SINGLE_ISSUE_QUERY`, which splices this same block
+    /// and therefore demands the same field (asserted by
+    /// `issue_queries_splice_one_shared_selection_set`). The fallback
+    /// swaps one rejected document for another.
+    ///
+    /// What it does bound is PRs. Every issue-producing query —
+    /// `ISSUES_QUERY` for discovery, `SINGLE_ISSUE_QUERY` for the
+    /// notification refresh — already selected `parent` before it reached
+    /// the hot path, so on such a host no issue ever enters the store and
+    /// none is ever a hot target. The damage is that the Issue fragment
+    /// invalidates the *shared* `nodes(ids:)` document, taking PR hot
+    /// refresh down with it for `HOT_BATCH_REJECTION_THRESHOLD` ticks
+    /// until the latch trips and PRs continue one at a time via
+    /// `SINGLE_PR_QUERY`, which selects no `parent`. Issues are simply
+    /// unavailable on that host, with or without this field.
+    ///
+    /// `serde(default)` contributes nothing to any of that.
     #[serde(default)]
     pub parent: Option<GqlIssueParent>,
 }
@@ -3878,6 +3916,19 @@ fn issue_links_to_task_ids(links: &[lazybox_core::IssueLink], own_repo: &str) ->
 
 #[cfg(test)]
 mod tests {
+    /// Collapse every run of whitespace to one space, so a query
+    /// assertion pins the SELECTION rather than its indentation.
+    ///
+    /// The guards below match against this form deliberately. Matching
+    /// raw text couples them to formatting in both directions: a query
+    /// reformatted onto multiple lines fails a guard whose field IS
+    /// selected (a false alarm that trains people to loosen the guard),
+    /// and a guard written against one line silently stops covering a
+    /// selection that moved onto two.
+    fn squeeze(query: &str) -> String {
+        query.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
     use super::*;
 
     fn gql_error(message: &str, error_type: Option<&str>, extensions: Option<&str>) -> GqlError {
@@ -4330,11 +4381,122 @@ mod tests {
         }
     }
 
-    /// The shared block must carry every field `issue_to_task` reads. A
-    /// field dropped here is not a compile error and not a deserialization
-    /// error — it is an empty value written over good stored state.
+    /// The list above is hand-maintained, which is the very shape this
+    /// change exists to abolish: a FOURTH query that deserializes a
+    /// `GqlIssue` without splicing the block would reproduce the original
+    /// bug and pass every guard, because no guard knows it exists.
+    ///
+    /// So close the loop over the source text instead of over a list.
+    /// Every construct in this file that opens an issue selection —
+    /// `... on Issue {` in a fragment, `issue(number:` in a single fetch
+    /// — must be immediately followed by the splice. Adding a query
+    /// without it fails here without anyone remembering to register it.
+    ///
+    /// `HOT_FRESHNESS_QUERY` is carved out by design, not by oversight:
+    /// it is a change *detector*, not a task source. Its response is
+    /// never deserialized into a `GqlIssue` (it stays
+    /// `serde_json::Value`, so the fingerprint is the raw node), and it
+    /// must stay lean — splicing the full block there would defeat the
+    /// two-tier probe. It is exempt because it cannot erase anything.
     #[test]
-    fn issue_task_fields_covers_everything_issue_to_task_reads() {
+    fn no_issue_selection_in_this_file_escapes_the_shared_block() {
+        // Queries live above the test module; `mod tests` also contains
+        // these very tokens inside string literals.
+        let source = include_str!("graphql.rs");
+        let queries = source
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("this file has a test module")
+            .0;
+
+        // Carve out the freshness probe by its own span.
+        let probe_start = queries
+            .find("const HOT_FRESHNESS_QUERY")
+            .expect("the probe is defined in this file");
+        let probe_end = probe_start
+            + queries[probe_start..]
+                .find("\n\"#;")
+                .expect("the probe const terminates")
+            + 4;
+
+        let mut checked = 0;
+        for token in ["... on Issue {", "issue(number:"] {
+            let mut from = 0;
+            while let Some(hit) = queries[from..].find(token) {
+                let at = from + hit;
+                from = at + token.len();
+                if (probe_start..probe_end).contains(&at) {
+                    continue;
+                }
+                // Whatever follows must close the raw string and splice.
+                let tail: String = queries[from..]
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .take(32)
+                    .collect();
+                assert!(
+                    tail.starts_with("$number){\"#,issue_task_fields!()")
+                        || tail.starts_with("\"#,issue_task_fields!()"),
+                    "an issue selection opened by `{token}` at byte {at} does \
+                     not splice issue_task_fields!() — every query that \
+                     deserializes a GqlIssue must share the one selection \
+                     set, or it erases the fields it forgot. Found: {tail}"
+                );
+                // ...and the splice must be the WHOLE selection. Whatever
+                // follows it has to close the fragment immediately (`r#"`
+                // then `}`); anything else is a field grown at one call
+                // site, which is how the sets drifted in the first place.
+                let after = &queries[from
+                    + queries[from..]
+                        .find("issue_task_fields!()")
+                        .expect("splice located above")
+                    + "issue_task_fields!()".len()..];
+                let closing: String = after
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .take(5)
+                    .collect();
+                assert!(
+                    closing.starts_with(",r#\"}"),
+                    "the issue selection opened by `{token}` at byte {at} adds \
+                     fields of its own after the shared block — grow the \
+                     macro, never one call site. Found: {closing}"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(
+            checked, 3,
+            "expected exactly the three issue-producing queries \
+             (ISSUES_QUERY, SINGLE_ISSUE_QUERY, HOT_TASKS_QUERY); found \
+             {checked} issue selections outside the probe. A new one must be \
+             spliced and this count updated deliberately."
+        );
+    }
+
+    /// Pins the fields the shared block is known to owe its consumers —
+    /// `issue_to_task`, which builds the `Task`, and `mentions::scan_issue`,
+    /// which reads the 👀 reactions. A field dropped here is not a compile
+    /// error and not a deserialization error — it is an empty value written
+    /// over good stored state.
+    ///
+    /// Be honest about the direction this covers. It is a REGRESSION guard,
+    /// not a coverage proof: the list is hand-written, so it catches the
+    /// removal of a field someone already knew was needed, and cannot catch
+    /// `issue_to_task` growing a read of a field the block never selected.
+    /// Nothing in Rust lets a test discover what a function reads. The
+    /// protection against that second direction is structural instead —
+    /// there is exactly one block to add the field to, and
+    /// `no_issue_selection_in_this_file_escapes_the_shared_block` makes
+    /// sure no query can quietly opt out of it.
+    ///
+    /// The reaction fields are the sharpest edge of that. Lazybox marks an
+    /// `@lazybox` mention handled by reacting 👀 and skips surfaces where
+    /// `viewerHasReacted` is true; `viewer_has_eyes_reacted(None)` is
+    /// `false`, so a query that stops selecting them does not read as "no
+    /// reaction data" but as "nobody has acknowledged this" — and the
+    /// mention spawns an agent again on every single poll.
+    #[test]
+    fn issue_task_fields_covers_every_field_its_consumers_read() {
         let shared = issue_task_fields!();
         for field in [
             "id",
@@ -4355,12 +4517,30 @@ mod tests {
             "repository { nameWithOwner }",
             // The sub-issue edge — the ticket forest / epic membership.
             "parent { number repository { nameWithOwner } }",
+            // The 👀 idempotency marker `scan_issue` reads. It is selected
+            // twice — issue body and per-comment — in the same words, so
+            // `contains` proves only that one survives; the count assert
+            // below pins both.
+            "reactions(content: EYES) { viewerHasReacted }",
         ] {
             assert!(
                 shared.contains(field),
-                "issue_task_fields! must select `{field}` — issue_to_task reads it"
+                "issue_task_fields! must select `{field}` — issue_to_task \
+                 or scan_issue reads it"
             );
         }
+        // Two distinct reaction selections: the issue body's and the
+        // per-comment one. `contains` alone cannot tell them apart.
+        assert_eq!(
+            shared
+                .matches("reactions(content: EYES) { viewerHasReacted }")
+                .count(),
+            2,
+            "issue_task_fields! must select the 👀 reaction on BOTH the issue \
+             body and each comment — scan_issue skips an already-acknowledged \
+             surface on each, and a missing selection re-spawns its agent \
+             every poll"
+        );
     }
 
     /// Every query whose result becomes a `Task` must select the label
@@ -4384,22 +4564,34 @@ mod tests {
             ("HOT_TASKS_QUERY", HOT_TASKS_QUERY),
             ("ISSUES_QUERY", ISSUES_QUERY),
         ] {
-            let selections: Vec<&str> = query
-                .lines()
-                .filter(|line| line.contains("labels(first:"))
-                .collect();
-            assert!(
-                !selections.is_empty(),
-                "{name} selects no labels — did the selection move?"
-            );
-            for selection in selections {
+            // Matched on the whitespace-normalized query, not per line:
+            // a labels selection wrapped onto two lines would otherwise
+            // fail this guard with `color` correctly selected, and a
+            // guard people have seen cry wolf is a guard people loosen.
+            let squeezed = squeeze(query);
+            let mut seen = 0;
+            let mut from = 0;
+            while let Some(hit) = squeezed[from..].find("labels(first:") {
+                let at = from + hit;
+                from = at + "labels(first:".len();
+                // Up to the first `}` — the one closing `nodes { … }`,
+                // which is where a label's own fields have to appear.
+                let end = squeezed[at..]
+                    .find('}')
+                    .map(|e| at + e)
+                    .unwrap_or(squeezed.len());
+                let selection = &squeezed[at..end];
                 assert!(
                     selection.contains("color"),
-                    "{name} selects labels without `color`: {} — a refresh on \
-                     this path would grey out the row's label chips",
-                    selection.trim()
+                    "{name} selects labels without `color`: {selection} — a \
+                     refresh on this path would grey out the row's label chips"
                 );
+                seen += 1;
             }
+            assert!(
+                seen > 0,
+                "{name} selects no labels — did the selection move?"
+            );
         }
     }
 
@@ -4410,16 +4602,32 @@ mod tests {
     /// event does not), and `parent_issue_added`'s behaviour is not
     /// documented — so the sub-issue edge is probed explicitly rather
     /// than assumed to ride along.
+    ///
+    /// It must be probed at the SAME granularity the stored value is
+    /// keyed at. `issue_to_task` builds the edge as `owner/repo#number`,
+    /// so probing `parent { number }` alone is blind to a cross-repo
+    /// re-parent that keeps the number — moving a child from `acme/web#7`
+    /// to `acme/api#7` yields a byte-identical fingerprint, the full
+    /// query never runs, and the epic membership feeding `E m`'s merge
+    /// order stays wrong. A probe narrower than the value it gates writes
+    /// a wrong answer; a wider one only wastes a refetch.
+    ///
+    /// Normalized on whitespace so reformatting the query cannot turn a
+    /// real regression into a pass or a reformat into a false failure.
     #[test]
-    fn hot_freshness_probe_sees_a_re_parenting() {
-        let issue_fragment = HOT_FRESHNESS_QUERY
-            .split("... on Issue {")
-            .nth(1)
-            .expect("probe has an Issue fragment");
+    fn hot_freshness_probe_sees_a_cross_repo_re_parenting() {
+        let issue_fragment = squeeze(
+            HOT_FRESHNESS_QUERY
+                .split("... on Issue {")
+                .nth(1)
+                .expect("probe has an Issue fragment"),
+        );
         assert!(
-            issue_fragment.contains("parent { number }"),
-            "the probe must select the sub-issue parent, or an issue added to \
-             an epic keeps `parent: None` until unrelated activity bumps updatedAt"
+            issue_fragment.contains("parent { number repository { nameWithOwner } }"),
+            "the probe must watch the parent's REPOSITORY as well as its \
+             number — issue_to_task keys the edge on `owner/repo#number`, so \
+             probing the number alone misses a cross-repo re-parent that keeps \
+             it. Probe fragment: {issue_fragment}"
         );
     }
 

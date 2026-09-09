@@ -195,6 +195,10 @@ fn maximal_workspace() -> Workspace {
     ws.snooze_wake = Some(lazybox_core::SnoozeWake::CiSettled);
     ws.woke_at = Some(at(12, 30));
     ws.auto_merge_on_green = true;
+    // Schema v12 (#1596): the provenance that lets a disarm turn GitHub's
+    // native auto-merge back off only when lazybox was the one that
+    // turned it on.
+    ws.native_auto_merge_by_lazybox = true;
     ws.track_main = true;
     ws.metered = true;
     ws.base_branch = Some("main".into());

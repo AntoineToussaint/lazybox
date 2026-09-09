@@ -379,6 +379,178 @@ impl MergeBackend for lazybox_gh::GhClient {
     }
 }
 
+/// Why lazybox did — or didn't — mirror a merge-on-green arm onto
+/// GitHub's native auto-merge (issue #1596). Reported back so the arm
+/// notice can say plainly which of the two the user actually got.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NativeArm {
+    /// GitHub's auto-merge is now on: the PR lands even with lazybox
+    /// closed.
+    Enabled,
+    /// Deliberately not enabled, for this reason. The lazybox latch
+    /// still carries the PR.
+    Skipped(&'static str),
+    /// We tried and GitHub refused. Also lazybox-only, but this is a
+    /// surprise rather than a policy — worth a louder notice.
+    Failed(String),
+}
+
+/// Reasons [`arm_native_auto_merge`] declines, phrased for the footer.
+mod native_skip {
+    pub(super) const CONFIG: &str = "merge_on_green.github_native is off";
+    pub(super) const NO_PR: &str = "no PR to arm";
+    pub(super) const NOT_POLLED: &str = "the PR hasn't been polled yet";
+    pub(super) const ALREADY_ON: &str = "GitHub auto-merge was already on";
+    pub(super) const EPIC: &str = "an epic sequences this merge";
+    pub(super) const STACKED: &str = "it's stacked on an open parent PR";
+    pub(super) const APPROVAL: &str = "this repo requires a human approval";
+    pub(super) const NO_REQUIRED_CHECKS: &str = "the base branch has no required status checks";
+    pub(super) const NO_CLIENT: &str = "no GitHub credentials";
+}
+
+/// Mirror a fresh merge-on-green arm onto GitHub's **native** auto-merge,
+/// so the PR lands server-side — seconds after its checks pass, and with
+/// lazybox closed (issue #1596).
+///
+/// Every gate here answers the same question: *would GitHub honor the
+/// same constraints lazybox does?* Where the answer is no, lazybox keeps
+/// the PR rather than handing it over:
+///
+/// * **Required checks.** GitHub's auto-merge waits only on checks a
+///   ruleset or protection rule marks REQUIRED. On a branch with none it
+///   merges without waiting for CI — strictly weaker than lazybox's
+///   all-green gate. `github_native: always` overrides this for someone
+///   who knows their own branch rules.
+/// * **Epic membership** (#1524/#1525). Merge-after ordering and blocking
+///   Reviewer verdicts are enforced only in lazybox's fire path
+///   ([`on_workspace_committed`]); GitHub would land a successor out of
+///   order. Membership, not the current hold, is the test — an edge can
+///   appear after the arm.
+/// * **Stacked children** (#969) and **`approval: human` repos** — both
+///   lazybox-only gates for the same reason.
+///
+/// Best-effort by design: the caller has already committed the local arm,
+/// and a GitHub failure here downgrades to "lazybox will merge it",
+/// never to "nothing is armed".
+pub(crate) async fn arm_native_auto_merge(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    workspace: &Workspace,
+) -> NativeArm {
+    let mode = lazybox_config::Config::load()
+        .map(|c| c.merge_on_green.github_native)
+        .unwrap_or_default();
+    // Cheap, purely local gates first — they decide most calls without
+    // touching the store or GitHub.
+    let target = match native_arm_target(mode, workspace) {
+        Ok(target) => target,
+        Err(reason) => return NativeArm::Skipped(reason),
+    };
+    let NativeTarget {
+        node_id,
+        repo_full,
+        owner,
+        name,
+        base_branch,
+    } = target;
+
+    // Then the lazybox-only holds GitHub cannot see. Each costs a store
+    // read or a config load, so they run only for a viable target.
+    if crate::epics::member_of_live_epic(config, key) {
+        return NativeArm::Skipped(native_skip::EPIC);
+    }
+    let pr = workspace.pr.as_ref().expect("target implies a PR");
+    if stacked_on_open_parent(config, pr).await {
+        return NativeArm::Skipped(native_skip::STACKED);
+    }
+    if approval_policy_for(&owner, &name) == lazybox_core::ApprovalPolicy::Human {
+        return NativeArm::Skipped(native_skip::APPROVAL);
+    }
+    let Some(client) = super::handlers::resolve_gh_client(config).await else {
+        return NativeArm::Skipped(native_skip::NO_CLIENT);
+    };
+    if mode == lazybox_config::GithubNativeAutoMerge::Auto
+        && !client
+            .base_branch_gates_on_checks(&owner, &name, &base_branch)
+            .await
+    {
+        return NativeArm::Skipped(native_skip::NO_REQUIRED_CHECKS);
+    }
+    match client
+        .enable_native_auto_merge(Some(&repo_full), &node_id)
+        .await
+    {
+        Ok(()) => NativeArm::Enabled,
+        Err(e) => NativeArm::Failed(e.to_string()),
+    }
+}
+
+/// What [`arm_native_auto_merge`] needs from the workspace to talk to
+/// GitHub about this PR.
+struct NativeTarget {
+    node_id: String,
+    repo_full: String,
+    owner: String,
+    name: String,
+    base_branch: String,
+}
+
+/// The purely-local half of [`arm_native_auto_merge`]'s gate: config
+/// mode, and whether this workspace even names a PR GitHub could
+/// auto-merge. Split out (like [`approval_from_config`]) so the
+/// decisions unit-test without a store, a GitHub client, or the user's
+/// real config file.
+fn native_arm_target(
+    mode: lazybox_config::GithubNativeAutoMerge,
+    workspace: &Workspace,
+) -> Result<NativeTarget, &'static str> {
+    if mode == lazybox_config::GithubNativeAutoMerge::Never {
+        return Err(native_skip::CONFIG);
+    }
+    let pr = workspace.pr.as_ref().ok_or(native_skip::NO_PR)?;
+    if pr.auto_merge_enabled {
+        // Already on — and NOT ours to claim: disarming must not turn
+        // off something the user enabled on github.com.
+        return Err(native_skip::ALREADY_ON);
+    }
+    let (Some(node_id), Some(repo_full), Some(base_branch)) = (
+        pr.node_id.as_deref(),
+        pr.repo.as_deref(),
+        pr.base_branch.as_deref(),
+    ) else {
+        return Err(native_skip::NOT_POLLED);
+    };
+    let Some((owner, name)) = repo_full.split_once('/') else {
+        return Err(native_skip::NOT_POLLED);
+    };
+    Ok(NativeTarget {
+        node_id: node_id.to_string(),
+        repo_full: repo_full.to_string(),
+        owner: owner.to_string(),
+        name: name.to_string(),
+        base_branch: base_branch.to_string(),
+    })
+}
+
+/// Turn off a native auto-merge **lazybox** enabled, when the user
+/// disarms `g g`. Never touches one they set on github.com — the caller
+/// gates on `Workspace::native_auto_merge_by_lazybox`.
+pub(crate) async fn disarm_native_auto_merge(config: &ServerConfig, workspace: &Workspace) -> bool {
+    let Some(node_id) = workspace.pr.as_ref().and_then(|pr| pr.node_id.as_deref()) else {
+        return false;
+    };
+    let Some(client) = super::handlers::resolve_gh_client(config).await else {
+        return false;
+    };
+    match client.disable_native_auto_merge(node_id).await {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(workspace = %workspace.key, "auto-merge: disabling GitHub auto-merge failed: {e}");
+            false
+        }
+    }
+}
+
 /// Whether a GitHub merge rejection is a "not yet" that the same head can
 /// still clear — required checks that haven't reported or passed yet, a
 /// review that's pending or requested, a base that moved, a merge already
@@ -471,7 +643,7 @@ async fn run_real_attempt_with_resolver<F, Fut>(
 /// that already retargeted its base is honored); the candidate parents
 /// come from the local snapshot. Reuses [`lazybox_core::detect_stacks`]
 /// so the daemon's "is this a stacked child" verdict matches the UI's.
-async fn stacked_on_open_parent(config: &ServerConfig, child: &Task) -> bool {
+pub(crate) async fn stacked_on_open_parent(config: &ServerConfig, child: &Task) -> bool {
     if child.repo.is_none() || child.base_branch.is_none() {
         return false;
     }
@@ -841,6 +1013,104 @@ mod tests {
         let store = Arc::new(MemoryStore::new());
         seed(&store, ws);
         ServerConfig::with_store(store)
+    }
+
+    // ── native auto-merge arm (#1596) ────────────────────────────
+
+    use lazybox_config::GithubNativeAutoMerge as Native;
+
+    /// A workspace GitHub could auto-merge: polled (node id, repo, base
+    /// branch all known) and not already auto-merging.
+    fn native_ready_ws() -> Workspace {
+        let mut ws = armed_ws("o/r#1");
+        ws.pr.as_mut().unwrap().node_id = Some("PR_kwDO".into());
+        ws
+    }
+
+    #[test]
+    fn native_arm_target_resolves_a_polled_pr() {
+        let ws = native_ready_ws();
+        let target = native_arm_target(Native::Auto, &ws).expect("a polled own PR is a target");
+        assert_eq!(target.node_id, "PR_kwDO");
+        assert_eq!(target.repo_full, "o/r");
+        assert_eq!(target.owner, "o");
+        assert_eq!(target.name, "r");
+        assert_eq!(target.base_branch, "main");
+    }
+
+    /// `github_native: never` restores the pre-#1596 behavior — `g g`
+    /// arms lazybox and nothing else — and must be checked before any
+    /// store or network work.
+    #[test]
+    fn native_arm_respects_the_config_opt_out() {
+        assert_eq!(
+            native_arm_target(Native::Never, &native_ready_ws()).err(),
+            Some(native_skip::CONFIG)
+        );
+    }
+
+    /// A native auto-merge already on the PR is the **user's**, not
+    /// ours: we neither re-enable it nor claim the provenance that would
+    /// later let a disarm turn it off (issue #1596).
+    #[test]
+    fn native_arm_never_claims_an_existing_auto_merge() {
+        let mut ws = native_ready_ws();
+        ws.pr.as_mut().unwrap().auto_merge_enabled = true;
+        assert_eq!(
+            native_arm_target(Native::Always, &ws).err(),
+            Some(native_skip::ALREADY_ON)
+        );
+    }
+
+    /// An un-polled PR has no node id to mutate, and an issue-only
+    /// workspace has nothing to merge at all.
+    #[test]
+    fn native_arm_needs_a_polled_pr() {
+        let mut unpolled = native_ready_ws();
+        unpolled.pr.as_mut().unwrap().node_id = None;
+        assert_eq!(
+            native_arm_target(Native::Auto, &unpolled).err(),
+            Some(native_skip::NOT_POLLED)
+        );
+
+        let mut no_base = native_ready_ws();
+        no_base.pr.as_mut().unwrap().base_branch = None;
+        assert_eq!(
+            native_arm_target(Native::Auto, &no_base).err(),
+            Some(native_skip::NOT_POLLED),
+            "without a base branch there is no rule set to check"
+        );
+
+        let mut issue_only = native_ready_ws();
+        issue_only.pr = None;
+        assert_eq!(
+            native_arm_target(Native::Auto, &issue_only).err(),
+            Some(native_skip::NO_PR)
+        );
+    }
+
+    /// Issue #1596: an epic member's merge stays lazybox-sequenced.
+    /// GitHub's auto-merge cannot see the merge-after order (#1524) or a
+    /// blocking Reviewer verdict (#1525), so it would land a successor
+    /// early. Membership — not the current hold — is the test, because
+    /// an edge can appear after the arm.
+    #[tokio::test(flavor = "current_thread")]
+    async fn native_arm_declines_an_epic_member() {
+        let ws = native_ready_ws();
+        let config = config_with(&ws);
+        let mut record = lazybox_core::EpicRecord::new(
+            lazybox_core::EpicKey::new("auth"),
+            "Auth refactor",
+            Utc::now(),
+        );
+        record.members = vec![ws.key.clone()];
+        crate::epics::persist(&config, &record).expect("seed the epic");
+
+        assert_eq!(
+            arm_native_auto_merge(&config, &ws.key, &ws).await,
+            NativeArm::Skipped(native_skip::EPIC),
+            "an epic member must not be handed to GitHub's auto-merge"
+        );
     }
 
     // ── signal_for ───────────────────────────────────────────────

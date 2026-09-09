@@ -567,8 +567,21 @@ limited simply parks again and says so). The `f` filter menu's
 opens the **github** group the same way: `g m` merge, `g u` update
 branch (the "Update branch" button — merge base into head; only on a
 PR behind its base, #484), `g g` toggle
-auto-merge on green (lazybox merges automatically once CI passes —
-own PR, no conflicts, no changes requested; only while lazybox runs),
+auto-merge on green — **both** arms (#1596): lazybox merges once CI
+passes (own PR, no conflicts, no changes requested; only while lazybox
+runs) AND, where GitHub would honor the same constraints, GitHub's own
+native auto-merge is turned on so the PR lands with lazybox closed. The
+arm notice says which you got. lazybox declines the native half where
+it would be *weaker* — a base branch with no required status checks
+(GitHub's auto-merge waits only on **required** checks, so there it
+would merge without waiting for CI), an epic member (GitHub can't see
+merge-after order or a blocking review), a PR stacked on an open
+parent, or an `approval: human` repo — and keeps the merge itself.
+`merge_on_green.github_native` (`auto` | `always` | `never`) controls
+it; disarming turns native back off only when lazybox was the one that
+enabled it. An armed PR is also polled on the 15s hot tier, so the
+lazybox half fires seconds after green rather than on the ~5-minute
+repo rotation,
 `g p` policies (the unified automation-policies menu — one surface
 listing merge-on-green, per-session auto-fix arm/disarm, and
 GitHub-native auto-merge status for the focused PR/issue, each toggled

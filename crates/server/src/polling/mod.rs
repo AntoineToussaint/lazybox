@@ -236,6 +236,12 @@ struct EngagementCandidate {
     /// counts a live Agent PTY and misses shells and post-restart idle
     /// sessions.
     sessioned: bool,
+    /// `auto_merge_on_green` is armed on this workspace (issue #1596).
+    /// The user has said "land this the moment it's green", so its
+    /// freshness is the one lazybox is *acting* on, not just showing —
+    /// a stale rollup here costs a merge, not a badge. Hot and uncapped
+    /// for the same reason `focused` and `live_agent` are.
+    auto_merge_armed: bool,
 }
 
 fn select_engagement_snapshot(
@@ -247,6 +253,7 @@ fn select_engagement_snapshot(
         .iter()
         .filter(|candidate| {
             candidate.live_agent
+                || candidate.auto_merge_armed
                 || focused_workspace == Some(candidate.workspace_key.as_str())
                 || (!candidate.cold
                     && candidate.own_open_pr
@@ -270,9 +277,13 @@ fn select_engagement_snapshot(
     });
 
     // Hot = the rows whose freshness the user is waiting on RIGHT NOW:
-    // the focused row and every row with a live agent (uncapped — they
-    // ride one batched `nodes(ids:)` query), plus recent own PRs capped
-    // at `HOT_SET_MAX`. A merely session-bearing workspace (an idle
+    // the focused row, every row with a live agent, and every armed
+    // merge-on-green PR (uncapped — they ride one batched `nodes(ids:)`
+    // query), plus recent own PRs capped at `HOT_SET_MAX`. An armed PR
+    // earns the tier because lazybox *acts* on its rollup: parked on the
+    // 5-minute repo rotation, a PR that went green minutes ago is still
+    // unmerged, and a check-rollup flip doesn't bump `updated_at`, so it
+    // can't ride the recent-own-PR window either (issue #1596). A merely session-bearing workspace (an idle
     // worktree / shell) is NOT hot on its own any more: with 20-40 open
     // worktrees that pinned the whole loop on the 15s hot cadence around
     // the clock. Its repo is still force-included in every repo-first
@@ -282,7 +293,7 @@ fn select_engagement_snapshot(
     let mut capped_used = 0usize;
     for candidate in eligible {
         let focused = focused_workspace == Some(candidate.workspace_key.as_str());
-        if focused || candidate.live_agent {
+        if focused || candidate.live_agent || candidate.auto_merge_armed {
             hot_keys.insert(candidate.workspace_key.as_str().to_string());
         } else if capped_used < HOT_SET_MAX {
             hot_keys.insert(candidate.workspace_key.as_str().to_string());
@@ -462,6 +473,7 @@ pub async fn refresh_github_engagement(config: &ServerConfig) -> EngagementSnaps
             live_agent: !muted && live_agent_workspaces.contains(workspace.key.as_str()),
             own_open_pr,
             sessioned: !(muted || digest) && !workspace.sessions.is_empty(),
+            auto_merge_armed: workspace.auto_merge_on_green && own_open_pr,
         });
     }
 
@@ -600,6 +612,7 @@ mod engagement_tier_tests {
             live_agent: false,
             own_open_pr: true,
             sessioned: false,
+            auto_merge_armed: false,
         }
     }
 
@@ -775,6 +788,37 @@ mod engagement_tier_tests {
         assert!(snapshot.signals_for(&key).live_agent);
         assert!(snapshot.cold_only_repos().is_empty());
         assert!(snapshot.live_agent_repos().contains("o/r"));
+    }
+
+    /// Issue #1596: an armed merge-on-green PR is the row lazybox
+    /// *acts* on, so it must be hot even when it is stale, unfocused,
+    /// agentless, and past the `HOT_SET_MAX` cap — parked on the
+    /// 5-minute repo rotation, a PR that went green minutes ago is
+    /// still sitting unmerged.
+    #[test]
+    fn armed_merge_on_green_is_hot_and_uncapped() {
+        let armed: Vec<_> = (1..=5)
+            .map(|n| {
+                let mut c = candidate(n);
+                // Stale enough to fall out of the recent-own-PR window,
+                // which a check-rollup flip would never refresh.
+                c.updated_at = Utc::now() - OWN_PR_HOT_WINDOW - chrono::Duration::hours(1);
+                c.auto_merge_armed = true;
+                c.repo = format!("o/a{n}");
+                c
+            })
+            .collect();
+        let keys: Vec<_> = armed.iter().map(|c| c.workspace_key.clone()).collect();
+
+        let snapshot = select_engagement_snapshot(armed, None, Utc::now());
+        assert_eq!(
+            snapshot.hot_count(),
+            5,
+            "every armed PR is hot — the cap must not drop one"
+        );
+        for key in &keys {
+            assert_eq!(snapshot.tier_for(key), EngagementTier::Hot);
+        }
     }
 
     #[test]

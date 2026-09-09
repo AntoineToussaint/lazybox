@@ -3332,6 +3332,7 @@ impl AutoFixConfig {
 /// ```yaml
 /// merge_on_green:
 ///   allow_authors: [dependabot, renovate]
+///   github_native: auto
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -3339,6 +3340,36 @@ pub struct MergeOnGreenConfig {
     /// Non-author logins whose green PRs may auto-merge. Empty (the
     /// default) keeps the safe own-PRs-only behavior.
     pub allow_authors: Vec<String>,
+    /// Should arming merge-on-green (`g g`) also turn on GitHub's
+    /// **native** auto-merge, so the PR lands even with lazybox closed
+    /// (issue #1596)? See [`GithubNativeAutoMerge`].
+    pub github_native: GithubNativeAutoMerge,
+}
+
+/// When arming `g g` should also enable GitHub-native auto-merge
+/// (issue #1596).
+///
+/// The reason this isn't a plain bool: GitHub's auto-merge waits only
+/// on checks a ruleset or branch-protection rule marks **required**. On
+/// a base branch with none, it either refuses to enable (the PR is
+/// already mergeable) or merges without waiting for CI at all —
+/// strictly weaker than lazybox's own all-green gate. So the default
+/// asks the branch first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GithubNativeAutoMerge {
+    /// Enable it only where the base branch actually gates merges on
+    /// required status checks (or a merge queue), so native is
+    /// equivalent-or-stricter than lazybox's gate. Anywhere else the
+    /// lazybox latch keeps the PR and says so.
+    #[default]
+    Auto,
+    /// Always enable it, skipping the required-checks probe. For repos
+    /// whose owner knows what their branch rules do.
+    Always,
+    /// Never enable it — `g g` stays lazybox-only, the pre-#1596
+    /// behavior.
+    Never,
 }
 
 impl MergeOnGreenConfig {
@@ -3928,6 +3959,36 @@ mod tests {
 
     /// The default merge-on-green config keeps own-PRs-only; a
     /// configured allowlist opts specific authors in, parsed from YAML.
+    /// Issue #1596: `g g` asks GitHub to auto-merge too by default, but
+    /// only where the base branch gates on required checks (`auto`). The
+    /// key must parse in snake_case and default to that safety-gated
+    /// mode when the section — or the whole config — is absent.
+    #[test]
+    fn github_native_auto_merge_defaults_to_auto_and_parses() {
+        assert_eq!(
+            Config::default().merge_on_green.github_native,
+            GithubNativeAutoMerge::Auto,
+            "a config with no merge_on_green section stays safety-gated"
+        );
+        for (yaml, want) in [
+            ("never", GithubNativeAutoMerge::Never),
+            ("always", GithubNativeAutoMerge::Always),
+            ("auto", GithubNativeAutoMerge::Auto),
+        ] {
+            let cfg = Config::parse(&format!("merge_on_green:\n  github_native: {yaml}\n"))
+                .expect("parse github_native");
+            assert_eq!(cfg.merge_on_green.github_native, want);
+        }
+        // The allowlist and the native mode are independent knobs.
+        let cfg = Config::parse("merge_on_green:\n  allow_authors: [dependabot]\n")
+            .expect("parse allow_authors alone");
+        assert_eq!(
+            cfg.merge_on_green.github_native,
+            GithubNativeAutoMerge::Auto,
+            "setting one key must not silently change the other"
+        );
+    }
+
     #[test]
     fn merge_on_green_allowlist_parses_and_builds_a_policy() {
         // Default: nobody else is allowed.

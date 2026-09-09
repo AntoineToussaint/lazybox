@@ -22,15 +22,28 @@
 //!    historically opt-*out* per PR via GitHub labels. This module adds
 //!    the per-session [`PolicyArm`] override the audit found missing.
 //! 3. **GitHub-native auto-merge** — GitHub's own server-side "merge when
-//!    ready" ([`crate::Task::auto_merge_enabled`]). lazybox does not set
-//!    it; the surface shows it read-only.
+//!    ready" ([`crate::Task::auto_merge_enabled`]). Arming merge-on-green
+//!    now turns this on too where GitHub would honor the same
+//!    constraints (issue #1596) — so the PR lands with lazybox closed.
+//!    lazybox declines to arm it where it would be *weaker*: GitHub's
+//!    auto-merge waits only on checks a ruleset marks REQUIRED, and it
+//!    can't see lazybox's epic merge-order, stacked-parent, or
+//!    `approval: human` holds. `merge_on_green.github_native` controls
+//!    this (`auto` | `always` | `never`), and
+//!    [`crate::Workspace::native_auto_merge_by_lazybox`] records whether
+//!    lazybox was the one that enabled it, so disarming clears only what
+//!    lazybox set.
 //!
 //! ### Precedence
 //!
 //! - **native auto-merge > lazybox merge-on-green.** When GitHub's native
-//!   auto-merge is already enabled on a PR, lazybox's merge-on-green
-//!   stands down (see [`should_auto_merge`]) — GitHub will land it, so a
-//!   second merge fired by lazybox is redundant and racy.
+//!   auto-merge is enabled on a PR, lazybox's merge-on-green stands down
+//!   (see [`should_auto_merge`]) — GitHub will land it, so a second merge
+//!   fired by lazybox is redundant and racy. Standing down is safe
+//!   *because* lazybox only arms native where GitHub's gate is
+//!   equivalent-or-stricter, and it self-heals: GitHub disables
+//!   auto-merge when an unprivileged push lands, polling sees the flag
+//!   clear, and the lazybox latch resumes.
 //! - **auto-fix per-session [`PolicyArm`]** resolves as
 //!   [`auto_fix_permitted`] documents: an explicit `Disarm` beats
 //!   everything, an explicit `Arm` overrides a label opt-out, and
@@ -256,7 +269,9 @@ pub fn merge_block_reason(pr: &Task) -> Option<&'static str> {
 /// 5. GitHub's **native** auto-merge is not already enabled. Precedence
 ///    (issue #363): native auto-merge wins — GitHub will land the PR
 ///    itself once it's ready, so firing lazybox's own merge on top is
-///    redundant and races the server-side merge.
+///    redundant and races the server-side merge. Since #1596 lazybox may
+///    be the one that enabled it, in which case this is the arm doing
+///    its job, not a block.
 ///
 /// Nothing here that `g m` wouldn't also merge — this is a subset.
 pub fn auto_merge_block_reason(

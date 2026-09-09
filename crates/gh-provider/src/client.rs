@@ -1222,6 +1222,15 @@ pub struct GhClient {
     /// mutation is rejected.
     repo_merge_methods:
         std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, String>>>,
+    /// `owner/name@branch` → "does this base branch gate merges on
+    /// required status checks?" (issue #1596). Read from the branch
+    /// rules API the first time a merge-on-green arm asks, then cached
+    /// for the process: GitHub's native auto-merge only waits on checks
+    /// a ruleset or protection rule marks REQUIRED, so on a branch with
+    /// none it would land a PR whose CI is red or still running.
+    /// Shared across clones.
+    base_branch_check_gates:
+        std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, bool>>>,
     /// Consecutive hot batches this server answered with a GraphQL
     /// error. Some GitHub Enterprise Server builds reject the batched
     /// `nodes(ids:)` hot queries outright — GHES 3.18 fails any PR node
@@ -1383,6 +1392,9 @@ impl GhClient {
             repo_merge_methods: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            base_branch_check_gates: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             issue_deps_cache: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
@@ -1423,6 +1435,9 @@ impl GhClient {
                 std::collections::HashMap::new(),
             )),
             repo_merge_methods: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            base_branch_check_gates: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
             hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -5939,6 +5954,140 @@ impl GhClient {
         Ok(())
     }
 
+    /// Turn on GitHub's **native** auto-merge for this PR (issue #1596)
+    /// — the "Enable auto-merge" button. GitHub then lands it
+    /// server-side once its *required* checks pass, with lazybox
+    /// running or closed.
+    ///
+    /// Pass `repo` (`owner/name`) so the queued merge uses the repo's
+    /// own default method from the same cache `merge_pr_in_repo` fills:
+    /// an unpinned method queues a merge commit, which a squash-only
+    /// repo rejects when the merge eventually fires — a failure the user
+    /// would discover long after arming.
+    ///
+    /// Callers must decide *whether* it is safe to enable
+    /// ([`Self::base_branch_gates_on_checks`]); this only performs it.
+    pub async fn enable_native_auto_merge(
+        &self,
+        repo: Option<&str>,
+        pull_request_node_id: &str,
+    ) -> Result<(), GhError> {
+        let merge_method = match repo.and_then(|r| self.repo_merge_methods.lock().get(r).cloned()) {
+            Some(method) => method,
+            None => {
+                let method = self.pr_merge_method(pull_request_node_id).await?;
+                if let Some(repo) = repo {
+                    self.repo_merge_methods
+                        .lock()
+                        .insert(repo.to_string(), method.clone());
+                }
+                method
+            }
+        };
+        self.acquire_or_block("enablePullRequestAutoMerge mutation")?;
+        let body = graphql::enable_auto_merge_body(pull_request_node_id, &merge_method);
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("enablePullRequestAutoMerge mutation", &body)
+            .await?;
+        if let Some(errors) = response.errors {
+            // Both markers describe an end state the caller wanted:
+            // already enabled, or nothing left for GitHub to wait on.
+            // See `ALREADY_AUTO_MERGE_MARKERS`.
+            if gql_errors_all_match(&errors, ALREADY_AUTO_MERGE_MARKERS) {
+                tracing::info!(
+                    "enablePullRequestAutoMerge: nothing to queue \
+                     (already enabled, or the PR is mergeable now)"
+                );
+                return Ok(());
+            }
+            return Err(mutation_error_response(
+                "enablePullRequestAutoMerge",
+                &errors,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Turn GitHub-native auto-merge back off. Only ever called for one
+    /// lazybox itself enabled (`Workspace::native_auto_merge_by_lazybox`)
+    /// — disarming `g g` must not silently undo a setting the user made
+    /// on github.com.
+    pub async fn disable_native_auto_merge(
+        &self,
+        pull_request_node_id: &str,
+    ) -> Result<(), GhError> {
+        self.acquire_or_block("disablePullRequestAutoMerge mutation")?;
+        let body = graphql::disable_auto_merge_body(pull_request_node_id);
+        let response: graphql::GqlMutationResponse = self
+            .post_graphql_with_retry("disablePullRequestAutoMerge mutation", &body)
+            .await?;
+        if let Some(errors) = response.errors {
+            // Disabling auto-merge that isn't enabled is rejected rather
+            // than being a no-op — but it IS the end state we wanted.
+            if gql_errors_all_match(&errors, NO_AUTO_MERGE_TO_DISABLE_MARKERS) {
+                return Ok(());
+            }
+            return Err(mutation_error_response(
+                "disablePullRequestAutoMerge",
+                &errors,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Does `branch` gate merges on **required** status checks — i.e.
+    /// would GitHub-native auto-merge actually wait for CI there?
+    ///
+    /// This is the safety gate for [`Self::enable_native_auto_merge`]
+    /// (issue #1596). GitHub's auto-merge waits only on checks a ruleset
+    /// or protection rule marks REQUIRED; on a branch with none it
+    /// either refuses to enable (the PR is already `CLEAN`) or merges
+    /// without waiting for CI at all — strictly weaker than lazybox's
+    /// own all-green gate. So lazybox arms native only where this is
+    /// true, and keeps the PR itself otherwise.
+    ///
+    /// Reads the same rules route as [`Self::branch_rule_names`], which
+    /// reports repository rulesets *and* classic branch protection.
+    /// A `merge_queue` rule counts too: a queued merge re-tests before
+    /// landing. Cached per `repo@branch`. Fails **closed** — any lookup
+    /// error returns `false`, so an unreachable rules API means lazybox
+    /// keeps the merge rather than handing GitHub a PR it might land red.
+    pub async fn base_branch_gates_on_checks(&self, owner: &str, repo: &str, branch: &str) -> bool {
+        let cache_key = format!("{owner}/{repo}@{branch}");
+        if let Some(cached) = self.base_branch_check_gates.lock().get(&cache_key).copied() {
+            return cached;
+        }
+        #[derive(serde::Deserialize)]
+        struct BranchRule {
+            #[serde(rename = "type")]
+            kind: String,
+            #[serde(default)]
+            parameters: Option<serde_json::Value>,
+        }
+        let route = format!("/repos/{owner}/{repo}/rules/branches/{branch}");
+        let rules: Vec<BranchRule> = match self.inner.get(&route, None::<&()>).await {
+            Ok(rules) => rules,
+            Err(e) => {
+                tracing::debug!("branch-rules lookup for {cache_key} failed: {e}");
+                // Not cached: a transient failure must not pin this
+                // branch as ungated for the life of the process.
+                return false;
+            }
+        };
+        let gated = rules.iter().any(|rule| match rule.kind.as_str() {
+            "required_status_checks" => rule
+                .parameters
+                .as_ref()
+                .and_then(|p| p.get("required_status_checks"))
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|checks| !checks.is_empty()),
+            "merge_queue" => true,
+            _ => false,
+        });
+        self.base_branch_check_gates.lock().insert(cache_key, gated);
+        gated
+    }
+
     /// Best-effort: is `pr` already merged on GitHub right now? Used to
     /// disambiguate an ambiguous merge rejection — GitHub returns a
     /// generic "not mergeable" for an already-merged PR, indistinguishable
@@ -6973,6 +7122,32 @@ pub(crate) fn should_query_issues(
 /// current api.github.com; older/GHES variants say "already merged".
 /// Matched case-insensitively as substrings.
 const ALREADY_MERGED_MARKERS: &[&str] = &["already merged", "merged state"];
+
+/// GraphQL error messages that mean an `enablePullRequestAutoMerge` has
+/// nothing to queue (issue #1596). Two distinct end states, both of
+/// which the caller wanted:
+///   * the PR already has native auto-merge on;
+///   * `Pull request is in clean status` — GitHub has nothing left to
+///     wait for, so there is no queue to join. lazybox's own
+///     merge-on-green latch takes it on the next poll instead.
+///
+/// Matched case-insensitively as substrings, all-of via
+/// [`gql_errors_all_match`].
+const ALREADY_AUTO_MERGE_MARKERS: &[&str] = &[
+    "auto merge is already enabled",
+    "already enabled",
+    "clean status",
+];
+
+/// GraphQL error messages that mean a `disablePullRequestAutoMerge` had
+/// nothing to turn off — again the end state the caller wanted. GitHub
+/// rejects disabling rather than treating it as a no-op.
+const NO_AUTO_MERGE_TO_DISABLE_MARKERS: &[&str] = &[
+    "auto merge is not enabled",
+    "not enabled",
+    "already merged",
+    "merged state",
+];
 
 /// GraphQL error messages that mean an `updatePullRequestBranch` has
 /// nothing left to do — the head already contains the base. GitHub:
@@ -8509,6 +8684,9 @@ mod tests {
             repo_merge_methods: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            base_branch_check_gates: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             hot_batch_graphql_failures: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             issue_deps_cache: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
@@ -9496,6 +9674,95 @@ mod tests {
             .merge_pr("PR_kwDO", None)
             .await
             .expect("merge success must not report a false failure");
+    }
+
+    /// Issue #1596: GitHub rejects `enablePullRequestAutoMerge` when the
+    /// PR is already mergeable (`Pull request is in clean status`) or
+    /// already has auto-merge on. Both are end states the arm wanted —
+    /// reporting them as failures would tell the user their arm broke
+    /// when it did exactly what it should.
+    #[tokio::test(flavor = "current_thread")]
+    async fn enable_auto_merge_treats_nothing_to_queue_as_success() {
+        const METHOD: &str =
+            r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"SQUASH"}}}}"#;
+        for rejection in [
+            r#"{"errors":[{"message":"Pull request is in clean status"}]}"#,
+            r#"{"errors":[{"message":"Auto merge is already enabled for this pull request"}]}"#,
+        ] {
+            let base_uri = spawn_sequenced_response_server(vec![METHOD, rejection]).await;
+            let client = make_client(&base_uri);
+            client
+                .enable_native_auto_merge(None, "PR_kwDO")
+                .await
+                .expect("a no-op rejection must not report a failed arm");
+        }
+    }
+
+    /// The idempotence guard is deliberately narrow: a real refusal
+    /// ("Auto merge is not allowed for this repository") must still fail,
+    /// so the arm notice can say GitHub declined.
+    #[tokio::test(flavor = "current_thread")]
+    async fn enable_auto_merge_surfaces_a_real_refusal() {
+        const METHOD: &str =
+            r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"SQUASH"}}}}"#;
+        const REFUSED: &str =
+            r#"{"errors":[{"message":"Auto merge is not allowed for this repository"}]}"#;
+        let base_uri = spawn_sequenced_response_server(vec![METHOD, REFUSED]).await;
+        let client = make_client(&base_uri);
+        client
+            .enable_native_auto_merge(None, "PR_kwDO")
+            .await
+            .expect_err("a repo that disallows auto-merge must surface as a failure");
+    }
+
+    /// A mixed response — one no-op marker plus a genuine error — must
+    /// still fail: `gql_errors_all_match` is all-of, not any-of.
+    #[tokio::test(flavor = "current_thread")]
+    async fn enable_auto_merge_fails_on_a_mixed_error_list() {
+        const METHOD: &str =
+            r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"MERGE"}}}}"#;
+        const MIXED: &str = r#"{"errors":[{"message":"Pull request is in clean status"},
+            {"message":"Resource not accessible by integration"}]}"#;
+        let base_uri = spawn_sequenced_response_server(vec![METHOD, MIXED]).await;
+        let client = make_client(&base_uri);
+        client
+            .enable_native_auto_merge(None, "PR_kwDO")
+            .await
+            .expect_err("an unrelated error alongside a no-op marker must still fail");
+    }
+
+    /// Issue #1596's safety gate. GitHub's auto-merge waits only on
+    /// checks a rule marks REQUIRED, so a branch with no such rule — the
+    /// `[]` this repo's own `main` returns — must read as ungated and
+    /// keep the merge with lazybox.
+    #[tokio::test(flavor = "current_thread")]
+    async fn base_branch_check_gate_reads_the_branch_rules() {
+        const NO_RULES: &str = "[]";
+        let base_uri = spawn_sequenced_response_server(vec![NO_RULES]).await;
+        let client = make_client(&base_uri);
+        assert!(
+            !client.base_branch_gates_on_checks("o", "r", "main").await,
+            "a branch with no rules cannot gate a native auto-merge on CI"
+        );
+
+        const REQUIRED: &str = r#"[{"type":"required_status_checks","parameters":
+            {"required_status_checks":[{"context":"build"}]}}]"#;
+        let base_uri = spawn_sequenced_response_server(vec![REQUIRED]).await;
+        let client = make_client(&base_uri);
+        assert!(
+            client.base_branch_gates_on_checks("o", "r", "main").await,
+            "a required-status-checks rule gates the merge"
+        );
+
+        // An empty context list is a rule that requires nothing.
+        const EMPTY_CONTEXTS: &str = r#"[{"type":"required_status_checks","parameters":
+            {"required_status_checks":[]}}]"#;
+        let base_uri = spawn_sequenced_response_server(vec![EMPTY_CONTEXTS]).await;
+        let client = make_client(&base_uri);
+        assert!(
+            !client.base_branch_gates_on_checks("o", "r", "main").await,
+            "a rule requiring no checks gates nothing"
+        );
     }
 
     /// Issue #469: a repo that disallows merge commits reports SQUASH

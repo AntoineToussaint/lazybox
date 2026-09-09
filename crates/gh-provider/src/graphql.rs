@@ -966,6 +966,61 @@ mutation($id: ID!, $method: PullRequestMergeMethod!, $expectedHeadOid: GitObject
 }
 "#;
 
+/// GraphQL mutation that turns on GitHub's **native** auto-merge —
+/// the "Enable auto-merge" button on github.com (issue #1596). GitHub
+/// then lands the PR server-side once its *required* checks and reviews
+/// pass, with lazybox closed or running.
+///
+/// `mergeMethod` is pinned for the same reason as `MERGE_PR_MUTATION`:
+/// an omitted method queues a merge commit, which a squash-only repo
+/// rejects when the queued merge finally fires — a failure the user
+/// would only see hours later.
+///
+/// Two rejections are *not* failures and the client classifies them as
+/// success (`ALREADY_AUTO_MERGE_MARKERS`): "already enabled" is the
+/// end state we wanted, and "clean status" means GitHub has nothing
+/// left to wait for — the PR is mergeable now, so lazybox's own
+/// merge-on-green latch takes it on the next poll.
+const ENABLE_AUTO_MERGE_MUTATION: &str = r#"
+mutation($id: ID!, $method: PullRequestMergeMethod!) {
+  enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: $method }) {
+    pullRequest { id autoMergeRequest { enabledAt } }
+  }
+}
+"#;
+
+pub fn enable_auto_merge_body(pull_request_node_id: &str, merge_method: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": ENABLE_AUTO_MERGE_MUTATION,
+        "variables": {
+            "id": pull_request_node_id,
+            "method": merge_method,
+        },
+    })
+}
+
+/// The inverse of [`ENABLE_AUTO_MERGE_MUTATION`]. Only ever fired for a
+/// native auto-merge **lazybox itself** enabled
+/// (`Workspace::native_auto_merge_by_lazybox`) — one the user set on
+/// github.com is theirs, and disarming `g g` must not silently undo it.
+///
+/// Disabling auto-merge that isn't enabled is rejected rather than
+/// being a no-op, so the client treats "not enabled" as success too.
+const DISABLE_AUTO_MERGE_MUTATION: &str = r#"
+mutation($id: ID!) {
+  disablePullRequestAutoMerge(input: { pullRequestId: $id }) {
+    pullRequest { id autoMergeRequest { enabledAt } }
+  }
+}
+"#;
+
+pub fn disable_auto_merge_body(pull_request_node_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": DISABLE_AUTO_MERGE_MUTATION,
+        "variables": { "id": pull_request_node_id },
+    })
+}
+
 /// Resolve a GitHub login to its node ID. Needed because the
 /// reviewer/assignee mutations below take node IDs, not bare
 /// usernames — the rest of GitHub's GraphQL surface uses IDs
@@ -4039,6 +4094,8 @@ mod tests {
         let mutations: &[(&str, &str)] = &[
             ("UPDATE_BRANCH_MUTATION", UPDATE_BRANCH_MUTATION),
             ("MERGE_PR_MUTATION", MERGE_PR_MUTATION),
+            ("ENABLE_AUTO_MERGE_MUTATION", ENABLE_AUTO_MERGE_MUTATION),
+            ("DISABLE_AUTO_MERGE_MUTATION", DISABLE_AUTO_MERGE_MUTATION),
             ("REQUEST_REVIEWS_MUTATION", REQUEST_REVIEWS_MUTATION),
             ("ADD_ASSIGNEES_MUTATION", ADD_ASSIGNEES_MUTATION),
             ("REMOVE_ASSIGNEES_MUTATION", REMOVE_ASSIGNEES_MUTATION),
@@ -4069,6 +4126,34 @@ mod tests {
     /// "observed green at OID X" and the merge itself. `Some` pins the
     /// OID; `None` serializes as JSON null (the nullable input field's
     /// "skip the guard" value), preserving the unguarded manual path.
+    /// Issue #1596: the queued native auto-merge must carry the repo's
+    /// own default method. An unpinned method queues a merge commit,
+    /// which a squash-only repo rejects when the merge finally fires —
+    /// a failure the user would only discover long after arming.
+    #[test]
+    fn enable_auto_merge_body_pins_the_repo_merge_method() {
+        let body = enable_auto_merge_body("PR_kwDO", "SQUASH");
+        assert_eq!(body["variables"]["id"], "PR_kwDO");
+        assert_eq!(body["variables"]["method"], "SQUASH");
+        assert!(
+            body["query"]
+                .as_str()
+                .is_some_and(|q| q.contains("enablePullRequestAutoMerge")),
+            "the enable mutation must be the document sent"
+        );
+    }
+
+    #[test]
+    fn disable_auto_merge_body_targets_the_node() {
+        let body = disable_auto_merge_body("PR_kwDO");
+        assert_eq!(body["variables"]["id"], "PR_kwDO");
+        assert!(
+            body["query"]
+                .as_str()
+                .is_some_and(|q| q.contains("disablePullRequestAutoMerge"))
+        );
+    }
+
     #[test]
     fn merge_pr_body_pins_expected_head_oid() {
         let body = merge_pr_body("PR_kwDO", "SQUASH", Some("abc123"));

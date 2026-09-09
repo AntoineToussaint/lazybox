@@ -1652,6 +1652,40 @@ fn held_by_in(
     held.into_iter().collect()
 }
 
+/// Is `key` a member of any live (non-archived) epic?
+///
+/// Coarser than [`held_by`] on purpose, and used for a different question
+/// (issue #1596): whether it is safe to hand this PR to **GitHub's** native
+/// auto-merge. `held_by` answers "is it held right now" — but an epic can
+/// gain a merge-after edge, or a Reviewer can raise a blocking verdict, long
+/// after `g g` was pressed, and GitHub would land the PR without ever
+/// consulting either. Membership is the durable question, so an epic member's
+/// merge stays lazybox-sequenced.
+///
+/// Cheap in the common case: no epic records means no workspace load.
+pub fn member_of_live_epic(config: &ServerConfig, key: &WorkspaceKey) -> bool {
+    let records = match list_all(config) {
+        Ok(r) => r,
+        Err(e) => {
+            // Fail CLOSED: an unreadable epic store must not be read as
+            // "no epics", which would let native auto-merge past the
+            // ordering guarantee.
+            tracing::warn!("epics: member_of_live_epic list failed: {e}");
+            return true;
+        }
+    };
+    if records.is_empty() {
+        return false;
+    }
+    let workspaces = crate::load_workspaces(&*config.store).values;
+    records.iter().filter(|r| !r.archived).any(|record| {
+        resolved_graph(record, &workspaces)
+            .members
+            .iter()
+            .any(|member| member == key)
+    })
+}
+
 /// A PR just landed merged (manual, auto, or external) and the store now holds
 /// that ground truth. Re-probe every workspace that named `merged` as a
 /// merge-after predecessor, so a successor whose *last* predecessor just landed

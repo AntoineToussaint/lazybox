@@ -2017,7 +2017,10 @@ impl<T: TerminalAdapter> Model<T> {
                             .map(|w| crate::util::notice_slug(&w.name).into_owned())
                             .unwrap_or_default();
                         if enabled {
-                            self.flash_info(format!("auto-merge on green: armed for {name}"));
+                            // The daemon follows with the authoritative
+                            // notice naming which arms actually landed —
+                            // lazybox only, or GitHub's too (#1596).
+                            self.flash_info(format!("auto-merge on green: arming for {name}…"));
                         } else {
                             self.flash_info(format!("auto-merge on green: off for {name}"));
                         }

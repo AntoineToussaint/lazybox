@@ -315,7 +315,12 @@ pub enum CleanupPrompt {
 /// - 11: `Workspace::role` (orchestration role — Planner/Coordinator/
 ///   Worker/Reviewer/Integrator). Optional with `#[serde(default)]`, so
 ///   older records read back cleanly as unroled.
-pub const WORKSPACE_SCHEMA_VERSION: u32 = 11;
+/// - 12: `Workspace::native_auto_merge_by_lazybox` (#1596) — did lazybox
+///   enable GitHub's native auto-merge for this PR? Optional with
+///   `#[serde(default)]`, so a record written before the field reads
+///   back as "not ours", and disarming leaves that PR's native
+///   auto-merge alone — the conservative direction.
+pub const WORKSPACE_SCHEMA_VERSION: u32 = 12;
 
 /// How long a workspace counts as "recently woken" after an
 /// event-conditional snooze fires (#scale): within this window the row
@@ -605,6 +610,14 @@ pub struct Workspace {
     /// lazybox's arm that only acts while the lazybox daemon runs.
     #[serde(default)]
     pub auto_merge_on_green: bool,
+    /// Did **lazybox** turn on GitHub's native auto-merge for this PR
+    /// (issue #1596)? Set when arming [`Workspace::auto_merge_on_green`]
+    /// successfully enables it upstream; disarming then turns native
+    /// back off — but only when this is set, so a native auto-merge the
+    /// user enabled on github.com is left alone. Provenance only: the
+    /// live upstream state is the PR's own `Task::auto_merge_enabled`.
+    #[serde(default)]
+    pub native_auto_merge_by_lazybox: bool,
     /// Per-workspace "track main" arm (issue #535). When `true`, the
     /// daemon's background sweep keeps this workspace's worktree
     /// fast-forwarded to `origin/<base_branch>` whenever the tree is
@@ -722,6 +735,7 @@ impl Workspace {
             snooze_wake: None,
             woke_at: None,
             auto_merge_on_green: false,
+            native_auto_merge_by_lazybox: false,
             track_main: false,
             base_branch: None,
             track_main_behind: false,
@@ -1232,6 +1246,7 @@ impl Workspace {
             snooze_wake,
             woke_at: _,
             auto_merge_on_green,
+            native_auto_merge_by_lazybox,
             track_main,
             base_branch,
             track_main_behind,
@@ -1269,6 +1284,10 @@ impl Workspace {
         // ride a transfer onto something it could never fire on.
         if self.pr.is_some() {
             self.auto_merge_on_green |= *auto_merge_on_green;
+            // Provenance rides the arm it describes: without it, a
+            // carried arm would later disarm a native auto-merge lazybox
+            // never enabled — or leak one it did.
+            self.native_auto_merge_by_lazybox |= *native_auto_merge_by_lazybox;
         }
         // Track-main applies only to a non-PR, non-linked GitHub worktree
         // (`supports_track_main`). Carried onto anything else — e.g. the
@@ -4425,6 +4444,31 @@ mod tests {
             "behind flag must not ride onto a PR"
         );
         assert_eq!(pr_target.base_branch, None, "no track-main base on a PR");
+    }
+
+    /// #1596: the "lazybox enabled GitHub's auto-merge" provenance rides
+    /// the arm it describes. Carried without it, a later disarm would
+    /// leave a native auto-merge lazybox turned on running forever;
+    /// carried onto a PR-less row, it would claim one that was never set.
+    #[test]
+    fn absorb_user_state_carries_native_auto_merge_provenance_with_the_arm() {
+        let mut source = Workspace::empty(WorkspaceKey::new("src"), "scratch", now());
+        source.auto_merge_on_green = true;
+        source.native_auto_merge_by_lazybox = true;
+
+        let mut pr_target = Workspace::from_task(pr("o/r#1"), now());
+        pr_target.absorb_user_state_from(&source);
+        assert!(
+            pr_target.native_auto_merge_by_lazybox,
+            "provenance follows the arm onto the PR",
+        );
+
+        let mut issue_target = Workspace::from_task(issue("github", "o/r#42"), now());
+        issue_target.absorb_user_state_from(&source);
+        assert!(
+            !issue_target.native_auto_merge_by_lazybox,
+            "no arm rides onto a PR-less destination, so no provenance either",
+        );
     }
 
     /// #554: a snooze on the source must never *hide* a destination the

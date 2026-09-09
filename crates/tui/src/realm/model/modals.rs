@@ -87,31 +87,47 @@ pub(crate) fn build_policy_rows(
 
     match ws.pr.as_ref() {
         Some(pr) => {
-            // 1. merge-on-green (client-side). Superseded by native
-            //    auto-merge when that's on (precedence, issue #363). The
-            //    detail spells out the durability difference the ` ARM `
-            //    pill can't (#794): lazybox merges it, but only while
-            //    lazybox is running.
+            // 1. merge-on-green. Arming it also asks GitHub to auto-merge
+            //    where GitHub would honor the same constraints (#1596), so
+            //    the detail names which of the two guarantees is live —
+            //    the durability difference the ` ARM ` pill can't (#794).
             let on = ws.auto_merge_on_green;
-            let detail = if pr.auto_merge_enabled {
+            let detail = if pr.auto_merge_enabled && ws.native_auto_merge_by_lazybox {
+                "  (lazybox + GitHub · lands with lazybox closed)"
+            } else if pr.auto_merge_enabled {
                 "  (lazybox · GitHub auto-merge takes over)"
-            } else {
+            } else if on {
                 "  (lazybox · merges only while lazybox runs)"
+            } else {
+                "  (lazybox · asks GitHub to auto-merge too, where it can)"
             };
             labels.push(format!("{} merge on green{detail}", glyph(on)));
             toggles.push(PolicyToggle::MergeOnGreen);
 
-            // 2. GitHub-native auto-merge — read-only status. Named as the
-            //    durable counterpart (#794): GitHub lands the PR server-side,
-            //    so it works even with lazybox closed.
+            // 2. GitHub-native auto-merge — status, not a toggle of its
+            //    own. Named as the durable counterpart (#794): GitHub
+            //    lands the PR server-side, so it works with lazybox
+            //    closed. Since #1596 arming row 1 turns this on too when
+            //    the base branch actually gates on required checks —
+            //    where it doesn't, GitHub's auto-merge would land a red
+            //    PR, so lazybox keeps the merge instead.
             labels.push(format!(
                 "{} GitHub auto-merge  (GitHub · merges even when lazybox is closed)",
                 glyph(pr.auto_merge_enabled)
             ));
             toggles.push(PolicyToggle::Info(
-                "GitHub-native auto-merge is set on github.com, not in lazybox — it merges \
-                 server-side even while lazybox is closed"
-                    .into(),
+                if ws.native_auto_merge_by_lazybox {
+                    "GitHub-native auto-merge — armed by lazybox with merge on green; \
+                     disarming that turns this off again"
+                } else if pr.auto_merge_enabled {
+                    "GitHub-native auto-merge — set on github.com, so lazybox leaves it \
+                     alone; it merges server-side even while lazybox is closed"
+                } else {
+                    "GitHub-native auto-merge — arm merge on green and lazybox turns this \
+                     on too, unless the base branch has no required status checks (there, \
+                     GitHub would merge without waiting for CI)"
+                }
+                .into(),
             ));
 
             // 3 + 4. per-session auto-fix arms.

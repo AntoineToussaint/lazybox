@@ -843,7 +843,110 @@ async fn set_auto_merge_on_green_with_policy(
         return;
     }
     workspace.auto_merge_on_green = enabled;
+    // Snapshot for the GitHub half below — taken under the lock, used
+    // after it, so the mutation never holds the workspace lock.
+    let snapshot = workspace.clone();
+    let was_ours = workspace.native_auto_merge_by_lazybox;
+    if !enabled {
+        workspace.native_auto_merge_by_lazybox = false;
+    }
     commit_upsert_offloaded_reported(config, key, workspace, "set auto-merge preference").await;
+    drop(_ws_guard);
+
+    // ── the GitHub half (#1596) ────────────────────────────────────────
+    // The local arm is already committed and broadcast; everything below
+    // is best-effort. A GitHub failure downgrades the arm to "lazybox
+    // will merge it", never to "nothing is armed".
+    //
+    // Detached, like every other GitHub mutation the daemon fires
+    // (`handlers::detach_mutation`): the arm the user pressed is already
+    // done, and a rate-limit wait here must not hold the command that
+    // delivered it.
+    let config = config.clone();
+    let key = key.clone();
+    tokio::spawn(async move {
+        if enabled {
+            mirror_arm_to_github(&config, &key, snapshot).await;
+        } else if was_ours {
+            // Only ours to clear. A native auto-merge the user set on
+            // github.com survives disarming `g g`.
+            crate::polling::auto_merge::disarm_native_auto_merge(&config, &snapshot).await;
+        }
+    });
+}
+
+/// Ask GitHub to auto-merge this PR too, and say plainly which of the two
+/// arms the user ended up with (issue #1596). Called after the local arm
+/// is committed, off the workspace lock.
+///
+/// The notice matters as much as the mutation: `ARM` and `AUTO` guarantee
+/// different things (#794) — one dies when lazybox closes, the other
+/// doesn't — so "armed" alone leaves the user guessing which they got.
+async fn mirror_arm_to_github(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    workspace: lazybox_core::Workspace,
+) {
+    use crate::polling::auto_merge::NativeArm;
+    let label = workspace
+        .pr
+        .as_ref()
+        .map(|pr| pr.id.key.clone())
+        .unwrap_or_else(|| key.as_str().to_string());
+    match crate::polling::auto_merge::arm_native_auto_merge(config, key, &workspace).await {
+        NativeArm::Enabled => {
+            {
+                let _ws_guard = config.lock_workspace(key.as_str()).await;
+                let Some(mut fresh) = load_workspace_offloaded(config, key).await else {
+                    return;
+                };
+                // The user may have disarmed while the mutation was in
+                // flight; don't claim provenance for an arm that's gone.
+                if !fresh.auto_merge_on_green {
+                    return;
+                }
+                fresh.native_auto_merge_by_lazybox = true;
+                commit_upsert_offloaded_reported(
+                    config,
+                    key,
+                    fresh,
+                    "record GitHub auto-merge provenance",
+                )
+                .await;
+            }
+            notice(
+                config,
+                "Auto-merge armed",
+                format!("{label}: GitHub auto-merge on too — it lands with lazybox closed"),
+            );
+        }
+        NativeArm::Skipped(reason) => {
+            tracing::info!(workspace = %key, "auto-merge: GitHub auto-merge not armed — {reason}");
+            notice(
+                config,
+                "Auto-merge armed",
+                format!("{label}: lazybox will merge it — {reason}"),
+            );
+        }
+        NativeArm::Failed(error) => {
+            tracing::warn!(workspace = %key, "auto-merge: enabling GitHub auto-merge failed: {error}");
+            notice(
+                config,
+                "Auto-merge armed",
+                format!("{label}: lazybox will merge it — GitHub declined auto-merge: {error}"),
+            );
+        }
+    }
+}
+
+/// Push a neutral footer notice. Deliberately NOT
+/// `Event::provider_error_*`: those mark the provider as failing in the
+/// sync status, which "GitHub auto-merge is on too" is the opposite of.
+fn notice(config: &ServerConfig, title: &str, body: String) {
+    let _ = config.bus.send(lazybox_ipc::Event::Notification {
+        title: title.to_string(),
+        body,
+    });
 }
 
 /// Persist the workspace's "track main" arm (issue #535). Mirrors

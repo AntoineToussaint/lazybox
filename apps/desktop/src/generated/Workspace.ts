@@ -112,6 +112,15 @@ woke_at: string | null,
  */
 auto_merge_on_green: boolean,
 /**
+ * Did **lazybox** turn on GitHub's native auto-merge for this PR
+ * (issue #1596)? Set when arming [`Workspace::auto_merge_on_green`]
+ * successfully enables it upstream; disarming then turns native
+ * back off — but only when this is set, so a native auto-merge the
+ * user enabled on github.com is left alone. Provenance only: the
+ * live upstream state is the PR's own `Task::auto_merge_enabled`.
+ */
+native_auto_merge_by_lazybox: boolean,
+/**
  * Per-workspace "track main" arm (issue #535). When `true`, the
  * daemon's background sweep keeps this workspace's worktree
  * fast-forwarded to `origin/<base_branch>` whenever the tree is

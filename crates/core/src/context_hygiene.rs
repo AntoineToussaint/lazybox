@@ -55,7 +55,9 @@ impl CompactionMode {
         !matches!(self, Self::Off)
     }
 
-    /// Whether a verdict may actually change the bytes an agent sends or sees.
+    /// Whether a verdict may actually change the bytes an agent sends or sees,
+    /// or block a tool call. **This, not the verdict, is the permission
+    /// check** — `evaluates()` is true in `Shadow` too.
     pub fn rewrites(self) -> bool {
         matches!(self, Self::On)
     }
@@ -144,6 +146,9 @@ pub enum Eligibility {
 }
 
 impl Eligibility {
+    /// Whether the policy considers this block condensable. Eligibility is not
+    /// permission: see [`ContextHygiene::eligibility`] for why acting on this
+    /// alone rewrites context in shadow mode.
     pub fn is_condense(self) -> bool {
         matches!(self, Self::Condense)
     }
@@ -231,6 +236,16 @@ impl Default for ContextHygiene {
 
 impl ContextHygiene {
     /// The single verdict both enforcement points ask for.
+    ///
+    /// It answers **"is this block eligible"** — never "may I rewrite it".
+    /// `Shadow` deliberately returns [`Eligibility::Condense`] for a block it
+    /// would condense, because that is the whole point of a shadow mode:
+    /// #1606's instrumentation wants the real verdict on every block while
+    /// nothing on the wire changes. So a caller that acts on
+    /// [`Eligibility::is_condense`] alone will act in shadow mode. Gate on
+    /// [`CompactionMode::rewrites`] before touching bytes or denying a tool
+    /// call — a hook that skips that check denies reads in the shipped default
+    /// configuration.
     ///
     /// Order matters for what shadow mode reports: the cheap structural reasons
     /// are checked before the size floor, so a block inside the recency window
@@ -357,6 +372,28 @@ mod tests {
         assert!(CompactionMode::On.rewrites());
         assert!(!CompactionMode::Off.evaluates());
         assert!(!CompactionMode::Off.rewrites());
+    }
+
+    /// The trap, pinned: shadow returns a real `Condense` verdict, so
+    /// `is_condense()` is eligibility and never permission. An enforcement
+    /// point must consult `rewrites()` before acting, or it enforces in the
+    /// shipped default configuration.
+    #[test]
+    fn shadow_yields_a_condense_verdict_that_is_not_permission_to_act() {
+        let kind = file();
+        let policy = ContextHygiene {
+            mode: CompactionMode::Shadow,
+            ..Default::default()
+        };
+        assert_eq!(
+            policy.eligibility(&facts(&kind, 900, 7)),
+            Eligibility::Condense,
+            "shadow must reach the same verdict On would"
+        );
+        assert!(
+            !policy.mode.rewrites(),
+            "but must not permit acting on it — this pair is the whole contract"
+        );
     }
 
     #[test]

@@ -92,6 +92,14 @@ agent:
   Rewriting an agent's context is load-bearing for correctness, not just
   accounting, so it earns its way from evidence rather than starting on. Note
   `on` is a YAML 1.1 boolean and must be quoted: `mode: 'on'`.
+
+  There is a trap here worth stating once. `eligibility()` returns `Condense` in
+  shadow mode — deliberately, because #1606's instrumentation needs the real
+  verdict on every block while nothing on the wire changes. So the verdict
+  answers *"is this block eligible"*, never *"may I act"*. **Permission is
+  `mode.rewrites()`**, which is true only for `on`. An enforcement point that
+  branches on the verdict alone enforces in the shipped default configuration —
+  for the hook, that would be a denied read on a fresh install.
 - **`keep_recent`** — tool results this close to the newest are never touched,
   whatever their size. The model is likely mid-task on them, and edits need real
   content.

@@ -1350,6 +1350,15 @@ type IssueDepsCache = std::sync::Arc<
     parking_lot::Mutex<std::collections::HashMap<TaskId, (Vec<TaskId>, std::time::Instant)>>,
 >;
 
+/// The repo-level facts a merge needs, resolved together because they come
+/// from the same query and are cached under the same key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoMergeSettings {
+    /// The repo's `viewerDefaultMergeMethod` (`MERGE` / `SQUASH` / `REBASE`).
+    pub method: String,
+    pub is_private: bool,
+}
+
 #[derive(Clone)]
 pub struct GhClient {
     inner: Octocrab,
@@ -1401,14 +1410,14 @@ pub struct GhClient {
     /// requested id set each batch and cleared by `force_full_sweep` so
     /// an explicit refresh always re-fetches.
     hot_freshness: std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, String>>>,
-    /// `owner/name` → the repo's `viewerDefaultMergeMethod`, learned by
+    /// `owner/name` → the repo's merge default and visibility, learned by
     /// the first merge in that repo. Shared across clones. A merge is
     /// then ONE request (the mutation) instead of two, which matters
     /// during a secondary cooldown where interactive requests are
     /// rationed; a stale entry is invalidated and refetched when the
     /// mutation is rejected.
     repo_merge_methods:
-        std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, String>>>,
+        std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, RepoMergeSettings>>>,
     /// `owner/name@branch` → the branch's [`BranchMergeGate`] and when it
     /// was read. Shared across clones, like
     /// [`repo_merge_methods`](Self::repo_merge_methods) and for the same
@@ -5312,6 +5321,107 @@ impl GhClient {
             .map(|outcome| (outcome.tasks, outcome.partial_failure, outcome.mentions))
     }
 
+    /// Record `trailers` on `pr` as a comment, for a repo whose merge
+    /// method produces no commit body of its own to carry them.
+    ///
+    /// Sticky: lazybox keeps ONE such comment per PR, marked with
+    /// [`TRAILER_COMMENT_MARKER`] and edited in place, so re-merging never
+    /// stacks a second one. Best-effort — the merge already landed, and a
+    /// failure to annotate it must not surface as a merge failure.
+    async fn write_sticky_trailer_comment(
+        &self,
+        pr: &lazybox_core::Task,
+        trailers: &lazybox_core::PrTrailers,
+    ) {
+        let Some((owner, name, number)) = parse_github_pr_key(&pr.id.key) else {
+            return;
+        };
+        let body = format!(
+            "{TRAILER_COMMENT_MARKER}\n\n```\n{}\n```",
+            trailers.render()
+        );
+        match self.find_trailer_comment(owner, name, number).await {
+            Ok(Some(comment_id)) => {
+                if let Err(error) = self
+                    .update_issue_comment(owner, name, comment_id, &body)
+                    .await
+                {
+                    tracing::warn!(
+                        "merge {}: updating the trailer comment failed: {error}",
+                        pr.id.key
+                    );
+                }
+            }
+            Ok(None) => {
+                if let Err(error) = self
+                    .post_issue_comment(&format!("{owner}/{name}"), number, &body)
+                    .await
+                {
+                    tracing::warn!(
+                        "merge {}: posting the trailer comment failed: {error}",
+                        pr.id.key
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "merge {}: could not look for an existing trailer comment ({error}) — \
+                     leaving the record unwritten rather than risking a duplicate",
+                    pr.id.key,
+                );
+            }
+        }
+    }
+
+    /// The id of this PR's existing lazybox trailer comment, if any. Matched
+    /// on BOTH the marker and our own authorship, so a marker pasted by
+    /// someone else can't redirect the edit onto their comment.
+    async fn find_trailer_comment(
+        &self,
+        owner: &str,
+        name: &str,
+        number: u64,
+    ) -> Result<Option<octocrab::models::CommentId>, GhError> {
+        self.acquire_or_block("list issue comments")?;
+        let _permit = self.request_permit().await?;
+        let page = self
+            .inner
+            .issues(owner, name)
+            .list_comments(number)
+            .per_page(100)
+            .send()
+            .await
+            .map_err(GhError::Api)?;
+        Ok(page
+            .items
+            .into_iter()
+            .find(|c| {
+                c.user.login == self.user
+                    && c.body
+                        .as_deref()
+                        .is_some_and(|b| b.starts_with(TRAILER_COMMENT_MARKER))
+            })
+            .map(|c| c.id))
+    }
+
+    async fn update_issue_comment(
+        &self,
+        owner: &str,
+        name: &str,
+        comment_id: octocrab::models::CommentId,
+        body: &str,
+    ) -> Result<(), GhError> {
+        self.acquire_or_block("update issue comment")?;
+        let _permit = self.request_permit().await?;
+        let _mutation_guard = self.mutation_gate.lock().await;
+        self.inner
+            .issues(owner, name)
+            .update_comment(comment_id, body)
+            .await
+            .map_err(GhError::Api)?;
+        Ok(())
+    }
+
     /// Post a top-level comment on an issue or PR. PRs ARE issues in
     /// the REST API, so the same `issues/{n}/comments` endpoint works
     /// for both. `repo` is the `owner/name` shorthand the rest of the
@@ -6026,8 +6136,11 @@ impl GhClient {
     /// Resolve the repository's default merge method for a PR — the
     /// method github.com's merge button pre-selects, and (on a repo
     /// that disallows merge commits) the only method the merge mutation
-    /// will accept.
-    pub async fn pr_merge_method(&self, pull_request_node_id: &str) -> Result<String, GhError> {
+    /// will accept — together with the repo's visibility.
+    pub async fn pr_merge_settings(
+        &self,
+        pull_request_node_id: &str,
+    ) -> Result<RepoMergeSettings, GhError> {
         self.acquire_or_block("pr merge-method query")?;
         let body = graphql::pr_merge_method_body(pull_request_node_id);
         let response: graphql::GqlMergeMethodResponse = self
@@ -6039,8 +6152,34 @@ impl GhClient {
         response
             .data
             .and_then(|d| d.node)
-            .map(|n| n.repository.viewer_default_merge_method)
+            .map(|n| RepoMergeSettings {
+                method: n.repository.viewer_default_merge_method,
+                is_private: n.repository.is_private,
+            })
             .ok_or_else(|| GhError::Graphql("PR node has no repository merge method".to_string()))
+    }
+
+    /// The commit body GitHub would write on its own for `merge_method`.
+    /// Reading it back is what lets [`merge_pr_in_repo`](Self::merge_pr_in_repo)
+    /// *append* trailers instead of replacing the squash log with them.
+    async fn pr_merge_body_text(
+        &self,
+        pull_request_node_id: &str,
+        merge_method: &str,
+    ) -> Result<String, GhError> {
+        self.acquire_or_block("pr merge-body query")?;
+        let body = graphql::pr_merge_body_text_body(pull_request_node_id, merge_method);
+        let response: graphql::GqlMergeBodyResponse = self
+            .post_graphql_with_retry("pr merge-body query", &body)
+            .await?;
+        if let Some(errors) = response.errors {
+            return Err(mutation_error_response("pr merge-body query", &errors));
+        }
+        response
+            .data
+            .and_then(|d| d.node)
+            .map(|n| n.viewer_merge_body_text)
+            .ok_or_else(|| GhError::Graphql("PR node has no default merge body".to_string()))
     }
 
     /// Merge a PR. `expected_head_oid` — when known — pins the merge to
@@ -6054,8 +6193,13 @@ impl GhClient {
         pull_request_node_id: &str,
         expected_head_oid: Option<&str>,
     ) -> Result<(), GhError> {
-        self.merge_pr_in_repo(None, pull_request_node_id, expected_head_oid)
-            .await
+        self.merge_pr_in_repo(
+            None,
+            pull_request_node_id,
+            &lazybox_core::MergeOptions::head(expected_head_oid),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// [`merge_pr`](Self::merge_pr) with the PR's `owner/name` so the
@@ -6063,15 +6207,28 @@ impl GhClient {
     /// per-repo cache. The first merge in a repo pays the lookup; later
     /// ones are a single mutation. If a cached method is rejected, the
     /// method is refetched and the merge retried once when it changed.
+    ///
+    /// Returns the trailers that the merge could NOT carry: a `REBASE`
+    /// merge writes no commit of its own, so a caller wanting the record
+    /// kept must put it somewhere else. `None` means there was nothing to
+    /// write, or it went into the merge commit.
     pub async fn merge_pr_in_repo(
         &self,
         repo: Option<&str>,
         pull_request_node_id: &str,
-        expected_head_oid: Option<&str>,
-    ) -> Result<(), GhError> {
-        let (merge_method, from_cache) = self.merge_method_for(repo, pull_request_node_id).await?;
+        options: &lazybox_core::MergeOptions<'_>,
+    ) -> Result<Option<lazybox_core::PrTrailers>, GhError> {
+        let (settings, from_cache) = self.merge_method_for(repo, pull_request_node_id).await?;
+        let (commit_body, deferred) = self
+            .resolve_commit_body(repo, pull_request_node_id, &settings, options)
+            .await;
         match self
-            .merge_pr_with_method(pull_request_node_id, &merge_method, expected_head_oid)
+            .merge_pr_with_method(
+                pull_request_node_id,
+                &settings.method,
+                options.expected_head_oid,
+                commit_body.as_deref(),
+            )
             .await
         {
             Err(GhError::Graphql(error)) if from_cache => {
@@ -6082,26 +6239,82 @@ impl GhClient {
                 let Some(repo) = repo else {
                     return Err(GhError::Graphql(error));
                 };
-                let fresh = self.pr_merge_method(pull_request_node_id).await?;
+                let fresh = self.pr_merge_settings(pull_request_node_id).await?;
                 self.repo_merge_methods
                     .lock()
                     .insert(repo.to_string(), fresh.clone());
-                if fresh == merge_method {
+                if fresh.method == settings.method {
                     return Err(GhError::Graphql(error));
                 }
                 tracing::info!(
-                    "merge {repo}: cached merge method {merge_method} was stale (now {fresh}) — retrying"
+                    "merge {repo}: cached merge method {} was stale (now {}) — retrying",
+                    settings.method,
+                    fresh.method,
                 );
-                self.merge_pr_with_method(pull_request_node_id, &fresh, expected_head_oid)
-                    .await
+                // The body was resolved for the stale method, so it may no
+                // longer describe what this merge writes.
+                let (commit_body, deferred) = self
+                    .resolve_commit_body(Some(repo), pull_request_node_id, &fresh, options)
+                    .await;
+                self.merge_pr_with_method(
+                    pull_request_node_id,
+                    &fresh.method,
+                    options.expected_head_oid,
+                    commit_body.as_deref(),
+                )
+                .await
+                .map(|()| deferred)
             }
-            other => other,
+            other => other.map(|()| deferred),
+        }
+    }
+
+    /// The `commitBody` to send, plus any trailers the merge cannot carry.
+    ///
+    /// Failing to resolve the default body yields `(None, None)`: merging
+    /// with only the trailers as the body would replace the squash log with
+    /// them, so losing the record is strictly better than losing history.
+    async fn resolve_commit_body(
+        &self,
+        repo: Option<&str>,
+        pull_request_node_id: &str,
+        settings: &RepoMergeSettings,
+        options: &lazybox_core::MergeOptions<'_>,
+    ) -> (Option<String>, Option<lazybox_core::PrTrailers>) {
+        let Some(trailers) = options.trailers.as_ref() else {
+            return (None, None);
+        };
+        let mode = options.trailer_policy.mode_for(repo, settings.is_private);
+        let Some(trailers) = mode.apply(trailers) else {
+            return (None, None);
+        };
+        if settings.method.eq_ignore_ascii_case("REBASE") {
+            return (None, Some(trailers));
+        }
+        match self
+            .pr_merge_body_text(pull_request_node_id, &settings.method)
+            .await
+        {
+            Ok(default_body) => (
+                Some(lazybox_core::append_pr_trailers(&default_body, &trailers)),
+                None,
+            ),
+            Err(error) => {
+                tracing::warn!(
+                    "merge: could not resolve the default commit body ({error}) — \
+                     merging without trailers rather than truncating the commit log"
+                );
+                (None, None)
+            }
         }
     }
 
     /// The cached merge method for `repo`, if a merge has learned it.
     pub fn cached_merge_method(&self, repo: &str) -> Option<String> {
-        self.repo_merge_methods.lock().get(repo).cloned()
+        self.repo_merge_methods
+            .lock()
+            .get(repo)
+            .map(|s| s.method.clone())
     }
 
     /// The merge method to use for a PR, served from (and learned into)
@@ -6112,19 +6325,19 @@ impl GhClient {
         &self,
         repo: Option<&str>,
         pull_request_node_id: &str,
-    ) -> Result<(String, bool), GhError> {
-        if let Some(method) =
+    ) -> Result<(RepoMergeSettings, bool), GhError> {
+        if let Some(settings) =
             repo.and_then(|repo| self.repo_merge_methods.lock().get(repo).cloned())
         {
-            return Ok((method, true));
+            return Ok((settings, true));
         }
-        let method = self.pr_merge_method(pull_request_node_id).await?;
+        let settings = self.pr_merge_settings(pull_request_node_id).await?;
         if let Some(repo) = repo {
             self.repo_merge_methods
                 .lock()
-                .insert(repo.to_string(), method.clone());
+                .insert(repo.to_string(), settings.clone());
         }
-        Ok((method, false))
+        Ok((settings, false))
     }
 
     /// Turn on GitHub's server-side auto-merge for a PR (issue #1596) —
@@ -6142,9 +6355,9 @@ impl GhClient {
         repo: Option<&str>,
         pull_request_node_id: &str,
     ) -> Result<(), GhError> {
-        let (merge_method, _) = self.merge_method_for(repo, pull_request_node_id).await?;
+        let (settings, _) = self.merge_method_for(repo, pull_request_node_id).await?;
         self.acquire_or_block("enablePullRequestAutoMerge mutation")?;
-        let body = graphql::enable_auto_merge_body(pull_request_node_id, &merge_method);
+        let body = graphql::enable_auto_merge_body(pull_request_node_id, &settings.method);
         let response: graphql::GqlMutationResponse = self
             .post_graphql_with_retry("enablePullRequestAutoMerge mutation", &body)
             .await?;
@@ -6207,9 +6420,15 @@ impl GhClient {
         pull_request_node_id: &str,
         merge_method: &str,
         expected_head_oid: Option<&str>,
+        commit_body: Option<&str>,
     ) -> Result<(), GhError> {
         self.acquire_or_block("mergePullRequest mutation")?;
-        let body = graphql::merge_pr_body(pull_request_node_id, merge_method, expected_head_oid);
+        let body = graphql::merge_pr_body(
+            pull_request_node_id,
+            merge_method,
+            expected_head_oid,
+            commit_body,
+        );
         let response: graphql::GqlMutationResponse = self
             .post_graphql_with_retry("mergePullRequest mutation", &body)
             .await?;
@@ -6704,14 +6923,14 @@ impl lazybox_core::TaskProvider for GhClient {
     /// `Permanent("PR has no node_id")` which the caller can
     /// translate to "repoll first".
     ///
-    /// `expected_head_oid` pins the merge to that head commit
+    /// `options.expected_head_oid` pins the merge to that head commit
     /// (`mergePullRequest`'s `expectedHeadOid`); a head that moved
     /// since surfaces as GitHub's own "Head branch was modified"
     /// rejection, which the caller reports via `Event::PrMergeFailed`.
     async fn merge(
         &self,
         workspace: &lazybox_core::Workspace,
-        expected_head_oid: Option<&str>,
+        options: &lazybox_core::MergeOptions<'_>,
     ) -> Result<(), lazybox_core::ProviderError> {
         let Some(pr) = workspace.pr.as_ref() else {
             return Err(lazybox_core::ProviderError::permanent(
@@ -6726,10 +6945,15 @@ impl lazybox_core::TaskProvider for GhClient {
             ));
         };
         match self
-            .merge_pr_in_repo(pr.repo.as_deref(), node_id, expected_head_oid)
+            .merge_pr_in_repo(pr.repo.as_deref(), node_id, options)
             .await
         {
-            Ok(()) => Ok(()),
+            Ok(deferred) => {
+                if let Some(trailers) = deferred {
+                    self.write_sticky_trailer_comment(pr, &trailers).await;
+                }
+                Ok(())
+            }
             Err(err) => {
                 // GitHub rejects a merge of an ALREADY-merged PR with a
                 // generic "not mergeable" — indistinguishable by message
@@ -7320,6 +7544,10 @@ pub(crate) fn should_query_issues(
 /// `Pull request Pull request is in merged state.` (yes, doubled) on
 /// current api.github.com; older/GHES variants say "already merged".
 /// Matched case-insensitively as substrings.
+/// Opening line of lazybox's trailer comment. Invisible when rendered, and
+/// the handle that makes the comment sticky rather than one-per-merge.
+const TRAILER_COMMENT_MARKER: &str = "<!-- lazybox:pr-trailers -->";
+
 const ALREADY_MERGED_MARKERS: &[&str] = &["already merged", "merged state"];
 
 /// GitHub's rejections that mean "auto-merge is already on" — the
@@ -8946,7 +9174,7 @@ mod tests {
         let client = make_client(&base_uri);
 
         let pr = Workspace::from_task(task_without_node_id(TaskKind::Pr), chrono::Utc::now());
-        let error = TaskProvider::merge(&client, &pr, None)
+        let error = TaskProvider::merge(&client, &pr, &lazybox_core::MergeOptions::default())
             .await
             .expect_err("a PR mutation requires the node id cached by polling");
         assert_eq!(
@@ -9869,7 +10097,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn merge_pins_repo_default_method() {
         assert_eq!(
-            graphql::merge_pr_body("PR_kwDO", "SQUASH", None)["variables"]["method"],
+            graphql::merge_pr_body("PR_kwDO", "SQUASH", None, None)["variables"]["method"],
             "SQUASH",
             "the resolved default method must ride the merge mutation"
         );
@@ -9897,7 +10125,11 @@ mod tests {
         let client = make_client(&base_uri);
         assert!(client.cached_merge_method("acme/widgets").is_none());
         client
-            .merge_pr_in_repo(Some("acme/widgets"), "PR_1", None)
+            .merge_pr_in_repo(
+                Some("acme/widgets"),
+                "PR_1",
+                &lazybox_core::MergeOptions::default(),
+            )
             .await
             .expect("first merge");
         assert_eq!(
@@ -9905,9 +10137,369 @@ mod tests {
             Some("SQUASH")
         );
         client
-            .merge_pr_in_repo(Some("acme/widgets"), "PR_2", None)
+            .merge_pr_in_repo(
+                Some("acme/widgets"),
+                "PR_2",
+                &lazybox_core::MergeOptions::default(),
+            )
             .await
             .expect("second merge served from the cached method");
+    }
+
+    /// Repository visibility rides the merge-method query and is cached
+    /// with it, so gating the trailer on it costs no extra round-trip.
+    #[tokio::test(flavor = "current_thread")]
+    async fn merge_settings_carry_repo_visibility() {
+        const METHOD: &str = r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"SQUASH","isPrivate":true}}}}"#;
+        let base_uri = spawn_sequenced_response_server(vec![METHOD]).await;
+        let client = make_client(&base_uri);
+        let settings = client
+            .pr_merge_settings("PR_1")
+            .await
+            .expect("merge settings resolve");
+        assert_eq!(settings.method, "SQUASH");
+        assert!(settings.is_private);
+    }
+
+    /// A pre-learned merge-method cache entry, as a first merge would leave it.
+    fn squash_settings() -> RepoMergeSettings {
+        RepoMergeSettings {
+            method: "SQUASH".to_string(),
+            is_private: false,
+        }
+    }
+
+    fn cost_trailers(micros: u64) -> lazybox_core::PrTrailers {
+        lazybox_core::PrTrailers {
+            cost: Some(lazybox_core::CostTrailer {
+                micros: Some(micros),
+                tokens: None,
+            }),
+            effort: lazybox_core::EffortTrailer {
+                ci_repairs: Some(2),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn merge_options<'a>(
+        trailers: &lazybox_core::PrTrailers,
+        policy: lazybox_core::TrailerPolicy,
+    ) -> lazybox_core::MergeOptions<'a> {
+        lazybox_core::MergeOptions {
+            expected_head_oid: None,
+            trailers: Some(trailers.clone()),
+            trailer_policy: policy,
+        }
+    }
+
+    /// The mutation body's `commitBody` is the resolved default APPENDED to,
+    /// never replaced by, the trailers. A squash log lost to a substituted
+    /// body is unrecoverable history.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_private_repo_merge_appends_trailers_to_the_default_body() {
+        const METHOD: &str = r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"SQUASH","isPrivate":true}}}}"#;
+        const DEFAULT_BODY: &str = r#"{"data":{"node":{"viewerMergeBodyText":"* first commit\n\n* second commit\n\n* third commit"}}}"#;
+        const MERGED: &str = r#"{"data":{"mergePullRequest":{"pullRequest":{"id":"PR_1","state":"MERGED","merged":true}}}}"#;
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base_uri =
+            spawn_recording_response_server(vec![METHOD, DEFAULT_BODY, MERGED], requests.clone())
+                .await;
+        let client = make_client(&base_uri);
+
+        let trailers = cost_trailers(13_893_891);
+        let deferred = client
+            .merge_pr_in_repo(
+                Some("acme/widgets"),
+                "PR_1",
+                &merge_options(&trailers, lazybox_core::TrailerPolicy::default()),
+            )
+            .await
+            .expect("merge succeeds");
+        assert!(deferred.is_none(), "a squash carries its own trailers");
+
+        let mutation = requests.lock().unwrap()[2].clone();
+        let commit_body =
+            sent_variable(&mutation, "commitBody").expect("the mutation must carry a commitBody");
+        assert!(
+            commit_body.starts_with("* first commit\n\n* second commit\n\n* third commit"),
+            "the whole squash log must survive: {commit_body:?}"
+        );
+        assert!(
+            commit_body.ends_with("\n\nLazybox-Cost: $13.89\nLazybox-Effort: 2 CI repairs"),
+            "trailers form the trailing paragraph: {commit_body:?}"
+        );
+    }
+
+    /// A merge with nothing to record sends no `commitBody` at all, leaving
+    /// GitHub's own default in place — the pre-existing behavior.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_merge_without_trailers_sends_no_commit_body() {
+        const METHOD: &str = r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"SQUASH","isPrivate":true}}}}"#;
+        const MERGED: &str = r#"{"data":{"mergePullRequest":{"pullRequest":{"id":"PR_1","state":"MERGED","merged":true}}}}"#;
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base_uri =
+            spawn_recording_response_server(vec![METHOD, MERGED], requests.clone()).await;
+        let client = make_client(&base_uri);
+
+        client
+            .merge_pr_in_repo(
+                Some("acme/widgets"),
+                "PR_1",
+                &lazybox_core::MergeOptions::default(),
+            )
+            .await
+            .expect("merge succeeds");
+
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 2, "no default-body query when nothing to write");
+        assert_eq!(sent_variable(&sent[1], "commitBody"), None);
+    }
+
+    /// The gate: a public repo writes nothing unless it is opted in, because
+    /// a trailer cannot be removed from history and per-PR spend is a
+    /// business signal anyone who clones can aggregate.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_public_repo_writes_nothing_unless_opted_in() {
+        const METHOD: &str = r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"SQUASH","isPrivate":false}}}}"#;
+        const MERGED: &str = r#"{"data":{"mergePullRequest":{"pullRequest":{"id":"PR_1","state":"MERGED","merged":true}}}}"#;
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base_uri =
+            spawn_recording_response_server(vec![METHOD, MERGED], requests.clone()).await;
+        let client = make_client(&base_uri);
+
+        let trailers = cost_trailers(13_893_891);
+        client
+            .merge_pr_in_repo(
+                Some("acme/widgets"),
+                "PR_1",
+                &merge_options(&trailers, lazybox_core::TrailerPolicy::default()),
+            )
+            .await
+            .expect("merge succeeds");
+
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 2, "no default-body query on a gated repo");
+        assert_eq!(sent_variable(&sent[1], "commitBody"), None);
+    }
+
+    /// Opting a public repo in at `shape` publishes what the work took but
+    /// withholds the commercial figure.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_opted_in_public_repo_can_withhold_the_dollars() {
+        const METHOD: &str = r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"SQUASH","isPrivate":false}}}}"#;
+        const DEFAULT_BODY: &str = r#"{"data":{"node":{"viewerMergeBodyText":"* only commit"}}}"#;
+        const MERGED: &str = r#"{"data":{"mergePullRequest":{"pullRequest":{"id":"PR_1","state":"MERGED","merged":true}}}}"#;
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base_uri =
+            spawn_recording_response_server(vec![METHOD, DEFAULT_BODY, MERGED], requests.clone())
+                .await;
+        let client = make_client(&base_uri);
+
+        let mut policy = lazybox_core::TrailerPolicy::default();
+        policy
+            .repos
+            .insert("acme/widgets".to_string(), lazybox_core::TrailerMode::Shape);
+        let trailers = cost_trailers(13_893_891);
+        client
+            .merge_pr_in_repo(
+                Some("acme/widgets"),
+                "PR_1",
+                &merge_options(&trailers, policy),
+            )
+            .await
+            .expect("merge succeeds");
+
+        let commit_body = sent_variable(&requests.lock().unwrap()[2], "commitBody")
+            .expect("an opted-in repo carries a body");
+        assert!(
+            !commit_body.contains("Lazybox-Cost"),
+            "the dollar figure must be withheld: {commit_body:?}"
+        );
+        assert!(commit_body.ends_with("\n\nLazybox-Effort: 2 CI repairs"));
+    }
+
+    /// A default body we cannot resolve must cost us the RECORD, not the
+    /// history: sending only the trailers as `commitBody` would replace the
+    /// squash log with them.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_unresolvable_default_body_merges_without_trailers() {
+        const METHOD: &str = r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"SQUASH","isPrivate":true}}}}"#;
+        const BODY_FAILED: &str = r#"{"errors":[{"message":"Something went wrong"}]}"#;
+        const MERGED: &str = r#"{"data":{"mergePullRequest":{"pullRequest":{"id":"PR_1","state":"MERGED","merged":true}}}}"#;
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base_uri =
+            spawn_recording_response_server(vec![METHOD, BODY_FAILED, MERGED], requests.clone())
+                .await;
+        let client = make_client(&base_uri);
+
+        let trailers = cost_trailers(13_893_891);
+        let deferred = client
+            .merge_pr_in_repo(
+                Some("acme/widgets"),
+                "PR_1",
+                &merge_options(&trailers, lazybox_core::TrailerPolicy::default()),
+            )
+            .await
+            .expect("the merge still lands");
+        assert!(deferred.is_none());
+        assert_eq!(
+            sent_variable(&requests.lock().unwrap()[2], "commitBody"),
+            None,
+            "no body beats a truncated one"
+        );
+    }
+
+    /// A REBASE merge writes no commit of its own, so the trailers come back
+    /// for the caller to record out of band.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_rebase_merge_defers_its_trailers() {
+        const METHOD: &str = r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"REBASE","isPrivate":true}}}}"#;
+        const MERGED: &str = r#"{"data":{"mergePullRequest":{"pullRequest":{"id":"PR_1","state":"MERGED","merged":true}}}}"#;
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base_uri =
+            spawn_recording_response_server(vec![METHOD, MERGED], requests.clone()).await;
+        let client = make_client(&base_uri);
+
+        let trailers = cost_trailers(13_893_891);
+        let deferred = client
+            .merge_pr_in_repo(
+                Some("acme/widgets"),
+                "PR_1",
+                &merge_options(&trailers, lazybox_core::TrailerPolicy::default()),
+            )
+            .await
+            .expect("merge succeeds");
+        assert_eq!(
+            deferred.map(|t| t.render()),
+            Some("Lazybox-Cost: $13.89\nLazybox-Effort: 2 CI repairs".to_string()),
+        );
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 2, "a rebase never queries a default body");
+        assert_eq!(sent_variable(&sent[1], "commitBody"), None);
+    }
+
+    /// One issue comment as GitHub's REST API returns it.
+    fn comment_json(id: u64, login: &str, body: &str) -> serde_json::Value {
+        let user = |login: &str| {
+            serde_json::json!({
+                "login": login,
+                "id": 1,
+                "node_id": "U_1",
+                "avatar_url": "https://example.invalid/a",
+                "gravatar_id": "",
+                "url": "https://example.invalid/u",
+                "html_url": "https://example.invalid/u",
+                "followers_url": "https://example.invalid/u",
+                "following_url": "https://example.invalid/u",
+                "gists_url": "https://example.invalid/u",
+                "starred_url": "https://example.invalid/u",
+                "subscriptions_url": "https://example.invalid/u",
+                "organizations_url": "https://example.invalid/u",
+                "repos_url": "https://example.invalid/u",
+                "events_url": "https://example.invalid/u",
+                "received_events_url": "https://example.invalid/u",
+                "type": "User",
+                "site_admin": false,
+                "name": null,
+                "patch_url": null,
+            })
+        };
+        serde_json::json!({
+            "id": id,
+            "node_id": "IC_1",
+            "url": "https://example.invalid/c",
+            "html_url": "https://example.invalid/c",
+            "body": body,
+            "user": user(login),
+            "created_at": "2026-09-09T00:00:00Z",
+        })
+    }
+
+    /// The REBASE fallback is *sticky*: an existing lazybox trailer comment
+    /// is edited in place, so re-merging never stacks a second one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_trailer_comment_is_edited_in_place_when_ours_exists() {
+        let existing = serde_json::json!([comment_json(
+            77,
+            "test-user",
+            "<!-- lazybox:pr-trailers -->\n\n```\nLazybox-Cost: $1.00\n```"
+        )])
+        .to_string();
+        let updated = comment_json(77, "test-user", "updated").to_string();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base_uri = spawn_recording_response_server(
+            vec![
+                Box::leak(existing.into_boxed_str()),
+                Box::leak(updated.into_boxed_str()),
+            ],
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&base_uri);
+
+        let pr = task_without_node_id(TaskKind::Pr);
+        client
+            .write_sticky_trailer_comment(&pr, &cost_trailers(13_893_891))
+            .await;
+
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 2, "list, then edit — never a second create");
+        assert!(
+            sent[1].starts_with("POST /repos/o/r/issues/comments/77"),
+            "the existing comment must be edited: {:?}",
+            sent[1].lines().next(),
+        );
+        assert!(
+            sent[1].contains("Lazybox-Cost: $13.89"),
+            "the edit carries the fresh figure",
+        );
+    }
+
+    /// The marker alone does not identify our comment: matching on it
+    /// without checking authorship would let anyone redirect the edit onto
+    /// a comment of theirs by pasting the marker.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_foreign_comment_carrying_the_marker_is_not_edited() {
+        let foreign = serde_json::json!([comment_json(
+            88,
+            "someone-else",
+            "<!-- lazybox:pr-trailers -->\nnot ours"
+        )])
+        .to_string();
+        let created = comment_json(99, "test-user", "created").to_string();
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let base_uri = spawn_recording_response_server(
+            vec![
+                Box::leak(foreign.into_boxed_str()),
+                Box::leak(created.into_boxed_str()),
+            ],
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&base_uri);
+
+        client
+            .write_sticky_trailer_comment(
+                &task_without_node_id(TaskKind::Pr),
+                &cost_trailers(13_893_891),
+            )
+            .await;
+
+        let sent = requests.lock().unwrap();
+        assert!(
+            sent[1].starts_with("POST /repos/o/r/issues/1/comments"),
+            "a foreign marker must not be edited over: {:?}",
+            sent[1].lines().next(),
+        );
+    }
+
+    /// Pull one GraphQL variable out of a recorded raw HTTP request.
+    fn sent_variable(request: &str, name: &str) -> Option<String> {
+        let body = request.split("\r\n\r\n").nth(1)?;
+        let json: serde_json::Value = serde_json::from_str(body).ok()?;
+        json["variables"][name].as_str().map(str::to_string)
     }
 
     /// Issue #998: branch-rule types map to short human names for the
@@ -10145,7 +10737,7 @@ mod tests {
         client
             .repo_merge_methods
             .lock()
-            .insert("o/r".into(), "SQUASH".into());
+            .insert("o/r".into(), squash_settings());
         client
             .enable_auto_merge(Some("o/r"), "PR_kwDO")
             .await
@@ -10190,7 +10782,7 @@ mod tests {
         client
             .repo_merge_methods
             .lock()
-            .insert("o/r".into(), "SQUASH".into());
+            .insert("o/r".into(), squash_settings());
         client
             .enable_auto_merge(Some("o/r"), "PR_kwDO")
             .await
@@ -10210,7 +10802,7 @@ mod tests {
         client
             .repo_merge_methods
             .lock()
-            .insert("o/r".into(), "SQUASH".into());
+            .insert("o/r".into(), squash_settings());
         client
             .enable_auto_merge(Some("o/r"), "PR_kwDO")
             .await
@@ -10228,7 +10820,7 @@ mod tests {
         client
             .repo_merge_methods
             .lock()
-            .insert("o/r".into(), "SQUASH".into());
+            .insert("o/r".into(), squash_settings());
         let error = client
             .enable_auto_merge(Some("o/r"), "PR_kwDO")
             .await

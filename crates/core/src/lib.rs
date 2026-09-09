@@ -55,14 +55,15 @@ pub use policy::{
     auto_merge_block_reason, merge_block_reason, should_auto_merge, toggled_arm,
 };
 pub use pr_trailers::{
-    AgentCount, CostTrailer, EffortTrailer, PrTrailers, TimeTrailer,
+    AgentCount, CostTrailer, EffortTrailer, PrTrailers, TimeTrailer, TrailerMode, TrailerPolicy,
     append_to_body as append_pr_trailers, extract as extract_pr_trailers,
 };
 pub use pricing::{ModelPrice, TokenCounts, cost_micros as pricing_cost_micros, price_for};
 pub use project::{Project, ProjectKey, github_owner_repo_from_url};
 pub use provider::{
     DEFAULT_MAX_PAGES, FetchCoverage, FetchOutcome, FetchPage, FetchPageInfo, GITHUB_SOURCE,
-    LINEAR_SOURCE, PaginationOutcome, PaginationStop, ProviderError, TaskProvider, paginate,
+    LINEAR_SOURCE, MergeOptions, PaginationOutcome, PaginationStop, ProviderError, TaskProvider,
+    paginate,
 };
 pub use scope::{MockScopeSource, Scope, ScopeKind, ScopeSource};
 pub use session_key::SessionKey;

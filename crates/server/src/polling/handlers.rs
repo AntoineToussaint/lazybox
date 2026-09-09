@@ -109,11 +109,11 @@ impl ProviderHandle {
     pub async fn merge(
         &self,
         ws: &lazybox_core::Workspace,
-        expected_head_oid: Option<&str>,
+        options: &lazybox_core::MergeOptions<'_>,
     ) -> Result<(), lazybox_core::ProviderError> {
         match self {
-            Self::Github(c) => lazybox_core::TaskProvider::merge(c, ws, expected_head_oid).await,
-            Self::Linear(c) => lazybox_core::TaskProvider::merge(c, ws, expected_head_oid).await,
+            Self::Github(c) => lazybox_core::TaskProvider::merge(c, ws, options).await,
+            Self::Linear(c) => lazybox_core::TaskProvider::merge(c, ws, options).await,
         }
     }
     pub async fn update_branch(
@@ -840,8 +840,17 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey, force
             return;
         }
     };
+    let merge_options = lazybox_core::MergeOptions {
+        expected_head_oid: expected_head.as_deref(),
+        trailers: Some(crate::pr_trailers::measure(config, &merge_ws, chrono::Utc::now()).await),
+        trailer_policy: lazybox_config::Config::load()
+            .unwrap_or_default()
+            .providers
+            .github
+            .pr_trailers,
+    };
     if let Err(e) = run_mutation_with_retry(&config.bus, "merge", || {
-        provider.merge(&merge_ws, expected_head.as_deref())
+        provider.merge(&merge_ws, &merge_options)
     })
     .await
     {
@@ -879,6 +888,7 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey, force
         return;
     }
     tracing::info!("merged PR for workspace {workspace_key}");
+    crate::pr_trailers::mark_reported(config, &workspace_key).await;
 
     // Local Task still reads `Open` — the GitHub mutation succeeded
     // but our stored copy won't reflect MERGED until the next poll.

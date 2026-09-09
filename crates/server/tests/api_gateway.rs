@@ -1468,14 +1468,67 @@ async fn next_terminal_frame(body: &mut api_gateway::Body) -> DecodedTerminalFra
     }
 }
 
-/// How long the sustained-output wait tolerates a real PTY emitting nothing
-/// at all before calling the fixture broken.
-const PTY_OUTPUT_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
         .any(|window| window == needle)
+}
+
+/// How long the sustained-output wait tolerates the PTY emitting nothing at
+/// all, and how long it tolerates the whole wait regardless of progress.
+///
+/// Both must fire before nextest's `slow-timeout` for this test
+/// (`.config/nextest.toml`): `terminate-after = 1` SIGKILLs the process, and a
+/// killed test never unwinds, so an assertion that would have named the
+/// failure never prints. `nextest_budget_outlasts_the_in_test_pty_bounds`
+/// pins that ordering.
+const PTY_OUTPUT_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const PTY_OUTPUT_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The in-test bounds only produce a readable failure if they fire before
+/// nextest kills the process, so the two budgets are a matched pair: raising
+/// either one alone trades a named assertion for a bare `TIMED OUT`.
+#[test]
+fn nextest_budget_outlasts_the_in_test_pty_bounds() {
+    /// Wall clock the phases after the sustained-output wait need — drain,
+    /// reconnect, replay, resync. Measured at ~8s under a loaded
+    /// `nextest run -p lazybox-server`.
+    const POST_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.config/nextest.toml");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+    let test_name = "desktop_runtime_real_pty_handles_backpressure_reconnect_replay_and_resync";
+    let block = text
+        .split("[[profile.default.overrides]]")
+        .find(|block| block.contains(test_name))
+        .unwrap_or_else(|| {
+            panic!("no nextest override pins {test_name}'s budget; it inherits the 10s default")
+        });
+    assert!(
+        block.contains("terminate-after"),
+        "the override no longer terminates the test, so the ordering this \
+         guard pins would no longer describe how it fails",
+    );
+    let period = block
+        .lines()
+        .find_map(|line| {
+            let rest = line.trim().strip_prefix("slow-timeout")?;
+            let secs = rest.split_once("period = \"")?.1.split_once("s\"")?.0;
+            secs.parse::<u64>().ok().map(std::time::Duration::from_secs)
+        })
+        .expect("override declares a slow-timeout period in whole seconds");
+
+    assert!(
+        PTY_OUTPUT_TOTAL_TIMEOUT + POST_WAIT_BUDGET < period,
+        "in-test bounds (wait {PTY_OUTPUT_TOTAL_TIMEOUT:?} + post-wait \
+         {POST_WAIT_BUDGET:?}) must complete before nextest's {period:?} kill, \
+         or the test dies by SIGKILL with no diagnostic",
+    );
+    assert!(
+        PTY_OUTPUT_STALL_TIMEOUT <= PTY_OUTPUT_TOTAL_TIMEOUT,
+        "a stall bound above the total bound can never fire",
+    );
 }
 
 #[tokio::test]
@@ -1570,37 +1623,46 @@ async fn desktop_runtime_real_pty_handles_backpressure_reconnect_replay_and_resy
     assert_eq!(response.status(), StatusCode::OK);
     let _command_stream = response.into_body();
 
-    // The fixture paces 4000 lines through an external `sleep` apiece, so how
-    // long it takes to fill the ring is a property of the box, not of the code
-    // under test — a budget sized off an idle run expires under a loaded one
-    // while the PTY is still healthily producing. Wait on progress instead:
-    // only a PTY that has stopped emitting chunks fails, and it says which of
-    // the three conditions it stopped short of.
+    // How long the fixture takes to fill the ring is a property of the box —
+    // 4000 lines each paced by an external `sleep` — so silence, not elapsed
+    // time, is what distinguishes a wedged PTY from a slow one. The total
+    // bound is the backstop that keeps the failure inside this assertion
+    // rather than nextest's SIGKILL.
     let mut observed_seq = 0;
+    let mut saw_end = false;
+    let mut saw_input = false;
+    let started = std::time::Instant::now();
     let mut idle_since = std::time::Instant::now();
-    loop {
+    let output_snapshot = loop {
         let snapshot = config
             .backend
             .snapshot(&backend_key)
             .await
             .expect("snapshot real PTY");
-        let saw_end = contains_bytes(&snapshot.replay, b"__LB_END__");
-        let saw_input = contains_bytes(&snapshot.replay, b"__LB_INPUT__desktop-input");
+        // Latched: a marker only ever appears, and the ring this rescans
+        // reaches ~200 KB, so re-proving a marker already seen costs more than
+        // the wait it guards.
+        saw_end = saw_end || contains_bytes(&snapshot.replay, b"__LB_END__");
+        saw_input = saw_input || contains_bytes(&snapshot.replay, b"__LB_INPUT__desktop-input");
         if snapshot.last_seq > lazybox_ipc::EVENT_CHANNEL_CAPACITY as u64 && saw_end && saw_input {
-            break;
+            break snapshot;
         }
         if snapshot.last_seq > observed_seq {
             observed_seq = snapshot.last_seq;
             idle_since = std::time::Instant::now();
         }
+        let idle = idle_since.elapsed();
+        let total = started.elapsed();
         assert!(
-            idle_since.elapsed() < PTY_OUTPUT_STALL_TIMEOUT,
-            "real PTY stopped producing at seq {observed_seq} (needs > {}); \
-             end marker: {saw_end}, input echo: {saw_input}",
-            lazybox_ipc::EVENT_CHANNEL_CAPACITY,
+            idle < PTY_OUTPUT_STALL_TIMEOUT && total < PTY_OUTPUT_TOTAL_TIMEOUT,
+            "real PTY never completed the sustained output: seq {observed_seq} \
+             (needs > {cap}), end marker: {saw_end}, input echo: {saw_input}, \
+             idle {idle:?}, total {total:?}",
+            cap = lazybox_ipc::EVENT_CHANNEL_CAPACITY,
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+    };
+    assert!(output_snapshot.last_seq > lazybox_ipc::EVENT_CHANNEL_CAPACITY as u64);
 
     let mut saw_size = false;
     let mut saw_begin = false;

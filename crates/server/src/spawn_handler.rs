@@ -10121,6 +10121,7 @@ pub async fn recover_sessions(config: &ServerConfig) {
             crate::working_claims::acquire_pty(config, claim_workspace, &key, claim_session_id)
                 .await;
         }
+        let announce_key = session_key.clone();
         let _ = config.bus.send(Event::TerminalSpawned {
             terminal_id,
             session_key,
@@ -10129,6 +10130,28 @@ pub async fn recover_sessions(config: &ServerConfig) {
             on_main,
             model_label: recovered_model_label,
         });
+        // `TerminalSpawned` carries no state, and hydration already put the
+        // restored one in the cache — so every later PTY reading folds to
+        // `from == to` and publishes nothing. A client that subscribed after
+        // its own snapshot but before this terminal registered would then sit
+        // stateless until the state actually MOVES, which for an agent still
+        // mid-turn is the end of the turn. Announce it instead: an announce,
+        // not a transition — the cache and the persisted row are untouched,
+        // and a client that did get the state in its snapshot folds this as an
+        // edge-triggered no-op rather than re-alerting.
+        if let Some(state) = restored_state {
+            tracing::info!(
+                ?terminal_id,
+                backend_key = %key,
+                state = ?state,
+                "announcing hydrated agent state behind TerminalSpawned"
+            );
+            let _ = config.bus.send(Event::AgentState {
+                session_key: announce_key,
+                terminal_id,
+                state,
+            });
+        }
         tokio::spawn(async move {
             let mut failures = 0u32;
             loop {

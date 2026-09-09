@@ -484,3 +484,74 @@ async fn recovered_dead_process_exits_and_fresh_spawn_has_no_old_state() {
         "a newly spawned process must not inherit the exited generation's Working state"
     );
 }
+
+/// Recovery must PUBLISH the hydrated state, not just hydrate it into the
+/// cache. `TerminalSpawned` carries no state, and hydration makes every
+/// later PTY reading fold to `from == to` — so a client that subscribed
+/// after its own snapshot but before this terminal registered (recovery
+/// walks a fleet over several seconds) would sit stateless until the state
+/// actually moved: the end of the turn for a mid-turn `Working` agent, and
+/// never for a parked `InputNeeded` one, which emits no output at all.
+#[tokio::test]
+async fn recovery_announces_the_hydrated_state_behind_terminal_spawned() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    for (ordinal, state) in [(50, AgentState::Working), (51, AgentState::InputNeeded)] {
+        let backend = MockBackend::new();
+        let db = temp.path().join(format!("announce-{ordinal}.db"));
+        let (backend_key, session_key) = seed_persisted_state(&db, &backend, state, ordinal).await;
+
+        let restarted = ServerConfig::with_store_and_backend(
+            Arc::new(SqliteStore::open(&db).expect("reopen sqlite store")),
+            backend.as_backend(),
+        );
+        let mut events = restarted.bus.subscribe();
+        recover_sessions(&restarted).await;
+
+        let spawned = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Event::TerminalSpawned { terminal_id, .. } =
+                    events.recv().await.expect("recovery event bus")
+                {
+                    break terminal_id;
+                }
+            }
+        })
+        .await
+        .expect("terminal spawned deadline");
+        let announced = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Event::AgentState {
+                    terminal_id,
+                    session_key,
+                    state,
+                } = events.recv().await.expect("recovery event bus")
+                {
+                    break (terminal_id, session_key, state);
+                }
+            }
+        })
+        .await
+        .expect("hydrated state announce deadline");
+        assert_eq!(
+            announced,
+            (spawned, session_key, state),
+            "{state:?} must be announced for the recovered terminal"
+        );
+
+        // An announce, not a transition: the cache keeps the hydrated
+        // reading and the persisted row keeps its own generation, so a
+        // restart never rewrites the lifecycle history it just read.
+        assert_eq!(
+            restarted.terminal.agent_state_for(spawned).await,
+            Some(state)
+        );
+        let store = SqliteStore::open(&db).expect("reopen sqlite store");
+        assert_eq!(
+            store
+                .get_kv(&format!("terminal-agent-state-generation:{backend_key}"))
+                .expect("read persisted generation"),
+            Some((10_000 + ordinal).to_string()),
+            "the announce must not re-key the persisted state to the new terminal id"
+        );
+    }
+}

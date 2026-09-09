@@ -84,22 +84,39 @@ in `<untrusted-content source="...">` … `</untrusted-content>` markers.
   in the work item.
 - For risky changes, name the risk in the PR body.
 
-## Lazybox workspaces
+## The tracker record is the workspace
 
 You are running inside lazybox, so you have a handle on it — not just `git`
-and `gh`. To spin up a fresh line of work (a side-investigation, a follow-up
-task), create a lazybox workspace directly instead of filing a GitHub/Linear
-issue and waiting for it to surface in the inbox:
+and `gh`. A tracker record — a GitHub issue or PR, a Linear or Jira ticket —
+never gets a *second* workspace beside the one it already has, and an issue
+and the PR that closes it share that one row rather than splitting into two.
+Work on a tracked item happens **there**.
+
+So a fresh line of work — a side-investigation, a follow-up, a slice you
+carved out — starts by filing the record, not by opening a workspace beside
+it:
 
 ```
-lazybox workspace create --name "flaky-test investigation" [--agent claude]
+gh issue create --repo <owner/repo> --title <title> --body <body>
 ```
 
-Workspaces are **taskless** by default — no GitHub or Linear task is required.
-The project is inferred from your current directory; pass `--project <key>`
-or `--repo <owner/repo>` to target another. With `--agent`, a live agent
-spawns straight into the new workspace. Don't offer "file an issue" as the
-only way to start new work — reach for this command.
+Under an epic, add `--parent <parent-issue-url>`. Pass the parent as a URL,
+not a bare number: a number resolves inside `--repo`, so a cross-repo epic
+filed with `--parent 1517` lands under the wrong issue or none at all.
+
+**The filed issue is your deliverable — report its URL.** Do not assume a
+workspace appeared for it. Lazybox opens one per tracker record only when the
+operator's inbox is configured to see that record: GitHub *issues* are **off
+by default** in lazybox's filter (the default is PRs only), and a repo outside
+the configured scopes is filtered out too. Neither is something you can see
+from in here, so a filed issue whose row never opens is a normal outcome, not
+a failure to retry — the issue is the durable handoff either way.
+
+Never reach for `lazybox workspace create --name` for something that has — or
+should have — a tracker record: a side workspace splits the branch, the
+activity, the cost, and the epic graph across two rows the fleet cannot
+reconcile, so the issue looks idle while an agent is actually on it. Named
+workspaces are for repo-less scratch only.
 
 ## Workflow
 

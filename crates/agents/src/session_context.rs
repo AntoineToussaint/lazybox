@@ -50,8 +50,13 @@ Handles beyond `git`/`gh`:\n\
   - `lazybox log` streams a noisy command to its own window instead of your context \
 — `cargo test 2>&1 | lazybox log --title tests`. Background long-running pipes with \
 a trailing `&` or they block your turn; `lazybox log --close-all` clears them.\n\
-  - `lazybox workspace create --name \"…\" [--agent claude]` starts a fresh line of \
-work — reach for it instead of filing an issue.\n\
+  - The tracker record IS the workspace: a tracked item is worked in the row it \
+already has, never a second one beside it. File new work as an issue (`gh issue \
+create --repo <owner/repo>`; under an epic add `--parent <url>` — a bare number \
+can't cross repos). Report the issue URL and don't assume a row opened for it: \
+GitHub issues are off by default in lazybox's filter, and an out-of-scope repo is \
+dropped. Never `lazybox workspace create --name` beside a tracked item — that is \
+repo-less scratch only.\n\
   - Snippets (`]]s`, `~/.lazybox/snippets.yaml`) and skills (`.claude/skills/`) drive \
 you; a prompt you did not type yourself may have come from one.\n\
   - Work on the branch lazybox checked out for you; if you create another one, lazybox \
@@ -138,6 +143,8 @@ mod tests {
             "auto-merge",
             "auto-fix",
             "lazybox workspace create",
+            "gh issue create",
+            "tracker record IS the workspace",
             // #1572: an agent switching branches inside its worktree is a
             // common habit lazybox now adopts rather than fights — but a
             // worktree left on `main` still can't be adopted, so the one
@@ -149,6 +156,41 @@ mod tests {
                 "session context must name `{needle}`: {text}"
             );
         }
+    }
+
+    #[test]
+    fn briefing_does_not_promise_a_workspace_for_a_filed_issue() {
+        // #1586 first shipped this bullet claiming lazybox "opens that
+        // issue's workspace on the next poll". It does not, on a default
+        // install: `ProviderConfig::default_for("github")` enables only
+        // `pr.*` keys, so `issue_enabled()` is false and the issue half of
+        // both the repo sweep and the discovery probe is skipped
+        // (`polling/sources/mod.rs` `want_issues` / `issue_probe_due`), and
+        // `filter_github_tasks_with_watches` drops out-of-scope repos. An
+        // agent that believes the promise files an issue, reports "lazybox
+        // will pick it up", and strands the work with no error anywhere.
+        // The briefing must name the issue as the deliverable and both
+        // reasons a row may never appear.
+        let text = lazybox_session_context();
+        for needle in [
+            "Report the issue URL",
+            "don't assume a row opened",
+            "off by default",
+            "out-of-scope repo",
+        ] {
+            assert!(
+                text.contains(needle),
+                "briefing must not promise a workspace it cannot deliver; missing `{needle}`: {text}"
+            );
+        }
+        // #1586's first pass also taught `--parent <n>`. A bare number
+        // resolves inside the target repo, so a cross-repo epic sub-issue
+        // filed that way lands under the wrong parent or errors — the
+        // silent-wrong-graph case. The briefing must teach the URL form.
+        assert!(
+            text.contains("--parent <url>") && text.contains("can't cross repos"),
+            "briefing must teach the URL parent form and why a number fails: {text}"
+        );
     }
 
     #[test]
@@ -226,10 +268,15 @@ mod tests {
         // agent gets. The caps carry the coordination vocabulary (labels,
         // policies, handles, and the MCP tools) with real slack for a word
         // or a tool name, while still failing if the blurb grows into prose:
-        // the text is ~3.4 KB today (P2 roles added the `role:*` label + the
-        // `spawn_worker` clause, #1523; #1572 added the branch-adoption rule),
-        // so 3600 bytes / 35 lines is prose-shaped headroom, not an exact-fit
-        // tripwire on the current string.
+        // the text is ~3.77 KB today (P2 roles added the `role:*` label + the
+        // `spawn_worker` clause, #1523; #1572 added the branch-adoption rule;
+        // #1586 added the tracker-record rule, which has to carry *why* a
+        // filed issue may never open a row — the failure an agent cannot see
+        // from inside — or it strands work), so 3950 bytes / 35 lines is
+        // prose-shaped headroom, not an exact-fit tripwire on the current
+        // string. The previous 3600 had decayed into one: #1586's first pass
+        // left 6 bytes free, so the next correct sentence could not be added
+        // without a cap change anyway.
         let text = lazybox_session_context_with_mcp();
         assert!(
             text.lines().count() <= 35,
@@ -237,7 +284,7 @@ mod tests {
             text.lines().count()
         );
         assert!(
-            text.len() <= 3600,
+            text.len() <= 3950,
             "session context should stay tight: {} bytes",
             text.len()
         );

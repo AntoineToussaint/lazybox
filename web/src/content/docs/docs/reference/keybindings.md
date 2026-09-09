@@ -253,6 +253,9 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | `E j` | next blocked |
 | `E m` | merge order |
 | `E g` | graph view |
+| `E A` | auto-dispatch |
+| `E R` | auto-review |
+| `E M` | merge in order |
 | `E r` | set role |
 | `E p` | spawn planner |
 | `E c` | spawn coordinator |

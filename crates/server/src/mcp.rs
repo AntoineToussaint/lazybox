@@ -305,15 +305,15 @@ struct ReportBlockerArgs {
 /// One blackboard note, stored as a JSON string in the kv under
 /// `lazybox:note:<scope>:<seq>`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct Note {
+pub(crate) struct Note {
     /// Session key of the posting agent (the caller).
-    author: String,
+    pub(crate) author: String,
     /// The scope the note was published to (a session key or `global`).
-    scope: String,
-    tags: Vec<String>,
+    pub(crate) scope: String,
+    pub(crate) tags: Vec<String>,
     /// Post time, unix milliseconds, stamped by the daemon at write.
-    ts: i64,
-    text: String,
+    pub(crate) ts: i64,
+    pub(crate) text: String,
 }
 
 /// The lazybox MCP handler. One instance per connection, all sharing the
@@ -563,6 +563,10 @@ impl LazyboxMcp {
                 "mcp: pruned oldest blackboard notes past the per-scope retention cap"
             );
         }
+        // A `review` or `contract` note is not just context — it is the signal
+        // the epic latches wait on (#1525). React to it here, at the write,
+        // rather than polling the blackboard on a timer.
+        crate::epics::on_note_posted(&self.config, &note).await;
         Ok(serde_json::json!({
             "scope": scope,
             "seq": seq,
@@ -1512,6 +1516,37 @@ fn note_seq(key: &str) -> Option<u64> {
     key.rsplit(':').next()?.parse().ok()
 }
 
+/// Every blackboard note in the store carrying **all** of `tags`, newest
+/// first. Reads across every scope — the epic resolver has no caller identity
+/// to scope by and a contract may be posted to `global` or to the producer's
+/// own scope (#1525). Notes that fail to decode are skipped, like the MCP read
+/// path; a store error yields an empty list rather than sinking a recompute.
+pub(crate) fn notes_with_tags(config: &ServerConfig, tags: &[&str]) -> Vec<Note> {
+    let rows = match config.store.list_kv_prefix(NOTE_KV_PREFIX) {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "mcp: listing blackboard notes failed");
+            return Vec::new();
+        }
+    };
+    let mut notes: Vec<(i64, u64, Note)> = rows
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let note = serde_json::from_str::<Note>(&value).ok()?;
+            tags.iter()
+                .all(|want| note.tags.iter().any(|tag| tag == want))
+                .then(|| (note.ts, note_seq(&key).unwrap_or(0), note))
+        })
+        .collect();
+    notes.sort_by_key(|(ts, seq, _)| std::cmp::Reverse((*ts, *seq)));
+    notes.into_iter().map(|(_, _, note)| note).collect()
+}
+
+/// The `epic:<key>` tag every epic-scoped note carries.
+pub(crate) fn epic_tag(epic_key: &str) -> String {
+    format!("epic:{epic_key}")
+}
+
 /// Filesystem-safe rendering of a session key (which carries `:`, `/`, `#`).
 fn sanitize_key(key: &str) -> String {
     key.chars()
@@ -1537,6 +1572,54 @@ mod tests {
         assert_eq!(parse_bearer("abc123"), None);
         assert_eq!(parse_bearer("Bearer "), None);
         assert_eq!(parse_bearer(""), None);
+    }
+
+    /// The epic resolver's note reader (#1525): every scope, ALL tags must
+    /// match, newest first. A partial tag match must not come back — a
+    /// `review` note is not a `contract` note.
+    #[tokio::test]
+    async fn notes_with_tags_reads_every_scope_and_requires_all_tags() {
+        let (config, _mock) = crate::ServerConfig::in_memory_with_mock();
+        let write = |scope: &str, seq: u64, author: &str, tags: &[&str], ts: i64, text: &str| {
+            let note = Note {
+                author: author.into(),
+                scope: scope.into(),
+                tags: tags.iter().map(|t| t.to_string()).collect(),
+                ts,
+                text: text.into(),
+            };
+            config
+                .store
+                .set_kv(
+                    &note_key(&note_key_prefix(scope), seq),
+                    &serde_json::to_string(&note).unwrap(),
+                )
+                .unwrap();
+        };
+        write("global", 1, "a", &["contract", "epic:e"], 100, "older");
+        write("session-b", 2, "b", &["contract", "epic:e"], 200, "newer");
+        write("global", 3, "c", &["contract"], 300, "no epic tag");
+        write(
+            "global",
+            4,
+            "d",
+            &["review", "epic:e"],
+            400,
+            "not a contract",
+        );
+
+        let found = notes_with_tags(&config, &["contract", "epic:e"]);
+        assert_eq!(
+            found.iter().map(|n| n.text.as_str()).collect::<Vec<_>>(),
+            vec!["newer", "older"],
+            "both scopes, newest first, and only the notes carrying both tags"
+        );
+        assert!(notes_with_tags(&config, &["contract", "epic:other"]).is_empty());
+    }
+
+    #[test]
+    fn epic_tag_is_the_shared_vocabulary() {
+        assert_eq!(epic_tag("auth-refactor"), "epic:auth-refactor");
     }
 
     #[test]

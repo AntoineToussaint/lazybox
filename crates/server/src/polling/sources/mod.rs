@@ -608,6 +608,13 @@ pub enum ProviderAction {
         /// `--dangerously-skip-permissions` bypass unless the user pinned
         /// `agent.autonomous_skip_permissions` (#1392).
         untrusted: bool,
+        /// Orchestration role to frame this spawn with (#1525). `Some` only
+        /// for an epic latch dispatching into its own graph — a Worker onto
+        /// a ready member, a Reviewer onto a green PR — which is also what
+        /// tags the run as [`lazybox_ipc::AutonomousTrigger::EpicAuto`] in
+        /// the trace and the footer notice. `None` for every provider-driven
+        /// spawn (`@lazybox`, labels), which carry no role.
+        epic_role: Option<lazybox_core::Role>,
     },
     /// Auto-fix a PR that's failing CI or conflicting with its base.
     /// Surfaced by the auto-fix scan (`evaluate_auto_fix`) during a
@@ -1234,6 +1241,7 @@ impl GhSource {
                     "queued auto-spawn"
                 );
                 pending.push(ProviderAction::AutoSpawnAgent {
+                    epic_role: None,
                     session_key,
                     agent_id: mention
                         .agent_id
@@ -1265,6 +1273,7 @@ impl GhSource {
             for (task, action) in label_spawn_actions(&raw, &mention_queued_keys, &self.conventions)
             {
                 if let ProviderAction::AutoSpawnAgent {
+                    epic_role: None,
                     reason,
                     agent_id,
                     model_alias,
@@ -1772,7 +1781,7 @@ async fn mark_auto_spawn_triggered(config: &ServerConfig, key: &str) {
 /// used by the auto-fix arm to post the "lazybox is fixing…" PR comment.
 /// `None` when no GitHub source ran this tick — the comment is then
 /// skipped (best-effort), but the spawn still fires.
-pub(super) async fn dispatch_action(
+pub(crate) async fn dispatch_action(
     config: &ServerConfig,
     source_name: &str,
     gh: Option<&GhClient>,
@@ -1787,6 +1796,7 @@ pub(super) async fn dispatch_action(
             reason,
             dedup_key,
             untrusted,
+            epic_role,
         } => {
             // Label-triggered spawns carry a store-backed marker (labels
             // persist with no reaction to skip on). If we've already
@@ -1824,10 +1834,10 @@ pub(super) async fn dispatch_action(
             // Label-triggered spawns carry a store-backed `dedup_key`;
             // `@lazybox` mentions dedupe via the 👀 reaction and carry
             // none. That tells the footer notice which tag to show (#645).
-            let trigger = if dedup_key.is_some() {
-                lazybox_ipc::AutonomousTrigger::Label
-            } else {
-                lazybox_ipc::AutonomousTrigger::Mention
+            let trigger = match (&epic_role, &dedup_key) {
+                (Some(_), _) => lazybox_ipc::AutonomousTrigger::EpicAuto,
+                (None, Some(_)) => lazybox_ipc::AutonomousTrigger::Label,
+                (None, None) => lazybox_ipc::AutonomousTrigger::Mention,
             };
             crate::spawn_handler::handle_spawn(
                 config,
@@ -1840,6 +1850,11 @@ pub(super) async fn dispatch_action(
                     model_alias,
                     origin: lazybox_ipc::SpawnOrigin::Autonomous(trigger),
                     untrusted,
+                    role: epic_role,
+                    // An epic latch dispatches deliberately, so it must not
+                    // collapse onto an unrelated idle agent left in the
+                    // workspace; provider-driven spawns keep reusing one.
+                    force_new: epic_role.is_some(),
                     ..Default::default()
                 },
             )
@@ -2932,6 +2947,7 @@ pub fn label_spawn_actions(
         out.push((
             task.clone(),
             ProviderAction::AutoSpawnAgent {
+                epic_role: None,
                 session_key,
                 agent_id,
                 model_alias,
@@ -3228,6 +3244,7 @@ mod linear_cadence_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }
@@ -3351,6 +3368,7 @@ mod auto_spawn_dedup_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }
@@ -3419,6 +3437,7 @@ mod auto_spawn_dedup_tests {
             "github",
             None,
             ProviderAction::AutoSpawnAgent {
+                epic_role: None,
                 session_key,
                 agent_id: "claude".into(),
                 model_alias: None,

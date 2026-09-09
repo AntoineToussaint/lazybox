@@ -210,6 +210,11 @@ struct Resolved<'a> {
     /// Whether each member currently has a *live* PR (open, not merged/closed).
     /// Merge order lists only PR members.
     has_pr: HashMap<WorkspaceKey, bool>,
+    /// `contracts[M]` = the members that must publish an interface contract
+    /// before M can build against it (`Contract:` markers, #1525). Like
+    /// `merge_after`, only *member* producers are tracked — a contract on a
+    /// task the epic does not contain is outside the epic's own graph.
+    contracts: HashMap<WorkspaceKey, BTreeSet<WorkspaceKey>>,
 }
 
 /// Resolve an epic's membership + dependency graph from the loaded workspaces.
@@ -270,6 +275,7 @@ fn resolved_graph<'a>(record: &EpicRecord, workspaces: &'a [Workspace]) -> Resol
     let mut done: HashMap<WorkspaceKey, bool> = HashMap::new();
     let mut landing_settled: HashMap<WorkspaceKey, bool> = HashMap::new();
     let mut has_pr: HashMap<WorkspaceKey, bool> = HashMap::new();
+    let mut contracts: HashMap<WorkspaceKey, BTreeSet<WorkspaceKey>> = HashMap::new();
     // Same classify-a-blocker logic reused for `blocked_by` and `merge_after`:
     // a member's own task is internal, another member is an internal edge, and
     // anything else is external. Merge-after only tracks the internal-edge case
@@ -288,6 +294,7 @@ fn resolved_graph<'a>(record: &EpicRecord, workspaces: &'a [Workspace]) -> Resol
         let deps = depends_on.entry(key.clone()).or_default();
         let ext = external.entry(key.clone()).or_default();
         let mut ma: BTreeSet<WorkspaceKey> = BTreeSet::new();
+        let mut ct: BTreeSet<WorkspaceKey> = BTreeSet::new();
         for task in tasks_of(ws) {
             for blocker in &task.blocked_by {
                 match task_ws.get(blocker) {
@@ -315,8 +322,22 @@ fn resolved_graph<'a>(record: &EpicRecord, workspaces: &'a [Workspace]) -> Resol
                     }
                 }
             }
+            for producer in &task.contracts {
+                match task_ws.get(producer) {
+                    Some(other) if other == key => {}
+                    Some(other) if member_set.contains(other) => {
+                        ct.insert(other.clone());
+                    }
+                    _ => {
+                        // A contract producer outside the epic cannot publish
+                        // an `epic:<key>` note, so it is not a gate we can ever
+                        // observe satisfied — out of scope, like merge-after.
+                    }
+                }
+            }
         }
         merge_after.insert(key.clone(), ma);
+        contracts.insert(key.clone(), ct);
     }
 
     // A `Blocks` edge implies a `MergeAfter` edge unless the epic opts out: the
@@ -339,6 +360,7 @@ fn resolved_graph<'a>(record: &EpicRecord, workspaces: &'a [Workspace]) -> Resol
         done,
         landing_settled,
         has_pr,
+        contracts,
     }
 }
 
@@ -514,6 +536,7 @@ fn blockers_for(
     in_cycle: bool,
     holds: u32,
     declared: Option<&DeclaredBlocker>,
+    published_contracts: &HashSet<WorkspaceKey>,
     since_at: &mut dyn FnMut(&WorkspaceKey, BlockerKind, &str) -> i64,
 ) -> Vec<Blocker> {
     let mut out: Vec<Blocker> = Vec::new();
@@ -545,6 +568,30 @@ fn blockers_for(
             kind: BlockerKind::Dependency,
             reason,
             owner: BlockerOwner::Agent(dep.clone()),
+            since,
+            holds,
+        });
+    }
+
+    // A contract edge is satisfied by the producer *publishing the interface*
+    // on the blackboard, not by its task closing — so a producer that is still
+    // mid-flight but has posted its `contract` note no longer gates the
+    // consumer, and one that merged without ever posting still does (#1525).
+    for producer in resolved.contracts.get(key).into_iter().flatten() {
+        if published_contracts.contains(producer) {
+            continue;
+        }
+        let producer_name = resolved
+            .by_key
+            .get(producer)
+            .map(|w| w.name.clone())
+            .unwrap_or_else(|| producer.as_str().to_string());
+        let reason = format!("waiting on contract from {producer_name}");
+        let since = since_at(key, BlockerKind::Contract, &reason);
+        out.push(Blocker {
+            kind: BlockerKind::Contract,
+            reason,
+            owner: BlockerOwner::Agent(producer.clone()),
             since,
             holds,
         });
@@ -602,12 +649,14 @@ fn blockers_for(
 }
 
 /// Derive a member's status. Precedence (first match wins): Done → Failed →
-/// Asking → InProgress → Mergeable → PrOpen → Claimed → Blocked → Ready.
+/// Asking → InProgress → ReviewBlocked → Mergeable → PrOpen → Claimed →
+/// Blocked → Ready.
 fn member_status(
     ws: &Workspace,
     agent: Option<AgentState>,
     blockers: &[Blocker],
     held_by: &[WorkspaceKey],
+    review_blocking: bool,
 ) -> EpicMemberStatus {
     if member_done(ws) {
         return EpicMemberStatus::Done;
@@ -629,6 +678,13 @@ fn member_status(
     }
     if matches!(agent, Some(AgentState::Working)) {
         return EpicMemberStatus::InProgress;
+    }
+    // A blocking review outranks every PR-shape status: the PR is live and may
+    // even be green, but the Reviewer found something and the merge is held
+    // until a clean review lands (#1525). Below the agent states, so a worker
+    // actively fixing the findings still reads as InProgress.
+    if review_blocking && pr.is_some() {
+        return EpicMemberStatus::ReviewBlocked;
     }
     if let Some(pr) = pr {
         let ci_failing = matches!(
@@ -724,6 +780,7 @@ pub fn resolve(
     workspaces: &[Workspace],
     agent_states: &HashMap<WorkspaceKey, AgentState>,
     declared: &HashMap<WorkspaceKey, DeclaredBlocker>,
+    latches: &LatchInputs,
     since_latch: &mut HashMap<(WorkspaceKey, BlockerKind, String), i64>,
     now: i64,
 ) -> EpicSnapshot {
@@ -752,6 +809,7 @@ pub fn resolve(
                 in_cycle,
                 holds,
                 declared.get(key),
+                &latches.published_contracts,
                 &mut since_at,
             )
         };
@@ -775,7 +833,21 @@ pub fn resolve(
             })
             .cloned()
             .collect();
-        let status = member_status(ws, agent_states.get(key).copied(), &blockers, &held_by);
+        let status = member_status(
+            ws,
+            agent_states.get(key).copied(),
+            &blockers,
+            &held_by,
+            latches.review_blocking.contains(key),
+        );
+        // The one non-graph block worth naming machine-readably: a consumer
+        // waiting on an unpublished contract looks identical to an ordinary
+        // dependency wait in `blocked_by` (it is not one) and carries no
+        // `external_blockers` at all (#1525).
+        let blocked_reason = blockers
+            .iter()
+            .any(|b| b.kind == BlockerKind::Contract)
+            .then(|| BlockerKind::Contract.as_str().to_string());
         members.push(EpicMember {
             key: key.clone(),
             wave: wave.get(key).copied().unwrap_or(0),
@@ -795,6 +867,7 @@ pub fn resolve(
                 .cloned()
                 .collect(),
             blockers,
+            blocked_reason,
         });
     }
 
@@ -818,6 +891,7 @@ pub fn resolve(
             EpicMemberStatus::Blocked => blocked += 1,
             EpicMemberStatus::Asking => asking += 1,
             EpicMemberStatus::Failed => failing += 1,
+            EpicMemberStatus::ReviewBlocked => blocked += 1,
             EpicMemberStatus::PrOpen { ci_failing, .. } if *ci_failing => failing += 1,
             _ => {}
         }
@@ -843,6 +917,7 @@ pub fn resolve(
         critical_path: critical_path(&order, &resolved.depends_on),
         edges: graph_edges(&resolved),
         merge_order: merge_order(&resolved),
+        policies: record.policies,
         computed_at: now,
     }
 }
@@ -867,6 +942,15 @@ fn graph_edges(resolved: &Resolved) -> Vec<EpicEdge> {
                 from: from.clone(),
                 to: to.clone(),
                 kind: EdgeKind::MergeAfter,
+            });
+        }
+    }
+    for (from, tos) in &resolved.contracts {
+        for to in tos {
+            edges.push(EpicEdge {
+                from: from.clone(),
+                to: to.clone(),
+                kind: EdgeKind::Contract,
             });
         }
     }
@@ -958,10 +1042,22 @@ pub fn diff(old: Option<&EpicSnapshot>, new: &EpicSnapshot) -> Vec<EpicDelta> {
         if prev.status != m.status {
             let prev_held = held_preds(&prev.status);
             let new_held = held_preds(&m.status);
+            // A review verdict reads as its own delta rather than a bare
+            // status transition — it is the one status change the *user* has
+            // to act on, and it names the direction (#1525).
+            if prev.status == EpicMemberStatus::ReviewBlocked
+                || m.status == EpicMemberStatus::ReviewBlocked
+            {
+                deltas.push(EpicDelta::Reviewed {
+                    key: m.key.clone(),
+                    blocking: m.status == EpicMemberStatus::ReviewBlocked,
+                });
             // A member leaving Blocked is reported as Unblocked (with the
             // dependencies that cleared it), which is more useful in the feed
             // than a bare status transition.
-            if prev.status == EpicMemberStatus::Blocked && m.status != EpicMemberStatus::Blocked {
+            } else if prev.status == EpicMemberStatus::Blocked
+                && m.status != EpicMemberStatus::Blocked
+            {
                 let now_done: Vec<WorkspaceKey> = prev
                     .blocked_by
                     .iter()
@@ -1133,6 +1229,7 @@ fn same_status(a: &EpicSnapshot, b: &EpicSnapshot) -> bool {
         && a.critical_path == b.critical_path
         && a.edges == b.edges
         && a.merge_order == b.merge_order
+        && a.policies == b.policies
         && a.members == b.members
 }
 
@@ -1151,6 +1248,7 @@ fn status_label(s: &EpicMemberStatus) -> &'static str {
         EpicMemberStatus::Mergeable { .. } => "mergeable",
         EpicMemberStatus::Done => "done",
         EpicMemberStatus::Failed => "failed",
+        EpicMemberStatus::ReviewBlocked => "review blocked",
     }
 }
 
@@ -1203,6 +1301,14 @@ fn delta_activity(delta: &EpicDelta, epic_name: &str) -> Option<(WorkspaceKey, S
         EpicDelta::BlockerCleared { key, reason, .. } => Some((
             key.clone(),
             format!("Blocker cleared in epic {epic_name} — {reason}"),
+        )),
+        EpicDelta::Reviewed { key, blocking } => Some((
+            key.clone(),
+            if *blocking {
+                format!("Review found blocking findings in epic {epic_name} — merge held")
+            } else {
+                format!("Review clean in epic {epic_name} — merge released")
+            },
         )),
         // Epic-wide: no single member to attach to. Still rides the
         // `EpicStatus` event; just not an activity row.
@@ -1334,6 +1440,7 @@ pub async fn recompute_all(config: &ServerConfig) {
         HashMap::new()
     });
     let workspaces = crate::load_workspaces(&*config.store).values;
+    let latches = LatchInputs::load(config, &records);
     let now = chrono::Utc::now().timestamp_millis();
 
     let mut to_emit: Vec<Event> = Vec::new();
@@ -1347,7 +1454,15 @@ pub async fn recompute_all(config: &ServerConfig) {
                 continue;
             }
             let latch = since.entry(record.key.as_str().to_string()).or_default();
-            let snapshot = resolve(record, &workspaces, &agent_states, &declared, latch, now);
+            let snapshot = resolve(
+                record,
+                &workspaces,
+                &agent_states,
+                &declared,
+                &latches,
+                latch,
+                now,
+            );
             let prev = last.get(record.key.as_str());
             // `computed_at` bumps every recompute, so equality must ignore it —
             // otherwise every tick looks "changed" and re-broadcasts. Blocker
@@ -1388,8 +1503,18 @@ pub async fn recompute_all(config: &ServerConfig) {
         crate::polling::apply_and_commit(config, &key, |ws| ws.merge_activity(&acts)).await;
     }
 
+    // Broadcast first, then act. A client sees the new status before an
+    // autonomy latch starts anything on the back of it, so an `AUTO` spawn
+    // never appears to precede the transition that caused it.
+    let mut latched: Vec<(EpicSnapshot, Vec<EpicDelta>)> = Vec::new();
     for event in to_emit {
+        if let Event::EpicStatus { snapshot, delta } = &event {
+            latched.push((snapshot.clone(), delta.clone()));
+        }
         let _ = config.bus.send(event);
+    }
+    for (snapshot, delta) in &latched {
+        run_latches(config, snapshot, delta).await;
     }
 }
 
@@ -1421,6 +1546,7 @@ pub async fn all_snapshots(config: &ServerConfig) -> Vec<EpicSnapshot> {
         HashMap::new()
     });
     let workspaces = crate::load_workspaces(&*config.store).values;
+    let latches = LatchInputs::load(config, &records);
     let now = chrono::Utc::now().timestamp_millis();
 
     let mut out = Vec::new();
@@ -1437,6 +1563,7 @@ pub async fn all_snapshots(config: &ServerConfig) -> Vec<EpicSnapshot> {
                 &workspaces,
                 &agent_states,
                 &declared,
+                &latches,
                 latch,
                 now,
             ));
@@ -1628,6 +1755,16 @@ pub async fn role_prompt_ctx(
             .filter(|b| done.contains(*b))
             .map(|b| b.as_str().to_string())
             .collect();
+        // Quote the epic's published contracts, newest note per producer, so
+        // the Worker starts with the interface in hand rather than having to
+        // go and read the blackboard for it (#1525).
+        let tag = crate::mcp::epic_tag(&snapshot.key);
+        let mut seen: HashSet<String> = HashSet::new();
+        ctx.contract_notes = crate::mcp::notes_with_tags(config, &[CONTRACT_TAG, &tag])
+            .into_iter()
+            .filter(|note| seen.insert(note.author.clone()))
+            .map(|note| note.text)
+            .collect();
     }
 
     // Integrator: land members in wave order (the snapshot is pre-sorted by wave
@@ -1711,6 +1848,31 @@ pub async fn assign(config: &ServerConfig, epic: &str, workspace: WorkspaceKey, 
     upsert(config, record).await;
 }
 
+/// Set an epic's autonomy-dial latches, then recompute so an armed latch acts
+/// on the current status immediately rather than waiting for the next
+/// transition. Backs `Command::SetEpicPolicies` (#1525).
+pub async fn set_policies(config: &ServerConfig, epic: &str, policies: lazybox_core::EpicPolicies) {
+    let Some(mut record) = load(config, epic).unwrap_or_else(|e| {
+        tracing::warn!("epics: load {epic} failed: {e}");
+        None
+    }) else {
+        tracing::warn!("epics: set_policies on unknown epic {epic}");
+        return;
+    };
+    if record.policies == policies {
+        return;
+    }
+    tracing::info!(
+        epic,
+        auto_dispatch = policies.auto_dispatch.as_str(),
+        auto_review = policies.auto_review.as_str(),
+        merge_in_order = policies.merge_in_order.as_str(),
+        "epics: autonomy latches set"
+    );
+    record.policies = policies;
+    upsert(config, record).await;
+}
+
 /// Mark an epic archived. Archived epics keep their record (so an un-archive is
 /// possible) but stop broadcasting status.
 pub async fn archive(config: &ServerConfig, epic: &str) {
@@ -1727,6 +1889,609 @@ pub async fn archive(config: &ServerConfig, epic: &str) {
     if let Err(e) = persist(config, &record) {
         tracing::warn!("epics: archive {epic} failed: {e}");
     }
+}
+
+// ── autonomy dial (#1525) ───────────────────────────────────────────────
+//
+// Three latches on the epic record, each a `PolicyArm` in the shape of the
+// existing `ARM` / `FIX` policies, and all off until armed:
+//
+//   * `AUTO`   — dispatch a Worker onto a member the moment it becomes Ready;
+//   * `REVIEW` — dispatch a Reviewer onto a member whose PR turns green, and
+//                hold its merge while the review reports `blocking` findings;
+//   * `ORDER`  — arm merge-on-green on every member as its PR opens, so P3's
+//                merge-after hold lands the whole epic in order.
+//
+// Every decision is a pure function over already-loaded data (`plan_dispatch`,
+// `plan_reviews`, `plan_merge_arming`); `on_epic_status` is the thin async
+// shell that gathers the inputs, calls them, and performs the effects.
+
+/// kv key prefix for the reviewer stage's per-member memory.
+const REVIEW_STATE_PREFIX: &str = "epic-review:";
+
+/// What the automatic Reviewer stage knows about one member's current *green
+/// run*. Persisted (so a restart neither re-reviews a PR nor forgets a hold)
+/// and deliberately short-lived: the row is dropped the moment the member
+/// stops being green, which is exactly what makes a re-green after fixes
+/// re-run the review once.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ReviewState {
+    pub workspace: WorkspaceKey,
+    /// A Reviewer has been dispatched for this green run. Gates the "fires
+    /// once" property — the row exists from dispatch until the PR leaves
+    /// green, so a poll storm cannot fan out reviewers.
+    pub dispatched: bool,
+    /// The Reviewer posted findings tagged `blocking`. Holds the merge and
+    /// shows the member as `ReviewBlocked` until a `clean` note lands.
+    pub blocking: bool,
+    /// Unix ms the row was created.
+    pub since: i64,
+}
+
+fn review_storage_key(workspace: &str) -> String {
+    format!("{REVIEW_STATE_PREFIX}{workspace}")
+}
+
+fn persist_review(config: &ServerConfig, state: &ReviewState) -> Result<(), String> {
+    let json = serde_json::to_string(state).map_err(|e| e.to_string())?;
+    config
+        .store
+        .set_kv(&review_storage_key(state.workspace.as_str()), &json)
+        .map_err(|e| e.to_string())
+}
+
+fn clear_review(config: &ServerConfig, workspace: &str) {
+    if let Err(error) = config.store.delete_kv(&review_storage_key(workspace)) {
+        tracing::warn!(%error, workspace, "epics: clearing review state failed");
+    }
+}
+
+/// Every member's review state, keyed by workspace. A row that fails to decode
+/// is skipped rather than sinking the whole read.
+pub fn list_reviews(config: &ServerConfig) -> HashMap<WorkspaceKey, ReviewState> {
+    let rows = match config.store.list_kv_prefix(REVIEW_STATE_PREFIX) {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "epics: listing review state failed");
+            return HashMap::new();
+        }
+    };
+    rows.into_iter()
+        .filter_map(|(_, json)| serde_json::from_str::<ReviewState>(&json).ok())
+        .map(|state| (state.workspace.clone(), state))
+        .collect()
+}
+
+/// Cross-cutting latch state the resolver *reads* but does not derive: which
+/// producers have published their interface contract, and which members a
+/// blocking review is holding. Both live in the kv (the blackboard and the
+/// review rows), so they are loaded once per recompute and handed to
+/// [`resolve`] rather than being read from inside it — the resolver stays a
+/// pure function of plain data.
+#[derive(Debug, Default)]
+pub struct LatchInputs {
+    /// Members that have posted a note tagged `contract` + `epic:<key>`, so
+    /// their `Contract` edges are satisfied.
+    pub published_contracts: HashSet<WorkspaceKey>,
+    /// Members whose latest review reported `blocking` findings.
+    pub review_blocking: HashSet<WorkspaceKey>,
+}
+
+impl LatchInputs {
+    /// Gather the latch state for `records` from the store.
+    pub fn load(config: &ServerConfig, records: &[EpicRecord]) -> Self {
+        let mut published_contracts = HashSet::new();
+        for record in records {
+            if record.archived {
+                continue;
+            }
+            let tag = crate::mcp::epic_tag(record.key.as_str());
+            for note in crate::mcp::notes_with_tags(config, &[CONTRACT_TAG, &tag]) {
+                published_contracts.insert(WorkspaceKey::new(note.author));
+            }
+        }
+        let review_blocking = list_reviews(config)
+            .into_iter()
+            .filter(|(_, state)| state.blocking)
+            .map(|(key, _)| key)
+            .collect();
+        Self {
+            published_contracts,
+            review_blocking,
+        }
+    }
+}
+
+/// Note tag marking a published interface contract.
+const CONTRACT_TAG: &str = "contract";
+/// Note tag marking a Reviewer's findings.
+const REVIEW_TAG: &str = "review";
+/// Verdict tags a Reviewer's note carries alongside [`REVIEW_TAG`].
+const BLOCKING_TAG: &str = "blocking";
+const CLEAN_TAG: &str = "clean";
+
+/// One member the `AUTO` latch wants a Worker started on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchTicket {
+    pub member: WorkspaceKey,
+    /// Store-backed idempotency key, so a double-fire (two recomputes racing,
+    /// or a daemon restart mid-dispatch) collapses to one spawn.
+    pub dedup_key: String,
+}
+
+/// Everything `plan_dispatch` needs beyond the snapshot, gathered by the
+/// caller so the planner itself touches no store and no clock.
+#[derive(Debug, Default)]
+pub struct DispatchContext {
+    /// Members of this epic already carrying the Worker role.
+    pub live_workers: usize,
+    /// `agent.max_epic_workers`. Zero disables dispatch entirely, exactly as
+    /// it disables the `spawn_worker` MCP tool.
+    pub max_workers: usize,
+    /// Members lazybox must not start: a `working` claim held on another box,
+    /// or an agent already running locally. Never start two agents on one
+    /// member.
+    pub excluded: HashSet<WorkspaceKey>,
+    /// Members carrying a `no-auto-fix` / `do-not-lazybox` label. Those
+    /// labels mean "do not act on this row unattended", which covers
+    /// auto-dispatch as much as auto-fix.
+    pub opted_out: HashSet<WorkspaceKey>,
+}
+
+/// The Workers the `AUTO` latch should start right now, ranked so the member
+/// that unblocks the most others goes first, and capped at the epic's
+/// remaining worker headroom. Pure: every gate is decided from the arguments.
+///
+/// Returns empty — the "stands down" cases — when the latch is not armed, the
+/// cap is reached or disabled, or every ready member is claimed / opted out.
+pub fn plan_dispatch(
+    snapshot: &EpicSnapshot,
+    policies: &lazybox_core::EpicPolicies,
+    ctx: &DispatchContext,
+) -> Vec<DispatchTicket> {
+    if !policies.armed(lazybox_core::EpicLatch::AutoDispatch) {
+        return Vec::new();
+    }
+    let headroom = ctx.max_workers.saturating_sub(ctx.live_workers);
+    if headroom == 0 {
+        return Vec::new();
+    }
+    ready_queue(snapshot)
+        .into_iter()
+        .map(|(key, _)| key)
+        .filter(|key| !ctx.excluded.contains(key) && !ctx.opted_out.contains(key))
+        .take(headroom)
+        .map(|member| DispatchTicket {
+            dedup_key: dispatch_dedup_key(&snapshot.key, &member),
+            member,
+        })
+        .collect()
+}
+
+/// The store marker that makes one epic→member dispatch fire at most once.
+fn dispatch_dedup_key(epic: &str, member: &WorkspaceKey) -> String {
+    format!("autospawn-epic:{epic}:{member}")
+}
+
+/// Whether a member's PR is currently *green* — the state the Reviewer stage
+/// keys off. A `Mergeable` PR is green by construction; a `PrOpen` one is green
+/// only with CI passing and no requested changes. Every other status (an agent
+/// working, a red PR, a held review) is not.
+fn member_is_green(status: &EpicMemberStatus) -> bool {
+    match status {
+        EpicMemberStatus::Mergeable { .. } => true,
+        EpicMemberStatus::PrOpen {
+            ci_failing,
+            changes_requested,
+        } => !ci_failing && !changes_requested,
+        _ => false,
+    }
+}
+
+/// What the `REVIEW` latch should do this tick: which members to dispatch a
+/// Reviewer onto, and which review rows to drop.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ReviewPlan {
+    /// Members whose PR just turned green with no reviewer yet.
+    pub dispatch: Vec<WorkspaceKey>,
+    /// Members that are no longer green — their row is dropped so the next
+    /// green run reviews once more (and a stale hold cannot outlive the PR).
+    pub clear: Vec<WorkspaceKey>,
+}
+
+/// Plan the automatic Reviewer stage. Pure over the snapshot, the latch, the
+/// persisted review rows, and the label opt-out set.
+///
+/// The `clear` half runs regardless of the latch: a row left behind by a
+/// disarmed latch must still be dropped when its PR goes red, or a stale
+/// `blocking` hold would outlive the review that produced it.
+pub fn plan_reviews(
+    snapshot: &EpicSnapshot,
+    policies: &lazybox_core::EpicPolicies,
+    reviews: &HashMap<WorkspaceKey, ReviewState>,
+    opted_out: &HashSet<WorkspaceKey>,
+) -> ReviewPlan {
+    let armed = policies.armed(lazybox_core::EpicLatch::AutoReview);
+    let mut plan = ReviewPlan::default();
+    for member in &snapshot.members {
+        let green = member_is_green(&member.status);
+        // `ReviewBlocked` is the status a held member *has*; it is not a
+        // reason to drop the hold that produced it.
+        let held = member.status == EpicMemberStatus::ReviewBlocked;
+        match reviews.get(&member.key) {
+            Some(_) if !green && !held => plan.clear.push(member.key.clone()),
+            Some(_) => {}
+            None if armed && green && !opted_out.contains(&member.key) => {
+                plan.dispatch.push(member.key.clone())
+            }
+            None => {}
+        }
+    }
+    plan
+}
+
+/// The members the `ORDER` latch should arm merge-on-green on: every member
+/// with a live PR that is not armed yet. P3's merge-after hold supplies the
+/// ordering, so arming everything is safe — a PR behind an unlanded
+/// predecessor is held, not merged early.
+pub fn plan_merge_arming(
+    snapshot: &EpicSnapshot,
+    policies: &lazybox_core::EpicPolicies,
+    already_armed: &HashSet<WorkspaceKey>,
+    opted_out: &HashSet<WorkspaceKey>,
+) -> Vec<WorkspaceKey> {
+    if !policies.armed(lazybox_core::EpicLatch::MergeInOrder) {
+        return Vec::new();
+    }
+    snapshot
+        .members
+        .iter()
+        .filter(|m| {
+            matches!(
+                m.status,
+                EpicMemberStatus::PrOpen { .. }
+                    | EpicMemberStatus::Mergeable { .. }
+                    | EpicMemberStatus::ReviewBlocked
+            )
+        })
+        .map(|m| m.key.clone())
+        .filter(|key| !already_armed.contains(key) && !opted_out.contains(key))
+        .collect()
+}
+
+/// Whether a member is opted out of unattended action by label. The
+/// `no-auto-fix` / `do-not-lazybox` labels have always meant "lazybox, keep
+/// your hands off this row"; the autonomy dial honors them as
+/// "do not auto-dispatch / auto-review" too.
+fn labels_opt_out(ws: &Workspace, opt_out_labels: &[String]) -> bool {
+    tasks_of(ws).any(|task| {
+        task.labels.iter().any(|label| {
+            opt_out_labels
+                .iter()
+                .any(|opt| opt.eq_ignore_ascii_case(&label.name))
+        })
+    })
+}
+
+/// Whether the merge of `key` is held by a blocking review (#1525). Checked
+/// beside [`held_by`] on the auto-merge and manual-merge paths, so a PR the
+/// Reviewer flagged does not land while the findings stand.
+pub fn review_blocks_merge(config: &ServerConfig, key: &WorkspaceKey) -> bool {
+    config
+        .store
+        .get_kv(&review_storage_key(key.as_str()))
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<ReviewState>(&json).ok())
+        .is_some_and(|state| state.blocking)
+}
+
+/// A blackboard note just landed. When it is a Reviewer's verdict for a member
+/// of a live epic, record it: `blocking` holds the member's merge and flips it
+/// to `ReviewBlocked`; `clean` releases. Hooked into `post_note` so the latch
+/// reacts at the write rather than polling the blackboard.
+///
+/// Note text is agent-authored and never parsed — only the tag vocabulary is
+/// read, and only for a note whose author is itself a member of the epic the
+/// note claims. A note tagged for an epic the author does not belong to is
+/// ignored.
+pub(crate) async fn on_note_posted(config: &ServerConfig, note: &crate::mcp::Note) {
+    if !note.tags.iter().any(|t| t == REVIEW_TAG) {
+        return;
+    }
+    let blocking = note.tags.iter().any(|t| t == BLOCKING_TAG);
+    if !blocking && !note.tags.iter().any(|t| t == CLEAN_TAG) {
+        return; // a review note with no verdict says nothing about the merge.
+    }
+    let author = WorkspaceKey::new(note.author.clone());
+    let records = list_all(config).unwrap_or_default();
+    let claimed: Vec<&EpicRecord> = records
+        .iter()
+        .filter(|r| {
+            !r.archived
+                && note
+                    .tags
+                    .iter()
+                    .any(|t| *t == crate::mcp::epic_tag(r.key.as_str()))
+        })
+        .collect();
+    if claimed.is_empty() {
+        return;
+    }
+    // The reviewer runs *in the member's own workspace* (a second agent beside
+    // the worker), so the note's author IS the member under review.
+    let Some(mut state) = list_reviews(config).remove(&author) else {
+        tracing::debug!(
+            author = %author,
+            "epics: review note for a member with no open review run — ignoring"
+        );
+        return;
+    };
+    if state.blocking == blocking {
+        return;
+    }
+    state.blocking = blocking;
+    if let Err(error) = persist_review(config, &state) {
+        tracing::warn!(%error, member = %author, "epics: persisting review verdict failed");
+        return;
+    }
+    tracing::info!(
+        member = %author,
+        blocking,
+        epics = claimed.len(),
+        "epics: reviewer verdict recorded"
+    );
+    recompute_all(config).await;
+}
+
+/// React to a freshly-broadcast epic snapshot by running whatever its armed
+/// latches ask for. Called from [`recompute_all`] after the snapshot is stored,
+/// once per epic whose status actually changed.
+///
+/// Only members named in `delta` are dispatched on: the latch acts on a
+/// *transition* (a member became Ready, a PR opened, a PR turned green), never
+/// on the standing state, so a quiet recompute is a no-op.
+async fn run_latches(config: &ServerConfig, snapshot: &EpicSnapshot, delta: &[EpicDelta]) {
+    let Some(record) = load(config, &snapshot.key).unwrap_or_default() else {
+        return;
+    };
+    if record.archived {
+        return;
+    }
+    let policies = record.policies;
+    let user_config = lazybox_config::Config::load().unwrap_or_default();
+    let opt_out_labels = user_config.auto_fix.opt_out_labels.clone();
+    let workspaces = crate::load_workspaces(&*config.store).values;
+    let by_key: HashMap<&WorkspaceKey, &Workspace> =
+        workspaces.iter().map(|w| (&w.key, w)).collect();
+
+    let opted_out: HashSet<WorkspaceKey> = snapshot
+        .members
+        .iter()
+        .filter(|m| {
+            by_key
+                .get(&m.key)
+                .is_some_and(|ws| labels_opt_out(ws, &opt_out_labels))
+        })
+        .map(|m| m.key.clone())
+        .collect();
+
+    // ── REVIEW ──────────────────────────────────────────────────────────
+    let reviews = list_reviews(config);
+    let review_plan = plan_reviews(snapshot, &policies, &reviews, &opted_out);
+    for member in &review_plan.clear {
+        clear_review(config, member.as_str());
+    }
+    let touched: HashSet<&WorkspaceKey> = delta.iter().filter_map(delta_key).collect();
+    for member in review_plan.dispatch.iter().filter(|m| touched.contains(*m)) {
+        dispatch_reviewer(config, &record, member, &user_config).await;
+    }
+
+    // ── ORDER ───────────────────────────────────────────────────────────
+    let already_armed: HashSet<WorkspaceKey> = workspaces
+        .iter()
+        .filter(|ws| ws.auto_merge_on_green)
+        .map(|ws| ws.key.clone())
+        .collect();
+    for member in plan_merge_arming(snapshot, &policies, &already_armed, &opted_out)
+        .into_iter()
+        .filter(|m| touched.contains(m))
+    {
+        tracing::info!(epic = %snapshot.key, %member, "epics: ORDER arming merge-on-green");
+        crate::workspace::set_auto_merge_on_green(config, &member, true).await;
+    }
+
+    // ── AUTO ────────────────────────────────────────────────────────────
+    if !policies.armed(lazybox_core::EpicLatch::AutoDispatch) {
+        return;
+    }
+    let agent_states = config.terminal.agent_states_by_workspace().await;
+    let excluded: HashSet<WorkspaceKey> = snapshot
+        .members
+        .iter()
+        .filter(|m| {
+            agent_states.contains_key(&m.key)
+                || matches!(m.status, EpicMemberStatus::Claimed)
+                || by_key.get(&m.key).is_some_and(|ws| has_working_claim(ws))
+        })
+        .map(|m| m.key.clone())
+        .collect();
+    let live_workers = snapshot
+        .members
+        .iter()
+        .filter(|m| {
+            by_key
+                .get(&m.key)
+                .is_some_and(|ws| ws.effective_role() == Some(Role::Worker))
+        })
+        .count();
+    let ctx = DispatchContext {
+        live_workers,
+        max_workers: user_config
+            .agent
+            .max_epic_workers
+            .unwrap_or(lazybox_config::DEFAULT_MAX_EPIC_WORKERS),
+        excluded,
+        opted_out,
+    };
+    for ticket in plan_dispatch(snapshot, &policies, &ctx)
+        .into_iter()
+        .filter(|t| touched.contains(&t.member))
+    {
+        let Some(ws) = by_key.get(&ticket.member) else {
+            continue;
+        };
+        dispatch_worker(config, &record, &ticket, ws, &user_config).await;
+    }
+}
+
+/// The member a delta is about, when it names one. `Stalled` / `Completed` are
+/// epic-wide and name no member.
+fn delta_key(delta: &EpicDelta) -> Option<&WorkspaceKey> {
+    match delta {
+        EpicDelta::Unblocked { key, .. }
+        | EpicDelta::StatusChanged { key, .. }
+        | EpicDelta::BlockerAdded { key, .. }
+        | EpicDelta::BlockerCleared { key, .. }
+        | EpicDelta::Held { key, .. }
+        | EpicDelta::Released { key }
+        | EpicDelta::Reviewed { key, .. } => Some(key),
+        EpicDelta::Stalled { .. } | EpicDelta::Completed => None,
+    }
+}
+
+/// Start a Worker on `ticket.member` through the same dispatcher the
+/// `@lazybox` / label auto-spawns use, so the singleton collapse, the
+/// unattended-permission handling, and the footer notice are identical. The
+/// `Role::Worker` rides in-band so `handle_spawn` frames the brief with the
+/// Worker preamble (which quotes the epic's contracts).
+async fn dispatch_worker(
+    config: &ServerConfig,
+    record: &EpicRecord,
+    ticket: &DispatchTicket,
+    workspace: &Workspace,
+    user_config: &lazybox_config::Config,
+) {
+    let session_key = lazybox_core::SessionKey::new(ticket.member.as_str());
+    let Some(prompt) = member_work_prompt(workspace, user_config) else {
+        tracing::warn!(
+            member = %ticket.member,
+            "epics: AUTO has nothing to brief a worker with — skipping"
+        );
+        return;
+    };
+    tracing::info!(
+        epic = %record.key,
+        member = %ticket.member,
+        "epics: AUTO dispatching a worker onto a ready member"
+    );
+    crate::polling::dispatch_action(
+        config,
+        "epic-auto",
+        None,
+        crate::polling::ProviderAction::AutoSpawnAgent {
+            session_key,
+            agent_id: default_agent(user_config),
+            model_alias: None,
+            prompt: Some(prompt),
+            reason: format!("AUTO dispatch on epic {}", record.key),
+            dedup_key: Some(ticket.dedup_key.clone()),
+            // The brief is built from the member's own issue, which is the
+            // same text a `w w` press would use — not foreign input the
+            // latch introduced.
+            untrusted: false,
+            epic_role: Some(Role::Worker),
+        },
+    )
+    .await;
+}
+
+/// Start a Reviewer beside the worker on a member whose PR turned green, and
+/// open its review row so the stage fires exactly once per green run. The row
+/// is written *before* the spawn: a spawn that fails leaves a row that the
+/// next non-green tick clears, whereas a row written after would let a slow
+/// spawn double-fire.
+async fn dispatch_reviewer(
+    config: &ServerConfig,
+    record: &EpicRecord,
+    member: &WorkspaceKey,
+    user_config: &lazybox_config::Config,
+) {
+    let state = ReviewState {
+        workspace: member.clone(),
+        dispatched: true,
+        blocking: false,
+        since: chrono::Utc::now().timestamp_millis(),
+    };
+    if let Err(error) = persist_review(config, &state) {
+        tracing::warn!(%error, %member, "epics: opening a review run failed — not spawning");
+        return;
+    }
+    tracing::info!(
+        epic = %record.key,
+        %member,
+        "epics: REVIEW dispatching a reviewer onto a green PR"
+    );
+    crate::polling::dispatch_action(
+        config,
+        "epic-auto",
+        None,
+        crate::polling::ProviderAction::AutoSpawnAgent {
+            session_key: lazybox_core::SessionKey::new(member.as_str()),
+            agent_id: default_agent(user_config),
+            model_alias: None,
+            prompt: Some(reviewer_brief(record.key.as_str())),
+            reason: format!("REVIEW stage on epic {}", record.key),
+            dedup_key: None,
+            untrusted: false,
+            epic_role: Some(Role::Reviewer),
+        },
+    )
+    .await;
+}
+
+/// The task half of a Reviewer's prompt. The Reviewer role preamble
+/// (`prompts::role_preamble`) supplies the framing; this names the one
+/// mechanical requirement the latch depends on — a verdict-tagged note.
+fn reviewer_brief(epic_key: &str) -> String {
+    format!(
+        "Review this workspace's open PR against its issue's Definition of Done.\n\n\
+         Read the diff with `gh pr diff` and the issue with `gh issue view`. Do not push \
+         changes and do not merge.\n\n\
+         **End with exactly one note**, which is how lazybox records your verdict:\n\
+         - findings that must be fixed before merge:\n  \
+           `post_note(text=\"<your findings>\", tags=[\"review\", \"epic:{epic_key}\", \"blocking\"])`\n\
+         - nothing blocking:\n  \
+           `post_note(text=\"<what you checked>\", tags=[\"review\", \"epic:{epic_key}\", \"clean\"])`\n\n\
+         A `blocking` verdict holds the PR's merge until you post a `clean` one."
+    )
+}
+
+/// The brief an auto-dispatched Worker starts from: the member's own issue,
+/// rendered with the same prompt builder the `w w` press and the label-spawn
+/// path use. `None` when the member has no issue to work from — a PR-only
+/// member is already past the point a Worker would be dispatched.
+fn member_work_prompt(ws: &Workspace, user_config: &lazybox_config::Config) -> Option<String> {
+    let issue = ws
+        .gh_issues
+        .iter()
+        .chain(ws.linear_issues.iter())
+        .find(|t| !matches!(t.state, TaskState::Merged | TaskState::Closed))?;
+    Some(lazybox_core::prompts::build_implement_issue_prompt_with(
+        issue,
+        &user_config.conventions,
+    ))
+}
+
+/// The agent id an epic latch spawns, resolved per dispatch from live config
+/// so an operator's edit takes effect without a daemon restart — same source
+/// the `spawn_worker` MCP tool reads.
+fn default_agent(user_config: &lazybox_config::Config) -> String {
+    user_config
+        .setup
+        .default_agent
+        .clone()
+        .unwrap_or_else(|| "claude".to_string())
 }
 
 #[cfg(test)]
@@ -1786,6 +2551,7 @@ mod tests {
             linked_tasks: vec![],
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
             parent: None,
             kind: None,
@@ -1809,12 +2575,21 @@ mod tests {
     }
 
     fn resolve_fresh(record: &EpicRecord, workspaces: &[Workspace]) -> EpicSnapshot {
+        resolve_with_latches(record, workspaces, &LatchInputs::default())
+    }
+
+    fn resolve_with_latches(
+        record: &EpicRecord,
+        workspaces: &[Workspace],
+        latches: &LatchInputs,
+    ) -> EpicSnapshot {
         let mut latch = HashMap::new();
         resolve(
             record,
             workspaces,
             &HashMap::new(),
             &HashMap::new(),
+            latches,
             &mut latch,
             1_000,
         )
@@ -1964,6 +2739,7 @@ mod tests {
             &workspaces,
             &states,
             &HashMap::new(),
+            &LatchInputs::default(),
             &mut latch,
             1,
         );
@@ -2000,6 +2776,7 @@ mod tests {
             &[w],
             &states,
             &HashMap::new(),
+            &LatchInputs::default(),
             &mut latch,
             1,
         );
@@ -2081,6 +2858,7 @@ mod tests {
             &workspaces,
             &HashMap::new(),
             &HashMap::new(),
+            &LatchInputs::default(),
             &mut latch,
             500,
         );
@@ -2091,6 +2869,7 @@ mod tests {
             &workspaces,
             &HashMap::new(),
             &HashMap::new(),
+            &LatchInputs::default(),
             &mut latch,
             9_999,
         );
@@ -2111,6 +2890,7 @@ mod tests {
             &[blocked],
             &HashMap::new(),
             &HashMap::new(),
+            &LatchInputs::default(),
             &mut latch,
             1,
         );
@@ -2122,6 +2902,7 @@ mod tests {
             &[clear],
             &HashMap::new(),
             &HashMap::new(),
+            &LatchInputs::default(),
             &mut latch,
             2,
         );
@@ -2144,6 +2925,7 @@ mod tests {
             &[a.clone(), b.clone()],
             &HashMap::new(),
             &HashMap::new(),
+            &LatchInputs::default(),
             &mut latch,
             1,
         );
@@ -2164,6 +2946,7 @@ mod tests {
             &[a, b],
             &HashMap::new(),
             &HashMap::new(),
+            &LatchInputs::default(),
             &mut latch,
             2,
         );
@@ -2185,6 +2968,7 @@ mod tests {
             &[open],
             &HashMap::new(),
             &HashMap::new(),
+            &LatchInputs::default(),
             &mut latch,
             1,
         );
@@ -2196,6 +2980,7 @@ mod tests {
             &[merged],
             &HashMap::new(),
             &HashMap::new(),
+            &LatchInputs::default(),
             &mut latch,
             2,
         );
@@ -2478,6 +3263,7 @@ mod tests {
             &[a.clone(), b.clone()],
             &HashMap::new(),
             &HashMap::new(),
+            &LatchInputs::default(),
             &mut latch,
             1,
         );
@@ -2500,6 +3286,7 @@ mod tests {
             &[a, b],
             &HashMap::new(),
             &HashMap::new(),
+            &LatchInputs::default(),
             &mut latch,
             2,
         );
@@ -2541,6 +3328,7 @@ mod tests {
             &[a.clone(), make_b(CiStatus::Failure)],
             &HashMap::new(),
             &HashMap::new(),
+            &LatchInputs::default(),
             &mut latch,
             1,
         );
@@ -2550,6 +3338,7 @@ mod tests {
             &[a, make_b(CiStatus::Success)],
             &HashMap::new(),
             &HashMap::new(),
+            &LatchInputs::default(),
             &mut latch,
             2,
         );
@@ -2575,6 +3364,7 @@ mod tests {
             &[open],
             &HashMap::new(),
             &HashMap::new(),
+            &LatchInputs::default(),
             &mut latch,
             1,
         );
@@ -2586,6 +3376,7 @@ mod tests {
             &[closed],
             &HashMap::new(),
             &HashMap::new(),
+            &LatchInputs::default(),
             &mut latch,
             2,
         );
@@ -2675,6 +3466,7 @@ mod tests {
             &[ws("w")],
             &HashMap::new(),
             &declared,
+            &LatchInputs::default(),
             &mut latch,
             9_999,
         );
@@ -2711,6 +3503,7 @@ mod tests {
             &[ws("w")],
             &HashMap::new(),
             &declared,
+            &LatchInputs::default(),
             &mut latch,
             1,
         );
@@ -3155,5 +3948,654 @@ mod tests {
         assert!(preamble.contains("--parent"));
         assert!(preamble.contains("--blocked-by"));
         assert!(preamble.contains("Blocked by:"));
+    }
+
+    // ── autonomy dial (#1525) ───────────────────────────────────────────
+
+    /// Members `a` (ready) and `b` (ready), no edges — the shape the
+    /// dispatcher plans over.
+    fn ready_epic() -> (EpicRecord, Vec<Workspace>) {
+        let mut a = ws("a");
+        a.gh_issues = vec![task("github", "o/r#1")];
+        let mut b = ws("b");
+        b.gh_issues = vec![task("github", "o/r#2")];
+        (record_with(&["a", "b"]), vec![a, b])
+    }
+
+    fn armed(latch: lazybox_core::EpicLatch) -> lazybox_core::EpicPolicies {
+        let mut p = lazybox_core::EpicPolicies::default();
+        p.set(latch, lazybox_core::PolicyArm::Arm);
+        p
+    }
+
+    fn dispatch_ctx() -> DispatchContext {
+        DispatchContext {
+            live_workers: 0,
+            max_workers: 6,
+            excluded: HashSet::new(),
+            opted_out: HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn dispatch_is_off_by_default() {
+        let (record, workspaces) = ready_epic();
+        let snap = resolve_fresh(&record, &workspaces);
+        assert_eq!(snap.ready, 2, "both members should read Ready");
+        assert!(
+            plan_dispatch(
+                &snap,
+                &lazybox_core::EpicPolicies::default(),
+                &dispatch_ctx()
+            )
+            .is_empty(),
+            "an unarmed epic must dispatch nothing"
+        );
+    }
+
+    #[test]
+    fn dispatch_plans_every_ready_member_when_armed() {
+        let (record, workspaces) = ready_epic();
+        let snap = resolve_fresh(&record, &workspaces);
+        let tickets = plan_dispatch(
+            &snap,
+            &armed(lazybox_core::EpicLatch::AutoDispatch),
+            &dispatch_ctx(),
+        );
+        let members: Vec<&str> = tickets.iter().map(|t| t.member.as_str()).collect();
+        assert_eq!(members, vec!["a", "b"]);
+        // Each ticket carries a per-(epic, member) marker so a re-fire on the
+        // next recompute collapses instead of spawning twice.
+        assert_eq!(tickets[0].dedup_key, "autospawn-epic:e:a");
+        assert_ne!(tickets[0].dedup_key, tickets[1].dedup_key);
+    }
+
+    /// Ranked by how much each unblocks: a member two others wait on is
+    /// dispatched before a leaf, so limited headroom buys the most.
+    #[test]
+    fn dispatch_ranks_by_downstream_unblocking() {
+        let mut a = ws("a");
+        a.gh_issues = vec![task("github", "o/r#1")];
+        let mut leaf = ws("leaf");
+        leaf.gh_issues = vec![task("github", "o/r#9")];
+        // b and c both wait on a; leaf waits on nobody.
+        let mut b = ws("b");
+        let mut b_issue = task("github", "o/r#2");
+        b_issue.blocked_by = vec![task("github", "o/r#1").id];
+        b.gh_issues = vec![b_issue];
+        let mut c = ws("c");
+        let mut c_issue = task("github", "o/r#3");
+        c_issue.blocked_by = vec![task("github", "o/r#1").id];
+        c.gh_issues = vec![c_issue];
+
+        let record = record_with(&["a", "b", "c", "leaf"]);
+        let snap = resolve_fresh(&record, &[a, b, c, leaf]);
+        let mut ctx = dispatch_ctx();
+        ctx.max_workers = 1;
+        let tickets = plan_dispatch(&snap, &armed(lazybox_core::EpicLatch::AutoDispatch), &ctx);
+        assert_eq!(
+            tickets
+                .iter()
+                .map(|t| t.member.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"],
+            "the member holding two others must go first"
+        );
+    }
+
+    #[test]
+    fn dispatch_stands_down_at_the_worker_cap() {
+        let (record, workspaces) = ready_epic();
+        let snap = resolve_fresh(&record, &workspaces);
+        let policies = armed(lazybox_core::EpicLatch::AutoDispatch);
+
+        let mut at_cap = dispatch_ctx();
+        at_cap.max_workers = 2;
+        at_cap.live_workers = 2;
+        assert!(plan_dispatch(&snap, &policies, &at_cap).is_empty());
+
+        // One slot left → exactly one ticket, not two.
+        let mut one_slot = dispatch_ctx();
+        one_slot.max_workers = 2;
+        one_slot.live_workers = 1;
+        assert_eq!(plan_dispatch(&snap, &policies, &one_slot).len(), 1);
+
+        // `max_epic_workers: 0` disables dispatch outright, exactly as it
+        // disables the `spawn_worker` MCP tool.
+        let mut disabled = dispatch_ctx();
+        disabled.max_workers = 0;
+        assert!(plan_dispatch(&snap, &policies, &disabled).is_empty());
+    }
+
+    #[test]
+    fn dispatch_stands_down_on_a_claim_or_an_opt_out_label() {
+        let (record, workspaces) = ready_epic();
+        let snap = resolve_fresh(&record, &workspaces);
+        let policies = armed(lazybox_core::EpicLatch::AutoDispatch);
+
+        let mut claimed = dispatch_ctx();
+        claimed.excluded.insert(WorkspaceKey::new("a"));
+        assert_eq!(
+            plan_dispatch(&snap, &policies, &claimed)
+                .iter()
+                .map(|t| t.member.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b"],
+            "a member claimed elsewhere (or already running an agent) is skipped"
+        );
+
+        let mut opted = dispatch_ctx();
+        opted.opted_out.insert(WorkspaceKey::new("b"));
+        assert_eq!(
+            plan_dispatch(&snap, &policies, &opted)
+                .iter()
+                .map(|t| t.member.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"],
+            "`no-auto-fix` / `do-not-lazybox` means do not auto-dispatch either"
+        );
+    }
+
+    /// A blocked member is never dispatched even when the latch is armed —
+    /// `plan_dispatch` reads the ready queue, not the member list.
+    #[test]
+    fn dispatch_never_starts_a_blocked_member() {
+        let mut a = ws("a");
+        a.gh_issues = vec![task("github", "o/r#1")];
+        let mut b = ws("b");
+        let mut b_issue = task("github", "o/r#2");
+        b_issue.blocked_by = vec![task("github", "o/r#1").id];
+        b.gh_issues = vec![b_issue];
+        let record = record_with(&["a", "b"]);
+        let snap = resolve_fresh(&record, &[a, b]);
+        assert_eq!(
+            plan_dispatch(
+                &snap,
+                &armed(lazybox_core::EpicLatch::AutoDispatch),
+                &dispatch_ctx()
+            )
+            .iter()
+            .map(|t| t.member.as_str())
+            .collect::<Vec<_>>(),
+            vec!["a"]
+        );
+    }
+
+    /// A green-PR epic: `a` has an open PR, CI passing.
+    fn green_pr_epic() -> (EpicRecord, Vec<Workspace>) {
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Open, CiStatus::Success);
+        (record_with(&["a"]), vec![a])
+    }
+
+    fn review_row(key: &str, blocking: bool) -> HashMap<WorkspaceKey, ReviewState> {
+        let mut map = HashMap::new();
+        map.insert(
+            WorkspaceKey::new(key),
+            ReviewState {
+                workspace: WorkspaceKey::new(key),
+                dispatched: true,
+                blocking,
+                since: 1,
+            },
+        );
+        map
+    }
+
+    #[test]
+    fn review_is_off_by_default() {
+        let (record, workspaces) = green_pr_epic();
+        let snap = resolve_fresh(&record, &workspaces);
+        let plan = plan_reviews(
+            &snap,
+            &lazybox_core::EpicPolicies::default(),
+            &HashMap::new(),
+            &HashSet::new(),
+        );
+        assert!(plan.dispatch.is_empty(), "an unarmed epic reviews nothing");
+    }
+
+    #[test]
+    fn review_fires_once_per_green_run() {
+        let (record, workspaces) = green_pr_epic();
+        let snap = resolve_fresh(&record, &workspaces);
+        let policies = armed(lazybox_core::EpicLatch::AutoReview);
+
+        let first = plan_reviews(&snap, &policies, &HashMap::new(), &HashSet::new());
+        assert_eq!(
+            first.dispatch,
+            vec![WorkspaceKey::new("a")],
+            "a green PR with no review run starts one"
+        );
+
+        // With the row in place the same snapshot plans nothing more — the
+        // "fires once" property.
+        let again = plan_reviews(&snap, &policies, &review_row("a", false), &HashSet::new());
+        assert!(again.dispatch.is_empty());
+        assert!(again.clear.is_empty(), "a still-green member keeps its row");
+    }
+
+    /// CI goes red → the row is dropped, so the next green re-reviews once.
+    #[test]
+    fn a_re_green_after_fixes_reviews_again() {
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Open, CiStatus::Failure);
+        let record = record_with(&["a"]);
+        let red = resolve_fresh(&record, &[a]);
+        let policies = armed(lazybox_core::EpicLatch::AutoReview);
+
+        let plan = plan_reviews(&red, &policies, &review_row("a", false), &HashSet::new());
+        assert_eq!(plan.clear, vec![WorkspaceKey::new("a")]);
+        assert!(plan.dispatch.is_empty(), "a red PR is not reviewed");
+
+        // Green again with the row now cleared → one more review.
+        let (record, workspaces) = green_pr_epic();
+        let green = resolve_fresh(&record, &workspaces);
+        assert_eq!(
+            plan_reviews(&green, &policies, &HashMap::new(), &HashSet::new()).dispatch,
+            vec![WorkspaceKey::new("a")]
+        );
+    }
+
+    #[test]
+    fn review_stands_down_on_an_opt_out_label() {
+        let (record, workspaces) = green_pr_epic();
+        let snap = resolve_fresh(&record, &workspaces);
+        let mut opted = HashSet::new();
+        opted.insert(WorkspaceKey::new("a"));
+        assert!(
+            plan_reviews(
+                &snap,
+                &armed(lazybox_core::EpicLatch::AutoReview),
+                &HashMap::new(),
+                &opted
+            )
+            .dispatch
+            .is_empty()
+        );
+    }
+
+    /// A blocking verdict flips the member's status and keeps the hold —
+    /// the row must not be cleared just because the status is no longer the
+    /// `PrOpen`/`Mergeable` shape `member_is_green` recognizes.
+    #[test]
+    fn a_blocking_review_holds_the_member_and_keeps_its_row() {
+        let (record, workspaces) = green_pr_epic();
+        let latches = LatchInputs {
+            review_blocking: HashSet::from([WorkspaceKey::new("a")]),
+            ..Default::default()
+        };
+        let snap = resolve_with_latches(&record, &workspaces, &latches);
+        assert_eq!(snap.members[0].status, EpicMemberStatus::ReviewBlocked);
+        assert_eq!(snap.blocked, 1);
+
+        let plan = plan_reviews(
+            &snap,
+            &armed(lazybox_core::EpicLatch::AutoReview),
+            &review_row("a", true),
+            &HashSet::new(),
+        );
+        assert!(
+            plan.clear.is_empty(),
+            "the hold must outlive the green read"
+        );
+        assert!(plan.dispatch.is_empty());
+    }
+
+    /// A review verdict reads as its own delta, not a bare status move.
+    /// A second, still-ready member keeps the epic off the `Stalled` path so
+    /// the assertion isolates the verdict delta.
+    #[test]
+    fn a_review_verdict_diffs_as_reviewed() {
+        let (_, mut workspaces) = green_pr_epic();
+        let mut z = ws("z");
+        z.gh_issues = vec![task("github", "o/r#9")];
+        workspaces.push(z);
+        let record = record_with(&["a", "z"]);
+        let clean = resolve_fresh(&record, &workspaces);
+        let blocked = resolve_with_latches(
+            &record,
+            &workspaces,
+            &LatchInputs {
+                review_blocking: HashSet::from([WorkspaceKey::new("a")]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            diff(Some(&clean), &blocked),
+            vec![EpicDelta::Reviewed {
+                key: WorkspaceKey::new("a"),
+                blocking: true
+            }]
+        );
+        assert_eq!(
+            diff(Some(&blocked), &clean),
+            vec![EpicDelta::Reviewed {
+                key: WorkspaceKey::new("a"),
+                blocking: false
+            }]
+        );
+    }
+
+    #[test]
+    fn merge_in_order_is_off_by_default() {
+        let (record, workspaces) = green_pr_epic();
+        let snap = resolve_fresh(&record, &workspaces);
+        assert!(
+            plan_merge_arming(
+                &snap,
+                &lazybox_core::EpicPolicies::default(),
+                &HashSet::new(),
+                &HashSet::new()
+            )
+            .is_empty()
+        );
+    }
+
+    /// Every PR member is armed regardless of the order it went green in —
+    /// P3's hold, not the arming, supplies the sequence.
+    #[test]
+    fn merge_in_order_arms_every_pr_member_once() {
+        let mut a = ws("a");
+        pr(&mut a, TaskState::Open, CiStatus::Success);
+        let mut b = ws("b");
+        pr(&mut b, TaskState::Open, CiStatus::Failure);
+        let mut c = ws("c"); // issue-only: nothing to arm.
+        c.gh_issues = vec![task("github", "o/r#3")];
+
+        let record = record_with(&["a", "b", "c"]);
+        let snap = resolve_fresh(&record, &[a, b, c]);
+        let policies = armed(lazybox_core::EpicLatch::MergeInOrder);
+
+        let mut armed_now = plan_merge_arming(&snap, &policies, &HashSet::new(), &HashSet::new());
+        armed_now.sort();
+        assert_eq!(
+            armed_now,
+            vec![WorkspaceKey::new("a"), WorkspaceKey::new("b")],
+            "both live PRs arm; the issue-only member has no PR to arm"
+        );
+
+        // Already-armed members are not re-sent — "fires once".
+        let already = HashSet::from([WorkspaceKey::new("a"), WorkspaceKey::new("b")]);
+        assert!(plan_merge_arming(&snap, &policies, &already, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn merge_in_order_stands_down_on_an_opt_out_label() {
+        let (record, workspaces) = green_pr_epic();
+        let snap = resolve_fresh(&record, &workspaces);
+        let opted = HashSet::from([WorkspaceKey::new("a")]);
+        assert!(
+            plan_merge_arming(
+                &snap,
+                &armed(lazybox_core::EpicLatch::MergeInOrder),
+                &HashSet::new(),
+                &opted
+            )
+            .is_empty()
+        );
+    }
+
+    // ── contracts (#1525 step 5) ────────────────────────────────────────
+
+    /// Consumer `b` declares `Contract: a`. Until `a` publishes, `b` is
+    /// blocked with reason `contract` — and *not* via a dependency edge.
+    fn contract_epic() -> (EpicRecord, Vec<Workspace>) {
+        let mut a = ws("a");
+        a.gh_issues = vec![task("github", "o/r#1")];
+        let mut b = ws("b");
+        let mut b_issue = task("github", "o/r#2");
+        b_issue.contracts = vec![task("github", "o/r#1").id];
+        b.gh_issues = vec![b_issue];
+        (record_with(&["a", "b"]), vec![a, b])
+    }
+
+    #[test]
+    fn an_unpublished_contract_blocks_the_consumer() {
+        let (record, workspaces) = contract_epic();
+        let snap = resolve_fresh(&record, &workspaces);
+        let b = snap.members.iter().find(|m| m.key.as_str() == "b").unwrap();
+        assert_eq!(b.status, EpicMemberStatus::Blocked);
+        assert_eq!(b.blocked_reason.as_deref(), Some("contract"));
+        assert!(
+            b.blocked_by.is_empty() && b.external_blockers.is_empty(),
+            "a contract is not a dependency edge and not an external task"
+        );
+        let blocker = b
+            .blockers
+            .iter()
+            .find(|x| x.kind == BlockerKind::Contract)
+            .expect("a contract blocker");
+        assert_eq!(blocker.owner, BlockerOwner::Agent(WorkspaceKey::new("a")));
+    }
+
+    #[test]
+    fn a_published_contract_unblocks_the_consumer() {
+        let (record, workspaces) = contract_epic();
+        let latches = LatchInputs {
+            published_contracts: HashSet::from([WorkspaceKey::new("a")]),
+            ..Default::default()
+        };
+        let snap = resolve_with_latches(&record, &workspaces, &latches);
+        let b = snap.members.iter().find(|m| m.key.as_str() == "b").unwrap();
+        assert_eq!(b.status, EpicMemberStatus::Ready);
+        assert!(b.blocked_reason.is_none());
+        assert!(b.blockers.is_empty());
+    }
+
+    /// A contract edge does not gate the *merge* the way a dependency does,
+    /// and it does not level waves — it only gates starting.
+    #[test]
+    fn a_contract_edge_is_typed_and_does_not_imply_merge_order() {
+        let (record, workspaces) = contract_epic();
+        let snap = resolve_fresh(&record, &workspaces);
+        assert!(snap.edges.contains(&EpicEdge {
+            from: WorkspaceKey::new("b"),
+            to: WorkspaceKey::new("a"),
+            kind: EdgeKind::Contract,
+        }));
+        assert!(
+            !snap.edges.iter().any(|e| e.kind == EdgeKind::MergeAfter),
+            "a contract must not imply a landing-order edge"
+        );
+        // The consumer stays in wave 0: a contract is satisfied by a note,
+        // not by the producer finishing, so it does not deepen the graph.
+        assert!(snap.members.iter().all(|m| m.wave == 0));
+    }
+
+    /// A contract naming a task the epic does not contain is out of scope —
+    /// it could never be observed satisfied, so it must not block forever.
+    #[test]
+    fn a_contract_on_a_non_member_is_ignored() {
+        let mut b = ws("b");
+        let mut b_issue = task("github", "o/r#2");
+        b_issue.contracts = vec![task("github", "other/repo#99").id];
+        b.gh_issues = vec![b_issue];
+        let snap = resolve_fresh(&record_with(&["b"]), &[b]);
+        assert_eq!(snap.members[0].status, EpicMemberStatus::Ready);
+        assert!(snap.members[0].blocked_reason.is_none());
+    }
+
+    /// End-to-end through `post_note`'s hook: a Reviewer's `blocking` verdict
+    /// records the hold (which gates the merge and shows as `ReviewBlocked`),
+    /// and a later `clean` verdict releases it.
+    #[tokio::test]
+    async fn a_review_note_records_then_releases_the_hold() {
+        let config = ServerConfig::in_memory();
+        let mut member = ws("w");
+        pr(&mut member, TaskState::Open, CiStatus::Success);
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: "w".to_string(),
+                created_at: Utc::now(),
+                workspace_json: Some(serde_json::to_string(&member).unwrap()),
+            })
+            .unwrap();
+        upsert(&config, record_with(&["w"])).await;
+
+        let key = WorkspaceKey::new("w");
+        // A verdict with no open review run is ignored — the stage did not
+        // start it, so a stray note cannot invent a hold.
+        on_note_posted(&config, &review_note(&["review", "epic:e", "blocking"])).await;
+        assert!(!review_blocks_merge(&config, &key));
+
+        // With a run open, the blocking verdict lands.
+        persist_review(
+            &config,
+            &ReviewState {
+                workspace: key.clone(),
+                dispatched: true,
+                blocking: false,
+                since: 1,
+            },
+        )
+        .unwrap();
+        on_note_posted(&config, &review_note(&["review", "epic:e", "blocking"])).await;
+        assert!(review_blocks_merge(&config, &key));
+        let snaps = all_snapshots(&config).await;
+        assert_eq!(
+            snaps.iter().find(|s| s.key == "e").unwrap().members[0].status,
+            EpicMemberStatus::ReviewBlocked
+        );
+
+        on_note_posted(&config, &review_note(&["review", "epic:e", "clean"])).await;
+        assert!(!review_blocks_merge(&config, &key));
+    }
+
+    /// A note that isn't a verdict (no `review` tag, or a `review` tag with no
+    /// `blocking`/`clean`) says nothing about the merge and must not move it.
+    #[tokio::test]
+    async fn a_non_verdict_note_leaves_the_hold_alone() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("w");
+        upsert(&config, record_with(&["w"])).await;
+        persist_review(
+            &config,
+            &ReviewState {
+                workspace: key.clone(),
+                dispatched: true,
+                blocking: true,
+                since: 1,
+            },
+        )
+        .unwrap();
+        on_note_posted(&config, &review_note(&["contract", "epic:e"])).await;
+        on_note_posted(&config, &review_note(&["review", "epic:e"])).await;
+        assert!(
+            review_blocks_merge(&config, &key),
+            "neither note carries a verdict, so the standing hold stands"
+        );
+    }
+
+    /// A verdict tagged for an epic the daemon does not know is ignored — the
+    /// tag names the epic, so an unknown one has no member to act on.
+    #[tokio::test]
+    async fn a_verdict_for_an_unknown_epic_is_ignored() {
+        let config = ServerConfig::in_memory();
+        let key = WorkspaceKey::new("w");
+        persist_review(
+            &config,
+            &ReviewState {
+                workspace: key.clone(),
+                dispatched: true,
+                blocking: false,
+                since: 1,
+            },
+        )
+        .unwrap();
+        on_note_posted(&config, &review_note(&["review", "epic:nope", "blocking"])).await;
+        assert!(!review_blocks_merge(&config, &key));
+    }
+
+    fn review_note(tags: &[&str]) -> crate::mcp::Note {
+        crate::mcp::Note {
+            author: "w".into(),
+            scope: "global".into(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
+            ts: 1,
+            text: "findings".into(),
+        }
+    }
+
+    /// Setting the latches persists them on the record and rides the snapshot,
+    /// so a client renders the pills without a second read.
+    #[tokio::test]
+    async fn set_policies_persists_and_reaches_the_snapshot() {
+        let config = ServerConfig::in_memory();
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: "w".to_string(),
+                created_at: Utc::now(),
+                workspace_json: Some(serde_json::to_string(&ws("w")).unwrap()),
+            })
+            .unwrap();
+        upsert(&config, record_with(&["w"])).await;
+        assert_eq!(
+            load(&config, "e").unwrap().unwrap().policies,
+            lazybox_core::EpicPolicies::default()
+        );
+
+        set_policies(&config, "e", armed(lazybox_core::EpicLatch::AutoReview)).await;
+        assert!(
+            load(&config, "e")
+                .unwrap()
+                .unwrap()
+                .policies
+                .armed(lazybox_core::EpicLatch::AutoReview)
+        );
+        let snaps = all_snapshots(&config).await;
+        assert_eq!(
+            snaps
+                .iter()
+                .find(|s| s.key == "e")
+                .unwrap()
+                .policies
+                .armed_latches(),
+            vec![lazybox_core::EpicLatch::AutoReview]
+        );
+    }
+
+    /// The Worker preamble quotes the epic's published contracts, fenced as
+    /// untrusted content — they are another agent's words.
+    #[tokio::test]
+    async fn worker_ctx_quotes_published_contracts_fenced() {
+        let config = ServerConfig::in_memory();
+        let mut member = ws("w");
+        member.role = Some(Role::Worker);
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: "w".to_string(),
+                created_at: Utc::now(),
+                workspace_json: Some(serde_json::to_string(&member).unwrap()),
+            })
+            .unwrap();
+        upsert(&config, record_with(&["w"])).await;
+        config
+            .store
+            .set_kv(
+                "lazybox:note:global:000000000001",
+                &serde_json::to_string(&crate::mcp::Note {
+                    author: "producer".into(),
+                    scope: "global".into(),
+                    tags: vec!["contract".into(), "epic:e".into()],
+                    ts: 1,
+                    text: "POST /v1/tokens returns {id, expires_at}".into(),
+                })
+                .unwrap(),
+            )
+            .unwrap();
+
+        let (role, ctx) = role_prompt_ctx(&config, &member).await.expect("a role");
+        assert_eq!(role, Role::Worker);
+        assert_eq!(
+            ctx.contract_notes,
+            vec!["POST /v1/tokens returns {id, expires_at}".to_string()]
+        );
+        let preamble = lazybox_core::prompts::role_preamble(role, &ctx);
+        assert!(preamble.contains("<untrusted-content source=\"agent-authored contract\">"));
+        assert!(preamble.contains("POST /v1/tokens"));
     }
 }

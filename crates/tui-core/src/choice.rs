@@ -67,7 +67,19 @@ pub trait PickPayload {
 pub enum PolicyPick {
     MergeOnGreen,
     AutoFix(AutoFixKind),
+    /// One of the epic's autonomy-dial latches (#1525). Present only when
+    /// the focused workspace belongs to an epic.
+    EpicLatch(lazybox_core::EpicLatch),
     Info(String),
+}
+
+/// The epic context a policy pick needs to toggle a latch: which epic, and
+/// what its latches currently read (#1525).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpicPolicyCtx {
+    pub key: String,
+    pub name: String,
+    pub policies: lazybox_core::EpicPolicies,
 }
 
 /// Snippet data visible to a picker resolution.
@@ -165,6 +177,10 @@ pub enum PickFlow {
     },
     Policy {
         workspace: Option<Box<Workspace>>,
+        /// The epic the focused workspace belongs to, when any (#1525) —
+        /// its key and current latches, so an epic row resolves without a
+        /// round-trip.
+        epic: Option<EpicPolicyCtx>,
     },
     WorkAgent {
         picker: Option<WorkPickerState>,
@@ -327,6 +343,19 @@ pub enum PickOutcome<F> {
         terminal_id: TerminalId,
         skill_name: String,
         text: String,
+    },
+    /// Move one of an epic's autonomy latches to `next` (#1525). Not a bare
+    /// `Commands` because arming `AUTO` asks for confirmation first, and the
+    /// renderer owns the confirm modal — the resolver can only name the move.
+    EpicLatch {
+        epic: String,
+        epic_name: String,
+        latch: lazybox_core::EpicLatch,
+        /// The arm the latch moves to (the `Default → Disarm → Arm` cycle).
+        next: lazybox_core::PolicyArm,
+        /// The epic's latches as they stand, so the renderer can build the
+        /// full replacement set from `next`.
+        policies: lazybox_core::EpicPolicies,
     },
     Jump(SessionKey),
     OpenUrl(String),
@@ -690,10 +719,25 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                 _ => PickOutcome::NoOp,
             }
         }
-        PickFlow::Policy { workspace } => {
+        PickFlow::Policy { workspace, epic } => {
             let Some(policy) = picks.first().and_then(P::policy) else {
                 return PickOutcome::NoOp;
             };
+            // An epic latch is toggled on the epic, not the workspace, so it
+            // resolves before the workspace is required — a taskless
+            // coordinator row has an epic but no PR.
+            if let PolicyPick::EpicLatch(latch) = policy {
+                let Some(epic) = epic else {
+                    return PickOutcome::NoOp;
+                };
+                return PickOutcome::EpicLatch {
+                    epic: epic.key,
+                    epic_name: epic.name,
+                    latch,
+                    next: epic.policies.toggled(latch),
+                    policies: epic.policies,
+                };
+            }
             let Some(workspace) = workspace else {
                 return PickOutcome::NoOp;
             };
@@ -740,6 +784,8 @@ pub fn resolve_pick<P: PickPayload>(picks: &[P], flow: PickFlow) -> PickOutcome<
                     commands: Vec::new(),
                     notice: Some(message),
                 },
+                // Handled above, before the workspace is required.
+                PolicyPick::EpicLatch(_) => PickOutcome::NoOp,
             }
         }
         PickFlow::WorkAgent { picker } => {
@@ -1142,6 +1188,7 @@ mod tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         };
         Workspace::from_task(task, Utc::now())
@@ -1525,6 +1572,7 @@ mod tests {
             resolve_pick(
                 &[Payload::Policy(PolicyPick::MergeOnGreen)],
                 PickFlow::Policy {
+                    epic: None,
                     workspace: Some(Box::new(ws)),
                 },
             ),

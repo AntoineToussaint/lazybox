@@ -638,6 +638,15 @@ pub struct Task {
     /// Empty for providers without the concept and for older snapshots.
     #[serde(default)]
     pub merge_after: Vec<TaskId>,
+    /// Tasks that must publish an **interface contract** before this one can
+    /// be built against it. Read from a `Contract: owner/repo#N` body marker
+    /// (same link grammar as `Blocked by:`). Unlike [`Task::blocked_by`], a
+    /// contract edge is satisfied by the producer posting a blackboard note
+    /// tagged `contract` + `epic:<key>` — not by the producer's task closing —
+    /// so a consumer can start as soon as the interface is agreed (#1525).
+    /// Empty for providers without the concept and for older snapshots.
+    #[serde(default)]
+    pub contracts: Vec<TaskId>,
     /// A declared blocker with a human-readable reason — parsed from a
     /// `Blocked on: <reason>` body line (a decision, a credential, an
     /// outside party). Distinct from [`Task::blocked_by`], which is task
@@ -1164,6 +1173,7 @@ mod status_tag_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }

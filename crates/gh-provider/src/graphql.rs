@@ -2754,6 +2754,9 @@ pub fn pr_to_task(pr: &GqlPr, my_username: &str) -> Task {
                 issue_links_to_task_ids(&lazybox_core::issue_links::extract_merge_after(b), &repo)
             })
             .unwrap_or_default(),
+        // A contract is declared on the issue that scopes the work, not on
+        // the PR implementing it — same split as `Blocked by:` (#1525).
+        contracts: vec![],
         blocked_on: None,
     }
 }
@@ -3770,6 +3773,14 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
         .as_deref()
         .map(|b| issue_links_to_task_ids(&lazybox_core::issue_links::extract_merge_after(b), &repo))
         .unwrap_or_default();
+    // `Contract: owner/repo#N` — the interface this issue is built against
+    // (#1525). Issue-only, like `Blocked by:`: a contract is declared where
+    // the work is scoped, not on the PR that implements it.
+    let contracts: Vec<TaskId> = issue
+        .body
+        .as_deref()
+        .map(|b| issue_links_to_task_ids(&lazybox_core::issue_links::extract_contracts(b), &repo))
+        .unwrap_or_default();
 
     Task {
         id: TaskId {
@@ -3834,6 +3845,7 @@ pub fn issue_to_task(issue: &GqlIssue, my_username: &str) -> Task {
         state_label: None,
         blocked_by,
         merge_after,
+        contracts,
         blocked_on: issue
             .body
             .as_deref()

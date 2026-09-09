@@ -82,6 +82,11 @@ pub struct EpicRecord {
     /// `Merge after:` marker always adds a merge-after edge regardless of this.
     #[serde(default = "default_true")]
     pub implied_merge_after: bool,
+    /// The autonomy-dial latches (#1525): assisted dispatch, the automatic
+    /// Reviewer stage, and epic-wide merge-in-order. All off unless explicitly
+    /// armed, so a record written before the field existed loads inert.
+    #[serde(default)]
+    pub policies: crate::EpicPolicies,
     #[serde(default)]
     pub archived: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -104,6 +109,7 @@ impl EpicRecord {
             members: Vec::new(),
             publish_status_labels: false,
             implied_merge_after: true,
+            policies: crate::EpicPolicies::default(),
             archived: false,
             created_at: now,
         }
@@ -135,6 +141,25 @@ mod tests {
         assert!(back.anchor.is_none());
         assert!(back.members.is_empty());
         assert!(back.implied_merge_after);
+        assert_eq!(back.policies, crate::EpicPolicies::default());
+    }
+
+    /// The autonomy latches ride the record and round-trip; a record written
+    /// before they existed loads with every latch inert (#1525).
+    #[test]
+    fn policies_round_trip_and_default_off() {
+        let now = chrono::Utc::now();
+        let mut record = EpicRecord::new(EpicKey::new("x"), "X", now);
+        assert!(!record.policies.armed(crate::EpicLatch::AutoDispatch));
+        record.policies.auto_dispatch = crate::PolicyArm::Arm;
+        record.policies.merge_in_order = crate::PolicyArm::Disarm;
+        let back: EpicRecord =
+            serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
+        assert_eq!(back.policies, record.policies);
+        assert_eq!(
+            back.policies.armed_latches(),
+            vec![crate::EpicLatch::AutoDispatch]
+        );
     }
 
     #[test]
@@ -150,6 +175,7 @@ mod tests {
         // A record written before `implied_merge_after` existed must load with
         // the implication ON — the default-true migration, not bool's false.
         assert!(back.implied_merge_after);
+        assert_eq!(back.policies, crate::EpicPolicies::default());
     }
 
     #[test]

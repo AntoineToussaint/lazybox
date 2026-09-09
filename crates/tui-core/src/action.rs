@@ -449,6 +449,9 @@ pub enum Action {
     /// columns, `j/k`/`h/l` navigate, `Enter` jumps to the highlighted
     /// member, `Esc` closes.
     EpicGraph,
+    ToggleEpicAutoDispatch,
+    ToggleEpicAutoReview,
+    ToggleEpicMergeInOrder,
     /// Set (or clear) the cursor workspace's orchestration role (`E r`,
     /// #1523). Opens a Choice modal listing the five roles plus a "none"
     /// entry that clears the role. Drives the sidebar badge, the spawn-time
@@ -681,6 +684,9 @@ pub enum ActionKind {
     JumpToBlocked,
     EpicMergeOrder,
     EpicGraph,
+    ToggleEpicAutoDispatch,
+    ToggleEpicAutoReview,
+    ToggleEpicMergeInOrder,
     SetRole,
     SpawnPlanner,
     SpawnCoordinator,
@@ -738,6 +744,9 @@ impl ActionKind {
         Self::JumpToBlocked,
         Self::EpicMergeOrder,
         Self::EpicGraph,
+        Self::ToggleEpicAutoDispatch,
+        Self::ToggleEpicAutoReview,
+        Self::ToggleEpicMergeInOrder,
         Self::ToggleFocusMode,
         Self::StartAgent,
         Self::ConnectBox,
@@ -992,6 +1001,9 @@ impl Action {
             Action::JumpToBlocked => ActionKind::JumpToBlocked,
             Action::EpicMergeOrder => ActionKind::EpicMergeOrder,
             Action::EpicGraph => ActionKind::EpicGraph,
+            Action::ToggleEpicAutoDispatch => ActionKind::ToggleEpicAutoDispatch,
+            Action::ToggleEpicAutoReview => ActionKind::ToggleEpicAutoReview,
+            Action::ToggleEpicMergeInOrder => ActionKind::ToggleEpicMergeInOrder,
             Action::SetRole => ActionKind::SetRole,
             Action::SpawnPlanner => ActionKind::SpawnPlanner,
             Action::SpawnCoordinator => ActionKind::SpawnCoordinator,
@@ -1214,6 +1226,27 @@ impl ActionDef {
                 default_keys: "E g",
                 label: "graph view",
                 describe: "Open the full-screen dependency graph for the focused workspace's epic (#1524): waves laid out as columns with the typed edges between them (solid for a blocking dependency, dashed for a merge-after-only edge). j/k move within a wave, h/l across; Enter jumps to the highlighted member, Esc closes.",
+                section: Section::Global,
+            },
+            ActionKind::ToggleEpicAutoDispatch => &Self {
+                kind: ActionKind::ToggleEpicAutoDispatch,
+                default_keys: "E A",
+                label: "auto-dispatch",
+                describe: "Toggle the cursor workspace's epic `AUTO` latch (#1525): when a member becomes ready and the epic is under its worker cap, lazybox spawns a Worker on it with the Worker preamble. Arming asks once, naming the cap; after that it dispatches silently. Honors working claims, the SpawnCoordinator, and the `no-auto-fix` / `do-not-lazybox` label opt-out.",
+                section: Section::Global,
+            },
+            ActionKind::ToggleEpicAutoReview => &Self {
+                kind: ActionKind::ToggleEpicAutoReview,
+                default_keys: "E R",
+                label: "auto-review",
+                describe: "Toggle the cursor workspace's epic `REVIEW` latch (#1525): when a member's PR turns green with no review, lazybox spawns a Reviewer whose findings land as a blackboard note. A `blocking` verdict shows the member as review-blocked and holds its merge until a `clean` one lands; a re-green after fixes re-runs the review once.",
+                section: Section::Global,
+            },
+            ActionKind::ToggleEpicMergeInOrder => &Self {
+                kind: ActionKind::ToggleEpicMergeInOrder,
+                default_keys: "E M",
+                label: "merge in order",
+                describe: "Toggle the cursor workspace's epic `ORDER` latch (#1525): every member gets merge-on-green armed as its PR opens, so the epic lands itself. The merge-after hold supplies the sequence — a PR behind an unlanded predecessor waits rather than merging early.",
                 section: Section::Global,
             },
             ActionKind::SetRole => &Self {
@@ -2489,6 +2522,9 @@ impl ActionKind {
             ActionKind::JumpToBlocked => "jump_to_blocked",
             ActionKind::EpicMergeOrder => "epic_merge_order",
             ActionKind::EpicGraph => "epic_graph",
+            ActionKind::ToggleEpicAutoDispatch => "toggle_epic_auto_dispatch",
+            ActionKind::ToggleEpicAutoReview => "toggle_epic_auto_review",
+            ActionKind::ToggleEpicMergeInOrder => "toggle_epic_merge_in_order",
             ActionKind::SetRole => "set_role",
             ActionKind::SpawnPlanner => "spawn_planner",
             ActionKind::SpawnCoordinator => "spawn_coordinator",
@@ -2742,7 +2778,10 @@ pub fn leader_group_label(kind: ActionKind) -> Option<&'static str> {
         | ActionKind::EpicGraph
         | ActionKind::SetRole
         | ActionKind::SpawnPlanner
-        | ActionKind::SpawnCoordinator => Some("epic"),
+        | ActionKind::SpawnCoordinator
+        | ActionKind::ToggleEpicAutoDispatch
+        | ActionKind::ToggleEpicAutoReview
+        | ActionKind::ToggleEpicMergeInOrder => Some("epic"),
         _ => None,
     }
 }
@@ -3448,7 +3487,12 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // workspace for the cursor epic and spawns. Both need a workspace
         // under the cursor (the epic is resolved from it at dispatch).
         | ActionKind::SpawnPlanner
-        | ActionKind::SpawnCoordinator => has_ws,
+        | ActionKind::SpawnCoordinator
+        // The autonomy latches live on the *epic*, resolved from the cursor
+        // workspace at dispatch (#1525); off an epic the dispatcher says so.
+        | ActionKind::ToggleEpicAutoDispatch
+        | ActionKind::ToggleEpicAutoReview
+        | ActionKind::ToggleEpicMergeInOrder => has_ws,
         // Needs a source workspace; the dispatcher checks it actually
         // carries a running agent terminal and nudges when it doesn't
         // (the catalog can't see live terminals).
@@ -4226,6 +4270,7 @@ mod tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         };
 
@@ -4318,6 +4363,7 @@ mod tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         };
 
@@ -4438,6 +4484,7 @@ mod tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         };
 
@@ -4521,6 +4568,7 @@ mod tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         };
         let ws_with_pr = |state: TaskState| {
@@ -4644,6 +4692,7 @@ mod tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         };
 

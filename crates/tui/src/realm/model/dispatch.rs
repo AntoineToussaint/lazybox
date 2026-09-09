@@ -2306,6 +2306,27 @@ impl<T: TerminalAdapter> Model<T> {
             Action::EpicGraph => {
                 self.mount_epic_graph();
             }
+            Action::ToggleEpicAutoDispatch
+            | Action::ToggleEpicAutoReview
+            | Action::ToggleEpicMergeInOrder => {
+                let latch = match action {
+                    Action::ToggleEpicAutoDispatch => lazybox_core::EpicLatch::AutoDispatch,
+                    Action::ToggleEpicAutoReview => lazybox_core::EpicLatch::AutoReview,
+                    _ => lazybox_core::EpicLatch::MergeInOrder,
+                };
+                let Some(epic) = self.focused_epic_policy_ctx() else {
+                    self.flash_hint("not part of an epic");
+                    return cmds;
+                };
+                let next = epic.policies.toggled(latch);
+                cmds.extend(self.move_epic_latch(
+                    &epic.key,
+                    &epic.name,
+                    latch,
+                    next,
+                    epic.policies,
+                ));
+            }
             Action::SetRole => {
                 // Set (or clear) the focused workspace's orchestration
                 // role (#1523). Section::Workspace, so this fires from

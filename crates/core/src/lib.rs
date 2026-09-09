@@ -42,9 +42,9 @@ pub use epic::{EpicKey, EpicRecord};
 pub use error_class::{ErrorClass, HttpErrorSignals, classify, classify_message, classify_status};
 pub use issue_links::{IssueLink, extract as extract_issue_links};
 pub use policy::{
-    ApprovalPolicy, AutomationPolicies, MergeOnGreenPolicy, NON_AUTHOR_BLOCK, PolicyArm,
-    approval_policy_blocks, author_gate_blocks, auto_fix_permitted, auto_merge_block_reason,
-    merge_block_reason, should_auto_merge, toggled_arm,
+    ApprovalPolicy, AutomationPolicies, EpicLatch, EpicPolicies, MergeOnGreenPolicy,
+    NON_AUTHOR_BLOCK, PolicyArm, approval_policy_blocks, author_gate_blocks, auto_fix_permitted,
+    auto_merge_block_reason, merge_block_reason, should_auto_merge, toggled_arm,
 };
 pub use pr_trailers::{
     AgentCount, CostTrailer, EffortTrailer, PrTrailers, TimeTrailer,

@@ -300,7 +300,28 @@ prompt; `E p` spawns a **Planner** and `E c` a **Coordinator** on the
 cursor workspace (the role rides the spawn in-band, so the preamble
 frames the launch regardless of when the parallel role persist lands).
 A Coordinator can create and
-staff sibling workers with the `spawn_worker` MCP tool. `Shift-P` cycle
+staff sibling workers with the `spawn_worker` MCP tool. Finally the `E`
+leader carries the **autonomy dial** (#1525) — three per-epic latches on
+the cursor workspace's epic, each in the `ARM` / `FIX` shape and all off
+until armed, also toggleable from `g p` and shown as pills on the epic
+readouts' titles (`Auth refactor · AUTO ORDER`): `E A` arms `AUTO`
+(a member becomes ready → spawn a Worker on it with the P2 preamble,
+ranked by how much each unblocks, capped at `agent.max_epic_workers`;
+arming asks once naming the cap, then it runs silently), `E R` arms
+`REVIEW` (a member's PR turns green → spawn a Reviewer whose verdict
+lands as a `post_note(tags=["review","epic:<key>","blocking"|"clean"])`;
+`blocking` shows the member `⚠ review blocked` and holds its merge until
+a `clean` verdict, and a re-green after fixes re-reviews once), and
+`E M` arms `ORDER` (every member gets merge-on-green armed as its PR
+opens, so the epic lands itself — P3's merge-after hold supplies the
+sequence). All three honor the `no-auto-fix` / `do-not-lazybox` labels
+as "do not act on this row unattended", the working-claim exclusion, and
+the SpawnCoordinator. A `Contract: owner/repo#N` marker adds a
+`Contract` edge satisfied by the producer posting a `contract` +
+`epic:<key>` note (not by its task closing) — an unsatisfied one keeps
+the consumer blocked with reason `contract`, and the newest note is
+quoted into the consumer's Worker preamble behind an
+`<untrusted-content>` fence. `Shift-P` cycle
 the activity pane full → summary (a slim one-line count of new activity /
 failing CI) → hidden → full, remembered per workspace with a
 `ui.activity_pane_default` starting mode (auto-hidden when the workspace

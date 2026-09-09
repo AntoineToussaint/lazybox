@@ -445,6 +445,12 @@ pub enum Id {
     /// in `ModalFlow::BroadcastConfirm` and mounts this rather than
     /// spawning silently; `Msg::Confirmed(true)` runs the fan-out.
     BroadcastConfirm,
+    /// Confirm gate shown once, when an epic's `AUTO` latch is armed
+    /// (#1525) — arming is what authorizes unattended worker dispatch, so
+    /// it names the epic and the worker cap. The pending latch move lives
+    /// in `ModalFlow::EpicLatchConfirm`; `Msg::Confirmed(true)` sends the
+    /// `SetEpicPolicies` command.
+    EpicLatchConfirm,
     /// Confirm gate shown before a bulk `w w` / spawn / shell over a `v`
     /// multi-select starts new sessions (#899). The pre-computed plan
     /// lives in `ModalFlow::BulkSpawnConfirm`; `Msg::Confirmed(true)`
@@ -976,6 +982,12 @@ pub(crate) enum ModalFlow {
     /// cancelling leaves no phantom prompt behind (unlike stashing
     /// already-built inject commands, which would have recorded at mount
     /// time).
+    /// The epic latch move an `EpicLatchConfirm` will apply on "Yes".
+    EpicLatchConfirm {
+        epic: String,
+        policies: lazybox_core::EpicPolicies,
+        notice: String,
+    },
     BulkSpawnConfirm {
         steps: Vec<BulkAgentStep>,
         summary: String,
@@ -1461,6 +1473,9 @@ impl lazybox_tui_core::choice::PickPayload for ChoicePayload {
             }
             Self::Policy(PolicyToggle::AutoFix(kind)) => {
                 Some(lazybox_tui_core::choice::PolicyPick::AutoFix(*kind))
+            }
+            Self::Policy(PolicyToggle::EpicLatch(latch)) => {
+                Some(lazybox_tui_core::choice::PolicyPick::EpicLatch(*latch))
             }
             Self::Policy(PolicyToggle::Info(message)) => {
                 Some(lazybox_tui_core::choice::PolicyPick::Info(message.clone()))

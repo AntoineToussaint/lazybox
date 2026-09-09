@@ -268,16 +268,27 @@ pub(crate) fn on_workspace_committed(
     // once `held_by` comes back empty. Only Fire pays the lookup, which is
     // cheap when no epics exist.
     let signal = if signal == Signal::Fire {
-        let held = crate::epics::held_by(config, key);
-        if held.is_empty() {
-            Signal::Fire
-        } else {
+        // A blocking review holds the merge on the same terms (#1525): the PR
+        // is green, but the Reviewer found something and the findings stand
+        // until a `clean` verdict lands.
+        if crate::epics::review_blocks_merge(config, key) {
             tracing::info!(
                 workspace = %key,
-                ?held,
-                "auto-merge: holding — merge-after predecessor not yet landed"
+                "auto-merge: holding — the review stage reported blocking findings"
             );
             Signal::Hold
+        } else {
+            let held = crate::epics::held_by(config, key);
+            if held.is_empty() {
+                Signal::Fire
+            } else {
+                tracing::info!(
+                    workspace = %key,
+                    ?held,
+                    "auto-merge: holding — merge-after predecessor not yet landed"
+                );
+                Signal::Hold
+            }
         }
     } else {
         signal
@@ -777,6 +788,7 @@ mod tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }

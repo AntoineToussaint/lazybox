@@ -407,6 +407,141 @@ impl AutomationPolicies {
     }
 }
 
+/// Per-epic automation latches (#1525) — the "autonomy dial". Each is a
+/// [`PolicyArm`] in exactly the shape of [`AutomationPolicies`], so the
+/// arm/disarm vocabulary, the pill, and the toggle cycle are the ones users
+/// already know from `ARM` / `FIX`.
+///
+/// **Off by default, deliberately.** `Default` means "do nothing
+/// automatically" for all three: an epic never starts dispatching workers,
+/// reviewing PRs, or arming merge-on-green until the operator explicitly arms
+/// the latch. Unlike auto-fix — where `Default` follows a global config switch
+/// — there is no global "autonomy" setting to follow, so `Default` and
+/// `Disarm` behave identically here. `Disarm` still exists as the *explicit*
+/// off, which survives an [`absorb_from`](EpicPolicies::absorb_from) fold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub struct EpicPolicies {
+    /// Spawn a Worker on a member the moment it becomes `Ready`, up to the
+    /// per-epic worker cap.
+    #[serde(default)]
+    pub auto_dispatch: PolicyArm,
+    /// Spawn a Reviewer when a member's PR turns green with no review yet.
+    #[serde(default)]
+    pub auto_review: PolicyArm,
+    /// Arm `auto_merge_on_green` on every member as its PR opens, so the epic
+    /// lands itself in merge order (the P3 hold supplies the ordering).
+    #[serde(default)]
+    pub merge_in_order: PolicyArm,
+}
+
+/// Which epic latch a toggle addresses. One value per [`EpicPolicies`] field,
+/// so a menu row or a key chord names a latch without duplicating the match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
+pub enum EpicLatch {
+    AutoDispatch,
+    AutoReview,
+    MergeInOrder,
+}
+
+impl EpicLatch {
+    pub const ALL: [EpicLatch; 3] = [Self::AutoDispatch, Self::AutoReview, Self::MergeInOrder];
+
+    /// Stable wire/log discriminant.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AutoDispatch => "auto_dispatch",
+            Self::AutoReview => "auto_review",
+            Self::MergeInOrder => "merge_in_order",
+        }
+    }
+
+    /// The pill shown on an armed epic (`AUTO` / `REVIEW` / `ORDER`).
+    pub fn pill(self) -> &'static str {
+        match self {
+            Self::AutoDispatch => "AUTO",
+            Self::AutoReview => "REVIEW",
+            Self::MergeInOrder => "ORDER",
+        }
+    }
+
+    /// Menu-row wording.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::AutoDispatch => "auto-dispatch workers",
+            Self::AutoReview => "auto-review green PRs",
+            Self::MergeInOrder => "merge in order",
+        }
+    }
+}
+
+impl EpicPolicies {
+    /// The arm governing `latch`.
+    pub fn arm(&self, latch: EpicLatch) -> PolicyArm {
+        match latch {
+            EpicLatch::AutoDispatch => self.auto_dispatch,
+            EpicLatch::AutoReview => self.auto_review,
+            EpicLatch::MergeInOrder => self.merge_in_order,
+        }
+    }
+
+    /// Set the arm governing `latch`.
+    pub fn set(&mut self, latch: EpicLatch, arm: PolicyArm) {
+        match latch {
+            EpicLatch::AutoDispatch => self.auto_dispatch = arm,
+            EpicLatch::AutoReview => self.auto_review = arm,
+            EpicLatch::MergeInOrder => self.merge_in_order = arm,
+        }
+    }
+
+    /// Whether `latch` is armed. The single gate every automatic epic
+    /// behavior asks — only an explicit [`PolicyArm::Arm`] acts, so a fresh
+    /// epic (and one whose latch was disarmed) stands still.
+    pub fn armed(&self, latch: EpicLatch) -> bool {
+        self.arm(latch) == PolicyArm::Arm
+    }
+
+    /// Every armed latch, in [`EpicLatch::ALL`] order — the pill row.
+    pub fn armed_latches(&self) -> Vec<EpicLatch> {
+        EpicLatch::ALL
+            .into_iter()
+            .filter(|latch| self.armed(*latch))
+            .collect()
+    }
+
+    /// The arm `latch` moves to on one toggle. Deliberately a **two-state**
+    /// cycle (`Arm ⇄ Default`), unlike [`toggled_arm`]'s three-state one: an
+    /// auto-fix arm has a global config for `Default` to follow, so `Disarm`
+    /// is a distinct, useful state there. An epic latch has none — `Default`
+    /// and `Disarm` are both simply off — so a three-state cycle would spend
+    /// a keypress moving between two indistinguishable offs. `Disarm` remains
+    /// a valid persisted value (it reads as off and survives
+    /// [`absorb_from`](Self::absorb_from)); toggling from it arms.
+    pub fn toggled(&self, latch: EpicLatch) -> PolicyArm {
+        match self.arm(latch) {
+            PolicyArm::Arm => PolicyArm::Default,
+            PolicyArm::Default | PolicyArm::Disarm => PolicyArm::Arm,
+        }
+    }
+
+    /// Fold another latch set into this one, keeping the more decisive arm
+    /// per latch (`Disarm` > `Arm` > `Default`), exactly as
+    /// [`AutomationPolicies::absorb_from`] does. The exhaustive destructure
+    /// is deliberate: a new latch is a compile error here until it is given a
+    /// merge rule.
+    pub fn absorb_from(&mut self, other: &EpicPolicies) {
+        let EpicPolicies {
+            auto_dispatch,
+            auto_review,
+            merge_in_order,
+        } = other;
+        self.auto_dispatch = self.auto_dispatch.max_decided(*auto_dispatch);
+        self.auto_review = self.auto_review.max_decided(*auto_review);
+        self.merge_in_order = self.merge_in_order.max_decided(*merge_in_order);
+    }
+}
+
 /// Resolve whether a per-session `arm` permits auto-fix, given whether a
 /// label currently opts the PR out. The global feature switch is applied
 /// separately (upstream, when candidates are queued), so this is purely
@@ -463,6 +598,70 @@ mod tests {
     fn arm_overrides_label_opt_out() {
         assert!(auto_fix_permitted(PolicyArm::Arm, true));
         assert!(auto_fix_permitted(PolicyArm::Arm, false));
+    }
+
+    /// Every epic latch is off until explicitly armed — `Default` does not
+    /// follow a global switch the way auto-fix's does, because there is none.
+    #[test]
+    fn epic_latches_are_off_by_default() {
+        let policies = EpicPolicies::default();
+        for latch in EpicLatch::ALL {
+            assert!(
+                !policies.armed(latch),
+                "{} armed by default",
+                latch.as_str()
+            );
+        }
+        assert!(policies.armed_latches().is_empty());
+    }
+
+    #[test]
+    fn epic_latch_arm_set_and_read_round_trip() {
+        let mut policies = EpicPolicies::default();
+        policies.set(EpicLatch::AutoReview, PolicyArm::Arm);
+        assert!(policies.armed(EpicLatch::AutoReview));
+        assert!(!policies.armed(EpicLatch::AutoDispatch));
+        assert_eq!(policies.arm(EpicLatch::AutoReview), PolicyArm::Arm);
+        assert_eq!(policies.armed_latches(), vec![EpicLatch::AutoReview]);
+        // An explicit disarm is off, same as the default — but it is a
+        // *decided* off, which `absorb_from` keeps.
+        policies.set(EpicLatch::AutoReview, PolicyArm::Disarm);
+        assert!(!policies.armed(EpicLatch::AutoReview));
+    }
+
+    /// Toggling an epic latch walks a two-state cycle, so one press always
+    /// changes what the epic *does* — unlike the three-state auto-fix cycle,
+    /// where `Default → Disarm` is a meaningful move.
+    #[test]
+    fn epic_latch_toggle_is_a_two_state_cycle() {
+        let mut policies = EpicPolicies::default();
+        assert_eq!(policies.toggled(EpicLatch::AutoDispatch), PolicyArm::Arm);
+        policies.set(EpicLatch::AutoDispatch, PolicyArm::Arm);
+        assert_eq!(
+            policies.toggled(EpicLatch::AutoDispatch),
+            PolicyArm::Default
+        );
+        // A persisted explicit off arms on the next press rather than
+        // shuffling between two indistinguishable offs.
+        policies.set(EpicLatch::AutoDispatch, PolicyArm::Disarm);
+        assert_eq!(policies.toggled(EpicLatch::AutoDispatch), PolicyArm::Arm);
+    }
+
+    #[test]
+    fn epic_policies_absorb_keeps_the_more_decisive_arm() {
+        let mut into = EpicPolicies {
+            auto_dispatch: PolicyArm::Arm,
+            auto_review: PolicyArm::Default,
+            merge_in_order: PolicyArm::Disarm,
+        };
+        into.absorb_from(&EpicPolicies {
+            auto_dispatch: PolicyArm::Disarm,
+            auto_review: PolicyArm::Arm,
+            merge_in_order: PolicyArm::Arm,
+        });
+        assert_eq!(into.auto_dispatch, PolicyArm::Disarm);
+        assert_eq!(into.auto_review, PolicyArm::Arm);
+        assert_eq!(into.merge_in_order, PolicyArm::Disarm);
     }
 
     /// Toggling walks a fixed, label-agnostic cycle so the same keypress
@@ -579,6 +778,7 @@ mod merge_gate_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         };
         Workspace::from_task(task, Utc::now())

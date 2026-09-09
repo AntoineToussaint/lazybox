@@ -591,6 +591,7 @@ pub fn issue_to_task(issue: &Issue, viewer_id: &str) -> Task {
         // would bake in an explicit edge the opt-out could never drop, making
         // `implied_merge_after = false` silently ineffective for Linear issues.
         merge_after: linear_body_edges(issue, lazybox_core::issue_links::extract_merge_after),
+        contracts: vec![],
         // Free-text `Blocked on:` reason declared in the description
         // (#1521) — the same prose extractor GitHub issues use.
         blocked_on: issue

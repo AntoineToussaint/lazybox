@@ -1603,6 +1603,23 @@ showing keybinding search only",
                     }
                 }
             }
+            Some(Id::EpicLatchConfirm) => {
+                // Arming `AUTO` (#1525): yes sends the latch move snapshotted
+                // at mount, no leaves the epic manual.
+                if let Some(ModalFlow::EpicLatchConfirm {
+                    epic,
+                    policies,
+                    notice,
+                }) = self.modal_flow.take()
+                {
+                    if yes {
+                        self.flash_info(notice);
+                        cmds.push(IpcCommand::SetEpicPolicies { epic, policies });
+                    } else {
+                        self.flash_info("cancelled");
+                    }
+                }
+            }
             Some(Id::BulkSpawnConfirm) => {
                 // Bulk `w w` / spawn / shell would start new agents (#899,
                 // #836); yes runs the plan snapshotted at mount, no drops

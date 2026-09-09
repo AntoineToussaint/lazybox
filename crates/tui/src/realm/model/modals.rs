@@ -48,6 +48,9 @@ pub enum PolicyToggle {
     MergeOnGreen,
     /// Flip the per-session auto-fix arm for one failure kind.
     AutoFix(lazybox_core::AutoFixKind),
+    /// Flip one of the focused workspace's *epic* autonomy latches (#1525).
+    /// Present only when the workspace belongs to an epic.
+    EpicLatch(lazybox_core::EpicLatch),
     /// A read-only / not-applicable row (native auto-merge status, or a
     /// PR-only policy shown on an issue). Selecting re-informs, no
     /// command.
@@ -76,6 +79,7 @@ pub(crate) fn build_policy_rows(
     ws: &lazybox_core::Workspace,
     auto_fix_enabled: bool,
     opt_out_labels: &[String],
+    epic: Option<&lazybox_tui_core::choice::EpicPolicyCtx>,
 ) -> (Vec<String>, Vec<PolicyToggle>) {
     let mut labels = Vec::new();
     let mut toggles = Vec::new();
@@ -151,7 +155,40 @@ pub(crate) fn build_policy_rows(
             }
         }
     }
+
+    // The epic's autonomy dial (#1525). Only shown when this workspace
+    // belongs to one — these latches govern the whole epic, not this row, and
+    // the label says so.
+    if let Some(epic) = epic {
+        for latch in lazybox_core::EpicLatch::ALL {
+            let arm = epic.policies.arm(latch);
+            let detail = match arm {
+                lazybox_core::PolicyArm::Arm => format!("  ({} · armed)", epic.name),
+                lazybox_core::PolicyArm::Disarm => format!("  ({} · disarmed)", epic.name),
+                lazybox_core::PolicyArm::Default => format!("  ({} · off)", epic.name),
+            };
+            labels.push(format!(
+                "{} epic {}{detail}",
+                glyph(arm == lazybox_core::PolicyArm::Arm),
+                latch.label()
+            ));
+            toggles.push(PolicyToggle::EpicLatch(latch));
+        }
+    }
     (labels, toggles)
+}
+
+/// `<name>` with the epic's armed autonomy pills appended (#1525), for the
+/// epic readouts' frame titles: `Auth refactor · AUTO ORDER`. An epic with
+/// nothing armed reads as its bare name — a pill marks a deviation from "you
+/// drive", never the default.
+pub(crate) fn epic_title(name: &str, policies: &lazybox_core::EpicPolicies) -> String {
+    let armed = policies.armed_latches();
+    if armed.is_empty() {
+        return name.to_string();
+    }
+    let pills: Vec<&str> = armed.iter().map(|l| l.pill()).collect();
+    format!("{name} · {}", pills.join(" "))
 }
 
 /// Whether any configured opt-out label is present on the PR
@@ -813,8 +850,13 @@ impl<T: TerminalAdapter> Model<T> {
         else {
             return;
         };
-        let (labels, toggles) =
-            build_policy_rows(ws, self.auto_fix_enabled, &self.auto_fix_opt_out_labels);
+        let epic = self.focused_epic_policy_ctx();
+        let (labels, toggles) = build_policy_rows(
+            ws,
+            self.auto_fix_enabled,
+            &self.auto_fix_opt_out_labels,
+            epic.as_ref(),
+        );
         // Pair each label with the toggle it fires so the pick carries
         // its own `PolicyToggle` (#512).
         let items: Vec<(String, PolicyToggle)> = labels.into_iter().zip(toggles).collect();
@@ -2185,12 +2227,76 @@ impl<T: TerminalAdapter> Model<T> {
     /// workspace, if any. Returns the epic *key* (owned) so a caller can
     /// re-borrow `self` mutably afterwards without holding the map borrow.
     /// A workspace never joins two epics, so the first match is the one.
-    fn focused_epic_key(&self) -> Option<String> {
+    pub(crate) fn focused_epic_key(&self) -> Option<String> {
         let ws = self.sidebar.selected_workspace()?.key.clone();
         self.epic_snapshots
             .values()
             .find(|snap| snap.members.iter().any(|m| m.key == ws))
             .map(|snap| snap.key.clone())
+    }
+
+    /// The epic-policy context for the focused workspace's epic (#1525):
+    /// its key, display name, and current latches, read from the cached
+    /// snapshot. `None` off an epic.
+    pub(crate) fn focused_epic_policy_ctx(
+        &self,
+    ) -> Option<lazybox_tui_core::choice::EpicPolicyCtx> {
+        let key = self.focused_epic_key()?;
+        let snap = self.epic_snapshots.get(&key)?;
+        Some(lazybox_tui_core::choice::EpicPolicyCtx {
+            key,
+            name: snap.name.clone(),
+            policies: snap.policies,
+        })
+    }
+
+    /// Move one of an epic's autonomy latches to `next` (#1525). Arming
+    /// `AUTO` is the one move that asks first — it is what authorizes lazybox
+    /// to start agents unattended, so the confirm names the epic and the
+    /// worker cap that bounds the fan-out. Every other move (including
+    /// disarming `AUTO`) applies straight away, exactly like the `ARM` / `FIX`
+    /// pills.
+    pub(crate) fn move_epic_latch(
+        &mut self,
+        epic: &str,
+        epic_name: &str,
+        latch: lazybox_core::EpicLatch,
+        next: lazybox_core::PolicyArm,
+        current: lazybox_core::EpicPolicies,
+    ) -> Vec<lazybox_ipc::Command> {
+        let mut policies = current;
+        policies.set(latch, next);
+        let state = match next {
+            lazybox_core::PolicyArm::Arm => "armed",
+            lazybox_core::PolicyArm::Disarm => "disarmed",
+            lazybox_core::PolicyArm::Default => "off",
+        };
+        let notice = format!("{}: {state} on {epic_name}", latch.pill());
+        let arming_dispatch =
+            latch == lazybox_core::EpicLatch::AutoDispatch && next == lazybox_core::PolicyArm::Arm;
+        if !arming_dispatch {
+            self.flash_info(notice);
+            return vec![lazybox_ipc::Command::SetEpicPolicies {
+                epic: epic.to_string(),
+                policies,
+            }];
+        }
+        let cap = lazybox_config::Config::load()
+            .unwrap_or_default()
+            .agent
+            .max_epic_workers
+            .unwrap_or(lazybox_config::DEFAULT_MAX_EPIC_WORKERS);
+        let prompt = format!(
+            "Start workers automatically for {epic_name}?              lazybox will spawn an agent on each member as it becomes ready,              up to {cap} at a time."
+        );
+        self.set_modal_flow(super::ModalFlow::EpicLatchConfirm {
+            epic: epic.to_string(),
+            policies,
+            notice,
+        });
+        let modal = crate::realm::components::confirm::Confirm::new(&prompt).default_yes();
+        self.mount_modal(super::Id::EpicLatchConfirm, modal);
+        Vec::new()
     }
 
     /// `owner/repo#N  Display name` for one epic member — the provider
@@ -2272,7 +2378,8 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         };
         let rows = self.merge_order_rows(&snap);
-        self.mount_modal(Id::MergeOrder, MergeOrder::new(snap.name, rows));
+        let title = epic_title(&snap.name, &snap.policies);
+        self.mount_modal(Id::MergeOrder, MergeOrder::new(title, rows));
     }
 
     /// Build + mount the full-screen epic DAG (`E g`, #1524) for the
@@ -2290,8 +2397,8 @@ impl<T: TerminalAdapter> Model<T> {
         let Some(snap) = self.epic_snapshots.get(&epic_key).cloned() else {
             return;
         };
-        let name = snap.name.clone();
-        self.mount_modal(Id::EpicGraph, EpicGraph::new(name, snap));
+        let title = epic_title(&snap.name, &snap.policies);
+        self.mount_modal(Id::EpicGraph, EpicGraph::new(title, snap));
     }
 
     /// Repaint an open epic readout in place when a fresh `EpicStatus` for
@@ -2312,7 +2419,8 @@ impl<T: TerminalAdapter> Model<T> {
                     return;
                 };
                 let rows = self.merge_order_rows(&snap);
-                self.mount_modal(Id::MergeOrder, MergeOrder::new(snap.name, rows));
+                let title = epic_title(&snap.name, &snap.policies);
+                self.mount_modal(Id::MergeOrder, MergeOrder::new(title, rows));
             }
             Some(&Id::EpicGraph) => {
                 if self.focused_epic_key().as_deref() != Some(key) {
@@ -2325,8 +2433,8 @@ impl<T: TerminalAdapter> Model<T> {
                     Ok(tuirealm::state::State::Single(tuirealm::state::StateValue::Usize(n))) => n,
                     _ => 0,
                 };
-                let name = snap.name.clone();
-                let mut modal = EpicGraph::new(name, snap);
+                let title = epic_title(&snap.name, &snap.policies);
+                let mut modal = EpicGraph::new(title, snap);
                 modal.set_selected(selected);
                 self.mount_modal(Id::EpicGraph, modal);
             }
@@ -4552,6 +4660,7 @@ mod tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         };
         let mut ws = lazybox_core::Workspace::from_task(
@@ -4565,8 +4674,12 @@ mod tests {
 
     /// The CI-auto-fix row of the policies menu (`●` armed / `○` off).
     fn ci_auto_fix_row(labels: &[&str], arm: lazybox_core::PolicyArm, enabled: bool) -> String {
-        let (rows, _) =
-            build_policy_rows(&pr_workspace(labels, arm), enabled, &["no-auto-fix".into()]);
+        let (rows, _) = build_policy_rows(
+            &pr_workspace(labels, arm),
+            enabled,
+            &["no-auto-fix".into()],
+            None,
+        );
         // Rows: [merge-on-green, github-auto-merge, auto-fix CI, auto-fix conflict].
         rows[2].clone()
     }
@@ -4615,6 +4728,7 @@ mod tests {
             &pr_workspace(&[], lazybox_core::PolicyArm::Default),
             true,
             &["no-auto-fix".into()],
+            None,
         );
         // Row 0: lazybox client-side merge-on-green.
         assert!(rows[0].contains("merge on green"), "{:?}", rows[0]);
@@ -4629,6 +4743,65 @@ mod tests {
             rows[1].contains("even when lazybox is closed"),
             "GitHub auto-merge row must name its offline durability: {:?}",
             rows[1]
+        );
+    }
+
+    /// The epic section only appears for a workspace that belongs to one —
+    /// an epic-less row must not grow three rows it cannot toggle (#1525).
+    #[test]
+    fn epic_rows_only_appear_inside_an_epic() {
+        let ws = pr_workspace(&[], lazybox_core::PolicyArm::Default);
+        let (without, toggles) = build_policy_rows(&ws, true, &[], None);
+        assert_eq!(without.len(), 4, "PR rows only: {without:?}");
+        assert!(
+            !toggles
+                .iter()
+                .any(|t| matches!(t, PolicyToggle::EpicLatch(_)))
+        );
+
+        let epic = lazybox_tui_core::choice::EpicPolicyCtx {
+            key: "auth-refactor".into(),
+            name: "Auth refactor".into(),
+            policies: lazybox_core::EpicPolicies {
+                auto_dispatch: lazybox_core::PolicyArm::Arm,
+                auto_review: lazybox_core::PolicyArm::Disarm,
+                merge_in_order: lazybox_core::PolicyArm::Default,
+            },
+        };
+        let (with, toggles) = build_policy_rows(&ws, true, &[], Some(&epic));
+        assert_eq!(with.len(), 7);
+        assert_eq!(
+            toggles[4..],
+            [
+                PolicyToggle::EpicLatch(lazybox_core::EpicLatch::AutoDispatch),
+                PolicyToggle::EpicLatch(lazybox_core::EpicLatch::AutoReview),
+                PolicyToggle::EpicLatch(lazybox_core::EpicLatch::MergeInOrder),
+            ]
+        );
+        // Only the armed latch reads on, and every row names the epic it
+        // governs — these are not this workspace's policies.
+        assert!(with[4].starts_with('●'), "{:?}", with[4]);
+        assert!(with[5].starts_with('○'), "{:?}", with[5]);
+        assert!(with[6].starts_with('○'), "{:?}", with[6]);
+        assert!(with.iter().skip(4).all(|r| r.contains("Auth refactor")));
+        assert!(with[5].contains("disarmed"), "{:?}", with[5]);
+    }
+
+    /// The pills mark a deviation from "you drive": a fully-manual epic
+    /// titles as its bare name, an armed one names each armed latch.
+    #[test]
+    fn epic_title_shows_only_armed_pills() {
+        let none = lazybox_core::EpicPolicies::default();
+        assert_eq!(epic_title("Auth refactor", &none), "Auth refactor");
+
+        let some = lazybox_core::EpicPolicies {
+            auto_dispatch: lazybox_core::PolicyArm::Arm,
+            auto_review: lazybox_core::PolicyArm::Default,
+            merge_in_order: lazybox_core::PolicyArm::Arm,
+        };
+        assert_eq!(
+            epic_title("Auth refactor", &some),
+            "Auth refactor · AUTO ORDER"
         );
     }
 

@@ -121,6 +121,7 @@ fn summarize_group(
         NotificationKind::Done => format!("{count} agents finished"),
         NotificationKind::LimitReached => format!("{count} agents rate-limited"),
         NotificationKind::Activity => format!("{count} workspaces have new activity"),
+        NotificationKind::Epic => format!("{count} epic updates"),
     };
     Some(PendingNotification {
         title: format!("lazybox — {headline}"),

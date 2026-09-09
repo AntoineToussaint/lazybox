@@ -8502,6 +8502,7 @@ mod stale_input_tests {
                 | Id::ErrorInboxClearConfirm
                 | Id::BroadcastConfirm
                 | Id::BulkSpawnConfirm
+                | Id::EpicLatchConfirm
                 | Id::ClaimedSpawnConfirm
                 | Id::ScopeRemovalConfirm
                 | Id::EditorRemoveConfirm
@@ -9797,6 +9798,7 @@ mod modal_input_responsiveness_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }
@@ -10581,6 +10583,7 @@ mod merge_focus_follow_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }
@@ -11371,6 +11374,159 @@ mod merge_focus_follow_tests {
             &m.modal_flow,
             Some(super::super::ModalFlow::PolicyWorkspace { workspace }) if *workspace == ws_key
         ));
+    }
+
+    /// Just the `SetEpicPolicies` commands from a dispatch — `dispatch_action`
+    /// also emits bookkeeping (the mastery ledger's `RecordAction`), which is
+    /// not what these tests are about.
+    fn epic_policy_cmds(cmds: &[IpcCommand]) -> Vec<(String, lazybox_core::EpicPolicies)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                IpcCommand::SetEpicPolicies { epic, policies } => Some((epic.clone(), *policies)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Seed the model with one epic snapshot containing `ws_key`, with
+    /// `policies` on it — what the daemon pushes as `Event::EpicStatus`.
+    fn seed_epic<T: tuirealm::terminal::TerminalAdapter>(
+        m: &mut Model<T>,
+        ws_key: &lazybox_core::WorkspaceKey,
+        policies: lazybox_core::EpicPolicies,
+    ) {
+        m.handle_daemon_event(IpcEvent::EpicStatus {
+            snapshot: lazybox_ipc::EpicSnapshot {
+                key: "auth-refactor".into(),
+                name: "Auth refactor".into(),
+                members: vec![lazybox_ipc::EpicMember {
+                    key: ws_key.clone(),
+                    wave: 0,
+                    status: lazybox_ipc::EpicMemberStatus::Ready,
+                    blocked_by: vec![],
+                    external_blockers: vec![],
+                    blockers: vec![],
+                    blocked_reason: None,
+                }],
+                done: 0,
+                total: 1,
+                ready: 1,
+                blocked: 0,
+                asking: 0,
+                failing: 0,
+                blockers_needing_operator: 0,
+                cycle: false,
+                critical_path: vec![],
+                edges: vec![],
+                merge_order: vec![],
+                policies,
+                computed_at: 0,
+            },
+            delta: Vec::new(),
+        });
+    }
+
+    /// `E A` arms auto-dispatch — but only behind a confirm that names the
+    /// epic and the worker cap, because arming it is what authorizes lazybox
+    /// to start agents unattended (#1525).
+    #[test]
+    fn arming_auto_dispatch_confirms_before_sending() {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#3", true, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+        seed_epic(&mut m, &ws_key, lazybox_core::EpicPolicies::default());
+
+        let cmds = m.dispatch_action(&lazybox_tui_core::action::Action::ToggleEpicAutoDispatch);
+        assert!(
+            epic_policy_cmds(&cmds).is_empty(),
+            "arming must not send the latch move before the confirm"
+        );
+        assert_eq!(m.modal_stack.last(), Some(&Id::EpicLatchConfirm));
+
+        match epic_policy_cmds(&m.handle_confirmed(true)).as_slice() {
+            [(epic, policies)] => {
+                assert_eq!(epic, "auth-refactor");
+                assert!(policies.armed(lazybox_core::EpicLatch::AutoDispatch));
+                assert!(!policies.armed(lazybox_core::EpicLatch::AutoReview));
+            }
+            other => panic!("expected one SetEpicPolicies, got {other:?}"),
+        }
+    }
+
+    /// Declining the confirm leaves the epic manual, and *disarming* an
+    /// already-armed `AUTO` needs no confirm — only handing over control does.
+    #[test]
+    fn declining_leaves_auto_dispatch_off_and_disarming_is_immediate() {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#3", true, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+        seed_epic(&mut m, &ws_key, lazybox_core::EpicPolicies::default());
+
+        m.dispatch_action(&lazybox_tui_core::action::Action::ToggleEpicAutoDispatch);
+        assert!(
+            epic_policy_cmds(&m.handle_confirmed(false)).is_empty(),
+            "no → nothing sent"
+        );
+
+        // Armed already: the cycle's next step is Default ("off"), which
+        // takes effect without asking.
+        seed_epic(
+            &mut m,
+            &ws_key,
+            lazybox_core::EpicPolicies {
+                auto_dispatch: lazybox_core::PolicyArm::Arm,
+                ..Default::default()
+            },
+        );
+        let cmds = m.dispatch_action(&lazybox_tui_core::action::Action::ToggleEpicAutoDispatch);
+        assert!(m.modal_stack.is_empty(), "standing down never asks");
+        match epic_policy_cmds(&cmds).as_slice() {
+            [(_, policies)] => {
+                assert!(!policies.armed(lazybox_core::EpicLatch::AutoDispatch));
+            }
+            other => panic!("expected one SetEpicPolicies, got {other:?}"),
+        }
+    }
+
+    /// The other two latches arm straight away — they never start an agent
+    /// on their own authority the way `AUTO` does... `REVIEW` does spawn a
+    /// reviewer, but only on a PR you already opened, so it is a review of
+    /// your own work rather than new work being picked up.
+    #[test]
+    fn merge_in_order_arms_without_a_confirm() {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#3", true, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+        seed_epic(&mut m, &ws_key, lazybox_core::EpicPolicies::default());
+
+        let cmds = m.dispatch_action(&lazybox_tui_core::action::Action::ToggleEpicMergeInOrder);
+        assert!(m.modal_stack.is_empty());
+        match epic_policy_cmds(&cmds).as_slice() {
+            [(_, policies)] => {
+                assert!(policies.armed(lazybox_core::EpicLatch::MergeInOrder));
+            }
+            other => panic!("expected one SetEpicPolicies, got {other:?}"),
+        }
+    }
+
+    /// Off an epic the chord says so rather than silently doing nothing.
+    #[test]
+    fn toggling_a_latch_off_an_epic_flashes_a_hint() {
+        let mut m = build_model();
+        let ws = workspace("owner/repo#3", true, Duration::hours(1));
+        let ws_key = ws.key.clone();
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&SessionKey::from(&ws_key)));
+
+        let cmds = m.dispatch_action(&lazybox_tui_core::action::Action::ToggleEpicAutoDispatch);
+        assert!(epic_policy_cmds(&cmds).is_empty());
+        assert!(m.modal_stack.is_empty());
     }
 
     /// The issue browser (`g i`, #1436): pressing the chord in a repo
@@ -17853,6 +18009,7 @@ mod destructive_confirm_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         };
         Workspace::from_task(task, Utc::now())
@@ -19327,6 +19484,7 @@ mod focus_mode_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         };
         let mut ws = Workspace::from_task(task, Utc::now());
@@ -19687,6 +19845,7 @@ mod jump_to_workspace_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }
@@ -22000,6 +22159,7 @@ mod merge_latch_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         };
         Workspace::from_task(task, Utc::now())
@@ -23573,6 +23733,7 @@ mod pr_chat_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }
@@ -25570,6 +25731,7 @@ mod spawn_focus_steal_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         };
         lazybox_core::Workspace::from_task(task, Utc::now())
@@ -25767,6 +25929,7 @@ mod repo_labels_failure_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }
@@ -26319,6 +26482,7 @@ mod keybinding_audit_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         };
         let mut ws = Workspace::from_task(task, Utc::now());
@@ -27434,6 +27598,7 @@ mod optimistic_mutation_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }
@@ -27756,6 +27921,7 @@ mod remote_spawn_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         }
     }
@@ -29329,6 +29495,7 @@ mod pr_details_debounce_tests {
             state_label: None,
             blocked_by: vec![],
             merge_after: vec![],
+            contracts: vec![],
             blocked_on: None,
         };
         lazybox_core::Workspace::from_task(task, Utc::now())

@@ -211,6 +211,7 @@ fn task(
         state_label: None,
         blocked_by: vec![],
         merge_after: vec![],
+        contracts: vec![],
         blocked_on: None,
     }
 }

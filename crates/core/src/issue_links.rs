@@ -121,6 +121,26 @@ pub fn extract_merge_after(body: &str) -> Vec<IssueLink> {
     out.into_iter().collect()
 }
 
+/// Keywords that introduce a *contract* reference: "the interface I build
+/// against is produced by the referenced task." Same link grammar and matcher
+/// as [`BLOCKED_KEYWORDS`]; distinct from blocking because a contract is
+/// satisfied by the producer *publishing the interface* (a blackboard note),
+/// not by its task closing — a producer can hand over a contract long before
+/// its own PR lands (#1525).
+const CONTRACT_KEYWORDS: &[&str] = &["contract", "consumes contract", "interface from"];
+
+/// Every `Contract: owner/repo#N` reference in `body`, deduplicated,
+/// deterministic order. Same link grammar as [`extract`].
+pub fn extract_contracts(body: &str) -> Vec<IssueLink> {
+    let mut out = BTreeSet::new();
+    for token in tokenize_with(body, CONTRACT_KEYWORDS, 80) {
+        if let Some(link) = parse_link_after_keyword(&token) {
+            out.insert(link);
+        }
+    }
+    out.into_iter().collect()
+}
+
 /// Keywords that introduce a *declared* (free-text) blocker.
 const BLOCKED_ON_KEYWORDS: &[&str] = &["blocked on", "blocked-on", "blockedon"];
 
@@ -478,6 +498,58 @@ mod tests {
         // Regression: `extract` (closing links) must not pick up a
         // `Blocked by:` reference.
         assert!(extract("Blocked by: #9").is_empty());
+    }
+
+    #[test]
+    fn contract_extracts_same_and_cross_repo() {
+        assert_eq!(
+            extract_contracts("Contract: #4"),
+            vec![IssueLink::GitHub {
+                repo: None,
+                number: 4
+            }]
+        );
+        assert_eq!(
+            extract_contracts("consumes contract owner/repo#12"),
+            vec![IssueLink::GitHub {
+                repo: Some("owner/repo".into()),
+                number: 12
+            }]
+        );
+        assert_eq!(
+            extract_contracts("Interface from api/core#7"),
+            vec![IssueLink::GitHub {
+                repo: Some("api/core".into()),
+                number: 7
+            }]
+        );
+    }
+
+    /// A contract line is not a blocking edge and vice versa — the two
+    /// keyword sets are disjoint, so a body carrying both yields one of each.
+    #[test]
+    fn contract_and_blocked_by_do_not_bleed_into_each_other() {
+        let body = "Blocked by: #1\nContract: #2";
+        assert_eq!(
+            extract_blocked_by(body),
+            vec![IssueLink::GitHub {
+                repo: None,
+                number: 1
+            }]
+        );
+        assert_eq!(
+            extract_contracts(body),
+            vec![IssueLink::GitHub {
+                repo: None,
+                number: 2
+            }]
+        );
+    }
+
+    #[test]
+    fn contract_without_a_link_yields_nothing() {
+        assert!(extract_contracts("the contract is still being designed").is_empty());
+        assert!(extract_contracts("").is_empty());
     }
 
     #[test]

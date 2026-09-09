@@ -154,6 +154,7 @@ fn seed_one_session(store: &dyn Store, worktree: &Path) -> anyhow::Result<()> {
         state_label: None,
         blocked_by: vec![],
         merge_after: vec![],
+        contracts: vec![],
         blocked_on: None,
     };
     let mut workspace = Workspace::from_task(task, Utc::now());

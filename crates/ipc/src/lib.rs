@@ -485,6 +485,12 @@ pub enum EdgeKind {
     /// The dependent's *merge* is gated on the predecessor landing
     /// (`Merge after:`, or implied by a `Blocks` edge).
     MergeAfter,
+    /// The dependent is built against an *interface* the predecessor
+    /// publishes (`Contract:`). Satisfied by a blackboard note tagged
+    /// `contract` + `epic:<key>` from the producer — not by the producer's
+    /// task closing — so it gates *starting* without gating on a merge
+    /// (#1525). Appended last (bincode is ordinal-sensitive).
+    Contract,
 }
 
 /// One directed edge in an epic's dependency graph. `from` depends on `to`:
@@ -542,6 +548,11 @@ pub enum EpicMemberStatus {
     Done,
     /// Agent exited non-zero and no PR.
     Failed,
+    /// The automatic Reviewer stage (#1525) posted findings tagged
+    /// `blocking` against this member's PR. The PR is otherwise live; the
+    /// merge is held until a `clean` review lands. Appended last (bincode is
+    /// ordinal-sensitive).
+    ReviewBlocked,
 }
 
 /// One member of an epic, in wave order.
@@ -558,6 +569,12 @@ pub struct EpicMember {
     /// The *why* behind [`EpicMemberStatus::Blocked`] (and any declared
     /// blockers even when another status wins).
     pub blockers: Vec<Blocker>,
+    /// A one-word machine-readable reason for a non-graph block, when one
+    /// applies: `contract` for an unsatisfied [`EdgeKind::Contract`] edge
+    /// (#1525). `None` for the ordinary dependency/external cases, whose
+    /// detail is already in `blocked_by` / `external_blockers`.
+    #[serde(default)]
+    pub blocked_reason: Option<String>,
 }
 
 /// A full derived snapshot of an epic. Everything the "give me status"
@@ -589,6 +606,10 @@ pub struct EpicSnapshot {
     /// PR. A held entry carries the predecessors it waits on.
     #[serde(default)]
     pub merge_order: Vec<MergeOrderEntry>,
+    /// The epic's autonomy-dial latches (#1525), mirrored from the record so
+    /// a client can render the pills and toggle them without a separate read.
+    #[serde(default)]
+    pub policies: lazybox_core::EpicPolicies,
     /// Unix ms the snapshot was computed.
     pub computed_at: i64,
 }
@@ -633,6 +654,13 @@ pub enum EpicDelta {
         key: lazybox_core::WorkspaceKey,
     },
     Completed,
+    /// The automatic Reviewer stage (#1525) reported on a member's PR.
+    /// `blocking` findings hold the merge until a clean review lands.
+    /// Appended last (bincode is ordinal-sensitive).
+    Reviewed {
+        key: lazybox_core::WorkspaceKey,
+        blocking: bool,
+    },
 }
 
 /// A normalized lifecycle hook fired by an agent, decoupled from the
@@ -2040,6 +2068,14 @@ pub enum Command {
         initial_prompt: Option<String>,
         #[serde(default)]
         on_main: bool,
+    },
+    /// Set an epic's autonomy-dial latches (#1525). The daemon persists them
+    /// on the `epic:<key>` record and recomputes, so an armed latch takes
+    /// effect on the next status change without waiting for a poll.
+    /// Appended last (bincode is ordinal-sensitive).
+    SetEpicPolicies {
+        epic: String,
+        policies: lazybox_core::EpicPolicies,
     },
 }
 
@@ -3507,6 +3543,10 @@ pub enum AutonomousTrigger {
     AutoFix,
     /// Startup session recovery re-provisioning a missing worktree.
     Restore,
+    /// An epic's `AUTO` latch dispatching a Worker onto a ready member, or
+    /// its `REVIEW` latch dispatching a Reviewer onto a green PR (#1525).
+    /// Appended last (bincode is ordinal-sensitive).
+    EpicAuto,
 }
 
 impl AutonomousTrigger {
@@ -3518,6 +3558,7 @@ impl AutonomousTrigger {
             Self::Label => "label",
             Self::AutoFix => "auto-fix",
             Self::Restore => "restored",
+            Self::EpicAuto => "AUTO",
         }
     }
 }

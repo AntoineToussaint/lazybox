@@ -29,15 +29,26 @@ pub async fn measure(
     let store = config.store.clone();
     let cost_lock = config.session_cost_lock.clone();
     let key = workspace.key.as_str().to_string();
-    let (cost_micros, ci_repairs) = tokio::task::spawn_blocking(move || {
+    let measured = tokio::task::spawn_blocking(move || {
         let _guard = cost_lock.lock();
         (
             client_kv::unreported_session_cost(&*store, &key),
-            autofix::attempts_so_far(&*store, &key),
+            autofix::ci_attempts_so_far(&*store, &key),
         )
     })
-    .await
-    .unwrap_or_default();
+    .await;
+    // A metered PR that reports nothing looks identical to an unmetered one,
+    // so say why rather than letting the figures silently read as zero.
+    let (cost_micros, ci_repairs) = match measured {
+        Ok(measured) => measured,
+        Err(e) => {
+            tracing::warn!(
+                workspace = %workspace.key,
+                "measuring the PR's cost failed ({e}) — merging with no trailer",
+            );
+            (0, 0)
+        }
+    };
 
     PrTrailers {
         cost: (cost_micros > 0).then_some(CostTrailer {
@@ -57,16 +68,24 @@ pub async fn measure(
     }
 }
 
-/// Close this workspace's cost slice: everything accrued so far belongs to
-/// the PR that just merged, so a later PR on the same workspace bills only
-/// what it spends itself.
-pub async fn mark_reported(config: &ServerConfig, key: &WorkspaceKey) {
+/// Close this workspace's cost slice by exactly the figure `trailers`
+/// carried, so a later PR on the same workspace bills only what it spends
+/// itself.
+///
+/// Takes the reported figure rather than re-reading the total: an agent goes
+/// on spending while the merge mutation is in flight, and stamping the
+/// then-current total would bury that spend in the watermark — absent from
+/// this PR's trailer and subtracted from the next one's.
+pub async fn mark_reported(config: &ServerConfig, key: &WorkspaceKey, trailers: &PrTrailers) {
+    let Some(reported) = trailers.cost.as_ref().and_then(|c| c.micros) else {
+        return;
+    };
     let store = config.store.clone();
     let cost_lock = config.session_cost_lock.clone();
     let key = key.as_str().to_string();
     let result = tokio::task::spawn_blocking(move || {
         let _guard = cost_lock.lock();
-        client_kv::mark_session_cost_reported(&*store, &key);
+        client_kv::mark_session_cost_reported(&*store, &key, reported);
     })
     .await;
     if let Err(e) = result {
@@ -249,6 +268,27 @@ mod tests {
         );
     }
 
+    /// The trailer renders this figure as "CI repairs", so a merge-conflict
+    /// rebase must not be counted into it — publishing a conflict fix as a CI
+    /// repair misstates what happened, permanently.
+    #[tokio::test]
+    async fn conflict_repairs_are_not_counted_as_ci_repairs() {
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        store
+            .set_kv(
+                "autofix:github:o/r#42:conflict",
+                r#"{"attempts":3,"window_start":null,"last_attempt":null}"#,
+            )
+            .unwrap();
+        let config = config_with(store);
+
+        let trailers = measure(&config, &workspace(), at(600)).await;
+        assert_eq!(
+            trailers.effort.ci_repairs, None,
+            "three conflict rebases are not three CI repairs",
+        );
+    }
+
     /// An unmetered PR must produce NO cost line — never `$0.00`, which
     /// would read as "this was free" instead of "this wasn't metered".
     #[tokio::test]
@@ -287,12 +327,12 @@ mod tests {
 
         let first = measure(&config, &ws, at(600)).await;
         assert_eq!(
-            first.cost.and_then(|c| c.micros),
+            first.cost.as_ref().and_then(|c| c.micros),
             Some(1_000_000),
             "the first PR bills the whole total, issue phase included",
         );
 
-        mark_reported(&config, &ws.key).await;
+        mark_reported(&config, &ws.key, &first).await;
         // The workspace keeps working and spends another $0.25.
         store.set_kv("meter-cost:github:o/r#42", "1250000").unwrap();
 
@@ -301,6 +341,54 @@ mod tests {
             second.cost.and_then(|c| c.micros),
             Some(250_000),
             "the reused workspace bills only what it spent since the merge",
+        );
+    }
+
+    /// The agent does not stop while the merge mutation is in flight. Spend
+    /// priced in that window was never in any trailer, so the watermark must
+    /// not absorb it — stamping the then-current total instead of the
+    /// reported figure hid it from this PR AND the next one.
+    #[tokio::test]
+    async fn spend_arriving_during_the_merge_is_billed_to_the_next_pr() {
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        store.set_kv("meter-cost:github:o/r#42", "1000000").unwrap();
+        let config = config_with(store.clone());
+        let ws = workspace();
+
+        let reported = measure(&config, &ws, at(600)).await;
+        assert_eq!(
+            reported.cost.as_ref().and_then(|c| c.micros),
+            Some(1_000_000)
+        );
+
+        // The agent's last turn prices while the mutation is in flight.
+        store.set_kv("meter-cost:github:o/r#42", "1400000").unwrap();
+        mark_reported(&config, &ws.key, &reported).await;
+
+        let next = measure(&config, &ws, at(1_200)).await;
+        assert_eq!(
+            next.cost.and_then(|c| c.micros),
+            Some(400_000),
+            "the $0.40 spent during the merge must survive to the next PR, \
+             not vanish into the watermark",
+        );
+    }
+
+    /// A merge that publishes no cost figure must not move the watermark:
+    /// doing so would silently consume a slice nothing recorded.
+    #[tokio::test]
+    async fn an_unpublished_cost_leaves_the_watermark_alone() {
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        store.set_kv("meter-cost:github:o/r#42", "900000").unwrap();
+        let config = config_with(store.clone());
+        let ws = workspace();
+
+        mark_reported(&config, &ws.key, &PrTrailers::default()).await;
+
+        assert_eq!(
+            client_kv::unreported_session_cost(&*store, ws.key.as_str()),
+            900_000,
+            "nothing was reported, so nothing is marked reported",
         );
     }
 

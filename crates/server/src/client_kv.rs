@@ -248,22 +248,36 @@ pub fn unreported_session_cost(store: &dyn lazybox_store::Store, session_key: &s
     read(SESSION_COST_KV_PREFIX).saturating_sub(read(SESSION_COST_MARK_KV_PREFIX))
 }
 
-/// Mark everything accrued to `session_key` so far as reported, so a later
-/// PR on the same workspace bills only what it spends itself. Best-effort:
-/// a failed write means the next PR over-reports, never that history is lost.
+/// Advance `session_key`'s watermark by exactly `reported_micros` — the
+/// figure that was actually measured and published — so a later PR on the
+/// same workspace bills only what it spends itself.
+///
+/// Deliberately additive rather than "stamp the current total": an agent
+/// keeps spending while the merge mutation is in flight, and re-reading the
+/// total here would fold that in-flight spend into the watermark without it
+/// ever appearing in a trailer, hiding it from this PR *and* the next one.
+/// Advancing by the reported figure leaves the difference where it belongs —
+/// unreported, and billed to whatever PR comes next.
 ///
 /// Production callers MUST hold `ServerConfig::session_cost_lock`, for the
 /// same reason [`move_session_cost`] must.
-pub fn mark_session_cost_reported(store: &dyn lazybox_store::Store, session_key: &str) {
-    let total = store
-        .get_kv(&format!("{SESSION_COST_KV_PREFIX}{session_key}"))
+pub fn mark_session_cost_reported(
+    store: &dyn lazybox_store::Store,
+    session_key: &str,
+    reported_micros: u64,
+) {
+    if reported_micros == 0 {
+        return;
+    }
+    let mark_key = format!("{SESSION_COST_MARK_KV_PREFIX}{session_key}");
+    let current = store
+        .get_kv(&mark_key)
         .ok()
         .flatten()
-        .unwrap_or_else(|| "0".to_string());
-    if let Err(e) = store.set_kv(
-        &format!("{SESSION_COST_MARK_KV_PREFIX}{session_key}"),
-        &total,
-    ) {
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let advanced = current.saturating_add(reported_micros);
+    if let Err(e) = store.set_kv(&mark_key, &advanced.to_string()) {
         tracing::warn!("mark session cost reported `{session_key}` failed: {e}");
     }
 }

@@ -110,7 +110,7 @@ impl ProviderHandle {
         &self,
         ws: &lazybox_core::Workspace,
         options: &lazybox_core::MergeOptions<'_>,
-    ) -> Result<(), lazybox_core::ProviderError> {
+    ) -> Result<lazybox_core::TrailerOutcome, lazybox_core::ProviderError> {
         match self {
             Self::Github(c) => lazybox_core::TaskProvider::merge(c, ws, options).await,
             Self::Linear(c) => lazybox_core::TaskProvider::merge(c, ws, options).await,
@@ -353,21 +353,21 @@ const MUTATION_RETRY_FALLBACK_SECS: u64 = 60;
 /// Every non-retryable failure (a genuine GitHub rejection: conflict,
 /// blocked checks, permission) returns immediately — those are not rate
 /// limits and must surface at once.
-pub(super) async fn run_mutation_with_retry<F, Fut>(
+pub(super) async fn run_mutation_with_retry<T, F, Fut>(
     bus: &tokio::sync::broadcast::Sender<Event>,
     op: &str,
     mut attempt: F,
-) -> Result<(), lazybox_core::ProviderError>
+) -> Result<T, lazybox_core::ProviderError>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<(), lazybox_core::ProviderError>>,
+    Fut: std::future::Future<Output = Result<T, lazybox_core::ProviderError>>,
 {
     let mut attempt_num = 0u32;
     let mut waited = 0u64;
     loop {
         attempt_num += 1;
         let err = match attempt().await {
-            Ok(()) => return Ok(()),
+            Ok(value) => return Ok(value),
             Err(e) => e,
         };
         let base = err
@@ -840,20 +840,21 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey, force
             return;
         }
     };
+    let trailers = crate::pr_trailers::measure(config, &merge_ws, chrono::Utc::now()).await;
     let merge_options = lazybox_core::MergeOptions {
         expected_head_oid: expected_head.as_deref(),
-        trailers: Some(crate::pr_trailers::measure(config, &merge_ws, chrono::Utc::now()).await),
+        trailers: Some(trailers.clone()),
         trailer_policy: lazybox_config::Config::load()
             .unwrap_or_default()
             .providers
             .github
             .pr_trailers,
     };
-    if let Err(e) = run_mutation_with_retry(&config.bus, "merge", || {
+    let merge_result = run_mutation_with_retry(&config.bus, "merge", || {
         provider.merge(&merge_ws, &merge_options)
     })
-    .await
-    {
+    .await;
+    if let Err(e) = merge_result {
         tracing::warn!("merge {workspace_key}: {e:?}");
         // A user-initiated merge that GitHub rejected is not a
         // transient blip — surface it as a distinct, persistent error
@@ -888,7 +889,13 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey, force
         return;
     }
     tracing::info!("merged PR for workspace {workspace_key}");
-    crate::pr_trailers::mark_reported(config, &workspace_key).await;
+    crate::pr_trailers::mark_reported(config, &workspace_key, &trailers).await;
+    if let Ok(lazybox_core::TrailerOutcome::Dropped { reason }) = merge_result {
+        let _ = config.bus.send(Event::provider_error_retryable(
+            "merge",
+            format!("merged, but the cost record was not written: {reason}"),
+        ));
+    }
 
     // Local Task still reads `Open` — the GitHub mutation succeeded
     // but our stored copy won't reflect MERGED until the next poll.
@@ -5976,7 +5983,7 @@ mod mutation_retry_tests {
     async fn rate_limited_mutation_retries_then_succeeds() {
         let (bus, mut rx) = tokio::sync::broadcast::channel(16);
         let calls = AtomicU32::new(0);
-        let result = run_mutation_with_retry(&bus, "merge", || {
+        let result: Result<(), _> = run_mutation_with_retry(&bus, "merge", || {
             let n = calls.fetch_add(1, Ordering::SeqCst);
             async move {
                 if n == 0 {
@@ -6040,7 +6047,7 @@ mod mutation_retry_tests {
     async fn long_reset_window_surfaces_immediately_without_spinning() {
         let (bus, mut rx) = tokio::sync::broadcast::channel(16);
         let calls = AtomicU32::new(0);
-        let result = run_mutation_with_retry(&bus, "merge", || {
+        let result: Result<(), _> = run_mutation_with_retry(&bus, "merge", || {
             calls.fetch_add(1, Ordering::SeqCst);
             async move {
                 Err(lazybox_core::ProviderError::retryable_after(
@@ -6085,7 +6092,7 @@ mod mutation_retry_tests {
     async fn non_retryable_mutation_fails_immediately() {
         let (bus, mut rx) = tokio::sync::broadcast::channel(16);
         let calls = AtomicU32::new(0);
-        let result = run_mutation_with_retry(&bus, "merge", || {
+        let result: Result<(), _> = run_mutation_with_retry(&bus, "merge", || {
             calls.fetch_add(1, Ordering::SeqCst);
             async move {
                 Err(lazybox_core::ProviderError::permanent(

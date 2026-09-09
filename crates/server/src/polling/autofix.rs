@@ -99,16 +99,17 @@ fn persist(store: &dyn Store, key: &str, rec: &AttemptRecord) {
     }
 }
 
-/// How many auto-fix repairs this workspace has taken, across both kinds.
+/// How many auto-fix CI repairs this workspace has taken.
 ///
-/// Reads the same records the budget guard writes, so it inherits their
-/// rolling window: a PR repaired outside the current window reports the
-/// repairs it has had *recently*, not over its whole life.
-pub fn attempts_so_far(store: &dyn Store, session_key: &str) -> u64 {
-    [AutoFixKind::CiFailure, AutoFixKind::MergeConflict]
-        .into_iter()
-        .map(|kind| u64::from(load(store, &record_key(session_key, kind)).attempts))
-        .sum()
+/// Deliberately `CiFailure` only: the trailer renders this figure as "CI
+/// repairs", and a merge-conflict rebase is not one — folding both in
+/// publishes a number that misstates what happened, permanently.
+///
+/// Reads the same record the budget guard writes, so it inherits its rolling
+/// window: a PR repaired outside the current window reports the repairs it
+/// has had *recently*, not over its whole life.
+pub fn ci_attempts_so_far(store: &dyn Store, session_key: &str) -> u64 {
+    u64::from(load(store, &record_key(session_key, AutoFixKind::CiFailure)).attempts)
 }
 
 /// Consult the cooldown + max-attempts guard for `(session_key, kind)`.

@@ -926,6 +926,33 @@ pub fn pr_merge_method_body(pull_request_node_id: &str) -> serde_json::Value {
     })
 }
 
+/// [`PR_MERGE_METHOD_QUERY`] without `isPrivate` — the selection set as it
+/// stood before repository visibility was needed.
+///
+/// Resolving the merge method is on the critical path: a host that rejects
+/// the query cannot merge at all. GitHub Enterprise Server is known to
+/// reject otherwise-valid PR selection sets (see the GHES 3.18 note on the
+/// hot batch query), so the visibility field must never be able to take the
+/// merge down with it — a failure here falls back to this shape and merges
+/// with visibility unknown.
+const PR_MERGE_METHOD_ONLY_QUERY: &str = r#"
+query($id: ID!) {
+  node(id: $id) {
+    ... on PullRequest {
+      repository { viewerDefaultMergeMethod }
+    }
+  }
+  rateLimit { cost limit remaining resetAt used }
+}
+"#;
+
+pub fn pr_merge_method_only_body(pull_request_node_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": PR_MERGE_METHOD_ONLY_QUERY,
+        "variables": { "id": pull_request_node_id },
+    })
+}
+
 #[derive(Debug, Deserialize)]
 pub struct GqlMergeMethodResponse {
     pub data: Option<GqlMergeMethodData>,

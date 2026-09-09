@@ -449,6 +449,34 @@ impl<'a> MergeOptions<'a> {
     }
 }
 
+/// What became of the trailers a merge was asked to record.
+///
+/// A merge that lands while silently dropping the cost record reproduces the
+/// exact failure the trailers exist to fix — the number was measured and
+/// never reached GitHub. The provider does the writing, but only the server
+/// can tell the user, so the verdict travels back rather than ending in a log
+/// line.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum TrailerOutcome {
+    /// Nothing was measurable, or the repository's policy withheld it.
+    #[default]
+    Nothing,
+    /// Written into the merge commit body.
+    InCommit,
+    /// Recorded out of band, because this repo's merge method writes no
+    /// commit of its own to carry them.
+    InComment,
+    /// Measured and permitted, but lost. `reason` is user-facing.
+    Dropped { reason: String },
+}
+
+impl TrailerOutcome {
+    /// Did the record actually land somewhere durable?
+    pub fn is_recorded(&self) -> bool {
+        matches!(self, Self::InCommit | Self::InComment)
+    }
+}
+
 /// A source of tasks (PRs, issues, tickets) — and the place where
 /// the user's mutations (merge, request reviewers, …) land.
 ///
@@ -488,7 +516,7 @@ pub trait TaskProvider: Send + Sync {
         &self,
         workspace: &Workspace,
         options: &MergeOptions<'_>,
-    ) -> Result<(), ProviderError> {
+    ) -> Result<TrailerOutcome, ProviderError> {
         let _ = (workspace, options);
         Err(ProviderError::unsupported(self.name(), "merge"))
     }

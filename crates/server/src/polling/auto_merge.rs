@@ -371,7 +371,7 @@ pub trait MergeBackend {
         &self,
         ws: &Workspace,
         options: &lazybox_core::MergeOptions<'_>,
-    ) -> Result<(), lazybox_core::ProviderError>;
+    ) -> Result<lazybox_core::TrailerOutcome, lazybox_core::ProviderError>;
 
     /// When GitHub has the token on a rate-limit pause (a secondary
     /// cooldown or an exhausted primary window), the instant it lifts;
@@ -406,7 +406,7 @@ impl MergeBackend for lazybox_gh::GhClient {
         &self,
         ws: &Workspace,
         options: &lazybox_core::MergeOptions<'_>,
-    ) -> Result<(), lazybox_core::ProviderError> {
+    ) -> Result<lazybox_core::TrailerOutcome, lazybox_core::ProviderError> {
         lazybox_core::TaskProvider::merge(self, ws, options).await
     }
 
@@ -711,9 +711,10 @@ pub async fn run_attempt<B: MergeBackend>(
     // This flow has no human in it at all, so it is the one that most needs
     // the record: without the trailer, an auto-merged PR's cost exists
     // nowhere anyone will look.
+    let trailers = crate::pr_trailers::measure(config, &probe, chrono::Utc::now()).await;
     let merge_options = lazybox_core::MergeOptions {
         expected_head_oid: head.as_deref(),
-        trailers: Some(crate::pr_trailers::measure(config, &probe, chrono::Utc::now()).await),
+        trailers: Some(trailers.clone()),
         trailer_policy: lazybox_config::Config::load()
             .unwrap_or_default()
             .providers
@@ -721,9 +722,19 @@ pub async fn run_attempt<B: MergeBackend>(
             .pr_trailers,
     };
     match backend.merge(&probe, &merge_options).await {
-        Ok(()) => {
+        Ok(outcome) => {
             tracing::info!(workspace = %key, "auto-merged PR (merge-on-green)");
-            crate::pr_trailers::mark_reported(config, key).await;
+            crate::pr_trailers::mark_reported(config, key, &trailers).await;
+            // Nobody is watching this flow, so a lost cost record has to
+            // announce itself or it is lost silently and for good.
+            if let lazybox_core::TrailerOutcome::Dropped { reason } = outcome {
+                let _ = config.bus.send(Event::provider_error_retryable(
+                    "auto-merge",
+                    format!(
+                        "auto-merged {pr_label}, but the cost record was not written: {reason}"
+                    ),
+                ));
+            }
             settle(Some(Latch::Done(head)));
             // Mirror `handle_merge_pr`: the local Task still reads
             // `Open` — broadcast `PrMerged` so clients flash the notice
@@ -2330,7 +2341,7 @@ mod tests {
     /// Recording fake: scripted fetch result + merge result.
     struct FakeBackend {
         fetch: Result<Option<(Task, Option<String>)>, String>,
-        merge_result: Result<(), lazybox_core::ProviderError>,
+        merge_result: Result<lazybox_core::TrailerOutcome, lazybox_core::ProviderError>,
         merges: parking_lot::Mutex<Vec<Option<String>>>,
         trailers: parking_lot::Mutex<Vec<Option<lazybox_core::PrTrailers>>>,
         paused_until: Option<chrono::DateTime<Utc>>,
@@ -2341,7 +2352,7 @@ mod tests {
         fn merging(fresh: Task, head: &str) -> Self {
             Self {
                 fetch: Ok(Some((fresh, Some(head.into())))),
-                merge_result: Ok(()),
+                merge_result: Ok(lazybox_core::TrailerOutcome::InCommit),
                 merges: parking_lot::Mutex::new(Vec::new()),
                 trailers: parking_lot::Mutex::new(Vec::new()),
                 paused_until: None,
@@ -2382,7 +2393,7 @@ mod tests {
             &self,
             _ws: &Workspace,
             options: &lazybox_core::MergeOptions<'_>,
-        ) -> Result<(), lazybox_core::ProviderError> {
+        ) -> Result<lazybox_core::TrailerOutcome, lazybox_core::ProviderError> {
             self.merges
                 .lock()
                 .push(options.expected_head_oid.map(|s| s.to_string()));
@@ -2669,7 +2680,7 @@ mod tests {
         fresh.review = ReviewStatus::ChangesRequested;
         let backend = FakeBackend {
             fetch: Ok(Some((fresh, Some("abc123".into())))),
-            merge_result: Ok(()),
+            merge_result: Ok(lazybox_core::TrailerOutcome::InCommit),
             merges: parking_lot::Mutex::new(Vec::new()),
             trailers: parking_lot::Mutex::new(Vec::new()),
             paused_until: None,
@@ -2960,7 +2971,7 @@ mod tests {
         let config = config_with(&ws);
         let backend = FakeBackend {
             fetch: Err("rate limited".into()),
-            merge_result: Ok(()),
+            merge_result: Ok(lazybox_core::TrailerOutcome::InCommit),
             merges: parking_lot::Mutex::new(Vec::new()),
             trailers: parking_lot::Mutex::new(Vec::new()),
             paused_until: None,

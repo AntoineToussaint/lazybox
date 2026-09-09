@@ -464,9 +464,17 @@ as off and the toggle is a two-state `Arm ⇄ Default` cycle
 Every decision is a pure function over already-loaded data — `plan_dispatch`,
 `plan_reviews`, `plan_merge_arming` in `server/src/epics.rs` — and
 `run_latches` is the thin async shell that gathers the inputs, calls them, and
-performs the effects after the snapshot has been broadcast. Latches act on
-*transitions* (the members named in the `EpicDelta`s), never the standing
-state, so a quiet recompute is a no-op. Dispatch runs through the same
+performs the effects after the snapshot has been broadcast. Latches read the
+snapshot's **standing state**, deliberately *not* the accompanying
+`EpicDelta`s: gating on the delta reads as the safer "act only on a
+transition" rule and is in fact a dead latch, because `diff` yields no member
+deltas either for a first-sight snapshot (every epic after a daemon restart)
+or for a policy-only change (arming moves no member's status) — the two
+moments a latch most needs to act. Re-entry is safe because each latch carries
+its own idempotency (the dispatch marker, the review row, the already-armed
+check), and `recompute_all` updates its `last` snapshot under the `EpicMemory`
+lock before calling in, so one transition reaches the latches once. Dispatch
+runs through the same
 `ProviderAction::AutoSpawnAgent` path the `@lazybox` / label spawns use — one
 `epic_role` field carries the role in-band and tags the run
 `AutonomousTrigger::EpicAuto` — so the SpawnCoordinator collapse, the
@@ -486,7 +494,15 @@ a latch down never asks.
 The **Reviewer stage** keys off a persisted `epic-review:<workspace>` row
 rather than a PR head sha (which `Task` does not carry): the row opens when the
 PR turns green, and is dropped the moment the member stops being green — which
-is what makes a re-green after fixes review exactly once more. The Reviewer's
+is what makes a re-green after fixes review exactly once more. The row also
+records the epic that opened the run, and a verdict is accepted only if it
+carries that epic's tag — otherwise the `epic:<key>` tag would be decorative
+and any live epic's tag could flip a hold a different epic raised. Because
+`review_blocks_merge` is keyed on the workspace alone, `recompute_all` prunes
+every row whose workspace no longer belongs to a live epic: without that a
+member unassigned, removed, or archived out of its epic would strand a
+`blocking: true` row and hold that PR's merge forever, citing an epic that no
+longer exists. The Reviewer's
 brief instructs it to end with `post_note(tags=["review", "epic:<key>",
 "blocking"|"clean"])`; `epics::on_note_posted`, hooked into `post_note` itself,
 records the verdict, so the latch reacts at the write instead of polling the
@@ -504,6 +520,12 @@ that merged without ever publishing still gates. An unsatisfied contract makes
 the consumer `Blocked` with `blocked_reason: Some("contract")`, no
 `blocked_by` and no `external_blockers`; the satisfied set is read once per
 recompute into `LatchInputs` so `resolve` stays a pure function of plain data.
+That read is a **single** blackboard scan bucketed by epic tag — scanning per
+epic would re-parse every note in the store once per record, and notes are
+capped per scope while scopes are not (one per session), so a fleet-sized
+blackboard would turn an N-epic recompute into N full scans on the 300 ms
+debounce path. The buckets are keyed by epic because a contract published for
+one epic says nothing about another epic's interface.
 The consumer's Worker preamble quotes the newest note per producer inside an
 `<untrusted-content source="agent-authored contract">` fence — a specification
 to satisfy, never instructions to follow.
@@ -514,9 +536,11 @@ rows, each naming the epic it governs) when the cursor sits inside one. Armed
 pills append to the epic readouts' frame titles (`Auth refactor · AUTO ORDER`)
 — the sidebar epic tier is still deferred, so those are the epic header rows
 this build has. Three desktop notifications fire, each debounced on a state
-change: ready work with `AUTO` off and an agent idle (latched per epic, since
-that one reads a standing state), an epic completing, and a review finding
-blocking findings.
+change: ready work with `AUTO` off and nothing currently Working (latched per
+epic, since that one reads a standing state — and keyed on the *absence* of a
+running agent rather than the presence of a parked one, so it still fires on a
+fresh install where no agent has ever reported a state), an epic completing,
+and a review finding blocking findings.
 
 Wire additions: `EpicPolicies` on the record and mirrored onto `EpicSnapshot`,
 `Command::SetEpicPolicies`, `EpicMemberStatus::ReviewBlocked`,

@@ -6848,3 +6848,192 @@ mod ticket_hierarchy_tests {
         );
     }
 }
+
+/// Epic-level desktop notifications (#1525): the three moments the fleet needs
+/// the operator. Queued as pure data by the inner sidebar so a `cargo test`
+/// run never fires a real banner.
+mod epic_notification_tests {
+    use super::super::{NotificationKind, PendingNotification, Sidebar};
+    use crate::PaneId;
+    use lazybox_core::SessionKey;
+    use lazybox_ipc::{AgentState, Event, TerminalId};
+
+    fn epic_snapshot(
+        ready: u32,
+        policies: lazybox_core::EpicPolicies,
+        status: lazybox_ipc::EpicMemberStatus,
+    ) -> lazybox_ipc::EpicSnapshot {
+        lazybox_ipc::EpicSnapshot {
+            key: "auth-refactor".into(),
+            name: "Auth refactor".into(),
+            members: vec![lazybox_ipc::EpicMember {
+                key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+                wave: 0,
+                status,
+                blocked_by: vec![],
+                external_blockers: vec![],
+                blockers: vec![],
+                blocked_reason: None,
+            }],
+            done: 0,
+            total: 1,
+            ready,
+            blocked: 0,
+            asking: 0,
+            failing: 0,
+            blockers_needing_operator: 0,
+            cycle: false,
+            critical_path: vec![],
+            edges: vec![],
+            merge_order: vec![],
+            policies,
+            computed_at: 0,
+        }
+    }
+
+    fn armed_auto() -> lazybox_core::EpicPolicies {
+        lazybox_core::EpicPolicies {
+            auto_dispatch: lazybox_core::PolicyArm::Arm,
+            ..Default::default()
+        }
+    }
+
+    fn feed(
+        sidebar: &mut Sidebar,
+        snapshot: lazybox_ipc::EpicSnapshot,
+        delta: Vec<lazybox_ipc::EpicDelta>,
+    ) -> Vec<PendingNotification> {
+        sidebar.on_event(&Event::EpicStatus { snapshot, delta });
+        sidebar.drain_pending_notifications()
+    }
+
+    /// Ready work with `AUTO` off and nothing running is the nudge's whole
+    /// point — and it must fire on a fresh install, where no agent has ever
+    /// reported a state. Keying off "some agent is parked Idle" instead left
+    /// the map empty and the banner silent in exactly that case.
+    #[test]
+    fn ready_work_with_auto_off_notifies_even_before_any_agent_has_run() {
+        let mut sidebar = Sidebar::new(PaneId::new(1));
+        let fired = feed(
+            &mut sidebar,
+            epic_snapshot(2, Default::default(), lazybox_ipc::EpicMemberStatus::Ready),
+            Vec::new(),
+        );
+        assert_eq!(fired.len(), 1, "{fired:?}");
+        assert!(fired[0].title.contains("Auth refactor"));
+        assert!(fired[0].body.contains("E A"), "names the arming chord");
+    }
+
+    /// Latched per epic: the queue is standing state, so a second recompute of
+    /// the same state must stay quiet, and draining only when the queue clears.
+    #[test]
+    fn the_ready_nudge_fires_once_per_standing_queue() {
+        let mut sidebar = Sidebar::new(PaneId::new(1));
+        let snap = epic_snapshot(2, Default::default(), lazybox_ipc::EpicMemberStatus::Ready);
+        assert_eq!(feed(&mut sidebar, snap.clone(), Vec::new()).len(), 1);
+        assert!(
+            feed(&mut sidebar, snap.clone(), Vec::new()).is_empty(),
+            "the same standing queue must not re-notify"
+        );
+
+        // Queue drains → latch clears → a later queue notifies again.
+        let drained = epic_snapshot(
+            0,
+            Default::default(),
+            lazybox_ipc::EpicMemberStatus::InProgress,
+        );
+        assert!(feed(&mut sidebar, drained, Vec::new()).is_empty());
+        assert_eq!(feed(&mut sidebar, snap, Vec::new()).len(), 1);
+    }
+
+    /// An armed epic dispatches for you, so there is nothing to nudge about.
+    #[test]
+    fn an_armed_epic_does_not_nudge() {
+        let mut sidebar = Sidebar::new(PaneId::new(1));
+        assert!(
+            feed(
+                &mut sidebar,
+                epic_snapshot(2, armed_auto(), lazybox_ipc::EpicMemberStatus::Ready),
+                Vec::new()
+            )
+            .is_empty()
+        );
+    }
+
+    /// A working agent means capacity is already spoken for.
+    #[test]
+    fn a_working_agent_suppresses_the_ready_nudge() {
+        let mut sidebar = Sidebar::new(PaneId::new(1));
+        sidebar.on_event(&Event::AgentState {
+            terminal_id: TerminalId(1),
+            session_key: SessionKey::from("github:o/r#9"),
+            state: AgentState::Working,
+        });
+        sidebar.drain_pending_notifications();
+        assert!(
+            feed(
+                &mut sidebar,
+                epic_snapshot(2, Default::default(), lazybox_ipc::EpicMemberStatus::Ready),
+                Vec::new()
+            )
+            .is_empty()
+        );
+    }
+
+    /// The two delta-driven banners. Both ride a transition, so they
+    /// self-debounce; each must name the epic and land on a real workspace.
+    #[test]
+    fn completion_and_blocking_review_each_raise_one_banner() {
+        let mut sidebar = Sidebar::new(PaneId::new(1));
+        let done = feed(
+            &mut sidebar,
+            epic_snapshot(0, Default::default(), lazybox_ipc::EpicMemberStatus::Done),
+            vec![lazybox_ipc::EpicDelta::Completed],
+        );
+        assert_eq!(done.len(), 1, "{done:?}");
+        assert!(done[0].title.contains("Auth refactor"));
+        assert_eq!(done[0].kind, NotificationKind::Epic);
+
+        let mut sidebar = Sidebar::new(PaneId::new(1));
+        let blocked = feed(
+            &mut sidebar,
+            epic_snapshot(
+                0,
+                Default::default(),
+                lazybox_ipc::EpicMemberStatus::ReviewBlocked,
+            ),
+            vec![lazybox_ipc::EpicDelta::Reviewed {
+                key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+                blocking: true,
+            }],
+        );
+        assert_eq!(blocked.len(), 1, "{blocked:?}");
+        assert!(blocked[0].body.contains("o/r#1"), "{:?}", blocked[0].body);
+        assert!(
+            !blocked[0].body.contains("github:"),
+            "the provider prefix is noise in a banner: {:?}",
+            blocked[0].body
+        );
+    }
+
+    /// A clean verdict is good news that changes nothing the operator must do.
+    #[test]
+    fn a_clean_review_raises_no_banner() {
+        let mut sidebar = Sidebar::new(PaneId::new(1));
+        assert!(
+            feed(
+                &mut sidebar,
+                epic_snapshot(
+                    0,
+                    Default::default(),
+                    lazybox_ipc::EpicMemberStatus::Mergeable { held_by: vec![] }
+                ),
+                vec![lazybox_ipc::EpicDelta::Reviewed {
+                    key: lazybox_core::WorkspaceKey::new("github:o/r#1"),
+                    blocking: false,
+                }],
+            )
+            .is_empty()
+        );
+    }
+}

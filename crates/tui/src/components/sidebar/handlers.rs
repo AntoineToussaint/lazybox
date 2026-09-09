@@ -634,8 +634,8 @@ impl Sidebar {
     /// fleet needs the operator rather than the other way round:
     ///
     /// 1. **ready work nobody is starting**: the epic has ready members, its
-    ///    `AUTO` latch is off, and an agent is sitting idle. Latched per epic
-    ///    so a standing queue notifies once, not once per recompute.
+    ///    `AUTO` latch is off, and no agent is Working. Latched per epic so a
+    ///    standing queue notifies once, not once per recompute.
     /// 2. **the epic finished**.
     /// 3. **a review found blocking findings**, so a PR that looks green is
     ///    actually held.
@@ -676,13 +676,17 @@ impl Sidebar {
         let armed = snapshot
             .policies
             .armed(lazybox_core::EpicLatch::AutoDispatch);
-        let idle_agent = self.agents.values().any(|state| {
-            matches!(
-                state,
-                lazybox_ipc::AgentState::Idle | lazybox_ipc::AgentState::Done
-            )
-        });
-        if snapshot.ready > 0 && !armed && idle_agent {
+        // "Spare capacity" is the absence of work in flight, not the presence
+        // of a parked agent. `agents` only holds workspaces that have
+        // *reported* a state, so testing for an `Idle`/`Done` entry is empty
+        // on a fresh install and after every agent exits — silencing the nudge
+        // in exactly the two situations it exists for. Asking whether anything
+        // is Working covers those and still stays quiet mid-run.
+        let capacity_free = !self
+            .agents
+            .values()
+            .any(|state| matches!(state, lazybox_ipc::AgentState::Working));
+        if snapshot.ready > 0 && !armed && capacity_free {
             if self.epic_ready_notified.insert(snapshot.key.clone()) {
                 let ready = snapshot
                     .members
@@ -694,7 +698,7 @@ impl Sidebar {
                     ready,
                     format!("lazybox — {} has work ready", snapshot.name),
                     format!(
-                        "{} member(s) ready and an agent idle · E A arms auto-dispatch",
+                        "{} member(s) ready and nothing running · E A arms auto-dispatch",
                         snapshot.ready
                     ),
                 );

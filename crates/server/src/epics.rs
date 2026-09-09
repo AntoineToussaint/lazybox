@@ -536,7 +536,7 @@ fn blockers_for(
     in_cycle: bool,
     holds: u32,
     declared: Option<&DeclaredBlocker>,
-    published_contracts: &HashSet<WorkspaceKey>,
+    published_contracts: Option<&HashSet<WorkspaceKey>>,
     since_at: &mut dyn FnMut(&WorkspaceKey, BlockerKind, &str) -> i64,
 ) -> Vec<Blocker> {
     let mut out: Vec<Blocker> = Vec::new();
@@ -578,7 +578,7 @@ fn blockers_for(
     // mid-flight but has posted its `contract` note no longer gates the
     // consumer, and one that merged without ever posting still does (#1525).
     for producer in resolved.contracts.get(key).into_iter().flatten() {
-        if published_contracts.contains(producer) {
+        if published_contracts.is_some_and(|published| published.contains(producer)) {
             continue;
         }
         let producer_name = resolved
@@ -809,7 +809,7 @@ pub fn resolve(
                 in_cycle,
                 holds,
                 declared.get(key),
-                &latches.published_contracts,
+                latches.contracts_for(record.key.as_str()),
                 &mut since_at,
             )
         };
@@ -1163,6 +1163,12 @@ fn stalled(s: &EpicSnapshot) -> bool {
                 | EpicMemberStatus::InProgress
                 | EpicMemberStatus::Asking
                 | EpicMemberStatus::Mergeable { .. }
+                // A review-blocked member is waiting on findings someone can
+                // act on right now, not on an external task or a cycle.
+                // Counting it as stalled would report "every remaining member
+                // is blocked" for an epic whose only outstanding item is a
+                // code review (#1525).
+                | EpicMemberStatus::ReviewBlocked
         )
     })
 }
@@ -1431,6 +1437,10 @@ pub async fn recompute_all(config: &ServerConfig) {
         }
     };
     if records.is_empty() {
+        // No epic owns anything, so no review row can be legitimate. Falling
+        // through to the prune (rather than returning) is what stops a hold
+        // outliving the epic that created it when every record is deleted.
+        prune_review_rows(config, &HashSet::new());
         return;
     }
 
@@ -1444,6 +1454,10 @@ pub async fn recompute_all(config: &ServerConfig) {
     let now = chrono::Utc::now().timestamp_millis();
 
     let mut to_emit: Vec<Event> = Vec::new();
+    // Every member of every LIVE epic, accumulated regardless of whether that
+    // epic's snapshot changed — the review-row prune below needs the full live
+    // set, not just the epics that moved this pass.
+    let mut live_members: HashSet<WorkspaceKey> = HashSet::new();
     {
         let mut memory = config.poll.epics.lock();
         let EpicMemory { since, last } = &mut *memory;
@@ -1463,6 +1477,7 @@ pub async fn recompute_all(config: &ServerConfig) {
                 latch,
                 now,
             );
+            live_members.extend(snapshot.members.iter().map(|m| m.key.clone()));
             let prev = last.get(record.key.as_str());
             // `computed_at` bumps every recompute, so equality must ignore it —
             // otherwise every tick looks "changed" and re-broadcasts. Blocker
@@ -1481,6 +1496,16 @@ pub async fn recompute_all(config: &ServerConfig) {
         last.retain(|k, _| live.contains(k));
         since.retain(|k, _| live.contains(k));
     }
+
+    // A review row is only ever cleared through its epic's member list, so a
+    // member that leaves — unassigned, workspace removed, epic archived or
+    // deleted — would strand a `blocking: true` row. `review_blocks_merge` is
+    // keyed on the workspace alone and consults no epic, so that stranded row
+    // holds the PR's merge forever: auto-merge silently downgrades to Hold on
+    // every tick and a manual `g m` keeps refusing, both citing an epic that no
+    // longer exists. Prune to the live member set so a hold cannot outlive the
+    // epic that raised it.
+    prune_review_rows(config, &live_members);
 
     // Land each workspace-keyed delta as an unread `StatusChange` row on its
     // workspace's activity feed *before* the `EpicStatus` events fire, so a
@@ -1506,15 +1531,15 @@ pub async fn recompute_all(config: &ServerConfig) {
     // Broadcast first, then act. A client sees the new status before an
     // autonomy latch starts anything on the back of it, so an `AUTO` spawn
     // never appears to precede the transition that caused it.
-    let mut latched: Vec<(EpicSnapshot, Vec<EpicDelta>)> = Vec::new();
+    let mut latched: Vec<EpicSnapshot> = Vec::new();
     for event in to_emit {
-        if let Event::EpicStatus { snapshot, delta } = &event {
-            latched.push((snapshot.clone(), delta.clone()));
+        if let Event::EpicStatus { snapshot, .. } = &event {
+            latched.push(snapshot.clone());
         }
         let _ = config.bus.send(event);
     }
-    for (snapshot, delta) in &latched {
-        run_latches(config, snapshot, delta).await;
+    for snapshot in &latched {
+        run_latches(config, snapshot).await;
     }
 }
 
@@ -1888,7 +1913,13 @@ pub async fn archive(config: &ServerConfig, epic: &str) {
     record.archived = true;
     if let Err(e) = persist(config, &record) {
         tracing::warn!("epics: archive {epic} failed: {e}");
+        return;
     }
+    // Archiving emits no bus event, so nothing would otherwise mark the
+    // resolver dirty — recompute here so the review-row prune runs and any
+    // merge this epic was holding is released now rather than whenever an
+    // unrelated event happens to wake the debounced loop.
+    recompute_all(config).await;
 }
 
 // ── autonomy dial (#1525) ───────────────────────────────────────────────
@@ -1917,6 +1948,11 @@ const REVIEW_STATE_PREFIX: &str = "epic-review:";
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReviewState {
     pub workspace: WorkspaceKey,
+    /// The epic whose `REVIEW` latch opened this run. A verdict note must
+    /// carry this epic's tag to be accepted, which is what makes the
+    /// `epic:<key>` tag load-bearing rather than decorative.
+    #[serde(default)]
+    pub epic: String,
     /// A Reviewer has been dispatched for this green run. Gates the "fires
     /// once" property — the row exists from dispatch until the PR leaves
     /// green, so a poll storm cannot fan out reviewers.
@@ -1946,6 +1982,21 @@ fn clear_review(config: &ServerConfig, workspace: &str) {
     }
 }
 
+/// Drop every review row whose workspace is no longer a member of any live
+/// epic. Called once per [`recompute_all`] with the full live member set.
+fn prune_review_rows(config: &ServerConfig, live_members: &HashSet<WorkspaceKey>) {
+    for (workspace, _) in list_reviews(config) {
+        if live_members.contains(&workspace) {
+            continue;
+        }
+        tracing::info!(
+            %workspace,
+            "epics: dropping a review row whose epic no longer owns the member"
+        );
+        clear_review(config, workspace.as_str());
+    }
+}
+
 /// Every member's review state, keyed by workspace. A row that fails to decode
 /// is skipped rather than sinking the whole read.
 pub fn list_reviews(config: &ServerConfig) -> HashMap<WorkspaceKey, ReviewState> {
@@ -1970,24 +2021,44 @@ pub fn list_reviews(config: &ServerConfig) -> HashMap<WorkspaceKey, ReviewState>
 /// pure function of plain data.
 #[derive(Debug, Default)]
 pub struct LatchInputs {
-    /// Members that have posted a note tagged `contract` + `epic:<key>`, so
-    /// their `Contract` edges are satisfied.
-    pub published_contracts: HashSet<WorkspaceKey>,
+    /// Per epic key, the members that have posted a note tagged `contract` +
+    /// `epic:<key>`, so their `Contract` edges in *that* epic are satisfied.
+    /// Keyed by epic rather than flattened: a contract published for one epic
+    /// says nothing about a different epic's interface, so a flat set would
+    /// let a producer satisfy an edge it never published for.
+    pub published_contracts: HashMap<String, HashSet<WorkspaceKey>>,
     /// Members whose latest review reported `blocking` findings.
     pub review_blocking: HashSet<WorkspaceKey>,
 }
 
 impl LatchInputs {
     /// Gather the latch state for `records` from the store.
+    ///
+    /// Reads the blackboard **once** and buckets by epic tag. Scanning per
+    /// epic instead would re-read and re-parse every note in the store for
+    /// each record — notes are capped per scope but scopes are not (one per
+    /// session), so a fleet-sized blackboard turns an N-epic recompute into N
+    /// full table scans on the 300 ms debounce path.
     pub fn load(config: &ServerConfig, records: &[EpicRecord]) -> Self {
-        let mut published_contracts = HashSet::new();
-        for record in records {
-            if record.archived {
-                continue;
-            }
-            let tag = crate::mcp::epic_tag(record.key.as_str());
-            for note in crate::mcp::notes_with_tags(config, &[CONTRACT_TAG, &tag]) {
-                published_contracts.insert(WorkspaceKey::new(note.author));
+        let tags: HashMap<String, String> = records
+            .iter()
+            .filter(|r| !r.archived)
+            .map(|r| {
+                (
+                    crate::mcp::epic_tag(r.key.as_str()),
+                    r.key.as_str().to_string(),
+                )
+            })
+            .collect();
+        let mut published_contracts: HashMap<String, HashSet<WorkspaceKey>> = HashMap::new();
+        for note in crate::mcp::notes_with_tags(config, &[CONTRACT_TAG]) {
+            for tag in &note.tags {
+                if let Some(epic) = tags.get(tag) {
+                    published_contracts
+                        .entry(epic.clone())
+                        .or_default()
+                        .insert(WorkspaceKey::new(note.author.clone()));
+                }
             }
         }
         let review_blocking = list_reviews(config)
@@ -1999,6 +2070,11 @@ impl LatchInputs {
             published_contracts,
             review_blocking,
         }
+    }
+
+    /// The producers that have published a contract for `epic`.
+    fn contracts_for(&self, epic: &str) -> Option<&HashSet<WorkspaceKey>> {
+        self.published_contracts.get(epic)
     }
 }
 
@@ -2134,6 +2210,11 @@ pub fn plan_reviews(
 /// with a live PR that is not armed yet. P3's merge-after hold supplies the
 /// ordering, so arming everything is safe — a PR behind an unlanded
 /// predecessor is held, not merged early.
+///
+/// A `ReviewBlocked` member is skipped, not held: the review hold would stop
+/// the merge anyway, so arming it only paints an `ARM` pill promising a merge
+/// that a second policy is silently refusing. It arms on the next pass once
+/// the review clears and the member reads `PrOpen` / `Mergeable` again.
 pub fn plan_merge_arming(
     snapshot: &EpicSnapshot,
     policies: &lazybox_core::EpicPolicies,
@@ -2149,9 +2230,7 @@ pub fn plan_merge_arming(
         .filter(|m| {
             matches!(
                 m.status,
-                EpicMemberStatus::PrOpen { .. }
-                    | EpicMemberStatus::Mergeable { .. }
-                    | EpicMemberStatus::ReviewBlocked
+                EpicMemberStatus::PrOpen { .. } | EpicMemberStatus::Mergeable { .. }
             )
         })
         .map(|m| m.key.clone())
@@ -2192,9 +2271,10 @@ pub fn review_blocks_merge(config: &ServerConfig, key: &WorkspaceKey) -> bool {
 /// reacts at the write rather than polling the blackboard.
 ///
 /// Note text is agent-authored and never parsed — only the tag vocabulary is
-/// read, and only for a note whose author is itself a member of the epic the
-/// note claims. A note tagged for an epic the author does not belong to is
-/// ignored.
+/// read. Two gates, both derived from state lazybox itself wrote: the author
+/// must have an open review row (so only a member the `REVIEW` latch actually
+/// dispatched on can report), and the note must carry that row's own
+/// `epic:<key>` tag (so a verdict cannot flip a hold a different epic raised).
 pub(crate) async fn on_note_posted(config: &ServerConfig, note: &crate::mcp::Note) {
     if !note.tags.iter().any(|t| t == REVIEW_TAG) {
         return;
@@ -2204,22 +2284,9 @@ pub(crate) async fn on_note_posted(config: &ServerConfig, note: &crate::mcp::Not
         return; // a review note with no verdict says nothing about the merge.
     }
     let author = WorkspaceKey::new(note.author.clone());
-    let records = list_all(config).unwrap_or_default();
-    let claimed: Vec<&EpicRecord> = records
-        .iter()
-        .filter(|r| {
-            !r.archived
-                && note
-                    .tags
-                    .iter()
-                    .any(|t| *t == crate::mcp::epic_tag(r.key.as_str()))
-        })
-        .collect();
-    if claimed.is_empty() {
-        return;
-    }
     // The reviewer runs *in the member's own workspace* (a second agent beside
-    // the worker), so the note's author IS the member under review.
+    // the worker), so the note's author IS the member under review — and the
+    // open review row is what proves the stage actually started this run.
     let Some(mut state) = list_reviews(config).remove(&author) else {
         tracing::debug!(
             author = %author,
@@ -2227,6 +2294,21 @@ pub(crate) async fn on_note_posted(config: &ServerConfig, note: &crate::mcp::Not
         );
         return;
     };
+    // The verdict must name the epic that asked for the review. Without this
+    // the `epic:<key>` tag is decorative: any live epic's tag would pass the
+    // gate and flip a hold raised by a different epic entirely.
+    if !note
+        .tags
+        .iter()
+        .any(|t| *t == crate::mcp::epic_tag(&state.epic))
+    {
+        tracing::debug!(
+            author = %author,
+            epic = %state.epic,
+            "epics: review verdict does not name the epic that opened the run — ignoring"
+        );
+        return;
+    }
     if state.blocking == blocking {
         return;
     }
@@ -2237,8 +2319,8 @@ pub(crate) async fn on_note_posted(config: &ServerConfig, note: &crate::mcp::Not
     }
     tracing::info!(
         member = %author,
+        epic = %state.epic,
         blocking,
-        epics = claimed.len(),
         "epics: reviewer verdict recorded"
     );
     recompute_all(config).await;
@@ -2248,10 +2330,22 @@ pub(crate) async fn on_note_posted(config: &ServerConfig, note: &crate::mcp::Not
 /// latches ask for. Called from [`recompute_all`] after the snapshot is stored,
 /// once per epic whose status actually changed.
 ///
-/// Only members named in `delta` are dispatched on: the latch acts on a
-/// *transition* (a member became Ready, a PR opened, a PR turned green), never
-/// on the standing state, so a quiet recompute is a no-op.
-async fn run_latches(config: &ServerConfig, snapshot: &EpicSnapshot, delta: &[EpicDelta]) {
+/// Deliberately reads the snapshot's **standing state**, not the `EpicDelta`s
+/// that accompany it. Gating on the delta looks like the safer "act only on a
+/// transition" rule and is in fact a dead latch: `diff` yields no member
+/// deltas for a first-sight snapshot (`diff(None, _)` is empty — every epic
+/// after a daemon restart) or for a policy-only change (arming a latch moves
+/// no member's status), so the two moments a latch most needs to act are
+/// exactly the two that produce nothing to act on.
+///
+/// Re-entry is safe without that gate because each latch carries its own
+/// idempotency: dispatch has the store-backed `autospawn-epic:<epic>:<member>`
+/// marker, review has the persisted `epic-review:<workspace>` row, and
+/// merge-arming skips workspaces already armed. `recompute_all` also updates
+/// its `last` snapshot under the `EpicMemory` lock *before* calling here, so a
+/// concurrent recompute short-circuits on `same_status` and one transition
+/// reaches this function once.
+async fn run_latches(config: &ServerConfig, snapshot: &EpicSnapshot) {
     let Some(record) = load(config, &snapshot.key).unwrap_or_default() else {
         return;
     };
@@ -2282,8 +2376,7 @@ async fn run_latches(config: &ServerConfig, snapshot: &EpicSnapshot, delta: &[Ep
     for member in &review_plan.clear {
         clear_review(config, member.as_str());
     }
-    let touched: HashSet<&WorkspaceKey> = delta.iter().filter_map(delta_key).collect();
-    for member in review_plan.dispatch.iter().filter(|m| touched.contains(*m)) {
+    for member in &review_plan.dispatch {
         dispatch_reviewer(config, &record, member, &user_config).await;
     }
 
@@ -2293,10 +2386,7 @@ async fn run_latches(config: &ServerConfig, snapshot: &EpicSnapshot, delta: &[Ep
         .filter(|ws| ws.auto_merge_on_green)
         .map(|ws| ws.key.clone())
         .collect();
-    for member in plan_merge_arming(snapshot, &policies, &already_armed, &opted_out)
-        .into_iter()
-        .filter(|m| touched.contains(m))
-    {
+    for member in plan_merge_arming(snapshot, &policies, &already_armed, &opted_out) {
         tracing::info!(epic = %snapshot.key, %member, "epics: ORDER arming merge-on-green");
         crate::workspace::set_auto_merge_on_green(config, &member, true).await;
     }
@@ -2334,29 +2424,11 @@ async fn run_latches(config: &ServerConfig, snapshot: &EpicSnapshot, delta: &[Ep
         excluded,
         opted_out,
     };
-    for ticket in plan_dispatch(snapshot, &policies, &ctx)
-        .into_iter()
-        .filter(|t| touched.contains(&t.member))
-    {
+    for ticket in plan_dispatch(snapshot, &policies, &ctx) {
         let Some(ws) = by_key.get(&ticket.member) else {
             continue;
         };
         dispatch_worker(config, &record, &ticket, ws, &user_config).await;
-    }
-}
-
-/// The member a delta is about, when it names one. `Stalled` / `Completed` are
-/// epic-wide and name no member.
-fn delta_key(delta: &EpicDelta) -> Option<&WorkspaceKey> {
-    match delta {
-        EpicDelta::Unblocked { key, .. }
-        | EpicDelta::StatusChanged { key, .. }
-        | EpicDelta::BlockerAdded { key, .. }
-        | EpicDelta::BlockerCleared { key, .. }
-        | EpicDelta::Held { key, .. }
-        | EpicDelta::Released { key }
-        | EpicDelta::Reviewed { key, .. } => Some(key),
-        EpicDelta::Stalled { .. } | EpicDelta::Completed => None,
     }
 }
 
@@ -2419,6 +2491,7 @@ async fn dispatch_reviewer(
 ) {
     let state = ReviewState {
         workspace: member.clone(),
+        epic: record.key.as_str().to_string(),
         dispatched: true,
         blocking: false,
         since: chrono::Utc::now().timestamp_millis(),
@@ -4134,6 +4207,7 @@ mod tests {
             WorkspaceKey::new(key),
             ReviewState {
                 workspace: WorkspaceKey::new(key),
+                epic: "e".into(),
                 dispatched: true,
                 blocking,
                 since: 1,
@@ -4242,16 +4316,12 @@ mod tests {
         assert!(plan.dispatch.is_empty());
     }
 
-    /// A review verdict reads as its own delta, not a bare status move.
-    /// A second, still-ready member keeps the epic off the `Stalled` path so
-    /// the assertion isolates the verdict delta.
+    /// A review verdict reads as its own delta, not a bare status move — and
+    /// on a single-member epic it is the ONLY delta: a review-blocked member
+    /// is actionable, so the epic must not also report itself Stalled.
     #[test]
     fn a_review_verdict_diffs_as_reviewed() {
-        let (_, mut workspaces) = green_pr_epic();
-        let mut z = ws("z");
-        z.gh_issues = vec![task("github", "o/r#9")];
-        workspaces.push(z);
-        let record = record_with(&["a", "z"]);
+        let (record, workspaces) = green_pr_epic();
         let clean = resolve_fresh(&record, &workspaces);
         let blocked = resolve_with_latches(
             &record,
@@ -4373,7 +4443,10 @@ mod tests {
     fn a_published_contract_unblocks_the_consumer() {
         let (record, workspaces) = contract_epic();
         let latches = LatchInputs {
-            published_contracts: HashSet::from([WorkspaceKey::new("a")]),
+            published_contracts: HashMap::from([(
+                "e".to_string(),
+                HashSet::from([WorkspaceKey::new("a")]),
+            )]),
             ..Default::default()
         };
         let snap = resolve_with_latches(&record, &workspaces, &latches);
@@ -4445,6 +4518,7 @@ mod tests {
             &config,
             &ReviewState {
                 workspace: key.clone(),
+                epic: "e".into(),
                 dispatched: true,
                 blocking: false,
                 since: 1,
@@ -4474,6 +4548,7 @@ mod tests {
             &config,
             &ReviewState {
                 workspace: key.clone(),
+                epic: "e".into(),
                 dispatched: true,
                 blocking: true,
                 since: 1,
@@ -4498,6 +4573,7 @@ mod tests {
             &config,
             &ReviewState {
                 workspace: key.clone(),
+                epic: "e".into(),
                 dispatched: true,
                 blocking: false,
                 since: 1,
@@ -4597,5 +4673,292 @@ mod tests {
         let preamble = lazybox_core::prompts::role_preamble(role, &ctx);
         assert!(preamble.contains("<untrusted-content source=\"agent-authored contract\">"));
         assert!(preamble.contains("POST /v1/tokens"));
+    }
+
+    /// **The latch must act on standing state, not on a transition.** Arming a
+    /// latch moves no member's status, so `diff` yields an empty delta — and
+    /// gating dispatch on that delta made every latch a no-op at exactly the
+    /// moment the operator armed it. Asserted through `recompute_all`, because
+    /// the bug lived in the caller, not in `plan_reviews`.
+    ///
+    /// The `REVIEW` latch is the observable one: `dispatch_reviewer` persists
+    /// its row *before* spawning, so the row's existence proves the latch ran
+    /// without depending on a real agent starting.
+    #[tokio::test]
+    async fn arming_a_latch_acts_on_members_that_are_already_eligible() {
+        let config = ServerConfig::in_memory();
+        let mut member = ws("w");
+        pr(&mut member, TaskState::Open, CiStatus::Success);
+        save_ws(&config, &member);
+
+        // First recompute latches the snapshot; the epic is unarmed, so the
+        // review stage does nothing yet.
+        upsert(&config, record_with(&["w"])).await;
+        assert!(
+            list_reviews(&config).is_empty(),
+            "an unarmed epic must not review"
+        );
+
+        // Arming changes no member status, so the delta is empty.
+        set_policies(&config, "e", armed(lazybox_core::EpicLatch::AutoReview)).await;
+        assert!(
+            list_reviews(&config).contains_key(&WorkspaceKey::new("w")),
+            "arming REVIEW on an already-green member must open a review run \
+             even though no member transitioned"
+        );
+    }
+
+    /// The same dead-latch bug in its second form: after a daemon restart the
+    /// `EpicMemory` is empty, so `diff(None, _)` returns no deltas at all. An
+    /// epic armed yesterday must still act on the state it comes back to.
+    #[tokio::test]
+    async fn a_first_sight_snapshot_acts_on_members_that_are_already_eligible() {
+        let config = ServerConfig::in_memory();
+        let mut member = ws("w");
+        pr(&mut member, TaskState::Open, CiStatus::Success);
+        save_ws(&config, &member);
+
+        // Persist an already-armed record without ever recomputing — the state
+        // a daemon boots into.
+        let mut record = record_with(&["w"]);
+        record.policies = armed(lazybox_core::EpicLatch::AutoReview);
+        persist(&config, &record).unwrap();
+
+        recompute_all(&config).await;
+        assert!(
+            list_reviews(&config).contains_key(&WorkspaceKey::new("w")),
+            "the first recompute after a restart must act on standing state"
+        );
+    }
+
+    /// **A hold must not outlive the epic that raised it.** `review_blocks_merge`
+    /// is keyed on the workspace alone, so a row stranded by an archived or
+    /// unassigned member would hold that PR's merge forever with no epic left
+    /// to explain it.
+    #[tokio::test]
+    async fn archiving_an_epic_releases_the_merges_its_reviews_were_holding() {
+        let config = ServerConfig::in_memory();
+        let mut member = ws("w");
+        pr(&mut member, TaskState::Open, CiStatus::Success);
+        save_ws(&config, &member);
+        upsert(&config, record_with(&["w"])).await;
+
+        let key = WorkspaceKey::new("w");
+        persist_review(
+            &config,
+            &ReviewState {
+                workspace: key.clone(),
+                epic: "e".into(),
+                dispatched: true,
+                blocking: true,
+                since: 1,
+            },
+        )
+        .unwrap();
+        assert!(review_blocks_merge(&config, &key));
+
+        archive(&config, "e").await;
+        assert!(
+            !review_blocks_merge(&config, &key),
+            "archiving the epic must drop the review row it owns, or the PR's \
+             merge is wedged forever"
+        );
+    }
+
+    /// The same prune, reached the other way: the member leaves the epic while
+    /// the epic itself stays live.
+    #[tokio::test]
+    async fn unassigning_a_member_releases_the_merge_its_review_was_holding() {
+        let config = ServerConfig::in_memory();
+        for k in ["w", "keep"] {
+            let mut m = ws(k);
+            pr(&mut m, TaskState::Open, CiStatus::Success);
+            save_ws(&config, &m);
+        }
+        upsert(&config, record_with(&["w", "keep"])).await;
+
+        let key = WorkspaceKey::new("w");
+        let kept = WorkspaceKey::new("keep");
+        for member in [&key, &kept] {
+            persist_review(
+                &config,
+                &ReviewState {
+                    workspace: member.clone(),
+                    epic: "e".into(),
+                    dispatched: true,
+                    blocking: true,
+                    since: 1,
+                },
+            )
+            .unwrap();
+        }
+
+        assign(&config, "e", key.clone(), false).await;
+        assert!(
+            !review_blocks_merge(&config, &key),
+            "the dropped member frees"
+        );
+        assert!(
+            review_blocks_merge(&config, &kept),
+            "a member still in the epic keeps its hold"
+        );
+    }
+
+    /// A verdict must name the epic whose latch opened the run. Without that
+    /// check the `epic:<key>` tag is decorative — any live epic's tag passes,
+    /// letting a note flip a hold a different epic raised.
+    #[tokio::test]
+    async fn a_verdict_tagged_for_another_epic_does_not_flip_the_hold() {
+        let config = ServerConfig::in_memory();
+        save_ws(&config, &ws("w"));
+        upsert(&config, record_with(&["w"])).await;
+        let mut other = EpicRecord::new(EpicKey::new("other"), "Other", Utc::now());
+        other.members = vec![WorkspaceKey::new("w")];
+        upsert(&config, other).await;
+
+        let key = WorkspaceKey::new("w");
+        persist_review(
+            &config,
+            &ReviewState {
+                workspace: key.clone(),
+                epic: "e".into(),
+                dispatched: true,
+                blocking: false,
+                since: 1,
+            },
+        )
+        .unwrap();
+
+        on_note_posted(&config, &review_note(&["review", "epic:other", "blocking"])).await;
+        assert!(
+            !review_blocks_merge(&config, &key),
+            "a verdict naming a different epic must not raise this run's hold"
+        );
+
+        on_note_posted(&config, &review_note(&["review", "epic:e", "blocking"])).await;
+        assert!(
+            review_blocks_merge(&config, &key),
+            "the run's own epic tag is accepted"
+        );
+    }
+
+    /// A contract published for one epic says nothing about another epic's
+    /// interface — the satisfied set is keyed by epic, not flattened.
+    #[test]
+    fn a_contract_published_for_another_epic_does_not_satisfy_this_one() {
+        let (record, workspaces) = contract_epic();
+        let elsewhere = LatchInputs {
+            published_contracts: HashMap::from([(
+                "other".to_string(),
+                HashSet::from([WorkspaceKey::new("a")]),
+            )]),
+            ..Default::default()
+        };
+        let snap = resolve_with_latches(&record, &workspaces, &elsewhere);
+        let b = snap.members.iter().find(|m| m.key.as_str() == "b").unwrap();
+        assert_eq!(
+            b.blocked_reason.as_deref(),
+            Some("contract"),
+            "only a contract published for THIS epic satisfies its edge"
+        );
+    }
+
+    /// One blackboard read per recompute, not one per epic: the resolver must
+    /// bucket a single scan by epic tag.
+    #[test]
+    fn latch_inputs_bucket_one_scan_across_every_epic() {
+        let config = ServerConfig::in_memory();
+        let mut first = EpicRecord::new(EpicKey::new("one"), "One", Utc::now());
+        first.members = vec![WorkspaceKey::new("a")];
+        let mut second = EpicRecord::new(EpicKey::new("two"), "Two", Utc::now());
+        second.members = vec![WorkspaceKey::new("b")];
+        let mut archived = EpicRecord::new(EpicKey::new("gone"), "Gone", Utc::now());
+        archived.archived = true;
+
+        for (seq, author, tags) in [
+            (1u64, "a", vec!["contract", "epic:one"]),
+            (2, "b", vec!["contract", "epic:two"]),
+            (3, "c", vec!["contract", "epic:gone"]),
+            (4, "d", vec!["review", "epic:one"]),
+        ] {
+            let note = crate::mcp::Note {
+                author: author.into(),
+                scope: "global".into(),
+                tags: tags.iter().map(|t| t.to_string()).collect(),
+                ts: seq as i64,
+                text: "x".into(),
+            };
+            config
+                .store
+                .set_kv(
+                    &format!("lazybox:note:global:{seq:012}"),
+                    &serde_json::to_string(&note).unwrap(),
+                )
+                .unwrap();
+        }
+
+        let latches = LatchInputs::load(&config, &[first, second, archived]);
+        assert_eq!(
+            latches.contracts_for("one"),
+            Some(&HashSet::from([WorkspaceKey::new("a")]))
+        );
+        assert_eq!(
+            latches.contracts_for("two"),
+            Some(&HashSet::from([WorkspaceKey::new("b")]))
+        );
+        assert_eq!(
+            latches.contracts_for("gone"),
+            None,
+            "an archived epic contributes no bucket"
+        );
+        assert_eq!(
+            latches.contracts_for("one").map(|s| s.len()),
+            Some(1),
+            "a `review` note must not land in a contract bucket"
+        );
+    }
+
+    /// An epic whose only outstanding member is review-blocked is waiting on
+    /// findings someone can act on — not stalled on an external task or cycle.
+    #[test]
+    fn a_review_blocked_member_does_not_stall_the_epic() {
+        let (record, workspaces) = green_pr_epic();
+        let snap = resolve_with_latches(
+            &record,
+            &workspaces,
+            &LatchInputs {
+                review_blocking: HashSet::from([WorkspaceKey::new("a")]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(snap.members[0].status, EpicMemberStatus::ReviewBlocked);
+        assert!(
+            !stalled(&snap),
+            "a review-blocked member is actionable, so the epic is not stalled"
+        );
+    }
+
+    /// ORDER leaves a review-blocked PR alone rather than painting an `ARM`
+    /// pill over a merge the review hold is refusing.
+    #[test]
+    fn merge_in_order_skips_a_review_blocked_member() {
+        let (record, workspaces) = green_pr_epic();
+        let snap = resolve_with_latches(
+            &record,
+            &workspaces,
+            &LatchInputs {
+                review_blocking: HashSet::from([WorkspaceKey::new("a")]),
+                ..Default::default()
+            },
+        );
+        assert!(
+            plan_merge_arming(
+                &snap,
+                &armed(lazybox_core::EpicLatch::MergeInOrder),
+                &HashSet::new(),
+                &HashSet::new()
+            )
+            .is_empty()
+        );
     }
 }

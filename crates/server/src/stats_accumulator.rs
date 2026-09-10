@@ -235,19 +235,43 @@ fn stat_events_from_event(event: &Event, day: &str) -> Vec<StatEvent> {
         // An unpriced turn's bytes are tallied separately rather than
         // priced at zero, so the view can tell "saved nothing" from
         // "cannot price this" instead of rendering a confident `$0.00`.
+        //
+        // A `shadow` turn computed its saving without taking it, so it
+        // lands under the projected metrics. Folding it in with the
+        // realized ones would report a dollar figure against a bill that
+        // never moved — and shadow is the shipped default, so that is the
+        // ordinary case, not the corner. Regressions stay on one metric
+        // either way: the kill switch cannot fire without a real rewrite.
         Event::AgentCompaction {
             blocks,
             saved_bytes,
             saved_cost_micros,
             regressions,
+            rewrote,
             ..
         } => [
-            (stats::COMPACTION_BLOCKS, *blocks),
-            (stats::COMPACTION_SAVED_BYTES, *saved_bytes),
+            (
+                if *rewrote {
+                    stats::COMPACTION_BLOCKS
+                } else {
+                    stats::COMPACTION_PROJECTED_BLOCKS
+                },
+                *blocks,
+            ),
+            (
+                if *rewrote {
+                    stats::COMPACTION_SAVED_BYTES
+                } else {
+                    stats::COMPACTION_PROJECTED_BYTES
+                },
+                *saved_bytes,
+            ),
             (stats::COMPACTION_REGRESSIONS, *regressions),
-            match saved_cost_micros {
-                Some(micros) => (stats::COMPACTION_SAVED_MICROS, *micros),
-                None => (stats::COMPACTION_UNPRICED_BYTES, *saved_bytes),
+            match (saved_cost_micros, rewrote) {
+                (Some(micros), true) => (stats::COMPACTION_SAVED_MICROS, *micros),
+                (Some(micros), false) => (stats::COMPACTION_PROJECTED_MICROS, *micros),
+                (None, true) => (stats::COMPACTION_UNPRICED_BYTES, *saved_bytes),
+                (None, false) => (stats::COMPACTION_PROJECTED_UNPRICED_BYTES, *saved_bytes),
             },
         ]
         .into_iter()
@@ -373,6 +397,63 @@ mod tests {
         assert!(got.iter().all(|s| !s.metric.starts_with("context_")));
     }
 
+    /// #1621: `shadow` computes a saving it never takes, and shadow is the
+    /// shipped default. Routed to the realized metrics it would report a
+    /// dollar figure against a bill that never moved — on most installs,
+    /// every install-week, with nothing on screen to say so.
+    #[test]
+    fn a_shadow_turn_is_projected_never_realized() {
+        let shadow = Event::AgentCompaction {
+            agent_id: "claude".into(),
+            session_key: Some(SessionKey::from("github:o/r#1")),
+            blocks: 4,
+            saved_bytes: 18_422,
+            saved_cost_micros: Some(61_000),
+            regressions: 0,
+            rewrote: false,
+        };
+        let metrics: Vec<(String, i64)> = stat_events_from_event(&shadow, DAY)
+            .into_iter()
+            .map(|s| (s.metric, s.value))
+            .collect();
+        assert_eq!(
+            metrics,
+            vec![
+                (stats::COMPACTION_PROJECTED_BLOCKS.to_string(), 4),
+                (stats::COMPACTION_PROJECTED_BYTES.to_string(), 18_422),
+                (stats::COMPACTION_PROJECTED_MICROS.to_string(), 61_000),
+            ],
+        );
+        assert!(
+            !metrics
+                .iter()
+                .any(|(metric, _)| metric == stats::COMPACTION_SAVED_MICROS
+                    || metric == stats::COMPACTION_SAVED_BYTES
+                    || metric == stats::COMPACTION_BLOCKS),
+            "a saving that was never taken must not reach the realized metrics",
+        );
+
+        // The unpriced split applies to projected turns too, so a shadow
+        // run on a subscription route reports bytes rather than `$0.00`.
+        let unpriced_shadow = Event::AgentCompaction {
+            agent_id: "claude".into(),
+            session_key: Some(SessionKey::from("github:o/r#1")),
+            blocks: 4,
+            saved_bytes: 18_422,
+            saved_cost_micros: None,
+            regressions: 0,
+            rewrote: false,
+        };
+        let metrics: Vec<String> = stat_events_from_event(&unpriced_shadow, DAY)
+            .into_iter()
+            .map(|s| s.metric)
+            .collect();
+        assert!(
+            metrics.contains(&stats::COMPACTION_PROJECTED_UNPRICED_BYTES.to_string()),
+            "{metrics:?}",
+        );
+    }
+
     #[test]
     fn compaction_expands_to_blocks_bytes_saving_and_regressions() {
         let ev = Event::AgentCompaction {
@@ -382,6 +463,7 @@ mod tests {
             saved_bytes: 18_422,
             saved_cost_micros: Some(61_000),
             regressions: 0,
+            rewrote: true,
         };
         let got = stat_events_from_event(&ev, DAY);
         let metrics: Vec<(&str, i64)> = got.iter().map(|s| (s.metric.as_str(), s.value)).collect();
@@ -405,6 +487,7 @@ mod tests {
             saved_bytes: 18_422,
             saved_cost_micros: None,
             regressions: 0,
+            rewrote: true,
         };
         let got = stat_events_from_event(&unpriced, DAY);
         let metrics: Vec<(&str, i64)> = got.iter().map(|s| (s.metric.as_str(), s.value)).collect();
@@ -425,6 +508,7 @@ mod tests {
             saved_bytes: 0,
             saved_cost_micros: Some(0),
             regressions: 1,
+            rewrote: true,
         };
         let got = stat_events_from_event(&tripped, DAY);
         assert_eq!(got.len(), 1);

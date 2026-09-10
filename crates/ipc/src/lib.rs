@@ -2363,6 +2363,17 @@ pub mod stats {
     /// Sessions a sustained prompt-cache regression backed compaction out
     /// of — the safety number the shadow-mode rollout is judged on.
     pub const COMPACTION_REGRESSIONS: &str = "compaction_regressions";
+    /// As [`COMPACTION_BLOCKS`], for turns that ran in `shadow` — computed
+    /// but never sent. Held apart from the realized metrics because the
+    /// default mode is shadow: added together they would claim a saving
+    /// against a bill that never moved.
+    pub const COMPACTION_PROJECTED_BLOCKS: &str = "compaction_projected_blocks";
+    /// As [`COMPACTION_SAVED_BYTES`], for `shadow` turns.
+    pub const COMPACTION_PROJECTED_BYTES: &str = "compaction_projected_bytes";
+    /// As [`COMPACTION_SAVED_MICROS`], for `shadow` turns.
+    pub const COMPACTION_PROJECTED_MICROS: &str = "compaction_projected_micros";
+    /// As [`COMPACTION_UNPRICED_BYTES`], for `shadow` turns.
+    pub const COMPACTION_PROJECTED_UNPRICED_BYTES: &str = "compaction_projected_unpriced_bytes";
 }
 
 /// Sentinel prefix on [`Event::PrMergeFailed`]'s `reason` marking the one
@@ -3604,6 +3615,13 @@ pub enum Event {
         /// compaction out of the session, `0` otherwise — a session trips
         /// the kill switch at most once.
         regressions: u64,
+        /// Whether these bytes actually went out elided (`on`), or were
+        /// only computed (`shadow`). Shadow changes nothing upstream, so
+        /// its saving is a projection, and the shipped default is shadow:
+        /// summed together the two would report a dollar figure for a bill
+        /// nobody reduced. Kept separate, the pair answers the question the
+        /// mode exists for — what flipping to `on` would actually buy.
+        rewrote: bool,
     },
 }
 

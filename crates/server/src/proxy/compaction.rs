@@ -101,6 +101,14 @@ pub struct Saving {
     pub saved_micros: Option<u64>,
     /// `1` on the turn the kill switch trips, `0` otherwise.
     pub regressions: u64,
+    /// Whether these bytes actually left the wire elided (`on`), or were
+    /// only computed (`shadow`). Shadow mode changes nothing upstream, so
+    /// its saving is a projection — money that *would* be saved, not money
+    /// that was. The shipped default is `shadow`, so a readout that summed
+    /// the two together would report a fleet-wide dollar figure for a bill
+    /// nobody reduced, and could never answer the one question the mode
+    /// exists to answer: what would flipping to `on` actually buy?
+    pub rewrote: bool,
 }
 
 impl Saving {
@@ -202,20 +210,63 @@ impl Plan {
     }
 }
 
+/// How many condensed block identities one session remembers in order to
+/// count each block exactly once. An identity is only worth keeping while
+/// the agent can still re-send it, which the transcript bounds — not the
+/// daemon's uptime. Past this many, the oldest is forgotten: a block that
+/// reappeared after 2048 newer ones would then be counted a second time,
+/// costing one block in a daily rollup. The alternative, an unbounded set,
+/// grows for as long as the daemon runs and is reclaimed only by restart.
+const MAX_CONDENSED_IDS: usize = 2048;
+
+/// Block identities seen recently, oldest forgotten first.
+#[derive(Debug, Default)]
+struct SeenBlocks {
+    ids: std::collections::HashSet<Arc<str>>,
+    order: std::collections::VecDeque<Arc<str>>,
+}
+
+impl SeenBlocks {
+    /// True when `id` had not been seen, so the caller counts it as new.
+    fn insert(&mut self, id: &str) -> bool {
+        if self.ids.contains(id) {
+            return false;
+        }
+        let id: Arc<str> = Arc::from(id);
+        self.ids.insert(Arc::clone(&id));
+        self.order.push_back(id);
+        if self.order.len() > MAX_CONDENSED_IDS
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.ids.remove(&oldest);
+        }
+        true
+    }
+
+    fn clear(&mut self) {
+        self.ids.clear();
+        self.order.clear();
+    }
+}
+
 /// Per-session compaction state: what it saved, and whether the prompt
 /// cache still likes it.
 #[derive(Debug, Default)]
 struct SessionState {
     disabled: bool,
-    /// Every block identity this session has condensed. A set, not a
-    /// count, because a count can only ever be a level — and a level is
-    /// wrong in both directions here: it silently reports zero new blocks
-    /// after a conversation restarts (the new conversation's blocks sit
-    /// below the old high-water mark), and it oscillates when two agents
-    /// share one workspace session key (#1310 allows that), each request
-    /// re-counting the other's blocks as new. Set difference is correct
-    /// under restarts, interleaving, and retries alike.
-    condensed_ids: std::collections::HashSet<String>,
+    /// Distinct block identities this session has condensed — the figure
+    /// [`Compactor::stats`] reports. A counter rather than the length of
+    /// `seen`, which forgets its oldest entries to stay bounded.
+    condensed_total: u64,
+    /// Identities kept to count a block once however many turns it
+    /// survives. A set, not a level, because a level is wrong in both
+    /// directions here: it silently reports zero new blocks after a
+    /// conversation restarts (the new conversation's blocks sit below the
+    /// old high-water mark), and it oscillates when two agents share one
+    /// workspace session key (#1310 allows that), each request re-counting
+    /// the other's blocks as new. Set difference is correct under
+    /// restarts, interleaving, and retries alike.
+    seen: SeenBlocks,
     saved_bytes: u64,
     saved_micros: u64,
     /// A rewrite has actually gone out for this session (shadow mode never
@@ -558,6 +609,7 @@ impl Compactor {
             if state.degraded_turns >= CACHE_REGRESSION_TURNS {
                 state.disabled = true;
                 state.regressions += 1;
+                state.seen.clear();
                 let saved = state.saved_micros as f64 / 1_000_000.0;
                 drop(sessions);
                 tracing::warn!(
@@ -575,6 +627,10 @@ impl Compactor {
                         session,
                         Saving {
                             regressions: 1,
+                            // Unreachable without `state.rewrote`, checked
+                            // above: only a session that really rewrote can
+                            // have a baseline to regress from.
+                            rewrote: true,
                             ..Saving::default()
                         },
                     );
@@ -591,7 +647,7 @@ impl Compactor {
         let sessions = self.sessions.lock().expect("compaction sessions");
         sessions.get(session).map_or((0, 0.0, 0), |state| {
             (
-                state.condensed_ids.len() as u64,
+                state.condensed_total,
                 state.saved_micros as f64 / 1_000_000.0,
                 state.regressions,
             )
@@ -638,9 +694,10 @@ impl Compactor {
         // instead of cancelling the first's.
         let blocks = pending
             .condensed_ids
-            .into_iter()
-            .filter(|id| state.condensed_ids.insert(id.clone()))
+            .iter()
+            .filter(|id| state.seen.insert(id.as_str()))
             .count() as u64;
+        state.condensed_total += blocks;
         // The saving, by contrast, IS recurring: those bytes would have
         // been paid for again on every turn the blocks survive.
         state.saved_bytes += pending.saved_bytes as u64;
@@ -651,6 +708,7 @@ impl Compactor {
             saved_bytes: pending.saved_bytes as u64,
             saved_micros: pending.saved_micros,
             regressions: 0,
+            rewrote: pending.rewrote,
         }
     }
 
@@ -742,15 +800,20 @@ pub fn plan(body: &[u8], policy: &ContextHygiene, tag: &CondenseTag) -> Option<P
 
     for (index, unit) in units.into_iter().enumerate() {
         let text = payload_text(unit);
-        let call_id = unit
+        // Identity and kind resolve together or not at all — the kind IS
+        // the lookup of the id — so they are carried as one value and
+        // checked once. The id is owned up front because condensing takes
+        // `unit` mutably, which ends any borrow of it.
+        let call = unit
             .as_object()
             .and_then(result_call_id)
-            .map(str::to_string);
-        let kind = call_id.as_deref().and_then(|id| calls.get(id)).cloned();
+            .map(str::to_string)
+            .and_then(|id| calls.get(&id).cloned().map(|kind| (id, kind)));
+        let kind = call.as_ref().map(|(_, kind)| kind);
         // `in_sequence` owns the newest-relative inversion, so this pass
         // cannot shift the whole recency window by one.
         let facts = ToolResultFacts::in_sequence(
-            kind.as_ref(),
+            kind,
             context_parse::payload_lines(unit),
             index,
             total,
@@ -760,7 +823,9 @@ pub fn plan(body: &[u8], policy: &ContextHygiene, tag: &CondenseTag) -> Option<P
             Eligibility::Skip(reason) => skip(reason, &mut skipped),
             Eligibility::Condense => {
                 // `eligibility` rejects a block whose kind is unknown.
-                let Some(kind) = kind.as_ref() else { continue };
+                let Some((call_id, kind)) = &call else {
+                    continue;
+                };
                 // A block that would barely shrink is not worth the cache
                 // miss its rewrite costs — the same judgement the line
                 // floor makes, applied to the outcome instead of the input.
@@ -769,12 +834,9 @@ pub fn plan(body: &[u8], policy: &ContextHygiene, tag: &CondenseTag) -> Option<P
                     continue;
                 };
                 let saved = text.len().saturating_sub(condensed.len());
-                // `kind` resolved, so the id did too — a block without one
-                // never reaches here.
-                let Some(call_id) = call_id else { continue };
                 if set_payload_text(unit, condensed) {
                     plan.condensed += 1;
-                    plan.condensed_ids.push(call_id);
+                    plan.condensed_ids.push(call_id.clone());
                     plan.saved_bytes += saved;
                 } else {
                     // Mixed content (a text part beside an image): rewriting
@@ -1727,6 +1789,140 @@ mod tests {
         (compactor, notices, savings)
     }
 
+    /// A `shadow`-mode compactor and the savings it reported.
+    fn shadow_compactor_reporting() -> (Compactor, Savings) {
+        let savings: Savings = Arc::new(Mutex::new(Vec::new()));
+        let recorder = savings.clone();
+        let compactor = Compactor::new(
+            policy(CompactionMode::Shadow),
+            Arc::new(std::collections::BTreeMap::new()),
+            Arc::new(|_, _| {}),
+            tags(),
+        )
+        .with_saving_sink(Arc::new(move |_: &str, _: &str, saving: Saving| {
+            recorder.lock().expect("lock").push(saving);
+        }));
+        (compactor, savings)
+    }
+
+    /// #1621: shadow computes a saving it never takes. Reported as though
+    /// it had been taken, it becomes a dollar figure for a bill that never
+    /// moved — and shadow is the shipped default, so that is the ordinary
+    /// reading, not an edge case.
+    #[test]
+    fn a_shadow_saving_is_reported_as_projected() {
+        let (compactor, savings) = shadow_compactor_reporting();
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+
+        let done = compactor.rewrite("ws", "claude", true, body.clone());
+        assert_eq!(done.body, body, "shadow forwards the originals");
+        compactor.commit(
+            "ws",
+            "claude",
+            done.pending.expect("shadow still plans a saving"),
+        );
+
+        let savings = savings.lock().expect("lock");
+        assert_eq!(savings.len(), 1, "shadow still reports");
+        assert!(savings[0].blocks > 0, "and reports a real block count");
+        assert!(
+            !savings[0].rewrote,
+            "but says the bytes never actually left elided",
+        );
+    }
+
+    /// The realized counterpart: an `on` turn genuinely elides the bytes,
+    /// so its saving is money the bill did not have to carry.
+    #[test]
+    fn an_on_mode_saving_is_reported_as_realized() {
+        let (compactor, _notices, savings) = compactor_with_notices();
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+
+        turn(&compactor, "ws", &body);
+
+        let savings = savings.lock().expect("lock");
+        assert!(
+            savings
+                .iter()
+                .any(|saving| saving.rewrote && saving.blocks > 0),
+            "an `on` turn reports a realized saving",
+        );
+    }
+
+    /// #1621: the de-duplication set is what keeps a block from being
+    /// counted once per turn it survives, but a set that only ever grows
+    /// is reclaimed by nothing short of a daemon restart. Past the cap the
+    /// oldest identities are forgotten while the reported total — which is
+    /// a counter, not the set's length — keeps counting.
+    #[test]
+    fn the_identity_set_stays_bounded_while_the_total_keeps_counting() {
+        let (compactor, _notices, _savings) = compactor_with_notices();
+        let mut state = SessionState::default();
+        for index in 0..(MAX_CONDENSED_IDS + 500) {
+            assert!(
+                state.seen.insert(&format!("call_{index}")),
+                "every distinct identity is new the first time",
+            );
+            state.condensed_total += 1;
+        }
+        assert_eq!(
+            state.seen.ids.len(),
+            MAX_CONDENSED_IDS,
+            "the set is capped, not unbounded",
+        );
+        assert_eq!(state.seen.order.len(), MAX_CONDENSED_IDS);
+        assert_eq!(
+            state.condensed_total,
+            (MAX_CONDENSED_IDS + 500) as u64,
+            "the reported total is a counter, so eviction cannot shrink it",
+        );
+        // The newest identities are the ones still worth remembering: they
+        // are the ones the agent can still re-send.
+        assert!(!state.seen.insert("call_2547"), "the newest is remembered");
+        assert!(state.seen.insert("call_0"), "the oldest was forgotten");
+        drop(compactor);
+    }
+
+    /// A session the kill switch backed out of will never condense again,
+    /// so the identities it kept for de-duplication are dead weight held
+    /// for the daemon's lifetime.
+    #[test]
+    fn backing_a_session_out_releases_the_identities_it_was_holding() {
+        let (compactor, _notices, _savings) = compactor_with_notices();
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        turn(&compactor, "ws", &body);
+        assert!(
+            !compactor
+                .sessions
+                .lock()
+                .expect("lock")
+                .get("ws")
+                .expect("session")
+                .seen
+                .ids
+                .is_empty(),
+            "the turn left identities behind",
+        );
+
+        for _ in 0..CACHE_REGRESSION_TURNS {
+            compactor.observe_usage("ws", "claude", &usage(900, 100), true);
+        }
+
+        let sessions = compactor.sessions.lock().expect("lock");
+        let state = sessions.get("ws").expect("session");
+        assert!(state.disabled, "the kill switch fired");
+        assert!(
+            state.seen.ids.is_empty() && state.seen.order.is_empty(),
+            "and released identities it can never consult again",
+        );
+        assert!(
+            state.condensed_total > 0,
+            "while still reporting what it did condense before backing out",
+        );
+    }
+
     /// Inspect and commit one body as a completed turn.
     fn turn(compactor: &Compactor, session: &str, body: &Bytes) {
         let done = compactor.rewrite(session, "claude", true, body.clone());
@@ -2088,14 +2284,24 @@ mod tests {
         let (compactor, notices, _savings) = compactor_with_notices();
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
 
+        // Each turn is committed as its response completes (#1621) — the
+        // accounting a rewrite claims only lands when the turn is billed.
+        let complete = |session: &str, body: &Bytes| {
+            let done = compactor.rewrite(session, "claude", true, body.clone());
+            if let Some(pending) = done.pending.clone() {
+                compactor.commit(session, "claude", pending);
+            }
+            done.body
+        };
+
         assert_eq!(
-            compactor.rewrite("ws", "claude", true, body.clone()).body,
+            complete("ws", &body),
             body,
             "the first eligible turn is held"
         );
         compactor.observe_usage("ws", "claude", &cold_usage(), true);
         assert_eq!(
-            compactor.rewrite("ws", "claude", true, body.clone()).body,
+            complete("ws", &body),
             body,
             "a cold reading is not a baseline, so the turn is held again \
              rather than rewriting with a guard that can never fire"
@@ -2104,7 +2310,7 @@ mod tests {
         // A warm turn is a real baseline, and compaction proceeds from there.
         compactor.observe_usage("ws", "claude", &usage(100, 900), true);
         assert!(
-            compactor.rewrite("ws", "claude", true, body.clone()).body.len() < body.len(),
+            complete("ws", &body).len() < body.len(),
             "with a usable baseline the rewrite proceeds"
         );
 
@@ -2210,7 +2416,11 @@ mod tests {
 
         seed_baseline(&compactor, "ws", &body);
         assert!(
-            compactor.rewrite("ws", "claude", true, body.clone()).body.len() < body.len(),
+            compactor
+                .rewrite("ws", "claude", true, body.clone())
+                .body
+                .len()
+                < body.len(),
             "on: the body is rewritten"
         );
 

@@ -2525,12 +2525,15 @@ impl<T: TerminalAdapter> Model<T> {
                                     })
                                     .unwrap_or(false);
                             let on_header = self.sidebar.cursor_on_repo_header()
-                                || self.sidebar.cursor_on_space_header();
+                                || self.sidebar.cursor_on_space_header()
+                                || self.sidebar.cursor_on_epic_header();
                             let double_on_workspace = is_double && !on_header;
                             if is_double {
                                 self.last_click = None; // consume the pair
                                 if self.sidebar.cursor_on_space_header() {
                                     self.sidebar.toggle_space_at_cursor();
+                                } else if self.sidebar.cursor_on_epic_header() {
+                                    self.sidebar.toggle_epic_at_cursor();
                                 } else if self.sidebar.cursor_on_repo_header() {
                                     self.sidebar.toggle_repo_at_cursor();
                                 }

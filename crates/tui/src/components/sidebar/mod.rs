@@ -158,6 +158,14 @@ pub struct Sidebar {
     /// Spaces the user collapsed. Mirrors `collapsed_repos` one tier up;
     /// persisted to `ui.collapsed_spaces`.
     collapsed_spaces: BTreeSet<String>,
+    /// Live epic snapshots the daemon derived, keyed by epic key (#1517).
+    /// The projection lifts each epic's members into their own cross-repo
+    /// tier and the header renders this snapshot's counts, so the status
+    /// line is always the daemon's, never re-derived here.
+    epics: BTreeMap<String, lazybox_ipc::EpicSnapshot>,
+    /// Epics the user folded. Mirrors `collapsed_spaces`; persisted to
+    /// `ui.collapsed_epics`.
+    collapsed_epics: BTreeSet<String>,
     /// Spaces the user metered (approach C): every workspace under one of
     /// these Spaces routes through the metering proxy. Persisted to
     /// `agent.metered_spaces`, toggled by `x $` on a Space header, read by the
@@ -621,6 +629,8 @@ impl Sidebar {
             focused_workspaces: Vec::new(),
             spaces: Vec::new(),
             collapsed_spaces: BTreeSet::new(),
+            epics: BTreeMap::new(),
+            collapsed_epics: BTreeSet::new(),
             metered_spaces: BTreeSet::new(),
             space_members: BTreeMap::new(),
             source_attention: BTreeMap::new(),
@@ -1387,6 +1397,7 @@ impl Sidebar {
         focused_workspaces: Vec<SessionKey>,
         spaces: Vec<lazybox_config::SpaceConfig>,
         collapsed_spaces: BTreeSet<String>,
+        collapsed_epics: BTreeSet<String>,
         metered_spaces: BTreeSet<String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
@@ -1406,6 +1417,7 @@ impl Sidebar {
             .collect();
         self.spaces = spaces;
         self.collapsed_spaces = collapsed_spaces;
+        self.collapsed_epics = collapsed_epics;
         self.metered_spaces = metered_spaces;
         if let Some(agent) = default_agent.filter(|s| !s.is_empty()) {
             self.default_agent = agent;
@@ -1523,6 +1535,7 @@ impl Sidebar {
             VisibleRow::FocusedHeader
             | VisibleRow::HopperHeader
             | VisibleRow::SpaceHeader(_)
+            | VisibleRow::EpicHeader(_)
             | VisibleRow::RepoHeader(_)
             | VisibleRow::KindHeader(_) => None,
         }
@@ -1872,6 +1885,7 @@ impl Sidebar {
             | Some(VisibleRow::FocusedHeader)
             | Some(VisibleRow::HopperHeader)
             | Some(VisibleRow::SpaceHeader(_))
+            | Some(VisibleRow::EpicHeader(_))
             | Some(VisibleRow::RepoHeader(_))
             | Some(VisibleRow::KindHeader(_)) => {
                 self.set_cursor(idx);
@@ -2131,6 +2145,7 @@ impl Sidebar {
                 row,
                 VisibleRow::RepoHeader(_)
                     | VisibleRow::SpaceHeader(_)
+                    | VisibleRow::EpicHeader(_)
                     | VisibleRow::FocusedHeader
                     | VisibleRow::HopperHeader
             )
@@ -2510,14 +2525,17 @@ impl Sidebar {
         if self.selected_workspace().is_some() {
             return None;
         }
+        if let Some(epic) = self.cursor_epic() {
+            return Some(format!("epic:{epic}"));
+        }
         if self.cursor_on_space_header() {
             return self.cursor_space().map(|s| format!("space:{s}"));
         }
         self.cursor_repo().map(|r| format!("repo:{r}"))
     }
 
-    /// Repo / Space **overview** for the cursor's group when it rests on
-    /// a header row (issue #1442). `None` when the cursor is on a real
+    /// Repo / Space / epic **overview** for the cursor's group when it
+    /// rests on a header row (issue #1442, #1517). `None` when the cursor is on a real
     /// workspace (the pane renders that instead) or on a non-group row
     /// (`★ Focused` / hopper / empty list). A Space header takes
     /// priority over the repo it may also sit under, so a cursor
@@ -2525,6 +2543,15 @@ impl Sidebar {
     pub fn header_overview(&self) -> Option<crate::components::repo_overview::RepoOverview> {
         if self.selected_workspace().is_some() {
             return None;
+        }
+        if let Some(key) = self.cursor_epic() {
+            let snapshot = self.epics.get(key)?;
+            return Some(crate::components::repo_overview::build_epic_overview(
+                snapshot,
+                &self.workspaces,
+                &self.projects,
+                &self.agents,
+            ));
         }
         if self.cursor_on_space_header() {
             let space = self.cursor_space()?;
@@ -3008,9 +3035,12 @@ impl Sidebar {
                     crate::components::visible_rows::project_label(p, &self.workspaces) == *name
                 })
                 .map(|p| p.key.clone()),
-            // The `★ Focused` header isn't a project — starring is a
-            // cross-repo shortlist, not a group you create workspaces in.
-            VisibleRow::FocusedHeader | VisibleRow::HopperHeader => None,
+            // Neither the `★ Focused` header nor an epic header is a
+            // project — both are cross-repo shortlists, not groups you
+            // create workspaces in.
+            VisibleRow::FocusedHeader | VisibleRow::HopperHeader | VisibleRow::EpicHeader(_) => {
+                None
+            }
             // Kind headers (PRs / Issues) don't belong to a single
             // project — they partition workspaces within a project,
             // so the parent project is whichever RepoHeader came
@@ -3516,6 +3546,7 @@ impl Sidebar {
             Some(VisibleRow::FocusedHeader)
             | Some(VisibleRow::HopperHeader)
             | Some(VisibleRow::SpaceHeader(_))
+            | Some(VisibleRow::EpicHeader(_))
             | None => None,
         }
     }
@@ -3545,6 +3576,24 @@ impl Sidebar {
             self.visible.get(self.cursor),
             Some(VisibleRow::SpaceHeader(_))
         )
+    }
+
+    /// True when the cursor rests on an epic header (#1517) — the row
+    /// `Space` folds and the row the right pane answers with an epic
+    /// overview.
+    pub fn cursor_on_epic_header(&self) -> bool {
+        matches!(
+            self.visible.get(self.cursor),
+            Some(VisibleRow::EpicHeader(_))
+        )
+    }
+
+    /// The epic key under the cursor, when the cursor is on an epic header.
+    pub fn cursor_epic(&self) -> Option<&str> {
+        match self.visible.get(self.cursor) {
+            Some(VisibleRow::EpicHeader(key)) => Some(key.as_str()),
+            _ => None,
+        }
     }
 
     /// True when the cursor's repo group is currently collapsed. `None`
@@ -3658,6 +3707,57 @@ impl Sidebar {
             self.set_cursor(idx);
         }
         true
+    }
+
+    /// Toggle the collapsed flag for the epic header under the cursor —
+    /// the epic-tier analogue of [`Self::toggle_space_at_cursor`]. Persists
+    /// to `ui.collapsed_epics` and re-parks the cursor on the toggled header
+    /// so a double-tap toggles the same epic (#1517).
+    pub fn toggle_epic_at_cursor(&mut self) -> bool {
+        let Some(VisibleRow::EpicHeader(key)) = self.visible.get(self.cursor) else {
+            return false;
+        };
+        let key = key.clone();
+        let was_collapsed = self.collapsed_epics.contains(&key);
+        if was_collapsed {
+            self.collapsed_epics.remove(&key);
+        } else {
+            self.collapsed_epics.insert(key.clone());
+        }
+        self.recompute_visible();
+        let op = if was_collapsed {
+            lazybox_config::UiListOp::Remove(key.clone())
+        } else {
+            lazybox_config::UiListOp::Add(key.clone())
+        };
+        lazybox_config::Config::mutate_ui_list(|c| &mut c.ui.collapsed_epics, op);
+        if let Some(idx) = self
+            .visible
+            .iter()
+            .position(|r| matches!(r, VisibleRow::EpicHeader(k) if k == &key))
+        {
+            self.set_cursor(idx);
+        }
+        true
+    }
+
+    /// True when the epic is currently folded (drives `▾` vs `▸`).
+    pub fn is_epic_collapsed(&self, key: &str) -> bool {
+        self.collapsed_epics.contains(key)
+    }
+
+    /// Replace one epic's cached snapshot, re-projecting the tree so its
+    /// members move into (or out of) the epic tier. Called for every
+    /// `Event::EpicStatus`, including the connect-replay burst.
+    pub fn set_epic_snapshot(&mut self, snapshot: lazybox_ipc::EpicSnapshot) {
+        self.epics.insert(snapshot.key.clone(), snapshot);
+        self.recompute_visible();
+    }
+
+    /// The cached snapshot for an epic key, for the header render and the
+    /// epic overview.
+    pub fn epic_snapshot(&self, key: &str) -> Option<&lazybox_ipc::EpicSnapshot> {
+        self.epics.get(key)
     }
 
     /// True when the Space is currently collapsed (used by the header
@@ -4281,9 +4381,11 @@ impl Sidebar {
         // the whole row to re-park on the exact same variant.
         let prior_header = if preserve_header_park {
             match self.visible.get(self.cursor) {
-                Some(row @ (VisibleRow::RepoHeader(_) | VisibleRow::SpaceHeader(_))) => {
-                    Some(row.clone())
-                }
+                Some(
+                    row @ (VisibleRow::RepoHeader(_)
+                    | VisibleRow::SpaceHeader(_)
+                    | VisibleRow::EpicHeader(_)),
+                ) => Some(row.clone()),
                 _ => None,
             }
         } else {
@@ -4307,6 +4409,8 @@ impl Sidebar {
                 focused_workspaces: &self.focused_workspaces,
                 spaces: &self.spaces,
                 collapsed_spaces: &self.collapsed_spaces,
+                epics: &self.epics,
+                collapsed_epics: &self.collapsed_epics,
                 collapsed_tickets: &self.collapsed_tickets,
                 attention: &self.attention,
                 source_attention: &self.source_attention,
@@ -4365,6 +4469,7 @@ impl Sidebar {
                     VisibleRow::FocusedHeader
                     | VisibleRow::HopperHeader
                     | VisibleRow::SpaceHeader(_)
+                    | VisibleRow::EpicHeader(_)
                     | VisibleRow::RepoHeader(_)
                     | VisibleRow::KindHeader(_) => false,
                 };

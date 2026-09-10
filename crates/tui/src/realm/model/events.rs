@@ -1022,6 +1022,10 @@ impl<T: TerminalAdapter> Model<T> {
         if let IpcEvent::EpicStatus { snapshot, .. } = &event {
             let key = snapshot.key.clone();
             self.epic_snapshots.insert(key.clone(), snapshot.clone());
+            // The sidebar keeps its own copy: the epic tier's membership and
+            // wave order are a projection input, so a new snapshot has to
+            // re-run `compute_visible`, not just repaint.
+            self.sidebar.set_epic_snapshot(snapshot.clone());
             self.refresh_open_epic_modal(&key);
         }
         // On a group-header row the right pane shows a repo/Space overview

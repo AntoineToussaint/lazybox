@@ -5918,6 +5918,95 @@ impl GhClient {
     /// Converge one owner/session-qualified claim on an issue or PR. Applying
     /// a heartbeat creates or renames only that identity's repository label,
     /// attaches the desired expiry, and removes superseded expiries for the
+    /// Converge the epic projection labels (#1517 §4j) on a task's issue or
+    /// PR: the `epic:<key>` membership set and the single mutually-exclusive
+    /// derived-status label. Both families go through add/remove — never a
+    /// wholesale replace — so working claims, roles, and user labels are left
+    /// untouched.
+    ///
+    /// `epic_labels` is the full desired membership set (extras are detached);
+    /// `status_label` is the one status label to hold, or `None` to hold none.
+    /// Label *definitions* are created on demand and, like roles, detached
+    /// rather than deleted: both vocabularies are small and reused, so
+    /// churning the repo's label picker would cost more than it saves.
+    ///
+    /// Best effort — the caller treats a failure as non-fatal, because the
+    /// resolver derives status from daemon state and never reads these back.
+    pub async fn sync_epic_labels(
+        &self,
+        task_id: &lazybox_core::TaskId,
+        repo: &str,
+        epic_labels: &[String],
+        status_label: Option<&str>,
+    ) -> Result<(), GhError> {
+        let (owner, name, number) = github_issue_target(task_id, repo)?;
+        let handler = self.inner.issues(owner, name);
+        let _permit = self.acquire_rest("list epic labels").await?;
+        let mut page = handler
+            .list_labels_for_issue(number)
+            .per_page(100)
+            .send()
+            .await
+            .map_err(GhError::Api)?;
+        let mut attached = Vec::new();
+        loop {
+            attached.extend(page.items.iter().map(|label| label.name.clone()));
+            if page.next.is_none() {
+                break;
+            }
+            let _permit = self.acquire_rest("list epic labels next page").await?;
+            page = match self
+                .inner
+                .get_page::<octocrab::models::Label>(&page.next)
+                .await
+                .map_err(GhError::Api)?
+            {
+                Some(next) => next,
+                None => break,
+            };
+        }
+
+        let desired: Vec<&str> = epic_labels
+            .iter()
+            .map(String::as_str)
+            .chain(status_label)
+            .collect();
+        let held: Vec<&str> = attached
+            .iter()
+            .map(String::as_str)
+            .filter(|n| {
+                n.starts_with(lazybox_core::EPIC_LABEL_PREFIX)
+                    || lazybox_core::STATUS_LABELS.contains(n)
+            })
+            .collect();
+
+        for label in desired.iter().filter(|l| !held.contains(l)) {
+            let _permit = self.acquire_rest("create epic label").await?;
+            match handler
+                .create_label(*label, "0e8a16", "lazybox epic projection (#1517).")
+                .await
+            {
+                Ok(_) => {}
+                Err(error) if octocrab_error_status(&error) == Some(422) => {}
+                Err(error) => return Err(GhError::Api(error)),
+            }
+            let _permit = self.acquire_rest("add epic label").await?;
+            handler
+                .add_labels(number, &[(*label).to_string()])
+                .await
+                .map_err(GhError::Api)?;
+        }
+        for label in held.iter().filter(|l| !desired.contains(l)) {
+            let _permit = self.acquire_rest("remove epic label").await?;
+            if let Err(error) = handler.remove_label(number, label).await
+                && octocrab_error_status(&error) != Some(404)
+            {
+                return Err(GhError::Api(error));
+            }
+        }
+        Ok(())
+    }
+
     /// same identity. Clearing removes every attached expiry for that identity.
     pub async fn sync_working_claim_target(
         &self,

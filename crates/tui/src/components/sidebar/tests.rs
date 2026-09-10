@@ -2197,6 +2197,183 @@ mod search_tests {
         );
     }
 
+    /// One-member epic snapshot with the given counts, for the header tests.
+    fn epic_snap(key: &str, name: &str, members: &[&str]) -> lazybox_ipc::EpicSnapshot {
+        lazybox_ipc::EpicSnapshot {
+            key: key.into(),
+            name: name.into(),
+            members: members
+                .iter()
+                .map(|m| lazybox_ipc::EpicMember {
+                    key: lazybox_core::WorkspaceKey::new(*m),
+                    wave: 0,
+                    status: lazybox_ipc::EpicMemberStatus::Ready,
+                    blocked_by: Vec::new(),
+                    external_blockers: Vec::new(),
+                    blockers: Vec::new(),
+                    blocked_reason: None,
+                })
+                .collect(),
+            done: 3,
+            total: 9,
+            ready: 2,
+            blocked: 1,
+            asking: 1,
+            failing: 0,
+            blockers_needing_operator: 1,
+            cycle: false,
+            critical_path: Vec::new(),
+            edges: Vec::new(),
+            merge_order: Vec::new(),
+            policies: lazybox_core::EpicPolicies::default(),
+            computed_at: 0,
+        }
+    }
+
+    fn rendered_rows(sb: &mut Sidebar) -> Vec<String> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let backend = TestBackend::new(90, 12);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal
+            .draw(|frame| sb.render(frame.area(), frame, true))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// The epic header renders the daemon's counts as its status line, with
+    /// the blocked count leading and the operator `!` when one is owed
+    /// (#1517 §4d/§4k).
+    #[test]
+    fn epic_header_renders_the_derived_status_line() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let a = issue_ws_in_repo("acme/api", "1", "token schema");
+        let key = SessionKey::from(&a.key);
+        sb.workspaces.insert(key.clone(), a);
+        sb.set_epic_snapshot(epic_snap("auth", "Auth refactor", &[key.as_str()]));
+
+        let rows = rendered_rows(&mut sb);
+        let header = rows
+            .iter()
+            .find(|r| r.contains("Auth refactor"))
+            .unwrap_or_else(|| panic!("no epic header:\n{}", rows.join("\n")));
+        assert!(
+            header.contains("\u{2297}1!"),
+            "blocked count + operator mark: {header:?}"
+        );
+        assert!(header.contains("?1"), "asking count: {header:?}");
+        assert!(header.contains("3/9"), "done/total: {header:?}");
+    }
+
+    /// Armed autonomy latches ride the header as pills; an epic with nothing
+    /// armed shows none (#1525).
+    #[test]
+    fn epic_header_shows_armed_pills_only() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let a = issue_ws_in_repo("acme/api", "1", "token schema");
+        let key = SessionKey::from(&a.key);
+        sb.workspaces.insert(key.clone(), a);
+
+        let mut snap = epic_snap("auth", "Auth refactor", &[key.as_str()]);
+        assert!(
+            !rendered_rows(&mut {
+                let mut bare = Sidebar::new(PaneId::new(2));
+                bare.workspaces = sb.workspaces.clone();
+                bare.set_epic_snapshot(snap.clone());
+                bare
+            })
+            .iter()
+            .any(|r| r.contains("AUTO")),
+            "nothing armed ⇒ no pill"
+        );
+
+        snap.policies.auto_dispatch = lazybox_core::PolicyArm::Arm;
+        sb.set_epic_snapshot(snap);
+        let rows = rendered_rows(&mut sb);
+        assert!(
+            rows.iter().any(|r| r.contains("AUTO")),
+            "armed latch shows its pill:\n{}",
+            rows.join("\n")
+        );
+    }
+
+    /// `Space` on an epic header folds its members away and keeps the
+    /// header; a second press restores them.
+    #[test]
+    fn toggling_an_epic_header_folds_its_members() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let a = issue_ws_in_repo("acme/api", "1", "token schema");
+        let key = SessionKey::from(&a.key);
+        sb.workspaces.insert(key.clone(), a);
+        sb.set_epic_snapshot(epic_snap("auth", "Auth refactor", &[key.as_str()]));
+
+        let epic_at = sb
+            .visible
+            .iter()
+            .position(|r| matches!(r, VisibleRow::EpicHeader(k) if k == "auth"))
+            .expect("epic header");
+        sb.set_cursor(epic_at);
+        assert!(sb.cursor_on_epic_header());
+
+        assert!(sb.toggle_epic_at_cursor());
+        assert!(sb.is_epic_collapsed("auth"));
+        assert!(
+            !sb.visible
+                .iter()
+                .any(|r| matches!(r, VisibleRow::Workspace(k) if k == &key)),
+            "members hidden while folded"
+        );
+        assert!(
+            sb.visible
+                .iter()
+                .any(|r| matches!(r, VisibleRow::EpicHeader(k) if k == "auth")),
+            "the header — the status line — survives the fold"
+        );
+
+        assert!(sb.toggle_epic_at_cursor());
+        assert!(!sb.is_epic_collapsed("auth"));
+        assert!(
+            sb.visible
+                .iter()
+                .any(|r| matches!(r, VisibleRow::Workspace(k) if k == &key))
+        );
+    }
+
+    /// A cursor on an epic header answers with the epic overview, not the
+    /// repo one (#1517 §4e).
+    #[test]
+    fn epic_header_yields_an_epic_overview() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let a = issue_ws_in_repo("acme/api", "1", "token schema");
+        let key = SessionKey::from(&a.key);
+        sb.workspaces.insert(key.clone(), a);
+        sb.set_epic_snapshot(epic_snap("auth", "Auth refactor", &[key.as_str()]));
+
+        let epic_at = sb
+            .visible
+            .iter()
+            .position(|r| matches!(r, VisibleRow::EpicHeader(_)))
+            .expect("epic header");
+        sb.set_cursor(epic_at);
+
+        assert_eq!(sb.header_group_ident().as_deref(), Some("epic:auth"));
+        let overview = sb.header_overview().expect("overview");
+        assert_eq!(
+            overview.kind,
+            crate::components::repo_overview::OverviewKind::Epic
+        );
+        assert_eq!(overview.title, "Auth refactor");
+        let epic = overview.epic.expect("epic sections");
+        assert_eq!((epic.done, epic.total), (3, 9));
+    }
+
     /// Frame-budget regression gate (#1090, acceptance #4): the sidebar's
     /// per-frame widget build must stay cheap at scale.
     /// `prebuild_workspace_lines` rebuilds every visible row every frame

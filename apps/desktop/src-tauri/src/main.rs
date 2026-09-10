@@ -295,6 +295,10 @@ impl InboxModel {
         // No per-source attention UI on the desktop yet; an empty ladder
         // leaves every source at its default attention (#scale).
         let source_attention = BTreeMap::new();
+        // No epic UI on the desktop yet; an empty map keeps every member in
+        // its repo group and emits no epic tier (#1517).
+        let epics = BTreeMap::new();
+        let collapsed_epics = BTreeSet::new();
         let outcome = inbox::compute_visible(ComputeInputs {
             workspaces: &self.workspaces,
             mailbox: self.mailbox,
@@ -320,6 +324,8 @@ impl InboxModel {
             collapsed_tickets: &std::collections::HashSet::new(),
             attention: &self.attention,
             agents: &self.agents,
+            epics: &epics,
+            collapsed_epics: &collapsed_epics,
             now,
             search: search.as_ref(),
         });

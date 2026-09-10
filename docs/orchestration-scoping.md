@@ -400,6 +400,48 @@ config, and writing the `epic:*` + status projection labels back to the
 tracker (§4j). The desktop protocol version stays at 4 — the desktop DTOs do
 not yet consume `EpicStatus`.
 
+**P1 client boundary shipped (#1517).** The deferred half of P1 landed with
+the epic tier the sidebar was missing. `VisibleRow::EpicHeader(key)` is a new
+tier in the shared projection (`tui_core::inbox`), emitted below the personal
+`★ Focused` / Hopper shortlists and above every Space / repo header; an epic's
+members are lifted out of their repo groups and rendered in the resolver's
+wave order. A workspace already lifted into Focused or Hopper stays there and
+a workspace two epics claim lands under the first, so the tree stays a tree —
+the header's counts come from the snapshot rather than from the rows on
+screen, so the status line reads the same either way. The header line **is**
+the status: blocked first with a `!` when the operator owns one (§4k), then
+asking, failing, ready, and `done/total`, with the armed autonomy pills on the
+title. `Space` folds an epic (persisted to `ui.collapsed_epics`) and the
+header survives the fold, because folding the members must not hide the
+status. A cursor on the header answers with `OverviewKind::Epic` in the
+existing overview pane (§4e): the counts strip, blockers sorted by how much
+work each holds with operator-owned rows leading, the ready queue ranked by
+how many members each unblocks, the merge order with held rows flagged, the
+critical path, and the per-repo rollup.
+
+The label projection (§4j) closes the same phase. `EpicRecord::publish_status_labels`
+finally has a reader: `epics::desired_labels` computes, from the snapshots of
+every live epic in one pass, the `epic:<key>` membership label per member plus
+the single derived-status label, and `sync_epic_labels` converges both
+families through add/remove so working claims, roles and user labels are never
+touched. Only the three coarse buckets are written (`Ready` → `lazybox:ready`,
+`Blocked`/`ReviewBlocked` → `lazybox:blocked`, `Done` → `lazybox:done`); the
+in-between statuses name no label, so a CI tick cannot churn the tracker. A
+member two epics claim carries one membership label per epic, and the
+*blocked* reading wins a status disagreement — a member one epic can start but
+another cannot is, in truth, not startable. An in-memory latch of what was
+last written per member keeps a quiet poll at zero API calls, and is updated
+only on a successful write, so a failure retries on the next pass that touches
+that member. The `epic:<key>` label is also now read as the third membership
+source, so a human or a planner can add a member from GitHub alone — a
+membership hint only, never an input to the resolver, so a stale label from a
+dead daemon can add a row but can never freeze what that row reports.
+
+Still deferred, and deliberately: the overview's inline ASCII DAG (`E g`
+already renders the graph full-screen, and a second layout engine in the pane
+would be a duplicate to keep in sync) and the "recent epic events" section
+(those deltas already land as activity rows on each member's own feed).
+
 **P2 shipped (#1523) — roles.** `Workspace.role: Option<Role>` is a
 serde-defaulted, OR-merge-safe field (`core/src/workspace.rs`);
 `effective_role()` lets the persisted field win and falls back to the

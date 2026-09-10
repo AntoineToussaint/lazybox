@@ -20,9 +20,43 @@ use crate::{TaskId, WorkspaceKey};
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct EpicKey(pub String);
 
+/// Prefix for the upstream epic-membership projection label (#1517 §4j). The
+/// remainder is the epic key (`epic:auth-refactor`). Unlike the derived
+/// status labels this one is read *and* written: a human or a planner can add
+/// a member from GitHub alone. It is a membership hint only — never an input
+/// to the status resolver, so a stale label from a dead daemon cannot freeze
+/// a member's status.
+pub const EPIC_LABEL_PREFIX: &str = "epic:";
+
+/// The three mutually-exclusive derived-status labels (#1517 §4j), written
+/// only when a member's status changes and only for an epic that opted in
+/// with [`EpicRecord::publish_status_labels`]. Write-only: the resolver never
+/// reads them back.
+pub const STATUS_LABEL_READY: &str = "lazybox:ready";
+pub const STATUS_LABEL_BLOCKED: &str = "lazybox:blocked";
+pub const STATUS_LABEL_DONE: &str = "lazybox:done";
+
+/// Every label in the derived-status family, for the converge-by-difference
+/// pass that detaches the ones a member no longer holds.
+pub const STATUS_LABELS: [&str; 3] = [STATUS_LABEL_READY, STATUS_LABEL_BLOCKED, STATUS_LABEL_DONE];
+
 impl EpicKey {
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
+    }
+
+    /// The upstream membership label for this epic (`epic:auth-refactor`) —
+    /// the write side of [`EpicKey::from_project_label`].
+    pub fn project_label(&self) -> String {
+        format!("{EPIC_LABEL_PREFIX}{}", self.0)
+    }
+
+    /// Parse an epic key out of an `epic:<key>` membership label. `None` for
+    /// any name without the prefix or with an empty remainder.
+    pub fn from_project_label(name: &str) -> Option<Self> {
+        name.strip_prefix(EPIC_LABEL_PREFIX)
+            .filter(|rest| !rest.is_empty())
+            .map(Self::new)
     }
 
     pub fn as_str(&self) -> &str {
@@ -128,6 +162,16 @@ mod tests {
         );
         assert_eq!(EpicKey::from_name("🚀").as_str(), "epic");
         assert_eq!(EpicKey::from_name("").as_str(), "epic");
+    }
+
+    #[test]
+    fn project_label_round_trips() {
+        let key = EpicKey::new("auth-refactor");
+        assert_eq!(key.project_label(), "epic:auth-refactor");
+        assert_eq!(EpicKey::from_project_label("epic:auth-refactor"), Some(key));
+        assert_eq!(EpicKey::from_project_label("epic:"), None);
+        assert_eq!(EpicKey::from_project_label("working"), None);
+        assert_eq!(EpicKey::from_project_label("role:worker"), None);
     }
 
     #[test]

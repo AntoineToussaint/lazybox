@@ -1198,7 +1198,7 @@ pub(crate) fn bind_loopback(desired_port: Option<u16>) -> std::io::Result<tokio:
     bind_loopback_port(0)
 }
 
-fn bind_loopback_port(port: u16) -> std::io::Result<tokio::net::TcpListener> {
+pub(crate) fn bind_loopback_port(port: u16) -> std::io::Result<tokio::net::TcpListener> {
     use socket2::{Domain, Protocol, Socket, Type};
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
     socket.set_reuse_address(true)?;
@@ -2445,6 +2445,74 @@ mod tests {
         assert_eq!(notes[0]["text"], format!("note {}", overflow - 1));
         let texts: Vec<&str> = notes.iter().map(|n| n["text"].as_str().unwrap()).collect();
         assert!(!texts.contains(&"note 0"), "oldest note must be pruned");
+    }
+
+    /// **The issue's own repro (#1577), driven through the real retention
+    /// path rather than a simulated eviction.** A producer publishes its
+    /// contract, then keeps posting to its own scope until `post_note`'s prune
+    /// evicts that note. Satisfaction is latched at the first sighting, so the
+    /// consumer's `Contract` edge stays satisfied and the interface is still
+    /// quotable — even though the note it arrived on is gone.
+    #[tokio::test]
+    async fn retention_cannot_un_publish_a_contract() {
+        let handler = LazyboxMcp::new(ServerConfig::in_memory());
+        let config = handler.config.clone();
+        let producer = SessionKey::from("a");
+        // Created at the epoch: the latch ignores a note older than its epic
+        // record, and these notes carry small readable `ts` values.
+        let mut record = lazybox_core::EpicRecord::new(
+            lazybox_core::EpicKey::new("e"),
+            "E",
+            chrono::DateTime::from_timestamp_millis(0).expect("epoch"),
+        );
+        record.members = vec![lazybox_core::WorkspaceKey::new("a")];
+        crate::epics::upsert(&config, record.clone()).await;
+
+        handler
+            .post_note_payload(
+                &producer,
+                "GET /v1/things -> [{id}]".into(),
+                None,
+                vec!["contract".into(), "epic:e".into()],
+                1,
+            )
+            .await
+            .expect("publish the contract");
+
+        // The producer keeps working out loud until its own scope rolls over.
+        for i in 0..NOTES_PER_SCOPE {
+            handler
+                .post_note_payload(
+                    &producer,
+                    format!("progress {i}"),
+                    None,
+                    vec![],
+                    2 + i as i64,
+                )
+                .await
+                .expect("post");
+        }
+        assert!(
+            notes_with_tags(&config, &["contract", "epic:e"]).is_empty(),
+            "retention must actually have evicted the contract note"
+        );
+
+        let latches = crate::epics::LatchInputs::load(&config, std::slice::from_ref(&record));
+        assert_eq!(
+            latches.published_contracts.get("e"),
+            Some(&std::collections::HashSet::from([
+                lazybox_core::WorkspaceKey::new("a")
+            ])),
+            "the contract stays published after its note is pruned"
+        );
+        assert_eq!(
+            crate::epics::list_published_contracts(&config)
+                .into_iter()
+                .map(|row| row.text)
+                .collect::<Vec<_>>(),
+            vec!["GET /v1/things -> [{id}]".to_string()],
+            "and the interface itself survives the note that carried it"
+        );
     }
 
     #[tokio::test]

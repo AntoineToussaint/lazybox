@@ -22,7 +22,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use lazybox_ipc::{AgentRunId, AgentUsage, ProviderQuota, QuotaWindow};
+use lazybox_ipc::{AgentRunId, AgentUsage, ContextAccounting, ProviderQuota, QuotaWindow};
 
 /// Cells in the `▓▓▓░░` progress bar.
 const BAR_WIDTH: usize = 5;
@@ -119,6 +119,11 @@ pub struct UsageTracker {
     /// `session key → accumulated cost (micro-USD)` — per-workspace cost,
     /// the headline number of the canary meter.
     session_cost_micros: BTreeMap<String, u64>,
+    /// `agent id → summed context accounting` (#1606): how much of what this
+    /// agent sent was tool output, and how much of that it had already sent.
+    /// Only proxied requests report it, so an agent absent here is
+    /// unmeasured rather than waste-free.
+    context: BTreeMap<String, ContextAccounting>,
 }
 
 impl UsageTracker {
@@ -189,6 +194,12 @@ impl UsageTracker {
                 .agent_cost_micros
                 .entry(agent_id.to_string())
                 .or_default() += cost;
+        }
+        if let Some(context) = &usage.context {
+            self.context
+                .entry(agent_id.to_string())
+                .or_default()
+                .add(context);
         }
         // Per-workspace attribution, when the proxy path carried a session
         // key (#per-session). The canary meter reads these.
@@ -283,6 +294,15 @@ impl UsageTracker {
             .get(agent_id)
             .copied()
             .filter(|quota| !quota.is_empty())
+    }
+
+    /// Every agent's summed context accounting (#1606), agent-id ordered.
+    /// Only agents whose traffic went through the metering proxy appear.
+    pub fn context_by_agent(&self) -> impl Iterator<Item = (&str, &ContextAccounting)> {
+        self.context
+            .iter()
+            .filter(|(_, context)| context.message_bytes > 0)
+            .map(|(agent, context)| (agent.as_str(), context))
     }
 
     /// Agent ids that have an observed plan-quota — the other half of the
@@ -469,6 +489,7 @@ mod tests {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
             cost_usd_micros: None,
+            context: None,
         }
     }
 
@@ -523,6 +544,7 @@ mod tests {
                 cache_creation_input_tokens: Some(4),
                 cache_read_input_tokens: Some(8),
                 cost_usd_micros: None,
+                context: None,
             },
         );
         tracker.commit_turn(&AgentRunId(7));
@@ -584,6 +606,36 @@ mod tests {
         tracker.observe_session_usage("claude", None, &usage(0, 0));
         assert_eq!(tracker.tokens_for("claude"), 0);
         assert_eq!(tracker.agents_with_usage().count(), 0);
+    }
+
+    /// Context accounting (#1606) accumulates per agent across responses,
+    /// and only proxied agents appear at all — an agent whose traffic never
+    /// went through the proxy is unmeasured, not measured at 0%.
+    #[test]
+    fn context_accounting_sums_per_agent_and_only_for_proxied_traffic() {
+        let mut tracker = UsageTracker::default();
+        let with_context = |message: u64, tool: u64, resent: u64| {
+            let mut u = usage(10, 5);
+            u.context = Some(ContextAccounting {
+                message_bytes: message,
+                tool_result_bytes: tool,
+                tool_result_resent_bytes: resent,
+                large_tool_results: 1,
+            });
+            u
+        };
+        tracker.observe_session_usage("claude", None, &with_context(1_000, 700, 500));
+        tracker.observe_session_usage("claude", None, &with_context(1_000, 700, 600));
+        // Unproxied usage carries none and never mints a row.
+        tracker.observe_session_usage("codex", None, &usage(10, 5));
+
+        let rows: Vec<(&str, Option<u32>, Option<u32>)> = tracker
+            .context_by_agent()
+            .map(|(agent, c)| (agent, c.tool_result_share_pct(), c.resent_share_pct()))
+            .collect();
+        assert_eq!(rows, vec![("claude", Some(70), Some(79))]);
+        let (_, claude) = tracker.context_by_agent().next().expect("claude row");
+        assert_eq!(claude.large_tool_results, 2);
     }
 
     #[test]

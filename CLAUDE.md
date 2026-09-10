@@ -336,9 +336,19 @@ as "do not act on this row unattended", the working-claim exclusion, and
 the SpawnCoordinator. A `Contract: owner/repo#N` marker adds a
 `Contract` edge satisfied by the producer posting a `contract` +
 `epic:<key>` note (not by its task closing) — an unsatisfied one keeps
-the consumer blocked with reason `contract`, and the newest note is
+the consumer blocked with reason `contract`, and the contract is
 quoted into the consumer's Worker preamble behind an
-`<untrusted-content>` fence. `Shift-P` cycle
+`<untrusted-content>` fence. The first sighting of that note is
+**latched** into an `epic-contract:<epic>:<producer>` row (#1577), so
+the blackboard's rolling retention evicting it neither re-blocks the
+consumer nor empties the Worker's brief. The row outlives its epic
+disappearing (it is the only surviving copy of the interface) and is
+written even when the epic is archived at the time; a surviving *older*
+note never overwrites it, since retention prunes per scope while the
+scan reads every scope. Publishing a *changed* interface bumps its
+`revision`; a row or note predating the epic record is dropped, so a
+later epic reusing a name inherits nothing from the earlier one; and a
+`contract` note only drives a recompute when it names a live epic. `Shift-P` cycle
 the activity pane full → summary (a slim one-line count of new activity /
 failing CI) → hidden → full, remembered per workspace with a
 `ui.activity_pane_default` starting mode (auto-hidden when the workspace
@@ -543,13 +553,27 @@ claude-opus-5`) so the pin is checkable (#1568). A `models:` block
 tier replaces the same-alias built-in tier in place and a new alias
 appends, so `tiers: [{alias: L, args: ["--model", "claude-opus-5[1m]"]}]`
 retunes one tier and keeps the rest of the menu plus the built-in
-priority routing. Because an overlay can only add, `replace: true` on
+capability routing. Because an overlay can only add, `replace: true` on
 the block takes it as the whole menu — the way to express a
 *restricted* set (Sonnet only, no `L` chord, no `high` → Opus
 routing); without it, a block that pins a `default` while inheriting a
-priority mapping to a tier it never declared is warned about at daemon
+capability mapping to a tier it never declared is warned about at daemon
 start, since a labelled task would otherwise route around the pinned
-default in silence. The alias is agent-agnostic at the chord — the daemon
+default in silence. A task can also *ask* for a tier: a `best`/`high`/
+`medium`/`low` label (or an `@best`/`@high`/`@medium`/`@low` body
+marker) resolves through `CapabilityTier`
+(`crates/core/src/capability.rs`) and `agents.<id>.models.capability`
+to a model. That is its **only** effect — it is a model-capability
+tier, not a priority: nothing ranks, queues, orders, or schedules work
+by it, and the genuinely-ranking `Priority` on `Task` (Linear's field)
+is a different type that merely shares the word (#1598). The key was
+`models.priority` before the rename; `Config::parse` folds the old
+spelling into `capability` and warns, so the file migrates itself on
+the next save. Config load also names an unrecognized `models` key and
+a capability mapping aimed at a Fable tier — which routing refuses
+outright, so a label can never put a coding task on a writing model —
+and a tier the agent routes nowhere (`best`, unmapped by default)
+reports itself at spawn instead of quietly running the default. The alias is agent-agnostic at the chord — the daemon
 maps it to whatever agent the spawn targets — and the picked tier's
 label rides a `◆ Opus` tab badge. The `a` leader also carries the bulk
 **rate-limit recovery** chord `a R` (restart rate-limited): for every

@@ -206,6 +206,24 @@ fn stat_events_from_event(event: &Event, day: &str) -> Vec<StatEvent> {
             push(stats::INPUT_TOKENS, usage.input_tokens);
             push(stats::OUTPUT_TOKENS, usage.output_tokens);
             push(stats::COST_MICROS, usage.cost_usd_micros);
+            // What that input was made of (#1606) — the fleet-wide half of
+            // the context ratios. Present only for proxied agents, so a
+            // missing bucket means "unmeasured", not "no waste".
+            if let Some(context) = &usage.context {
+                push(stats::CONTEXT_MESSAGE_BYTES, Some(context.message_bytes));
+                push(
+                    stats::CONTEXT_TOOL_RESULT_BYTES,
+                    Some(context.tool_result_bytes),
+                );
+                push(
+                    stats::CONTEXT_RESENT_BYTES,
+                    Some(context.tool_result_resent_bytes),
+                );
+                push(
+                    stats::CONTEXT_LARGE_TOOL_RESULTS,
+                    Some(context.large_tool_results as u64),
+                );
+            }
             out
         }
         _ => Vec::new(),
@@ -257,6 +275,7 @@ mod tests {
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: None,
                 cost_usd_micros: Some(2500),
+                context: None,
             },
         };
         let got = stat_events_from_event(&ev, DAY);
@@ -266,6 +285,60 @@ mod tests {
             metrics,
             vec![(stats::INPUT_TOKENS, 1000), (stats::COST_MICROS, 2500)],
         );
+    }
+
+    /// Proxied usage also carries what the request was made of (#1606), so
+    /// the day's rollup can show the tool-result and re-send shares.
+    #[test]
+    fn context_accounting_expands_to_its_own_metrics() {
+        let ev = Event::AgentSessionUsage {
+            agent_id: "claude".into(),
+            session_key: None,
+            usage: AgentUsage {
+                input_tokens: None,
+                output_tokens: None,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                cost_usd_micros: None,
+                context: Some(lazybox_ipc::ContextAccounting {
+                    message_bytes: 10_000,
+                    tool_result_bytes: 7_100,
+                    tool_result_resent_bytes: 5_800,
+                    large_tool_results: 2,
+                }),
+            },
+        };
+        let got = stat_events_from_event(&ev, DAY);
+        let metrics: Vec<(&str, i64)> = got.iter().map(|s| (s.metric.as_str(), s.value)).collect();
+        assert_eq!(
+            metrics,
+            vec![
+                (stats::CONTEXT_MESSAGE_BYTES, 10_000),
+                (stats::CONTEXT_TOOL_RESULT_BYTES, 7_100),
+                (stats::CONTEXT_RESENT_BYTES, 5_800),
+                (stats::CONTEXT_LARGE_TOOL_RESULTS, 2),
+            ],
+        );
+    }
+
+    /// Unproxied usage carries no context, and mints no context buckets —
+    /// so an absent bucket reads as "unmeasured", never as a measured 0%.
+    #[test]
+    fn usage_without_context_mints_no_context_metrics() {
+        let ev = Event::AgentSessionUsage {
+            agent_id: "claude".into(),
+            session_key: None,
+            usage: AgentUsage {
+                input_tokens: Some(10),
+                output_tokens: None,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                cost_usd_micros: None,
+                context: None,
+            },
+        };
+        let got = stat_events_from_event(&ev, DAY);
+        assert!(got.iter().all(|s| !s.metric.starts_with("context_")));
     }
 
     #[test]

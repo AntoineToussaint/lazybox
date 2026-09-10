@@ -2762,8 +2762,18 @@ impl<T: TerminalAdapter> Model<T> {
         // Daemon-pushed user notice (e.g. auto-cleanup of a merged
         // PR's worktrees). Surface the body in the footer; the OS
         // banner path isn't wired for daemon-originated notices.
+        //
+        // Info, not Hint: `Hint` is the one severity `flash` keeps out
+        // of the durable messages log (#309) because it is meant for
+        // ephemeral UI nudges ("scroll: alt-screen"). Every producer of
+        // this event reports something the DAEMON DID on the user's
+        // behalf — adopted a branch, reaped a session, cleaned
+        // worktrees, refused a model tier — which is exactly what
+        // `Shift-M` exists to keep. As a Hint it faded in 3s, was
+        // displaced by the next flash of any severity, and left no
+        // trace anywhere (#1598).
         if let IpcEvent::Notification { body, .. } = &event {
-            self.flash_hint(body.clone());
+            self.flash_info(body.clone());
         }
         if let IpcEvent::SnippetDelivered {
             terminal_id,

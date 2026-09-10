@@ -915,6 +915,7 @@ mod tests {
             cache_creation_input_tokens: Some(0),
             cache_read_input_tokens: Some(cache_read),
             cost_usd_micros: None,
+            context: None,
         }
     }
 

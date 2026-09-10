@@ -100,9 +100,34 @@ async fn start_proxy_with(
     let quota_sink: proxy::QuotaSink = std::sync::Arc::new(|_, _, _| {});
     let prices = std::sync::Arc::new(std::collections::BTreeMap::new());
     tokio::spawn(proxy::serve(
-        listener, upstreams, sink, quota_sink, prices, compactor,
+        listener, upstreams, sink, quota_sink, prices, compactor, 350,
     ));
     port
+}
+
+/// Like [`mock_upstream`] but serves every connection, so a test can send
+/// more than one request through the proxy.
+async fn mock_upstream_repeating(body: &'static str) -> String {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind mock");
+    let addr = listener.local_addr().expect("mock addr");
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut scratch = [0u8; 65536];
+                let _ = stream.read(&mut scratch).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+    format!("http://{addr}")
 }
 
 #[tokio::test]
@@ -499,6 +524,50 @@ async fn proxy_condenses_old_tool_results_before_the_upstream_sees_them() {
     );
 }
 
+/// The seam invariant where #1606 and #1609 meet: accounting is parsed off
+/// the body the *agent* sent, and the compaction rewrite rebinds those bytes
+/// immediately afterwards. Ordered the other way round, the re-send meter
+/// silently starts describing lazybox's own condensed output instead of the
+/// conversation — plausible numbers, no panic, nothing else to catch it.
+#[tokio::test]
+async fn the_accounting_measures_what_the_agent_sent_not_the_rewrite() {
+    let (captured, sink) = recording_sink();
+    let (upstream, seen) = mock_upstream_recording(WARM_CACHE_TURN).await;
+    let port = start_proxy_with(upstream, sink, compactor(lazybox_core::CompactionMode::On)).await;
+
+    let sent = conversation_body(8);
+    post_conversation(port, "github-acme-widget-7", sent.clone()).await;
+    post_conversation(port, "github-acme-widget-7", sent.clone()).await;
+
+    let forwarded_len = {
+        let requests = seen.lock().expect("lock");
+        upstream_body(&requests[1]).len()
+    };
+    assert!(
+        forwarded_len < sent.len(),
+        "precondition: the second turn was actually rewritten"
+    );
+
+    let captured = captured.lock().expect("lock");
+    let first = captured[0].2.context.expect("the first turn was measured");
+    let second = captured[1].2.context.expect("the second turn was measured");
+
+    assert_eq!(
+        (second.message_bytes, second.tool_result_bytes),
+        (first.message_bytes, first.tool_result_bytes),
+        "the agent sent byte-identical bodies, so both turns account identically"
+    );
+    assert_eq!(
+        second.tool_result_resent_bytes, second.tool_result_bytes,
+        "every block was a mechanical re-send — the signal #1606 exists to report"
+    );
+    assert!(
+        second.tool_result_bytes > forwarded_len as u64,
+        "accounting describes the {} bytes the agent sent, not the {forwarded_len} forwarded",
+        second.tool_result_bytes,
+    );
+}
+
 /// Shadow mode is the evidence-gathering mode: it must never change what
 /// crosses the wire, or the evidence is worthless.
 #[tokio::test]
@@ -526,4 +595,175 @@ async fn shadow_mode_forwards_the_original_bytes() {
             "shadow mode leaves the body byte-identical"
         );
     }
+}
+
+/// The re-send meter, end to end (#1606): the accounting is read off the
+/// *request* body and rides the response's usage event, and the same
+/// tool_result block is fresh the first time a session sends it and a
+/// mechanical re-send every time after.
+#[tokio::test]
+async fn proxy_meters_the_tool_result_share_and_flags_a_re_send() {
+    let response_body = "event: message_start\n\
+        data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1200,\"output_tokens\":1}}}\n\n\
+        data: [DONE]\n\n";
+    let (captured, sink) = recording_sink();
+    let upstream = mock_upstream_repeating(response_body).await;
+    let port = start_proxy(upstream, sink).await;
+
+    let request_body = serde_json::json!({
+        "model": "claude-opus-5",
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": "run the tests"}]},
+            {"role": "user", "content": [{
+                "type": "tool_result",
+                "tool_use_id": "toolu_1",
+                "content": "a".repeat(4096),
+            }]},
+        ]
+    })
+    .to_string();
+
+    let client = reqwest::Client::new();
+    for _ in 0..2 {
+        let response = client
+            .post(format!(
+                "http://127.0.0.1:{port}/anthropic/claude/github-o-r-42/v1/messages"
+            ))
+            .body(request_body.clone())
+            .send()
+            .await
+            .expect("proxy request");
+        assert!(response.status().is_success());
+        // Drain the body so the tee finishes and the sink fires.
+        let _ = response.text().await.expect("body");
+    }
+
+    let captured = captured.lock().expect("lock");
+    assert_eq!(captured.len(), 2, "one metered response per request");
+
+    let first = captured[0].2.context.expect("first request measured");
+    assert!(
+        first.tool_result_bytes > 4_000 && first.message_bytes > first.tool_result_bytes,
+        "the tool_result block is a share of the payload: {first:?}"
+    );
+    assert_eq!(
+        first.tool_result_resent_bytes, 0,
+        "the block's first send is not a re-send"
+    );
+
+    let second = captured[1].2.context.expect("second request measured");
+    assert_eq!(
+        second.tool_result_resent_bytes, second.tool_result_bytes,
+        "the identical block is wholly a re-send the second time"
+    );
+    assert_eq!(second.resent_share_pct(), Some(100));
+}
+
+/// A session that never sends tool output measures at 0% — distinct from
+/// an unmeasured (unproxied, or unrecognized-shape) request, which carries
+/// no accounting at all.
+#[tokio::test]
+async fn a_request_without_a_conversation_array_carries_no_accounting() {
+    let response_body = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}}\n\n";
+    let (captured, sink) = recording_sink();
+    let upstream = mock_upstream(response_body).await;
+    let port = start_proxy(upstream, sink).await;
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!(
+            "http://127.0.0.1:{port}/anthropic/claude/github-o-r-42/v1/messages"
+        ))
+        .body("{\"model\":\"claude-opus-5\"}")
+        .send()
+        .await
+        .expect("proxy request");
+    let _ = response.text().await.expect("body");
+
+    let captured = captured.lock().expect("lock");
+    assert_eq!(captured.len(), 1);
+    assert!(
+        captured[0].2.context.is_none(),
+        "no conversation array → nothing measured, not a measured zero"
+    );
+}
+
+/// An upstream that answers each successive connection with the next body in
+/// `bodies`, so one proxy — one seen-set — can serve a sequence of differently
+/// shaped responses.
+async fn mock_upstream_sequence(bodies: Vec<&'static str>) -> String {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("bind mock");
+    let addr = listener.local_addr().expect("mock addr");
+    tokio::spawn(async move {
+        let mut bodies = bodies.into_iter();
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let Some(body) = bodies.next() else { break };
+            tokio::spawn(async move {
+                let mut scratch = [0u8; 65536];
+                let _ = stream.read(&mut scratch).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+                let _ = stream.flush().await;
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+/// The re-send meter must not be poisoned by requests that are never billed
+/// (#1606). Claude Code preflights `count_tokens` with the whole transcript,
+/// and retries the same body verbatim after a 429 — neither reports usage. If
+/// those marked their blocks as sent, the *first* real send of every block
+/// would be reported as a mechanical re-send and the headline ratio would read
+/// ~100% for every session.
+#[tokio::test]
+async fn an_unbilled_request_does_not_consume_a_blocks_first_send() {
+    let (captured, sink) = recording_sink();
+    let upstream = mock_upstream_sequence(vec![
+        // A `count_tokens` preflight: no `usage` object, nothing metered.
+        "{\"input_tokens\":2095}",
+        // A 429 the agent will retry: also no usage.
+        "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\"}}",
+        // The real turn, carrying the same transcript.
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1200,\"output_tokens\":1}}}\n\n",
+    ])
+    .await;
+    let port = start_proxy(upstream, sink).await;
+
+    let body = serde_json::json!({
+        "model": "claude-opus-5",
+        "messages": [{"role": "user", "content": [{
+            "type": "tool_result",
+            "tool_use_id": "toolu_1",
+            "content": "a".repeat(4096),
+        }]}]
+    })
+    .to_string();
+
+    let client = reqwest::Client::new();
+    for path in ["/v1/messages/count_tokens", "/v1/messages", "/v1/messages"] {
+        let response = client
+            .post(format!(
+                "http://127.0.0.1:{port}/anthropic/claude/github-o-r-42{path}"
+            ))
+            .body(body.clone())
+            .send()
+            .await
+            .expect("proxy request");
+        let _ = response.text().await.expect("body");
+    }
+
+    let captured = captured.lock().expect("lock");
+    assert_eq!(captured.len(), 1, "only the billed turn reports usage");
+    let context = captured[0].2.context.expect("the billed turn was measured");
+    assert_eq!(
+        context.tool_result_resent_bytes, 0,
+        "an unbilled preflight/retry must not consume the block's first send",
+    );
 }

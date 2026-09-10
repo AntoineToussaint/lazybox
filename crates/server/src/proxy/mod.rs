@@ -11,6 +11,11 @@
 //! no structured `AgentUsage`) and the one that finally captures Codex
 //! (#1109).
 //!
+//! The request side is read too, but only for accounting: `context_parse`
+//! measures how much of each request body is tool output and how much of
+//! that the session had already sent (#1606), and that measurement rides
+//! the same usage event. Nothing about the body is rewritten.
+//!
 //! Attribution rides the URL path: the injected base URL carries
 //! `/<provider>/<agent-id>`, so the proxy knows which agent a request
 //! belongs to and which upstream to forward it to without inspecting the
@@ -26,6 +31,7 @@
 //! why the rewrite carries its own kill switch.
 
 mod compaction;
+mod context_parse;
 mod quota_parse;
 mod usage_parse;
 
@@ -65,14 +71,39 @@ pub fn port() -> Option<u16> {
     PROXY_PORT.get().copied()
 }
 
-/// kv key holding the last loopback port, reused on restart so a metered
-/// agent that survived the restart keeps resolving its baked
-/// `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`.
-const PORT_KV_KEY: &str = "proxy:port";
+/// kv key holding the loopback ports metered agents have recently been
+/// baked with, most-recent first. Reclaimed on restart so a metered agent
+/// that survived it keeps resolving its `ANTHROPIC_BASE_URL` /
+/// `OPENAI_BASE_URL` instead of retry-looping on a dead port.
+///
+/// A list rather than a single cell because it has **multiple writers**: the
+/// standalone-daemon pid guard only skips the embedded *socket* bind, so
+/// `lazybox server start` plus a `lazybox` TUI launch runs two daemons
+/// against one store, each binding a proxy of its own. A cell let the second
+/// daemon's (individually correct) fallback erase the first's live port, and
+/// the first then restored the stale value on its next restart — #1616.
+///
+/// Appending instead of overwriting also removes the need to know *which*
+/// daemon a remembered port belongs to. A restarted daemon cannot recognise
+/// its own previous incarnation — role, pid file, and start order are all
+/// guesses that invert when the other daemon stops first — so it doesn't
+/// guess: it claims the first port in the list that will still bind. The
+/// ports a living peer is serving are exactly the ones that refuse, which
+/// makes the kernel, not a heuristic, the arbiter of ownership.
+const PORTS_KV_KEY: &str = "proxy:ports";
 
-/// Bind the proxy's loopback listener, **reusing the port persisted by the
-/// previous daemon** when it is free (falling back to an ephemeral one with a
-/// warning), and persist whatever was bound for the next restart.
+/// The pre-#1616 single-port key, read once to seed the list so metered
+/// agents spawned before the upgrade keep reaching the proxy across it.
+const LEGACY_PORT_KV_KEY: &str = "proxy:port";
+
+/// How many ports to remember. A daemon only takes a new one when its
+/// previous port is contended at startup, so this spans far more restarts
+/// than a metered agent survives.
+const PORT_HISTORY: usize = 8;
+
+/// Bind the proxy's loopback listener, **reclaiming a port a previous daemon
+/// baked into live agents** when one is still free, and record whatever was
+/// bound for the next restart.
 ///
 /// The port is baked into every metered agent's `*_BASE_URL` environment at
 /// spawn, and a lazybox restart keeps those agent processes alive (session
@@ -81,29 +112,70 @@ const PORT_KV_KEY: &str = "proxy:port";
 /// stuck until respawn. Mirrors the MCP endpoint, which bakes its URL the
 /// same way and solved this the same way (#1420).
 pub(crate) async fn bind_listener(config: &crate::ServerConfig) -> Option<(TcpListener, u16)> {
-    let prior = restore_port(config).await;
-    let listener = match crate::mcp::bind_loopback(prior) {
+    let known = restore_ports(config).await;
+    let bound = claim_known_port(&known).or_else(|| {
+        if !known.is_empty() {
+            tracing::warn!(
+                ?known,
+                "every remembered proxy port is taken — agents that survived the restart keep \
+                 dialing theirs until respawn; binding a fresh port"
+            );
+        }
+        bind_fresh()
+    })?;
+    let (listener, port) = bound;
+    persist_port(config, port).await;
+    Some((listener, port))
+}
+
+/// Take the most recent remembered port that still binds. A port that
+/// refuses is being served by a peer daemon this store shares — its agents
+/// depend on it, so it is skipped rather than contended for.
+fn claim_known_port(known: &[u16]) -> Option<(TcpListener, u16)> {
+    known
+        .iter()
+        .copied()
+        .find_map(|port| match crate::mcp::bind_loopback_port(port) {
+            Ok(listener) => Some((listener, port)),
+            Err(error) => {
+                tracing::debug!(port, %error, "remembered proxy port is held; trying the next");
+                None
+            }
+        })
+}
+
+fn bind_fresh() -> Option<(TcpListener, u16)> {
+    let listener = match crate::mcp::bind_loopback_port(0) {
         Ok(listener) => listener,
         Err(error) => {
             tracing::warn!("metering proxy failed to bind: {error}");
             return None;
         }
     };
-    let port = match listener.local_addr() {
-        Ok(addr) => addr.port(),
+    match listener.local_addr() {
+        Ok(addr) => Some((listener, addr.port())),
         Err(error) => {
             tracing::warn!("metering proxy local_addr failed: {error}");
-            return None;
+            None
         }
-    };
-    persist_port(config, port).await;
-    Some((listener, port))
+    }
 }
 
 async fn persist_port(config: &crate::ServerConfig, port: u16) {
-    let value = port.to_string();
     if let Err(error) = crate::store_blocking(&config.store, move |store| {
-        store.set_kv(PORT_KV_KEY, &value)
+        // Re-read rather than reuse the list loaded before the bind: two
+        // daemons starting together would otherwise each write back a list
+        // missing the other's port, and a port dropped from the list is one
+        // its daemon can no longer reclaim for its live agents.
+        let mut ports = vec![port];
+        ports.extend(read_ports(store).into_iter().filter(|known| *known != port));
+        ports.truncate(PORT_HISTORY);
+        let value = ports
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        store.set_kv(PORTS_KV_KEY, &value)
     })
     .await
     {
@@ -111,11 +183,25 @@ async fn persist_port(config: &crate::ServerConfig, port: u16) {
     }
 }
 
-async fn restore_port(config: &crate::ServerConfig) -> Option<u16> {
-    match crate::store_blocking(&config.store, |store| store.get_kv(PORT_KV_KEY)).await {
-        Ok(Some(raw)) => raw.trim().parse().ok(),
-        _ => None,
+async fn restore_ports(config: &crate::ServerConfig) -> Vec<u16> {
+    crate::store_blocking(&config.store, read_ports).await
+}
+
+fn read_ports(store: &dyn lazybox_store::Store) -> Vec<u16> {
+    if let Ok(Some(raw)) = store.get_kv(PORTS_KV_KEY) {
+        return parse_ports(&raw);
     }
+    match store.get_kv(LEGACY_PORT_KV_KEY) {
+        Ok(Some(raw)) => parse_ports(&raw),
+        _ => Vec::new(),
+    }
+}
+
+fn parse_ports(raw: &str) -> Vec<u16> {
+    raw.split(',')
+        .filter_map(|port| port.trim().parse().ok())
+        .filter(|port| *port != 0)
+        .collect()
 }
 
 /// Callback invoked once per upstream response that carried usage, with the
@@ -228,6 +314,13 @@ struct ProxyState {
     prices: usage_parse::PriceOverrides,
     /// The context-hygiene pass over request bodies (#1609).
     compactor: Arc<Compactor>,
+    /// Tool-result blocks each session has already sent, so a repeat is
+    /// recognizable as a re-send (#1606). Bounded per session and across
+    /// sessions.
+    seen_blocks: std::sync::Mutex<context_parse::SeenStore>,
+    /// Line count above which a tool result counts as large
+    /// (`agent.context_hygiene.min_lines`).
+    large_tool_result_lines: usize,
 }
 
 /// Start the metering proxy when `agent.metering_proxy` is on: bind a
@@ -305,7 +398,17 @@ pub async fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHand
 
     tracing::info!("metering proxy listening on 127.0.0.1:{port}");
     Some(tokio::spawn(serve(
-        listener, upstreams, sink, quota_sink, prices, compactor,
+        listener,
+        upstreams,
+        sink,
+        quota_sink,
+        prices,
+        compactor,
+        // The line floor comes from the shared context-hygiene policy
+        // (#1611), which is also what the compaction pass gates its rewrite
+        // on — so "large" means one thing, and the count of candidates can't
+        // drift from the set that gets rewritten.
+        cfg.agent.context_hygiene.min_lines,
     )))
 }
 
@@ -324,6 +427,7 @@ pub async fn serve(
     quota_sink: QuotaSink,
     prices: usage_parse::PriceOverrides,
     compactor: Arc<Compactor>,
+    large_tool_result_lines: usize,
 ) {
     let state = Arc::new(ProxyState {
         client: reqwest::Client::new(),
@@ -332,6 +436,8 @@ pub async fn serve(
         quota_sink,
         prices,
         compactor,
+        seen_blocks: std::sync::Mutex::new(context_parse::SeenStore::default()),
+        large_tool_result_lines,
     });
     loop {
         let (stream, _) = match listener.accept().await {
@@ -466,6 +572,19 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
         }
     };
 
+    // What this request is *made of* (#1606), parsed off the body already
+    // buffered for forwarding. Only the parse happens here; the blocks are
+    // folded into the session's seen-set at the far end, together with the
+    // usage report, so that only a *billed* request consumes a block's first
+    // send — see the fold below.
+    //
+    // This must stay *above* the compaction rewrite below: `rewrite` rebinds
+    // `body_bytes` to lazybox's own output, so measuring after it would
+    // report the proxy's rewrite as the conversation the agent sent — a
+    // silent instrumentation lie, with plausible numbers and no test to
+    // catch it.
+    let measured = context_parse::measure(&body_bytes, state.large_tool_result_lines);
+
     // The one place the proxy is not transparent: old, large tool results
     // are condensed before the expensive model ever sees them (#1609).
     // `off` and `shadow` hand the original bytes straight back.
@@ -517,7 +636,6 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
     // wrong partial is worse than a missing one for a cost meter. The gap is
     // bounded to interrupted turns and documented rather than guessed.
     let sink = state.sink.clone();
-    let compactor = state.compactor.clone();
     let accumulator = {
         let acc = UsageAccumulator::with_prices(state.prices.clone());
         if count_only { acc.counting_only() } else { acc }
@@ -526,7 +644,7 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
         (
             upstream.bytes_stream(),
             accumulator,
-            Some((sink, compactor, agent_id, session, compacted.measured)),
+            Some((state, sink, agent_id, session, measured, compacted.measured)),
         ),
         |(mut bytes, mut acc, mut pending)| async move {
             match bytes.next().await {
@@ -539,10 +657,28 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
                     Some((Err(BoxErr::from(error)), (bytes, acc, pending)))
                 }
                 None => {
-                    if let Some((sink, compactor, agent_id, session, measured)) = pending.take()
-                        && let Some(usage) = acc.finish()
+                    if let Some((state, sink, agent_id, session, measured, judged)) = pending.take()
+                        && let Some(mut usage) = acc.finish()
                     {
-                        compactor.observe_usage(&session, &agent_id, &usage, measured);
+                        // Fold the request's blocks into the session's
+                        // seen-set only now, on the same condition that
+                        // reports usage: a request the provider never billed
+                        // must not consume a block's first send. Claude Code
+                        // preflights `count_tokens` with the whole transcript
+                        // and retries the same body after a 429 — neither
+                        // reports usage, and folding those would make the
+                        // *first* real send of every block read as a
+                        // mechanical re-send.
+                        usage.context = measured.map(|measured| {
+                            let mut store = state
+                                .seen_blocks
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            measured.against(store.entry(&format!("{agent_id}/{session}")))
+                        });
+                        state
+                            .compactor
+                            .observe_usage(&session, &agent_id, &usage, judged);
                         sink(&agent_id, &session, usage);
                     }
                     None
@@ -562,76 +698,196 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
 mod tests {
     use super::*;
 
-    /// The restart case: the proxy's port is persisted, and a fresh daemon
-    /// (fresh listener, same store) binds the SAME port back — so a metered
-    /// agent that survived the restart with `…BASE_URL=http://127.0.0.1:PORT`
-    /// baked in keeps reaching the proxy instead of "connection refused".
-    /// When the port is genuinely taken, it falls back to a fresh one and
-    /// persists that instead, so the next restart converges again.
+    /// A fresh install has nothing to reclaim: it takes an ephemeral port and
+    /// remembers it, so the next restart has something to come back to.
     #[tokio::test]
-    async fn bind_listener_reuses_the_persisted_port_across_a_restart() {
+    async fn a_fresh_install_binds_and_remembers_an_ephemeral_port() {
         let config = crate::ServerConfig::in_memory();
+        let (_listener, port) = bind_listener(&config).await.expect("first bind");
+        assert_eq!(restore_ports(&config).await, vec![port]);
+    }
 
-        // The freed port is only ours to reclaim if nothing else on the host
-        // takes it in the window between the drop and the rebind — and a
-        // just-released ephemeral port is exactly what the next ephemeral
-        // bind anywhere on the box is handed. `bind_listener` answers a lost
-        // race by falling back to a fresh port, which is correct behaviour
-        // but indistinguishable here from "reuse is broken", so retry on a
-        // fresh port instead of asserting we win the race.
-        //
-        // The budget is larger than the sibling `mcp::bind_loopback` test's:
-        // that one closes its window with a bare syscall, while
-        // `bind_listener` reads the store before binding, so a
-        // `spawn_blocking` hop sits inside this window and widens it under
-        // exactly the load that loses the race.
-        //
-        // Each round demands the port back twice. Reuse that works wins both
-        // rebinds; a `bind_listener` that stopped threading the persisted
-        // value through would have to be handed the same ephemeral port by
-        // coincidence twice over, so retrying cannot buy a regression a
-        // lucky draw.
-        let mut reclaimed = None;
-        for _ in 0..32 {
-            // Whatever is persisted now is what this binds and re-persists:
-            // nothing on the first round, the previous round's fallback on
-            // every round after it.
-            let (first, port) = bind_listener(&config).await.expect("first bind");
-            assert_eq!(
-                restore_port(&config).await,
-                Some(port),
-                "the bound port must be persisted for the next restart"
-            );
-            drop(first);
+    /// The restart case (#1530): a fresh daemon on the same store binds the
+    /// remembered port back, so a metered agent that survived the restart
+    /// with `…BASE_URL=http://127.0.0.1:PORT` baked in keeps reaching the
+    /// proxy instead of "connection refused". When that port is genuinely
+    /// taken, it falls back to a fresh one and remembers it *beside* the one
+    /// still in use rather than replacing it.
+    #[tokio::test]
+    async fn a_restart_reclaims_the_remembered_port_and_a_held_one_falls_back() {
+        for attempt in 0..8 {
+            let config = crate::ServerConfig::in_memory();
+            let remembered = free_static_ports(22000 + attempt * 100, 1)[0];
+            config
+                .store
+                .set_kv(PORTS_KV_KEY, &remembered.to_string())
+                .expect("seed history");
 
-            // Second daemon on the same store: same port comes back.
-            let (second, reused) = bind_listener(&config).await.expect("rebind");
-            if reused != port {
+            let (held, reused) = bind_listener(&config).await.expect("rebind");
+            if reused != remembered {
+                // Something on this host took the port in the window where it
+                // was released; try a different one rather than assert we win
+                // that race (#1602). A lucky draw cannot make a broken wiring
+                // pass here the way it could for an ephemeral port: a
+                // `bind_listener` that stopped reading the history binds an
+                // ephemeral port, never one of these candidates.
                 continue;
             }
-            drop(second);
-            let (third, again) = bind_listener(&config).await.expect("second rebind");
-            if again == port {
-                reclaimed = Some((third, port));
-                break;
+            assert_eq!(
+                restore_ports(&config).await,
+                vec![remembered],
+                "the reused port must be re-recorded so the next restart converges"
+            );
+
+            // Still held (a peer daemon never released it) → fresh port,
+            // recorded in front of the one whose agents still depend on it.
+            let (_next, fallback) = bind_listener(&config).await.expect("fallback bind");
+            assert_ne!(
+                fallback, remembered,
+                "a held port falls back to a fresh one"
+            );
+            assert_eq!(restore_ports(&config).await, vec![fallback, remembered]);
+            drop(held);
+            return;
+        }
+        panic!(
+            "the remembered port was never reclaimed — either bind_listener \
+             stopped reading the history, or every candidate port was taken \
+             by another process on this host"
+        );
+    }
+
+    /// #1616, and the sequence that a per-daemon *slot* scheme got wrong: two
+    /// daemons share a store, and whichever restarts first must come back on
+    /// the port ITS live metered agents were baked with — including the
+    /// second daemon restarting after the first has stopped, where any
+    /// role-derived identity flips and hands it the other daemon's port.
+    ///
+    /// Nothing here identifies a daemon. Each simply claims the most recent
+    /// remembered port that still binds, and a port a living peer is serving
+    /// refuses to bind — so the kernel resolves ownership.
+    #[tokio::test]
+    async fn each_daemon_reclaims_its_own_port_when_the_other_restarts() {
+        for attempt in 0..8 {
+            let config = crate::ServerConfig::in_memory();
+            // Static ports: an ephemeral one can be handed to a sibling test
+            // in the window where this test releases it to simulate a
+            // restart. A candidate lost anyway is retried, not asserted on.
+            let ports = free_static_ports(23000 + attempt * 100, 2);
+            config
+                .store
+                .set_kv(PORTS_KV_KEY, &format!("{},{}", ports[0], ports[1]))
+                .expect("seed history");
+
+            // Daemon A claims the front of the history; its agents are baked
+            // with `a_port`. B starts beside it: A holds that port, so B
+            // takes the next.
+            let (a, a_port) = bind_listener(&config).await.expect("daemon A binds");
+            let (b, b_port) = bind_listener(&config).await.expect("daemon B binds");
+            if (a_port, b_port) != (ports[0], ports[1]) {
+                continue;
+            }
+            assert_eq!(
+                restore_ports(&config).await,
+                vec![b_port, a_port],
+                "a peer's bind appends to the history instead of erasing it"
+            );
+
+            // A stops, B restarts: B must reclaim `b_port`, NOT the port A's
+            // agents are still baked with, even though `a_port` is free now.
+            drop(a);
+            drop(b);
+            let (b_again, b_reclaimed) = bind_listener(&config).await.expect("B restarts");
+            assert_eq!(b_reclaimed, b_port, "B comes back on its own port");
+
+            // A restarts too and finds its own port waiting behind B's.
+            let (_a_again, a_reclaimed) = bind_listener(&config).await.expect("A restarts");
+            assert_eq!(a_reclaimed, a_port, "A comes back on its own port");
+            drop(b_again);
+            return;
+        }
+        panic!("every candidate port pair was taken by another process on this host");
+    }
+
+    /// The upgrade itself must not strand agents: a store written by the
+    /// pre-#1616 code carries a single `proxy:port`, and the metered agents
+    /// alive across the upgrade are baked with it. Seed the history from it
+    /// so the first run of the new code reclaims it rather than binding fresh.
+    #[tokio::test]
+    async fn the_pre_1616_single_port_key_seeds_the_history() {
+        for attempt in 0..8 {
+            let config = crate::ServerConfig::in_memory();
+            let legacy = free_static_ports(21000 + attempt * 100, 1)[0];
+            config
+                .store
+                .set_kv(LEGACY_PORT_KV_KEY, &legacy.to_string())
+                .expect("seed the legacy key");
+
+            let (_listener, bound) = bind_listener(&config).await.expect("bind");
+            if bound != legacy {
+                continue;
+            }
+            assert_eq!(
+                restore_ports(&config).await,
+                vec![legacy],
+                "the pre-upgrade port is carried into the history"
+            );
+            return;
+        }
+        panic!("every candidate port was taken by another process on this host");
+    }
+
+    /// Free ports from `base`, outside every platform's ephemeral range so a
+    /// sibling test's ephemeral bind can never be handed one between a
+    /// release here and the reclaim under test. Each caller scans its own
+    /// range, so two tests running in parallel cannot pick the same port.
+    /// The probes are held until all are found, then released together, so
+    /// the ports are distinct.
+    fn free_static_ports(base: u16, count: usize) -> Vec<u16> {
+        let mut held = Vec::new();
+        for port in base..base + 100 {
+            if let Ok(listener) = crate::mcp::bind_loopback_port(port) {
+                held.push((listener, port));
+            }
+            if held.len() == count {
+                return held.iter().map(|(_, port)| *port).collect();
             }
         }
-        let (held, port) = reclaimed.expect(
-            "the persisted port was never reused across a restart — either \
-             bind_listener stopped threading it through, or every attempt \
-             lost the freed port to another process on this host",
-        );
-        assert_eq!(
-            restore_port(&config).await,
-            Some(port),
-            "the reused port must be re-persisted so the next restart converges"
-        );
+        panic!("no {count} free static ports from {base}");
+    }
 
-        // Port still held (daemon didn't release it) → fresh port, persisted.
-        let (_fourth, fallback) = bind_listener(&config).await.expect("fallback bind");
-        assert_ne!(fallback, port, "a held port falls back to a fresh one");
-        assert_eq!(restore_port(&config).await, Some(fallback));
-        drop(held);
+    #[test]
+    fn the_port_history_is_bounded_and_ignores_junk() {
+        assert_eq!(parse_ports("7777, 8888,9999"), vec![7777, 8888, 9999]);
+        // A truncated / half-written value contributes what it can rather
+        // than throwing away ports that live agents still depend on.
+        assert_eq!(parse_ports("7777,,not-a-port,0,8888"), vec![7777, 8888]);
+        assert!(parse_ports("").is_empty());
+    }
+
+    /// The history is capped, and re-binding a port already in it moves that
+    /// port to the front instead of appending a duplicate — otherwise a few
+    /// restarts would push a live agent's port off the end of the list.
+    #[tokio::test]
+    async fn rebinding_a_known_port_promotes_it_without_growing_the_history() {
+        let config = crate::ServerConfig::in_memory();
+        let history: Vec<String> = (1..=PORT_HISTORY + 2)
+            .map(|n| (40000 + n as u16).to_string())
+            .collect();
+        config
+            .store
+            .set_kv(PORTS_KV_KEY, &history.join(","))
+            .expect("seed history");
+
+        let (_listener, bound) = bind_listener(&config).await.expect("bind");
+        let stored = restore_ports(&config).await;
+        assert_eq!(stored.first().copied(), Some(bound));
+        assert_eq!(
+            stored.iter().filter(|port| **port == bound).count(),
+            1,
+            "the reclaimed port is promoted, not duplicated"
+        );
+        assert!(stored.len() <= PORT_HISTORY);
     }
 
     #[test]

@@ -978,6 +978,7 @@ fn all_events() -> Vec<Event> {
                 cache_creation_input_tokens: Some(3),
                 cache_read_input_tokens: Some(4),
                 cost_usd_micros: Some(1234),
+                context: None,
             },
         },
         Event::AgentSessionUsage {
@@ -989,6 +990,7 @@ fn all_events() -> Vec<Event> {
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: Some(50),
                 cost_usd_micros: Some(4321),
+                context: None,
             },
         },
         Event::AgentProviderQuota {

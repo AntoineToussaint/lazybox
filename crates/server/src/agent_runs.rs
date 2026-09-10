@@ -840,6 +840,7 @@ impl StreamEventMapper {
                         cache_creation_input_tokens,
                         cache_read_input_tokens,
                         cost_usd_micros: None,
+                        context: None,
                     },
                 });
             }
@@ -938,6 +939,7 @@ fn agent_usage_from_value(raw: &Value) -> Option<AgentUsage> {
             .or_else(|| raw.get("cached_input_tokens"))
             .and_then(Value::as_u64),
         cost_usd_micros: None,
+        context: None,
     })
 }
 

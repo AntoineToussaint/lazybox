@@ -364,6 +364,12 @@ impl Sidebar {
             .add_agent_session_usage(agent_id, session_key, usage);
     }
 
+    /// Per-agent context accounting (#1606) — the tool-result and re-send
+    /// shares of what each proxied agent has sent.
+    pub fn agent_context(&self) -> Vec<(String, lazybox_ipc::ContextAccounting)> {
+        self.inner.agent_context()
+    }
+
     /// Hydrate persisted per-session cost on connect (`Event::SessionCosts`,
     /// #1389) so the `$ METER · $cost` figure survives a restart.
     pub fn hydrate_session_costs(&mut self, costs: &[(String, u64)]) {

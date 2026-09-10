@@ -13965,6 +13965,64 @@ mod merge_focus_follow_tests {
         );
     }
 
+    /// Regression (#1633): the same `g s`, but on a repo whose owner or name
+    /// contains a hyphen — `codefly-dev/cli`, `obin-ai/infra-base`, which is
+    /// nearly every real repo. The gate used to require that the flat
+    /// `github-{owner}-{repo}` project key split back into a slug, which is
+    /// impossible once either half has a hyphen, so `g s` refused with
+    /// "nothing to sync — this workspace has no PR, issue, or repo" for a repo
+    /// that plainly exists. The daemon resolves the exact slug from the stored
+    /// project record; the client must not be the stricter of the two.
+    #[test]
+    fn sync_on_a_hyphenated_repo_workspace_still_syncs_the_repo() {
+        use lazybox_ipc::Event as IpcEvent;
+        use lazybox_tui_core::action::Action;
+
+        let key = lazybox_core::ProjectKey::github("codefly-dev", "cli");
+        assert!(
+            key.unambiguous_github_slug().is_none(),
+            "precondition: the flat key cannot be split back into a slug",
+        );
+
+        let mut m = build_model();
+        let mut ws = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new("github:codefly-dev/cli#scratch"),
+            "main",
+            chrono::Utc::now(),
+        );
+        ws.project_key = Some(key);
+        let session_key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        m.focus = PaneFocus::Sidebar;
+        m.set_focus_attr();
+        assert!(m.sidebar.focus_workspace_key(&session_key));
+
+        let cmds = m.dispatch_action(&Action::SyncWorkspace);
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [IpcCommand::SyncWorkspace { workspace_key }]
+                    if workspace_key.as_str() == "github:codefly-dev/cli#scratch"
+            ),
+            "a hyphenated repo scope must still sync, got {cmds:?}",
+        );
+
+        // And under a `v` multi-select: the bulk predicate counted only rows
+        // with their own PR/issue, so a selection sync skipped every pre-PR
+        // row as "nothing to sync".
+        m.sidebar.toggle_broadcast_select();
+        assert_eq!(m.sidebar.broadcast_selected_count(), 1);
+        let cmds = m.dispatch_action(&Action::SyncWorkspace);
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                IpcCommand::SyncWorkspace { workspace_key }
+                    if workspace_key.as_str() == "github:codefly-dev/cli#scratch"
+            )),
+            "a repo-scoped row must sync under a multi-select too, got {cmds:?}",
+        );
+    }
+
     /// The combined close & kill (`x k`): one confirm issues BOTH the
     /// upstream `DeleteOrClose` and the local `Kill` for the target row,
     /// and the row drops optimistically — the `g d` + `x x` pair in one
@@ -24074,6 +24132,31 @@ mod dismiss_and_messages_tests {
         assert_eq!(logged[0].severity, NoticeSeverity::Permanent);
         assert_eq!(logged[1].message, "saved");
         assert_eq!(logged[1].severity, NoticeSeverity::Info);
+    }
+
+    /// A daemon-pushed notice reports something the daemon DID, so it
+    /// must survive in `Shift-M` rather than fading as an ephemeral
+    /// hint. As a Hint it was displaced by the very next flash and
+    /// recorded nowhere, which made every daemon notice — including
+    /// "your model tier bought nothing" — effectively silent (#1598).
+    #[test]
+    fn a_daemon_notification_lands_in_the_durable_message_log() {
+        let mut m = build_model();
+        m.handle_daemon_event(lazybox_ipc::Event::Notification {
+            title: "Model tier not applied".into(),
+            body: "`best` selects a model tier, but this agent maps it to none".into(),
+        });
+        // Displaced immediately by the spawn's own notice, as it is on a
+        // cold spawn that provisions a worktree.
+        m.flash_info("starting agent on acme/widget#7 (@lazybox)");
+
+        let logged: Vec<_> = m.status.messages.recent().collect();
+        assert!(
+            logged.iter().any(
+                |e| e.message.contains("maps it to none") && e.severity == NoticeSeverity::Info
+            ),
+            "the daemon notice must outlive the footer: {logged:?}"
+        );
     }
 
     /// Esc clears the current notice whatever its severity — the whole

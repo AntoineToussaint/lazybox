@@ -34,6 +34,31 @@ on:
   push:
     branches: [main]
 
+# Compile settings every Rust job inherits. Both target the same thing: the
+# Linux `test` job spends ~4m47s compiling and only ~72s running its 6548
+# tests, and the tail of that compile is LINKING — one binary per test target
+# (95 of them, ~3.7GB with debuginfo on).
+#
+#   * `debug = 0` for the dev+test profiles. CI never sets `RUST_BACKTRACE`,
+#     so the DWARF being generated is bought and never read: panics still
+#     report file:line (`#[track_caller]` / `file!()` are compile-time), and
+#     nextest reports the failing test by name. Dropping it cuts codegen, cuts
+#     the bytes the linker writes, and shrinks the shared cache. Set as env
+#     rather than in `Cargo.toml` so a local `cargo test` keeps full debuginfo
+#     for `rust-gdb` / `lldb`.
+#   * `lld` for linking. 95 binaries over this dependency graph is a
+#     linker-bound workload and GNU ld is the slow default. That one is set by
+#     `rust-build-env` itself, which installs lld and exports the flag ONLY on
+#     Linux — the macOS lanes have no lld and `-fuse-ld=lld` would fail every
+#     link there.
+#
+# Both change the build fingerprint, so the first run after this lands
+# recompiles from scratch and re-seeds the `main` cache; every run after
+# restores the smaller, faster artifacts.
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
 # Cancel superseded PR runs on force-push so a re-push doesn't queue behind a
 # now-stale run. Only pull_request events cancel: each merge-queue entry gets a
 # unique group ref (no cancellation), and `push: main` runs stay independent so
@@ -136,12 +161,30 @@ jobs:
           tool: cargo-nextest
 
       - name: Test with per-test timeout enforcement
-        run: |
-          cargo nextest run --workspace --profile ci
-          # `managed-k8s` is intentionally not wired into the product yet,
-          # so workspace feature unification does not compile it. Keep the
-          # provider contract and in-memory control plane release-gated.
-          cargo nextest run -p lazybox-sandbox --all-features --profile ci
+        run: cargo nextest run --workspace --profile ci
+
+  # `managed-k8s` is intentionally not wired into the product yet, so workspace
+  # feature unification does not compile it; the provider contract and
+  # in-memory control plane stay release-gated behind `--all-features`. Its own
+  # job rather than a second command in `test`: `--all-features` re-unifies the
+  # feature set, so it re-compiles the crate and its dependency tail (~36s)
+  # from scratch — serially, inside the critical path, for 99 tests that run in
+  # 0.3s. In parallel it costs nothing.
+  sandbox:
+    name: sandbox (all features)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/rust-build-env
+        with:
+          shared-key: linux
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Test the release-gated sandbox surface
+        run: cargo nextest run -p lazybox-sandbox --all-features --profile ci
 
   macos:
     name: test (macos-14)
@@ -356,11 +399,15 @@ jobs:
 
   benches:
     # The workspace's two criterion benches (tui, server) type-check under the
-    # clippy `--all-targets` gate but only this full build proves they still
-    # link. Its own runner keeps the ~3m bench link off the test critical path.
+    # clippy `--all-targets` gate on every PR; only this full build proves they
+    # still LINK. That link is a second whole-workspace compile (~4m52s) for a
+    # check that has never caught anything clippy didn't, so it runs in the
+    # merge queue against the candidate tree — like `msrv` and macOS — rather
+    # than on every push. Without this it becomes the critical path the moment
+    # `test` gets faster, which is the entire point of the changes above.
     name: benches
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: github.event_name == 'merge_group' && needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7

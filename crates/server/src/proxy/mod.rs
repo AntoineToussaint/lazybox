@@ -588,6 +588,8 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
     // are condensed before the expensive model ever sees them (#1609).
     // `off` and `shadow` hand the original bytes straight back.
     let compacted = state.compactor.rewrite(&session, &agent_id, body_bytes);
+    let compaction_pending = compacted.pending;
+    let compaction_measured = compacted.measured;
     let body_bytes = compacted.body;
 
     let upstream = state
@@ -643,7 +645,15 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
         (
             upstream.bytes_stream(),
             accumulator,
-            Some((state, sink, agent_id, session, measured, compacted.measured)),
+            Some((
+                state,
+                sink,
+                agent_id,
+                session,
+                measured,
+                compaction_measured,
+                compaction_pending,
+            )),
         ),
         |(mut bytes, mut acc, mut pending)| async move {
             match bytes.next().await {
@@ -656,8 +666,15 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
                     Some((Err(BoxErr::from(error)), (bytes, acc, pending)))
                 }
                 None => {
-                    if let Some((state, sink, agent_id, session, measured, compaction_measured)) =
-                        pending.take()
+                    if let Some((
+                        state,
+                        sink,
+                        agent_id,
+                        session,
+                        measured,
+                        compaction_measured,
+                        compaction_pending,
+                    )) = pending.take()
                         && let Some(mut usage) = acc.finish()
                     {
                         // Fold the request's blocks into the session's
@@ -681,6 +698,7 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
                             &agent_id,
                             &usage,
                             compaction_measured,
+                            compaction_pending,
                         );
                         sink(&agent_id, &session, usage);
                     }

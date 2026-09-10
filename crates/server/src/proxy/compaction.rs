@@ -9,12 +9,12 @@
 //! The decision itself is not made here — [`lazybox_core::ContextHygiene`]
 //! owns it, so the hook enforcement point can't drift from this one. Nor
 //! is the definition of a block: a unit is what the instrumentation's
-//! `context_parse` (#1606) says it is, and its lines are the lines of
-//! that module's payload text, so "blocks over N lines" and the set
-//! rewritten here can never disagree. `conversation_mut` /
-//! `tool_result_units_mut` / `payload_text` below mirror those functions
-//! — mutable, because rewriting needs `&mut` and accounting never does.
-//! They collapse into an import of `context_parse` once both land.
+//! `context_parse` (#1606) says it is, and its line count is that
+//! module's `payload_lines` called directly, so "blocks over N lines"
+//! and the set rewritten here cannot disagree. `conversation_mut` /
+//! `tool_result_units_mut` below stay local because rewriting needs
+//! `&mut` and accounting never does; `payload_text` stays because
+//! condensing needs the text itself, which accounting never materializes.
 //!
 //! What is genuinely this module's: pairing each result with the tool
 //! *call* that produced it (only the call names the file or command, so
@@ -49,6 +49,7 @@ use lazybox_core::{
 use lazybox_ipc::AgentUsage;
 use serde_json::{Map, Value};
 
+use super::context_parse;
 use super::usage_parse::PriceOverrides;
 use crate::context_tag::TagSource;
 
@@ -475,7 +476,7 @@ pub fn plan(body: &[u8], policy: &ContextHygiene, tag: &CondenseTag) -> Option<P
         // cannot shift the whole recency window by one.
         let facts = ToolResultFacts::in_sequence(
             kind.as_ref(),
-            text.lines().count(),
+            context_parse::payload_lines(unit),
             index,
             total,
             is_condensed(&text, tag),
@@ -1111,6 +1112,103 @@ mod tests {
         assert!(entry(&mut sessions, "ws-0").is_some(), "known keys persist");
         assert!(entry(&mut sessions, "ws-new").is_none());
         assert_eq!(sessions.len(), MAX_SESSIONS);
+    }
+
+    /// Past the cap a session is not compacted *at all*. `entry()` alone
+    /// does not deliver that: `rewrite` has to consult it before touching
+    /// bytes. An untracked session that got rewritten would have no state to
+    /// record the saving against and none to arm the kill switch with — a
+    /// rewrite that is invisible and, because nothing can trip the switch,
+    /// unretractable. `measured` is the discriminator, since a *tracked*
+    /// session also forwards its original bytes on the held first turn.
+    #[test]
+    fn a_session_past_the_cap_is_forwarded_untouched_and_unjudged() {
+        let compactor = Compactor::new(
+            policy(CompactionMode::On),
+            Arc::new(std::collections::BTreeMap::new()),
+            Arc::new(|_, _| {}),
+            tags(),
+        );
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+
+        // A tracked session: held on its first turn, but judged.
+        let tracked = compactor.rewrite("ws-tracked", "claude", body.clone());
+        assert_eq!(
+            tracked.body, body,
+            "the first turn is held for the baseline"
+        );
+        assert!(tracked.measured, "but a tracked session is judged");
+
+        {
+            let mut sessions = compactor.sessions.lock().expect("compaction sessions");
+            for index in 0..MAX_SESSIONS {
+                entry(&mut sessions, &format!("filler-{index}"));
+            }
+            assert_eq!(sessions.len(), MAX_SESSIONS, "the cap is full");
+        }
+
+        let over_cap = compactor.rewrite("ws-over-cap", "claude", body.clone());
+        assert_eq!(
+            over_cap.body, body,
+            "an untracked session's bytes are forwarded exactly as sent"
+        );
+        assert!(
+            !over_cap.measured,
+            "and it is not judged, so it cannot arm a switch it could never trip"
+        );
+    }
+
+    /// A unit's line count is `context_parse::payload_lines` — the very
+    /// function the instrumentation counts "blocks over N lines" with — not
+    /// a local re-derivation from the flattened text. Flattening joins the
+    /// parts with newlines, so an array of *empty* parts counts one line per
+    /// separator: 400 empty parts read as 399 lines and cross the floor,
+    /// condensing a block that carries nothing, while the instrumentation
+    /// records it as 0 lines and not a candidate at all.
+    #[test]
+    fn an_array_of_empty_parts_is_not_large_by_the_shared_line_count() {
+        let policy = policy(CompactionMode::On);
+        let mut body = anthropic_body(8);
+        let empties: Vec<Value> = (0..400)
+            .map(|_| json!({"type": "text", "text": ""}))
+            .collect();
+        body["messages"][2]["content"][0]["content"] = Value::Array(empties);
+
+        let unit = &body["messages"][2]["content"][0];
+        assert_eq!(
+            context_parse::payload_lines(unit),
+            0,
+            "empty parts carry no lines"
+        );
+        assert!(
+            payload_text(unit).lines().count() >= policy.min_lines,
+            "precondition: flattening would put this block over the floor on its own"
+        );
+
+        let bytes = Bytes::from(serde_json::to_vec(&body).expect("serialize"));
+        let planned = plan(&bytes, &policy, &tag()).expect("a conversation");
+        assert!(
+            planned
+                .skipped
+                .iter()
+                .any(|(reason, _)| *reason == SkipReason::BelowLineFloor),
+            "the empty block is held under the floor: {:?}",
+            planned.skipped
+        );
+
+        // The same conversation with real content has nothing under the
+        // floor, so the skip above is caused by the empty parts and not by
+        // some unrelated default.
+        let untouched = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+        let baseline = plan(&untouched, &policy, &tag()).expect("a conversation");
+        assert!(
+            !baseline
+                .skipped
+                .iter()
+                .any(|(reason, _)| *reason == SkipReason::BelowLineFloor),
+            "control: real blocks are all over the floor: {:?}",
+            baseline.skipped
+        );
     }
 
     #[test]

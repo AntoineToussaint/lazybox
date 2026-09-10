@@ -489,7 +489,6 @@ fn all_commands() -> Vec<Command> {
         },
         Command::ReauthenticateAgent {
             terminal_id: TerminalId(12),
-            switch_account: true,
         },
         Command::CancelAgentReauthentication {
             terminal_id: TerminalId(12),
@@ -1209,7 +1208,6 @@ fn all_events() -> Vec<Event> {
             display_name: "Codex".into(),
             reason: "provider sign-in expired".into(),
             other_session_count: 2,
-            credentials_isolated: true,
         },
         Event::AgentAuthProgress {
             recovery_terminal_id: TerminalId(12),

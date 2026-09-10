@@ -5170,7 +5170,6 @@ impl TerminalStack {
         if let Some(recovery_terminal_id) = slot.auth_recovery_id {
             cmds.push(Command::ReauthenticateAgent {
                 terminal_id: recovery_terminal_id,
-                switch_account: true,
             });
         } else {
             cmds.push(Command::ResumeAgent { terminal_id });
@@ -12373,7 +12372,6 @@ mod agent_crash_tests {
             cmds.as_slice(),
             [Command::ReauthenticateAgent {
                 terminal_id: TerminalId(1),
-                switch_account: true,
             }]
         ));
     }

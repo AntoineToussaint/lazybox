@@ -145,6 +145,39 @@ GenericCli (user YAML). The server registers built-ins plus every
 `agents.<id>` entry with a `command` at startup; `spawn_handler` builds the
 worktree, env, and `SpawnCtx`, then launches through the tmux wrapper.
 
+Every agent uses one machine-wide login, shared across workspaces — for Codex
+that is the daemon's inherited `CODEX_HOME`, or `~/.codex` by default. Sign in
+once with `codex login`. A pane whose sign-in expires prompts to re-authenticate,
+and that is always a **login-only refresh**: lazybox never runs the provider's
+`logout`, because one pane doing so would sign out every other session of that
+agent *and* your own interactive terminal (#1376). To sign in as a different
+account, run `codex logout` (or `claude auth logout`) yourself first.
+
+Because the refresh runs with the old credential still present, `login` can exit
+0 without having re-authenticated. lazybox therefore confirms the credential with
+the provider's own status command before resuming the conversation — and treats
+only an explicit "not logged in" as a refusal, so a status command that cannot
+answer (an old build, a wrapper script) never strands a conversation you did in
+fact sign back into.
+
+#### Migrating off the per-workspace Codex homes
+
+Builds between #1376 and #1656 gave each workspace its own Codex home under
+`~/.lazybox/v2/agent-homes/codex/`. On the first start after upgrading, lazybox
+sweeps **every** one of those homes and hard-links the conversation rollouts it
+finds into the shared home, so `codex resume` still sees them. It records what it
+imported, so a conversation you later delete from the shared home stays deleted,
+and a rollout an old still-running Codex writes afterwards is picked up on the
+next start.
+
+The original homes are left in place — they hold the only copy of those
+conversations until the sweep runs, so do not delete `agent-homes/` before
+starting the new build at least once. Credentials and `config.toml` are
+deliberately **not** imported: a copied `auth.json` is the forked refresh-token
+state this change exists to undo. If you only ever signed in inside a workspace
+home, sign in once to the shared home. Restart any Codex terminal left over from
+the old build so it picks up the shared login.
+
 ### Test checklist
 - [ ] `s` opens a shell in the correct worktree dir.
 - [ ] `a c` / `a x` / `a u` launch the respective agent if its binary is on PATH.

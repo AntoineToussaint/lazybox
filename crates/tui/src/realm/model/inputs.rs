@@ -1406,10 +1406,7 @@ showing keybinding search only",
             Some(Id::AgentAuth) => {
                 if let Some(ModalFlow::AgentAuth { terminal_id, retry }) = self.modal_flow.take() {
                     if yes {
-                        cmds.push(IpcCommand::ReauthenticateAgent {
-                            terminal_id,
-                            switch_account: true,
-                        });
+                        cmds.push(IpcCommand::ReauthenticateAgent { terminal_id });
                     } else if retry {
                         cmds.push(IpcCommand::CancelAgentReauthentication { terminal_id });
                     }

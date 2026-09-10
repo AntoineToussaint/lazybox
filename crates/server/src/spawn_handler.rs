@@ -360,7 +360,7 @@ fn hook_command(exe: &Path, backend_key: &str, mcp_wired: bool) -> String {
     // to its context). Only the settings-file path — Claude — carries it;
     // Codex's argv `hook_command_keyfile` omits it, since it is unverified
     // whether Codex surfaces a hook's stdout as context. TODO(codex): once
-    // confirmed, seed the same text through the CODEX_HOME lazybox already owns.
+    // confirmed, pass the same text through a per-launch Codex configuration.
     //
     // `--emit-mcp-context` is added ONLY when this spawn is wired to the
     // coordination MCP bus (`SpawnFlags::mcp_wired`). The base blurb rides on

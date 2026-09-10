@@ -132,3 +132,62 @@ fn preamble_fences_no_runnable_placeholder_text() {
         "a quoted ellipsis is a runnable argument, not a placeholder"
     );
 }
+
+/// Every built-in prompt string, flowed. The role preambles need a context to
+/// render; a blank one exercises the fallbacks and still carries all the prose.
+fn builtin_prompts() -> Vec<(&'static str, String)> {
+    use lazybox_core::Role;
+    use lazybox_core::prompts::{RolePromptCtx, role_preamble};
+    let ctx = RolePromptCtx::default();
+    let mut out = vec![("agent-work.md", AGENT_WORK_PREAMBLE.to_string())];
+    for role in [
+        Role::Planner,
+        Role::Coordinator,
+        Role::Worker,
+        Role::Reviewer,
+        Role::Integrator,
+    ] {
+        out.push((role.display_name(), role_preamble(role, &ctx)));
+    }
+    out
+}
+
+#[test]
+fn no_builtin_prompt_hands_over_a_named_workspace_create() {
+    // #1586 §6: the built-in prompts are the loudest instructions an agent
+    // hears, and `lazybox workspace create --name` is the one command that
+    // produces the split the rule exists to prevent — a second row beside a
+    // tracker record, holding the branch, activity, cost and epic membership
+    // the operator is watching the record for. The CLI keeps the flag for
+    // repo-less scratch, and the preamble *names* it to forbid it, so the
+    // guard is the same one `preamble_starts_new_work_from_the_tracker_record`
+    // uses — a line that IS the invocation — extended to every role preamble.
+    for (what, text) in builtin_prompts() {
+        let offered = text
+            .lines()
+            .find(|line| as_command_line(line).starts_with("lazybox workspace create"));
+        assert!(
+            offered.is_none(),
+            "built-in prompt `{what}` must not offer `lazybox workspace create` as a command \
+             to run: {offered:?}"
+        );
+    }
+}
+
+#[test]
+fn the_coordinator_preamble_starts_workers_on_a_record() {
+    // `spawn_worker` no longer takes a `workspace_name` (#1586 §1). A
+    // Coordinator briefed only with "start workers with `spawn_worker`"
+    // discovers that by getting an error mid-fan-out, so the preamble names
+    // the record-shaped arguments up front.
+    use lazybox_core::Role;
+    use lazybox_core::prompts::{RolePromptCtx, role_preamble};
+    let text = role_preamble(Role::Coordinator, &RolePromptCtx::default());
+    let flowed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    for needle in ["`task`", "`create_issue`", "never a named one beside it"] {
+        assert!(
+            flowed.contains(needle),
+            "the Coordinator preamble must name {needle}: {text}"
+        );
+    }
+}

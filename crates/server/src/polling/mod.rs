@@ -4088,7 +4088,7 @@ fn closing_issue_workspace_keys(pr: &Task) -> Vec<WorkspaceKey> {
 /// merge pass so the two can't recognize different source rows.
 fn collapse_candidate_keys(config: &ServerConfig, pr: &Task) -> Vec<WorkspaceKey> {
     let mut keys = closing_issue_workspace_keys(pr);
-    for key in linked_ticket_workspace_keys(config, pr) {
+    for key in store_side_collapse_candidates(config, pr) {
         if !keys.contains(&key) {
             keys.push(key);
         }
@@ -4098,16 +4098,38 @@ fn collapse_candidate_keys(config: &ServerConfig, pr: &Task) -> Vec<WorkspaceKey
     keys
 }
 
-/// Linear ticket workspaces that link back to `pr` through the ticket's
-/// own GitHub attachment (#922) — Linear's integration records the PR
-/// URL, which the Linear provider parsed into the ticket's
-/// `linked_tasks`. Authoritative but ticket-side, so it can't be derived
-/// from the PR alone. Only PR-less (ticket) workspaces are considered, so
-/// this never folds one PR into another.
-fn linked_ticket_workspace_keys(config: &ServerConfig, pr: &Task) -> Vec<WorkspaceKey> {
+/// The collapse candidates that can only be found by looking at stored
+/// workspaces rather than at the PR: Linear tickets that link back to it
+/// (#922) and scratch rows it adopted (#1586).
+///
+/// Both live in ONE scan on purpose. `collapse_candidate_keys` runs several
+/// times per PR upsert (twice inside `lock_workspace_with_closing_issues`'s
+/// re-check loop, once in the merge pass), and a full reconcile upserts the
+/// whole roster — so each extra `list_workspaces()` + `Workspace` decode here
+/// is multiplied by roster × calls. That is the same quadratic
+/// `UpsertContext` exists to avoid; a second pass for the second signal would
+/// have doubled it.
+///
+/// **Linear ticket link (#922):** the ticket's GitHub attachment records the
+/// PR URL, which the Linear provider parsed into `linked_tasks`. Authoritative
+/// but ticket-side, so it cannot be derived from the PR alone.
+///
+/// **Scratch adoption (#1586):** a named workspace that then opened a PR is
+/// the split the rule exists to close — the branch, activity, cost and epic
+/// membership sit on the scratch row while the PR's own row shows an
+/// untouched task. Recognized by the PR body carrying a
+/// `lazybox:<workspace-key>` marker, or by the row sitting on the PR's head
+/// branch in the same repo.
+fn store_side_collapse_candidates(config: &ServerConfig, pr: &Task) -> Vec<WorkspaceKey> {
     let Ok(records) = config.store.list_workspaces() else {
         return Vec::new();
     };
+    let project = lazybox_core::project_key_for_task(pr);
+    let head = pr
+        .branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty());
     let mut keys = Vec::new();
     for record in records {
         let Some(json) = record.workspace_json else {
@@ -4116,14 +4138,48 @@ fn linked_ticket_workspace_keys(config: &ServerConfig, pr: &Task) -> Vec<Workspa
         let Ok(ws) = serde_json::from_str::<Workspace>(&json) else {
             continue;
         };
+        // Never fold one PR row into another.
         if ws.pr.is_some() {
             continue;
         }
-        let links_pr = ws
+        if ws
             .linear_issues
             .iter()
-            .any(|ticket| ticket.linked_tasks.contains(&pr.id));
-        if links_pr {
+            .any(|ticket| ticket.linked_tasks.contains(&pr.id))
+        {
+            keys.push(ws.key);
+            continue;
+        }
+        // Hand-created rows with no task of their own. Imported dev-folder
+        // checkouts and Hopper captures are `local` too, but they are standing
+        // user-owned rows rather than work-in-flight, so they are excluded.
+        let is_scratch = ws.local
+            && ws.gh_issues.is_empty()
+            && ws.linear_issues.is_empty()
+            && ws.hopper.is_none()
+            && ws.linked_checkout.is_none();
+        if !is_scratch {
+            continue;
+        }
+        let marked = pr
+            .body
+            .as_deref()
+            .is_some_and(|body| body.contains(&format!("lazybox:{}", ws.key.as_str())));
+        // A branch match is only evidence once a worktree actually set the
+        // branch (`spawn_handler` stamps the real checkout onto the row).
+        // `create_empty_workspace` seeds every new row with the literal
+        // "main" PLACEHOLDER, so an unprovisioned scratch row claims to be on
+        // `main` without ever having been checked out — and a PR whose head
+        // really is `main` (a gitflow "merge main into develop", a
+        // master→main migration) would then match, and silently absorb, every
+        // untouched scratch row in the repo. Sessions are what prove the
+        // branch was resolved from a real checkout.
+        let branch_is_real = !ws.sessions.is_empty();
+        let same_branch = branch_is_real
+            && head == Some(ws.branch.trim())
+            && project.is_some()
+            && lazybox_core::workspace_project_key(&ws) == project;
+        if marked || same_branch {
             keys.push(ws.key);
         }
     }
@@ -4285,6 +4341,9 @@ async fn merge_closing_issue_workspaces(
         let is_cross_provider = issue_ws
             .primary_task()
             .is_some_and(|task| task.id.source == "linear");
+        // A scratch row has no task at all — it is folded because the PR *is*
+        // its tracker record (#1586), not because a link was parsed.
+        let is_scratch = issue_ws.primary_task().is_none();
         let issue_label = workspace_label_for(&issue_ws, &issue_key);
         let pr_label = workspace_label_for(workspace, &workspace.key);
         let moved_session_ids = absorb_issue_workspace(workspace, issue_ws);
@@ -4295,7 +4354,9 @@ async fn merge_closing_issue_workspaces(
             moved_session_ids,
         });
 
-        let link_source = if is_cross_provider {
+        let link_source = if is_scratch {
+            "scratch workspace adopted by its PR"
+        } else if is_cross_provider {
             "cross-provider link"
         } else if closes_keys.contains(issue_key.as_str()) {
             "closingIssuesReferences"
@@ -5579,6 +5640,164 @@ mod merge_detection_tests {
         let mut t = pr("o/r#99", TaskState::Open);
         t.branch = Some(branch.into());
         t
+    }
+
+    /// Persist a hand-created (scratch) workspace on `branch`, optionally
+    /// under a repo project — the shape `x n` / `lazybox workspace create
+    /// --name --scratch` leaves behind.
+    fn seed_scratch(config: &ServerConfig, key: &str, branch: &str, repo: Option<&str>) {
+        seed_scratch_with(config, key, branch, repo, true);
+    }
+
+    /// `provisioned` controls whether the row carries a session — i.e. whether
+    /// a worktree ever resolved its `branch`, or it is still the literal
+    /// "main" placeholder `create_empty_workspace` seeds.
+    fn seed_scratch_with(
+        config: &ServerConfig,
+        key: &str,
+        branch: &str,
+        repo: Option<&str>,
+        provisioned: bool,
+    ) {
+        let mut ws = Workspace::empty(WorkspaceKey::new(key), branch, Utc::now());
+        ws.local = true;
+        ws.project_key = repo.map(|repo| {
+            let (owner, name) = repo.split_once('/').expect("owner/repo");
+            lazybox_core::ProjectKey::github(owner, name)
+        });
+        if provisioned {
+            ws.add_session(lazybox_core::WorkspaceSession::new(
+                WorkspaceKey::new(key),
+                lazybox_core::SessionKind::Shell,
+                std::path::PathBuf::from("/tmp/worktree"),
+                Utc::now(),
+            ));
+        }
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: key.to_string(),
+                created_at: Utc::now(),
+                workspace_json: Some(serde_json::to_string(&ws).expect("serialize")),
+            })
+            .expect("save");
+    }
+
+    #[test]
+    fn scratch_workspace_folds_into_its_pr_on_poll() {
+        // #1586: a named workspace that then opened a PR is the split the rule
+        // exists to close — the branch, activity and cost sit on the scratch
+        // row while the PR's own row looks untouched. The PR adopts it.
+        let config = ServerConfig::in_memory();
+        seed_scratch(&config, "spike-the-cache", "feat", Some("o/r"));
+        let pr = pr_on_branch("feat");
+        assert!(
+            collapse_candidate_keys(&config, &pr).contains(&WorkspaceKey::new("spike-the-cache")),
+            "a scratch row on the PR's head branch is a fold candidate"
+        );
+    }
+
+    #[test]
+    fn a_scratch_workspace_folds_on_an_explicit_body_marker() {
+        // The branch match cannot see a scratch row whose worktree was never
+        // provisioned, so an agent can name the row it started in.
+        let config = ServerConfig::in_memory();
+        seed_scratch(&config, "spike-the-cache", "main", None);
+        let mut pr = pr_on_branch("feat");
+        pr.body = Some("Closes nothing.\n\nlazybox:spike-the-cache\n".into());
+        assert!(
+            collapse_candidate_keys(&config, &pr).contains(&WorkspaceKey::new("spike-the-cache")),
+            "a `lazybox:<key>` marker in the PR body is a fold candidate"
+        );
+    }
+
+    #[test]
+    fn the_scratch_fold_leaves_unrelated_rows_alone() {
+        let config = ServerConfig::in_memory();
+        // A different branch.
+        seed_scratch(&config, "other-branch", "spike", Some("o/r"));
+        // The right branch in a different repo.
+        seed_scratch(&config, "other-repo", "feat", Some("other/repo"));
+
+        let candidates = collapse_candidate_keys(&config, &pr_on_branch("feat"));
+        for key in ["other-branch", "other-repo"] {
+            assert!(
+                !candidates.contains(&WorkspaceKey::new(key)),
+                "{key} must not be folded: {candidates:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unprovisioned_scratch_row_is_never_matched_by_its_placeholder_branch() {
+        // `create_empty_workspace` seeds EVERY new row with the literal
+        // branch "main" before any worktree exists, so that string is a
+        // placeholder, not evidence of a checkout. A PR whose head really is
+        // `main` — the gitflow "merge main into develop", a master→main
+        // migration — would otherwise match every untouched scratch row in
+        // the repo and silently absorb the lot, moving their sessions and
+        // deleting their rows.
+        let config = ServerConfig::in_memory();
+        seed_scratch_with(&config, "unstarted", "main", Some("o/r"), false);
+        seed_scratch_with(&config, "also-unstarted", "main", Some("o/r"), false);
+
+        let mut pr = pr_on_branch("main");
+        pr.base_branch = Some("develop".into());
+        let candidates = collapse_candidate_keys(&config, &pr);
+        for key in ["unstarted", "also-unstarted"] {
+            assert!(
+                !candidates.contains(&WorkspaceKey::new(key)),
+                "{key} has no worktree, so its `main` is a placeholder: {candidates:?}"
+            );
+        }
+
+        // The same holds when the provider gave us no base branch at all —
+        // `base_branch` is `Option` with a serde default, so a guard that
+        // leaned on it would not fire here either.
+        pr.base_branch = None;
+        assert!(
+            collapse_candidate_keys(&config, &pr).is_empty(),
+            "a missing base branch must not re-open the placeholder match"
+        );
+
+        // …but a row that really was checked out on `main` still folds: the
+        // session proves the branch came from a worktree.
+        seed_scratch_with(&config, "really-on-main", "main", Some("o/r"), true);
+        assert!(
+            collapse_candidate_keys(&config, &pr).contains(&WorkspaceKey::new("really-on-main")),
+            "a provisioned row on the PR's head branch is still a candidate"
+        );
+    }
+
+    #[test]
+    fn the_scratch_fold_skips_rows_that_are_not_scratch() {
+        let config = ServerConfig::in_memory();
+        // A polled row (not `local`) on the same branch is the tracker record
+        // itself or another workspace's — never something to absorb.
+        let mut polled = Workspace::empty(WorkspaceKey::new("polled"), "feat", Utc::now());
+        polled.project_key = Some(lazybox_core::ProjectKey::github("o", "r"));
+        // A hand-created row that is really an imported dev-folder checkout.
+        let mut imported = Workspace::empty(WorkspaceKey::new("imported"), "feat", Utc::now());
+        imported.local = true;
+        imported.project_key = Some(lazybox_core::ProjectKey::github("o", "r"));
+        imported.linked_checkout = Some(std::path::PathBuf::from("/dev/o/r"));
+        for ws in [&polled, &imported] {
+            config
+                .store
+                .save_workspace(&lazybox_store::WorkspaceRecord {
+                    key: ws.key.as_str().to_string(),
+                    created_at: Utc::now(),
+                    workspace_json: Some(serde_json::to_string(ws).expect("serialize")),
+                })
+                .expect("save");
+        }
+
+        let candidates = collapse_candidate_keys(&config, &pr_on_branch("feat"));
+        assert!(
+            !candidates.contains(&WorkspaceKey::new("polled"))
+                && !candidates.contains(&WorkspaceKey::new("imported")),
+            "{candidates:?}"
+        );
     }
 
     #[test]

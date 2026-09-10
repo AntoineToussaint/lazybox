@@ -1792,7 +1792,13 @@ fn preserve_lazy_pr_fields(mut incoming: Task, existing: &Task) -> Task {
 /// Used so that "the workspace for this PR" resolves predictably even
 /// before the user gives the workspace a custom name.
 pub fn workspace_key_for(task: &Task) -> String {
-    sanitize_key(&format!("{}-{}", task.id.source, task.id.key))
+    workspace_key_for_id(&task.id)
+}
+
+/// [`workspace_key_for`] from the id alone, for callers that hold a `TaskId`
+/// without the `Task` — checking a record against the archived set, say.
+pub fn workspace_key_for_id(id: &TaskId) -> String {
+    sanitize_key(&format!("{}-{}", id.source, id.key))
 }
 
 /// The Project a workspace belongs to. Prefers the stored

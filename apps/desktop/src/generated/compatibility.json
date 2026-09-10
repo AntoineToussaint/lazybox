@@ -18,8 +18,10 @@
     {
       "CreateWorkspace": {
         "agent": "codex",
+        "anchor": null,
         "name": "first workspace",
-        "project_key": "github-o-r"
+        "project_key": "github-o-r",
+        "scratch": false
       }
     },
     {
@@ -563,6 +565,6 @@
       }
     }
   ],
-  "protocol_fingerprint": 3627135822,
+  "protocol_fingerprint": 1523953768,
   "protocol_version": 4
 }

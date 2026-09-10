@@ -1465,6 +1465,20 @@ pub enum Command {
         /// from another client's concurrent create with the same name.
         #[serde(default)]
         client_request_id: Option<String>,
+        /// The tracker record this create is *for* (#1586). When set the
+        /// daemon **attaches**: it resolves the task's existing workspace
+        /// (materializing it with a single-item sync when the poll has not
+        /// reached it yet) and returns that key instead of minting a second
+        /// row beside the record. `name` is then only a fallback label.
+        #[serde(default)]
+        anchor: Option<lazybox_core::TaskId>,
+        /// Opt out of the anchor-less refusal: this really is repo-less
+        /// scratch, not work on a tracked item. Without it a bare `name`
+        /// under a repo-scoped project is refused (or, when the name matches
+        /// an open task in that repo, redirected to that task's row) — the
+        /// rule that a tracker record never gets a second workspace.
+        #[serde(default)]
+        scratch: bool,
     },
     /// Create a brand-new local Project — a top-level container the
     /// sidebar groups workspaces under, like a github repo but with

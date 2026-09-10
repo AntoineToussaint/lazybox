@@ -190,6 +190,8 @@ describe("credential-free desktop workflow", () => {
           name: "first local workspace",
           project_key: "github-acme-widget",
           agent: "codex",
+          anchor: null,
+          scratch: false,
         },
       });
     });

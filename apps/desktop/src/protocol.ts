@@ -139,6 +139,11 @@ export function createWorkspaceCommand(
       name,
       project_key: projectKey,
       agent,
+      // No anchor and not declared scratch: the daemon checks the name
+      // against the repo's open tasks and either attaches to the record or
+      // refuses with the rule (#1586).
+      anchor: null,
+      scratch: false,
     },
   };
 }

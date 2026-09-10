@@ -6406,7 +6406,7 @@ impl GhClient {
     /// the durable half of lazybox's `g g` arm: GitHub lands the PR once
     /// its **required** checks and reviews are satisfied, with lazybox
     /// closed. Uses the repo's own default merge method, like
-    /// [`merge_pr_in_repo`](Self::merge_pr_in_repo).
+    /// [`merge_pr`](Self::merge_pr).
     ///
     /// GitHub refuses this on a PR that is already mergeable ("Pull
     /// request is in clean status") — with nothing left to wait for

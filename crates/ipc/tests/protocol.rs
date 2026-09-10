@@ -590,6 +590,14 @@ fn all_commands() -> Vec<Command> {
                 merge_in_order: lazybox_core::PolicyArm::Default,
             },
         },
+        Command::DecideToolUse {
+            backend_key: Some("lazybox-ws-claude-1-7".into()),
+            request: lazybox_ipc::ToolUseRequest {
+                tool_name: "Read".into(),
+                file_path: "/w/src/lib.rs".into(),
+            },
+            client_request_id: "req-1".into(),
+        },
         Command::Shutdown,
     ]
 }
@@ -1373,6 +1381,12 @@ fn all_events() -> Vec<Event> {
                 },
             ],
         },
+        Event::ToolUseDecided {
+            client_request_id: "req-1".into(),
+            decision: lazybox_ipc::ToolUseDecision::Deny {
+                reason: "[condensed by lazybox: src/lib.rs, 900 lines \u{2192} 2 lines]".into(),
+            },
+        },
     ]
 }
 
@@ -1480,6 +1494,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::SetWorkspaceRole { .. } => "SetWorkspaceRole",
         Command::AdoptWorktreeBranch { .. } => "AdoptWorktreeBranch",
         Command::SetEpicPolicies { .. } => "SetEpicPolicies",
+        Command::DecideToolUse { .. } => "DecideToolUse",
     }
 }
 
@@ -1593,6 +1608,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::KeepAwakeStatus { .. } => "KeepAwakeStatus",
         Event::MasteryLedger { .. } => "MasteryLedger",
         Event::EpicStatus { .. } => "EpicStatus",
+        Event::ToolUseDecided { .. } => "ToolUseDecided",
     }
 }
 
@@ -1604,12 +1620,12 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        99,
+        100,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(
         event_tags.len(),
-        103,
+        104,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

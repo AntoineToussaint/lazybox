@@ -107,6 +107,7 @@ pub mod box_liveness;
 pub mod chat;
 pub mod client_kv;
 pub mod client_runtime;
+pub mod codex_home_migration;
 pub mod codex_quota;
 pub mod epics;
 pub mod error_inbox;
@@ -554,7 +555,7 @@ impl ServerConfig {
     /// Open failures (permissions, disk corruption) abort startup. A
     /// production process must never impersonate an empty installation
     /// when the user's persisted state is temporarily unavailable.
-    pub fn from_user_config() -> Result<Self, ServerError> {
+    pub async fn from_user_config() -> Result<Self, ServerError> {
         match resource_limits::raise_open_file_limit() {
             Ok(limit) if limit.soft > limit.previous_soft => {
                 tracing::info!(
@@ -613,6 +614,18 @@ impl ServerConfig {
             keystore,
         ));
         config.working_claims_enabled = user_config.server.working_claims_enabled();
+        // One-shot, whole-tree migration off #1376's per-workspace Codex
+        // homes (#1656). Runs here — once per daemon start, before anything
+        // is served — rather than from the spawn path: keyed to "the next
+        // spawn in this workspace" it would never reach a workspace the user
+        // does not reopen, and those homes hold the only copy of their
+        // conversations. `spawn_blocking` because it walks directories and
+        // links files, which must not sit on a runtime worker driving PTYs.
+        if let Err(error) =
+            tokio::task::spawn_blocking(codex_home_migration::migrate_legacy_codex_homes).await
+        {
+            tracing::warn!(%error, "codex-home migration task failed");
+        }
         Ok(config)
     }
 
@@ -2336,17 +2349,8 @@ pub async fn dispatch_command(
         lazybox_ipc::Command::RestartAgentAndContinue { terminal_id } => {
             agent_auth::restart_agent_and_continue(config, terminal_id).await;
         }
-        lazybox_ipc::Command::ReauthenticateAgent {
-            terminal_id,
-            switch_account,
-        } => {
-            agent_auth::start_reauthentication(
-                config,
-                terminal_id,
-                switch_account,
-                Some(tx.clone()),
-            )
-            .await;
+        lazybox_ipc::Command::ReauthenticateAgent { terminal_id } => {
+            agent_auth::start_reauthentication(config, terminal_id, Some(tx.clone())).await;
         }
         lazybox_ipc::Command::CancelAgentReauthentication { terminal_id } => {
             agent_auth::cancel_reauthentication(config, terminal_id).await;

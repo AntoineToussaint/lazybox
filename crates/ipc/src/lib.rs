@@ -1967,10 +1967,12 @@ pub enum Command {
         terminal_id: TerminalId,
     },
     /// Confirm provider-owned interactive authentication for one blocked
-    /// agent terminal.
+    /// agent terminal. This is always a login-only refresh of the one
+    /// machine-wide credential every session of that agent shares: lazybox
+    /// never runs the provider `logout`, because doing so signs the whole
+    /// fleet — and the user's own interactive pane — out at once (#1376).
     ReauthenticateAgent {
         terminal_id: TerminalId,
-        switch_account: bool,
     },
     /// Cancel only the authentication subprocess created for this terminal.
     CancelAgentReauthentication {
@@ -3248,12 +3250,10 @@ pub enum Event {
         agent_id: String,
         display_name: String,
         reason: String,
+        /// How many other sessions of this agent are running. Every agent
+        /// shares one machine-wide login, so the re-auth prompt names what
+        /// is riding on the credential it is about to refresh.
         other_session_count: usize,
-        /// The agent isolates its login per session (Codex → a private
-        /// `CODEX_HOME`), so re-auth rewrites only this session's
-        /// credential and leaves the rest of the fleet on their own
-        /// logins — no machine-wide cascade to warn about.
-        credentials_isolated: bool,
     },
     /// Non-secret orchestration progress. Provider PTY bytes continue over
     /// the terminal stream and are never copied into this message.
@@ -3518,7 +3518,6 @@ pub enum AgentCreditRecoveryStage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub enum AgentAuthPhase {
-    LoggingOut,
     LoginInteractive,
     Resuming,
 }

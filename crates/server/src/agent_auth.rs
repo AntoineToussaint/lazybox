@@ -8,6 +8,14 @@ use tokio::sync::Mutex;
 
 const AUTH_REPLAY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// Env for the provider's own auth subprocesses (`login`, `login status`).
+/// Empty on purpose: they must read and write the SAME credential home the
+/// agent itself will use, and that is the daemon's inherited environment —
+/// its `CODEX_HOME` when set, else the provider's own default. Adding a
+/// credential-home override here would re-fork the login that #1656 merged
+/// back together, so there is deliberately nothing to add.
+const AUTH_ENV: &[(String, String)] = &[];
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AgentResumeContext {
     pub terminal_id: TerminalId,
@@ -51,7 +59,6 @@ struct RequiredAuth {
     display_name: String,
     reason: String,
     other_session_count: usize,
-    credentials_isolated: bool,
 }
 
 #[derive(Clone, Default)]
@@ -135,7 +142,6 @@ impl AgentRecoveryRegistry {
         display_name: String,
         reason: String,
         other_session_count: usize,
-        credentials_isolated: bool,
     ) -> bool {
         let mut requirements = self.requirements.lock().await;
         if requirements.contains_key(&terminal_id) {
@@ -148,7 +154,6 @@ impl AgentRecoveryRegistry {
                 display_name,
                 reason,
                 other_session_count,
-                credentials_isolated,
             },
         );
         true
@@ -176,7 +181,7 @@ impl AgentRecoveryRegistry {
             terminal_id,
             AuthFlow {
                 agent_id: agent_id.to_string(),
-                phase: AgentAuthPhase::LoggingOut,
+                phase: AgentAuthPhase::LoginInteractive,
                 terminal_id: current_terminal_id,
                 terminal_backend_key: current_backend_key,
                 auth_process_key: None,
@@ -408,7 +413,6 @@ impl AgentRecoveryRegistry {
                     display_name: required.display_name.clone(),
                     reason: required.reason.clone(),
                     other_session_count: required.other_session_count,
-                    credentials_isolated: required.credentials_isolated,
                 }),
         );
         (events, replay_backends)
@@ -435,17 +439,10 @@ pub(crate) async fn detect_required(
     if config.agent_recovery.active(terminal_id).await {
         return;
     }
-    // With per-session isolation, re-auth only rewrites this session's credential;
-    // the rest of the fleet is untouched, so there is no cascade to warn
-    // about and the "other running sessions" count is moot.
-    let credentials_isolated = config
-        .agents
-        .get(&context.agent_id)
-        .and_then(|agent| agent.credential_isolation())
-        .is_some();
-    let other_session_count = if credentials_isolated {
-        0
-    } else {
+    // Every agent shares one machine-wide login, so a re-auth always touches
+    // what the rest of the fleet reads. Count the other running sessions of
+    // this agent so the prompt can name what is riding on it.
+    let other_session_count = {
         let entries = config.terminal.entries.lock().await;
         entries
             .iter()
@@ -473,7 +470,6 @@ pub(crate) async fn detect_required(
             display_name.clone(),
             reason.clone(),
             other_session_count,
-            credentials_isolated,
         )
         .await
     {
@@ -485,7 +481,6 @@ pub(crate) async fn detect_required(
         display_name,
         reason,
         other_session_count,
-        credentials_isolated,
     });
 }
 
@@ -642,7 +637,6 @@ async fn resume_agent_with_prompt(
 pub(crate) async fn start_reauthentication(
     config: &ServerConfig,
     terminal_id: TerminalId,
-    switch_account: bool,
     output: Option<lazybox_ipc::EventSender>,
 ) {
     let Some(context) = config.agent_recovery.context(terminal_id).await else {
@@ -706,7 +700,7 @@ pub(crate) async fn start_reauthentication(
     }
     let config = config.clone();
     tokio::spawn(async move {
-        run_reauthentication(config, context, commands, switch_account).await;
+        run_reauthentication(config, context, commands).await;
     });
 }
 
@@ -767,29 +761,30 @@ async fn run_reauthentication(
     config: ServerConfig,
     context: AgentResumeContext,
     commands: lazybox_agents::AgentAuthCommands,
-    switch_account: bool,
 ) {
     let recovery_terminal_id = context.terminal_id;
     let display_name = agent_display_name(&config, &context.agent_id);
-    // Auth and resume use the same credential home. Built-in Codex and Claude
-    // share the machine login, so never log out as part of a pane's recovery.
-    // A provider login can still change shared credentials itself; verify its
-    // status before resuming the conversation.
-    let auth_env = auth_credential_env(&config, &context);
-    let credentials_isolated = config
-        .agents
-        .get(&context.agent_id)
-        .and_then(|agent| agent.credential_isolation())
-        .is_some();
-    let switch_account = if switch_account && !credentials_isolated {
-        tracing::info!(
-            agent_id = %context.agent_id,
-            "re-auth: refreshing shared machine-wide login in place; skipping logout so other sessions stay signed in"
-        );
-        false
-    } else {
-        switch_account
-    };
+    // Every agent lazybox drives keeps ONE machine-wide login, shared by every
+    // other running session of that agent AND the user's own interactive
+    // pane. Running the provider `logout` there signs all of them out at once
+    // — the acute bug (#1376). So lazybox never runs it: a pane's recovery is
+    // a login-only refresh of the shared credential, and there is no code path
+    // here that can invalidate it.
+    //
+    // That is not an absolute guarantee the user cannot end up logged out.
+    // `login` is the provider's own subprocess: if the user cancels it
+    // (`cancel_reauthentication` kills it) after it has cleared the credential
+    // to begin a fresh sign-in, the shared login can be left empty. That
+    // window is inherent to a shared login and cannot be closed from here, so
+    // instead of leaving it silent, a cancel that lands on an empty shared
+    // login is detected and named (see `cancelled_login_error`) — the user is
+    // told the machine-wide login needs signing in again rather than
+    // discovering it one failing pane at a time.
+    //
+    // The common case — an already-valid login the user re-triggered — is
+    // protected because `login` exiting 0 is not trusted on its own: the
+    // status gate below confirms the credential really is valid before the
+    // conversation is resumed.
     let previous_failure = config
         .agent_recovery
         .take_failure(recovery_terminal_id)
@@ -809,11 +804,6 @@ async fn run_reauthentication(
             current_backend_key.clone(),
         )
         .await;
-    let _ = config.bus.send(Event::AgentAuthProgress {
-        recovery_terminal_id,
-        terminal_id: current_terminal_id,
-        phase: AgentAuthPhase::LoggingOut,
-    });
     if config
         .agent_recovery
         .is_cancelled(recovery_terminal_id)
@@ -829,59 +819,6 @@ async fn run_reauthentication(
         )
         .await;
         return;
-    }
-    if switch_account {
-        let result = run_quiet_command(
-            &config,
-            recovery_terminal_id,
-            &commands.logout,
-            &context.cwd,
-            &auth_env,
-        )
-        .await;
-        if config
-            .agent_recovery
-            .is_cancelled(recovery_terminal_id)
-            .await
-        {
-            finish_failure(
-                &config,
-                recovery_terminal_id,
-                current_terminal_id,
-                &display_name,
-                "authentication was cancelled".into(),
-                current_backend_key,
-            )
-            .await;
-            return;
-        }
-        match result {
-            Ok(Some(0)) => {}
-            Ok(code) => {
-                finish_failure(
-                    &config,
-                    recovery_terminal_id,
-                    current_terminal_id,
-                    &display_name,
-                    format!("provider logout exited with {}", exit_label(code)),
-                    current_backend_key,
-                )
-                .await;
-                return;
-            }
-            Err(error) => {
-                finish_failure(
-                    &config,
-                    recovery_terminal_id,
-                    current_terminal_id,
-                    &display_name,
-                    format!("provider logout could not start: {error}"),
-                    current_backend_key,
-                )
-                .await;
-                return;
-            }
-        }
     }
     if config
         .agent_recovery
@@ -905,7 +842,7 @@ async fn run_reauthentication(
         .await;
     let login_key = match config
         .backend
-        .spawn(&commands.login, Some(&context.cwd), &auth_env, "agent-auth")
+        .spawn(&commands.login, Some(&context.cwd), AUTH_ENV, "agent-auth")
         .await
     {
         Ok(key) => key,
@@ -1066,7 +1003,18 @@ async fn run_reauthentication(
             recovery_terminal_id,
             auth_terminal_id,
             &display_name,
-            "authentication was cancelled".into(),
+            cancelled_login_error(
+                verify_authenticated(
+                    &config,
+                    recovery_terminal_id,
+                    &commands.status,
+                    commands.signed_out_marker,
+                    &latest_context.cwd,
+                    AUTH_ENV,
+                )
+                .await,
+                &display_name,
+            ),
             Some(login_key),
         )
         .await;
@@ -1084,46 +1032,52 @@ async fn run_reauthentication(
         .await;
         return;
     }
-    // For a shared login we skipped the logout above, so `login` ran with the
-    // stale credential still present and can exit 0 without actually
+    // lazybox never runs the provider `logout`, so `login` ran with the stale
+    // credential still present and can exit 0 without actually
     // re-authenticating (e.g. reporting an already-present but expired
     // session). Trusting that exit code alone would resume straight back into
-    // the same failed session and re-arm the auth loop. Confirm the credential
-    // is genuinely valid with the provider's own status command before
-    // resuming; an isolated login already did a clean logout+login, so it needs
-    // no re-check.
-    if !credentials_isolated
-        && !verify_authenticated(
-            &config,
-            recovery_terminal_id,
-            &commands.status,
-            commands.signed_out_marker,
-            &latest_context.cwd,
-            &auth_env,
-        )
+    // the same failed session and re-arm the auth loop, so confirm the
+    // credential is genuinely valid with the provider's own status command
+    // before resuming.
+    let authenticated = verify_authenticated(
+        &config,
+        recovery_terminal_id,
+        &commands.status,
+        commands.signed_out_marker,
+        &latest_context.cwd,
+        AUTH_ENV,
+    )
+    .await;
+    // Cancellation is checked on its own, BEFORE the gate's verdict is acted
+    // on. The gate deliberately fails open for a probe that cannot answer,
+    // and a cancel kills that probe mid-flight — so reading the verdict first
+    // would let a re-auth the user explicitly cancelled go on to resume the
+    // agent. A cancelled flow never resumes, whatever the probe managed to
+    // say; the gate's answer only picks which cancellation message is true.
+    if config
+        .agent_recovery
+        .is_cancelled(recovery_terminal_id)
         .await
     {
-        // The status gate can fail for two reasons: the user cancelled the
-        // re-auth mid-probe (the login itself may have succeeded), or the
-        // login genuinely didn't take. Report the cancel as such — mirroring
-        // the other cancel points — rather than telling a user who just
-        // completed sign-in that they're "still logged out".
-        let error = if config
-            .agent_recovery
-            .is_cancelled(recovery_terminal_id)
-            .await
-        {
-            "authentication was cancelled".to_string()
-        } else {
-            "sign-in did not complete — the agent is still logged out. Please sign in again."
-                .to_string()
-        };
         finish_failure(
             &config,
             recovery_terminal_id,
             auth_terminal_id,
             &display_name,
-            error,
+            cancelled_login_error(authenticated, &display_name),
+            Some(login_key),
+        )
+        .await;
+        return;
+    }
+    if !authenticated {
+        finish_failure(
+            &config,
+            recovery_terminal_id,
+            auth_terminal_id,
+            &display_name,
+            "sign-in did not complete — the agent is still logged out. Please sign in again."
+                .to_string(),
             Some(login_key),
         )
         .await;
@@ -1169,31 +1123,50 @@ async fn run_reauthentication(
     config.agent_recovery.finish(recovery_terminal_id).await;
 }
 
-/// Isolated credential-home env for a re-auth flow. Seeds the per-session
-/// home for adapters that opt in. Empty for shared-login agents, including
-/// Codex and Claude.
-fn auth_credential_env(
-    config: &ServerConfig,
-    context: &AgentResumeContext,
-) -> Vec<(String, String)> {
-    let Some(agent) = config.agents.get(&context.agent_id) else {
-        return Vec::new();
-    };
-    crate::spawn_plan::seed_credential_home(agent.as_ref(), &context.session_key);
-    crate::spawn_plan::credential_home_env(Some(agent.as_ref()), &context.session_key)
+/// Message for a re-auth cancelled *after* the interactive login had started,
+/// given whether the credential is `authenticated` now.
+///
+/// Killing the provider's `login` mid-flight is the one way lazybox's own
+/// recovery can still leave the shared machine-wide credential empty: the
+/// provider may have cleared it to begin a fresh sign-in, and the kill lands
+/// before the replacement is written. Nothing here can prevent that (the
+/// subprocess owns the credential), but it must not be SILENT — the user
+/// would otherwise discover it one failing pane at a time, across every
+/// session of that agent and their own interactive terminal.
+///
+/// So when the login is intact — the overwhelmingly common cancel, where the
+/// user changed their mind before the provider touched anything — report the
+/// plain cancellation and say nothing alarming. When it is not, name it.
+fn cancelled_login_error(authenticated: bool, display_name: &str) -> String {
+    if authenticated {
+        return "authentication was cancelled".into();
+    }
+    format!(
+        "authentication was cancelled while {display_name} was signing in, and the \
+         shared machine-wide login is now empty — every {display_name} session on \
+         this machine needs signing in again."
+    )
 }
 
 /// Confirm the agent's login is actually valid before resuming, by running
 /// the provider's own status command. Returns `true` (resume) unless the
-/// status command exits non-zero OR its output contains `signed_out_marker`
-/// (the provider's explicit "not logged in" token).
+/// probe reports, unambiguously, that the agent is signed out.
 ///
-/// Deliberately fails OPEN: an empty status command, a spawn error, no marker
-/// configured, or an output that lacks the marker all return `true` so a
-/// status-probe quirk can never block an otherwise-successful re-auth. The
-/// only signals that stop a resume are the two unambiguous "not logged in"
-/// ones. This gate matters only on the shared-login path (isolated logins
-/// already did a clean logout+login), so it is called only there.
+/// Deliberately fails OPEN, and the exit code alone is NOT an unambiguous
+/// signal. A probe that cannot answer — an empty status command, a spawn
+/// failure, a `codex` shim or an older build without a `login status`
+/// subcommand (clap exits 2), an auth mode the probe does not recognize —
+/// exits non-zero while saying nothing about the credential. Failing closed
+/// there turns a sign-in the user just completed successfully into a
+/// permanent "still logged out", with the conversation never resumed and
+/// every retry looping; before Codex moved onto the shared login it skipped
+/// this gate entirely, so that was a new way to strand a conversation.
+///
+/// So: when the agent declares a `signed_out_marker`, that token is the only
+/// thing that stops a resume — a non-zero exit *without* it is treated as a
+/// probe quirk and the resume proceeds. An agent that declares no marker has
+/// nothing else to go on, so its exit code is all that is left and a non-zero
+/// one does block. Every built-in that reaches this gate declares a marker.
 ///
 /// Output is collected by draining the live subscription until it CLOSES, not
 /// via a post-exit snapshot. The PTY reader thread and the child-reap exit
@@ -1241,45 +1214,29 @@ async fn verify_authenticated(
         .set_auth_process(terminal_id, None)
         .await;
     config.backend.release(&key).await;
-    let signed_out = signed_out_marker.is_some_and(|marker| {
-        // Whitespace-insensitive, case-folded scan on both sides so
-        // pretty-printing or casing in the status output can't hide the
-        // provider's signed-out token.
-        let normalize = |s: &str| -> String {
-            s.split_whitespace()
-                .collect::<String>()
-                .to_ascii_lowercase()
-        };
-        normalize(&String::from_utf8_lossy(&output)).contains(&normalize(marker))
-    });
-    code == Some(0) && !signed_out
-}
-
-async fn run_quiet_command(
-    config: &ServerConfig,
-    terminal_id: TerminalId,
-    argv: &[String],
-    cwd: &std::path::Path,
-    env: &[(String, String)],
-) -> Result<Option<i32>, crate::backend::BackendError> {
-    let key = config
-        .backend
-        .spawn(argv, Some(cwd), env, "agent-auth")
-        .await?;
-    config
-        .agent_recovery
-        .set_auth_process(terminal_id, Some(key.clone()))
-        .await;
-    if config.agent_recovery.is_cancelled(terminal_id).await {
-        let _ = config.backend.kill(&key).await;
+    let Some(marker) = signed_out_marker else {
+        // No token to look for: the exit code is the only signal available.
+        return code == Some(0);
+    };
+    // Whitespace-insensitive, case-folded scan on both sides so
+    // pretty-printing or casing in the status output can't hide the
+    // provider's signed-out token.
+    let normalize = |s: &str| -> String {
+        s.split_whitespace()
+            .collect::<String>()
+            .to_ascii_lowercase()
+    };
+    let signed_out = normalize(&String::from_utf8_lossy(&output)).contains(&normalize(marker));
+    if signed_out {
+        return false;
     }
-    let code = config.backend.wait_exit(&key).await;
-    config
-        .agent_recovery
-        .set_auth_process(terminal_id, None)
-        .await;
-    config.backend.release(&key).await;
-    Ok(code)
+    if code != Some(0) {
+        tracing::warn!(
+            ?code,
+            "re-auth status probe exited non-zero without its signed-out marker —              treating as an unusable probe and resuming rather than stranding the conversation"
+        );
+    }
+    true
 }
 
 async fn pump_auth_terminal(
@@ -1451,7 +1408,6 @@ mod tests {
                         agent_display_name(&config, agent_id)
                     ),
                     0,
-                    false,
                 )
                 .await
         );
@@ -1523,7 +1479,6 @@ mod tests {
         start_reauthentication(
             &config,
             terminal_id,
-            true,
             Some(lazybox_ipc::EventSender::from_unbounded(output_tx)),
         )
         .await;
@@ -1608,35 +1563,38 @@ mod tests {
     #[tokio::test]
     async fn codex_reauthentication_shares_login_without_logging_other_workspaces_out() {
         let (config, mock, terminal_id) = recovery_fixture("codex", Some("conversation-777")).await;
-        start_reauthentication(&config, terminal_id, true, None).await;
+        start_reauthentication(&config, terminal_id, None).await;
         wait_for_argv(&mock, &["codex", "login"]).await;
         let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
         let login_key = config
             .terminal
             .backend_key_for(auth_terminal_id)
             .await
-            .unwrap();
+            .expect("interactive login terminal");
         assert!(
             mock.env_for(&login_key)
                 .await
-                .unwrap()
+                .expect("login command spawned")
                 .iter()
-                .all(|(k, _)| k != "CODEX_HOME")
+                .all(|(k, _)| k != "CODEX_HOME"),
+            "login must inherit the daemon's shared Codex home, not be pinned to a per-workspace one"
         );
         assert!(
             mock.all_argv()
                 .await
                 .iter()
-                .all(|argv| argv.as_slice() != ["codex", "logout"])
+                .all(|argv| argv.as_slice() != ["codex", "logout"]),
+            "a shared machine-wide login must never be logged out by a single pane's re-auth"
         );
         mock.finish(&login_key, 0).await;
         wait_for_argv(&mock, &["codex", "login", "status"]).await;
         assert!(
             mock.env_for("mock-agent-auth-2")
                 .await
-                .unwrap()
+                .expect("status probe spawned")
                 .iter()
-                .all(|(k, _)| k != "CODEX_HOME")
+                .all(|(k, _)| k != "CODEX_HOME"),
+            "the status probe must read the same shared home the login wrote"
         );
         mock.emit("mock-agent-auth-2", b"Not logged in").await;
         mock.finish("mock-agent-auth-2", 0).await;
@@ -1657,17 +1615,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claude_switch_account_never_signs_out_the_shared_login() {
-        // Claude keeps a machine-wide login (no per-session credential home),
-        // shared by every other Claude session AND the user's own interactive
-        // pane. A single pane's re-auth must therefore NEVER run the provider
-        // `logout` — that would sign all of them out at once. Even when the
-        // client asks to "switch account" (`switch_account: true`), the shared
-        // login is only refreshed in place (login), never invalidated, so a
-        // cancelled login can't leave the user logged out.
+    async fn reauthentication_never_signs_out_the_shared_login() {
+        // Every agent keeps a machine-wide login, shared by every other
+        // session of that agent AND the user's own interactive pane. A single
+        // pane's re-auth must therefore NEVER run the provider `logout` —
+        // that would sign all of them out at once (#1376). There is no longer
+        // any request that can ask it to: the shared login is only ever
+        // refreshed in place.
         let (config, mock, terminal_id) =
             recovery_fixture("claude", Some("claude-conversation-708")).await;
-        start_reauthentication(&config, terminal_id, true, None).await;
+        start_reauthentication(&config, terminal_id, None).await;
 
         // Login runs directly, with no preceding logout of the shared credential.
         wait_for_argv(&mock, &["claude", "auth", "login"]).await;
@@ -1695,6 +1652,147 @@ mod tests {
         wait_for_argv(&mock, &["claude", "--resume", "claude-conversation-708"]).await;
     }
 
+    /// A status probe that CANNOT answer must not strand the conversation.
+    ///
+    /// `codex login status` exits 1 when signed out, but a `codex` shim, a
+    /// build predating the subcommand, or an auth mode the probe does not
+    /// recognize also exits non-zero — while saying nothing at all about the
+    /// credential. Failing closed there turned a sign-in the user had just
+    /// completed into a permanent "still logged out" with the conversation
+    /// never resumed and every retry looping. The signed-out MARKER is the
+    /// only unambiguous signal, so a non-zero exit without it resumes.
+    #[tokio::test]
+    async fn a_status_probe_that_cannot_answer_still_resumes() {
+        let (config, mock, terminal_id) = recovery_fixture("codex", Some("conversation-708")).await;
+        start_reauthentication(&config, terminal_id, None).await;
+
+        wait_for_argv(&mock, &["codex", "login"]).await;
+        let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
+        let login_key = config
+            .terminal
+            .backend_key_for(auth_terminal_id)
+            .await
+            .expect("interactive login terminal");
+        mock.finish(&login_key, 0).await;
+        // The probe fails the way a missing subcommand does: non-zero, and
+        // nothing resembling the provider's signed-out token.
+        wait_for_argv(&mock, &["codex", "login", "status"]).await;
+        mock.emit(
+            "mock-agent-auth-2",
+            b"error: unrecognized subcommand 'status'",
+        )
+        .await;
+        mock.finish("mock-agent-auth-2", 2).await;
+
+        wait_for_argv(&mock, &["codex", "resume", "conversation-708"]).await;
+    }
+
+    /// The other half of the same gate: an unambiguous signed-out token still
+    /// blocks the resume even though the exit code is now advisory.
+    #[tokio::test]
+    async fn a_signed_out_marker_blocks_the_resume_whatever_the_exit_code() {
+        let (config, mock, terminal_id) = recovery_fixture("codex", Some("conversation-708")).await;
+        start_reauthentication(&config, terminal_id, None).await;
+
+        wait_for_argv(&mock, &["codex", "login"]).await;
+        let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
+        let login_key = config
+            .terminal
+            .backend_key_for(auth_terminal_id)
+            .await
+            .expect("interactive login terminal");
+        mock.finish(&login_key, 0).await;
+        wait_for_argv(&mock, &["codex", "login", "status"]).await;
+        // Exit 0 — only the marker says otherwise, and it must win.
+        mock.emit("mock-agent-auth-2", b"Not logged in").await;
+        mock.finish("mock-agent-auth-2", 0).await;
+
+        for _ in 0..10_000 {
+            if !config.agent_recovery.active(terminal_id).await {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!config.agent_recovery.active(terminal_id).await);
+        assert!(
+            mock.all_argv()
+                .await
+                .iter()
+                .all(|argv| !argv.starts_with(&["codex".into(), "resume".into()])),
+            "an explicitly signed-out status must not resume the agent"
+        );
+    }
+
+    /// lazybox never logs out, so it must never SAY it is logging out. The
+    /// re-auth flow used to open by broadcasting `LoggingOut`, which the TUI
+    /// renders as "signing out of the provider…" — the exact opposite of the
+    /// guarantee #1376 exists to give. The phase no longer exists at all, so
+    /// the compiler enforces the message; what this pins is the phase a
+    /// client reconnecting mid-flow actually reads.
+    #[tokio::test]
+    async fn a_client_reconnecting_mid_re_auth_reads_the_login_phase() {
+        let (config, mock, terminal_id) = recovery_fixture("codex", Some("conversation-708")).await;
+        start_reauthentication(&config, terminal_id, None).await;
+        wait_for_argv(&mock, &["codex", "login"]).await;
+        let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
+
+        let (replay, _) = config.agent_recovery.replay_events(None).await;
+        assert!(
+            replay.iter().any(|event| matches!(
+                event,
+                Event::AgentAuthProgress {
+                    recovery_terminal_id,
+                    terminal_id: id,
+                    phase: AgentAuthPhase::LoginInteractive,
+                } if *recovery_terminal_id == terminal_id && *id == auth_terminal_id
+            )),
+            "the only phase before the login completes is the interactive login: {replay:?}"
+        );
+        cancel_reauthentication(&config, terminal_id).await;
+    }
+
+    /// Killing the provider's `login` mid-flight can leave the shared
+    /// credential empty — it may have been cleared to begin a fresh sign-in.
+    /// That cannot be prevented from here, but it must not be silent: the
+    /// user would otherwise discover it one failing pane at a time, across
+    /// every session of that agent and their own terminal.
+    #[tokio::test]
+    async fn a_cancel_that_empties_the_shared_login_says_so() {
+        let (config, mock, terminal_id) = recovery_fixture("codex", Some("conversation-708")).await;
+        start_reauthentication(&config, terminal_id, None).await;
+        wait_for_argv(&mock, &["codex", "login"]).await;
+        wait_for_replacement(&config, terminal_id).await;
+
+        cancel_reauthentication(&config, terminal_id).await;
+        // The cancel probes the shared login, which the killed sign-in left empty.
+        wait_for_argv(&mock, &["codex", "login", "status"]).await;
+        mock.emit("mock-agent-auth-2", b"Not logged in").await;
+        mock.finish("mock-agent-auth-2", 1).await;
+
+        for _ in 0..10_000 {
+            if !config.agent_recovery.active(terminal_id).await {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let (replay, _) = config.agent_recovery.replay_events(None).await;
+        let error = replay
+            .iter()
+            .find_map(|event| match event {
+                Event::AgentAuthFinished {
+                    recovery_terminal_id,
+                    error: Some(error),
+                    ..
+                } if *recovery_terminal_id == terminal_id => Some(error.clone()),
+                _ => None,
+            })
+            .expect("the cancelled re-auth reports a failure");
+        assert!(
+            error.contains("shared machine-wide login is now empty"),
+            "a cancel that emptied the shared login must name it: {error}"
+        );
+    }
+
     #[tokio::test]
     async fn login_reporting_signed_out_does_not_resume_into_a_dead_session() {
         // The shared-login path skips logout, so `claude auth login` can exit 0
@@ -1704,7 +1802,7 @@ mod tests {
         // the loop returns. The conversation stays recoverable for a retry.
         let (config, mock, terminal_id) =
             recovery_fixture("claude", Some("claude-conversation-708")).await;
-        start_reauthentication(&config, terminal_id, true, None).await;
+        start_reauthentication(&config, terminal_id, None).await;
 
         wait_for_argv(&mock, &["claude", "auth", "login"]).await;
         let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
@@ -1763,7 +1861,7 @@ mod tests {
         // to the replay ring) must still block the resume.
         let (config, mock, terminal_id) =
             recovery_fixture("claude", Some("claude-conversation-708")).await;
-        start_reauthentication(&config, terminal_id, true, None).await;
+        start_reauthentication(&config, terminal_id, None).await;
 
         wait_for_argv(&mock, &["claude", "auth", "login"]).await;
         let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
@@ -1815,7 +1913,7 @@ mod tests {
         // agent being "still logged out".
         let (config, mock, terminal_id) =
             recovery_fixture("claude", Some("claude-conversation-708")).await;
-        start_reauthentication(&config, terminal_id, true, None).await;
+        start_reauthentication(&config, terminal_id, None).await;
 
         wait_for_argv(&mock, &["claude", "auth", "login"]).await;
         let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
@@ -1876,7 +1974,7 @@ mod tests {
             "new draft before login starts",
         )
         .await;
-        start_reauthentication(&config, terminal_id, true, None).await;
+        start_reauthentication(&config, terminal_id, None).await;
         wait_for_argv(&mock, &["codex", "login"]).await;
         let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
         let login_key = config
@@ -1946,7 +2044,7 @@ mod tests {
     #[tokio::test]
     async fn reconnect_during_codex_login_keeps_the_auth_terminal_addressable() {
         let (config, mock, terminal_id) = recovery_fixture("codex", Some("conversation-708")).await;
-        start_reauthentication(&config, terminal_id, true, None).await;
+        start_reauthentication(&config, terminal_id, None).await;
         wait_for_argv(&mock, &["codex", "login"]).await;
         let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
         let snapshot = crate::spawn_handler::snapshot_terminals(&config).await;
@@ -1980,7 +2078,6 @@ mod tests {
         start_reauthentication(
             &config,
             terminal_id,
-            true,
             Some(lazybox_ipc::EventSender::from_unbounded(first_tx)),
         )
         .await;
@@ -2039,7 +2136,7 @@ mod tests {
     #[tokio::test]
     async fn closing_a_failed_auth_pane_removes_its_server_side_recovery_state() {
         let (config, mock, terminal_id) = recovery_fixture("codex", Some("conversation-708")).await;
-        start_reauthentication(&config, terminal_id, true, None).await;
+        start_reauthentication(&config, terminal_id, None).await;
         wait_for_argv(&mock, &["codex", "login"]).await;
         let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
         mock.finish("mock-agent-auth-1", 1).await;
@@ -2126,14 +2223,13 @@ mod tests {
                     "Codex".into(),
                     "Codex authentication is no longer valid.".into(),
                     1,
-                    false,
                 )
                 .await
         );
 
-        start_reauthentication(&config, terminal_id, true, None).await;
+        start_reauthentication(&config, terminal_id, None).await;
         wait_for_argv(&mock, &["codex", "login"]).await;
-        start_reauthentication(&config, other_terminal_id, true, None).await;
+        start_reauthentication(&config, other_terminal_id, None).await;
         tokio::task::yield_now().await;
 
         assert_eq!(
@@ -2171,7 +2267,7 @@ mod tests {
             .await
             .remove(&terminal_id);
 
-        start_reauthentication(&config, terminal_id, true, None).await;
+        start_reauthentication(&config, terminal_id, None).await;
         tokio::task::yield_now().await;
 
         assert!(

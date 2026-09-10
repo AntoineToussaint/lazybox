@@ -166,7 +166,6 @@ mod agent_auth_recovery_tests {
             display_name: "Claude Code".into(),
             reason: "provider sign-in expired".into(),
             other_session_count: 2,
-            credentials_isolated: false,
         });
 
         assert_eq!(model.top_modal(), Some(&Id::AgentAuth));
@@ -190,32 +189,43 @@ mod agent_auth_recovery_tests {
             model.handle_confirmed(true).as_slice(),
             [Command::ReauthenticateAgent {
                 terminal_id: TerminalId(7),
-                switch_account: true,
             }]
         ));
     }
 
+    /// The prompt must not offer to sign in "with another account".
+    /// lazybox never runs the provider `logout` — that would sign out every
+    /// session sharing the machine-wide login (#1376) — so `login` runs with
+    /// the old credential still present and refreshes it in place. A provider
+    /// that short-circuits on an already-valid credential would then resume
+    /// on the very account the user asked to leave, and report success.
     #[test]
-    fn isolated_auth_required_drops_the_machine_wide_cascade_warning() {
+    fn auth_required_offers_a_refresh_not_an_account_switch() {
         let mut model = build_model();
-        // An adapter that opts into credential isolation never
-        // cascades, so the modal reassures instead of warning.
         model.handle_daemon_event(Event::AgentAuthRequired {
             terminal_id: TerminalId(7),
             agent_id: "codex".into(),
             display_name: "Codex".into(),
             reason: "provider sign-in expired".into(),
             other_session_count: 0,
-            credentials_isolated: true,
         });
 
         let screen = rendered_auth_modal(&mut model)
+            .replace('│', " ")
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
-        assert!(screen.contains("Only this agent is affected"), "{screen}");
-        assert!(!screen.contains("machine-wide"), "{screen}");
-        assert!(!screen.contains("other running"), "{screen}");
+        assert!(
+            !screen.contains("another account"),
+            "the prompt must not promise a switch lazybox cannot perform: {screen}"
+        );
+        assert!(screen.contains("Sign in again and continue"), "{screen}");
+        assert!(
+            screen.contains("refreshes the machine-wide Codex login in place"),
+            "{screen}"
+        );
+        // ...and it must say how to actually change accounts.
+        assert!(screen.contains("codex logout"), "{screen}");
     }
 
     #[test]
@@ -227,7 +237,6 @@ mod agent_auth_recovery_tests {
             display_name: "Claude Code".into(),
             reason: "provider sign-in expired".into(),
             other_session_count: 0,
-            credentials_isolated: false,
         });
 
         assert!(model.handle_modal_dismissed().is_empty());
@@ -256,7 +265,6 @@ mod agent_auth_recovery_tests {
             model.handle_confirmed(true).as_slice(),
             [Command::ReauthenticateAgent {
                 terminal_id: TerminalId(9),
-                switch_account: true,
             }]
         ));
     }

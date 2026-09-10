@@ -1853,7 +1853,7 @@ async fn run_embedded_realm(
     preselect: Option<lazybox_tui::realm::model::Preselect>,
 ) -> anyhow::Result<()> {
     let (client, server) = channel::pair();
-    let config = server_config_from_user()?;
+    let config = server_config_from_user().await?;
     // Refresh the stable `<home>/bin/lazybox` copy agent hooks reference,
     // once, before any spawn — never on the per-spawn hot path (#856).
     lazybox_server::spawn_handler::ensure_stable_hook_exe();
@@ -2558,7 +2558,7 @@ async fn server_start() -> anyhow::Result<()> {
     let socket = lifecycle::socket_path();
     let pid_file = lifecycle::pid_path();
 
-    let config = server_config_from_user()?;
+    let config = server_config_from_user().await?;
     // Refresh the stable `<home>/bin/lazybox` copy agent hooks reference,
     // once, before any spawn — never on the per-spawn hot path (#856).
     lazybox_server::spawn_handler::ensure_stable_hook_exe();
@@ -2665,7 +2665,7 @@ async fn server_api(args: &[String]) -> anyhow::Result<()> {
         std::process::exit(2);
     }
 
-    let config = server_config_from_user()?;
+    let config = server_config_from_user().await?;
     // Refresh the stable `<home>/bin/lazybox` copy agent hooks reference,
     // once, before any spawn — never on the per-spawn hot path (#856).
     lazybox_server::spawn_handler::ensure_stable_hook_exe();
@@ -2715,8 +2715,8 @@ async fn server_api(args: &[String]) -> anyhow::Result<()> {
 /// Load the production database without ever degrading to ephemeral
 /// state. Tracing redirects stderr to the log file, so print the failure
 /// to stdout before returning it or a CLI user would see a silent exit.
-fn server_config_from_user() -> anyhow::Result<ServerConfig> {
-    match ServerConfig::from_user_config() {
+async fn server_config_from_user() -> anyhow::Result<ServerConfig> {
+    match ServerConfig::from_user_config().await {
         Ok(config) => Ok(config),
         Err(error) => {
             println!(

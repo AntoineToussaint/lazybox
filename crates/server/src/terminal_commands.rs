@@ -316,11 +316,10 @@ async fn run_io_lane(
             Command::RestartAgentAndContinue { .. } => {
                 crate::agent_auth::restart_agent_and_continue(&config, terminal_id).await;
             }
-            Command::ReauthenticateAgent { switch_account, .. } => {
+            Command::ReauthenticateAgent { .. } => {
                 crate::agent_auth::start_reauthentication(
                     &config,
                     terminal_id,
-                    switch_account,
                     Some(event_tx.clone()),
                 )
                 .await;
@@ -633,10 +632,7 @@ mod tests {
             let router = tokio::spawn(run_io_router(config.clone(), event_tx, command_rx));
             let mut events = config.bus.subscribe();
             command_tx
-                .send(Command::ReauthenticateAgent {
-                    terminal_id,
-                    switch_account: true,
-                })
+                .send(Command::ReauthenticateAgent { terminal_id })
                 .await
                 .expect("router open");
             command_tx

@@ -101,40 +101,20 @@ impl StructuredAgentProtocol {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentAuthCommands {
     pub status: Vec<String>,
-    pub logout: Vec<String>,
     pub login: Vec<String>,
     /// The provider's explicit "not logged in" token as it appears in
     /// `status` output — the one agent-specific signal a caller may scan for
-    /// to confirm a login actually took (a re-auth on a shared login skips
-    /// logout, so `login` can exit 0 without truly authenticating). Matched
+    /// to confirm a login actually took. lazybox never runs the provider
+    /// `logout` (that would sign out every session sharing the machine-wide
+    /// credential, #1376), so `login` runs with the stale credential still
+    /// present and can exit 0 without truly authenticating. Matched
     /// whitespace-insensitively and case-folded, so store it in a natural
-    /// form (Claude's `--json` prints `"loggedIn": false`). `None` means the
-    /// caller trusts the exit code alone.
+    /// form (Claude's `--json` prints `"loggedIn": false`).
+    ///
+    /// `None` leaves the caller with nothing but the exit code, which cannot
+    /// distinguish "signed out" from "this probe does not work here" — so an
+    /// agent that reaches the status gate should declare one.
     pub signed_out_marker: Option<&'static str>,
-}
-
-/// How to give an agent a per-session credential home so an expired token
-/// or an account switch on one session never disturbs the machine-wide
-/// login shared by every other session.
-///
-/// A CLI that reads `home_env` to relocate its credential/config directory
-/// can be pointed at a private directory per lazybox workspace. lazybox
-/// seeds `seed_files` from the machine-wide home (`$home_env`, else
-/// `$HOME/<default_home>`) once, so the session starts already
-/// authenticated but re-logs in isolation — a `logout`/`login` on one
-/// session rewrites only that session's copy.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CredentialIsolation {
-    /// Env var the CLI reads to relocate its credential/config home
-    /// (Codex → `CODEX_HOME`).
-    pub home_env: &'static str,
-    /// Machine-wide home relative to `$HOME`, used as the seed source when
-    /// `home_env` is unset (Codex → `.codex`).
-    pub default_home: &'static str,
-    /// Files under the home carrying login (and user config) state that
-    /// must be copied into a fresh per-session home so it starts
-    /// authenticated.
-    pub seed_files: &'static [&'static str],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -359,14 +339,6 @@ pub trait Agent: Send + Sync {
     /// from recent PTY output.
     fn detect_auth_failure(&self, recent_output: &[u8]) -> Option<AuthFailure> {
         let _ = recent_output;
-        None
-    }
-
-    /// Per-session credential-home isolation for this agent, when its CLI
-    /// can relocate its credential directory through an environment
-    /// variable. `None` (the default) leaves the agent on the machine-wide
-    /// login, where a re-auth on one session cascades to every other.
-    fn credential_isolation(&self) -> Option<CredentialIsolation> {
         None
     }
 
@@ -820,7 +792,6 @@ pub mod builtins {
                     "status".into(),
                     "--json".into(),
                 ],
-                logout: vec!["claude".into(), "auth".into(), "logout".into()],
                 login: vec!["claude".into(), "auth".into(), "login".into()],
                 signed_out_marker: Some("\"loggedIn\": false"),
             })
@@ -1089,7 +1060,6 @@ pub mod builtins {
         fn auth_commands(&self) -> Option<AgentAuthCommands> {
             Some(AgentAuthCommands {
                 status: vec!["codex".into(), "login".into(), "status".into()],
-                logout: vec!["codex".into(), "logout".into()],
                 login: vec!["codex".into(), "login".into()],
                 // Re-auth refreshes the shared login without logging other panes out.
                 signed_out_marker: Some("Not logged in"),
@@ -1098,13 +1068,6 @@ pub mod builtins {
 
         fn detect_auth_failure(&self, recent_output: &[u8]) -> Option<AuthFailure> {
             crate::detect::codex_auth_failure(recent_output)
-        }
-
-        /// Keep the normal shared home, including an inherited CODEX_HOME.
-        /// Copying auth.json per workspace forks refresh-token state and misses
-        /// keyring credentials, forcing users to sign in repeatedly.
-        fn credential_isolation(&self) -> Option<CredentialIsolation> {
-            None
         }
 
         /// Suppress Homebrew's implicit self-update inside a spawned Codex
@@ -1717,17 +1680,19 @@ mod tests {
         );
     }
 
+    /// Codex re-auth refreshes the one shared login in place, so the status
+    /// gate is the only thing standing between a `login` that exited 0
+    /// without actually re-authenticating and a resume straight back into
+    /// the dead session. That gate needs an explicit signed-out token.
     #[test]
-    fn codex_and_claude_share_the_machine_login() {
-        assert!(super::builtins::Codex.credential_isolation().is_none());
+    fn codex_carries_a_signed_out_marker_for_the_shared_login_gate() {
         assert_eq!(
             super::builtins::Codex
                 .auth_commands()
-                .unwrap()
+                .expect("codex declares auth commands")
                 .signed_out_marker,
             Some("Not logged in")
         );
-        assert!(Claude.credential_isolation().is_none());
     }
 
     #[test]

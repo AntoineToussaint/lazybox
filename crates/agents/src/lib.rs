@@ -20,9 +20,8 @@ pub mod state_machine;
 pub mod update;
 
 pub use agent::{
-    Agent, AgentAuthCommands, AgentObservation, AuthFailure, CredentialIsolation, GatewayInjection,
-    LlmProvider, Registry, SpawnCtx, StructuredAgentProtocol, UnattendedPromptKind,
-    UnattendedPromptNudge,
+    Agent, AgentAuthCommands, AgentObservation, AuthFailure, GatewayInjection, LlmProvider,
+    Registry, SpawnCtx, StructuredAgentProtocol, UnattendedPromptKind, UnattendedPromptNudge,
 };
 pub use lazybox_ipc::AgentState;
 pub use pty::{

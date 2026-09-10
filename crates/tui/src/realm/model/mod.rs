@@ -1231,10 +1231,10 @@ pub(crate) enum EditorFormStage {
 pub(crate) struct AgentAuthPrompt {
     pub terminal_id: lazybox_ipc::TerminalId,
     pub display_name: String,
+    /// Other running sessions of this agent. They share the one machine-wide
+    /// login this re-auth refreshes, so the modal names how many are riding
+    /// on it.
     pub other_session_count: usize,
-    /// The agent isolates its login per session, so re-auth affects only
-    /// this session — the modal drops the machine-wide cascade warning.
-    pub credentials_isolated: bool,
     pub retry: bool,
     pub error: Option<String>,
 }

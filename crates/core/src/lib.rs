@@ -47,7 +47,10 @@ pub use context_hygiene::{
     KV_PREFIX_CONDENSE, SkipReason, ToolResultFacts, is_condensed, render_condensed,
 };
 pub use conventions::{CommitStyle, Conventions};
-pub use epic::{EpicKey, EpicRecord};
+pub use epic::{
+    EPIC_LABEL_PREFIX, EpicKey, EpicRecord, STATUS_LABEL_BLOCKED, STATUS_LABEL_DONE,
+    STATUS_LABEL_READY, STATUS_LABELS,
+};
 pub use error_class::{ErrorClass, HttpErrorSignals, classify, classify_message, classify_status};
 pub use issue_links::{IssueLink, extract as extract_issue_links};
 pub use policy::{

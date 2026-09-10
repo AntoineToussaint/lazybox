@@ -3467,6 +3467,15 @@ pub enum Event {
         snapshot: EpicSnapshot,
         delta: Vec<EpicDelta>,
     },
+    /// An epic stopped being live — archived, or its record deleted. No
+    /// further [`Event::EpicStatus`] will name it, so a client holding a
+    /// cached snapshot must drop it: nothing else ever invalidates one, and
+    /// a stale snapshot keeps rendering a dead epic (and keeps lifting its
+    /// members out of their repo groups) until the process restarts.
+    /// Appended last (bincode is ordinal-sensitive).
+    EpicGone {
+        key: String,
+    },
 }
 
 /// Daemon resource posture for the Shift-D sync-status screen.

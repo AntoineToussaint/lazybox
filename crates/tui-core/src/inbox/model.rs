@@ -244,6 +244,14 @@ pub enum VisibleRow {
         workspace: SessionKey,
         session_id: SessionId,
     },
+    /// Epic group header — the cross-repo tier (#1517 §4d), emitted above
+    /// every Space / repo header. The string is the epic key; the display
+    /// name and the derived counts come from the client's cached
+    /// [`lazybox_ipc::EpicSnapshot`], which is also what lifts the member
+    /// rows out of their repo groups and orders them by wave. Non-selectable
+    /// like the other headers. Appended last — this enum is a wire type and
+    /// bincode encodes it by ordinal.
+    EpicHeader(String),
 }
 
 /// Hierarchy metadata for one visible workspace row. Kept beside

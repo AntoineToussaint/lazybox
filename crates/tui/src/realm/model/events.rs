@@ -1022,7 +1022,16 @@ impl<T: TerminalAdapter> Model<T> {
         if let IpcEvent::EpicStatus { snapshot, .. } = &event {
             let key = snapshot.key.clone();
             self.epic_snapshots.insert(key.clone(), snapshot.clone());
+            // The sidebar keeps its own copy: the epic tier's membership and
+            // wave order are a projection input, so a new snapshot has to
+            // re-run `compute_visible`, not just repaint.
+            self.sidebar.set_epic_snapshot(snapshot.clone());
             self.refresh_open_epic_modal(&key);
+        }
+        if let IpcEvent::EpicGone { key } = &event {
+            self.epic_snapshots.remove(key);
+            self.sidebar.forget_epic(key);
+            self.refresh_open_epic_modal(key);
         }
         // On a group-header row the right pane shows a repo/Space overview
         // projected — in `sync_panes` — from workspace + agent data. Unlike
@@ -1321,9 +1330,10 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::MasteryLedger { .. }
                 // Epic status (#1522) carries no workspace payload the merge
                 // latch patches — the daemon derives it and pushes it whole.
-                // The client sidebar/overview UI that consumes it is deferred
-                // to a follow-up, so ignore it here.
+                // The sidebar tier and overview consume it earlier in this
+                // function; there is nothing to patch here.
                 | IpcEvent::EpicStatus { .. }
+                | IpcEvent::EpicGone { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -2407,6 +2417,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::MasteryLedger { .. }
             // Epic status (#1522) is a derived-status push, not a sync attempt.
             | IpcEvent::EpicStatus { .. }
+            | IpcEvent::EpicGone { .. }
             | IpcEvent::ResourcePosture(..) => {}
         }
         // Keep the empty-inbox doctor's sync facts (polled-ok /
@@ -2744,8 +2755,9 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::KeepAwakeStatus { .. }
                 | IpcEvent::MasteryLedger { .. }
                 // Epic status (#1522): no poll-indicator / mutation-failure
-                // semantics; the consuming client UI is a deferred follow-up.
+                // semantics — it is a derived push, consumed earlier.
                 | IpcEvent::EpicStatus { .. }
+                | IpcEvent::EpicGone { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }

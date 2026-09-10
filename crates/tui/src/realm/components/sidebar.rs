@@ -661,6 +661,7 @@ impl Sidebar {
         focused_workspaces: Vec<lazybox_core::SessionKey>,
         spaces: Vec<lazybox_config::SpaceConfig>,
         collapsed_spaces: std::collections::BTreeSet<String>,
+        collapsed_epics: std::collections::BTreeSet<String>,
         metered_spaces: std::collections::BTreeSet<String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
@@ -672,10 +673,28 @@ impl Sidebar {
             focused_workspaces,
             spaces,
             collapsed_spaces,
+            collapsed_epics,
             metered_spaces,
             default_agent,
             display,
         );
+    }
+
+    /// See `Sidebar::set_epic_snapshot` — cache one epic's derived status
+    /// and re-project the tree around it (#1517).
+    pub fn set_epic_snapshot(&mut self, snapshot: lazybox_ipc::EpicSnapshot) {
+        self.inner.set_epic_snapshot(snapshot);
+    }
+
+    /// See `Sidebar::forget_epic` — drop an archived / deleted epic (#1517).
+    pub fn forget_epic(&mut self, key: &str) {
+        self.inner.forget_epic(key);
+    }
+
+    /// See `Sidebar::toggle_epic_at_cursor` — fold / unfold the epic tier
+    /// under the cursor (#1517).
+    pub fn toggle_epic_at_cursor(&mut self) -> bool {
+        self.inner.toggle_epic_at_cursor()
     }
 
     /// See `Sidebar::seed_lens` — the persisted `ui.last_lens`
@@ -986,6 +1005,11 @@ impl Sidebar {
     /// tier-aware branch of the `Space` collapse + double-click.
     pub fn cursor_on_space_header(&self) -> bool {
         self.inner.cursor_on_space_header()
+    }
+
+    /// See `Sidebar::cursor_on_epic_header` (#1517).
+    pub fn cursor_on_epic_header(&self) -> bool {
+        self.inner.cursor_on_epic_header()
     }
 
     /// Toggle the Space header under the cursor. Same effect as `Space`

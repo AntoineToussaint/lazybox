@@ -20,9 +20,36 @@ use crate::{TaskId, WorkspaceKey};
 #[cfg_attr(feature = "desktop-contract", derive(ts_rs::TS))]
 pub struct EpicKey(pub String);
 
+/// Prefix for the upstream epic-membership projection label (#1517 §4j). The
+/// remainder is the epic key (`epic:auth-refactor`). Unlike the derived
+/// status labels this one is read *and* written: a human or a planner can add
+/// a member from GitHub alone. It is a membership hint only — never an input
+/// to the status resolver, so a stale label from a dead daemon cannot freeze
+/// a member's status.
+pub const EPIC_LABEL_PREFIX: &str = "epic:";
+
+/// The three mutually-exclusive derived-status labels (#1517 §4j), written
+/// only when a member's status changes and only for an epic that opted in
+/// with [`EpicRecord::publish_status_labels`]. Write-only: the resolver never
+/// reads them back.
+pub const STATUS_LABEL_READY: &str = "lazybox:ready";
+pub const STATUS_LABEL_BLOCKED: &str = "lazybox:blocked";
+pub const STATUS_LABEL_DONE: &str = "lazybox:done";
+
+/// Every label in the derived-status family, for the converge-by-difference
+/// pass that detaches the ones a member no longer holds.
+pub const STATUS_LABELS: [&str; 3] = [STATUS_LABEL_READY, STATUS_LABEL_BLOCKED, STATUS_LABEL_DONE];
+
 impl EpicKey {
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
+    }
+
+    /// The membership label that names this epic (`epic:auth-refactor`).
+    /// Matched against a task's labels to admit a member; lazybox never
+    /// writes it, so this is the read side only.
+    pub fn project_label(&self) -> String {
+        format!("{EPIC_LABEL_PREFIX}{}", self.0)
     }
 
     pub fn as_str(&self) -> &str {
@@ -128,6 +155,14 @@ mod tests {
         );
         assert_eq!(EpicKey::from_name("🚀").as_str(), "epic");
         assert_eq!(EpicKey::from_name("").as_str(), "epic");
+    }
+
+    #[test]
+    fn project_label_names_the_epic() {
+        assert_eq!(
+            EpicKey::new("auth-refactor").project_label(),
+            "epic:auth-refactor"
+        );
     }
 
     #[test]

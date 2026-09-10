@@ -6041,6 +6041,93 @@ impl GhClient {
         Ok(())
     }
 
+    /// Converge the single derived-status label (#1517 §4j) on a task's issue
+    /// or PR: `lazybox:blocked`, `lazybox:done`, or none. Goes through
+    /// add/remove — never a wholesale replace — so working claims, roles and
+    /// user labels are left untouched.
+    ///
+    /// Scoped strictly to [`lazybox_core::STATUS_LABELS`]. The `epic:*`
+    /// family is deliberately **not** managed here: lazybox reads
+    /// `epic:<key>` as a membership hint but never writes it, so a label in
+    /// that namespace is always somebody else's — a planner's, a human's, or
+    /// another tool's — and detaching one lazybox did not put there would
+    /// destroy live coordination state.
+    ///
+    /// The label *definition* is created on demand and, like roles, detached
+    /// rather than deleted on clear: the vocabulary is three fixed names, so
+    /// churning the repo's label picker would cost more than it saves.
+    ///
+    /// Best effort — the caller treats a failure as non-fatal, because the
+    /// resolver derives status from daemon state and never reads these back.
+    pub async fn sync_epic_status_label(
+        &self,
+        task_id: &lazybox_core::TaskId,
+        repo: &str,
+        desired: Option<&str>,
+    ) -> Result<(), GhError> {
+        let (owner, name, number) = github_issue_target(task_id, repo)?;
+        let handler = self.inner.issues(owner, name);
+        let _permit = self.acquire_rest("list epic status labels").await?;
+        let mut page = handler
+            .list_labels_for_issue(number)
+            .per_page(100)
+            .send()
+            .await
+            .map_err(GhError::Api)?;
+        let mut attached = Vec::new();
+        loop {
+            attached.extend(page.items.iter().map(|label| label.name.clone()));
+            if page.next.is_none() {
+                break;
+            }
+            let _permit = self
+                .acquire_rest("list epic status labels next page")
+                .await?;
+            page = match self
+                .inner
+                .get_page::<octocrab::models::Label>(&page.next)
+                .await
+                .map_err(GhError::Api)?
+            {
+                Some(next) => next,
+                None => break,
+            };
+        }
+        let held: Vec<&str> = attached
+            .iter()
+            .map(String::as_str)
+            .filter(|n| lazybox_core::STATUS_LABELS.contains(n))
+            .collect();
+
+        if let Some(desired) = desired
+            && !held.contains(&desired)
+        {
+            let _permit = self.acquire_rest("create epic status label").await?;
+            match handler
+                .create_label(desired, "0e8a16", "lazybox epic status (#1517).")
+                .await
+            {
+                Ok(_) => {}
+                Err(error) if octocrab_error_status(&error) == Some(422) => {}
+                Err(error) => return Err(GhError::Api(error)),
+            }
+            let _permit = self.acquire_rest("add epic status label").await?;
+            handler
+                .add_labels(number, &[desired.to_string()])
+                .await
+                .map_err(GhError::Api)?;
+        }
+        for previous in held.iter().filter(|n| Some(**n) != desired) {
+            let _permit = self.acquire_rest("remove epic status label").await?;
+            if let Err(error) = handler.remove_label(number, previous).await
+                && octocrab_error_status(&error) != Some(404)
+            {
+                return Err(GhError::Api(error));
+            }
+        }
+        Ok(())
+    }
+
     /// Converge the single `role:<role>` orchestration label (#1523) on a
     /// task's issue or PR through the add/remove path — never a wholesale
     /// replace — so every other label (working claims, `working`, user labels)

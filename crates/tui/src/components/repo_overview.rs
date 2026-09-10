@@ -32,6 +32,7 @@ use crate::components::visible_rows::group_label;
 pub enum OverviewKind {
     Repo,
     Space,
+    Epic,
 }
 
 /// At-a-glance rollup over a set of workspaces. Every field is a plain
@@ -98,6 +99,47 @@ pub struct RepoRollupRow {
     pub counts: OverviewCounts,
 }
 
+/// One blocker line in an epic overview — the §4k record, flattened for
+/// render. Operator-owned rows are the ones a human has to clear.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpicBlockerRow {
+    pub member: String,
+    pub kind: String,
+    pub reason: String,
+    pub operator: bool,
+    pub holds: u32,
+}
+
+/// One ready-queue line: a member nothing is holding back, with how many
+/// other members start moving once it lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpicReadyRow {
+    pub key: SessionKey,
+    pub label: String,
+    pub unblocks: usize,
+}
+
+/// The epic-only sections of an overview: everything the "give me status"
+/// question needs, read straight off the daemon's snapshot rather than
+/// re-derived here.
+#[derive(Debug, Clone, Default)]
+pub struct EpicOverview {
+    pub done: u32,
+    pub total: u32,
+    pub ready: u32,
+    pub blocked: u32,
+    pub asking: u32,
+    pub failing: u32,
+    pub in_progress: u32,
+    pub cycle: bool,
+    pub pills: Vec<&'static str>,
+    pub blockers: Vec<EpicBlockerRow>,
+    pub ready_queue: Vec<EpicReadyRow>,
+    pub critical_path: Vec<String>,
+    /// `(member label, predecessors still holding it)` in landing order.
+    pub merge_order: Vec<(String, Vec<String>)>,
+}
+
 /// The full overview payload the pane renders.
 #[derive(Debug, Clone)]
 pub struct RepoOverview {
@@ -109,8 +151,11 @@ pub struct RepoOverview {
     /// renderer can print a `+N more` trailer.
     pub roster: Vec<RosterRow>,
     pub roster_total: usize,
-    /// Per-repo rollup — only populated for a Space.
+    /// Per-repo rollup — populated for a Space and for an epic, whose
+    /// members are cross-repo by construction.
     pub rollup: Vec<RepoRollupRow>,
+    /// The epic-only sections. `None` for every other kind.
+    pub epic: Option<EpicOverview>,
 }
 
 /// How many roster rows the overview keeps; the rest collapse into a
@@ -193,6 +238,7 @@ pub fn build_repo_overview(
         roster,
         roster_total,
         rollup: Vec::new(),
+        epic: None,
     }
 }
 
@@ -244,6 +290,161 @@ pub fn build_space_overview(
         roster,
         roster_total,
         rollup,
+        epic: None,
+    }
+}
+
+/// Build the overview for an epic header — the answer to "give me status"
+/// (#1517 §4e). Every count, blocker, edge and merge position comes off the
+/// daemon's snapshot; nothing about status is decided here.
+pub fn build_epic_overview(
+    snapshot: &lazybox_ipc::EpicSnapshot,
+    workspaces: &HashMap<SessionKey, Workspace>,
+    projects: &BTreeMap<ProjectKey, Project>,
+    agents: &HashMap<SessionKey, AgentState>,
+) -> RepoOverview {
+    let member_keys: Vec<SessionKey> = snapshot
+        .members
+        .iter()
+        .map(|m| SessionKey::new(m.key.as_str()))
+        .collect();
+
+    let mut counts = OverviewCounts::default();
+    let mut roster: Vec<RosterRow> = Vec::new();
+    let mut per_repo: BTreeMap<String, OverviewCounts> = BTreeMap::new();
+    for key in &member_keys {
+        let Some(w) = workspaces.get(key) else {
+            continue;
+        };
+        let repo = group_label(w, projects, workspaces);
+        let agent = agents.get(key).cloned();
+        counts.add_workspace(w, agent.as_ref());
+        per_repo
+            .entry(repo.clone())
+            .or_default()
+            .add_workspace(w, agent.as_ref());
+        roster.push(roster_row(key, w, repo, agent));
+    }
+    // Members stay in the resolver's wave order — the epic's own reading
+    // order — rather than the roster rank the repo/Space views use.
+    let roster_total = roster.len();
+    roster.truncate(ROSTER_CAP);
+    let mut rollup: Vec<RepoRollupRow> = per_repo
+        .into_iter()
+        .map(|(repo, counts)| RepoRollupRow { repo, counts })
+        .collect();
+    rollup.sort_by(|a, b| {
+        b.counts
+            .workspaces
+            .cmp(&a.counts.workspaces)
+            .then_with(|| a.repo.cmp(&b.repo))
+    });
+
+    let label_of = |key: &lazybox_core::WorkspaceKey| -> String {
+        let session = SessionKey::new(key.as_str());
+        let Some(w) = workspaces.get(&session) else {
+            return key.as_str().to_string();
+        };
+        match w.primary_task() {
+            Some(t) => match t.id.number() {
+                Some(n) => format!("#{n} {}", t.title),
+                None => t.title.clone(),
+            },
+            None => w.name.clone(),
+        }
+    };
+
+    let mut blockers: Vec<EpicBlockerRow> = snapshot
+        .members
+        .iter()
+        .flat_map(|m| {
+            m.blockers.iter().map(|b| EpicBlockerRow {
+                member: label_of(&m.key),
+                kind: b.kind.as_str().to_string(),
+                reason: b.reason.clone(),
+                operator: matches!(b.owner, lazybox_ipc::BlockerOwner::Operator),
+                holds: b.holds,
+            })
+        })
+        .collect();
+    // What holds the most work leads; an operator-owned blocker of equal
+    // weight outranks one somebody else already owns (§4k).
+    blockers.sort_by(|a, b| {
+        b.holds
+            .cmp(&a.holds)
+            .then_with(|| b.operator.cmp(&a.operator))
+            .then_with(|| a.member.cmp(&b.member))
+    });
+
+    // How many members name each one directly as a blocker — the
+    // "starting this unblocks N others" figure, read off the snapshot's
+    // own edges rather than re-walking the graph.
+    let mut dependents: HashMap<&str, usize> = HashMap::new();
+    for m in &snapshot.members {
+        for blocker in &m.blocked_by {
+            *dependents.entry(blocker.as_str()).or_default() += 1;
+        }
+    }
+    let mut ready_queue: Vec<EpicReadyRow> = snapshot
+        .members
+        .iter()
+        .filter(|m| m.status == lazybox_ipc::EpicMemberStatus::Ready)
+        .map(|m| EpicReadyRow {
+            key: SessionKey::new(m.key.as_str()),
+            label: label_of(&m.key),
+            unblocks: dependents.get(m.key.as_str()).copied().unwrap_or(0),
+        })
+        .collect();
+    ready_queue.sort_by(|a, b| {
+        b.unblocks
+            .cmp(&a.unblocks)
+            .then_with(|| a.label.cmp(&b.label))
+    });
+
+    let in_progress = snapshot
+        .members
+        .iter()
+        .filter(|m| m.status == lazybox_ipc::EpicMemberStatus::InProgress)
+        .count() as u32;
+
+    let epic = EpicOverview {
+        done: snapshot.done,
+        total: snapshot.total,
+        ready: snapshot.ready,
+        blocked: snapshot.blocked,
+        asking: snapshot.asking,
+        failing: snapshot.failing,
+        in_progress,
+        cycle: snapshot.cycle,
+        pills: snapshot
+            .policies
+            .armed_latches()
+            .iter()
+            .map(|l| l.pill())
+            .collect(),
+        blockers,
+        ready_queue,
+        critical_path: snapshot.critical_path.iter().map(&label_of).collect(),
+        merge_order: snapshot
+            .merge_order
+            .iter()
+            .map(|e| {
+                (
+                    label_of(&e.key),
+                    e.held_by.iter().map(&label_of).collect::<Vec<String>>(),
+                )
+            })
+            .collect(),
+    };
+
+    RepoOverview {
+        kind: OverviewKind::Epic,
+        title: snapshot.name.clone(),
+        counts,
+        roster,
+        roster_total,
+        rollup,
+        epic: Some(epic),
     }
 }
 
@@ -318,6 +519,7 @@ impl RepoOverview {
         let (chip, chip_label) = match self.kind {
             OverviewKind::Repo => (" REPO ", &self.title),
             OverviewKind::Space => (" SPACE ", &self.title),
+            OverviewKind::Epic => (" EPIC ", &self.title),
         };
         lines.push(Line::from(vec![
             Span::styled(
@@ -336,6 +538,166 @@ impl RepoOverview {
             ),
         ]));
         lines.push(Line::from(""));
+
+        // ── Epic sections ──────────────────────────────────────────
+        // Blockers lead: "give me status" is usually "what is stuck, on
+        // what, on whom" (§4k), so they come before the ready queue and
+        // before the workspace roster.
+        if let Some(epic) = &self.epic {
+            let mut strip: Vec<Vec<Span<'static>>> = vec![vec![
+                Span::styled(
+                    format!("{}/{} ", epic.done, epic.total),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("done"),
+            ]];
+            for seg in [
+                count_span(
+                    epic.blocked as usize,
+                    "blocked",
+                    Style::default()
+                        .fg(theme.error)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                count_span(
+                    epic.asking as usize,
+                    "asking",
+                    Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+                ),
+                count_span(
+                    epic.failing as usize,
+                    "CI failing",
+                    Style::default()
+                        .fg(theme.error)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                count_span(
+                    epic.in_progress as usize,
+                    "in progress",
+                    Style::default().fg(theme.accent),
+                ),
+                count_span(
+                    epic.ready as usize,
+                    "ready",
+                    Style::default().fg(theme.success),
+                ),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                strip.push(seg);
+            }
+            let mut summary: Vec<Span<'static>> = Vec::new();
+            for (i, seg) in strip.into_iter().enumerate() {
+                if i > 0 {
+                    summary.push(Span::styled("  ·  ", Style::default().fg(theme.chrome)));
+                }
+                summary.extend(seg);
+            }
+            if !epic.pills.is_empty() {
+                summary.push(Span::styled("  ·  ", Style::default().fg(theme.chrome)));
+                summary.push(Span::styled(
+                    epic.pills.join(" "),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            lines.push(Line::from(summary));
+            if epic.cycle {
+                lines.push(Line::from(Span::styled(
+                    "  cycle in the dependency graph — order is undefined",
+                    Style::default()
+                        .fg(theme.error)
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
+            lines.push(Line::from(""));
+
+            if !epic.blockers.is_empty() {
+                lines.push(section_header("Blocked on"));
+                for b in &epic.blockers {
+                    let style = if b.operator {
+                        Style::default()
+                            .fg(theme.error)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(theme.text_strong)
+                    };
+                    let mut spans = vec![
+                        Span::raw("  "),
+                        Span::styled(truncate(&b.member, title_budget(width)), style),
+                        Span::styled(
+                            format!("  {} · {}", b.kind, b.reason),
+                            Style::default().fg(theme.text_dim),
+                        ),
+                    ];
+                    if b.holds > 0 {
+                        spans.push(Span::styled(
+                            format!("  holds {}", b.holds),
+                            Style::default().fg(theme.warn),
+                        ));
+                    }
+                    lines.push(Line::from(spans));
+                }
+                lines.push(Line::from(""));
+            }
+
+            if !epic.ready_queue.is_empty() {
+                lines.push(section_header("Ready"));
+                for r in &epic.ready_queue {
+                    let mut spans = vec![
+                        Span::raw("  "),
+                        Span::styled(
+                            truncate(&r.label, title_budget(width)),
+                            Style::default().fg(theme.text_strong),
+                        ),
+                    ];
+                    if r.unblocks > 0 {
+                        spans.push(Span::styled(
+                            format!("  unblocks {}", r.unblocks),
+                            Style::default().fg(theme.success),
+                        ));
+                    }
+                    hits.push((lines.len(), r.key.clone()));
+                    lines.push(Line::from(spans));
+                }
+                lines.push(Line::from(""));
+            }
+
+            if !epic.merge_order.is_empty() {
+                lines.push(section_header("Merge order"));
+                for (i, (label, held_by)) in epic.merge_order.iter().enumerate() {
+                    let mut spans = vec![
+                        Span::styled(
+                            format!("  {}. ", i + 1),
+                            Style::default().fg(theme.text_dim),
+                        ),
+                        Span::styled(
+                            truncate(label, title_budget(width)),
+                            Style::default().fg(theme.text_strong),
+                        ),
+                    ];
+                    if !held_by.is_empty() {
+                        spans.push(Span::styled(
+                            format!("  held behind {}", held_by.join(", ")),
+                            Style::default().fg(theme.warn),
+                        ));
+                    }
+                    lines.push(Line::from(spans));
+                }
+                lines.push(Line::from(""));
+            }
+
+            if epic.critical_path.len() > 1 {
+                lines.push(section_header("Critical path"));
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", epic.critical_path.join("  →  ")),
+                    Style::default().fg(theme.text_dim),
+                )));
+                lines.push(Line::from(""));
+            }
+        }
 
         // ── Counts summary ─────────────────────────────────────────
         let c = &self.counts;
@@ -394,7 +756,7 @@ impl RepoOverview {
         lines.push(Line::from(""));
 
         // ── Per-repo rollup (Space only) ───────────────────────────
-        if self.kind == OverviewKind::Space && !self.rollup.is_empty() {
+        if self.kind != OverviewKind::Repo && !self.rollup.is_empty() {
             lines.push(section_header("Repos"));
             for r in &self.rollup {
                 let mut spans = vec![
@@ -474,6 +836,9 @@ impl RepoOverview {
         let actions = match self.kind {
             OverviewKind::Repo => "  b c agent on main · x n new workspace · g o open in browser",
             OverviewKind::Space => "  x n new workspace · Space collapse",
+            OverviewKind::Epic => {
+                "  E g graph · E m merge order · E j next blocked · Space collapse"
+            }
         };
         lines.push(Line::from(Span::styled(actions, theme_hint(theme))));
 

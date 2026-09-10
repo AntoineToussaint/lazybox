@@ -2198,21 +2198,18 @@ impl<T: TerminalAdapter> Model<T> {
                 terminal_id,
                 display_name,
                 other_session_count,
-                credentials_isolated,
                 ..
             } => {
                 self.queue_agent_auth_prompt(super::AgentAuthPrompt {
                     terminal_id: *terminal_id,
                     display_name: display_name.clone(),
                     other_session_count: *other_session_count,
-                    credentials_isolated: *credentials_isolated,
                     retry: false,
                     error: None,
                 });
             }
             IpcEvent::AgentAuthProgress { phase, .. } => {
                 let message = match phase {
-                    lazybox_ipc::AgentAuthPhase::LoggingOut => "signing out of the provider…",
                     lazybox_ipc::AgentAuthPhase::LoginInteractive => {
                         "complete sign-in in the terminal…"
                     }
@@ -2237,7 +2234,6 @@ impl<T: TerminalAdapter> Model<T> {
                         terminal_id: *recovery_terminal_id,
                         display_name: display_name.clone(),
                         other_session_count: 0,
-                        credentials_isolated: false,
                         retry: true,
                         error: error.clone(),
                     });

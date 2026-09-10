@@ -2482,6 +2482,7 @@ async fn start_local_gateway(
         ));
     }
     let config = ServerConfig::from_user_config()
+        .await
         .map_err(|error| format!("start lazybox daemon: {error}"))?;
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
         .await

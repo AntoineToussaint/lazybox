@@ -110,15 +110,20 @@ pub fn identity_dir() -> PathBuf {
     state_root().join("identity")
 }
 
-/// Root for per-session agent credential homes. `<home>/v2/agent-homes/`.
-/// An agent kind that isolates its login (Codex → `CODEX_HOME`) gets a
-/// private directory per workspace here, seeded once from the machine-wide
-/// login, so a re-auth on one session never re-logs the others.
+/// Root of the per-workspace agent credential homes #1376 created.
+/// `<home>/v2/agent-homes/`.
+///
+/// Nothing writes here any more: every agent runs on its own machine-wide
+/// login (#1656), because a per-workspace home forked Codex's refresh-token
+/// state and could not reach a keyring credential at all. The tree survives
+/// only so the one-shot migration in `lazybox-server`'s
+/// `codex_home_migration` can find the conversation rollouts those homes
+/// still hold and link them into the shared home.
 pub fn agent_homes_root() -> PathBuf {
     state_root().join("agent-homes")
 }
 
-/// Per-session credential home for `agent_id` in `session_key`:
+/// One legacy per-workspace credential home:
 /// `<home>/v2/agent-homes/<agent_id>/<session>`. The session component is
 /// slugged to a filesystem-safe name because a session key can carry
 /// `:`/`/`/`#` (`github:owner/repo#123`).

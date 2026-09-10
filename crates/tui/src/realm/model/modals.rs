@@ -2583,12 +2583,7 @@ impl<T: TerminalAdapter> Model<T> {
                 prompt.error.as_deref().unwrap_or("Provider login failed.")
             )
         } else {
-            let affected = if prompt.credentials_isolated {
-                format!(
-                    "Only this agent is affected — every other {} session keeps its own login.",
-                    prompt.display_name
-                )
-            } else if prompt.other_session_count == 0 {
+            let affected = if prompt.other_session_count == 0 {
                 format!(
                     "This refreshes the machine-wide {} login in place — it won't sign out any other session.",
                     prompt.display_name
@@ -2607,8 +2602,9 @@ impl<T: TerminalAdapter> Model<T> {
                 )
             };
             format!(
-                "{} authentication is no longer valid.\n\nSign in with another account and continue this conversation?\n\n{affected}\n\n[Enter] Sign in and continue    [Esc] Not now",
-                prompt.display_name
+                "{} authentication is no longer valid.\n\nSign in again and continue this conversation?\n\n{affected}\n\nTo sign in as a different account, run `{} logout` yourself first — lazybox won't, because it would sign out every session sharing this login.\n\n[Enter] Sign in and continue    [Esc] Not now",
+                prompt.display_name,
+                prompt.display_name.to_lowercase()
             )
         };
         self.set_modal_flow(ModalFlow::AgentAuth {

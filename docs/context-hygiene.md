@@ -87,10 +87,13 @@ agent:
     condense_input_cap_bytes: 262144
 ```
 
-- **`mode`** — `shadow` (the default) decides everything `on` decides, logs what
-  it *would* rewrite and what that would save, and sends the original bytes.
-  Rewriting an agent's context is load-bearing for correctness, not just
-  accounting, so it earns its way from evidence rather than starting on.
+- **`mode`** — `shadow` (the default) decides everything `on` decides, reports
+  what it *would* rewrite and what that would save, and sends the original
+  bytes. Rewriting an agent's context is load-bearing for correctness, not just
+  accounting, so it earns its way from evidence rather than starting on — which
+  is why the shadow saving lands on the stats screen next to the cost it claims
+  to reduce (#1621), not only in the daemon log. Note `on` is a YAML 1.1
+  boolean and must be quoted: `mode: 'on'`.
 
   There is a trap here worth stating once. `eligibility()` returns `Condense` in
   shadow mode — deliberately, because #1606's instrumentation needs the real

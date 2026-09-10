@@ -76,5 +76,6 @@ pub use workspace::{
     SnippetDeliveryLog, SnoozeWake, TileDirection, TileTree, WOKE_WINDOW,
     WORKING_CLAIM_HEARTBEAT_SECS, WORKING_CLAIM_LABEL_PREFIX, WORKING_CLAIM_TTL_SECS,
     WORKING_LABEL_NAME, WORKSPACE_SCHEMA_VERSION, Workspace, WorkspaceDecodeError, WorkspaceKey,
-    project_key_for_task, snooze_wake_due, workspace_key_for, workspace_project_key,
+    project_key_for_task, snooze_wake_due, workspace_key_for, workspace_key_for_id,
+    workspace_project_key,
 };

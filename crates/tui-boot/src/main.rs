@@ -704,9 +704,12 @@ async fn workspace_subcommand(args: &[String]) -> anyhow::Result<()> {
 /// reading better at its call site: they take `owner/repo#N`, a GitHub URL, a
 /// bare `#N` beside `--repo`, or a Linear identifier, and the daemon returns
 /// the record's own row — materializing it when the poll has not reached the
-/// record yet. A bare `--name` under a repo scope is refused unless
-/// `--scratch` says it really is repo-less scratch (#1586); under a local
-/// project it stays allowed, since there is no record for it to shadow.
+/// record yet. A bare `--name` under a tracker-backed project is refused
+/// unless `--scratch` says it really is scratch work with no record behind it
+/// (#1586); under a local project it stays allowed, since there is no record
+/// for it to shadow. `--scratch` lifts the *refusal* only: a name that turns
+/// out to be a record (`#1586`) still lands on that record's row, never
+/// beside it.
 ///
 /// The Project is resolved from `--project`/`--repo`, else inferred from the
 /// checkout at `--cwd` (default: the process cwd) — so an agent running in a

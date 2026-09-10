@@ -90,11 +90,26 @@ runs a single-item fetch + upsert first so an issue filed seconds ago is
 workable in the same turn.
 
 `Command::CreateWorkspace` carries `anchor: Option<TaskId>` and `scratch:
-bool`. With an anchor the daemon attaches; without one, under a repo-scoped
-project, `workspace::attach::resolve_named_create` normalizes the name and
-checks it against the repo's open tasks — a match returns the existing key plus
-a "attached to #N instead of creating a workspace beside it" notification, and
-no match is refused unless `scratch` is set.
+bool`. With an anchor the daemon attaches; without one, under a tracker-backed
+project (GitHub, Linear, Jira), `workspace::attach::resolve_named_create`
+normalizes the name and checks it against that project's open tasks — an
+explicit `#N`, a provider identifier like `ENG-45`, or the task title. A match
+returns the existing key plus an "attached to #N instead of creating a
+workspace beside it" notification; no match is refused unless `scratch` is set.
+
+`scratch` suppresses the **refusal only, never the attach**: if the name names
+a record, that record's row is the answer no matter who is asking. Only the
+refusal is a judgement about intent that a caller may override. A *bare*
+number is deliberately not a reference — `#7` means the record, `7` is an
+ordinary scratch name — so a create can never be silently redirected by a name
+that merely looks numeric.
+
+The TUI's `x n` (and the Start sheet's rows) therefore send `scratch: true`:
+there is no keybinding for "yes, this is scratch", and a human who opened the
+New-workspace modal and typed a name has already declared intent. They keep
+the attach, so `x n` "#1586" still lands on that issue's row. The refusal
+exists to teach agents and scripts, which reach the daemon through the CLI,
+MCP, or gateway and can pass `--scratch` deliberately.
 
 The poll closes the last gap: `collapse_candidate_keys` treats a hand-created
 (`local`, task-less) workspace as a fold candidate for a PR whose head branch
@@ -109,6 +124,10 @@ activity, cost and notes onto the PR's row and archives the scratch one.
       `create_issue`.
 - [ ] `lazybox workspace create --name foo --repo owner/repo` is refused with
       the rule; adding `--scratch` succeeds.
+- [ ] `--scratch` still attaches when the name is a record (`--name '#7'`).
+- [ ] `x n` under a repo group creates without refusing, but `x n` "#7"
+      attaches to issue #7's row.
+- [ ] `x n` under a Linear team project is guarded the same way.
 - [ ] `lazybox workspace create --issue <url>` prints `Attached to …` and the
       record's existing key.
 - [ ] A scratch workspace whose branch becomes a PR's head folds into the PR's
@@ -117,9 +136,15 @@ activity, cost and notes onto the PR's row and archives the scratch one.
 ### Known sharp edges
 - `create_issue` shells out to `gh issue create`; a `gh` that is missing or
   unauthenticated surfaces as a tool error rather than a lazybox-side refusal.
+  The subprocess is bounded at 60s — past that the tool reports that the issue
+  may or may not have been filed, since it cannot tell which.
 - A Linear ticket with no polled workspace cannot be materialized on demand —
   the targeted fetch needs the node id the identifier alone does not carry, so
-  attaching waits for the Linear poll.
+  attaching waits for the Linear poll. The named-create guard covers Linear and
+  Jira projects; only the on-demand materialize is GitHub-only.
+- An archived record (`x x` deletes the row and tombstones the key, which
+  `upsert` then skips) reports that it was archived and points at the Inactive
+  mailbox, rather than being silently resurrected or reported as invisible.
 - The name-match dedupe only sees tasks already in the store; a name matching
   an issue the poll has never fetched is refused rather than attached.
 

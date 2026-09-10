@@ -314,6 +314,9 @@ struct CreateIssueArgs {
 #[derive(Debug)]
 struct PreparedWorker {
     key: lazybox_core::WorkspaceKey,
+    /// The record the worker was attached to, echoed in the tool result so a
+    /// Coordinator can see *which* row it landed on rather than inferring it.
+    anchor: lazybox_core::TaskId,
     agent_id: String,
     epic_key: String,
 }
@@ -966,6 +969,48 @@ impl LazyboxMcp {
             .await
             .map_err(|e| McpError::invalid_request(format!("attach to {anchor}: {e}"), None))?;
 
+        // Gate 5 — never target the caller's own workspace. Since the target
+        // is now an existing row rather than a fresh one, a Coordinator that
+        // names its own epic anchor would role-stamp ITSELF `Worker` below —
+        // losing the Coordinator role that gates this very tool, so every
+        // later spawn_worker fails and the demotion is unrecoverable from
+        // inside the agent — and then inject the worker brief into its own
+        // conversation.
+        if key.as_str() == caller.as_str() {
+            return Err(McpError::invalid_request(
+                format!(
+                    "{anchor} is your own workspace — a Coordinator cannot staff itself as a \
+                     Worker. Pass the sub-issue the worker should own, or `create_issue` to \
+                     file one under this epic."
+                ),
+                None,
+            ));
+        }
+
+        // Gate 6 — never spawn onto a row that already has a live agent. The
+        // spawn below reuses an existing singleton rather than starting a
+        // second one, so this would inject the worker brief into whatever
+        // conversation is already running there — a human's session, or
+        // another worker's — mid-task, with nothing anywhere recording it.
+        // The epic autonomy dial already declines to dispatch onto a claimed
+        // row for the same reason; this is that rule at the manual entry.
+        if let Some(terminal_id) = self
+            .config
+            .terminal
+            .running_agent_terminal(&SessionKey::from(&key))
+            .await
+        {
+            return Err(McpError::invalid_request(
+                format!(
+                    "{anchor} already has a running agent (terminal {terminal_id:?}) — someone \
+                     is on it. Use `read_session`/`notify_session` on `{}` to reach them, or \
+                     pick another record.",
+                    key.as_str()
+                ),
+                None,
+            ));
+        }
+
         // Assign → set role. Each persists; the spawn (in the payload below)
         // then picks up the Worker role and frames the brief.
         crate::epics::assign(&self.config, &epic_key, key.clone(), true).await;
@@ -973,6 +1018,7 @@ impl LazyboxMcp {
 
         Ok(PreparedWorker {
             key,
+            anchor,
             agent_id,
             epic_key,
         })
@@ -993,7 +1039,15 @@ impl LazyboxMcp {
             .map(str::trim)
             .filter(|s| !s.is_empty());
         match (task, args.create_issue.as_ref()) {
-            (Some(task), _) => {
+            // Both is a contradiction, not a precedence question: a caller
+            // that passed `create_issue` expects an issue to exist afterwards.
+            // Silently honoring `task` would leave it believing it filed one.
+            (Some(_), Some(_)) => Err(McpError::invalid_request(
+                "pass `task` OR `create_issue`, not both — `task` names a record that already \
+                 exists, `create_issue` files a new one",
+                None,
+            )),
+            (Some(task), None) => {
                 lazybox_core::task_ref::parse_task_ref(task, None).ok_or_else(|| {
                     McpError::invalid_request(
                         format!(
@@ -1025,11 +1079,26 @@ impl LazyboxMcp {
         epic_anchor: Option<&lazybox_core::TaskId>,
     ) -> Result<lazybox_core::TaskId, McpError> {
         let argv = gh_issue_create_argv(create, epic_anchor)?;
-        let output = tokio::process::Command::new("gh")
-            .args(&argv)
-            .output()
-            .await
-            .map_err(|e| McpError::internal_error(format!("run `gh issue create`: {e}"), None))?;
+        // Bound the subprocess. `output()` waits forever, and `gh` can stall
+        // indefinitely on a wedged network — the MCP call has no cancellation
+        // of its own, so an unbounded wait leaves the calling Coordinator
+        // hung with no way out and no diagnostic.
+        let run = tokio::process::Command::new("gh").args(&argv).output();
+        let output = match tokio::time::timeout(GH_ISSUE_CREATE_TIMEOUT, run).await {
+            Ok(result) => result.map_err(|e| {
+                McpError::internal_error(format!("run `gh issue create`: {e}"), None)
+            })?,
+            Err(_) => {
+                return Err(McpError::internal_error(
+                    format!(
+                        "`gh issue create` did not finish within {}s — the issue may or may not \
+                         have been filed; check the repo before retrying",
+                        GH_ISSUE_CREATE_TIMEOUT.as_secs()
+                    ),
+                    None,
+                ));
+            }
+        };
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(McpError::internal_error(
@@ -1072,6 +1141,7 @@ impl LazyboxMcp {
         let brief = brief.to_string();
         let PreparedWorker {
             key,
+            anchor,
             agent_id,
             epic_key,
         } = self
@@ -1101,12 +1171,13 @@ impl LazyboxMcp {
 
         Ok(serde_json::json!({
             "workspace_key": key.as_str(),
+            "task": anchor.to_string(),
             "epic": epic_key,
             "agent": agent_id,
             "role": lazybox_core::Role::Worker.project_label(),
             "handed_off": true,
             "delivery_confirmed": false,
-            "note": "Worker workspace created, assigned to the epic, role-stamped, and spawned with the brief (framed by the Worker role preamble). Not a confirmation the agent has started — verify with list_sessions / read_session.",
+            "note": "Attached to the record's own workspace (not a new one), assigned to the epic, role-stamped, and spawned with the brief (framed by the Worker role preamble). Not a confirmation the agent has started — verify with list_sessions / read_session.",
         }))
     }
 
@@ -1204,6 +1275,11 @@ fn notify_handoff_payload(workspace: &str, submit: bool) -> serde_json::Value {
     })
 }
 
+/// How long `gh issue create` may take before `spawn_worker` gives up. Well
+/// past a normal round-trip, short enough that a wedged network surfaces as an
+/// error the Coordinator can act on rather than a hung tool call.
+const GH_ISSUE_CREATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The `gh issue create` argv for a `spawn_worker` `create_issue` request.
 /// Pure so the flag shape — especially the URL-form `--parent`, whose bare-
 /// number alternative silently resolves inside `--repo` and mis-parents a
@@ -1262,10 +1338,18 @@ fn gh_issue_create_argv(
 /// The id of the issue `gh issue create` just filed. It prints the new
 /// issue's URL, sometimes after progress chatter, so the *last* URL-shaped
 /// line is the answer.
+///
+/// Only a `github.com` **URL** counts. Running every line through the full
+/// reference grammar would let any incidental `WORD-digits` token in `gh`'s
+/// output (`HTTP-404`, a warning code) parse as a Linear identifier and be
+/// returned as the freshly-filed issue — a fabricated id that then fails to
+/// attach with a misleading message instead of "gh printed no issue URL".
 fn parse_gh_issue_create_output(stdout: &str) -> Option<lazybox_core::TaskId> {
     stdout
         .lines()
+        .map(str::trim)
         .rev()
+        .filter(|line| line.contains("github.com/"))
         .find_map(|line| lazybox_core::task_ref::parse_task_ref(line, None))
 }
 
@@ -2358,6 +2442,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawn_worker_refuses_to_staff_the_coordinator_itself() {
+        // §2 puts the Coordinator in the epic's anchor-issue row, so its own
+        // record is exactly the one it might name by mistake. Since the target
+        // is now an EXISTING row rather than a fresh one, that would
+        // role-stamp the caller `Worker` — losing the Coordinator role that
+        // gates this very tool, so every later spawn_worker fails and the
+        // demotion cannot be undone from inside the agent.
+        let config = ServerConfig::in_memory();
+        let mut ws = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new("coord"),
+            "branch",
+            chrono::Utc::now(),
+        );
+        ws.role = Some(lazybox_core::Role::Coordinator);
+        ws.gh_issues.push(github_issue_task("acme/widget", 100));
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: "coord".to_string(),
+                created_at: chrono::Utc::now(),
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
+        seed_epic(&config, "e", &["coord"]).await;
+
+        let handler = LazyboxMcp::new(config);
+        let caller = SessionKey::from("coord");
+        let err = handler
+            .spawn_worker_prepare(
+                &caller,
+                &spawn_worker_args("acme/widget#100", "do it"),
+                6,
+                "claude",
+            )
+            .await
+            .expect_err("a coordinator must not staff itself");
+        assert!(
+            err.message.contains("your own workspace"),
+            "{}",
+            err.message
+        );
+        // The role must survive the refusal — that is the damage being
+        // prevented, not the error message.
+        assert_eq!(
+            handler
+                .load_workspace(&lazybox_core::WorkspaceKey::new("coord"))
+                .expect("caller workspace")
+                .effective_role(),
+            Some(lazybox_core::Role::Coordinator),
+            "the refusal must not have demoted the coordinator"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_refuses_a_record_that_already_has_a_running_agent() {
+        // The spawn reuses an existing singleton rather than starting a second
+        // one, so without this gate the worker brief is injected into whatever
+        // conversation is already running on that row — a human's session, or
+        // another worker's — mid-task, with nothing recording it and the tool
+        // still reporting success.
+        let config = ServerConfig::in_memory();
+        seed_workspace_role(&config, "coord", lazybox_core::Role::Coordinator);
+        seed_epic(&config, "e", &["coord"]).await;
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        config
+            .terminal
+            .register_terminal(
+                lazybox_ipc::TerminalId(1),
+                "backend".to_string(),
+                SessionKey::from("github-acme-widget-7"),
+                lazybox_ipc::TerminalKind::Agent("claude".to_string()),
+            )
+            .await;
+
+        let handler = LazyboxMcp::new(config);
+        let caller = SessionKey::from("coord");
+        let err = handler
+            .spawn_worker_prepare(
+                &caller,
+                &spawn_worker_args("acme/widget#7", "do it"),
+                6,
+                "claude",
+            )
+            .await
+            .expect_err("a row with a live agent must not be taken over");
+        assert!(
+            err.message.contains("already has a running agent"),
+            "{}",
+            err.message
+        );
+        // And the row must be left exactly as it was — not silently rebadged
+        // Worker on the way to a refusal.
+        assert_eq!(
+            handler
+                .load_workspace(&lazybox_core::WorkspaceKey::new("github-acme-widget-7"))
+                .expect("issue workspace")
+                .effective_role(),
+            None,
+            "a refused spawn must not role-stamp the target"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_refuses_both_a_task_and_create_issue() {
+        // A caller that passed `create_issue` expects an issue to exist
+        // afterwards; silently preferring `task` leaves it believing it filed
+        // one that was never created.
+        let config = ServerConfig::in_memory();
+        seed_workspace_role(&config, "coord", lazybox_core::Role::Coordinator);
+        seed_epic(&config, "e", &["coord"]).await;
+
+        let handler = LazyboxMcp::new(config);
+        let args = SpawnWorkerArgs {
+            task: Some("acme/widget#7".into()),
+            create_issue: Some(CreateIssueArgs {
+                title: "t".into(),
+                body: "b".into(),
+                repo: "acme/widget".into(),
+                parent: None,
+                blocked_by: Vec::new(),
+            }),
+            brief: "do it".into(),
+            agent: None,
+            workspace_name: None,
+        };
+        let err = handler
+            .spawn_worker_prepare(&SessionKey::from("coord"), &args, 6, "claude")
+            .await
+            .expect_err("task and create_issue together is a contradiction");
+        assert!(err.message.contains("not both"), "{}", err.message);
+    }
+
+    #[tokio::test]
     async fn spawn_worker_refuses_without_a_record() {
         let config = ServerConfig::in_memory();
         seed_workspace_role(&config, "coord", lazybox_core::Role::Coordinator);
@@ -2441,6 +2658,33 @@ mod tests {
         );
 
         // And the id the filed issue reports is what gets attached to.
+        assert_eq!(
+            parse_gh_issue_create_output(
+                "Creating issue in acme/widget\nhttps://github.com/acme/widget/issues/42\n"
+            ),
+            Some(lazybox_core::TaskId {
+                source: "github".into(),
+                key: "acme/widget#42".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn gh_output_parsing_ignores_everything_that_is_not_a_github_url() {
+        // Running every line through the full reference grammar let any
+        // incidental `WORD-digits` token parse as a Linear identifier, so a
+        // `gh` that printed a warning code instead of a URL returned a
+        // FABRICATED id that then failed to attach with a misleading message.
+        assert_eq!(
+            parse_gh_issue_create_output("HTTP-404\nrequest failed\n"),
+            None,
+            "a warning code is not the issue that was just filed"
+        );
+        assert_eq!(
+            parse_gh_issue_create_output("Creating issue in acme/widget\n"),
+            None
+        );
+        // The real thing still parses, last-URL-wins.
         assert_eq!(
             parse_gh_issue_create_output(
                 "Creating issue in acme/widget\nhttps://github.com/acme/widget/issues/42\n"

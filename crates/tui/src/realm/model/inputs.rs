@@ -518,13 +518,21 @@ impl<T: TerminalAdapter> Model<T> {
             project_key,
             spawn_agent,
             client_request_id: Some(client_request_id),
-            // `x n` is the hand-made-workspace flow, so it carries no
-            // anchor. The daemon still checks the name against the repo's
-            // open tasks and either attaches to the record or refuses with
-            // the rule (#1586) — a named row beside a tracked item is the
-            // split this closes.
+            // No anchor: `x n` and the Start sheet's Chat row are the
+            // hand-made-workspace flows, so the daemon resolves the name
+            // itself. It still attaches when the name turns out to be a
+            // record (`#1586` lands on that issue's row, never beside it) —
+            // `scratch` suppresses only the *refusal*, not the attach.
+            //
+            // It is set here because there is no keybinding for "yes, this is
+            // scratch": a human who opened the New-workspace modal and typed
+            // a name has already declared intent, and refusing them would
+            // dead-end an action the Start sheet still offers, with no way
+            // through. The refusal exists to teach agents and scripts, which
+            // reach the daemon through the CLI / MCP / gateway and can pass
+            // `--scratch` deliberately.
             anchor: None,
-            scratch: false,
+            scratch: true,
         }]
     }
 

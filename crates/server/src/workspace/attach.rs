@@ -32,6 +32,11 @@ pub enum AttachError {
          the record is visible to your token"
     )]
     Unresolved(TaskId),
+    #[error(
+        "{task} was archived in lazybox (`x x`), so it has no workspace to attach to — unarchive \
+         it from the Inactive mailbox (`Shift-S`) rather than filing a duplicate record"
+    )]
+    Archived { task: TaskId },
 }
 
 /// The workspace holding `anchor`, materializing it from the provider when the
@@ -48,8 +53,31 @@ pub async fn attach_to_record(
     if let Some(key) = workspace_for_task(config, anchor) {
         return Ok(key);
     }
+    // An archived record has no row AND cannot get one: `x x` deletes the row
+    // and adds the key to the archived set, which `upsert` then skips — so the
+    // materialize below is a guaranteed no-op. Say that, because the generic
+    // "could not be fetched, check the reference" would send an agent off to
+    // file a duplicate issue: exactly the split this module exists to prevent.
+    let archived = crate::workspace::load_archived_set(config);
+    if let Some(key) = archived_key_for(anchor, &archived) {
+        tracing::debug!(task = %anchor, %key, "attach: record is archived — refusing to resurrect");
+        return Err(AttachError::Archived {
+            task: anchor.clone(),
+        });
+    }
     materialize(config, anchor).await?;
     workspace_for_task(config, anchor).ok_or_else(|| AttachError::Unresolved(anchor.clone()))
+}
+
+/// The archived-set entry for `anchor`, if the record was archived. Checks the
+/// key a standalone upsert of this task would have produced — the same
+/// `workspace_key_for` the archived set is populated from.
+fn archived_key_for(
+    anchor: &TaskId,
+    archived: &std::collections::HashSet<String>,
+) -> Option<String> {
+    let key = lazybox_core::workspace_key_for_id(anchor);
+    archived.contains(&key).then_some(key)
 }
 
 /// The workspace whose tasks include `id`. Matches on the whole hierarchy, not
@@ -122,17 +150,26 @@ pub enum NamedCreate {
     Refuse { message: String },
 }
 
-/// Decide an anchor-less create. A named workspace under a repo is the shape
-/// that produces a side row beside a tracker record, so it needs either a
-/// record to attach to or an explicit `scratch` declaration; a local
-/// (repo-less) project is scratch by construction and always allowed.
+/// Decide an anchor-less create under a tracker-backed project.
+///
+/// `scratch` suppresses the **refusal only**, never the attach. Those are two
+/// different questions and conflating them was a hole: a caller declaring
+/// scratch was skipping the record lookup too, so `--scratch` doubled as a
+/// full bypass and could still put a second row beside an open issue. The
+/// attach is the part that actually protects the invariant — if the name
+/// names a record, that record's row is the answer no matter who is asking —
+/// and only the refusal is a judgement about intent that a caller may
+/// legitimately override.
+///
+/// A project with no tracker behind it (a local project) has no record for a
+/// named row to shadow, so it always creates.
 pub fn resolve_named_create(
     config: &ServerConfig,
     name: &str,
     project_key: &ProjectKey,
     scratch: bool,
 ) -> NamedCreate {
-    if scratch || project_key.source_prefix() != "github" {
+    if !is_tracker_backed(project_key) {
         return NamedCreate::Create;
     }
     if let Some(task) = open_task_matching(config, name, project_key) {
@@ -145,27 +182,43 @@ pub fn resolve_named_create(
             notice,
         };
     }
+    if scratch {
+        return NamedCreate::Create;
+    }
     NamedCreate::Refuse {
         message: format!(
-            "refusing to create the workspace \"{name}\" beside a tracked repo: a GitHub issue / \
-             PR already gets exactly one workspace, and a second named row splits its branch, \
-             activity, cost and epic graph. File the record and attach to it — `gh issue create \
-             --repo <owner/repo> …` then `lazybox workspace create --issue <owner/repo#N>` — or \
-             pass `--scratch` if this really is repo-less scratch."
+            "refusing to create the workspace \"{name}\" beside a tracked project: an issue / PR \
+             / ticket already gets exactly one workspace, and a second named row splits its \
+             branch, activity, cost and epic graph. File the record and attach to it — \
+             `gh issue create --repo <owner/repo> …` then \
+             `lazybox workspace create --issue <owner/repo#N>` — or pass `--scratch` if this \
+             really is scratch work with no record behind it."
         ),
     }
 }
 
-/// The open task in `project_key`'s repo that `name` names, if any. Matches a
-/// `#N` / `N` reference or the task title after normalization, so the shapes
-/// an agent naturally types for a workspace ("1586", "#1586", the issue title)
-/// all land on the record instead of beside it.
+/// Whether a project's workspaces come from a tracker, and so can be shadowed
+/// by a named row. Every provider counts, not just GitHub: a Linear ticket is
+/// as much a tracker record as an issue, and leaving Linear out would make
+/// `x n` under a team project the one surviving way to split a ticket's work
+/// across two rows.
+fn is_tracker_backed(key: &ProjectKey) -> bool {
+    matches!(key.source_prefix(), "github" | "linear" | "jira")
+}
+
+/// The open task in `project_key` that `name` names, if any. Matches an
+/// explicit `#N`, the provider identifier (`ENG-45`), or the task title after
+/// normalization — the shapes someone types when they mean the record.
+///
+/// A **bare** number is deliberately not a reference. `#1586` is unambiguous
+/// intent; `2024` is a perfectly ordinary scratch name that would otherwise
+/// silently redirect onto whatever issue happens to carry that number.
 fn open_task_matching(config: &ServerConfig, name: &str, project_key: &ProjectKey) -> Option<Task> {
     let needle = normalize(name);
     if needle.is_empty() {
         return None;
     }
-    let number: Option<u64> = needle.trim_start_matches('#').parse().ok();
+    let number: Option<u64> = needle.strip_prefix('#').and_then(|n| n.parse().ok());
     load_workspaces(config)
         .into_iter()
         .filter(|ws| lazybox_core::workspace_project_key(ws).as_ref() == Some(project_key))
@@ -178,7 +231,9 @@ fn open_task_matching(config: &ServerConfig, name: &str, project_key: &ProjectKe
         .filter(|task| !matches!(task.state, TaskState::Merged | TaskState::Closed))
         .find(|task| match number {
             Some(number) => task.id.number() == Some(number),
-            None => normalize(&task.title) == needle,
+            // `ENG-45` normalizes the same way on both sides, so the
+            // identifier match falls out of the title comparison.
+            None => normalize(&task.title) == needle || normalize(&task.id.key) == needle,
         })
 }
 
@@ -303,9 +358,8 @@ mod tests {
         );
         let project = github_project("acme/widget");
 
-        // By number, with and without the `#`, and by title after
-        // normalization — the shapes an agent naturally reaches for.
-        for name in ["7", "#7", "Fix the parser", "fix-the-parser"] {
+        // An explicit `#N`, or the title after normalization.
+        for name in ["#7", "Fix the parser", "fix-the-parser"] {
             match resolve_named_create(&config, name, &project, false) {
                 NamedCreate::Attach { anchor, notice } => {
                     assert_eq!(anchor, gh("acme/widget#7"), "{name}");
@@ -314,6 +368,82 @@ mod tests {
                 other => panic!("{name:?} should attach, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_bare_number_is_a_name_not_a_reference() {
+        // "7" is a perfectly ordinary scratch name. Treating it as a
+        // reference silently hands the caller issue #7's workspace instead of
+        // the one they asked for — a redirect they never requested and cannot
+        // see coming. `#7` is the way to mean the record.
+        let config = ServerConfig::in_memory();
+        seed_issue(
+            &config,
+            "github-acme-widget-7",
+            "acme/widget",
+            7,
+            "Fix the parser",
+        );
+        assert!(matches!(
+            resolve_named_create(&config, "7", &github_project("acme/widget"), false),
+            NamedCreate::Refuse { .. }
+        ));
+        assert_eq!(
+            resolve_named_create(&config, "7", &github_project("acme/widget"), true),
+            NamedCreate::Create
+        );
+    }
+
+    #[test]
+    fn scratch_suppresses_the_refusal_but_never_the_attach() {
+        // Two different questions, and conflating them was a hole: when
+        // `scratch` skipped the record lookup as well, `--scratch` was a full
+        // bypass that could still park a named row beside an open issue — the
+        // exact split this module exists to prevent. Declaring scratch may
+        // override the *judgement* about intent, never the invariant.
+        let config = ServerConfig::in_memory();
+        seed_issue(
+            &config,
+            "github-acme-widget-7",
+            "acme/widget",
+            7,
+            "Fix the parser",
+        );
+        match resolve_named_create(&config, "#7", &github_project("acme/widget"), true) {
+            NamedCreate::Attach { anchor, .. } => assert_eq!(anchor, gh("acme/widget#7")),
+            other => panic!("scratch must not bypass the attach, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_linear_team_project_is_guarded_too() {
+        // A Linear ticket is as much a tracker record as a GitHub issue.
+        // Gating only on `github` would leave `x n` under a team project the
+        // one surviving way to split a ticket's work across two rows.
+        let config = ServerConfig::in_memory();
+        let project = ProjectKey::linear("ENG");
+        let mut ws = Workspace::empty(
+            WorkspaceKey::new("linear-eng-45"),
+            "branch",
+            chrono::Utc::now(),
+        );
+        ws.project_key = Some(project.clone());
+        let mut ticket = task("acme/widget", 0, "Fix the parser", "Open");
+        ticket.id = TaskId {
+            source: "linear".into(),
+            key: "ENG-45".into(),
+        };
+        ws.linear_issues.push(ticket);
+        save(&config, &ws);
+
+        match resolve_named_create(&config, "ENG-45", &project, false) {
+            NamedCreate::Attach { anchor, .. } => assert_eq!(anchor.key, "ENG-45"),
+            other => panic!("`ENG-45` should attach, got {other:?}"),
+        }
+        assert!(matches!(
+            resolve_named_create(&config, "spike the cache", &project, false),
+            NamedCreate::Refuse { .. }
+        ));
     }
 
     #[test]
@@ -382,6 +512,29 @@ mod tests {
         assert_eq!(
             resolve_named_create(&config, "notes", &ProjectKey::local("scratch"), false),
             NamedCreate::Create
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_to_an_archived_record_says_it_was_archived() {
+        // `x x` deletes the row AND adds the key to the archived set, which
+        // `upsert` skips — so materializing is a guaranteed no-op. The
+        // generic "could not be fetched, check the reference and your token"
+        // would send an agent off to file a duplicate: the exact split this
+        // module exists to prevent.
+        let config = ServerConfig::in_memory();
+        assert!(
+            crate::workspace::archive_workspace_key(&config, "github-acme-widget-7"),
+            "the archive marker must persist for the guard to see it"
+        );
+
+        let err = attach_to_record(&config, &gh("acme/widget#7"))
+            .await
+            .expect_err("an archived record has no row to attach to");
+        let message = err.to_string();
+        assert!(
+            message.contains("archived") && message.contains("duplicate"),
+            "the refusal must name the real cause and steer away from re-filing: {message}"
         );
     }
 

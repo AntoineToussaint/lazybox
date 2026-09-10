@@ -1629,6 +1629,42 @@ mod effects_tests {
         }
     }
 
+    /// `x n` under a REPO project must declare itself scratch (#1586).
+    ///
+    /// The daemon refuses an anchor-less named create under a tracker-backed
+    /// project, and the TUI has no keybinding for "yes, this is scratch" — so
+    /// sending `scratch: false` here dead-ends an action the Start sheet still
+    /// offers, with a CLI flag (`--scratch`) as the only stated way out and no
+    /// way to reach it. `scratch` suppresses only the refusal, so the record
+    /// attach still applies and `x n` "#7" continues to land on issue #7's row.
+    #[test]
+    fn new_workspace_under_a_repo_declares_scratch_so_it_cannot_dead_end() {
+        let mut m = build_model();
+        let pk = lazybox_core::ProjectKey::github("acme", "widget");
+        m.modal_stack.push(Id::NewWorkspace);
+        m.modal_flow = Some(super::super::ModalFlow::NewWorkspaceProject {
+            project: pk.clone(),
+        });
+        let cmds = m.handle_input_submitted("spike the cache".into());
+        match &cmds[0] {
+            IpcCommand::CreateWorkspace {
+                project_key,
+                anchor,
+                scratch,
+                ..
+            } => {
+                assert_eq!(project_key, &pk);
+                assert_eq!(*anchor, None, "`x n` resolves the name daemon-side");
+                assert!(
+                    *scratch,
+                    "a human who typed a name in the New-workspace modal must not be refused \
+                     with no way through"
+                );
+            }
+            other => panic!("expected CreateWorkspace, got {other:?}"),
+        }
+    }
+
     /// Regression for the silent new-workspace failure: the display name is
     /// not the identity (`Work` may allocate `work-8`). The correlated daemon
     /// acknowledgement must reveal the exact allocated row and arm the

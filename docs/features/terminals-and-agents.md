@@ -609,9 +609,12 @@ Option<Role>`), OR-merge-safe like `hopper` / `remote`. It does three things:
 Roles are **advisory** except one enforced gate: the MCP `spawn_worker` tool
 (Coordinator-only) starts a Worker **on a tracker record** — it attaches to the
 issue's own workspace, assigns it to the caller's epic as a Worker, and spawns
-an agent on a brief — refusing off-role, past `max_epic_workers`, or on a
-record it cannot resolve. Merge gating/ordering is P3; automatic dispatch is
-P4.
+an agent on a brief. It refuses off-role, past `max_epic_workers`, on a record
+it cannot resolve, on the **caller's own workspace** (attaching there would
+role-stamp the Coordinator `Worker` and lose the role gating this very tool),
+and on a record that **already has a running agent** (the spawn reuses a live
+singleton, so it would inject the brief into someone else's conversation
+mid-task). Merge gating/ordering is P3; automatic dispatch is P4.
 
 ### How to use it
 - `E r` on a workspace opens a picker (the five roles or *none*); the choice
@@ -625,7 +628,10 @@ P4.
   issue/PR URL, a Linear identifier); `create_issue { title, body, repo,
   parent?, blocked_by? }` files it as a sub-issue of the epic first. There is
   no `workspace_name`: a worker runs in the record's own row, never a named one
-  beside it (#1586). It refuses for any non-Coordinator caller.
+  beside it (#1586). Pass one or the other, never both. It refuses for any
+  non-Coordinator caller, for your own workspace, and for a record someone is
+  already running an agent on — use `read_session` / `notify_session` to reach
+  them instead.
 - On GitHub, the `role:*` label makes the plan legible to anyone looking at the
   tracker rather than at lazybox — and lazybox adopts it back if the field is
   unset, so the two stay in sync.
@@ -651,6 +657,10 @@ beside the record (#1586).
 - [ ] `spawn_worker` is refused for a non-Coordinator and past `max_epic_workers`.
 - [ ] `spawn_worker` with a `task` reference lands the agent in that record's
       existing row; passing `workspace_name` is refused with the rule.
+- [ ] `spawn_worker` on the Coordinator's own record is refused AND leaves its
+      Coordinator role intact.
+- [ ] `spawn_worker` on a record with a live agent is refused and does not
+      rebadge that row.
 
 ---
 

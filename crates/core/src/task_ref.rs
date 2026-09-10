@@ -71,13 +71,18 @@ fn strip_host<'a>(raw: &'a str, host: &str) -> Option<&'a str> {
 /// `owner/repo/issues/123`, `owner/repo/pull/123` — tolerating the trailing
 /// segments and `#`/`?` fragments a real browser URL carries
 /// (`…/pull/12/files`, `…/issues/12#issuecomment-9`).
+///
+/// Issues and PRs share one number sequence per repo, so either kind resolves
+/// to the same `owner/repo#N`. **Discussions do not** — they are numbered
+/// independently, so `…/discussions/5` and `…/issues/5` are different records
+/// and accepting the former would silently attach work to the latter.
 fn github_from_url_path(path: &str) -> Option<TaskId> {
     let path = path.split(['?', '#']).next().unwrap_or(path);
     let mut parts = path.split('/');
     let owner = parts.next()?;
     let repo = parts.next()?;
     let kind = parts.next()?;
-    if !matches!(kind, "issues" | "pull" | "discussions") {
+    if !matches!(kind, "issues" | "pull") {
         return None;
     }
     github_task_id(&format!("{owner}/{repo}"), parts.next()?)
@@ -218,6 +223,9 @@ mod tests {
             "/widget#4",
             "acme/#4",
             "https://github.com/acme/widget/releases/4",
+            // Discussions carry their own number sequence, so resolving one
+            // to `acme/widget#4` would attach work to an unrelated issue.
+            "https://github.com/acme/widget/discussions/4",
             "https://example.com/acme/widget/issues/4",
             "-45",
             "ENG-",

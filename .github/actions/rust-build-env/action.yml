@@ -88,7 +88,21 @@ runs:
         sudo sed -i -E '/dl\.google\.com|packages\.microsoft\.com/d' \
           /etc/apt/sources.list
         sudo apt-get update
-        sudo apt-get install -y build-essential pkg-config libc++-dev libc++abi-dev
+        # `lld` is the linker every Rust job selects via `RUSTFLAGS` in
+        # ci.yml: this workspace links ~95 test binaries per run, which is a
+        # linker-bound workload GNU ld handles badly.
+        sudo apt-get install -y build-essential pkg-config libc++-dev libc++abi-dev lld
+
+    # Select lld for every Rust link in this job. Linux only: the macOS lanes
+    # have no lld, and `-fuse-ld=lld` would fail every link there. Appended to
+    # any inherited RUSTFLAGS rather than assigned, so a caller that sets its
+    # own flags keeps them. Exported via $GITHUB_ENV so the cache action sees
+    # the same flags the build will use.
+    - name: Select the lld linker (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        echo "RUSTFLAGS=${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-fuse-ld=lld" >> "$GITHUB_ENV"
 
     - name: Cache pinned Zig
       # bootstrap.sh downloads zig into this host-level cache. Restoring

@@ -1,4 +1,4 @@
-//! One-shot migration off #1376's per-workspace Codex credential homes.
+//! Migration off #1376's per-workspace Codex credential homes.
 //!
 //! #1376 gave every workspace its own `CODEX_HOME` under
 //! `agent-homes/codex/<session>` so a re-auth in one pane could not re-log
@@ -7,8 +7,9 @@
 //! the shared login — which leaves each legacy home holding conversation
 //! rollouts `codex resume` can no longer find.
 //!
-//! This module links those rollouts into the shared home. It runs **once at
-//! daemon start over every legacy home**, not per workspace-spawn: a
+//! This module links those rollouts into the shared home. It sweeps **every
+//! legacy home at each daemon start**, importing any rollout it has not
+//! already recorded, rather than running per workspace-spawn: a
 //! migration keyed to "the next time an agent spawns in this workspace"
 //! never reaches a workspace the user does not reopen, and the resulting
 //! rollouts are the only copy in the tree — nothing else references
@@ -644,9 +645,13 @@ mod tests {
         let _codex = EnvGuard::set("CODEX_HOME", shared.to_str().unwrap());
 
         let root = lazybox_core::paths::agent_homes_root().join("codex");
-        for workspace in ["github-acme-widget-1", "github-acme-widget-2", "scratch"] {
+        let workspaces = ["github-acme-widget-1", "github-acme-widget-2", "scratch"];
+        for workspace in workspaces {
             write(
-                &root.join(workspace).join("sessions").join("rollout.jsonl"),
+                &root
+                    .join(workspace)
+                    .join("sessions")
+                    .join(format!("rollout-{workspace}.jsonl")),
                 format!("{{\"from\":\"{workspace}\"}}\n").as_bytes(),
             );
         }
@@ -655,21 +660,32 @@ mod tests {
 
         migrate_legacy_codex_homes();
 
-        // Every workspace's rollout landed, each under its own name.
-        assert_eq!(
-            std::fs::read_dir(shared.join("sessions"))
-                .unwrap()
-                .flatten()
-                .count(),
-            1,
-            "same basename collapses to the first importer; distinct names all land"
-        );
-        for workspace in ["github-acme-widget-1", "github-acme-widget-2", "scratch"] {
+        // EVERY workspace's conversation reached the shared home — the whole
+        // point of sweeping at startup instead of on the next spawn, since a
+        // workspace the user never reopens holds the only copy of its own.
+        for workspace in workspaces {
+            assert_eq!(
+                std::fs::read(
+                    shared
+                        .join("sessions")
+                        .join(format!("rollout-{workspace}.jsonl"))
+                )
+                .unwrap(),
+                format!("{{\"from\":\"{workspace}\"}}\n").as_bytes(),
+                "{workspace}'s conversation never reached the shared home"
+            );
             assert!(
                 root.join(workspace).join(MANIFEST).exists(),
                 "{workspace} was never swept"
             );
         }
+        assert_eq!(
+            std::fs::read_dir(shared.join("sessions"))
+                .unwrap()
+                .flatten()
+                .count(),
+            workspaces.len()
+        );
     }
 
     #[test]

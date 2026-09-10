@@ -16,6 +16,42 @@ const AUTH_REPLAY_TIMEOUT: std::time::Duration = std::time::Duration::from_milli
 /// back together, so there is deliberately nothing to add.
 const AUTH_ENV: &[(String, String)] = &[];
 
+/// Ceiling on the provider's status probe (`codex login status`,
+/// `claude auth status --json`). These read a local credential file and
+/// return in milliseconds, so this is not a performance budget — it is a
+/// liveness one. The probe is drained until its output channel CLOSES, which
+/// only happens when the child exits, and `cancel_reauthentication` kills the
+/// flow's registered process exactly once (when the user cancels) — so a
+/// probe spawned after that point, or one that simply never exits (a `codex`
+/// wrapper that waits on stdin), would otherwise hang the recovery flow for
+/// good: the pane stays `authenticating` and a second Esc does nothing.
+const AUTH_STATUS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Test-only shortening of [`AUTH_STATUS_PROBE_TIMEOUT`], in milliseconds; 0
+/// means "use the real one". The wedge tests need the bound to actually
+/// elapse, and driving that with `tokio::time::advance` under a paused clock
+/// proved platform-dependent — it passed on macOS and failed on Linux CI,
+/// because a `yield_now` wait loop keeps the runtime non-idle and the
+/// interaction with the resume path's own timers differs. A genuinely short
+/// real timeout is deterministic everywhere. Deliberately generous (see the
+/// setter) so that if it ever leaked to a sibling test — `cargo test` shares
+/// one process, unlike `cargo nextest` — that test's probe, which completes in
+/// microseconds against the in-memory mock, still could not race it.
+#[cfg(test)]
+static AUTH_STATUS_PROBE_TIMEOUT_MS_OVERRIDE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn auth_status_probe_timeout() -> std::time::Duration {
+    #[cfg(test)]
+    {
+        let ms = AUTH_STATUS_PROBE_TIMEOUT_MS_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+        if ms > 0 {
+            return std::time::Duration::from_millis(ms);
+        }
+    }
+    AUTH_STATUS_PROBE_TIMEOUT
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct AgentResumeContext {
     pub terminal_id: TerminalId,
@@ -1198,24 +1234,46 @@ async fn verify_authenticated(
         .agent_recovery
         .set_auth_process(terminal_id, Some(key.clone()))
         .await;
-    let output = match config.backend.subscribe(&key).await {
-        Ok(mut subscription) => {
-            let mut bytes = subscription.replay;
+    let mut output = Vec::new();
+    let probe = async {
+        if let Ok(mut subscription) = config.backend.subscribe(&key).await {
+            output.extend_from_slice(&subscription.replay);
             while let Some(chunk) = subscription.live.recv().await {
-                bytes.extend_from_slice(&chunk.bytes);
+                output.extend_from_slice(&chunk.bytes);
             }
-            bytes
         }
-        Err(_) => Vec::new(),
+        config.backend.wait_exit(&key).await
     };
-    let code = config.backend.wait_exit(&key).await;
+    let outcome = tokio::time::timeout(auth_status_probe_timeout(), probe).await;
     config
         .agent_recovery
         .set_auth_process(terminal_id, None)
         .await;
-    config.backend.release(&key).await;
+    let code = match outcome {
+        Ok(code) => {
+            config.backend.release(&key).await;
+            code
+        }
+        Err(_) => {
+            // A probe that never exits is the extreme case of one that cannot
+            // answer: kill it, reap it, and resume rather than strand the
+            // conversation on a wedged subprocess. But judge it on whatever it
+            // DID print first — a probe that reported "not logged in" and then
+            // wedged has already given the one unambiguous answer, and
+            // resuming on it would land straight back in the dead session.
+            let _ = config.backend.kill(&key).await;
+            config.backend.release(&key).await;
+            tracing::warn!(
+                timeout = ?auth_status_probe_timeout(),
+                "re-auth status probe did not exit — killed it; judging the \
+                 partial output rather than leaving the pane stuck mid-recovery"
+            );
+            None
+        }
+    };
     let Some(marker) = signed_out_marker else {
-        // No token to look for: the exit code is the only signal available.
+        // No token to look for: the exit code is the only signal available,
+        // and a probe that never exited has none.
         return code == Some(0);
     };
     // Whitespace-insensitive, case-folded scan on both sides so
@@ -1230,7 +1288,7 @@ async fn verify_authenticated(
     if signed_out {
         return false;
     }
-    if code != Some(0) {
+    if code.is_some_and(|code| code != 0) {
         tracing::warn!(
             ?code,
             "re-auth status probe exited non-zero without its signed-out marker —              treating as an unusable probe and resuming rather than stranding the conversation"
@@ -1423,6 +1481,27 @@ mod tests {
         )
         .await;
         (config, mock, terminal_id)
+    }
+
+    /// Shorten the status-probe bound for a test that needs it to elapse,
+    /// restoring it on drop. 2s is far longer than any sibling test's probe
+    /// (in-memory mock, microseconds) yet short enough to stay well inside
+    /// nextest's 10s per-test deadline.
+    struct ShortProbeTimeout;
+
+    impl ShortProbeTimeout {
+        fn arm() -> Self {
+            super::AUTH_STATUS_PROBE_TIMEOUT_MS_OVERRIDE
+                .store(2_000, std::sync::atomic::Ordering::Relaxed);
+            Self
+        }
+    }
+
+    impl Drop for ShortProbeTimeout {
+        fn drop(&mut self) {
+            super::AUTH_STATUS_PROBE_TIMEOUT_MS_OVERRIDE
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     async fn wait_for_argv(mock: &crate::backend::MockBackend, expected: &[&str]) -> Vec<String> {
@@ -1749,6 +1828,99 @@ mod tests {
             "the only phase before the login completes is the interactive login: {replay:?}"
         );
         cancel_reauthentication(&config, terminal_id).await;
+    }
+
+    /// A status probe that never exits must not wedge the recovery.
+    ///
+    /// The probe is drained until its output channel closes, which only
+    /// happens when the child exits, and `cancel_reauthentication` kills the
+    /// flow's registered process exactly ONCE — so a probe that hangs (or one
+    /// spawned on the cancel path, after that kill already fired) would leave
+    /// the pane `authenticating` for good, with a second Esc doing nothing.
+    #[tokio::test]
+    async fn a_status_probe_that_never_exits_does_not_wedge_the_recovery() {
+        let _short = ShortProbeTimeout::arm();
+        let (config, mock, terminal_id) = recovery_fixture("codex", Some("conversation-708")).await;
+        start_reauthentication(&config, terminal_id, None).await;
+
+        wait_for_argv(&mock, &["codex", "login"]).await;
+        let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
+        let login_key = config
+            .terminal
+            .backend_key_for(auth_terminal_id)
+            .await
+            .expect("interactive login terminal");
+        mock.finish(&login_key, 0).await;
+        // The probe starts and is never finished — no exit, no channel close.
+        wait_for_argv(&mock, &["codex", "login", "status"]).await;
+
+        // The bound is real time now, so wait on the clock rather than a
+        // yield-only spin (which would never let it elapse).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while config.agent_recovery.active(terminal_id).await
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(
+            !config.agent_recovery.active(terminal_id).await,
+            "the flow must give up on a wedged status probe, not hang forever"
+        );
+        // Giving up resumes rather than stranding the conversation, and the
+        // wedged probe is killed rather than left running.
+        wait_for_argv(&mock, &["codex", "resume", "conversation-708"]).await;
+        assert!(
+            mock.released_keys()
+                .await
+                .iter()
+                .any(|key| key == "mock-agent-auth-2"),
+            "the abandoned probe must be reaped, not leaked: {:?}",
+            mock.released_keys().await
+        );
+    }
+
+    /// A probe that printed its signed-out token and THEN wedged has already
+    /// given the one unambiguous answer. Abandoning it must not discard that
+    /// and resume — the resumed agent would land straight back in the dead
+    /// session and re-arm the auth loop.
+    #[tokio::test]
+    async fn a_wedged_probe_that_already_reported_signed_out_still_blocks() {
+        let _short = ShortProbeTimeout::arm();
+        let (config, mock, terminal_id) = recovery_fixture("codex", Some("conversation-708")).await;
+        start_reauthentication(&config, terminal_id, None).await;
+
+        wait_for_argv(&mock, &["codex", "login"]).await;
+        let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
+        let login_key = config
+            .terminal
+            .backend_key_for(auth_terminal_id)
+            .await
+            .expect("interactive login terminal");
+        mock.finish(&login_key, 0).await;
+        wait_for_argv(&mock, &["codex", "login", "status"]).await;
+        // Reports signed out, then never exits.
+        mock.emit("mock-agent-auth-2", b"Not logged in").await;
+
+        // The bound is real time now, so wait on the clock rather than a
+        // yield-only spin (which would never let it elapse).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while config.agent_recovery.active(terminal_id).await
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        assert!(!config.agent_recovery.active(terminal_id).await);
+        assert!(
+            mock.all_argv()
+                .await
+                .iter()
+                .all(|argv| !argv.starts_with(&["codex".into(), "resume".into()])),
+            "the marker it managed to print must still block the resume"
+        );
+        assert!(
+            config.agent_recovery.context(terminal_id).await.is_some(),
+            "the conversation stays recoverable so the user can retry sign-in"
+        );
     }
 
     /// Killing the provider's `login` mid-flight can leave the shared

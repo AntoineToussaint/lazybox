@@ -93,9 +93,12 @@ pub struct Saving {
     /// figure". Collapsing the two is how a screen ends up showing
     /// `−$0.00` for a real saving.
     ///
-    /// Like [`Compactor::estimate_saved_micros`], a **gross** figure that
-    /// does not net out the re-processing a shortened prefix costs — which
-    /// is why the readout labels it so.
+    /// A **gross** figure, like the estimate it comes from: condensing a
+    /// block also shortens the cacheable prefix, so blocks still inside the
+    /// recency window are re-processed as one crosses out of it. That
+    /// recurring cost is not netted out here and can exceed the saving on a
+    /// short conversation — which is why the readout labels it `gross`, and
+    /// why the kill switch, not this number, is what catches that case.
     pub saved_micros: Option<u64>,
     /// `1` on the turn the kill switch trips, `0` otherwise.
     pub regressions: u64,

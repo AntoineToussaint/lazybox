@@ -584,12 +584,20 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
     // report the proxy's rewrite as the conversation the agent sent — a
     // silent instrumentation lie, with plausible numbers and no test to
     // catch it.
-    let measured = context_parse::measure(&body_bytes, state.large_tool_result_lines);
+    // Both passes read the same buffered body, so it is parsed once here
+    // (#1623) rather than once each — a conversation body grows for the
+    // length of a session, and this is the hot path of every request a
+    // metered agent makes. The bytes and their parse travel together so the
+    // two cannot drift apart.
+    let request = compaction::ParsedBody::new(body_bytes);
+    let measured = request
+        .value()
+        .and_then(|body| context_parse::measure(body, state.large_tool_result_lines));
 
     // The one place the proxy is not transparent: old, large tool results
     // are condensed before the expensive model ever sees them (#1609).
     // `off` and `shadow` hand the original bytes straight back.
-    let compacted = state.compactor.rewrite(&session, &agent_id, body_bytes);
+    let compacted = state.compactor.rewrite(&session, &agent_id, request);
     let compaction_pending = compacted.pending;
     let judged = compacted.measured;
     let body_bytes = compacted.body;

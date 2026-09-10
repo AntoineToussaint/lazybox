@@ -93,8 +93,9 @@ pub fn status_projection_label(status: &EpicMemberStatus) -> Option<&'static str
 /// Fold one epic's derived statuses into the cross-epic desired-label map.
 ///
 /// Only the status family is projected. The `epic:<key>` membership label is
-/// **read** as a membership source ([`resolved_graph`]) and deliberately
-/// never written: writing it would make membership self-sustaining — the
+/// **read** as a membership source (by the resolver's graph pass) and
+/// deliberately never written: writing it would make membership
+/// self-sustaining — the
 /// label we wrote re-asserts the membership that produced it — so an
 /// `unassign` could never be honored once a poll had refreshed the row's
 /// labels. Leaving that family untouched also means lazybox never detaches

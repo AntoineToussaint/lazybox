@@ -117,6 +117,32 @@ const CLAUDE_CHOICE_MARKERS: &[&str] = &["1. Yes", "1) Yes", "(y/n)", "[y/n]"];
 /// chat prose realistically produces it; keeping the `needs authentication`
 /// half anchors on the operative words even if the styled `⚠`/count prefix
 /// or the `· run /mcp` suffix fragments out of the detect window.
+/// Claude's workspace / folder-trust gate — the startup chooser that asks
+/// whether you trust the directory before it will read or edit anything.
+///
+/// Its own shape defeats every other rule here, which is why it needs its own
+/// table (#1641): the options are *unnumbered* labels under a selection arrow
+/// (`❯ No, exit` / `  Yes, I trust this folder`), so the structural-chooser
+/// rule (arrow + numbered list) never fires, and the question wording is not
+/// in `CLAUDE_STANDALONE_PROMPT_PHRASES`. It therefore classified as `Idle`,
+/// and the spawn-time inject gate (#1444) — which releases held keystrokes as
+/// soon as the agent reports `InputNeeded` — could not see that the agent was
+/// waiting on the user. Keystrokes parked for the injection's full
+/// `PENDING_READY_CAP`, so the console read as frozen for a minute and then
+/// recovered: the exact deadlock that exemption exists to prevent.
+///
+/// Both wordings are carried: the older `Do you trust the files in this
+/// folder?` and the current `Quick safety check: Is this a project you created
+/// or one you trust?`. `trust this folder` alone also matches the affirmative
+/// option label both render, which is the most stable token across rewordings.
+/// Matched space-free like every other phrase table.
+pub const CLAUDE_TRUST_GATE_PHRASES: &[&str] = &[
+    "do you trust the files in this folder",
+    "do you trust this folder",
+    "trust this folder",
+    "is this a project you created",
+];
+
 pub const CLAUDE_BLOCKING_INTERSTITIAL_PHRASES: &[&str] = &[
     "mcp server needs authentication",
     "mcp servers need authentication",
@@ -538,6 +564,8 @@ enum Trigger {
     /// A startup blocker an unattended spawn can't clear — an MCP server
     /// awaiting interactive auth (`CLAUDE_BLOCKING_INTERSTITIAL_PHRASES`).
     BlockingInterstitial,
+    /// The workspace / folder-trust gate (`CLAUDE_TRUST_GATE_PHRASES`).
+    WorkspaceTrustGate,
     /// A provider usage / monthly-limit block
     /// (`CLAUDE_USAGE_LIMIT_PHRASES`) — the distinct `LimitReached` state.
     UsageLimit,
@@ -754,6 +782,19 @@ fn classify(s: &str, compact: &str, last_chunk_start: Option<usize>) -> Decision
     // anchor painted after it (the agent streaming = it got past the gate)
     // suppresses it, keeping a resolved-then-working session from pinning
     // InputNeeded (issue #256).
+    // The folder-trust gate, on the same terms and for the same reason
+    // (#1641): it renders at startup ALONGSIDE the composer chrome, so a
+    // more-recent composer footer does not mean it was answered — only a live
+    // working anchor painted after it (the agent streaming = it got past the
+    // gate) does. Placed ahead of the chooser rules because its options are
+    // unnumbered labels, which those rules structurally cannot recognize.
+    let trust_pos = last_compact_match_pos(compact, CLAUDE_TRUST_GATE_PHRASES);
+    if marker_at_least_as_recent(trust_pos, work_anchor_against(trust_pos)) {
+        d.state = AgentState::InputNeeded;
+        d.trigger = Some(Trigger::WorkspaceTrustGate);
+        return d;
+    }
+
     let blocker_pos = last_compact_match_pos(compact, CLAUDE_BLOCKING_INTERSTITIAL_PHRASES);
     if marker_at_least_as_recent(blocker_pos, work_anchor_against(blocker_pos)) {
         d.state = AgentState::InputNeeded;
@@ -985,7 +1026,7 @@ pub fn claude_ready_for_prompt(recent_output: &[u8]) -> bool {
     // Idle. Veto explicitly — pasting the work prompt into the trust
     // dialog is the original "y eats my prompt" race. Matched space-free
     // like every other footer phrase.
-    if compact.contains("trustthisfolder") || compact.contains("doyoutrustthefiles") {
+    if last_compact_match_pos(&compact, CLAUDE_TRUST_GATE_PHRASES).is_some() {
         return false;
     }
     // The composer must actually be on screen. The boot banner is also
@@ -3079,6 +3120,57 @@ mod tests {
             "Esc to cancel · Tab to amend · ctrl+e to explain",
         );
         assert_eq!(claude_state(buf.as_bytes()), Some(AgentState::Idle));
+    }
+
+    /// Regression (#1641): Claude's folder-trust gate must report
+    /// `InputNeeded`. Its options are UNNUMBERED labels under a selection
+    /// arrow, so the structural-chooser rule can't see it, and its question is
+    /// in no consent-phrase table — it classified as `Idle`. The spawn-time
+    /// inject gate (#1444) releases held keystrokes the moment the agent
+    /// reports `InputNeeded`, so with the gate invisible every keystroke
+    /// parked for the injection's full `PENDING_READY_CAP`: the console froze
+    /// for a minute, then recovered on its own.
+    #[test]
+    fn folder_trust_gate_is_input_needed() {
+        // The current wording, verbatim from a real spawn into a fresh
+        // worktree.
+        let buf = concat!(
+            "Accessing workspace:\n",
+            "/Users/u/.lazybox/v2/github-o-r/issue-96\n\n",
+            "Quick safety check: Is this a project you created or one you trust? ",
+            "(Like your own code, a well-known open source project, or work from your team). ",
+            "If not, take a moment to review what's in this folder first.\n\n",
+            "Claude Code'll be able to read, edit, and execute files here.\n\n",
+            "Security guide\n\n",
+            "❯ No, exit\n",
+            "  Yes, I trust this folder\n\n",
+            "Enter to confirm · Esc to cancel\n",
+        );
+        assert_eq!(claude_state(buf.as_bytes()), Some(AgentState::InputNeeded));
+        assert!(
+            !claude_ready_for_prompt(buf.as_bytes()),
+            "the work prompt must never be pasted into the trust gate",
+        );
+
+        // The older wording still classifies.
+        let legacy = concat!(
+            "Do you trust the files in this folder?\n",
+            "❯ 1. Yes, proceed\n",
+            "  2. No, exit\n",
+        );
+        assert_eq!(
+            claude_state(legacy.as_bytes()),
+            Some(AgentState::InputNeeded)
+        );
+
+        // Answered: the agent is streaming again, so a trust phrase left in
+        // scrollback must not pin `InputNeeded`.
+        let cleared = format!("{buf}\n✻ Thinking… (5s · esc to interrupt)\n");
+        assert_ne!(
+            claude_state(cleared.as_bytes()),
+            Some(AgentState::InputNeeded),
+            "a newer working anchor proves the gate was answered",
+        );
     }
 
     #[test]

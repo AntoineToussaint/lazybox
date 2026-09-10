@@ -151,11 +151,34 @@ impl Stats {
     fn has_compaction(&self) -> bool {
         [
             stats::COMPACTION_BLOCKS,
-            stats::COMPACTION_SAVED_MICROS,
+            stats::COMPACTION_SAVED_BYTES,
             stats::COMPACTION_REGRESSIONS,
         ]
         .iter()
         .any(|metric| self.grand_total(metric) > 0)
+    }
+
+    /// What the compaction pass saved over the active window, as a figure
+    /// that is true rather than merely confident. Any unpriced turn in the
+    /// window — an unpriced model, or a flat-fee subscription route where a
+    /// prompt token has no marginal cost — makes the dollar total cover
+    /// only part of it, so bytes are shown for all of it instead. A
+    /// `−$0.00` beside a real saving is what talks a reader out of the
+    /// rollout the number exists to justify.
+    fn compaction_saved(&self) -> String {
+        if self.total(stats::COMPACTION_UNPRICED_BYTES) > 0 {
+            format!("−{}", fmt_bytes(self.total(stats::COMPACTION_SAVED_BYTES)))
+        } else {
+            // "gross" because condensing also shortens the cacheable prefix,
+            // so the blocks still inside the recency window are re-processed
+            // as a block crosses out of it — a recurring cost this figure
+            // does not net out and which can exceed it on a short
+            // conversation. The kill switch is what catches that case.
+            format!(
+                "−{} gross",
+                fmt_cost(self.total(stats::COMPACTION_SAVED_MICROS))
+            )
+        }
     }
 
     /// Distinct local days that saw any activity, over the shipped window.
@@ -276,8 +299,8 @@ impl Stats {
             lines.push(row(
                 "Compaction",
                 format!(
-                    "−{} · {} blocks",
-                    fmt_cost(self.total(stats::COMPACTION_SAVED_MICROS)),
+                    "{} · {} blocks",
+                    self.compaction_saved(),
                     fmt_int(self.total(stats::COMPACTION_BLOCKS)),
                 ),
             ));
@@ -373,6 +396,16 @@ fn fmt_compact(n: i64) -> String {
 /// USD micros (millionths of a dollar) → `$1.23`.
 fn fmt_cost(micros: i64) -> String {
     format!("${:.2}", micros as f64 / 1_000_000.0)
+}
+
+/// Byte counts at the scale a condensed conversation reaches: `812 B`,
+/// `41.6 KB`, `3.2 MB`. Decimal units, matching `fmt_compact`'s `k`/`M`.
+fn fmt_bytes(bytes: i64) -> String {
+    match bytes {
+        _ if bytes >= 1_000_000 => format!("{:.1} MB", bytes as f64 / 1_000_000.0),
+        _ if bytes >= 1_000 => format!("{:.1} KB", bytes as f64 / 1_000.0),
+        _ => format!("{bytes} B"),
+    }
 }
 
 /// A unicode block sparkline. An all-zero series renders as flat lows so
@@ -504,6 +537,17 @@ mod tests {
         })
     }
 
+    /// The rendered `Compaction` row on its own — the dollar/byte assertions
+    /// have to be scoped to it, since the `Cost` rows legitimately render
+    /// `$0.00` when a fixture carries no cost.
+    fn compaction_row(rendered: &str) -> String {
+        rendered
+            .lines()
+            .find(|line| line.contains("Compaction"))
+            .expect("a compaction row")
+            .to_string()
+    }
+
     fn render(comp: &mut Stats, w: u16, h: u16) -> String {
         use tuirealm::ratatui::Terminal;
         use tuirealm::ratatui::backend::TestBackend;
@@ -581,11 +625,56 @@ mod tests {
     }
 
     #[test]
+    fn an_unpriced_saving_shows_bytes_not_a_confident_zero() {
+        // A model with no rate card, or a flat-fee subscription route,
+        // yields real bytes and no dollar figure. Pricing that at zero puts
+        // `−$0.00` beside a 1.2 MB saving and talks the reader out of the
+        // rollout the row exists to justify.
+        let mut comp = Stats::new(
+            vec![
+                bucket("2026-08-25", stats::COMPACTION_BLOCKS, 12),
+                bucket("2026-08-25", stats::COMPACTION_SAVED_BYTES, 1_240_000),
+                bucket("2026-08-25", stats::COMPACTION_UNPRICED_BYTES, 1_240_000),
+            ],
+            today(),
+            false,
+        );
+        let out = render(&mut comp, 50, 40);
+        let row = compaction_row(&out);
+        assert!(row.contains("−1.2 MB · 12 blocks"), "{out}");
+        assert!(
+            !row.contains('$'),
+            "no dollar figure is claimed on the row: {row:?}"
+        );
+
+        // A window where only SOME turns were priceable still shows bytes:
+        // a dollar total over part of the window understates the whole.
+        let mut mixed = Stats::new(
+            vec![
+                bucket("2026-08-25", stats::COMPACTION_BLOCKS, 12),
+                bucket("2026-08-25", stats::COMPACTION_SAVED_BYTES, 1_240_000),
+                bucket("2026-08-25", stats::COMPACTION_SAVED_MICROS, 40_000),
+                bucket("2026-08-25", stats::COMPACTION_UNPRICED_BYTES, 800_000),
+            ],
+            today(),
+            false,
+        );
+        let out = render(&mut mixed, 50, 40);
+        let row = compaction_row(&out);
+        assert!(row.contains("−1.2 MB"), "{out}");
+        assert!(
+            !row.contains('$'),
+            "a part-priced window still shows bytes: {row:?}"
+        );
+    }
+
+    #[test]
     fn the_compaction_saving_sits_next_to_the_cost_it_reduces() {
         let mut comp = Stats::new(
             vec![
                 bucket("2026-08-25", stats::COST_MICROS, 12_400_000),
                 bucket("2026-08-25", stats::COMPACTION_SAVED_MICROS, 1_840_000),
+                bucket("2026-08-25", stats::COMPACTION_SAVED_BYTES, 1_240_000),
                 bucket("2026-08-25", stats::COMPACTION_BLOCKS, 12),
                 // Six days back — inside the shipped window, outside today.
                 bucket("2026-08-19", stats::COMPACTION_REGRESSIONS, 1),
@@ -600,7 +689,7 @@ mod tests {
             .position(|l| l.contains("Compaction"))
             .expect("compaction");
         assert_eq!(saving, cost + 1, "{out}");
-        assert!(out.contains("−$1.84 · 12 blocks"), "{out}");
+        assert!(out.contains("−$1.84 gross · 12 blocks"), "{out}");
         // Today saw no back-out even though the window did — the row reports
         // the active tab, not the whole window.
         assert!(out.contains("Regressions  0"), "{out}");
@@ -721,6 +810,14 @@ mod tests {
         rebuilt.set_scroll(2);
         assert!(rebuilt.week, "week survives the rebuild");
         assert_eq!(rebuilt.scroll, 2, "scroll survives the rebuild");
+    }
+
+    #[test]
+    fn fmt_bytes_scales_to_the_size_a_condensed_conversation_reaches() {
+        assert_eq!(fmt_bytes(0), "0 B");
+        assert_eq!(fmt_bytes(812), "812 B");
+        assert_eq!(fmt_bytes(41_600), "41.6 KB");
+        assert_eq!(fmt_bytes(3_200_000), "3.2 MB");
     }
 
     #[test]

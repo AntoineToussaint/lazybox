@@ -1126,6 +1126,9 @@ mod tests {
     fn seed_baseline(compactor: &Compactor, session: &str, body: &Bytes) {
         let held = compactor.rewrite(session, "claude", true, body.clone());
         assert_eq!(held.body, *body, "the first eligible turn is held");
+        if let Some(pending) = held.pending {
+            compactor.commit(session, "claude", pending);
+        }
         compactor.observe_usage(session, "claude", &usage(100, 900), true);
     }
 
@@ -1176,8 +1179,12 @@ mod tests {
             Arc::new(|_, _| {}),
         );
         seed_baseline(&compactor, "ws", &body);
-        let sent = compactor.rewrite("ws", "claude", true, body.clone()).body;
-        assert!(sent.len() < body.len(), "the rewritten body is smaller");
+        let done = compactor.rewrite("ws", "claude", true, body.clone());
+        assert!(
+            done.body.len() < body.len(),
+            "the rewritten body is smaller"
+        );
+        compactor.commit("ws", "claude", done.pending.expect("a plan to commit"));
         let (blocks, saved, regressions) = compactor.stats("ws");
         assert_eq!((blocks, regressions), (4, 0));
         assert!(saved > 0.0, "a priced model reports a dollar saving");
@@ -1186,7 +1193,7 @@ mod tests {
         // count is what the conversation currently carries condensed — not
         // a tally that counts one block again on every turn — while the
         // saving does accumulate, because it is paid again every turn.
-        compactor.rewrite("ws", "claude", true, body.clone());
+        turn(&compactor, "ws", &body);
         let (blocks_again, saved_again, _) = compactor.stats("ws");
         assert_eq!(blocks_again, 4, "still four condensed blocks, not eight");
         assert!(saved_again > saved, "the saving recurs each turn");
@@ -1753,6 +1760,10 @@ mod tests {
 
         // The user flips the canary off before the response lands.
         *flipped.lock().expect("lock") = true;
+        // …and the response then lands. The accounting was captured when
+        // the request was inspected (#1621), so committing it after the
+        // flip still attributes the turn to the mode it actually ran under.
+        compactor.commit("ws", "claude", out.pending.expect("a plan to commit"));
         for _ in 0..3 {
             compactor.observe_usage("ws", "claude", &usage(900, 100), true);
         }
@@ -1780,13 +1791,14 @@ mod tests {
 
     #[test]
     fn a_sustained_cache_regression_trips_the_kill_switch() {
-        let (compactor, notices, _savings) = compactor_with_notices();
+        let (compactor, notices, savings) = compactor_with_notices();
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
 
         // A healthy 90% of the prompt served from cache becomes the baseline.
         seed_baseline(&compactor, "ws", &body);
-        let rewritten = compactor.rewrite("ws", "claude", true, body.clone()).body;
-        assert!(rewritten.len() < body.len(), "the next turn rewrites");
+        let done = compactor.rewrite("ws", "claude", true, body.clone());
+        assert!(done.body.len() < body.len(), "the next turn rewrites");
+        compactor.commit("ws", "claude", done.pending.expect("a plan to commit"));
 
         // Three turns where the cache share collapses and never recovers.
         for _ in 0..3 {
@@ -1796,6 +1808,17 @@ mod tests {
             notices.lock().expect("lock").len(),
             1,
             "the user is told once that compaction backed out"
+        );
+        // And the back-out reaches the day rollup exactly once, on the turn
+        // it trips — not once per later response.
+        assert_eq!(
+            savings
+                .lock()
+                .expect("lock")
+                .iter()
+                .filter(|saving| saving.regressions > 0)
+                .count(),
+            1,
         );
         let (_, _, regressions) = compactor.stats("ws");
         assert_eq!(regressions, 1);

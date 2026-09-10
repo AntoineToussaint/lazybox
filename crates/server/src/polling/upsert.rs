@@ -1084,7 +1084,13 @@ fn github_slug_from_config_scopes(key: &lazybox_core::ProjectKey) -> Option<Stri
     key.github_slug_from_scopes(scopes.iter().map(String::as_str))
 }
 
-fn github_slug_for_workspace(
+/// Best-effort `owner/repo` for a workspace's GitHub project, in order of
+/// authority: the primary task's own `repo`, then the user's configured
+/// scopes, then the lossy flat-key parse. Shared with `handle_sync_workspace`
+/// (#1633) — `g s`'s repo discovery used the flat parse alone, so it silently
+/// did nothing for every repo whose owner or name contains a hyphen
+/// (`codefly-dev/cli`, `obin-ai/infra-base`).
+pub(crate) fn github_slug_for_workspace(
     project_key: &lazybox_core::ProjectKey,
     workspace: &Workspace,
 ) -> Option<String> {

@@ -2326,6 +2326,30 @@ pub mod stats {
     /// Tool-result blocks past the large-result line floor, counted once
     /// each on the send that introduced them.
     pub const CONTEXT_LARGE_TOOL_RESULTS: &str = "context_large_tool_results";
+    /// Tool-result blocks the context-hygiene pass newly condensed. A block
+    /// is counted the turn it is first condensed and never again — the agent
+    /// re-sends the same originals every turn, so a per-turn tally would
+    /// count one block once per turn it survives.
+    pub const COMPACTION_BLOCKS: &str = "compaction_blocks";
+    /// Bytes the condensation kept off the wire. The figure that is true
+    /// whatever the model is, so it is what a reader is shown when the
+    /// saving cannot be priced. Accumulates: those bytes would have been
+    /// paid for again on every turn the blocks survive.
+    pub const COMPACTION_SAVED_BYTES: &str = "compaction_saved_bytes";
+    /// USD micros the condensation kept off the wire, counted only for the
+    /// turns that could actually be priced. A **gross** figure: condensing
+    /// also shortens the cacheable prefix, and the re-processing that costs
+    /// is not netted out here.
+    pub const COMPACTION_SAVED_MICROS: &str = "compaction_saved_micros";
+    /// Bytes saved on turns that could NOT be priced — an unpriced model,
+    /// or a flat-fee subscription route where a prompt token carries no
+    /// marginal cost. Non-zero means [`COMPACTION_SAVED_MICROS`] covers
+    /// only part of the window, so a dollar total would understate it; the
+    /// reader is shown bytes instead of a confident `$0.00`.
+    pub const COMPACTION_UNPRICED_BYTES: &str = "compaction_unpriced_bytes";
+    /// Sessions a sustained prompt-cache regression backed compaction out
+    /// of — the safety number the shadow-mode rollout is judged on.
+    pub const COMPACTION_REGRESSIONS: &str = "compaction_regressions";
 }
 
 /// Sentinel prefix on [`Event::PrMergeFailed`]'s `reason` marking the one
@@ -3523,6 +3547,50 @@ pub enum Event {
     ToolUseDecided {
         client_request_id: String,
         decision: ToolUseDecision,
+    },
+    /// What the proxy's context-hygiene pass just saved on one metered
+    /// request (#1621), attributed like [`Event::AgentSessionUsage`] so the
+    /// saving lands next to the cost it is claiming to reduce. Shadow mode
+    /// emits this too — proving the number before anyone flips a workspace
+    /// to `on` is the entire point of the mode.
+    ///
+    /// Emitted when the turn's response completes, on the same clock as
+    /// [`Event::AgentSessionUsage`], so the saving and the cost it is
+    /// compared against are measured over the same set of turns. A retried
+    /// or aborted request reports nothing.
+    ///
+    /// Every field is an **increment**, never a running total, because the
+    /// two numbers are not the same kind of number: `blocks` counts block
+    /// identities this session had not condensed before (the conversation
+    /// re-sends the same originals every turn, so summing a level would
+    /// count one block once per turn it survives), while the byte and
+    /// dollar figures genuinely accumulate — those bytes would have been
+    /// paid for again next turn. Appended last (bincode is
+    /// ordinal-sensitive).
+    AgentCompaction {
+        agent_id: String,
+        /// The workspace/session the saving is attributed to, parsed from
+        /// the proxy request path. `None` for a metered spawn without a
+        /// resolvable key, matching [`Event::AgentSessionUsage`].
+        session_key: Option<SessionKey>,
+        /// Blocks condensed for the first time in this session.
+        blocks: u64,
+        /// Bytes this turn's condensation kept off the wire — true whether
+        /// or not the model can be priced.
+        saved_bytes: u64,
+        /// What those bytes would have cost, or `None` when the saving
+        /// cannot honestly be priced: a model with no rate card, or a
+        /// flat-fee subscription route where a prompt token carries no
+        /// marginal cost. `Some(0)` is a real zero; `None` means "claim no
+        /// dollar figure", and collapsing the two is how a screen ends up
+        /// showing `−$0.00` for a saving that was genuinely large. A
+        /// **gross** figure: condensing also shortens the cacheable prefix,
+        /// and the re-processing that costs is not netted out.
+        saved_cost_micros: Option<u64>,
+        /// `1` on the turn a sustained prompt-cache regression backed
+        /// compaction out of the session, `0` otherwise — a session trips
+        /// the kill switch at most once.
+        regressions: u64,
     },
 }
 

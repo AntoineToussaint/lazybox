@@ -226,6 +226,38 @@ fn stat_events_from_event(event: &Event, day: &str) -> Vec<StatEvent> {
             }
             out
         }
+        // The context-hygiene pass's own saving (#1621), reported next to
+        // the cost it reduces. The event already carries increments rather
+        // than running totals, so the additive rollup is correct as-is: a
+        // block condensed once is counted once however many turns it then
+        // survives, while the bytes and dollars keep accruing every turn.
+        //
+        // An unpriced turn's bytes are tallied separately rather than
+        // priced at zero, so the view can tell "saved nothing" from
+        // "cannot price this" instead of rendering a confident `$0.00`.
+        Event::AgentCompaction {
+            blocks,
+            saved_bytes,
+            saved_cost_micros,
+            regressions,
+            ..
+        } => [
+            (stats::COMPACTION_BLOCKS, *blocks),
+            (stats::COMPACTION_SAVED_BYTES, *saved_bytes),
+            (stats::COMPACTION_REGRESSIONS, *regressions),
+            match saved_cost_micros {
+                Some(micros) => (stats::COMPACTION_SAVED_MICROS, *micros),
+                None => (stats::COMPACTION_UNPRICED_BYTES, *saved_bytes),
+            },
+        ]
+        .into_iter()
+        .filter(|(_, value)| *value > 0)
+        .map(|(metric, value)| StatEvent {
+            day: day.to_string(),
+            metric: metric.to_string(),
+            value: value as i64,
+        })
+        .collect(),
         _ => Vec::new(),
     }
 }
@@ -339,6 +371,65 @@ mod tests {
         };
         let got = stat_events_from_event(&ev, DAY);
         assert!(got.iter().all(|s| !s.metric.starts_with("context_")));
+    }
+
+    #[test]
+    fn compaction_expands_to_blocks_bytes_saving_and_regressions() {
+        let ev = Event::AgentCompaction {
+            agent_id: "claude".into(),
+            session_key: Some(SessionKey::from("github:o/r#1")),
+            blocks: 4,
+            saved_bytes: 18_422,
+            saved_cost_micros: Some(61_000),
+            regressions: 0,
+        };
+        let got = stat_events_from_event(&ev, DAY);
+        let metrics: Vec<(&str, i64)> = got.iter().map(|s| (s.metric.as_str(), s.value)).collect();
+        assert_eq!(
+            metrics,
+            vec![
+                (stats::COMPACTION_BLOCKS, 4),
+                (stats::COMPACTION_SAVED_BYTES, 18_422),
+                (stats::COMPACTION_SAVED_MICROS, 61_000),
+            ],
+            "a clean priced run mints no regression or unpriced bucket",
+        );
+
+        // An unpriced turn tallies its bytes as unpriced rather than
+        // pricing them at zero, so the view can tell "saved nothing" from
+        // "cannot price this" instead of showing a confident `$0.00`.
+        let unpriced = Event::AgentCompaction {
+            agent_id: "codex".into(),
+            session_key: Some(SessionKey::from("github:o/r#1")),
+            blocks: 4,
+            saved_bytes: 18_422,
+            saved_cost_micros: None,
+            regressions: 0,
+        };
+        let got = stat_events_from_event(&unpriced, DAY);
+        let metrics: Vec<(&str, i64)> = got.iter().map(|s| (s.metric.as_str(), s.value)).collect();
+        assert_eq!(
+            metrics,
+            vec![
+                (stats::COMPACTION_BLOCKS, 4),
+                (stats::COMPACTION_SAVED_BYTES, 18_422),
+                (stats::COMPACTION_UNPRICED_BYTES, 18_422),
+            ],
+        );
+
+        // The turn a session's kill switch trips carries only the back-out.
+        let tripped = Event::AgentCompaction {
+            agent_id: "claude".into(),
+            session_key: Some(SessionKey::from("github:o/r#1")),
+            blocks: 0,
+            saved_bytes: 0,
+            saved_cost_micros: Some(0),
+            regressions: 1,
+        };
+        let got = stat_events_from_event(&tripped, DAY);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].metric, stats::COMPACTION_REGRESSIONS);
+        assert_eq!(got[0].value, 1);
     }
 
     #[test]

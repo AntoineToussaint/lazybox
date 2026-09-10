@@ -138,8 +138,18 @@ invalidates the cached prefix and *costs more than it saves*. Three properties
 hold the line:
 
 - *Monotone.* A block is condensed on turn *k* and byte-identical on every turn
-  after. It is never un-condensed, and never re-condensed — `is_condensed()`
-  makes our own output ineligible, so the rewrite is idempotent.
+  after. It is never un-condensed, and never re-condensed. Two mechanisms hold
+  that, and it is worth being precise about which does what, because they have
+  different reach. `is_condensed()` makes our own output ineligible — but only
+  within one *(daemon run, session)* pair, since the tag is drawn per session in
+  the proxy and per run for the hook. Across a daemon restart, or between the
+  two enforcement points, a condensed block is *not* recognized. What stops it
+  being condensed a second time there is the saving floor: re-condensing an
+  already-condensed block keeps 41 of its ~42 lines, saves ~2%, and
+  `MIN_SAVED_FRACTION` refuses it. Recognition is the fast path; the floor is
+  the guarantee. Neither may be removed on the assumption that the other is
+  decoration — `a_block_condensed_under_another_tag_is_still_not_recondensed`
+  pins the floor specifically.
 - *Byte-stable rendering.* `render_condensed` is a pure function of its
   arguments, and the cached summary behind it is content-addressed, so the same
   block renders identically from either enforcement point forever. It returns
@@ -178,10 +188,18 @@ file's summary under another file's header — and the inputs here are unbounded
 tool output, not the small closed set of snippet bodies. Length prefixes mean no
 field's content can impersonate a boundary and forge another entry's key.
 
-Entries live in the store kv under `condense:`, not in memory, because agent
-processes survive a daemon restart and keep sending the same blocks. Both
-enforcement points read and write that one space, so a file condensed by the hook
-is never re-condensed by the proxy.
+Entries are to live in the store kv under `condense:`, not in memory, because
+agent processes survive a daemon restart and keep sending the same blocks. Both
+enforcement points will read and write that one space, so a file condensed by
+the hook is not re-condensed by the proxy.
+
+**That cache ships with #1608 and is not in the tree yet.** #1609 and #1610
+condense by keeping a block's head and tail, with no model call and no cache
+between them, so `cache_key` / `cache_kv_key` / `KV_PREFIX_CONDENSE`,
+`condense_model` and `condense_timeout_ms` are the contract #1608 fills in, not
+live code paths. Until then the two enforcement points do not share an entry
+and cannot recognize each other's markers — the saving floor described above is
+what keeps that from double-summarizing anything.
 
 The cache holds the **summary**, not the rendered block, because the rendered
 block carries a per-session tag (below) while the summary does not — which is

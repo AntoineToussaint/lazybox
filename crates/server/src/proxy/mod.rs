@@ -316,10 +316,10 @@ struct ProxyState {
     /// recognizable as a re-send (#1606). Bounded per session and across
     /// sessions.
     seen_blocks: std::sync::Mutex<context_parse::SeenStore>,
-    /// Line count above which a tool result counts as large
-    /// (`agent.context_hygiene.min_lines`).
-    large_tool_result_lines: usize,
-    /// The context-hygiene pass over request bodies (#1609).
+    /// The context-hygiene pass over request bodies (#1609). Also the single
+    /// source of the line floor above which a tool result counts as large
+    /// (`agent.context_hygiene.min_lines`), for the instrumentation below —
+    /// two copies of that number would drift the moment the policy changed.
     compactor: Arc<Compactor>,
 }
 
@@ -390,25 +390,17 @@ pub async fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHand
     let notice: NoticeSink = Arc::new(move |title: String, body: String| {
         let _ = notice_bus.send(lazybox_ipc::Event::Notification { title, body });
     });
-    let compactor = Arc::new(Compactor::new(
-        cfg.agent.context_hygiene.clone(),
-        prices.clone(),
-        notice,
-    ));
+    // The policy is read per request, not captured here: the `PreToolUse`
+    // hook resolves it live on every decision, and a snapshot taken at spawn
+    // would leave the two enforcement points disagreeing about `mode` for the
+    // rest of the daemon's life after any config edit (#1611). The line floor
+    // the instrumentation uses rides the same source, so "large" still means
+    // one thing.
+    let compactor = Arc::new(Compactor::live(prices.clone(), notice));
 
     tracing::info!("metering proxy listening on 127.0.0.1:{port}");
     Some(tokio::spawn(serve(
-        listener,
-        upstreams,
-        sink,
-        quota_sink,
-        prices,
-        // The line floor comes from the shared context-hygiene policy
-        // (#1611), which is also what the compaction pass gates its rewrite
-        // on — so "large" means one thing, and the count of candidates can't
-        // drift from the set that gets rewritten.
-        cfg.agent.context_hygiene.min_lines,
-        compactor,
+        listener, upstreams, sink, quota_sink, prices, compactor,
     )))
 }
 
@@ -426,7 +418,6 @@ pub async fn serve(
     sink: UsageSink,
     quota_sink: QuotaSink,
     prices: usage_parse::PriceOverrides,
-    large_tool_result_lines: usize,
     compactor: Arc<Compactor>,
 ) {
     let state = Arc::new(ProxyState {
@@ -436,7 +427,6 @@ pub async fn serve(
         quota_sink,
         prices,
         seen_blocks: std::sync::Mutex::new(context_parse::SeenStore::default()),
-        large_tool_result_lines,
         compactor,
     });
     loop {
@@ -584,7 +574,7 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
     // new identity the turn it is condensed and read its re-send as a first
     // send. Measuring first keeps re-send accounting independent of whether
     // the compactor fired.
-    let measured = context_parse::measure(&body_bytes, state.large_tool_result_lines);
+    let measured = context_parse::measure(&body_bytes, state.compactor.min_lines());
 
     // The one place the proxy is not transparent: old, large tool results
     // are condensed before the expensive model ever sees them (#1609).

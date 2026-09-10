@@ -61,8 +61,8 @@ pub type NoticeSink = Arc<dyn Fn(String, String) + Send + Sync>;
 /// The dial is per workspace, not per fleet: the session key off the request
 /// path names a workspace, and that workspace may be the canary running the
 /// real rewrite while everything else stays in shadow. Consulted exactly
-/// once per request, in [`Compactor::begin`] — the resolved mode is then
-/// carried on the request's [`SessionPass`] and recorded on the session, so
+/// once per request, in `Compactor::begin` — the resolved mode is then
+/// carried on the request's `SessionPass` and recorded on the session, so
 /// the response's kill-switch accounting judges the turn under the mode that
 /// turn actually ran under. Asking twice would let a mid-turn flip strand a
 /// rewritten turn unaccounted.

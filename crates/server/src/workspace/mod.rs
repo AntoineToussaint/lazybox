@@ -900,7 +900,7 @@ pub async fn set_metered(config: &ServerConfig, key: &WorkspaceKey, enabled: boo
 ///
 /// The membership half of the canary — the per-workspace opt-in OR a
 /// compacted Space (`agent.compacted_spaces`) — handed to
-/// [`ContextHygiene::mode_for`], which owns what an opt-in may and may not
+/// [`lazybox_core::ContextHygiene::mode_for`], which owns what an opt-in may and may not
 /// promote. The two halves live apart on purpose: membership is a config and
 /// store question the daemon answers, promotion is policy the `PreToolUse`
 /// hook enforcement point reads too, so only the policy half is shared.

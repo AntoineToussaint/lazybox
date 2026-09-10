@@ -2111,6 +2111,45 @@ mod search_tests {
         w
     }
 
+    /// #1622: the Space-tier compaction toggle inverts the sidebar's mirrored
+    /// set, not a fresh `Config::load`.
+    ///
+    /// `Config::load` is stamp-cached on the file's mtime, so two presses inside
+    /// one granule would both read the pre-toggle value and the second would
+    /// invert the wrong way — leaving the config and what the user was told
+    /// disagreeing. Driving the toggle twice pins that it alternates.
+    #[test]
+    fn the_space_compaction_toggle_alternates_across_rapid_presses() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let a = issue_ws_in_repo("obin-ai/platform", "1", "one");
+        let other = issue_ws_in_repo("acme/widget", "3", "three");
+        sb.workspaces.insert(SessionKey::from(&a.key), a);
+        sb.workspaces.insert(SessionKey::from(&other.key), other);
+        sb.recompute_visible();
+        assert!(sb.focus_header_row("obin-ai"), "park on the Space header");
+
+        // The mirror starts empty, so the first press turns it on and the
+        // second turns it back off — whatever the config file's mtime does.
+        assert!(!sb.is_space_compacting("obin-ai"));
+        let first = sb.toggle_space_compaction_at_cursor();
+        assert_eq!(
+            first,
+            Some(("obin-ai".to_string(), true)),
+            "first press arms"
+        );
+        assert!(sb.is_space_compacting("obin-ai"));
+        let second = sb.toggle_space_compaction_at_cursor();
+        assert_eq!(
+            second,
+            Some(("obin-ai".to_string(), false)),
+            "the second press disarms rather than re-arming",
+        );
+        assert!(!sb.is_space_compacting("obin-ai"));
+
+        // And it is independent of the metering Space set.
+        assert!(!sb.is_space_metered("obin-ai"));
+    }
+
     /// #1389: the per-Space meter figure sums the hydrated per-workspace
     /// costs of every workspace under that Space, so a Space-metered header
     /// shows a legible total that survives a restart (hydrated via

@@ -56,6 +56,18 @@ use super::usage_parse::PriceOverrides;
 /// the proxy does to their traffic.
 pub type NoticeSink = Arc<dyn Fn(String, String) + Send + Sync>;
 
+/// Resolves the compaction mode in force for one session (#1622).
+///
+/// The dial is per workspace, not per fleet: the session key off the request
+/// path names a workspace, and that workspace may be the canary running the
+/// real rewrite while everything else stays in shadow. Consulted exactly
+/// once per request, in `Compactor::begin` — the resolved mode is then
+/// carried on the request's `SessionPass` and recorded on the session, so
+/// the response's kill-switch accounting judges the turn under the mode that
+/// turn actually ran under. Asking twice would let a mid-turn flip strand a
+/// rewritten turn unaccounted.
+pub type ModeResolver = Arc<dyn Fn(&str) -> CompactionMode + Send + Sync>;
+
 /// Lines kept from the head and the tail of a condensed block. The head
 /// carries what the material *is* (a file's imports, a command's
 /// invocation); the tail carries how it ended (the error, the summary
@@ -123,6 +135,12 @@ struct SessionState {
     /// sets it — nothing on the wire changed, so there is nothing to
     /// attribute a cache regression to).
     rewrote: bool,
+    /// Whether the most recent request for this session ran under a mode
+    /// that rewrites (#1622). Written by `begin` from the one resolution
+    /// that request made, read by `observe_usage` when the response lands:
+    /// the response must be judged under its own request's mode, not under
+    /// whatever the dial says by the time it arrives.
+    rewriting: bool,
     /// The last cache-read share seen *before* the first rewrite. Without
     /// one there is no baseline to judge against, so the kill switch stays
     /// out of the way rather than guessing.
@@ -136,6 +154,7 @@ impl Default for SessionState {
         Self {
             tag: CondenseTag::new(&uuid::Uuid::new_v4().simple().to_string()),
             disabled: false,
+            rewriting: false,
             condensed: 0,
             saved_bytes: 0,
             saved_micros: 0,
@@ -163,6 +182,9 @@ pub struct Rewritten {
 struct SessionPass {
     tag: CondenseTag,
     may_rewrite: bool,
+    /// The mode in force for this session on this request (#1622) — the
+    /// configured mode, or `On` when this workspace is the canary.
+    mode: CompactionMode,
 }
 
 impl Rewritten {
@@ -181,6 +203,10 @@ pub struct Compactor {
     policy: ContextHygiene,
     prices: PriceOverrides,
     notice: NoticeSink,
+    /// Per-session override of `policy.mode` (#1622). Absent means every
+    /// session runs the configured mode — the shape before the canary, and
+    /// what every test that isn't about the canary wants.
+    mode_for_session: Option<ModeResolver>,
     sessions: Mutex<HashMap<String, SessionState>>,
 }
 
@@ -190,8 +216,16 @@ impl Compactor {
             policy,
             prices,
             notice,
+            mode_for_session: None,
             sessions: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Route the mode decision through `resolver` so one workspace can carry
+    /// the rewrite while the fleet stays on the configured mode (#1622).
+    pub fn with_mode_resolver(mut self, resolver: ModeResolver) -> Self {
+        self.mode_for_session = Some(resolver);
+        self
     }
 
     /// A compactor that never inspects anything — for the proxy paths that
@@ -213,7 +247,10 @@ impl Compactor {
     /// exists to prove the saving is real before taking it, and a shadow
     /// run that altered the wire would prove nothing.
     pub fn rewrite(&self, session: &str, agent_id: &str, body: Bytes) -> Rewritten {
-        if !self.policy.mode.evaluates() || body.is_empty() {
+        // No global-mode precheck here: the mode is per session (#1622) and
+        // is resolved once, in `begin`. A fleet in `shadow` still has to
+        // reach `begin` so a canary workspace can be promoted to `on`.
+        if body.is_empty() {
             return Rewritten::passed(body);
         }
         // A spawn with no resolvable session key would share one bucket with
@@ -227,12 +264,19 @@ impl Compactor {
         let Some(pass) = self.begin(session) else {
             return Rewritten::passed(body);
         };
-        let Some(plan) = plan(&body, &self.policy, &pass.tag) else {
+        // The session's own mode, substituted into the shared policy:
+        // `eligibility` reads `mode.evaluates()` internally, so a canary
+        // judged against the fleet's `shadow` would decide it was disabled.
+        let policy = ContextHygiene {
+            mode: pass.mode,
+            ..self.policy.clone()
+        };
+        let Some(plan) = plan(&body, &policy, &pass.tag) else {
             return Rewritten::passed(body);
         };
         // Rewriting waits for a pre-rewrite cache reading (see `begin`).
-        let rewriting = self.policy.mode.rewrites() && pass.may_rewrite;
-        let mode = match (self.policy.mode.rewrites(), pass.may_rewrite) {
+        let rewriting = pass.mode.rewrites() && pass.may_rewrite;
+        let mode = match (pass.mode.rewrites(), pass.may_rewrite) {
             (true, true) => "on",
             (true, false) => "on/awaiting-cache-baseline",
             _ => "shadow",
@@ -289,7 +333,7 @@ impl Compactor {
     /// otherwise read as a sustained regression and disable compaction for
     /// the whole workspace.
     pub fn observe_usage(&self, session: &str, agent_id: &str, usage: &AgentUsage, measured: bool) {
-        if !self.policy.mode.rewrites() || !measured {
+        if !measured {
             return;
         }
         let Some(share) = cache_read_share(usage) else {
@@ -300,6 +344,14 @@ impl Compactor {
             return;
         };
         if state.disabled {
+            return;
+        }
+        // The mode this session's request ran under, not the dial's current
+        // value (#1622). Re-resolving here would let a flip between request
+        // and response drop the sample: the turn rewrote, but the response
+        // would be judged as shadow and never folded into the baseline the
+        // kill switch later compares against.
+        if !state.rewriting {
             return;
         }
         if !state.rewrote {
@@ -358,14 +410,28 @@ impl Compactor {
     /// turn is deliberately held: it plans, logs, and forwards the original,
     /// and the response's usage becomes the baseline.
     fn begin(&self, session: &str) -> Option<SessionPass> {
+        // Resolved before the lock is taken: the resolver reads config and
+        // the store, and holding the sessions mutex across that would
+        // serialize every proxied request behind one workspace lookup.
+        let mode = match &self.mode_for_session {
+            Some(resolve) => resolve(session),
+            None => self.policy.mode,
+        };
+        if !mode.evaluates() {
+            return None;
+        }
         let mut sessions = self.sessions.lock().expect("compaction sessions");
         let state = entry(&mut sessions, session)?;
         if state.disabled {
             return None;
         }
+        // The response's accounting reads this back, so it judges the turn
+        // under the mode the turn ran under (#1622).
+        state.rewriting = mode.rewrites();
         Some(SessionPass {
             tag: state.tag.clone(),
             may_rewrite: state.baseline_share.is_some(),
+            mode,
         })
     }
 
@@ -908,6 +974,18 @@ mod tests {
         assert_eq!(sent, body, "shadow mode never alters bytes on the wire");
     }
 
+    /// Drive the real pre-rewrite handshake for `session`: one held turn
+    /// (see `begin`), then the response whose cache reading becomes the
+    /// baseline. Seeding a baseline by calling `observe_usage` alone cannot
+    /// happen in production — `measured` is threaded out of `rewrite`, so a
+    /// response is only ever accounted for when its own request already went
+    /// through `begin`.
+    fn seed_baseline(compactor: &Compactor, session: &str, body: &Bytes) {
+        let held = compactor.rewrite(session, "claude", body.clone());
+        assert_eq!(held.body, *body, "the first eligible turn is held");
+        compactor.observe_usage(session, "claude", &usage(100, 900), true);
+    }
+
     fn usage(input: u64, cache_read: u64) -> AgentUsage {
         AgentUsage {
             input_tokens: Some(input),
@@ -950,7 +1028,7 @@ mod tests {
             Arc::new(std::collections::BTreeMap::new()),
             Arc::new(|_, _| {}),
         );
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        seed_baseline(&compactor, "ws", &body);
         let sent = compactor.rewrite("ws", "claude", body.clone()).body;
         assert!(sent.len() < body.len(), "the rewritten body is smaller");
         let (blocks, saved, regressions) = compactor.stats("ws");
@@ -1029,8 +1107,8 @@ mod tests {
             Arc::new(std::collections::BTreeMap::new()),
             Arc::new(|_, _| {}),
         );
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
-        compactor.observe_usage("other-ws", "claude", &usage(100, 900), true);
+        seed_baseline(&compactor, "ws", &body);
+        seed_baseline(&compactor, "other-ws", &body);
         let first = compactor.rewrite("ws", "claude", body.clone()).body;
         let second = compactor.rewrite("ws", "claude", body.clone()).body;
         assert_eq!(
@@ -1234,15 +1312,118 @@ mod tests {
         (compactor, notices)
     }
 
+    /// A compactor whose resolver promotes one session (#1622): the canary
+    /// rewrites while the fleet's configured `shadow` leaves every other
+    /// session's bytes alone.
+    fn canary_compactor(canary: &'static str) -> Compactor {
+        Compactor::new(
+            policy(CompactionMode::Shadow),
+            Arc::new(std::collections::BTreeMap::new()),
+            Arc::new(|_, _| {}),
+        )
+        .with_mode_resolver(Arc::new(move |session: &str| {
+            if session == canary {
+                CompactionMode::On
+            } else {
+                CompactionMode::Shadow
+            }
+        }))
+    }
+
+    #[test]
+    fn only_the_opted_in_session_gets_its_bytes_rewritten() {
+        let compactor = canary_compactor("canary");
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+
+        // The canary's first eligible turn is held for a baseline like any
+        // other rewriting session, then it rewrites.
+        seed_baseline(&compactor, "canary", &body);
+        assert!(
+            compactor
+                .rewrite("canary", "claude", body.clone())
+                .body
+                .len()
+                < body.len(),
+            "the opted-in session sends condensed bytes",
+        );
+
+        // The fleet stays in shadow: it plans and logs, and sends originals.
+        assert_eq!(
+            compactor.rewrite("fleet", "claude", body.clone()).body,
+            body,
+            "every other session sends the originals",
+        );
+        compactor.observe_usage("fleet", "claude", &usage(100, 900), true);
+        assert_eq!(
+            compactor.rewrite("fleet", "claude", body.clone()).body,
+            body,
+            "and stays in shadow on the turn after a baseline exists",
+        );
+    }
+
+    /// #1622: the response is judged under the mode its own request ran
+    /// under. Flipping the canary off between a rewritten request and its
+    /// response must not drop that turn's cache sample — dropping it strands
+    /// the kill switch comparing a later share against a stale baseline.
+    #[test]
+    fn a_mid_turn_flip_still_accounts_for_the_turn_that_rewrote() {
+        let flipped = Arc::new(Mutex::new(false));
+        let reader = flipped.clone();
+        let compactor = Compactor::new(
+            policy(CompactionMode::Shadow),
+            Arc::new(std::collections::BTreeMap::new()),
+            Arc::new(|_, _| {}),
+        )
+        .with_mode_resolver(Arc::new(move |_: &str| {
+            if *reader.lock().expect("lock") {
+                CompactionMode::Shadow
+            } else {
+                CompactionMode::On
+            }
+        }));
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+
+        // Held baseline turn, then a turn that really rewrites.
+        seed_baseline(&compactor, "ws", &body);
+        let out = compactor.rewrite("ws", "claude", body.clone());
+        assert!(out.body.len() < body.len(), "this turn rewrote");
+
+        // The user flips the canary off before the response lands.
+        *flipped.lock().expect("lock") = true;
+        for _ in 0..3 {
+            compactor.observe_usage("ws", "claude", &usage(900, 100), true);
+        }
+        let (_, _, regressions) = compactor.stats("ws");
+        assert_eq!(
+            regressions, 1,
+            "the rewritten turn's collapse is still attributed to compaction",
+        );
+    }
+
+    /// Without a resolver the compactor is exactly what it was before the
+    /// canary existed: the configured mode, for every session.
+    #[test]
+    fn no_resolver_means_the_configured_mode_for_every_session() {
+        let compactor = Compactor::new(
+            policy(CompactionMode::Off),
+            Arc::new(std::collections::BTreeMap::new()),
+            Arc::new(|_, _| {}),
+        );
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+        let out = compactor.rewrite("a", "claude", body.clone());
+        assert_eq!(out.body, body, "an off policy inspects nothing");
+        assert!(!out.measured);
+    }
+
     #[test]
     fn a_sustained_cache_regression_trips_the_kill_switch() {
         let (compactor, notices) = compactor_with_notices();
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
 
-        // Before any rewrite: a healthy 90% of the prompt served from cache.
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        // A healthy 90% of the prompt served from cache becomes the baseline.
+        seed_baseline(&compactor, "ws", &body);
         let rewritten = compactor.rewrite("ws", "claude", body.clone()).body;
-        assert!(rewritten.len() < body.len(), "the first turn rewrites");
+        assert!(rewritten.len() < body.len(), "the next turn rewrites");
 
         // Three turns where the cache share collapses and never recovers.
         for _ in 0..3 {
@@ -1270,7 +1451,7 @@ mod tests {
         // cache as compaction's fault and disable the whole workspace.
         let (compactor, notices) = compactor_with_notices();
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        seed_baseline(&compactor, "ws", &body);
         assert!(compactor.rewrite("ws", "claude", body.clone()).body.len() < body.len());
 
         // Ten cold subagent turns — not requests compaction acted on.
@@ -1298,7 +1479,7 @@ mod tests {
     fn a_cache_dip_that_recovers_does_not_trip_the_kill_switch() {
         let (compactor, notices) = compactor_with_notices();
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        seed_baseline(&compactor, "ws", &body);
         let rewritten = compactor.rewrite("ws", "claude", body.clone()).body;
         assert!(rewritten.len() < body.len());
 

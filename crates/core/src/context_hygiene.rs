@@ -345,6 +345,27 @@ impl ContextHygiene {
         Ok(())
     }
 
+    /// The mode in force for one workspace, given whether that workspace
+    /// opted into compaction (#1622).
+    ///
+    /// The dial is otherwise fleet-wide, which is the wrong shape for a pass
+    /// that rewrites what a model sees: the saving has to be proven on one
+    /// row before the fleet carries it. `opted_in` promotes `shadow` to `on`
+    /// for that row alone and changes nothing for any other.
+    ///
+    /// An opt-in promotes only what is already evaluating, so a configured
+    /// `off` stays `off`. That is the kill switch — the one setting that
+    /// means "do not do this to my traffic at all" — and a flag left on a
+    /// row must not resurrect the pass under it, exactly as no per-workspace
+    /// meter overrides `agent.metering_proxy: false`.
+    pub fn mode_for(&self, opted_in: bool) -> CompactionMode {
+        if self.mode.evaluates() && opted_in {
+            CompactionMode::On
+        } else {
+            self.mode
+        }
+    }
+
     /// The single verdict both enforcement points ask for.
     ///
     /// It answers **"is this block eligible"** — never "may I rewrite it".
@@ -542,6 +563,40 @@ mod tests {
             !policy.mode.rewrites(),
             "but must not permit acting on it — this pair is the whole contract"
         );
+    }
+
+    /// #1622: the per-workspace canary promotes `shadow` to `on` for one
+    /// workspace and leaves every other row on the configured mode.
+    #[test]
+    fn an_opted_in_workspace_rewrites_while_the_fleet_stays_in_shadow() {
+        let policy = ContextHygiene::default();
+        assert_eq!(policy.mode, CompactionMode::Shadow);
+        assert_eq!(policy.mode_for(true), CompactionMode::On);
+        assert_eq!(policy.mode_for(false), CompactionMode::Shadow);
+    }
+
+    /// A configured `off` is the kill switch, not a default to be overridden:
+    /// an opt-in left on a row must not resurrect the rewrite under it.
+    #[test]
+    fn a_configured_off_is_not_promotable_by_an_opt_in() {
+        let policy = ContextHygiene {
+            mode: CompactionMode::Off,
+            ..ContextHygiene::default()
+        };
+        assert_eq!(policy.mode_for(true), CompactionMode::Off);
+        assert_eq!(policy.mode_for(false), CompactionMode::Off);
+    }
+
+    /// A fleet already on `on` is unaffected by the flag either way — the
+    /// canary only ever adds rows, it never carves one out.
+    #[test]
+    fn a_global_on_stays_on_for_a_workspace_that_never_opted_in() {
+        let policy = ContextHygiene {
+            mode: CompactionMode::On,
+            ..ContextHygiene::default()
+        };
+        assert_eq!(policy.mode_for(false), CompactionMode::On);
+        assert_eq!(policy.mode_for(true), CompactionMode::On);
     }
 
     #[test]

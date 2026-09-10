@@ -147,6 +147,19 @@ track_main: boolean,
  */
 metered: boolean,
 /**
+ * Run this workspace's proxied agent traffic under context compaction
+ * `on` while the fleet stays in the configured mode (#1622). The
+ * per-workspace half of the same OR the meter has: this flag, a
+ * compacted Space (`agent.compacted_spaces`), or the global
+ * `agent.context_hygiene.mode`. Off for every workspace until chosen —
+ * unlike [`Workspace::metered`], which is on by default, a canary for a
+ * pass that *rewrites what the model sees* is opted into one row at a
+ * time. Read per request by the metering proxy, so a flip takes effect
+ * on the next turn without respawning. Inert unless the workspace is
+ * actually proxied, and an explicit global `mode: off` still wins.
+ */
+compact_context: boolean,
+/**
  * The resolved default branch this workspace is based on
  * (`main` / `master` / …), persisted so "track main" doesn't
  * re-derive it every sweep and so the exact branch survives a

@@ -2156,6 +2156,18 @@ pub struct AgentSection {
     /// live from the sidebar with `x $` on a Space header.
     #[serde(default)]
     pub metered_spaces: std::collections::BTreeSet<String>,
+    /// Space names whose every workspace runs context compaction `on` while
+    /// the rest of the fleet stays on [`AgentSection::context_hygiene`]'s
+    /// mode (#1622) — the Space tier of the same canary
+    /// [`Workspace::compact_context`](lazybox_core::Workspace) provides per
+    /// row. Resolved with [`space_of`] over `ui.spaces`, exactly like
+    /// [`AgentSection::metered_spaces`], so a rollout can widen from one
+    /// workspace to one repo group without touching the global mode.
+    /// Composes (OR) with the per-workspace flag; a configured `mode: off`
+    /// still overrides both. Toggled live from the sidebar with the
+    /// compaction chord on a Space header.
+    #[serde(default)]
+    pub compacted_spaces: std::collections::BTreeSet<String>,
     /// Context hygiene (#1611): the one policy both enforcement points read.
     ///
     /// A large share of an agent's input-token bill is mechanical re-sends — a
@@ -2628,6 +2640,20 @@ impl Config {
         }
         self.agent
             .metered_spaces
+            .contains(&space_of(source_label, &self.ui.spaces))
+    }
+
+    /// True when `source_label` sits in a Space listed in
+    /// `agent.compacted_spaces`, the Space tier of the context-compaction
+    /// canary (#1622). Same resolution as [`Config::source_is_metered`], and
+    /// like it, short-circuits on the empty set so it costs nothing on the
+    /// common path.
+    pub fn source_compacts_context(&self, source_label: &str) -> bool {
+        if self.agent.compacted_spaces.is_empty() {
+            return false;
+        }
+        self.agent
+            .compacted_spaces
             .contains(&space_of(source_label, &self.ui.spaces))
     }
 
@@ -5433,6 +5459,37 @@ repos:
         }];
         cfg.agent.metered_spaces.insert("Obin".into());
         assert!(cfg.source_is_metered("me/dotfiles"));
+    }
+
+    /// `agent.compacted_spaces` is empty on a fresh config, resolves through
+    /// `ui.spaces` like its metering twin, and is independent of it — a
+    /// metered Space is not thereby a compacted one (#1622).
+    #[test]
+    fn compacted_spaces_default_empty_and_resolve_independently_of_metering() {
+        let mut cfg: Config = serde_yaml::from_str("{}").expect("parse");
+        assert!(cfg.agent.compacted_spaces.is_empty());
+        assert!(!cfg.source_compacts_context("obin-ai/platform"));
+
+        cfg.agent.metered_spaces.insert("obin-ai".into());
+        assert!(
+            !cfg.source_compacts_context("obin-ai/platform"),
+            "metering a Space must not start rewriting its context",
+        );
+
+        cfg.agent.compacted_spaces.insert("obin-ai".into());
+        assert!(cfg.source_compacts_context("obin-ai/platform"));
+        assert!(!cfg.source_compacts_context("other/repo"));
+
+        cfg.ui.spaces = vec![SpaceConfig {
+            name: "Obin".into(),
+            sources: vec!["me/dotfiles".into()],
+        }];
+        cfg.agent.compacted_spaces.insert("Obin".into());
+        assert!(cfg.source_compacts_context("me/dotfiles"));
+
+        let written = serde_yaml::to_string(&cfg).expect("serialize");
+        let reparsed: Config = serde_yaml::from_str(&written).expect("reparse");
+        assert_eq!(reparsed.agent.compacted_spaces, cfg.agent.compacted_spaces);
     }
 
     /// The theme is unset on a fresh config (so the default palette

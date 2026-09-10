@@ -882,7 +882,8 @@ pub(crate) fn debug_byte_fingerprint(bytes: &[u8]) -> Option<ByteFingerprint> {
 
 /// A subscription to a `DaemonPty`'s output. Includes the replay so
 /// the caller can reconstruct the screen, then the live stream for
-/// everything after.
+/// everything after. The two never overlap: `live` delivers only
+/// chunks with `seq > last_seq` (see [`DaemonPty::subscribe`]).
 pub struct Subscription {
     pub replay: Vec<u8>,
     pub replay_complete: bool,
@@ -1280,16 +1281,28 @@ impl DaemonPty {
 
     /// Fire up a subscription: the current ring snapshot + a live feed.
     ///
-    /// Subscribe to the broadcast BEFORE snapshotting the ring. The
-    /// reader thread pushes to the ring then broadcasts (outside the ring
-    /// lock), so snapshotting first leaves a window where a chunk is
-    /// broadcast after our snapshot but before our receiver exists —
-    /// lost from both replay and live. Subscribing first instead lets a
-    /// chunk appear in both; `last_seq` is the replay high-water mark, so
-    /// the consumer drops live chunks with `seq <= last_seq`.
+    /// Attach the broadcast receiver UNDER the ring lock, so the
+    /// (snapshot, `last_seq`) pair and the live tail are one atomic cut
+    /// of the stream. Both producers — the reader thread and `resize` —
+    /// push, allocate their seq and broadcast under this same lock, so a
+    /// chunk sent before we attached is already counted in `last_seq`
+    /// and one sent after gets a seq above it. Every chunk therefore
+    /// lands on exactly one side of the cut: complete in the replay, or
+    /// delivered live with `seq > last_seq`. Never both (a duplicate the
+    /// consumer had to dedup, and a same-seq delivery the seq-ordering
+    /// assertion read as a reordering — #1635), never neither (the
+    /// lost-output window that snapshotting first would leave).
+    ///
+    /// Attaching a receiver inside the ring lock is safe because the
+    /// order is ring → broadcast-tail at every site that takes both —
+    /// the reader thread and `resize` hold the ring across their
+    /// `send`, and nothing takes the tail first. The section holds no
+    /// await, so the reader thread never waits on a descheduled task.
     pub async fn subscribe(&self) -> Subscription {
+        let ring = self.ring.lock().await;
         let live = self.output_tx.subscribe();
-        let snapshot = self.snapshot_only().await;
+        let snapshot = self.snapshot_locked(&ring);
+        drop(ring);
         Subscription {
             replay: snapshot.replay,
             replay_complete: snapshot.complete,
@@ -1321,6 +1334,13 @@ impl DaemonPty {
     /// reconstructed rows faithful.
     pub async fn snapshot_only(&self) -> crate::backend::ReplaySnapshot {
         let ring = self.ring.lock().await;
+        self.snapshot_locked(&ring)
+    }
+
+    /// The snapshot body, taken from a ring guard the caller already
+    /// holds — reading `last_seq` under that lock is what makes the pair
+    /// consistent with the producers, which seq and broadcast under it.
+    fn snapshot_locked(&self, ring: &ReplayRing) -> crate::backend::ReplaySnapshot {
         let mut replay = Vec::with_capacity(self.seed.len() + ring.len());
         replay.extend_from_slice(&self.seed);
         let sizes = ring.replay_snapshot_into(&mut replay);
@@ -2050,7 +2070,10 @@ mod seed_tests {
         // so the next delivered seq is still greater than the last seen.
         let mut prev = sub.last_seq;
         let mut received = 0u32;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // Inside nextest's 10s per-test kill, so a stream too slow to reach
+        // 3000 chunks fails on the count below instead of dying as a bare
+        // `TIMED OUT` — this test's failures have to name their own cause.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while received < 3000 && std::time::Instant::now() < deadline {
             match tokio::time::timeout(std::time::Duration::from_millis(200), sub.live.recv()).await
             {
@@ -2078,6 +2101,68 @@ mod seed_tests {
         assert!(
             received > 100,
             "expected a meaningful sample of the interleaved stream, got {received}"
+        );
+    }
+
+    /// `subscribe` cuts a live stream atomically: the replay snapshot and
+    /// the broadcast receiver are taken under the same lock the producers
+    /// broadcast under, so no chunk is ever both counted in `last_seq`
+    /// and still queued on the receiver (#1635). Subscribing repeatedly
+    /// against a saturated reader is what exercises the window — a
+    /// non-atomic subscribe loses the race whenever the reader broadcasts
+    /// between attaching and snapshotting.
+    #[tokio::test]
+    async fn subscribe_never_delivers_a_chunk_the_snapshot_already_counted() {
+        let pty = DaemonPty::spawn(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                // The leading sleep outlasts the per-recv budget below, so
+                // the first sample ALWAYS times out: the sampling loop has
+                // to treat a child that has not reached its first `printf`
+                // as a slow start rather than a verdict, on every run and
+                // not just on a loaded runner.
+                "sleep 0.3; while :; do printf 'xxxxxxxx'; done".to_string(),
+            ],
+            small(),
+            None,
+            Vec::new(),
+            &[],
+        )
+        .expect("spawn");
+
+        // Inside nextest's 10s per-test kill (`.config/nextest.toml`): a
+        // deadline AT the ceiling is SIGKILLed as a bare `TIMED OUT`
+        // instead of failing with the assertion below.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut checked = 0u32;
+        while checked < 500 && std::time::Instant::now() < deadline {
+            let mut sub = pty.subscribe().await;
+            match tokio::time::timeout(std::time::Duration::from_millis(200), sub.live.recv()).await
+            {
+                Ok(Ok(chunk)) => {
+                    assert!(
+                        chunk.seq > sub.last_seq,
+                        "live delivered seq {} but the snapshot already counted through {} \
+                         — subscribe took its snapshot and its receiver non-atomically",
+                        chunk.seq,
+                        sub.last_seq
+                    );
+                    checked += 1;
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+                // Keep sampling until the deadline. A child that has not
+                // reached its first `printf` yet — a fork+exec on a loaded
+                // runner — is a slow start, not a verdict.
+                Err(_) => continue,
+            }
+            tokio::task::yield_now().await;
+        }
+        pty.kill();
+        assert!(
+            checked > 50,
+            "expected a meaningful number of subscriptions to observe live output, got {checked}"
         );
     }
 

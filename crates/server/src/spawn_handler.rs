@@ -213,96 +213,94 @@ pub(crate) fn alloc_terminal_id(store: &dyn lazybox_store::Store) -> TerminalId 
     TerminalId(id)
 }
 
-/// How a workspace task's declared capability tier routes onto an
-/// agent's model menu. Keeps "nothing declared" distinct from "declared
-/// but this agent routes it nowhere": the latter silently falls back to
-/// the default model, and looks from the outside exactly like the label
-/// was ignored, so the spawn path reports it (issues #748, #1598).
+/// How a workspace task's declared model requests route onto an agent's
+/// model menu. Keeps "nothing declared" distinct from "declared but this
+/// agent routes it nowhere": the latter silently falls back to the
+/// default model, and looks from the outside exactly like the label was
+/// ignored, so the spawn path reports it (issues #748, #1598).
 #[derive(Debug, PartialEq, Eq)]
-enum CapabilityRoute {
-    /// The task declared no capability tier — nothing to route.
+enum ModelRoute {
+    /// The task declared nothing — nothing to route.
     None,
-    /// The declared tier maps to this tier alias.
+    /// A declaration resolved to this tier alias.
     Mapped(String),
-    /// The tier is declared, but this agent's menu maps it to nothing —
-    /// the spawn keeps its default tier / model. The built-in Claude
-    /// menu leaves `best` unmapped, so this is the shape a `best` label
-    /// lands in until the user defines a max tier.
-    Unmapped(lazybox_core::CapabilityTier),
-    /// The declared tier maps to a model tier lazybox refuses to route a
-    /// coding task to — a creative-class (Fable) model. The spawn keeps
-    /// its default.
-    Excluded {
-        tier: lazybox_core::CapabilityTier,
-        alias: String,
-    },
+    /// Something was declared, but nothing it named resolves on this
+    /// agent's menu — the spawn keeps its default tier / model. Carries
+    /// the highest-precedence token, the one the user most likely meant.
+    Unmapped(String),
+    /// Equally authoritative declarations named different tiers. Nothing
+    /// is selected: the provider promises no order for a task's labels,
+    /// so letting that order pick would make the model a coin flip
+    /// between polls (#1600).
+    Conflict(Vec<String>),
 }
 
-/// Pure decision behind [`capability_alias_for`]: route the (optional)
-/// declared capability tier onto `models`, without touching the store,
-/// so the outcomes are individually testable.
-fn route_declared_capability(
-    tier: Option<lazybox_core::CapabilityTier>,
+/// Pure decision behind [`model_alias_for`]: route the declarations onto
+/// `models`, without touching the store, so the outcomes are
+/// individually testable.
+fn route_model_requests(
+    ranks: &[Vec<lazybox_core::ModelRequest>],
     models: &lazybox_core::AgentModels,
-) -> CapabilityRoute {
-    let Some(tier) = tier else {
-        return CapabilityRoute::None;
-    };
-    match (
-        models.alias_for_capability(tier),
-        models.capability.alias_for(tier),
-    ) {
-        (Some(alias), _) => CapabilityRoute::Mapped(alias.to_string()),
-        (None, Some(alias)) => CapabilityRoute::Excluded {
-            tier,
-            alias: alias.to_string(),
+) -> ModelRoute {
+    match models.choose_model(ranks) {
+        lazybox_core::ModelChoice::Resolved { alias, .. } => ModelRoute::Mapped(alias.to_string()),
+        lazybox_core::ModelChoice::Conflict(aliases) => {
+            ModelRoute::Conflict(aliases.into_iter().map(str::to_string).collect())
+        }
+        lazybox_core::ModelChoice::Unresolved => match ranks.iter().flatten().next() {
+            Some(declared) => ModelRoute::Unmapped(declared.token().to_string()),
+            None => ModelRoute::None,
         },
-        (None, None) => CapabilityRoute::Unmapped(tier),
     }
 }
 
-/// The tier alias the workspace task's declared capability tier
-/// (`best`/`high`/`medium`/`low` label or `@best`/`@high`/`@medium`/`@low`
-/// body marker) maps to for `models`. `None` when the task declares
-/// nothing, the workspace/task can't be loaded, or this agent routes that
-/// tier nowhere — the spawn then keeps its default tier / model. The
-/// declared-but-unrouted cases are logged *and* announced, so a label
-/// that buys nothing never looks like one that worked. Used only as the
-/// fallback when no explicit tier chord was passed.
-fn capability_alias_for(
+/// The tier alias the workspace task's declared model maps to for
+/// `models` — a `model:<tier>` label or `@model:<tier>` marker, or a
+/// `best`/`high`/`medium`/`low` capability word. `None` when the task
+/// declares nothing, the workspace/task can't be loaded, or nothing it
+/// declares resolves on this agent's menu; the spawn then keeps its
+/// default tier / model.
+///
+/// `untrusted` narrows the read to labels only: attaching a label needs
+/// repo write access, while anyone can write an issue body, and an
+/// autonomous spawn triggered by a foreign actor must not let that body
+/// pick the tier (#1600).
+///
+/// The declared-but-unrouted cases are logged *and* announced, so a
+/// label that buys nothing never looks like one that worked. Used only
+/// as the fallback when no explicit tier chord was passed.
+fn model_alias_for(
     config: &ServerConfig,
     session_key: &SessionKey,
     models: &lazybox_core::AgentModels,
+    untrusted: bool,
 ) -> Option<String> {
-    let tier = load_workspace(config, &WorkspaceKey::new(session_key.as_str()))
+    let scope = if untrusted {
+        lazybox_core::DeclarationScope::LabelsOnly
+    } else {
+        lazybox_core::DeclarationScope::All
+    };
+    let ranks = load_workspace(config, &WorkspaceKey::new(session_key.as_str()))
         .ok()
         .and_then(|w| {
             w.primary_task()
-                .and_then(lazybox_core::resolve_capability_tier)
-        });
-    let (body, alias) = match route_declared_capability(tier, models) {
-        CapabilityRoute::None => return None,
-        CapabilityRoute::Mapped(alias) => return Some(alias),
-        CapabilityRoute::Unmapped(tier) => (
-            format!(
-                "`{}` selects a model tier, but this agent maps it to none — running the default model",
-                tier.as_str()
-            ),
-            None,
+                .map(|task| lazybox_core::resolve_model_requests(task, scope))
+        })
+        .unwrap_or_default();
+    let body = match route_model_requests(&ranks, models) {
+        ModelRoute::None => return None,
+        ModelRoute::Mapped(alias) => return Some(alias),
+        ModelRoute::Unmapped(token) => format!(
+            "`{token}` selects a model tier, but this agent's menu defines none by that \
+             name — running the default model"
         ),
-        CapabilityRoute::Excluded { tier, alias } => (
-            format!(
-                "`{}` maps to tier {alias:?}, which is not a coding model — running the default model",
-                tier.as_str()
-            ),
-            Some(alias),
+        ModelRoute::Conflict(aliases) => format!(
+            "this task names more than one model tier ({}) with equal authority — running \
+             the default model rather than letting label order choose",
+            aliases.join(", ")
         ),
     };
-    tracing::warn!(
-        capability = tier.map(lazybox_core::CapabilityTier::as_str),
-        alias,
-        "spawn: {body}"
-    );
+    tracing::warn!("spawn: {body}");
     let _ = config.bus.send(Event::Notification {
         title: "Model tier not applied".to_string(),
         body,
@@ -428,10 +426,12 @@ pub const HOOK_HELPER_PROBE_RESPONSE: &str = "lazybox-hook-helper-v1";
 ///
 /// The bound exists only so a wedged candidate can't hang daemon boot — it is
 /// not a performance budget, and it must never be tight enough to *answer* the
-/// question. A timeout is read as "not hook-capable", which disables lifecycle
-/// hooks for the whole daemon run; on a box loaded the way lazybox's own docs
-/// expect (many agents on one machine), a healthy ~80 MB binary that is merely
-/// starved of CPU has to be given room to reply rather than be misjudged.
+/// question. Expiring is now [`HookProbe::Unanswered`] rather than a verdict,
+/// so it no longer costs the daemon its hooks outright (#1627); it still costs
+/// a helper that was merely starved of CPU its refresh, and on a box loaded the
+/// way lazybox's own docs expect — many agents on one machine, where a plain
+/// shell fork has been measured past 20s — a healthy ~80 MB binary needs the
+/// room to reply rather than be misjudged.
 const HOOK_HELPER_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long to wait for the probe's answer once the candidate has *exited*
@@ -439,6 +439,23 @@ const HOOK_HELPER_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 /// scheduling the reader — and it bounds the call when a descendant that
 /// inherited the candidate's stdout keeps the pipe from ever reaching EOF.
 const HOOK_HELPER_PROBE_ANSWER_GRACE: Duration = Duration::from_secs(2);
+
+/// What the probe learned about a candidate.
+///
+/// A timeout is not a rejection, and collapsing the two is what made a loaded
+/// box read exactly like a GUI-only build (#1627): the timeout says nothing
+/// about the candidate, only that we could not find out, so callers have to be
+/// able to decide differently for it.
+#[derive(Debug, PartialEq, Eq)]
+enum HookProbe {
+    /// Answered the probe: safe to install as the durable helper.
+    Capable,
+    /// Ran to completion without answering — a GUI-only build, or one too old
+    /// to know the probe flag.
+    Incapable,
+    /// Never answered within the timeout. No verdict on the candidate.
+    Unanswered,
+}
 
 pub fn hook_helper_probe_requested(args: &[String]) -> bool {
     args.len() == 1 && args[0] == HOOK_HELPER_PROBE_ARG
@@ -457,38 +474,80 @@ pub fn hook_helper_probe_requested(args: &[String]) -> bool {
 /// `hook_exe` read and leaves tests (which never boot a daemon) untouched.
 pub fn ensure_stable_hook_exe() -> Option<PathBuf> {
     let current = std::env::current_exe().ok()?;
-    ensure_stable_hook_exe_from(&current, &lazybox_core::paths::stable_exe_path())
+    ensure_stable_hook_exe_from(
+        &current,
+        &lazybox_core::paths::stable_exe_path(),
+        HOOK_HELPER_PROBE_TIMEOUT,
+    )
 }
 
-fn ensure_stable_hook_exe_from(current: &Path, stable: &Path) -> Option<PathBuf> {
-    if !is_hook_capable_exe(current) {
-        tracing::error!(
-            executable = %current.display(),
-            "refusing to install a hook helper that cannot ingest lifecycle hooks"
-        );
-        return None;
+fn ensure_stable_hook_exe_from(
+    current: &Path,
+    stable: &Path,
+    probe_timeout: Duration,
+) -> Option<PathBuf> {
+    // Whether a helper that already passed this probe is installed. It is the
+    // fact every branch below turns on, because declining to install is never
+    // "hooks off": `hook_exe` hands agents the installed copy when one exists
+    // and this very executable (its `current_exe` fallback) when none does.
+    let installed = stable.is_file();
+    let unrefreshed = if installed { stable } else { current };
+    match probe_hook_helper_within(current, probe_timeout) {
+        HookProbe::Capable => {}
+        HookProbe::Incapable => {
+            tracing::error!(
+                executable = %current.display(),
+                hooks_will_use = %unrefreshed.display(),
+                "refusing to install a hook helper that cannot ingest lifecycle hooks"
+            );
+            return None;
+        }
+        // Keeping the installed helper is only the safer choice when there *is*
+        // one — overwriting a copy that did answer with an unverified one would
+        // retire a working helper on the word of a binary we never heard from.
+        HookProbe::Unanswered if installed => {
+            tracing::error!(
+                executable = %current.display(),
+                hooks_will_use = %stable.display(),
+                ?probe_timeout,
+                "hook helper probe went unanswered; keeping the installed helper, \
+                 which may predate the running build"
+            );
+            return None;
+        }
+        // With nothing installed there is no good helper to protect: `hook_exe`
+        // resolves to this same executable either way, so declining cannot stop
+        // it from serving hooks — it only leaves the baked path a rebuild away
+        // from dead, the breakage the copy exists to prevent (#856).
+        HookProbe::Unanswered => {
+            tracing::warn!(
+                executable = %current.display(),
+                ?probe_timeout,
+                "hook helper probe went unanswered; installing it anyway since hooks \
+                 would run this executable regardless"
+            );
+        }
     }
     let stabilized = stabilize_exe(current, stable);
     if stabilized.is_none() {
         // A copy/metadata failure (unwritable bin dir, full disk) otherwise
-        // vanishes: `hook_exe` then finds no stable helper and — with the
-        // current-exe fallback gone in release builds — silently disables
-        // lifecycle hooks. Callers that only need best-effort hooks (tui-boot)
-        // ignore the return, so this is the sole place the failure is recorded.
+        // vanishes: hooks keep working off whatever `hook_exe` still resolves
+        // — a stale copy, or the `current_exe` path a rebuild invalidates — so
+        // the loss is durability, silently. Callers that only need best-effort
+        // hooks (tui-boot) ignore the return, so this is the sole place the
+        // failure is recorded.
         tracing::error!(
             executable = %current.display(),
             stable = %stable.display(),
-            "failed to install the stable hook helper; lifecycle hooks will be disabled"
+            hooks_will_use = %unrefreshed.display(),
+            "failed to install the stable hook helper; lifecycle hooks lose their \
+             durable path"
         );
     }
     stabilized
 }
 
-fn is_hook_capable_exe(candidate: &Path) -> bool {
-    is_hook_capable_exe_within(candidate, HOOK_HELPER_PROBE_TIMEOUT)
-}
-
-fn is_hook_capable_exe_within(candidate: &Path, timeout: Duration) -> bool {
+fn probe_hook_helper_within(candidate: &Path, timeout: Duration) -> HookProbe {
     use std::io::BufRead;
 
     let Ok(mut child) = std::process::Command::new(candidate)
@@ -498,7 +557,7 @@ fn is_hook_capable_exe_within(candidate: &Path, timeout: Duration) -> bool {
         .stderr(std::process::Stdio::null())
         .spawn()
     else {
-        return false;
+        return HookProbe::Incapable;
     };
 
     // Read stdout on its own thread and hand the answer back over a channel
@@ -533,14 +592,15 @@ fn is_hook_capable_exe_within(candidate: &Path, timeout: Duration) -> bool {
                 std::thread::sleep(Duration::from_millis(10));
             }
             outcome => {
-                // A timeout is not an answer, and it costs the daemon its
-                // hooks — say so, so the degradation is traceable to the probe
-                // instead of surfacing later as hooks silently doing nothing.
+                // Say so, so the degradation is traceable to the probe instead
+                // of surfacing later as hooks silently doing nothing. What it
+                // costs the daemon is decided by the caller now, not here: a
+                // timeout is not a verdict on the candidate.
                 if matches!(outcome, Ok(None)) {
                     tracing::warn!(
                         candidate = %candidate.display(),
                         ?timeout,
-                        "hook-helper probe timed out; treating the candidate as not hook-capable"
+                        "hook-helper probe timed out without an answer"
                     );
                 }
                 let _ = child.kill();
@@ -551,14 +611,21 @@ fn is_hook_capable_exe_within(candidate: &Path, timeout: Duration) -> bool {
     };
 
     let Some(status) = status else {
-        return false;
+        return HookProbe::Unanswered;
     };
     if !status.success() {
-        return false;
+        return HookProbe::Incapable;
     }
-    answer
-        .recv_timeout(HOOK_HELPER_PROBE_ANSWER_GRACE)
-        .is_ok_and(|answer| answer.trim() == HOOK_HELPER_PROBE_RESPONSE)
+    // A candidate that exits without writing hits EOF, so the reader publishes
+    // an empty line and this resolves to `Incapable` — the GUI-only build the
+    // guard is for. Only a grace expiry leaves us without any answer to judge,
+    // and that is `Unanswered`: the line is already in the pipe by then, so the
+    // one way to reach it is a reader thread that never got scheduled.
+    match answer.recv_timeout(HOOK_HELPER_PROBE_ANSWER_GRACE) {
+        Ok(answer) if answer.trim() == HOOK_HELPER_PROBE_RESPONSE => HookProbe::Capable,
+        Ok(_) => HookProbe::Incapable,
+        Err(_) => HookProbe::Unanswered,
+    }
 }
 
 /// Copy `current` to the stable `stable` path when the copy is missing or
@@ -1601,9 +1668,9 @@ async fn handle_spawn_inner(
     // text's privileges (#1392).
     let would_skip_permissions =
         crate::spawn_plan::skip_permissions_for(autonomous, &cfg, untrusted);
-    let capability_model_alias = match &kind {
+    let declared_model_alias = match &kind {
         TerminalKind::Agent(agent_id) if model_alias.is_none() => {
-            capability_alias_for(config, &session_key, &cfg.agent_models(agent_id))
+            model_alias_for(config, &session_key, &cfg.agent_models(agent_id), untrusted)
         }
         _ => None,
     };
@@ -2066,7 +2133,7 @@ async fn handle_spawn_inner(
             hook_settings,
             hook_command: argv_hook_command,
             repo_env,
-            capability_model_alias,
+            declared_model_alias,
             autonomous,
             autonomous_untrusted: untrusted,
             landed_on_main,
@@ -2396,10 +2463,13 @@ async fn handle_spawn_inner(
                 let Some(chunk) = chunk else {
                     break;
                 };
-                // `subscribe` subscribes before snapshotting, so a live
-                // chunk already covered by the replay (seq within the
-                // snapshot's high-water mark) must be dropped to avoid
-                // re-feeding the detector and re-emitting bytes. Batch
+                // A live chunk already covered by the replay (seq within
+                // the current high-water mark) must be dropped to avoid
+                // re-feeding the detector and re-emitting bytes. A fresh
+                // `subscribe` cuts the stream atomically and never
+                // overlaps, but a mid-stream resync below re-seeds
+                // `last_seq` from a `snapshot_only` taken while this
+                // receiver already held chunks under it. Batch
                 // accounting still counts it as received; the normal path
                 // folds that accounting into its one-lock chunk context
                 // (#1256 P0-2) while these early-exit branches note it
@@ -9696,6 +9766,9 @@ async fn pump_recovered_session(
                 let Some(chunk) = chunk else {
                     break;
                 };
+                // Not dead now that `subscribe` cuts atomically: the resync
+                // below re-seeds `last_seq` from a `snapshot_only` taken
+                // while this receiver already held chunks under it.
                 if chunk.seq <= last_seq {
                     config
                         .terminal
@@ -12370,34 +12443,88 @@ mod tests {
     }
 
     #[test]
-    fn route_declared_capability_distinguishes_unmapped_from_absent() {
-        use lazybox_core::CapabilityTier;
+    fn route_model_requests_distinguishes_unmapped_from_absent() {
+        use lazybox_core::{CapabilityTier, ModelRequest};
         let models = lazybox_core::AgentModels::builtin("claude").unwrap();
         // Nothing declared → nothing to route.
+        assert_eq!(route_model_requests(&[], &models), ModelRoute::None);
+        // A capability word yields its tier alias.
         assert_eq!(
-            route_declared_capability(None, &models),
-            CapabilityRoute::None
+            route_model_requests(
+                &[vec![ModelRequest::Capability(CapabilityTier::High)]],
+                &models
+            ),
+            ModelRoute::Mapped("L".into())
         );
-        // A mapped tier yields its tier alias.
+        // `best` now reaches the top of the ladder rather than falling
+        // through to whatever `default` happens to be (#1600).
         assert_eq!(
-            route_declared_capability(Some(CapabilityTier::High), &models),
-            CapabilityRoute::Mapped("L".into())
+            route_model_requests(
+                &[vec![ModelRequest::Capability(CapabilityTier::Best)]],
+                &models
+            ),
+            ModelRoute::Mapped("XL".into())
         );
-        // `best` is declared but the built-in menu maps it to nothing —
-        // this must be distinct from `None` so the fallback is reported,
-        // not silently indistinguishable from "declared nothing".
+        // A `model:` token resolves by alias, label, or pinned id.
+        for token in ["l", "Opus", "claude-opus-5"] {
+            assert_eq!(
+                route_model_requests(&[vec![ModelRequest::Tier(token.into())]], &models),
+                ModelRoute::Mapped("L".into()),
+                "model:{token}"
+            );
+        }
+        // A token no tier defines stays distinct from `None`, so the
+        // fallback is reported rather than looking like "declared
+        // nothing" (#748).
         assert_eq!(
-            route_declared_capability(Some(CapabilityTier::Best), &models),
-            CapabilityRoute::Unmapped(CapabilityTier::Best)
+            route_model_requests(&[vec![ModelRequest::Tier("gpt-5".into())]], &models),
+            ModelRoute::Unmapped("gpt-5".into())
         );
     }
 
+    /// Regression for the rank walk: a `model:` token this agent has no
+    /// tier for must not *consume* the decision — the capability word
+    /// beside it still has to resolve. Picking one declaration before
+    /// consulting the menu is how an unrelated `model:*` label silently
+    /// dropped a `high` task to the default (#1600).
     #[test]
-    fn route_declared_capability_refuses_a_fable_tier() {
-        use lazybox_core::CapabilityTier;
-        // A capability map aimed at a creative-class model is reported as
-        // excluded, not routed: a `high` label must never spawn a coding
-        // task on Fable (#1598).
+    fn route_model_requests_falls_through_an_unresolvable_token() {
+        use lazybox_core::{CapabilityTier, ModelRequest};
+        let models = lazybox_core::AgentModels::builtin("claude").unwrap();
+        let ranks = vec![
+            vec![ModelRequest::Tier("v2".into())],
+            vec![ModelRequest::Capability(CapabilityTier::High)],
+        ];
+        assert_eq!(
+            route_model_requests(&ranks, &models),
+            ModelRoute::Mapped("L".into())
+        );
+    }
+
+    /// Equal-authority labels naming different tiers select nothing
+    /// rather than letting GitHub's unpromised label order pick.
+    #[test]
+    fn route_model_requests_refuses_a_contradiction() {
+        use lazybox_core::ModelRequest;
+        let models = lazybox_core::AgentModels::builtin("claude").unwrap();
+        let ranks = vec![vec![
+            ModelRequest::Tier("s".into()),
+            ModelRequest::Tier("xl".into()),
+        ]];
+        assert_eq!(
+            route_model_requests(&ranks, &models),
+            ModelRoute::Conflict(vec!["S".into(), "XL".into()])
+        );
+    }
+
+    /// #1598 refused to route *any* capability word onto a Fable-class
+    /// tier. That guard now lives where it can tell the two cases apart
+    /// — `Config::agent_models` strips an **inherited** mapping — so a
+    /// menu that *declares* the tier and *declares* the mapping is
+    /// honored here (#1600, resolved in favour of the declaration).
+    #[test]
+    fn a_declared_capability_mapping_onto_fable_is_honored() {
+        use lazybox_core::{CapabilityTier, ModelRequest};
         let models = lazybox_core::AgentModels {
             tiers: vec![lazybox_core::ModelTier {
                 alias: "F".into(),
@@ -12412,11 +12539,11 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            route_declared_capability(Some(CapabilityTier::High), &models),
-            CapabilityRoute::Excluded {
-                tier: CapabilityTier::High,
-                alias: "F".into(),
-            }
+            route_model_requests(
+                &[vec![ModelRequest::Capability(CapabilityTier::High)]],
+                &models
+            ),
+            ModelRoute::Mapped("F".into()),
         );
     }
 
@@ -12984,7 +13111,7 @@ mod tests {
                 hook_settings: None,
                 hook_command: None,
                 repo_env: vec![("PROJECT_ENV".into(), "test".into())],
-                capability_model_alias: None,
+                declared_model_alias: None,
                 autonomous: false,
                 autonomous_untrusted: false,
                 landed_on_main: true,
@@ -18772,7 +18899,7 @@ mod tests {
         );
     }
 
-    /// Persist a workspace built from `task` so `capability_alias_for`
+    /// Persist a workspace built from `task` so `model_alias_for`
     /// (which loads it by session key) can read its primary task.
     fn persist_task_workspace(config: &ServerConfig, task: Task) -> SessionKey {
         let ws = Workspace::from_task(task, Utc::now());
@@ -18789,7 +18916,7 @@ mod tests {
     }
 
     #[test]
-    fn capability_alias_for_maps_label_to_builtin_tier_alias() {
+    fn model_alias_for_maps_a_label_to_a_builtin_tier_alias() {
         let config =
             ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
         let models = lazybox_core::AgentModels::builtin("claude").unwrap();
@@ -18799,7 +18926,7 @@ mod tests {
         let key = persist_task_workspace(&config, high);
         // high → Claude's `L` (Opus) tier.
         assert_eq!(
-            capability_alias_for(&config, &key, &models).as_deref(),
+            model_alias_for(&config, &key, &models, false).as_deref(),
             Some("L")
         );
 
@@ -18808,19 +18935,19 @@ mod tests {
         low.body = Some("please handle this @low".into());
         let key = persist_task_workspace(&config, low);
         assert_eq!(
-            capability_alias_for(&config, &key, &models).as_deref(),
+            model_alias_for(&config, &key, &models, false).as_deref(),
             Some("S")
         );
     }
 
     #[test]
-    fn capability_alias_for_none_without_a_declared_tier_or_mapping() {
+    fn model_alias_for_none_without_a_declared_tier_or_mapping() {
         let config =
             ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
         // Nothing declared → no alias, even for an agent with a map.
         let key = persist_task_workspace(&config, task_for("github", "acme/widget#7"));
         let claude = lazybox_core::AgentModels::builtin("claude").unwrap();
-        assert_eq!(capability_alias_for(&config, &key, &claude), None);
+        assert_eq!(model_alias_for(&config, &key, &claude, false), None);
 
         // A `high`-labelled task, but an agent menu with no capability map
         // → no alias (agent keeps its default model).
@@ -18831,23 +18958,41 @@ mod tests {
             tiers: claude.tiers.clone(),
             ..Default::default()
         };
-        assert_eq!(capability_alias_for(&config, &key, &no_map), None);
+        assert_eq!(model_alias_for(&config, &key, &no_map, false), None);
     }
 
+    /// #1598 added this for `best`, which its built-in menu mapped to
+    /// nothing. #1600 wires `best` to the Fable tier, so that label now
+    /// *works* — the announcement it introduced still has to fire for a
+    /// declaration that genuinely routes nowhere, which is what this
+    /// pins instead.
     #[test]
-    fn an_unrouted_capability_label_announces_itself() {
-        // A `best` label the built-in menu maps to nothing must not look
-        // like a label that worked — the run silently uses the default
-        // model, so say so where the user can see it (#1598).
+    fn an_unrouted_declaration_announces_itself() {
         let config =
             ServerConfig::with_store(std::sync::Arc::new(lazybox_store::MemoryStore::new()));
         let mut events = config.bus.subscribe();
         let models = lazybox_core::AgentModels::builtin("claude").unwrap();
 
+        // `best` now resolves — no notice, and the strongest tier runs.
         let mut best = task_for("github", "acme/widget#9");
         best.labels = vec![lazybox_core::Label::new("best")];
         let key = persist_task_workspace(&config, best);
-        assert_eq!(capability_alias_for(&config, &key, &models), None);
+        assert_eq!(
+            model_alias_for(&config, &key, &models, false).as_deref(),
+            Some("XL")
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "a label that worked must not announce itself"
+        );
+
+        // A token no tier defines still must not look like one that
+        // worked: the run silently uses the default model, so say so
+        // where the user can see it (#1598's contract, kept).
+        let mut unknown = task_for("github", "acme/widget#10");
+        unknown.labels = vec![lazybox_core::Label::new("model:gpt-5")];
+        let key = persist_task_workspace(&config, unknown);
+        assert_eq!(model_alias_for(&config, &key, &models, false), None);
 
         let event = events.try_recv().expect("a notification was published");
         let Event::Notification { body, .. } = event else {
@@ -18858,8 +19003,8 @@ mod tests {
         // stand alone — a test pinning the title would pass while the
         // user-visible text said nothing (#1598).
         assert!(
-            body.contains("best") && body.contains("default model"),
-            "the notice must name the label and what ran instead: {body}"
+            body.contains("gpt-5") && body.contains("default model"),
+            "the notice must name the declaration and what ran instead: {body}"
         );
     }
 
@@ -19023,6 +19168,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The probe fixtures are `/bin/sh` scripts, so a timeout these tests could
+    /// actually reach would make them assert "this box can fork a shell within
+    /// N seconds" — the #1627 flake. It has to clear the worst real fork delay
+    /// by a wide margin: 2.01s at load average 38, and over 20s at load average
+    /// 142, both measured on a 15-core box running a lazybox fleet. So it is a
+    /// hang guard only, and no assertion here depends on its value.
+    #[cfg(unix)]
+    const TEST_PROBE_TIMEOUT: Duration = Duration::from_secs(120);
+
     #[cfg(unix)]
     #[test]
     fn stable_hook_exe_rejects_a_gui_only_executable() {
@@ -19031,7 +19185,14 @@ mod tests {
         let stable = directory.path().join("bin/lazybox");
         write_fake_exe(&gui, "#!/bin/sh\nexit 0\n");
 
-        assert_eq!(ensure_stable_hook_exe_from(&gui, &stable), None);
+        assert_eq!(
+            probe_hook_helper_within(&gui, TEST_PROBE_TIMEOUT),
+            HookProbe::Incapable
+        );
+        assert_eq!(
+            ensure_stable_hook_exe_from(&gui, &stable, TEST_PROBE_TIMEOUT),
+            None
+        );
         assert!(!stable.exists());
     }
 
@@ -19050,7 +19211,7 @@ mod tests {
         );
 
         assert_eq!(
-            ensure_stable_hook_exe_from(&cli, &stable),
+            ensure_stable_hook_exe_from(&cli, &stable, TEST_PROBE_TIMEOUT),
             Some(stable.clone())
         );
         assert!(stable.is_file());
@@ -19073,13 +19234,13 @@ mod tests {
         write_fake_exe(&wedged, "#!/bin/sh\nsleep 120\n");
 
         let started = std::time::Instant::now();
-        let capable = is_hook_capable_exe_within(&wedged, Duration::from_millis(200));
+        let outcome = probe_hook_helper_within(&wedged, Duration::from_millis(200));
         let elapsed = started.elapsed();
 
-        assert!(
-            !capable,
-            "a candidate that never answers is not hook-capable"
-        );
+        // `Unanswered`, never `Incapable`: giving up on a candidate that never
+        // spoke is not a finding about the candidate, and reporting it as one
+        // is what made a loaded box read like a GUI-only build (#1627).
+        assert_eq!(outcome, HookProbe::Unanswered);
         // Bounded well inside the suite's 10s per-test ceiling, so a
         // regression fails with this message rather than as an opaque kill
         // from the runner.
@@ -19109,7 +19270,7 @@ mod tests {
         );
 
         let started = std::time::Instant::now();
-        let capable = is_hook_capable_exe_within(&noisy, Duration::from_secs(6));
+        let outcome = probe_hook_helper_within(&noisy, Duration::from_secs(6));
         let elapsed = started.elapsed();
 
         // Both bounds sit under the suite's 10s per-test ceiling: an undrained
@@ -19119,9 +19280,56 @@ mod tests {
             elapsed < Duration::from_secs(4),
             "the probe blocked on a full stdout pipe for {elapsed:?}"
         );
-        assert!(
-            !capable,
+        // It exited and was heard from, just with the wrong thing to say — a
+        // rejection, not a timeout.
+        assert_eq!(
+            outcome,
+            HookProbe::Incapable,
             "stdout that is not exactly the probe response is not an answer"
+        );
+    }
+
+    /// An unanswered probe with nothing installed must still install. Declining
+    /// cannot stop this executable from serving hooks — `hook_exe` falls back
+    /// to `current_exe` — so it would only leave the baked path a rebuild away
+    /// from dead, which is the breakage the stable copy exists to prevent.
+    #[cfg(unix)]
+    #[test]
+    fn unanswered_probe_installs_when_no_helper_is_installed() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let hung = directory.path().join("lazybox");
+        let stable = directory.path().join("bin/lazybox");
+        write_fake_exe(&hung, "#!/bin/sh\nsleep 30\n");
+
+        assert_eq!(
+            ensure_stable_hook_exe_from(&hung, &stable, Duration::from_millis(50)),
+            Some(stable.clone())
+        );
+        assert!(stable.is_file());
+    }
+
+    /// ...but an unanswered probe must never overwrite a helper that already
+    /// answered one: that would retire a working helper on the word of a binary
+    /// we never heard from. A rejection and a timeout diverge here, which is
+    /// the point of telling them apart.
+    #[cfg(unix)]
+    #[test]
+    fn unanswered_probe_keeps_an_already_installed_helper() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let hung = directory.path().join("lazybox");
+        let stable = directory.path().join("bin/lazybox");
+        write_fake_exe(&hung, "#!/bin/sh\nsleep 30\n");
+        std::fs::create_dir_all(stable.parent().expect("stable has a parent"))
+            .expect("create bin dir");
+        write_fake_exe(&stable, "#!/bin/sh\nexit 0\n");
+
+        assert_eq!(
+            ensure_stable_hook_exe_from(&hung, &stable, Duration::from_millis(50)),
+            None
+        );
+        assert_eq!(
+            std::fs::read_to_string(&stable).expect("installed helper survives"),
+            "#!/bin/sh\nexit 0\n"
         );
     }
 
@@ -19147,7 +19355,10 @@ mod tests {
         std::fs::write(&blocker, "not a directory").expect("write blocker");
         let stable = blocker.join("lazybox");
 
-        assert_eq!(ensure_stable_hook_exe_from(&cli, &stable), None);
+        assert_eq!(
+            ensure_stable_hook_exe_from(&cli, &stable, TEST_PROBE_TIMEOUT),
+            None
+        );
     }
 
     /// The injected hook command pins the *running* binary by absolute

@@ -2775,6 +2775,43 @@ impl Config {
                 models
             }
         };
+        // A user who wrote their own tier menu is never *routed* to a
+        // Fable-class tier they did not write. `excluded_from_default`
+        // marks the models that must not be reached implicitly, and a
+        // capability mapping inherited from the built-in menu is
+        // implicit reach: without this, a menu deliberately restricted
+        // to Sonnet still spawned Fable for a `best`-labelled task,
+        // because `capability.best → XL` rode in with the inherited
+        // tiers. This is #1598's guard kept where it belongs — on the
+        // inherited mapping — instead of on every capability lookup,
+        // which would also block the built-in menu's own deliberate
+        // `best → XL` (#1600).
+        if let Some(entry) = self.agents.get(agent_id)
+            && !entry.models.replace
+            && !entry.models.tiers.is_empty()
+        {
+            let inherited_fable: Vec<_> = lazybox_core::CapabilityTier::ALL
+                .into_iter()
+                .filter(|tier| {
+                    entry
+                        .models
+                        .capability
+                        .declared()
+                        .all(|(declared, _)| declared != tier.as_str())
+                })
+                .filter(|tier| {
+                    models.capability.alias_for(*tier).is_some_and(|alias| {
+                        models
+                            .tier(alias)
+                            .is_some_and(lazybox_core::ModelTier::excluded_from_default)
+                            && !entry.models.tiers.iter().any(|t| t.alias == alias)
+                    })
+                })
+                .collect();
+            for tier in inherited_fable {
+                models.capability.clear(tier);
+            }
+        }
         // A default pointing at a Fable tier is re-pointed: creative-class
         // models stay spawnable through an explicit chord but are never
         // what a bare spawn lands on. Prefer the built-in default so the
@@ -6278,7 +6315,7 @@ agents:
         let m = cfg.agent_models("claude");
         assert_eq!(
             m.tiers.iter().map(|t| t.alias.as_str()).collect::<Vec<_>>(),
-            vec!["S", "M", "L"],
+            vec!["S", "M", "L", "XL"],
             "the built-in menu survives, `L` replaced in place"
         );
         assert_eq!(
@@ -6308,7 +6345,7 @@ agents:
         let m = cfg.agent_models("claude");
         assert_eq!(
             m.tiers.iter().map(|t| t.alias.as_str()).collect::<Vec<_>>(),
-            vec!["S", "M", "L", "B"]
+            vec!["S", "M", "L", "XL", "B"]
         );
         assert!(cfg.model_alias_warnings().is_empty());
     }

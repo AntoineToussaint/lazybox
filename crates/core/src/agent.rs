@@ -192,7 +192,12 @@ mod tests {
                 .iter()
                 .map(|t| t.model_id().expect("every built-in tier pins a model"))
                 .collect::<Vec<_>>(),
-            vec!["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"]
+            vec![
+                "claude-haiku-4-5",
+                "claude-sonnet-5",
+                "claude-opus-5",
+                "claude-fable-5-1",
+            ]
         );
     }
 
@@ -242,7 +247,7 @@ mod tests {
         // `L` kept its slot (menu order is display order); `B` appended.
         assert_eq!(
             m.tiers.iter().map(|t| t.alias.as_str()).collect::<Vec<_>>(),
-            vec!["S", "M", "L", "B"]
+            vec!["S", "M", "L", "XL", "B"]
         );
         assert_eq!(m.tier("L").unwrap().model_id(), Some("claude-opus-5[1m]"));
         // The tiers the overlay didn't mention survive untouched.
@@ -282,7 +287,12 @@ mod tests {
             args: vec!["--profile".into(), "fable-writing".into()],
         };
         assert!(implicit_fable.excluded_from_default());
-        for tier in &AgentModels::builtin("claude").unwrap().tiers {
+        // The built-in menu now ships a Fable tier of its own (#1600).
+        // It must be the only ineligible one, and never the default.
+        let m = AgentModels::builtin("claude").unwrap();
+        assert!(m.tier("XL").unwrap().excluded_from_default());
+        assert_ne!(m.default.as_deref(), Some("XL"));
+        for tier in m.tiers.iter().filter(|t| t.alias != "XL") {
             assert!(
                 !tier.excluded_from_default(),
                 "{} must stay eligible",
@@ -335,11 +345,15 @@ mod tests {
         assert_eq!(m.alias_for_capability(CapabilityTier::High), None);
     }
 
+    /// #1598 refused to route *any* capability tier onto a Fable-class
+    /// model, at every lookup. That also blocked the built-in menu's own
+    /// deliberate `best → XL`, which #1600 exists to wire — so the guard
+    /// moved to where it can tell the two cases apart:
+    /// `Config::agent_models` strips an **inherited** mapping, while a
+    /// menu that declares both the tier and the mapping is honored here.
     #[test]
-    fn a_capability_mapped_onto_a_fable_tier_never_routes() {
+    fn a_declared_capability_mapping_onto_fable_is_honored() {
         use crate::CapabilityTier;
-        // Whatever the config says, a `best`/`high` label must not land a
-        // coding task on a creative-class model (#1598).
         let m = AgentModels {
             tiers: vec![ModelTier {
                 alias: "F".into(),
@@ -354,20 +368,14 @@ mod tests {
             },
             ..Default::default()
         };
-        assert_eq!(m.alias_for_capability(CapabilityTier::Best), None);
-        assert_eq!(m.alias_for_capability(CapabilityTier::High), None);
-        assert!(
-            m.resolve_args(m.alias_for_capability(CapabilityTier::High))
-                .is_empty()
-        );
-        // The raw mapping is still readable, so the spawn path can say
-        // *why* the label routed nowhere.
-        assert_eq!(m.capability.alias_for(CapabilityTier::High), Some("F"));
-        // And the tier stays selectable by an explicit chord.
+        assert_eq!(m.alias_for_capability(CapabilityTier::Best), Some("F"));
+        assert_eq!(m.alias_for_capability(CapabilityTier::High), Some("F"));
         assert_eq!(
-            m.resolve_args(Some("F")),
+            m.resolve_args(m.alias_for_capability(CapabilityTier::High)),
             vec!["--model".to_string(), "claude-fable-5".to_string()]
         );
+        // The raw mapping still reads the same — nothing filters it now.
+        assert_eq!(m.capability.alias_for(CapabilityTier::High), Some("F"));
     }
 }
 
@@ -517,6 +525,17 @@ impl CapabilityAliases {
         self.best.is_none() && self.high.is_none() && self.medium.is_none() && self.low.is_none()
     }
 
+    /// Drop `tier`'s mapping, so it resolves to no model tier. Used to
+    /// strip an *inherited* mapping a user's own menu never asked for.
+    pub fn clear(&mut self, tier: crate::CapabilityTier) {
+        match tier {
+            crate::CapabilityTier::Best => self.best = None,
+            crate::CapabilityTier::High => self.high = None,
+            crate::CapabilityTier::Medium => self.medium = None,
+            crate::CapabilityTier::Low => self.low = None,
+        }
+    }
+
     /// The alias `tier` maps to, verbatim — no eligibility filtering.
     /// [`AgentModels::alias_for_capability`] is the resolver callers
     /// want; this is the raw mapping, for diagnostics that need to say
@@ -576,6 +595,25 @@ impl CapabilityAliases {
             self.low = other.low.clone();
         }
     }
+}
+
+/// What an agent's menu makes of a task's model declarations — the
+/// outcome of [`AgentModels::choose_model`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum ModelChoice<'a> {
+    /// Nothing the task declared names a tier this menu defines. The
+    /// spawn keeps the agent's default tier / model.
+    Unresolved,
+    /// `request` (the highest-precedence declaration that resolved)
+    /// selects the tier `alias`.
+    Resolved {
+        request: &'a crate::ModelRequest,
+        alias: &'a str,
+    },
+    /// Equally authoritative declarations named different tiers. Left
+    /// unselected on purpose: the alternative is letting an order the
+    /// provider never promised decide which model spends the money.
+    Conflict(Vec<&'a str>),
 }
 
 /// Per-agent model menu — the ordered tiers a spawn chord can pick from
@@ -661,11 +699,80 @@ impl AgentModels {
     /// through an explicit chord, the same escape hatch the default
     /// resolution leaves open.
     pub fn alias_for_capability(&self, tier: crate::CapabilityTier) -> Option<&str> {
-        self.capability.alias_for(tier).filter(|alias| {
-            !self
-                .tier(alias)
-                .is_some_and(ModelTier::excluded_from_default)
-        })
+        self.capability.alias_for(tier)
+    }
+
+    /// The tier a `model:<token>` declaration names: matched against
+    /// each tier's alias, then its label, then the model id it pins —
+    /// case-insensitively and exactly, in that order. So `model:l`,
+    /// `model:opus` and `model:claude-opus-5` all reach the same tier,
+    /// while a substring rule (which would make `model:s` match
+    /// "Sonnet" as readily as the `S` tier) is avoided (#1600).
+    pub fn tier_for_token(&self, token: &str) -> Option<&ModelTier> {
+        let by = |f: fn(&ModelTier) -> Option<&str>| {
+            self.tiers
+                .iter()
+                .find(|t| f(t).is_some_and(|v| v.eq_ignore_ascii_case(token)))
+        };
+        by(|t| Some(t.alias.as_str()))
+            .or_else(|| by(|t| Some(t.label.as_str())))
+            .or_else(|| by(ModelTier::model_id))
+    }
+
+    /// The tier alias one declared [`ModelRequest`](crate::ModelRequest)
+    /// resolves to on this menu, if any.
+    pub fn alias_for_request(&self, request: &crate::ModelRequest) -> Option<&str> {
+        match request {
+            crate::ModelRequest::Tier(token) => {
+                self.tier_for_token(token).map(|t| t.alias.as_str())
+            }
+            crate::ModelRequest::Capability(tier) => self.alias_for_capability(*tier),
+        }
+    }
+
+    /// Walk `ranks` (from
+    /// [`resolve_model_requests`](crate::resolve_model_requests),
+    /// highest precedence first) and pick the tier the task asks for.
+    ///
+    /// The first rank that resolves against this menu wins, so a
+    /// declaration this agent has no tier for falls through to the next
+    /// rank instead of consuming the decision — an unrelated `model:*`
+    /// label must not swallow a `high` label that would have resolved.
+    ///
+    /// A rank whose members resolve to *different* tiers is a
+    /// contradiction the menu cannot break, and the provider gives no
+    /// stable order to break it with, so nothing is selected and the
+    /// caller reports the conflict. Members that agree (`model:l` and
+    /// `model:opus` naming one tier) are not a conflict.
+    pub fn choose_model<'a>(&'a self, ranks: &'a [Vec<crate::ModelRequest>]) -> ModelChoice<'a> {
+        for rank in ranks {
+            let mut chosen: Option<(&crate::ModelRequest, &str)> = None;
+            let mut conflict: Vec<&str> = Vec::new();
+            for request in rank {
+                let Some(alias) = self.alias_for_request(request) else {
+                    continue;
+                };
+                match chosen {
+                    None => chosen = Some((request, alias)),
+                    Some((_, picked)) if picked == alias => {}
+                    Some((_, picked)) => {
+                        if conflict.is_empty() {
+                            conflict.push(picked);
+                        }
+                        if !conflict.contains(&alias) {
+                            conflict.push(alias);
+                        }
+                    }
+                }
+            }
+            if !conflict.is_empty() {
+                return ModelChoice::Conflict(conflict);
+            }
+            if let Some((request, alias)) = chosen {
+                return ModelChoice::Resolved { request, alias };
+            }
+        }
+        ModelChoice::Unresolved
     }
 
     /// Aliases named by `default` or any `capability.*` that no tier in the
@@ -779,16 +886,34 @@ impl AgentModels {
                         short: Some("Op".into()),
                         args: vec!["--model".into(), "claude-opus-5".into()],
                     },
+                    // The top of the ladder. Two chars, so it claims no
+                    // chord — Fable is reached deliberately, by a
+                    // `model:xl` / `model:fable` label or the `best`
+                    // capability word, never by a stray keystroke — and
+                    // `excluded_from_default` keeps it off every bare
+                    // spawn (#1600).
+                    ModelTier {
+                        alias: "XL".into(),
+                        label: "Fable".into(),
+                        short: Some("F".into()),
+                        args: vec!["--model".into(), "claude-fable-5-1".into()],
+                    },
                 ],
                 // A declared capability tier routes to the matching model
-                // tier: high → Opus, medium → Sonnet, low → Haiku. `best`
-                // is left unmapped: the built-in menu has no max-reasoning
-                // tier, so a `best` run is opt-in — define a best tier
-                // (model + effort) and `capability.best` in YAML (#748).
-                // The spawn path says so out loud rather than quietly
-                // running the default (#1598).
+                // tier: best → Fable, high → Opus, medium → Sonnet,
+                // low → Haiku. `best` used to map to nothing, so a task
+                // asking for the strongest model got whatever `default`
+                // happened to be — masked while `default` was `L`, a
+                // silent downgrade to Haiku under `default: S` (#1600).
+                //
+                // Reaching a Fable-class tier from a capability word is
+                // allowed only because this mapping is *declared*, here
+                // and deliberately. `Config::agent_models` clears an
+                // *inherited* one, so a user menu is never routed to a
+                // creative-class model it never named (#1598's guard,
+                // narrowed rather than dropped).
                 capability: CapabilityAliases {
-                    best: None,
+                    best: Some("XL".into()),
                     high: Some("L".into()),
                     medium: Some("M".into()),
                     low: Some("S".into()),

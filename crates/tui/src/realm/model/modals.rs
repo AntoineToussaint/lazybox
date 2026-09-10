@@ -3789,7 +3789,11 @@ impl<T: TerminalAdapter> Model<T> {
     ) {
         let trigger = match origin {
             lazybox_ipc::SpawnOrigin::Interactive => {
-                self.apply_worktree_progress(session_key, step, status);
+                if self.bulk_batch_claims(&session_key) {
+                    self.report_bulk_member_progress(&session_key, status);
+                } else {
+                    self.apply_worktree_progress(session_key, step, status);
+                }
                 return;
             }
             lazybox_ipc::SpawnOrigin::Autonomous(trigger) => trigger,
@@ -3817,6 +3821,100 @@ impl<T: TerminalAdapter> Model<T> {
         }
         if finished {
             self.autonomous_spawn_notified.remove(&session_key);
+        }
+    }
+
+    /// Whether a live bulk fan-out (#1636) still owns `session_key`'s
+    /// provisioning. An expired batch — a spawn the daemon dropped
+    /// never reports either way — is released here, so a later single
+    /// spawn on one of those rows gets its checklist back.
+    pub(super) fn bulk_batch_claims(&mut self, session_key: &lazybox_core::SessionKey) -> bool {
+        self.bulk_batch_claims_at(session_key, std::time::Instant::now())
+    }
+
+    /// [`Self::bulk_batch_claims`] with an injectable clock so tests can
+    /// drive the expiry without sleeping.
+    pub(super) fn bulk_batch_claims_at(
+        &mut self,
+        session_key: &lazybox_core::SessionKey,
+        now: std::time::Instant,
+    ) -> bool {
+        let Some(batch) = self.bulk_spawn_batch.as_ref() else {
+            return false;
+        };
+        if batch.expired(now) {
+            self.bulk_spawn_batch = None;
+            return false;
+        }
+        batch.pending.contains(session_key)
+    }
+
+    /// Report one bulk member's provisioning step on the aggregate
+    /// footer notice instead of a modal. Ordinary steps are silent (the
+    /// sidebar row's spawning arc, #1069, already shows each one
+    /// coming); a `Failed` step retires the member with a footer error
+    /// naming the row and the reason — retry is `w w` on that row.
+    fn report_bulk_member_progress(
+        &mut self,
+        session_key: &lazybox_core::SessionKey,
+        status: lazybox_ipc::WorktreeStepStatus,
+    ) {
+        let lazybox_ipc::WorktreeStepStatus::Failed(err) = status else {
+            return;
+        };
+        if !self.retire_bulk_member(session_key, false) {
+            return;
+        }
+        if err == lazybox_ipc::SPAWN_CANCELLED_NOTE {
+            self.flash_info(lazybox_ipc::SPAWN_CANCELLED_NOTE);
+        } else {
+            let name = self
+                .sidebar
+                .workspace_by_key(session_key)
+                .map(|ws| crate::util::notice_slug(&ws.name).into_owned())
+                .unwrap_or_else(|| worktree_notice_label(session_key));
+            self.flash_error(format!("✗ {name} — {err}"));
+        }
+        self.summarize_bulk_batch_if_done();
+    }
+
+    /// Count a bulk member as landed and advance the aggregate notice.
+    /// Returns whether the member belonged to a live batch.
+    pub(super) fn note_bulk_member_ready(
+        &mut self,
+        session_key: &lazybox_core::SessionKey,
+    ) -> bool {
+        if !self.bulk_batch_claims(session_key) || !self.retire_bulk_member(session_key, true) {
+            return false;
+        }
+        if let Some(batch) = self.bulk_spawn_batch.as_ref()
+            && !batch.done()
+        {
+            let notice = batch.progress_notice();
+            self.flash_info(notice);
+        }
+        self.summarize_bulk_batch_if_done();
+        true
+    }
+
+    fn retire_bulk_member(&mut self, session_key: &lazybox_core::SessionKey, ok: bool) -> bool {
+        self.bulk_spawn_batch
+            .as_mut()
+            .is_some_and(|batch| batch.retire(session_key, ok))
+    }
+
+    /// Flash the batch's closing summary and clear it once every member
+    /// has landed or failed.
+    fn summarize_bulk_batch_if_done(&mut self) {
+        if !self.bulk_spawn_batch.as_ref().is_some_and(|b| b.done()) {
+            return;
+        }
+        let batch = self.bulk_spawn_batch.take().expect("checked done");
+        let notice = batch.summary_notice();
+        if batch.failed == 0 {
+            self.flash_info(notice);
+        } else {
+            self.flash_error(notice);
         }
     }
 
@@ -3915,6 +4013,11 @@ impl<T: TerminalAdapter> Model<T> {
         &mut self,
         session_key: &lazybox_core::SessionKey,
     ) {
+        // A bulk fan-out's member never had a checklist — its landing
+        // advances the batch's aggregate notice instead (#1636).
+        if self.note_bulk_member_ready(session_key) {
+            return;
+        }
         // The operation completed — release any Esc-dismissal marker
         // for it so the NEXT provision on this workspace gets its
         // checklist again.

@@ -112,9 +112,9 @@ agent:
   llm_gateway_url: "http://gateway.internal"
 
 # ── agents (per-agent overrides) ─────────────────────────────────────
-# Model-tier menu the `w S`/`w M`/`w L` and `a S`/`a M`/`a L` chords pick
-# from. Claude ships a built-in Haiku/Sonnet/Opus menu; other agents
-# define theirs here.
+# Model-tier menu the `w S`/`w M`/`w L` and `a S`/`a M`/`a L` chords and
+# the `model:<tier>` task labels pick from. Claude ships a built-in
+# Haiku/Sonnet/Opus/Fable menu; other agents define theirs here.
 agents:
   codex:
     models:
@@ -335,7 +335,7 @@ other agents have no built-in menu.
 | `asking_patterns` | list of string | `[]` | Output markers that classify the custom agent as **Input Needed** |
 | `models.default` | string | unset | Alias of the tier a bare spawn uses; unset → the agent's own default model |
 | `models.tiers` | list | `[]` | Ordered tier menu. Each entry: `alias` (the chord key — a single uppercase letter binds as `Shift`, e.g. `S` → `w S`), `label` (shown in the popup and the `◆` tab badge), `args` (appended to the spawn argv) |
-| `models.priority` | map | `{}` | `high` / `medium` / `low` → tier alias, used when a spawn declares no explicit tier but the task carries a priority |
+| `models.priority` | map | `{}` | Deprecated `best` / `high` / `medium` / `low` task keys → tier alias, used when a spawn declares no explicit tier and the task carries one of them. The current spelling, a `model:<tier>` label, names a `models.tiers` entry directly and needs no map |
 | `auto_update` | bool | `false` | Let lazybox apply this agent's CLI updates automatically when the scheduled out-of-band check finds a newer version. Off by default: the check still runs and surfaces "update available", but installing waits for the manual "update agent CLIs" action. |
 
 ## `worktree`

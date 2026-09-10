@@ -2346,6 +2346,70 @@ mod search_tests {
         );
     }
 
+    /// An epic that stops being live is dropped, and its members fall back
+    /// into their repo groups. Nothing else invalidates a cached snapshot,
+    /// so without this the dead epic renders until the process restarts.
+    #[test]
+    fn forgetting_an_epic_returns_its_members_to_their_repos() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let a = issue_ws_in_repo("acme/api", "1", "token schema");
+        let key = SessionKey::from(&a.key);
+        sb.workspaces.insert(key.clone(), a);
+        sb.set_epic_snapshot(epic_snap("auth", "Auth refactor", &[key.as_str()]));
+        assert!(
+            sb.visible
+                .iter()
+                .any(|r| matches!(r, VisibleRow::EpicHeader(_)))
+        );
+
+        sb.forget_epic("auth");
+
+        assert!(
+            !sb.visible
+                .iter()
+                .any(|r| matches!(r, VisibleRow::EpicHeader(_))),
+            "the dead epic must not keep rendering"
+        );
+        // The member is back under its own repo header, not stranded.
+        let repo_at = sb
+            .visible
+            .iter()
+            .position(|r| matches!(r, VisibleRow::RepoHeader(n) if n == "acme/api"))
+            .expect("repo header");
+        assert!(
+            sb.visible
+                .iter()
+                .skip(repo_at)
+                .any(|r| matches!(r, VisibleRow::Workspace(k) if k == &key)),
+            "member must fall back into its repo group"
+        );
+    }
+
+    /// A repo header counts the rows under it, so a member lifted into an
+    /// epic leaves its repo's count — the same rule `★ Focused` already
+    /// follows. Pinned because it is a number people read.
+    #[test]
+    fn a_lifted_epic_member_leaves_its_repo_count() {
+        let mut sb = Sidebar::new(PaneId::new(1));
+        let mut lifted = None;
+        for (num, title) in [("1", "one"), ("2", "two")] {
+            let w = issue_ws_in_repo("acme/api", num, title);
+            let key = SessionKey::from(&w.key);
+            lifted.get_or_insert_with(|| key.clone());
+            sb.workspaces.insert(key, w);
+        }
+        sb.recompute_visible();
+        assert_eq!(sb.repo_summaries.get("acme/api").map(|s| s.active), Some(2));
+
+        let lifted = lifted.expect("a workspace");
+        sb.set_epic_snapshot(epic_snap("auth", "Auth refactor", &[lifted.as_str()]));
+        assert_eq!(
+            sb.repo_summaries.get("acme/api").map(|s| s.active),
+            Some(1),
+            "a lifted member is counted by its epic, not twice"
+        );
+    }
+
     /// A cursor on an epic header answers with the epic overview, not the
     /// repo one (#1517 §4e).
     #[test]

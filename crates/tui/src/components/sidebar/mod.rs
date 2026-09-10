@@ -3754,6 +3754,17 @@ impl Sidebar {
         self.recompute_visible();
     }
 
+    /// Drop an epic that stopped being live, re-projecting so its members
+    /// fall back into their repo groups. Without this the tier renders a
+    /// dead epic — and keeps its members lifted out of their repos — until
+    /// the process restarts, because a snapshot is only ever inserted.
+    pub fn forget_epic(&mut self, key: &str) {
+        if self.epics.remove(key).is_some() {
+            self.collapsed_epics.remove(key);
+            self.recompute_visible();
+        }
+    }
+
     /// The cached snapshot for an epic key, for the header render and the
     /// epic overview.
     pub fn epic_snapshot(&self, key: &str) -> Option<&lazybox_ipc::EpicSnapshot> {

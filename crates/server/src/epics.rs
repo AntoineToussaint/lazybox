@@ -26,8 +26,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use lazybox_core::{
-    Activity, ActivityKind, EpicKey, EpicRecord, Role, Task, TaskId, TaskState, Workspace,
-    WorkspaceKey,
+    Activity, ActivityKind, EpicRecord, Role, Task, TaskId, TaskState, Workspace, WorkspaceKey,
 };
 use lazybox_ipc::{
     AgentState, Blocker, BlockerKind, BlockerOwner, EdgeKind, EpicDelta, EpicEdge, EpicMember,
@@ -53,38 +52,36 @@ const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(300);
 ///   recomputes (a recompute must not reset "blocked 2h ago" to "just now").
 /// - `last`: the last snapshot broadcast per epic, so a recompute can diff
 ///   against it and skip epics whose snapshot did not change.
-/// - `labels`: the epic-membership + derived-status labels last projected
-///   upstream per member, so a quiet poll costs zero API calls and only a
-///   real change reaches GitHub (§4j).
+/// - `labels`: the derived-status label last projected upstream per member,
+///   so a quiet poll costs zero API calls and only a real change reaches
+///   GitHub (§4j).
 #[derive(Default)]
 pub struct EpicMemory {
     since: HashMap<String, HashMap<(WorkspaceKey, BlockerKind, String), i64>>,
     last: HashMap<String, EpicSnapshot>,
-    labels: HashMap<WorkspaceKey, LabelProjection>,
-}
-
-/// The upstream label state one member should hold: its `epic:<key>`
-/// memberships and, when at least one of those epics opted in, the single
-/// derived-status label.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct LabelProjection {
-    pub epics: Vec<String>,
-    pub status: Option<String>,
+    labels: HashMap<WorkspaceKey, Option<&'static str>>,
 }
 
 /// The `lazybox:<status>` label a member's derived status projects to, or
-/// `None` for the in-between states that no label names. Only the three
-/// coarse buckets from §4j are written: a member is startable, waiting, or
-/// finished — the finer statuses are lazybox's own view and would churn the
-/// tracker on every CI tick.
+/// `None` for the states that name no label.
+///
+/// Only `Blocked` and `Done` project. `Ready` deliberately does **not**,
+/// even though §4j's table lists it: `member_status` returns `Ready` for a
+/// member whose local agent is merely idle (the `Claimed` arm is gated on
+/// `agent.is_none()`), so a working agent oscillates `InProgress` ⇄ `Ready`
+/// on every turn boundary. Projecting `Ready` would turn each of those into
+/// an attach/detach pair against the tracker — dozens of API calls a minute
+/// on a busy member. `Blocked` is graph- and declaration-driven and `Done`
+/// is terminal, so both are stable; the absence of a label already reads as
+/// "not blocked, not finished" to anyone looking at GitHub.
 pub fn status_projection_label(status: &EpicMemberStatus) -> Option<&'static str> {
     match status {
-        EpicMemberStatus::Ready => Some(lazybox_core::STATUS_LABEL_READY),
         EpicMemberStatus::Blocked | EpicMemberStatus::ReviewBlocked => {
             Some(lazybox_core::STATUS_LABEL_BLOCKED)
         }
         EpicMemberStatus::Done => Some(lazybox_core::STATUS_LABEL_DONE),
-        EpicMemberStatus::Claimed
+        EpicMemberStatus::Ready
+        | EpicMemberStatus::Claimed
         | EpicMemberStatus::InProgress
         | EpicMemberStatus::Asking
         | EpicMemberStatus::PrOpen { .. }
@@ -93,39 +90,38 @@ pub fn status_projection_label(status: &EpicMemberStatus) -> Option<&'static str
     }
 }
 
-/// The label state every member of every live epic should hold, from the
-/// snapshots just computed. A member in several epics carries one
-/// `epic:<key>` label per epic; its status label is written only when at
-/// least one of those epics opted in, and the *blocked* reading wins a
-/// disagreement — a member one epic can start but another cannot is, in
-/// truth, not startable.
-pub fn desired_labels(
-    snapshots: &[(&EpicRecord, &EpicSnapshot)],
-) -> HashMap<WorkspaceKey, LabelProjection> {
-    let mut desired: HashMap<WorkspaceKey, LabelProjection> = HashMap::new();
-    for (record, snapshot) in snapshots {
-        for member in &snapshot.members {
-            let entry = desired.entry(member.key.clone()).or_default();
-            let label = EpicKey::new(snapshot.key.clone()).project_label();
-            if !entry.epics.contains(&label) {
-                entry.epics.push(label);
-            }
-            if !record.publish_status_labels {
-                continue;
-            }
-            let Some(next) = status_projection_label(&member.status) else {
-                continue;
-            };
-            let blocked = lazybox_core::STATUS_LABEL_BLOCKED;
-            if entry.status.as_deref() != Some(blocked) {
-                entry.status = Some(next.to_string());
-            }
+/// Fold one epic's derived statuses into the cross-epic desired-label map.
+///
+/// Only the status family is projected. The `epic:<key>` membership label is
+/// **read** as a membership source ([`resolved_graph`]) and deliberately
+/// never written: writing it would make membership self-sustaining — the
+/// label we wrote re-asserts the membership that produced it — so an
+/// `unassign` could never be honored once a poll had refreshed the row's
+/// labels. Leaving that family untouched also means lazybox never detaches
+/// an `epic:*` label a human put there, whether or not it names an epic
+/// lazybox knows.
+///
+/// A member in several epics resolves to one label: the *blocked* reading
+/// wins, because a member one epic can start but another cannot is, in
+/// truth, not startable. An epic that has not opted in
+/// ([`EpicRecord::publish_status_labels`]) contributes nothing.
+pub fn fold_status_labels(
+    record: &EpicRecord,
+    snapshot: &EpicSnapshot,
+    into: &mut HashMap<WorkspaceKey, Option<&'static str>>,
+) {
+    for member in &snapshot.members {
+        let entry = into.entry(member.key.clone()).or_default();
+        if !record.publish_status_labels {
+            continue;
+        }
+        if *entry == Some(lazybox_core::STATUS_LABEL_BLOCKED) {
+            continue;
+        }
+        if let Some(next) = status_projection_label(&member.status) {
+            *entry = Some(next);
         }
     }
-    for projection in desired.values_mut() {
-        projection.epics.sort();
-    }
-    desired
 }
 
 // ── kv persistence ──────────────────────────────────────────────────────
@@ -1548,11 +1544,14 @@ pub async fn recompute_all(config: &ServerConfig) {
     // epic's snapshot changed — the review-row prune below needs the full live
     // set, not just the epics that moved this pass.
     let mut live_members: HashSet<WorkspaceKey> = HashSet::new();
-    // Every live (record, snapshot) pair, likewise regardless of change: the
-    // label projection is a function of the whole set, because a member two
-    // epics claim carries a label from each and a shrinking set has to detach
-    // the one that went away.
-    let mut resolved: Vec<(EpicRecord, EpicSnapshot)> = Vec::new();
+    // The desired status label for every member of every LIVE epic, folded
+    // as we go: the projection is a function of the whole set (the blocked
+    // reading wins across epics) and a member that dropped out has to be
+    // detached, so it is accumulated regardless of whether the epic's
+    // snapshot changed. Folded in place rather than collected as snapshots —
+    // cloning every snapshot every tick, inside the memory lock, is what the
+    // debounce path cannot afford.
+    let mut desired_labels: HashMap<WorkspaceKey, Option<&'static str>> = HashMap::new();
     {
         let mut memory = config.poll.epics.lock();
         let EpicMemory { since, last, .. } = &mut *memory;
@@ -1573,7 +1572,7 @@ pub async fn recompute_all(config: &ServerConfig) {
                 now,
             );
             live_members.extend(snapshot.members.iter().map(|m| m.key.clone()));
-            resolved.push((record.clone(), snapshot.clone()));
+            fold_status_labels(record, &snapshot, &mut desired_labels);
             let prev = last.get(record.key.as_str());
             // `computed_at` bumps every recompute, so equality must ignore it —
             // otherwise every tick looks "changed" and re-broadcasts. Blocker
@@ -1587,8 +1586,26 @@ pub async fn recompute_all(config: &ServerConfig) {
             to_emit.push(Event::EpicStatus { snapshot, delta });
         }
 
-        // Drop memory for epics that no longer exist (archived rows keep their
-        // record but stop recomputing; deleted rows leave `live`).
+        // Drop memory for epics that stopped being live — a deleted record
+        // leaves `live`, an archived one stays in it but never resolves. A
+        // client caches the last snapshot per epic and nothing else
+        // invalidates it, so each one that goes away has to say so or it
+        // renders forever.
+        let archived: HashSet<&str> = records
+            .iter()
+            .filter(|r| r.archived)
+            .map(|r| r.key.as_str())
+            .collect();
+        let gone: Vec<String> = last
+            .keys()
+            .filter(|k| !live.contains(*k) || archived.contains(k.as_str()))
+            .cloned()
+            .collect();
+        for key in gone {
+            last.remove(&key);
+            since.remove(&key);
+            to_emit.push(Event::EpicGone { key });
+        }
         last.retain(|k, _| live.contains(k));
         since.retain(|k, _| live.contains(k));
     }
@@ -1638,83 +1655,157 @@ pub async fn recompute_all(config: &ServerConfig) {
         run_latches(config, snapshot).await;
     }
 
-    project_labels(config, &resolved).await;
+    // `workspaces` is the scan this function already paid for; the
+    // projection reuses it rather than re-reading the whole store.
+    project_labels(config, &workspaces, desired_labels).await;
 }
 
-/// Converge the `epic:<key>` membership and derived-status labels (§4j) for
-/// every member whose projection moved since the last pass. The latch in
-/// [`EpicMemory::labels`] is what keeps a quiet poll free: only a member
-/// whose desired label set actually differs reaches the provider.
+/// Converge the derived-status label (§4j) for every member whose projection
+/// moved since the last pass. The latch in [`EpicMemory::labels`] is what
+/// keeps a quiet poll free: only a member whose desired label actually
+/// differs reaches the provider.
 ///
-/// Best effort throughout — labels are a projection, never an input to the
+/// Every member is latched once resolved — including one with no GitHub task
+/// to carry the label. Latching only the successful *writes* would leave a
+/// local Coordinator or a Linear-tracked member permanently "changed", and
+/// this function would then re-run its work on every debounced recompute for
+/// the life of the daemon.
+///
+/// Best effort on the wire: labels are a projection, never an input to the
 /// resolver, so a failed write costs visibility on the tracker and nothing
-/// else. It is deliberately *not* retried on failure: the memory is only
-/// updated on success, so the next pass that touches this member tries again.
-async fn project_labels(config: &ServerConfig, resolved: &[(EpicRecord, EpicSnapshot)]) {
-    let pairs: Vec<(&EpicRecord, &EpicSnapshot)> = resolved.iter().map(|(r, s)| (r, s)).collect();
-    let desired = desired_labels(&pairs);
-
-    let changed: Vec<(WorkspaceKey, LabelProjection)> = {
-        let memory = config.poll.epics.lock();
-        let mut changed: Vec<(WorkspaceKey, LabelProjection)> = desired
-            .iter()
-            .filter(|(key, want)| memory.labels.get(*key) != Some(*want))
-            .map(|(key, want)| (key.clone(), want.clone()))
-            .collect();
-        // A member that left every epic keeps its labels until we detach
-        // them, so an empty projection is a real desired state, not a skip.
-        changed.extend(
-            memory
-                .labels
-                .keys()
-                .filter(|key| !desired.contains_key(*key))
-                .map(|key| (key.clone(), LabelProjection::default())),
-        );
-        changed
-    };
-    if changed.is_empty() {
-        return;
-    }
-
-    let workspaces = crate::load_workspaces(&*config.store).values;
+/// else. The latch is set *before* the write and rolled back if it fails —
+/// `recompute_all` is reachable concurrently (the bus loop and every
+/// mutating MCP tool call it), so claiming the member up front is what stops
+/// two overlapping passes issuing the same mutation twice.
+async fn project_labels(
+    config: &ServerConfig,
+    workspaces: &[Workspace],
+    desired: HashMap<WorkspaceKey, Option<&'static str>>,
+) {
     let by_key: HashMap<&WorkspaceKey, &Workspace> =
         workspaces.iter().map(|w| (&w.key, w)).collect();
+    // Only a GitHub task can carry the label.
+    let github_target = |key: &WorkspaceKey| -> Option<(TaskId, String)> {
+        let task = by_key.get(key).and_then(|w| w.primary_task())?;
+        (task.id.source == lazybox_core::GITHUB_SOURCE)
+            .then(|| task.repo.clone().map(|repo| (task.id.clone(), repo)))
+            .flatten()
+    };
 
-    // Only a GitHub task can carry the projection; a local workspace holds
-    // its membership in the record alone. Resolving the targets first keeps
-    // the client resolution off the path when no member has one.
-    let targets: Vec<(WorkspaceKey, LabelProjection, TaskId, String)> = changed
-        .into_iter()
-        .filter_map(|(key, want)| {
-            let task = by_key.get(&key).and_then(|w| w.primary_task())?;
-            let repo = task.repo.clone()?;
-            (task.id.source == lazybox_core::GITHUB_SOURCE)
-                .then(|| (key, want, task.id.clone(), repo))
-        })
-        .collect();
+    // One pass over every member we want a label on plus every member we
+    // last wrote one for — the latter so a member that left every epic gets
+    // its label detached rather than stranded.
+    let mut targets: Vec<Target> = Vec::new();
+    {
+        let mut memory = config.poll.epics.lock();
+        let keys: BTreeSet<WorkspaceKey> = desired
+            .keys()
+            .chain(memory.labels.keys())
+            .cloned()
+            .collect();
+        for key in keys {
+            let departed = !desired.contains_key(&key);
+            // A departed member wants no label at all.
+            let want = desired.get(&key).copied().flatten();
+            if memory.labels.get(&key) == Some(&want) && !departed {
+                continue; // already projected, nothing to do.
+            }
+            let Some((task_id, repo)) = github_target(&key) else {
+                // Nothing can ever carry this member's label. Settle it now
+                // — latching only successful *writes* would leave a local
+                // Coordinator or a Linear-tracked member permanently
+                // "changed", re-running this work every debounced recompute
+                // for the life of the daemon.
+                if departed {
+                    memory.labels.remove(&key);
+                } else {
+                    memory.labels.insert(key.clone(), want);
+                }
+                continue;
+            };
+            if departed && memory.labels.get(&key) == Some(&None) {
+                // Held no label anyway; just stop tracking it.
+                memory.labels.remove(&key);
+                continue;
+            }
+            // Claim the member before the await. `recompute_all` is
+            // reachable concurrently (the bus loop and every mutating MCP
+            // tool call it), so an unclaimed window is two overlapping
+            // passes issuing the same mutation twice.
+            let previous = memory.labels.insert(key.clone(), want);
+            targets.push(Target {
+                key,
+                want,
+                task_id,
+                repo,
+                previous,
+                departed,
+            });
+        }
+    }
     if targets.is_empty() {
         return;
     }
+
     let client = match crate::polling::resolve_gh_client_result(config).await {
         Ok(client) => client,
         Err(error) => {
             tracing::warn!(%error, "epics: github client unavailable for label projection");
+            let mut memory = config.poll.epics.lock();
+            for target in &targets {
+                target.roll_back(&mut memory);
+            }
             return;
         }
     };
 
-    for (key, want, task_id, repo) in targets {
-        let repo = repo.as_str();
-        let mutation = client.sync_epic_labels(&task_id, repo, &want.epics, want.status.as_deref());
-        match tokio::time::timeout(std::time::Duration::from_secs(20), mutation).await {
+    for target in targets {
+        let mutation = client.sync_epic_status_label(&target.task_id, &target.repo, target.want);
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(20), mutation).await;
+        match outcome {
             Ok(Ok(())) => {
-                config.poll.epics.lock().labels.insert(key, want);
+                if target.departed {
+                    // Detached and no longer a member — stop tracking it so
+                    // the latch does not grow without bound.
+                    config.poll.epics.lock().labels.remove(&target.key);
+                }
             }
             Ok(Err(error)) => {
+                let repo = &target.repo;
                 tracing::warn!(%repo, %error, "epics: label projection failed");
+                target.roll_back(&mut config.poll.epics.lock());
             }
             Err(_) => {
+                let repo = &target.repo;
                 tracing::warn!(%repo, "epics: label projection timed out after 20s");
+                target.roll_back(&mut config.poll.epics.lock());
+            }
+        }
+    }
+}
+
+/// One member's pending status-label write, with the latch value to restore
+/// if it does not land.
+struct Target {
+    key: WorkspaceKey,
+    want: Option<&'static str>,
+    task_id: TaskId,
+    repo: String,
+    /// What the latch held before this pass claimed it.
+    previous: Option<Option<&'static str>>,
+    /// The member left every epic; its label is being detached.
+    departed: bool,
+}
+
+impl Target {
+    /// Undo the optimistic claim so the next pass retries this member.
+    fn roll_back(&self, memory: &mut EpicMemory) {
+        match self.previous {
+            Some(prev) => {
+                memory.labels.insert(self.key.clone(), prev);
+            }
+            None => {
+                memory.labels.remove(&self.key);
             }
         }
     }
@@ -3242,14 +3333,12 @@ mod tests {
         assert_eq!(snap.total, 0);
     }
 
-    /// Only the three coarse buckets project upstream; the in-between
-    /// states name no label, so a CI tick can't churn the tracker.
+    /// Only the two *stable* buckets project upstream. `Ready` must not:
+    /// `member_status` returns it for a member whose local agent is merely
+    /// idle, so projecting it would attach/detach a label on every agent
+    /// turn boundary.
     #[test]
-    fn only_coarse_statuses_project_a_label() {
-        assert_eq!(
-            status_projection_label(&EpicMemberStatus::Ready),
-            Some("lazybox:ready")
-        );
+    fn only_stable_statuses_project_a_label() {
         assert_eq!(
             status_projection_label(&EpicMemberStatus::Blocked),
             Some("lazybox:blocked")
@@ -3262,37 +3351,39 @@ mod tests {
             status_projection_label(&EpicMemberStatus::Done),
             Some("lazybox:done")
         );
+        assert_eq!(status_projection_label(&EpicMemberStatus::Ready), None);
         assert_eq!(status_projection_label(&EpicMemberStatus::InProgress), None);
+        assert_eq!(status_projection_label(&EpicMemberStatus::Claimed), None);
         assert_eq!(
             status_projection_label(&EpicMemberStatus::Mergeable { held_by: vec![] }),
             None
         );
     }
 
-    /// Membership labels are always desired; the status label only when the
-    /// epic opted in.
+    /// The Working ⇄ Idle oscillation an agent produces must not move the
+    /// projection at all — otherwise every turn boundary is two GitHub
+    /// mutations. `InProgress` and `Ready` are exactly that oscillation.
     #[test]
-    fn status_label_is_opt_in_per_epic() {
-        let workspaces = vec![ws("a")];
-        let record = record_with(&["a"]);
-        let snap = resolve_fresh(&record, &workspaces);
-        let key = WorkspaceKey::new("a");
-
-        let off = desired_labels(&[(&record, &snap)]);
-        assert_eq!(off[&key].epics, vec!["epic:e".to_string()]);
-        assert_eq!(off[&key].status, None);
-
-        let mut opted = record.clone();
-        opted.publish_status_labels = true;
-        let on = desired_labels(&[(&opted, &snap)]);
-        assert_eq!(on[&key].status.as_deref(), Some("lazybox:ready"));
+    fn an_agent_turn_boundary_does_not_move_the_label() {
+        assert_eq!(
+            status_projection_label(&EpicMemberStatus::InProgress),
+            status_projection_label(&EpicMemberStatus::Ready),
+        );
     }
 
-    /// A member two epics claim carries one membership label per epic, and
-    /// the blocked reading wins a status disagreement — a member one epic
-    /// can start but another cannot is, in truth, not startable.
+    fn folded(
+        pairs: &[(&EpicRecord, &EpicSnapshot)],
+    ) -> HashMap<WorkspaceKey, Option<&'static str>> {
+        let mut out = HashMap::new();
+        for (record, snapshot) in pairs {
+            fold_status_labels(record, snapshot, &mut out);
+        }
+        out
+    }
+
+    /// The status label is opt-in per epic; membership is never projected.
     #[test]
-    fn two_epics_union_membership_and_blocked_wins() {
+    fn status_label_is_opt_in_per_epic() {
         let mut blocker = ws("blocker");
         blocker.gh_issues = vec![task("github", "o/r#1")];
         let mut member = ws("m");
@@ -3303,27 +3394,126 @@ mod tests {
         }];
         member.gh_issues = vec![mt];
         let workspaces = vec![blocker, member];
+        let mut record = record_with(&["blocker", "m"]);
+        let key = WorkspaceKey::new("m");
 
-        let mut ready = EpicRecord::new(EpicKey::new("ready-epic"), "Ready", epoch());
-        ready.members = vec![WorkspaceKey::new("m")];
-        ready.publish_status_labels = true;
-        let ready_snap = resolve_fresh(&ready, &workspaces);
+        let snap = resolve_fresh(&record, &workspaces);
+        assert_eq!(folded(&[(&record, &snap)])[&key], None);
 
-        let mut blocked = EpicRecord::new(EpicKey::new("blocked-epic"), "Blocked", epoch());
-        blocked.members = vec![WorkspaceKey::new("blocker"), WorkspaceKey::new("m")];
-        blocked.publish_status_labels = true;
-        let blocked_snap = resolve_fresh(&blocked, &workspaces);
+        record.publish_status_labels = true;
+        let snap = resolve_fresh(&record, &workspaces);
+        assert_eq!(folded(&[(&record, &snap)])[&key], Some("lazybox:blocked"));
+    }
 
-        let desired = desired_labels(&[(&ready, &ready_snap), (&blocked, &blocked_snap)]);
-        let m = &desired[&WorkspaceKey::new("m")];
+    /// A snapshot naming one member at one status — enough to exercise the
+    /// cross-epic fold without needing the resolver to disagree with itself.
+    fn snapshot_of(key: &str, member: &str, status: EpicMemberStatus) -> EpicSnapshot {
+        EpicSnapshot {
+            key: key.into(),
+            name: key.into(),
+            members: vec![EpicMember {
+                key: WorkspaceKey::new(member),
+                wave: 0,
+                status,
+                blocked_by: vec![],
+                external_blockers: vec![],
+                blockers: vec![],
+                blocked_reason: None,
+            }],
+            done: 0,
+            total: 1,
+            ready: 0,
+            blocked: 0,
+            asking: 0,
+            failing: 0,
+            blockers_needing_operator: 0,
+            cycle: false,
+            critical_path: vec![],
+            edges: vec![],
+            merge_order: vec![],
+            policies: Default::default(),
+            computed_at: 0,
+        }
+    }
+
+    /// A member two epics claim resolves to one label, and the blocked
+    /// reading wins — a member one epic can start but another cannot is, in
+    /// truth, not startable. Order-independent.
+    #[test]
+    fn blocked_wins_across_epics_in_either_order() {
+        let mut a = EpicRecord::new(EpicKey::new("a"), "A", epoch());
+        a.publish_status_labels = true;
+        let mut b = EpicRecord::new(EpicKey::new("b"), "B", epoch());
+        b.publish_status_labels = true;
+        let done = snapshot_of("a", "m", EpicMemberStatus::Done);
+        let blocked = snapshot_of("b", "m", EpicMemberStatus::Blocked);
+        let key = WorkspaceKey::new("m");
+
         assert_eq!(
-            m.epics,
-            vec![
-                "epic:blocked-epic".to_string(),
-                "epic:ready-epic".to_string()
-            ]
+            folded(&[(&a, &done), (&b, &blocked)])[&key],
+            Some("lazybox:blocked")
         );
-        assert_eq!(m.status.as_deref(), Some("lazybox:blocked"));
+        assert_eq!(
+            folded(&[(&b, &blocked), (&a, &done)])[&key],
+            Some("lazybox:blocked")
+        );
+    }
+
+    /// An epic that has not opted in contributes nothing, even when it is
+    /// the one reporting `Blocked`.
+    #[test]
+    fn an_opted_out_epic_contributes_no_status() {
+        let mut a = EpicRecord::new(EpicKey::new("a"), "A", epoch());
+        a.publish_status_labels = true;
+        let b = EpicRecord::new(EpicKey::new("b"), "B", epoch()); // opted out
+        let done = snapshot_of("a", "m", EpicMemberStatus::Done);
+        let blocked = snapshot_of("b", "m", EpicMemberStatus::Blocked);
+        assert_eq!(
+            folded(&[(&a, &done), (&b, &blocked)])[&WorkspaceKey::new("m")],
+            Some("lazybox:done")
+        );
+    }
+
+    /// Every member of a live epic appears in the fold — including one that
+    /// projects no label. `project_labels` latches on this map, so a member
+    /// missing from it would be reconsidered on every recompute forever.
+    #[test]
+    fn every_member_is_present_even_with_no_label() {
+        let mut a = EpicRecord::new(EpicKey::new("a"), "A", epoch());
+        a.publish_status_labels = true;
+        let ready = snapshot_of("a", "m", EpicMemberStatus::Ready);
+        let out = folded(&[(&a, &ready)]);
+        assert_eq!(out.get(&WorkspaceKey::new("m")), Some(&None));
+    }
+
+    /// Unassigning a member has to actually remove it. The `epic:<key>`
+    /// label is a membership *input*, so if the projection also wrote it the
+    /// member would re-assert its own membership and could never leave —
+    /// this pins that lazybox never writes that family.
+    #[test]
+    fn unassign_is_not_undone_by_a_label_lazybox_wrote() {
+        let mut member = ws("m");
+        member.gh_issues = vec![task("github", "o/r#2")];
+        let workspaces = vec![member];
+        let mut record = record_with(&["m"]);
+        record.publish_status_labels = true;
+
+        // Assigned: a member, and the projection asks for no membership
+        // label — only a status one may ever be written.
+        let snap = resolve_fresh(&record, &workspaces);
+        assert_eq!(snap.total, 1);
+        for want in folded(&[(&record, &snap)]).values() {
+            assert!(
+                want.is_none_or(|l| lazybox_core::STATUS_LABELS.contains(&l)),
+                "only status labels may be projected, got {want:?}"
+            );
+        }
+
+        // Unassigned: no label was written, so nothing re-asserts membership
+        // and the member is gone.
+        record.members.clear();
+        let snap = resolve_fresh(&record, &workspaces);
+        assert_eq!(snap.total, 0, "unassign must actually remove the member");
     }
 
     #[test]

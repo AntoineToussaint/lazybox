@@ -419,23 +419,50 @@ work each holds with operator-owned rows leading, the ready queue ranked by
 how many members each unblocks, the merge order with held rows flagged, the
 critical path, and the per-repo rollup.
 
-The label projection (§4j) closes the same phase. `EpicRecord::publish_status_labels`
-finally has a reader: `epics::desired_labels` computes, from the snapshots of
-every live epic in one pass, the `epic:<key>` membership label per member plus
-the single derived-status label, and `sync_epic_labels` converges both
-families through add/remove so working claims, roles and user labels are never
-touched. Only the three coarse buckets are written (`Ready` → `lazybox:ready`,
-`Blocked`/`ReviewBlocked` → `lazybox:blocked`, `Done` → `lazybox:done`); the
-in-between statuses name no label, so a CI tick cannot churn the tracker. A
-member two epics claim carries one membership label per epic, and the
-*blocked* reading wins a status disagreement — a member one epic can start but
-another cannot is, in truth, not startable. An in-memory latch of what was
-last written per member keeps a quiet poll at zero API calls, and is updated
-only on a successful write, so a failure retries on the next pass that touches
-that member. The `epic:<key>` label is also now read as the third membership
-source, so a human or a planner can add a member from GitHub alone — a
-membership hint only, never an input to the resolver, so a stale label from a
-dead daemon can add a row but can never freeze what that row reports.
+The label projection (§4j) closes the same phase, with **two deliberate
+deviations from that section's table**, both forced by the code as it stands.
+
+*`epic:<key>` is read, never written.* §4j lists it as "read **and** written",
+but the two directions cannot coexist without persistent provenance: the label
+is a membership *input* (`resolved_graph`), so a label lazybox wrote
+re-asserts the membership that produced it. An `unassign` would drop the
+member from `EpicRecord::members`, the next resolve would re-derive it from
+the label lazybox itself had written, and the member could never leave —
+intermittently, too, since it only bites once a poll has refreshed the row's
+labels. lazybox therefore never writes or detaches anything in that
+namespace. A human or a planner adding `epic:<key>` by hand still works, and
+is the only way a label gets there; nothing lazybox does can destroy an
+`epic:*` label somebody else is using for their own coordination.
+
+*Only `Blocked` and `Done` project a status label.* §4j lists
+`lazybox:ready` too, but `member_status` returns `Ready` for a member whose
+local agent is merely idle — the `Claimed` arm is gated on `agent.is_none()`
+— so an agent working a member oscillates `InProgress` ⇄ `Ready` on every
+turn boundary. Projecting `Ready` would turn each of those into an
+attach/detach pair, dozens of tracker mutations a minute on a busy member.
+`Blocked` is graph- and declaration-driven and `Done` is terminal, so both
+are stable, and the absence of a label already reads as "not blocked, not
+finished".
+
+What does ship: `EpicRecord::publish_status_labels` finally has a reader.
+`fold_status_labels` accumulates, across every live epic in one pass, the one
+status label each member should hold — the *blocked* reading winning a
+disagreement, since a member one epic can start but another cannot is not
+startable — and `sync_epic_status_label` converges it through add/remove,
+scoped strictly to the three names in `STATUS_LABELS`, so working claims,
+roles and user labels are untouched. Every member is latched once resolved,
+including one with no GitHub task to carry a label: latching only the
+successful *writes* would leave a local Coordinator or a Linear-tracked
+member permanently "changed" and re-run the projection on every debounced
+recompute forever. The latch is claimed *before* the write and rolled back if
+it fails, because `recompute_all` is reachable concurrently — the bus loop
+and every mutating MCP tool call it — so an unclaimed window is two
+overlapping passes issuing the same mutation twice.
+
+An epic that stops being live now says so. `Event::EpicGone` fires for a
+record that was archived or deleted; without it a client's cached snapshot is
+never invalidated, and the sidebar keeps rendering a dead epic — and keeps
+its members lifted out of their repo groups — until the process restarts.
 
 Still deferred, and deliberately: the overview's inline ASCII DAG (`E g`
 already renders the graph full-screen, and a second layout engine in the pane

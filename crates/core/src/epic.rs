@@ -45,18 +45,11 @@ impl EpicKey {
         Self(s.into())
     }
 
-    /// The upstream membership label for this epic (`epic:auth-refactor`) —
-    /// the write side of [`EpicKey::from_project_label`].
+    /// The membership label that names this epic (`epic:auth-refactor`).
+    /// Matched against a task's labels to admit a member; lazybox never
+    /// writes it, so this is the read side only.
     pub fn project_label(&self) -> String {
         format!("{EPIC_LABEL_PREFIX}{}", self.0)
-    }
-
-    /// Parse an epic key out of an `epic:<key>` membership label. `None` for
-    /// any name without the prefix or with an empty remainder.
-    pub fn from_project_label(name: &str) -> Option<Self> {
-        name.strip_prefix(EPIC_LABEL_PREFIX)
-            .filter(|rest| !rest.is_empty())
-            .map(Self::new)
     }
 
     pub fn as_str(&self) -> &str {
@@ -165,13 +158,11 @@ mod tests {
     }
 
     #[test]
-    fn project_label_round_trips() {
-        let key = EpicKey::new("auth-refactor");
-        assert_eq!(key.project_label(), "epic:auth-refactor");
-        assert_eq!(EpicKey::from_project_label("epic:auth-refactor"), Some(key));
-        assert_eq!(EpicKey::from_project_label("epic:"), None);
-        assert_eq!(EpicKey::from_project_label("working"), None);
-        assert_eq!(EpicKey::from_project_label("role:worker"), None);
+    fn project_label_names_the_epic() {
+        assert_eq!(
+            EpicKey::new("auth-refactor").project_label(),
+            "epic:auth-refactor"
+        );
     }
 
     #[test]

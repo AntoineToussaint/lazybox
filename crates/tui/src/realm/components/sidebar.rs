@@ -686,6 +686,11 @@ impl Sidebar {
         self.inner.set_epic_snapshot(snapshot);
     }
 
+    /// See `Sidebar::forget_epic` — drop an archived / deleted epic (#1517).
+    pub fn forget_epic(&mut self, key: &str) {
+        self.inner.forget_epic(key);
+    }
+
     /// See `Sidebar::toggle_epic_at_cursor` — fold / unfold the epic tier
     /// under the cursor (#1517).
     pub fn toggle_epic_at_cursor(&mut self) -> bool {

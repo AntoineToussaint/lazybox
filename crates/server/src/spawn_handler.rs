@@ -2396,10 +2396,13 @@ async fn handle_spawn_inner(
                 let Some(chunk) = chunk else {
                     break;
                 };
-                // `subscribe` subscribes before snapshotting, so a live
-                // chunk already covered by the replay (seq within the
-                // snapshot's high-water mark) must be dropped to avoid
-                // re-feeding the detector and re-emitting bytes. Batch
+                // A live chunk already covered by the replay (seq within
+                // the current high-water mark) must be dropped to avoid
+                // re-feeding the detector and re-emitting bytes. A fresh
+                // `subscribe` cuts the stream atomically and never
+                // overlaps, but a mid-stream resync below re-seeds
+                // `last_seq` from a `snapshot_only` taken while this
+                // receiver already held chunks under it. Batch
                 // accounting still counts it as received; the normal path
                 // folds that accounting into its one-lock chunk context
                 // (#1256 P0-2) while these early-exit branches note it

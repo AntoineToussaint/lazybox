@@ -520,7 +520,18 @@ pub fn plan(body: &[u8], policy: &ContextHygiene, tag: &CondenseTag) -> Option<P
 /// Condense one block: keep its head and its tail, say what was elided.
 /// Pure, so the same block renders the same bytes on every later turn.
 /// `None` when the result would not be meaningfully smaller.
-fn condense(text: &str, kind: &CondenseKind, lines: usize, tag: &CondenseTag) -> Option<String> {
+///
+/// Shared with the `PreToolUse` large-read intercept (#1610), which condenses
+/// a file before the read happens rather than a tool result after it. Both
+/// enforcement points render through this one function so identical input
+/// yields identical bytes — forking it is exactly the drift the epic exists
+/// to prevent.
+pub(crate) fn condense(
+    text: &str,
+    kind: &CondenseKind,
+    lines: usize,
+    tag: &CondenseTag,
+) -> Option<String> {
     if lines <= KEEP_HEAD_LINES + KEEP_TAIL_LINES {
         return None;
     }

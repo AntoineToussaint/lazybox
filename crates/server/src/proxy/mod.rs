@@ -25,7 +25,7 @@
 //! why it ships in `shadow` — deciding and logging, changing nothing — and
 //! why the rewrite carries its own kill switch.
 
-mod compaction;
+pub(crate) mod compaction;
 mod quota_parse;
 mod usage_parse;
 

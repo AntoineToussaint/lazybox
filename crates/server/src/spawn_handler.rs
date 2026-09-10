@@ -6117,12 +6117,20 @@ pub(crate) async fn terminal_for_backend_key(
 
 /// Whether `workspace` opted into metering — the per-workspace `$ meter`
 /// canary, its source's Space (`agent.metered_spaces`), or the blanket
-/// `agent.meter_all`, all only meaningful while the proxy is enabled. This is
-/// the same opt-in the spawn path routes on, and the context-hygiene
-/// enforcement points (#1611) reuse it as their per-workspace switch: both
-/// condense through the agent's own upstream, which only a proxied session
-/// has. A remote workspace is never metered — the injected loopback base URL
-/// names this host, not the box.
+/// `agent.meter_all`, all only meaningful while the proxy is enabled. A
+/// remote workspace is never metered: the injected loopback base URL names
+/// this host, not the box.
+///
+/// The per-workspace switch for the context-hygiene enforcement points
+/// (#1611), which scope themselves to proxied sessions — the compactor only
+/// ever sees those, so the hook intercept must not act where it wouldn't.
+///
+/// This states the routing decision in ONE expression. The spawn path reaches
+/// the same answer across two places — `spawn_terminal` folds the canary and
+/// the Space, `gateway_injection_for_agent` applies `metering_proxy` /
+/// `meter_all` — and is deliberately left alone here: it decides *whether to
+/// inject a base URL*, which has ordering constraints this predicate does
+/// not. Same inputs, same result; not a shared call site.
 pub(crate) fn workspace_is_metered(cfg: &lazybox_config::Config, workspace: &Workspace) -> bool {
     cfg.agent.metering_proxy
         && workspace.remote.is_none()

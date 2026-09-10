@@ -215,16 +215,52 @@ async fn ingest_hook_inner(args: &[String]) {
 /// daemon therefore costs one bounded pause, never a stalled turn.
 const DECISION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
-/// Deadline override, for tests only. 200 ms is generous for a local socket
-/// but not for a test box already running a fleet of agents, where process
-/// spawn plus handshake can outrun it — and a deny test that times out passes
-/// vacuously, since a timeout also prints nothing.
+/// Ceiling on the deadline override. The override exists because 200 ms is
+/// generous for a local socket but not for a test box already running a fleet
+/// of agents, where process spawn plus handshake can outrun it — and a deny
+/// test that times out passes vacuously, since a timeout also prints nothing.
+/// It is clamped because it is read from the environment of a process that
+/// blocks an agent's turn: an unclamped value turns every full-file read into
+/// a multi-second stall, which is worse than the feature being off.
+const MAX_DECISION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 fn decision_deadline() -> std::time::Duration {
     std::env::var("LAZYBOX_HOOK_DECISION_TIMEOUT_MS")
         .ok()
-        .and_then(|raw| raw.parse().ok())
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
         .map(std::time::Duration::from_millis)
+        .map(|requested| requested.min(MAX_DECISION_TIMEOUT))
         .unwrap_or(DECISION_TIMEOUT)
+}
+
+#[cfg(test)]
+mod decision_deadline_tests {
+    use super::*;
+
+    /// The override is clamped and validated: garbage, zero, and an absurd
+    /// value all resolve to something an agent's turn can survive.
+    #[test]
+    fn the_deadline_override_is_clamped() {
+        assert_eq!(
+            clamp_override(Some("50")),
+            std::time::Duration::from_millis(50)
+        );
+        assert_eq!(clamp_override(Some("999999999")), MAX_DECISION_TIMEOUT);
+        assert_eq!(clamp_override(Some("0")), DECISION_TIMEOUT);
+        assert_eq!(clamp_override(Some("nonsense")), DECISION_TIMEOUT);
+        assert_eq!(clamp_override(None), DECISION_TIMEOUT);
+    }
+
+    /// The pure half of `decision_deadline`, so the test never mutates the
+    /// process environment (which other tests in this binary read).
+    fn clamp_override(raw: Option<&str>) -> std::time::Duration {
+        raw.and_then(|raw| raw.parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .map(std::time::Duration::from_millis)
+            .map(|requested| requested.min(MAX_DECISION_TIMEOUT))
+            .unwrap_or(DECISION_TIMEOUT)
+    }
 }
 
 /// The intercept candidate in this payload, or `None` when the daemon must
@@ -238,8 +274,10 @@ fn decision_deadline() -> std::time::Duration {
 fn intercept_request(payload: &str) -> Option<lazybox_ipc::ToolUseRequest> {
     let request = lazybox_agents::hook::read_intercept_candidate(payload)?;
     let config = lazybox_config::Config::load().ok()?;
-    let policy = &config.agent.context_hygiene;
-    (policy.hook_intercept && policy.mode.rewrites()).then_some(request)
+    // The daemon re-checks this; sharing the predicate rather than restating
+    // it is what stops the two copies drifting, and this copy has veto power
+    // (a round-trip it declines is a decision the daemon never makes).
+    crate::read_intercept::armed(&config.agent.context_hygiene).then_some(request)
 }
 
 /// Send the hook's state signal and its decision request on one connection,

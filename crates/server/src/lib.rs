@@ -109,6 +109,8 @@ pub mod client_kv;
 pub mod client_runtime;
 pub mod codex_home_migration;
 pub mod codex_quota;
+pub mod condense;
+pub mod context_tag;
 pub mod epics;
 pub mod error_inbox;
 pub mod event_forward;
@@ -138,6 +140,7 @@ pub mod polling;
 pub mod pr_trailers;
 pub mod proxy;
 pub mod pty;
+pub mod read_intercept;
 pub mod registries;
 mod resource_limits;
 pub mod session_cost;
@@ -541,6 +544,20 @@ pub struct ServerConfig {
     /// worktree removals) so shutdown can wait for them — see
     /// `register_maintenance_latch` / `drain_maintenance_tasks`.
     pub(crate) maintenance_done: Arc<parking_lot::Mutex<Vec<tokio::sync::oneshot::Receiver<()>>>>,
+    /// Token marking condensations this daemon run renders outside the proxy
+    /// — the `PreToolUse` large-read intercept (#1610). Random per run and
+    /// unguessable by file content, for the reason
+    /// [`lazybox_core::context_hygiene::CondenseTag`] documents; constant
+    /// within the run so the same file renders the same bytes every time,
+    /// which is what prompt caching needs. The proxy compactor keeps its own
+    /// per-conversation tag: it rewrites blocks that must stay byte-stable
+    /// across the turns of one conversation, which this layer never does.
+    pub(crate) condense_tag: lazybox_core::context_hygiene::CondenseTag,
+    /// Files the `PreToolUse` intercept has already condensed, per session
+    /// (#1610). The hook has no recency window to honour, so this is what
+    /// keeps a model that genuinely needs a file's bytes from being held off
+    /// it — see [`read_intercept::DeniedReads`].
+    pub(crate) denied_reads: Arc<read_intercept::DeniedReads>,
     /// MCP cross-agent coordination runtime (#1420): the per-session bearer
     /// → `SessionKey` registry the MCP server reads to identify a tool caller,
     /// and the bound endpoint URL set once [`mcp::start`] runs. Shared (Arc)
@@ -698,8 +715,23 @@ impl ServerConfig {
             worktree_ownership_lock: Arc::new(Mutex::new(())),
             provisioning_worktree_claims: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             maintenance_done: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            condense_tag: lazybox_core::context_hygiene::CondenseTag::new(
+                &uuid::Uuid::new_v4().simple().to_string(),
+            ),
+            denied_reads: Arc::new(read_intercept::DeniedReads::default()),
             mcp: Arc::new(mcp::McpRuntime::default()),
         }
+    }
+
+    /// This daemon run's condense tag (see [`ServerConfig::condense_tag`]).
+    pub(crate) fn condense_tag(&self) -> &lazybox_core::context_hygiene::CondenseTag {
+        &self.condense_tag
+    }
+
+    /// Files the read intercept has already condensed this run (see
+    /// [`ServerConfig::denied_reads`]).
+    pub(crate) fn denied_reads(&self) -> &read_intercept::DeniedReads {
+        &self.denied_reads
     }
 
     /// Register a detached maintenance task's completion latch so the
@@ -1066,6 +1098,20 @@ impl Server {
         // manufacture an arbitrarily large structured-event backlog; live
         // recovery uses the bus-lag snapshot and RequestTerminalResync paths.
         let mut subscribed = false;
+        // Set by a connection that asked one question and wants one answer:
+        // `lazybox hook-ingest`'s `PreToolUse` decision round-trip (#1610). It
+        // holds the connection open for its deadline, and forwarding the bus
+        // into it meant serializing every terminal's PTY output to a process
+        // that decodes and discards it, once per full-file read.
+        //
+        // Keyed on the command actually sent, NOT on "never subscribed":
+        // `Subscribe` gates the snapshot, and connections that skip it still
+        // legitimately consume bus events — the structured agent-run clients
+        // (`StartAgentRun` → `AgentRunStarted`/`AgentRunFinished`) do exactly
+        // that. Inferring intent from a missing `Subscribe` cut them off.
+        // Command replies are unaffected either way: `dispatch_command`
+        // writes those straight to `conn.tx`, never via the bus.
+        let mut bus_suppressed = false;
         // Debounce for bus-lag recovery snapshots (2026-08-19 audit,
         // M7): a genuinely slow client lags again WHILE the expensive
         // snapshot builds — lag → rebuild → more lag, a positive
@@ -1145,6 +1191,27 @@ impl Server {
                             continue;
                         }
                         subscribed = true;
+                        bus_suppressed = false;
+                    }
+                    if matches!(&cmd, lazybox_ipc::Command::DecideToolUse { .. }) {
+                        // Suppression is what makes the decision round-trip
+                        // cheap, but it is destructive to a connection that
+                        // wanted the bus: it would silently stop receiving
+                        // events with nothing to attribute it to. A subscriber
+                        // asking for a decision is therefore refused outright
+                        // rather than quietly cut off — `hook-ingest` opens its
+                        // own connection and never subscribes, so nothing
+                        // legitimate takes this path.
+                        if subscribed {
+                            let _ = conn.tx.send(Event::CommandRejected {
+                                command: "DecideToolUse".into(),
+                                message: "a subscribed connection cannot ask for a tool-use \
+                                          decision; use a dedicated connection"
+                                    .into(),
+                            });
+                            continue;
+                        }
+                        bus_suppressed = true;
                     }
                     // Per-command name at INFO so a stalled IPC channel is
                     // visible at a glance — historically we'd see `daemon
@@ -1158,6 +1225,7 @@ impl Server {
                         lazybox_ipc::Command::CancelSpawn { .. } => "CancelSpawn",
                         lazybox_ipc::Command::Close { .. } => "Close",
                         lazybox_ipc::Command::IngestHook { .. } => "IngestHook",
+                        lazybox_ipc::Command::DecideToolUse { .. } => "DecideToolUse",
                         lazybox_ipc::Command::CreateSession { .. } => "CreateSession",
                         lazybox_ipc::Command::Subscribe => "Subscribe",
                         lazybox_ipc::Command::Refresh => "Refresh",
@@ -1404,9 +1472,22 @@ impl Server {
                     }
                 }
                 bus = bus_rx.recv() => {
+                    // `bus_rx` is drained either way, so a suppressed
+                    // connection never makes the broadcast channel report it
+                    // as lagging — only the forwarding is skipped.
                     match bus {
                         Ok(evt) => {
-                            let _ = conn.tx.send(evt);
+                            if !bus_suppressed {
+                                let _ = conn.tx.send(evt);
+                            }
+                        }
+                        // A suppressed connection has no stream to heal: it
+                        // never took a snapshot to fall behind.
+                        Err(broadcast::error::RecvError::Lagged(n)) if bus_suppressed => {
+                            tracing::debug!(
+                                lagged = n,
+                                "request/response connection lagged the bus — nothing to recover"
+                            );
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             // Slow client missed `n` events — possibly
@@ -2069,6 +2150,20 @@ pub async fn dispatch_command(
             backend_key,
         } => {
             spawn_handler::handle_ingest_hook(config, terminal_id, backend_key, hook).await;
+        }
+        lazybox_ipc::Command::DecideToolUse {
+            backend_key,
+            request,
+            client_request_id,
+        } => {
+            read_intercept::handle_decide_tool_use(
+                config,
+                tx,
+                backend_key,
+                request,
+                client_request_id,
+            )
+            .await;
         }
         lazybox_ipc::Command::StartAgentRun {
             request_id,

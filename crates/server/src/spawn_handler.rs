@@ -6204,7 +6204,42 @@ fn workspace_in_metered_space(cfg: &lazybox_config::Config, workspace: &Workspac
         .unwrap_or(false)
 }
 
-fn load_workspace(
+/// Reverse-resolve the stable backend session key an agent's hook command
+/// carries to the live terminal it names. `None` when nothing matches — a
+/// terminal from a previous process, or one already finishing.
+pub(crate) async fn terminal_for_backend_key(
+    config: &ServerConfig,
+    backend_key: &str,
+) -> Option<TerminalId> {
+    let entries = config.terminal.lock_entries().await;
+    entries.iter().find_map(|(id, entry)| {
+        (!entry.finishing && entry.backend_key.as_deref() == Some(backend_key)).then_some(*id)
+    })
+}
+
+/// Whether `workspace` opted into metering — the per-workspace `$ meter`
+/// canary, its source's Space (`agent.metered_spaces`), or the blanket
+/// `agent.meter_all`, all only meaningful while the proxy is enabled. A
+/// remote workspace is never metered: the injected loopback base URL names
+/// this host, not the box.
+///
+/// The per-workspace switch for the context-hygiene enforcement points
+/// (#1611), which scope themselves to proxied sessions — the compactor only
+/// ever sees those, so the hook intercept must not act where it wouldn't.
+///
+/// This states the routing decision in ONE expression. The spawn path reaches
+/// the same answer across two places — `spawn_terminal` folds the canary and
+/// the Space, `gateway_injection_for_agent` applies `metering_proxy` /
+/// `meter_all` — and is deliberately left alone here: it decides *whether to
+/// inject a base URL*, which has ordering constraints this predicate does
+/// not. Same inputs, same result; not a shared call site.
+pub(crate) fn workspace_is_metered(cfg: &lazybox_config::Config, workspace: &Workspace) -> bool {
+    cfg.agent.metering_proxy
+        && workspace.remote.is_none()
+        && (cfg.agent.meter_all || workspace.metered || workspace_in_metered_space(cfg, workspace))
+}
+
+pub(crate) fn load_workspace(
     config: &ServerConfig,
     key: &WorkspaceKey,
 ) -> Result<Workspace, crate::ServerError> {
@@ -9492,27 +9527,13 @@ pub async fn handle_ingest_hook(
             return;
         }
     };
-    let terminal_id = match backend_key.as_deref() {
-        Some(key) => {
-            let resolved = {
-                let entries = config.terminal.lock_entries().await;
-                entries.iter().find_map(|(id, entry)| {
-                    (!entry.finishing && entry.backend_key.as_deref() == Some(key)).then_some(*id)
-                })
-            };
-            match resolved {
-                Some(id) => id,
-                None => {
-                    tracing::debug!(
-                        backend_key = %key,
-                        kind = ?hook.kind,
-                        "hook for unknown backend key, dropping"
-                    );
-                    return;
-                }
-            }
-        }
-        None => unreachable!("backend key was checked above"),
+    let Some(terminal_id) = terminal_for_backend_key(config, &resolved_backend_key).await else {
+        tracing::debug!(
+            backend_key = %resolved_backend_key,
+            kind = ?hook.kind,
+            "hook for unknown backend key, dropping"
+        );
+        return;
     };
     // Resolve the workspace; a terminal mid-teardown (terminals entry
     // resolved but meta already swept) is dropped without marking
@@ -19238,12 +19259,18 @@ mod tests {
     fn hook_probe_does_not_deadlock_on_a_candidate_that_floods_stdout() {
         let directory = tempfile::tempdir().expect("tempdir");
         let noisy = directory.path().join("lazybox");
-        // 4096 × 64 B = 256 KB, comfortably past the 64 KB pipe buffer.
+        // 64 × 4 KiB = 256 KB, comfortably past the 64 KB pipe buffer. The
+        // flood is written in a few long lines rather than thousands of short
+        // ones on purpose: what is being timed is whether the reader drains
+        // the pipe, so the shell's own per-iteration cost has to stay far
+        // below the deadline. Four thousand iterations put it within noise of
+        // the bound on a loaded machine, and this test then blamed a block
+        // that had not happened.
         write_fake_exe(
             &noisy,
             &format!(
-                "#!/bin/sh\ni=0\nwhile [ $i -lt 4096 ]; do\n  echo \"{}\"\n  i=$((i + 1))\ndone\necho {}\n",
-                "x".repeat(63),
+                "#!/bin/sh\ni=0\nwhile [ $i -lt 64 ]; do\n  echo \"{}\"\n  i=$((i + 1))\ndone\necho {}\n",
+                "x".repeat(4095),
                 HOOK_HELPER_PROBE_RESPONSE
             ),
         );

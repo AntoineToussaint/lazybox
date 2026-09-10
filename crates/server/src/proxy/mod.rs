@@ -22,7 +22,15 @@
 //! body. The proxy is otherwise transparent — it copies auth headers
 //! through untouched and never buffers a streaming response, so the
 //! agent's own credentials and incremental output are unaffected.
+//!
+//! One exception, and it is deliberate: with `agent.context_hygiene.mode`
+//! set to `on`, the [`Compactor`] rewrites old, large tool results out of the
+//! request body before it is forwarded (#1609). That makes the proxy
+//! load-bearing for correctness rather than only for accounting, which is
+//! why it ships in `shadow` — deciding and logging, changing nothing — and
+//! why the rewrite carries its own kill switch.
 
+pub(crate) mod compaction;
 mod context_parse;
 mod quota_parse;
 mod usage_parse;
@@ -43,6 +51,7 @@ use lazybox_agents::LlmProvider;
 use lazybox_ipc::{AgentUsage, ProviderQuota};
 use tokio::net::{TcpListener, TcpStream};
 
+pub use compaction::{Compactor, NoticeSink, PolicySource};
 pub use usage_parse::UsageAccumulator;
 
 /// The loopback port the running proxy bound, published once at startup so
@@ -303,13 +312,15 @@ struct ProxyState {
     /// Per-model price overrides (`agent.pricing`), layered over the built-in
     /// rate card when pricing a response's tokens.
     prices: usage_parse::PriceOverrides,
+    /// The context-hygiene pass over request bodies (#1609). Also the single
+    /// source of the line floor above which a tool result counts as large
+    /// (`agent.context_hygiene.min_lines`), for the instrumentation below —
+    /// two copies of that number would drift the moment the policy changed.
+    compactor: Arc<Compactor>,
     /// Tool-result blocks each session has already sent, so a repeat is
     /// recognizable as a re-send (#1606). Bounded per session and across
     /// sessions.
     seen_blocks: std::sync::Mutex<context_parse::SeenStore>,
-    /// Line count above which a tool result counts as large
-    /// (`agent.context_hygiene.min_lines`).
-    large_tool_result_lines: usize,
 }
 
 /// Start the metering proxy when `agent.metering_proxy` is on: bind a
@@ -375,18 +386,25 @@ pub async fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHand
 
     let prices: usage_parse::PriceOverrides = Arc::new(cfg.agent.pricing.clone());
 
+    let notice_bus = config.bus.clone();
+    let notice: NoticeSink = Arc::new(move |title: String, body: String| {
+        let _ = notice_bus.send(lazybox_ipc::Event::Notification { title, body });
+    });
+    // The policy is read per request, not captured here: the `PreToolUse`
+    // hook resolves it live on every decision, and a snapshot taken at spawn
+    // would leave the two enforcement points disagreeing about `mode` for the
+    // rest of the daemon's life after any config edit (#1611). The line floor
+    // the instrumentation uses rides the same source, so "large" still means
+    // one thing.
+    let compactor = Arc::new(Compactor::live(
+        prices.clone(),
+        notice,
+        crate::context_tag::TagSource::load(config).await,
+    ));
+
     tracing::info!("metering proxy listening on 127.0.0.1:{port}");
     Some(tokio::spawn(serve(
-        listener,
-        upstreams,
-        sink,
-        quota_sink,
-        prices,
-        // The line floor comes from the shared context-hygiene policy
-        // (#1611), which is also what the compaction pass gates its rewrite
-        // on — so "large" means one thing, and the count of candidates can't
-        // drift from the set that gets rewritten.
-        cfg.agent.context_hygiene.min_lines,
+        listener, upstreams, sink, quota_sink, prices, compactor,
     )))
 }
 
@@ -404,7 +422,7 @@ pub async fn serve(
     sink: UsageSink,
     quota_sink: QuotaSink,
     prices: usage_parse::PriceOverrides,
-    large_tool_result_lines: usize,
+    compactor: Arc<Compactor>,
 ) {
     let state = Arc::new(ProxyState {
         client: reqwest::Client::new(),
@@ -412,8 +430,8 @@ pub async fn serve(
         sink,
         quota_sink,
         prices,
+        compactor,
         seen_blocks: std::sync::Mutex::new(context_parse::SeenStore::default()),
-        large_tool_result_lines,
     });
     loop {
         let (stream, _) = match listener.accept().await {
@@ -553,7 +571,20 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
     // folded into the session's seen-set at the far end, together with the
     // usage report, so that only a *billed* request consumes a block's first
     // send — see the fold below.
-    let measured = context_parse::measure(&body_bytes, state.large_tool_result_lines);
+    //
+    // This must stay *above* the compaction rewrite below: `rewrite` rebinds
+    // `body_bytes` to lazybox's own output. Measuring afterwards would both
+    // report the proxy's rewrite as the conversation the agent sent, and give
+    // a condensed block a new identity the turn it is rewritten — reading its
+    // re-send as a first send. Measuring first keeps the accounting
+    // independent of whether the compactor fired.
+    let measured = context_parse::measure(&body_bytes, state.compactor.min_lines());
+
+    // The one place the proxy is not transparent: old, large tool results
+    // are condensed before the expensive model ever sees them (#1609).
+    // `off` and `shadow` hand the original bytes straight back.
+    let compacted = state.compactor.rewrite(&session, &agent_id, body_bytes);
+    let body_bytes = compacted.body;
 
     let upstream = state
         .client
@@ -608,7 +639,7 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
         (
             upstream.bytes_stream(),
             accumulator,
-            Some((state, sink, agent_id, session, measured)),
+            Some((state, sink, agent_id, session, measured, compacted.measured)),
         ),
         |(mut bytes, mut acc, mut pending)| async move {
             match bytes.next().await {
@@ -621,7 +652,7 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
                     Some((Err(BoxErr::from(error)), (bytes, acc, pending)))
                 }
                 None => {
-                    if let Some((state, sink, agent_id, session, measured)) = pending.take()
+                    if let Some((state, sink, agent_id, session, measured, judged)) = pending.take()
                         && let Some(mut usage) = acc.finish()
                     {
                         // Fold the request's blocks into the session's
@@ -640,6 +671,9 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
                             measured.against(store.entry(&format!("{agent_id}/{session}")))
                         });
+                        state
+                            .compactor
+                            .observe_usage(&session, &agent_id, &usage, judged);
                         sink(&agent_id, &session, usage);
                     }
                     None

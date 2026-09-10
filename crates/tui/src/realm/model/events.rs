@@ -1334,6 +1334,10 @@ impl<T: TerminalAdapter> Model<T> {
                 // function; there is nothing to patch here.
                 | IpcEvent::EpicStatus { .. }
                 | IpcEvent::EpicGone { .. }
+                // The `PreToolUse` decision (#1610) answers the hook helper that
+                // asked for it, on its own short-lived connection; it reaches the
+                // TUI only as bus traffic and has no UI.
+                | IpcEvent::ToolUseDecided { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -2414,6 +2418,10 @@ impl<T: TerminalAdapter> Model<T> {
             // Epic status (#1522) is a derived-status push, not a sync attempt.
             | IpcEvent::EpicStatus { .. }
             | IpcEvent::EpicGone { .. }
+            // The `PreToolUse` decision (#1610) answers the hook helper that
+            // asked for it, on its own short-lived connection; it reaches the
+            // TUI only as bus traffic and has no UI.
+            | IpcEvent::ToolUseDecided { .. }
             | IpcEvent::ResourcePosture(..) => {}
         }
         // Keep the empty-inbox doctor's sync facts (polled-ok /
@@ -2754,6 +2762,10 @@ impl<T: TerminalAdapter> Model<T> {
                 // semantics — it is a derived push, consumed earlier.
                 | IpcEvent::EpicStatus { .. }
                 | IpcEvent::EpicGone { .. }
+                // The `PreToolUse` decision (#1610) answers the hook helper that
+                // asked for it, on its own short-lived connection; it reaches the
+                // TUI only as bus traffic and has no UI.
+                | IpcEvent::ToolUseDecided { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }

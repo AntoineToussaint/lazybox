@@ -138,8 +138,18 @@ invalidates the cached prefix and *costs more than it saves*. Three properties
 hold the line:
 
 - *Monotone.* A block is condensed on turn *k* and byte-identical on every turn
-  after. It is never un-condensed, and never re-condensed — `is_condensed()`
-  makes our own output ineligible, so the rewrite is idempotent.
+  after. It is never un-condensed, and never re-condensed. Two mechanisms hold
+  that, and it is worth being precise about which does what, because they have
+  different reach. `is_condensed()` makes our own output ineligible — but only
+  within one *(daemon run, session)* pair, since the tag is drawn per session in
+  the proxy and per run for the hook. Across a daemon restart, or between the
+  two enforcement points, a condensed block is *not* recognized. What stops it
+  being condensed a second time there is the saving floor: re-condensing an
+  already-condensed block keeps 41 of its ~42 lines, saves ~2%, and
+  `MIN_SAVED_FRACTION` refuses it. Recognition is the fast path; the floor is
+  the guarantee. Neither may be removed on the assumption that the other is
+  decoration — `a_block_condensed_under_another_tag_is_still_not_recondensed`
+  pins the floor specifically.
 - *Byte-stable rendering.* `render_condensed` is a pure function of its
   arguments, and the cached summary behind it is content-addressed, so the same
   block renders identically from either enforcement point forever. It returns
@@ -178,10 +188,18 @@ file's summary under another file's header — and the inputs here are unbounded
 tool output, not the small closed set of snippet bodies. Length prefixes mean no
 field's content can impersonate a boundary and forge another entry's key.
 
-Entries live in the store kv under `condense:`, not in memory, because agent
-processes survive a daemon restart and keep sending the same blocks. Both
-enforcement points read and write that one space, so a file condensed by the hook
-is never re-condensed by the proxy.
+Entries are to live in the store kv under `condense:`, not in memory, because
+agent processes survive a daemon restart and keep sending the same blocks. Both
+enforcement points will read and write that one space, so a file condensed by
+the hook is not re-condensed by the proxy.
+
+**That cache ships with #1608 and is not in the tree yet.** #1609 and #1610
+condense by keeping a block's head and tail, with no model call and no cache
+between them, so `cache_key` / `cache_kv_key` / `KV_PREFIX_CONDENSE`,
+`condense_model` and `condense_timeout_ms` are the contract #1608 fills in, not
+live code paths. Until then the two enforcement points do not share an entry
+and cannot recognize each other's markers — the saving floor described above is
+what keeps that from double-summarizing anything.
 
 The cache holds the **summary**, not the rendered block, because the rendered
 block carries a per-session tag (below) while the summary does not — which is
@@ -201,6 +219,43 @@ bytes stay stable across turns; across sessions it differs, which is why it is
 not part of the cache key. This closes the structural hole — lazybox no longer
 acts on forged markers — but it cannot stop a model from believing a
 plausible-looking line it reads in a file, which no marker scheme can.
+
+In the **proxy** the token is **derived, not drawn**
+(`crates/server/src/context_tag.rs`): one random secret per installation,
+persisted in the store, and `TagSource::tag(session)` a one-way function of it.
+The reason is that "constant within a session" is a stronger claim than it looks.
+The condensed text is never written back to the agent's transcript — the proxy
+rewrites bytes in flight, so every turn re-renders the block from the original,
+under the token. A token drawn per process would therefore re-render every
+already-condensed block differently on the first turn after a daemon restart,
+invalidating exactly the prompt-cache prefix compaction exists to protect.
+
+The **hook** does not share that token. It renders under
+`ServerConfig::condense_tag`, random per daemon run and not persisted (#1610).
+That is sound for byte stability, and for the opposite reason: hook output is
+*durable* — it is written into the transcript once and re-sent verbatim on later
+turns, so it is stable as stored bytes and never re-rendered, which is precisely
+what the proxy cannot rely on.
+
+What the two tokens do cost is **recognition across the enforcement points**. A
+block the hook condensed arrives in the proxy's next request body carrying the
+hook's token, so `is_condensed(text, &proxy_tag)` is false and the proxy sees an
+ordinary tool result. At the shipped `min_lines: 350` nothing follows from that —
+a summary is tens of lines, so it is skipped as `BelowLineFloor`. Lower the floor
+(`min_lines: 20` parses fine) and the proxy will condense lazybox's own summary,
+which is the monotonicity rule this module exists to enforce. Unifying the two is
+tracked separately; it needs the hook side's agreement, not a third token.
+
+Derived means no per-session write on the request path and nothing to lose across
+a restart. Callers do not have to coordinate: the secret is seeded with a
+conditional insert (`Store::set_kv_if_absent`), so concurrent loads — two
+enforcement points in one daemon, or two daemons on one `state.db` — all read
+back the single value that won rather than each keeping the one it proposed.
+
+A load whose store read *fails* is the one case that does not write. An
+unreadable key is not an absent key, and seeding over a secret that merely could
+not be read would replace it permanently, re-rendering every block condensed
+under it. That daemon runs on an ephemeral secret and warns instead.
 
 ## Slices
 

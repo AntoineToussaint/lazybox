@@ -13561,6 +13561,158 @@ mod merge_focus_follow_tests {
         )));
     }
 
+    /// #1636: a bulk `w w` over N rows confirmed once must not then walk
+    /// the user through N provisioning checklists in a row. Every member
+    /// provisions silently behind ONE aggregate footer notice; a member
+    /// that fails names itself and its reason, and the batch summarizes
+    /// when the last one reports.
+    #[test]
+    fn bulk_fanout_reports_one_aggregate_notice_instead_of_a_modal_per_member() {
+        use lazybox_ipc::{
+            SpawnOrigin, TerminalId, TerminalKind, WorktreeStep, WorktreeStepStatus,
+        };
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let keys = seed_and_select(
+            &mut m,
+            vec![
+                workspace("owner/repo#1", true, Duration::hours(1)),
+                workspace("owner/repo#2", true, Duration::hours(2)),
+                workspace("owner/repo#3", true, Duration::hours(3)),
+            ],
+        );
+        assert!(m.dispatch_action(&Action::Work).is_empty());
+        assert_eq!(m.modal_stack.last(), Some(&Id::BulkSpawnConfirm));
+        assert_eq!(m.handle_confirmed(true).len(), 3, "one spawn per row");
+
+        // Every member's provisioning steps land — none may mount a modal.
+        for key in &keys {
+            for step in [WorktreeStep::Clone, WorktreeStep::Fetch] {
+                m.handle_daemon_event(IpcEvent::WorktreeProgress {
+                    session_key: key.clone(),
+                    step,
+                    status: WorktreeStepStatus::Started,
+                    origin: SpawnOrigin::Interactive,
+                });
+            }
+        }
+        assert!(
+            !m.modal_stack.contains(&Id::WorktreeProgress) && m.worktree_progress.is_none(),
+            "a bulk fan-out's members must provision without a checklist each",
+        );
+
+        // The first member lands: the footer carries the running tally.
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(1),
+            session_key: keys[0].clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            agent_state: None,
+        });
+        assert_eq!(
+            m.status.notice.as_ref().map(|n| n.message.as_str()),
+            Some("starting 3 agents · 1/3 ready"),
+        );
+
+        // The second fails: it retires with a footer error naming the row
+        // and the reason — retry is `w w` on that row, no recovery modal.
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key: keys[1].clone(),
+            step: WorktreeStep::Clone,
+            status: WorktreeStepStatus::Failed("disk full".into()),
+            origin: SpawnOrigin::Interactive,
+        });
+        assert!(
+            !m.modal_stack.contains(&Id::WorktreeProgress),
+            "a failed member must not mount a per-row recovery modal in a fan-out",
+        );
+        let msg = &m.status.notice.as_ref().expect("failure flashed").message;
+        assert!(
+            msg.contains("owner/repo#2") && msg.contains("disk full"),
+            "the error names the row and the reason: {msg}",
+        );
+
+        // The last one lands, closing the batch with its summary.
+        m.handle_daemon_event(IpcEvent::TerminalSpawned {
+            model_label: None,
+            terminal_id: TerminalId(3),
+            session_key: keys[2].clone(),
+            kind: TerminalKind::Agent("claude".into()),
+            no_permission: false,
+            on_main: false,
+            agent_state: None,
+        });
+        assert_eq!(
+            m.status.notice.as_ref().map(|n| n.message.as_str()),
+            Some("2 agents started, 1 failed"),
+        );
+        assert!(
+            m.bulk_spawn_batch.is_none(),
+            "the batch clears once every member reported",
+        );
+    }
+
+    /// The flip side of #1636: a lone spawn is the terminal the user is
+    /// about to land in, so it keeps its provisioning checklist.
+    #[test]
+    fn single_spawn_keeps_the_checklist_modal() {
+        use lazybox_ipc::{SpawnOrigin, WorktreeStep, WorktreeStepStatus};
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let keys = seed_and_select(
+            &mut m,
+            vec![workspace("owner/repo#1", true, Duration::hours(1))],
+        );
+        assert!(m.dispatch_action(&Action::Work).is_empty());
+        assert_eq!(m.handle_confirmed(true).len(), 1);
+        assert!(
+            m.bulk_spawn_batch.is_none(),
+            "one spawn is not a fan-out — no batch is armed",
+        );
+
+        m.handle_daemon_event(IpcEvent::WorktreeProgress {
+            session_key: keys[0].clone(),
+            step: WorktreeStep::Clone,
+            status: WorktreeStepStatus::Started,
+            origin: SpawnOrigin::Interactive,
+        });
+        assert!(
+            m.modal_stack.contains(&Id::WorktreeProgress),
+            "a single spawn still shows its checklist",
+        );
+    }
+
+    /// A spawn the daemon drops reports neither ready nor failed, so the
+    /// batch must not claim that row forever — after its TTL a later
+    /// single spawn there gets its checklist back.
+    #[test]
+    fn an_expired_bulk_batch_releases_its_members() {
+        use lazybox_tui_core::action::Action;
+
+        let mut m = build_model();
+        let keys = seed_and_select(
+            &mut m,
+            vec![
+                workspace("owner/repo#1", true, Duration::hours(1)),
+                workspace("owner/repo#2", true, Duration::hours(2)),
+            ],
+        );
+        assert!(m.dispatch_action(&Action::Work).is_empty());
+        assert_eq!(m.handle_confirmed(true).len(), 2);
+        assert!(m.bulk_batch_claims(&keys[0]), "the batch owns its members");
+
+        let later = std::time::Instant::now() + crate::realm::model::BULK_SPAWN_BATCH_TTL;
+        assert!(
+            !m.bulk_batch_claims_at(&keys[0], later),
+            "an expired batch releases the rows it never heard back about",
+        );
+        assert!(m.bulk_spawn_batch.is_none());
+    }
+
     /// #928 acceptance #3: the model-tier chords (`w S/M/L`) fan out over
     /// a multi-select the same way bare `w w` does. Every *fresh* target
     /// spawns at the picked tier; a target already running an agent is

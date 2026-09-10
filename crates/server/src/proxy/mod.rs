@@ -51,7 +51,7 @@ use lazybox_agents::LlmProvider;
 use lazybox_ipc::{AgentUsage, ProviderQuota};
 use tokio::net::{TcpListener, TcpStream};
 
-pub use compaction::{Compactor, NoticeSink};
+pub use compaction::{Compactor, NoticeSink, PolicySource};
 pub use usage_parse::UsageAccumulator;
 
 /// The loopback port the running proxy bound, published once at startup so

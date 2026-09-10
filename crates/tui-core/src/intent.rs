@@ -108,6 +108,13 @@ pub enum Intent {
         workspace_key: WorkspaceKey,
         enabled: bool,
     },
+    /// Flip the workspace's context-compaction opt-in (#1622) and persist it.
+    /// `enabled` is the new state (the resolver reads the current flag and
+    /// inverts it). The model ships `Command::SetContextCompaction`.
+    SetContextCompaction {
+        workspace_key: WorkspaceKey,
+        enabled: bool,
+    },
     /// Kill every running terminal under the workspace + remove
     /// the row. Two-press confirm at the model layer.
     KillWorkspace { session_key: SessionKey },
@@ -667,6 +674,21 @@ pub fn resolve_toggle_metering(workspace: Option<&Workspace>) -> Intent {
     Intent::SetMetered {
         workspace_key: ws.key.clone(),
         enabled: !ws.metered,
+    }
+}
+
+/// Resolve the context-compaction toggle (#1622). Applies to any workspace:
+/// like metering, this records intent, and whether it actually rewrites
+/// anything is the daemon's gate (the workspace has to be proxied and
+/// `agent.context_hygiene.mode` must not be `off`). Inverts the persisted
+/// flag.
+pub fn resolve_toggle_context_compaction(workspace: Option<&Workspace>) -> Intent {
+    let Some(ws) = workspace else {
+        return Intent::NoOp;
+    };
+    Intent::SetContextCompaction {
+        workspace_key: ws.key.clone(),
+        enabled: !ws.compact_context,
     }
 }
 

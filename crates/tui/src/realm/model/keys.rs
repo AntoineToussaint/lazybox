@@ -3142,6 +3142,7 @@ pub(super) fn action_from_kind(
         ActionKind::ToggleAutoFix => Action::ToggleAutoFix,
         ActionKind::ToggleTrackMain => Action::ToggleTrackMain,
         ActionKind::ToggleMetering => Action::ToggleMetering,
+        ActionKind::ToggleContextCompaction => Action::ToggleContextCompaction,
         ActionKind::ManagePolicies => Action::ManagePolicies,
         ActionKind::ToggleEpicAutoDispatch => Action::ToggleEpicAutoDispatch,
         ActionKind::ToggleEpicAutoReview => Action::ToggleEpicAutoReview,

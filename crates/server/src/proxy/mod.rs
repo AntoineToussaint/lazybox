@@ -51,7 +51,7 @@ use lazybox_agents::LlmProvider;
 use lazybox_ipc::{AgentUsage, ProviderQuota};
 use tokio::net::{TcpListener, TcpStream};
 
-pub use compaction::{Compactor, NoticeSink, PolicySource};
+pub use compaction::{CanaryOptIn, Compactor, NoticeSink, PolicySource};
 pub use usage_parse::UsageAccumulator;
 
 /// The loopback port the running proxy bound, published once at startup so
@@ -395,12 +395,17 @@ pub async fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHand
     // would leave the two enforcement points disagreeing about `mode` for the
     // rest of the daemon's life after any config edit (#1611). The line floor
     // the instrumentation uses rides the same source, so "large" still means
-    // one thing.
-    let compactor = Arc::new(Compactor::live(
-        prices.clone(),
-        notice,
-        crate::context_tag::TagSource::load(config).await,
-    ));
+    // one thing. The canary opt-in is resolved per request for the same
+    // reason (#1622): a flip in the sidebar lands on the next turn, not the
+    // next spawn.
+    let compactor = Arc::new(
+        Compactor::live(
+            prices.clone(),
+            notice,
+            crate::context_tag::TagSource::load(config).await,
+        )
+        .with_canary(crate::workspace::compaction_opt_in(config)),
+    );
 
     tracing::info!("metering proxy listening on 127.0.0.1:{port}");
     Some(tokio::spawn(serve(

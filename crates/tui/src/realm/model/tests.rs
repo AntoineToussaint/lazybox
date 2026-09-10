@@ -9919,6 +9919,89 @@ mod modal_input_responsiveness_tests {
         );
     }
 
+    /// #1622: `x h` on a workspace row ships `SetContextCompaction` with the
+    /// flag inverted, so the daemon — not the client — holds the canary.
+    #[test]
+    fn the_compaction_chord_ships_the_inverted_flag_for_the_focused_workspace() {
+        use lazybox_core::Workspace;
+        use lazybox_tui_core::action::Action;
+
+        let ws = Workspace::from_task(
+            repo_task("obin-ai/platform#1", "obin-ai/platform"),
+            chrono::Utc::now(),
+        );
+        let key = ws.key.clone();
+
+        let mut m = build_model();
+        m.handle_daemon_event(lazybox_ipc::Event::Snapshot {
+            workspaces: vec![ws],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        let session_key = lazybox_core::SessionKey::from(&key);
+        assert!(m.sidebar.focus_workspace_key(&session_key), "row focused");
+
+        let cmds = m.dispatch_action(&Action::ToggleContextCompaction);
+        assert!(
+            cmds.iter().any(|cmd| matches!(
+                cmd,
+                lazybox_ipc::Command::SetContextCompaction {
+                    session_key,
+                    enabled: true,
+                } if session_key.as_str() == key.as_str()
+            )),
+            "off → on for the focused workspace: {cmds:?}",
+        );
+    }
+
+    /// The Space tier refuses over `--connect` for the same reason metering's
+    /// does: `agent.compacted_spaces` is a client-side write the remote
+    /// daemon never reads, so a silent no-op would be worse than a refusal.
+    #[test]
+    fn space_compaction_toggle_is_refused_over_connect() {
+        use lazybox_core::Workspace;
+        use lazybox_tui_core::action::Action;
+
+        let a = Workspace::from_task(
+            repo_task("obin-ai/platform#1", "obin-ai/platform"),
+            chrono::Utc::now(),
+        );
+        let b = Workspace::from_task(
+            repo_task("acme/widget#1", "acme/widget"),
+            chrono::Utc::now(),
+        );
+
+        let mut m = build_model().with_remote();
+        m.handle_daemon_event(lazybox_ipc::Event::Snapshot {
+            workspaces: vec![a, b],
+            terminals: vec![],
+            projects: vec![],
+            recent_snippets: Vec::new(),
+            dismissed_updates: Vec::new(),
+        });
+        assert!(m.sidebar.focus_header_row("obin-ai"));
+        assert!(m.sidebar.cursor_on_space_header());
+
+        m.dispatch_action(&Action::ToggleContextCompaction);
+
+        let notice = m
+            .status
+            .notice
+            .as_ref()
+            .map(|notice| notice.message.clone())
+            .unwrap_or_default();
+        assert!(
+            notice.contains("--connect"),
+            "the refusal names the transport: {notice:?}",
+        );
+        assert!(
+            !notice.contains("compact context: on"),
+            "nothing was toggled: {notice:?}",
+        );
+    }
+
     /// `g s` on a Linear-only workspace (a Linear ticket, no GitHub PR /
     /// issue / repo scope) must dispatch a targeted sync — not refuse with
     /// "nothing to sync". Before the Linear branch, the gate only counted

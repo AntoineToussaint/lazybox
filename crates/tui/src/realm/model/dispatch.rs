@@ -389,6 +389,7 @@ impl<T: TerminalAdapter> Model<T> {
             | Intent::SetAutoMergeOnGreen { .. }
             | Intent::SetTrackMain { .. }
             | Intent::SetMetered { .. }
+            | Intent::SetContextCompaction { .. }
             | Intent::KillWorkspace { .. }
             | Intent::Unsnooze { .. } => Vec::new(),
         }
@@ -1672,6 +1673,7 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::SetAutoMergeOnGreen { .. }
                     | Intent::SetTrackMain { .. }
                     | Intent::SetMetered { .. }
+                    | Intent::SetContextCompaction { .. }
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }
@@ -1783,6 +1785,7 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::SetAutoMergeOnGreen { .. }
                     | Intent::SetTrackMain { .. }
                     | Intent::SetMetered { .. }
+                    | Intent::SetContextCompaction { .. }
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }
@@ -2069,6 +2072,7 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::UpdateBranch { .. }
                     | Intent::SetTrackMain { .. }
                     | Intent::SetMetered { .. }
+                    | Intent::SetContextCompaction { .. }
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }
@@ -2162,6 +2166,50 @@ impl<T: TerminalAdapter> Model<T> {
                     _ => {}
                 }
             }
+            Action::ToggleContextCompaction if self.sidebar.cursor_on_space_header() => {
+                // Space tier (#1622), the same double duty `x $` has on a
+                // Space header. Like Space metering this is a client-side
+                // config write a `--connect` daemon never reads, so refuse
+                // rather than silently no-op; the per-workspace canary below
+                // goes over IPC and works either way.
+                if self.remote {
+                    self.flash_info(
+                        "Space compaction isn't available over --connect (it's a client-side \
+                         setting the daemon can't see); compact individual workspaces with x h \
+                         instead"
+                            .to_string(),
+                    );
+                } else if let Some((space, enabled)) =
+                    self.sidebar.toggle_space_compaction_at_cursor()
+                {
+                    let space = crate::util::notice_slug(&space).into_owned();
+                    let verb = if enabled { "on" } else { "off" };
+                    self.flash_info(format!("compact context: {verb} for {space} (space)"));
+                }
+            }
+            Action::ToggleContextCompaction => {
+                let workspace = self.sidebar.selected_workspace().cloned();
+                use crate::intent::Intent;
+                match crate::intent::resolve_toggle_context_compaction(workspace.as_ref()) {
+                    Intent::SetContextCompaction {
+                        workspace_key,
+                        enabled,
+                    } => {
+                        let name = workspace
+                            .as_ref()
+                            .map(|w| crate::util::notice_slug(&w.name).into_owned())
+                            .unwrap_or_default();
+                        let verb = if enabled { "on" } else { "off" };
+                        self.flash_info(format!("compact context: {verb} for {name}"));
+                        cmds.push(IpcCommand::SetContextCompaction {
+                            session_key: lazybox_core::SessionKey::from(&workspace_key),
+                            enabled,
+                        });
+                    }
+                    Intent::Notice(msg) => self.flash_info(msg),
+                    _ => {}
+                }
+            }
             Action::ToggleTrackMain => {
                 let workspace = self.sidebar.selected_workspace().cloned();
                 // Explicit variant list (no `_`): a new Intent variant is
@@ -2199,6 +2247,7 @@ impl<T: TerminalAdapter> Model<T> {
                     | Intent::UpdateBranch { .. }
                     | Intent::SetAutoMergeOnGreen { .. }
                     | Intent::SetMetered { .. }
+                    | Intent::SetContextCompaction { .. }
                     | Intent::KillWorkspace { .. }
                     | Intent::Snooze { .. }
                     | Intent::Unsnooze { .. }

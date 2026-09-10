@@ -1341,6 +1341,9 @@ impl Server {
                         }
                         lazybox_ipc::Command::UpsertEpic { .. } => "UpsertEpic",
                         lazybox_ipc::Command::SetEpicPolicies { .. } => "SetEpicPolicies",
+                        lazybox_ipc::Command::SetContextCompaction { .. } => {
+                            "SetContextCompaction"
+                        }
                         lazybox_ipc::Command::AssignEpic { .. } => "AssignEpic",
                         lazybox_ipc::Command::ArchiveEpic { .. } => "ArchiveEpic",
                         lazybox_ipc::Command::SetWorkspaceRole { .. } => "SetWorkspaceRole",
@@ -2713,6 +2716,13 @@ pub async fn dispatch_command(
         }
         lazybox_ipc::Command::SetEpicPolicies { epic, policies } => {
             epics::set_policies(config, &epic, policies).await;
+        }
+        lazybox_ipc::Command::SetContextCompaction {
+            session_key,
+            enabled,
+        } => {
+            let key = lazybox_core::WorkspaceKey::new(session_key.as_str().to_string());
+            workspace::set_context_compaction(config, &key, enabled).await;
         }
         lazybox_ipc::Command::Shutdown => {
             unreachable!("Shutdown is loop control, intercepted by the serve loop")

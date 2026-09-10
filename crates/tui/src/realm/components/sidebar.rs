@@ -663,6 +663,7 @@ impl Sidebar {
         collapsed_spaces: std::collections::BTreeSet<String>,
         collapsed_epics: std::collections::BTreeSet<String>,
         metered_spaces: std::collections::BTreeSet<String>,
+        compacted_spaces: std::collections::BTreeSet<String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
     ) {
@@ -675,6 +676,7 @@ impl Sidebar {
             collapsed_spaces,
             collapsed_epics,
             metered_spaces,
+            compacted_spaces,
             default_agent,
             display,
         );
@@ -1023,6 +1025,13 @@ impl Sidebar {
     /// Space header. Delegates to the domain `Sidebar` method of the same name.
     pub fn toggle_space_metering_at_cursor(&mut self) -> Option<(String, bool)> {
         self.inner.toggle_space_metering_at_cursor()
+    }
+
+    /// Toggle Space-tier context compaction for the Space under the cursor
+    /// (`x h`, #1622). Returns `(space_name, now_compacting)`, or `None` off a
+    /// Space header. Delegates to the domain `Sidebar` method of the same name.
+    pub fn toggle_space_compaction_at_cursor(&mut self) -> Option<(String, bool)> {
+        self.inner.toggle_space_compaction_at_cursor()
     }
 
     /// The Space a source currently resolves to — prefills the

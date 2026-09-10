@@ -898,6 +898,74 @@ pub async fn set_metered(config: &ServerConfig, key: &WorkspaceKey, enabled: boo
     commit_upsert_offloaded_reported(config, key, workspace, "set metering preference").await;
 }
 
+/// Whether one workspace opted into context compaction (#1622): its own flag
+/// OR a compacted Space (`agent.compacted_spaces`).
+///
+/// The membership half of the canary only.
+/// [`lazybox_core::ContextHygiene::mode_for`] owns what an opt-in may and may
+/// not promote. The two halves live apart on purpose: membership is a config
+/// and store question the daemon answers, promotion is policy the
+/// `PreToolUse` hook enforcement point reads too, so only the policy half is
+/// shared.
+///
+/// This lives beside [`set_context_compaction`] rather than in the spawn
+/// path: the metering proxy asks it on the request path, and the request
+/// path has no business importing spawn internals.
+pub fn compacts_context(cfg: &lazybox_config::Config, workspace: &lazybox_core::Workspace) -> bool {
+    let in_space = workspace
+        .repo_slug()
+        .map(|label| cfg.source_compacts_context(label.as_ref()))
+        .unwrap_or(false);
+    workspace.compact_context || in_space
+}
+
+/// Whether one session's workspace opted into compaction (#1622), for the
+/// metering proxy to consult once per request.
+///
+/// Only the opt-in: the compactor already reads the shared policy live
+/// through its `PolicySource`, and `ContextHygiene::mode_for` decides what
+/// the opt-in promotes. Resolving a whole mode here instead would give the
+/// proxy a second, independently-read policy — the disagreement the shared
+/// policy exists to prevent.
+///
+/// A workspace that cannot be read has not opted in. Failing toward "not
+/// rewriting" is the epic's pass-through-on-doubt rule; the alternative is
+/// guessing a session into a rewrite on a store miss.
+pub fn compaction_opt_in(
+    config: &ServerConfig,
+) -> std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync> {
+    let config = config.clone();
+    std::sync::Arc::new(move |session: &str| {
+        let Ok(cfg) = lazybox_config::Config::load() else {
+            return false;
+        };
+        let key = lazybox_core::WorkspaceKey::new(session);
+        let Ok(Some(record)) = config.store.get_workspace(&key) else {
+            return false;
+        };
+        let Some(json) = record.workspace_json else {
+            return false;
+        };
+        serde_json::from_str::<lazybox_core::Workspace>(&json)
+            .map(|workspace| compacts_context(&cfg, &workspace))
+            .unwrap_or(false)
+    })
+}
+
+/// Persist the workspace's context-compaction opt-in (#1622). Mirrors
+/// [`set_metered`]: load, set the flag, commit (persists + broadcasts
+/// `WorkspaceUpserted`). The metering proxy reads it back per request rather
+/// than at spawn, so the flip lands on the workspace's next turn.
+pub async fn set_context_compaction(config: &ServerConfig, key: &WorkspaceKey, enabled: bool) {
+    let _ws_guard = config.lock_workspace(key.as_str()).await;
+    let Some(mut workspace) = load_workspace_offloaded(config, key).await else {
+        return;
+    };
+    workspace.compact_context = enabled;
+    commit_upsert_offloaded_reported(config, key, workspace, "set context-compaction preference")
+        .await;
+}
+
 /// Persist the workspace's orchestration role (#1523). Mirrors
 /// [`set_metered`]: load, set the field, commit (persists + broadcasts
 /// `WorkspaceUpserted` so the sidebar role badge refreshes). `role: None`
@@ -4389,6 +4457,122 @@ mod orphan_backend_session_tests {
             !config.deleted_workspaces.lock().contains(key.as_str()),
             "a failed non-archiving delete must clear the deleted_workspaces guard \
              even when the tombstone rollback write also fails"
+        );
+    }
+}
+
+#[cfg(test)]
+mod compaction_canary_tests {
+    use super::*;
+    use lazybox_core::Task;
+
+    /// A GitHub-backed task fixture — same literal shape the spawn-path
+    /// tests use, since `Task` has no `Default`.
+    fn repo_task(key: &str, repo: &str) -> Task {
+        Task {
+            author: String::new(),
+            id: lazybox_core::TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::default(),
+            review: lazybox_core::ReviewStatus::default(),
+            checks: vec![],
+            unread_count: 0,
+            url: String::new(),
+            repo: Some(repo.to_string()),
+            branch: None,
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Unknown,
+            is_behind_base: false,
+            merge_blocked: false,
+            approval_policy: Default::default(),
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            kind: None,
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            parent: None,
+            priority: None,
+            state_label: None,
+            blocked_by: vec![],
+            merge_after: vec![],
+            contracts: vec![],
+            blocked_on: None,
+        }
+    }
+
+    /// #1622: the compaction canary composes the same way metering does —
+    /// per-workspace flag OR compacted Space — and promotes only that
+    /// workspace, leaving the fleet on the configured mode.
+    ///
+    /// Asserted through the same composition the proxy performs
+    /// (`compacts_context` for membership, `mode_for` for promotion) rather
+    /// than membership alone, so the kill switch stays covered end to end.
+    #[test]
+    fn the_compaction_canary_promotes_one_workspace_at_a_time() {
+        use lazybox_core::CompactionMode;
+
+        let task = repo_task("obin-ai/platform#1", "obin-ai/platform");
+        let mut ws = lazybox_core::Workspace::from_task(task, chrono::Utc::now());
+        let other = repo_task("acme/widget#1", "acme/widget");
+        let other_ws = lazybox_core::Workspace::from_task(other, chrono::Utc::now());
+
+        let mut cfg = lazybox_config::Config::default();
+        let mode = |cfg: &lazybox_config::Config, ws: &lazybox_core::Workspace| {
+            cfg.agent
+                .context_hygiene
+                .mode_for(compacts_context(cfg, ws))
+        };
+
+        assert!(
+            !compacts_context(&cfg, &ws),
+            "a fresh install compacts nothing"
+        );
+        assert_eq!(mode(&cfg, &ws), CompactionMode::Shadow);
+
+        ws.compact_context = true;
+        assert_eq!(mode(&cfg, &ws), CompactionMode::On);
+        assert_eq!(
+            mode(&cfg, &other_ws),
+            CompactionMode::Shadow,
+            "the canary does not spread to its neighbours",
+        );
+
+        // Space tier: the source auto-seeds into the "obin-ai" Space, so
+        // compacting that name promotes the workspace without its own flag.
+        ws.compact_context = false;
+        cfg.agent.compacted_spaces.insert("obin-ai".into());
+        assert!(compacts_context(&cfg, &ws));
+        assert_eq!(mode(&cfg, &ws), CompactionMode::On);
+        assert_eq!(mode(&cfg, &other_ws), CompactionMode::Shadow);
+
+        // A configured `off` is the kill switch and outranks both.
+        cfg.agent.context_hygiene.mode = CompactionMode::Off;
+        ws.compact_context = true;
+        assert!(compacts_context(&cfg, &ws), "membership still says yes");
+        assert_eq!(
+            mode(&cfg, &ws),
+            CompactionMode::Off,
+            "but off is not promotable"
         );
     }
 }

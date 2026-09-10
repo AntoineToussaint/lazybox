@@ -541,11 +541,15 @@ pub struct ServerConfig {
     /// worktree removals) so shutdown can wait for them — see
     /// `register_maintenance_latch` / `drain_maintenance_tasks`.
     pub(crate) maintenance_done: Arc<parking_lot::Mutex<Vec<tokio::sync::oneshot::Receiver<()>>>>,
-    /// Cheap-model condenser for the context-hygiene enforcement points
-    /// (#1611). Registered at daemon start once the summarizer service
-    /// (#1608) is available; `None` means the `PreToolUse` large-read
-    /// intercept has nothing to redirect a read to and always allows.
-    pub condenser: Option<Arc<dyn read_intercept::Condense>>,
+    /// Token marking condensations this daemon run renders outside the proxy
+    /// — the `PreToolUse` large-read intercept (#1610). Random per run and
+    /// unguessable by file content, for the reason
+    /// [`lazybox_core::context_hygiene::CondenseTag`] documents; constant
+    /// within the run so the same file renders the same bytes every time,
+    /// which is what prompt caching needs. The proxy compactor keeps its own
+    /// per-conversation tag: it rewrites blocks that must stay byte-stable
+    /// across the turns of one conversation, which this layer never does.
+    pub(crate) condense_tag: lazybox_core::context_hygiene::CondenseTag,
     /// MCP cross-agent coordination runtime (#1420): the per-session bearer
     /// → `SessionKey` registry the MCP server reads to identify a tool caller,
     /// and the bound endpoint URL set once [`mcp::start`] runs. Shared (Arc)
@@ -691,9 +695,16 @@ impl ServerConfig {
             worktree_ownership_lock: Arc::new(Mutex::new(())),
             provisioning_worktree_claims: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             maintenance_done: Arc::new(parking_lot::Mutex::new(Vec::new())),
-            condenser: None,
+            condense_tag: lazybox_core::context_hygiene::CondenseTag::new(
+                &uuid::Uuid::new_v4().simple().to_string(),
+            ),
             mcp: Arc::new(mcp::McpRuntime::default()),
         }
+    }
+
+    /// This daemon run's condense tag (see [`ServerConfig::condense_tag`]).
+    pub(crate) fn condense_tag(&self) -> &lazybox_core::context_hygiene::CondenseTag {
+        &self.condense_tag
     }
 
     /// Register a detached maintenance task's completion latch so the
@@ -1399,9 +1410,31 @@ impl Server {
                     }
                 }
                 bus = bus_rx.recv() => {
+                    // Bus traffic belongs to SUBSCRIBERS. A connection that
+                    // never subscribed asked one question and is waiting on
+                    // its own answer — `lazybox hook-ingest`'s `PreToolUse`
+                    // decision round-trip (#1610) is the case that forced
+                    // this: it holds a connection open for its deadline, and
+                    // forwarding the fleet's `TerminalOutput` into it meant
+                    // serializing every terminal's PTY output to a process
+                    // that decodes and discards it, once per full-file read.
+                    // Command replies are unaffected — `dispatch_command`
+                    // writes those straight to `conn.tx`, never via the bus.
+                    // We still drain `bus_rx` so the broadcast channel does
+                    // not report this connection as lagging.
                     match bus {
                         Ok(evt) => {
-                            let _ = conn.tx.send(evt);
+                            if subscribed {
+                                let _ = conn.tx.send(evt);
+                            }
+                        }
+                        // An unsubscribed connection has no state to heal —
+                        // it never received a snapshot to fall behind.
+                        Err(broadcast::error::RecvError::Lagged(n)) if !subscribed => {
+                            tracing::debug!(
+                                lagged = n,
+                                "unsubscribed connection lagged the bus — nothing to recover"
+                            );
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             // Slow client missed `n` events — possibly

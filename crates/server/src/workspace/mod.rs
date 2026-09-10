@@ -4475,20 +4475,58 @@ mod compaction_canary_tests {
     use super::*;
     use lazybox_core::Task;
 
-    /// A GitHub-backed task, built through serde so this fixture does not
-    /// have to track every field on `Task`.
+    /// A GitHub-backed task fixture — same literal shape the spawn-path
+    /// tests use, since `Task` has no `Default`.
     fn repo_task(key: &str, repo: &str) -> Task {
-        serde_json::from_value(serde_json::json!({
-            "author": "",
-            "id": { "source": "github", "key": key },
-            "title": "t",
-            "state": "open",
-            "role": "author",
-            "url": "",
-            "repo": repo,
-            "updated_at": chrono::Utc::now(),
-        }))
-        .expect("task fixture")
+        Task {
+            author: String::new(),
+            id: lazybox_core::TaskId {
+                source: "github".into(),
+                key: key.into(),
+            },
+            title: "t".into(),
+            body: None,
+            state: lazybox_core::TaskState::Open,
+            role: lazybox_core::TaskRole::Author,
+            ci: lazybox_core::CiStatus::default(),
+            review: lazybox_core::ReviewStatus::default(),
+            checks: vec![],
+            unread_count: 0,
+            url: String::new(),
+            repo: Some(repo.to_string()),
+            branch: None,
+            base_branch: None,
+            updated_at: chrono::Utc::now(),
+            created_at: None,
+            closed_at: None,
+            labels: vec![],
+            reviewers: vec![],
+            reviews: vec![],
+            assignees: vec![],
+            auto_merge_enabled: false,
+            is_in_merge_queue: false,
+            mergeable: lazybox_core::Mergeable::Unknown,
+            is_behind_base: false,
+            merge_blocked: false,
+            approval_policy: Default::default(),
+            node_id: None,
+            needs_reply: false,
+            last_commenter: None,
+            recent_activity: vec![],
+            additions: 0,
+            deletions: 0,
+            changed_files: 0,
+            kind: None,
+            closes_issues: vec![],
+            linked_tasks: vec![],
+            parent: None,
+            priority: None,
+            state_label: None,
+            blocked_by: vec![],
+            merge_after: vec![],
+            contracts: vec![],
+            blocked_on: None,
+        }
     }
 
     /// #1622: the compaction canary composes the same way metering does —
@@ -4523,10 +4561,7 @@ mod compaction_canary_tests {
         ws.compact_context = false;
         cfg.agent.compacted_spaces.insert("obin-ai".into());
         assert_eq!(compaction_mode(&cfg, &ws), CompactionMode::On);
-        assert_eq!(
-            compaction_mode(&cfg, &other_ws),
-            CompactionMode::Shadow,
-        );
+        assert_eq!(compaction_mode(&cfg, &other_ws), CompactionMode::Shadow,);
 
         // A configured `off` is the kill switch and outranks both.
         cfg.agent.context_hygiene.mode = CompactionMode::Off;

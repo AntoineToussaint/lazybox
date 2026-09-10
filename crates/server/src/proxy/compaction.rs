@@ -974,6 +974,18 @@ mod tests {
         assert_eq!(sent, body, "shadow mode never alters bytes on the wire");
     }
 
+    /// Drive the real pre-rewrite handshake for `session`: one held turn
+    /// (see `begin`), then the response whose cache reading becomes the
+    /// baseline. Seeding a baseline by calling `observe_usage` alone cannot
+    /// happen in production — `measured` is threaded out of `rewrite`, so a
+    /// response is only ever accounted for when its own request already went
+    /// through `begin`.
+    fn seed_baseline(compactor: &Compactor, session: &str, body: &Bytes) {
+        let held = compactor.rewrite(session, "claude", body.clone());
+        assert_eq!(held.body, *body, "the first eligible turn is held");
+        compactor.observe_usage(session, "claude", &usage(100, 900), true);
+    }
+
     fn usage(input: u64, cache_read: u64) -> AgentUsage {
         AgentUsage {
             input_tokens: Some(input),
@@ -1016,7 +1028,7 @@ mod tests {
             Arc::new(std::collections::BTreeMap::new()),
             Arc::new(|_, _| {}),
         );
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        seed_baseline(&compactor, "ws", &body);
         let sent = compactor.rewrite("ws", "claude", body.clone()).body;
         assert!(sent.len() < body.len(), "the rewritten body is smaller");
         let (blocks, saved, regressions) = compactor.stats("ws");
@@ -1095,8 +1107,8 @@ mod tests {
             Arc::new(std::collections::BTreeMap::new()),
             Arc::new(|_, _| {}),
         );
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
-        compactor.observe_usage("other-ws", "claude", &usage(100, 900), true);
+        seed_baseline(&compactor, "ws", &body);
+        seed_baseline(&compactor, "other-ws", &body);
         let first = compactor.rewrite("ws", "claude", body.clone()).body;
         let second = compactor.rewrite("ws", "claude", body.clone()).body;
         assert_eq!(
@@ -1325,10 +1337,13 @@ mod tests {
 
         // The canary's first eligible turn is held for a baseline like any
         // other rewriting session, then it rewrites.
-        assert_eq!(compactor.rewrite("canary", "claude", body.clone()).body, body);
-        compactor.observe_usage("canary", "claude", &usage(100, 900), true);
+        seed_baseline(&compactor, "canary", &body);
         assert!(
-            compactor.rewrite("canary", "claude", body.clone()).body.len() < body.len(),
+            compactor
+                .rewrite("canary", "claude", body.clone())
+                .body
+                .len()
+                < body.len(),
             "the opted-in session sends condensed bytes",
         );
 
@@ -1369,8 +1384,7 @@ mod tests {
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
 
         // Held baseline turn, then a turn that really rewrites.
-        compactor.rewrite("ws", "claude", body.clone());
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        seed_baseline(&compactor, "ws", &body);
         let out = compactor.rewrite("ws", "claude", body.clone());
         assert!(out.body.len() < body.len(), "this turn rewrote");
 
@@ -1406,17 +1420,8 @@ mod tests {
         let (compactor, notices) = compactor_with_notices();
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
 
-        // The real sequence: the first eligible turn is held (see `begin`),
-        // its response supplies the pre-rewrite baseline, and only then does
-        // a turn actually rewrite. Feeding `observe_usage` a baseline before
-        // any request cannot happen in production — `measured` is threaded
-        // out of `rewrite`, so a response is only accounted for when its own
-        // request went through `begin` first.
-        let held = compactor.rewrite("ws", "claude", body.clone());
-        assert_eq!(held.body, body, "the first eligible turn is held");
-        assert!(held.measured, "but it is still the baseline turn");
         // A healthy 90% of the prompt served from cache becomes the baseline.
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        seed_baseline(&compactor, "ws", &body);
         let rewritten = compactor.rewrite("ws", "claude", body.clone()).body;
         assert!(rewritten.len() < body.len(), "the next turn rewrites");
 
@@ -1446,7 +1451,7 @@ mod tests {
         // cache as compaction's fault and disable the whole workspace.
         let (compactor, notices) = compactor_with_notices();
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        seed_baseline(&compactor, "ws", &body);
         assert!(compactor.rewrite("ws", "claude", body.clone()).body.len() < body.len());
 
         // Ten cold subagent turns — not requests compaction acted on.
@@ -1474,7 +1479,7 @@ mod tests {
     fn a_cache_dip_that_recovers_does_not_trip_the_kill_switch() {
         let (compactor, notices) = compactor_with_notices();
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        seed_baseline(&compactor, "ws", &body);
         let rewritten = compactor.rewrite("ws", "claude", body.clone()).body;
         assert!(rewritten.len() < body.len());
 

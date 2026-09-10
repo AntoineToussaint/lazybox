@@ -428,10 +428,12 @@ pub const HOOK_HELPER_PROBE_RESPONSE: &str = "lazybox-hook-helper-v1";
 ///
 /// The bound exists only so a wedged candidate can't hang daemon boot — it is
 /// not a performance budget, and it must never be tight enough to *answer* the
-/// question. A timeout is read as "not hook-capable", which disables lifecycle
-/// hooks for the whole daemon run; on a box loaded the way lazybox's own docs
-/// expect (many agents on one machine), a healthy ~80 MB binary that is merely
-/// starved of CPU has to be given room to reply rather than be misjudged.
+/// question. Expiring is now [`HookProbe::Unanswered`] rather than a verdict,
+/// so it no longer costs the daemon its hooks outright (#1627); it still costs
+/// a helper that was merely starved of CPU its refresh, and on a box loaded the
+/// way lazybox's own docs expect — many agents on one machine, where a plain
+/// shell fork has been measured past 20s — a healthy ~80 MB binary needs the
+/// room to reply rather than be misjudged.
 const HOOK_HELPER_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long to wait for the probe's answer once the candidate has *exited*
@@ -439,6 +441,23 @@ const HOOK_HELPER_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 /// scheduling the reader — and it bounds the call when a descendant that
 /// inherited the candidate's stdout keeps the pipe from ever reaching EOF.
 const HOOK_HELPER_PROBE_ANSWER_GRACE: Duration = Duration::from_secs(2);
+
+/// What the probe learned about a candidate.
+///
+/// A timeout is not a rejection, and collapsing the two is what made a loaded
+/// box read exactly like a GUI-only build (#1627): the timeout says nothing
+/// about the candidate, only that we could not find out, so callers have to be
+/// able to decide differently for it.
+#[derive(Debug, PartialEq, Eq)]
+enum HookProbe {
+    /// Answered the probe: safe to install as the durable helper.
+    Capable,
+    /// Ran to completion without answering — a GUI-only build, or one too old
+    /// to know the probe flag.
+    Incapable,
+    /// Never answered within the timeout. No verdict on the candidate.
+    Unanswered,
+}
 
 pub fn hook_helper_probe_requested(args: &[String]) -> bool {
     args.len() == 1 && args[0] == HOOK_HELPER_PROBE_ARG
@@ -457,38 +476,80 @@ pub fn hook_helper_probe_requested(args: &[String]) -> bool {
 /// `hook_exe` read and leaves tests (which never boot a daemon) untouched.
 pub fn ensure_stable_hook_exe() -> Option<PathBuf> {
     let current = std::env::current_exe().ok()?;
-    ensure_stable_hook_exe_from(&current, &lazybox_core::paths::stable_exe_path())
+    ensure_stable_hook_exe_from(
+        &current,
+        &lazybox_core::paths::stable_exe_path(),
+        HOOK_HELPER_PROBE_TIMEOUT,
+    )
 }
 
-fn ensure_stable_hook_exe_from(current: &Path, stable: &Path) -> Option<PathBuf> {
-    if !is_hook_capable_exe(current) {
-        tracing::error!(
-            executable = %current.display(),
-            "refusing to install a hook helper that cannot ingest lifecycle hooks"
-        );
-        return None;
+fn ensure_stable_hook_exe_from(
+    current: &Path,
+    stable: &Path,
+    probe_timeout: Duration,
+) -> Option<PathBuf> {
+    // Whether a helper that already passed this probe is installed. It is the
+    // fact every branch below turns on, because declining to install is never
+    // "hooks off": `hook_exe` hands agents the installed copy when one exists
+    // and this very executable (its `current_exe` fallback) when none does.
+    let installed = stable.is_file();
+    let unrefreshed = if installed { stable } else { current };
+    match probe_hook_helper_within(current, probe_timeout) {
+        HookProbe::Capable => {}
+        HookProbe::Incapable => {
+            tracing::error!(
+                executable = %current.display(),
+                hooks_will_use = %unrefreshed.display(),
+                "refusing to install a hook helper that cannot ingest lifecycle hooks"
+            );
+            return None;
+        }
+        // Keeping the installed helper is only the safer choice when there *is*
+        // one — overwriting a copy that did answer with an unverified one would
+        // retire a working helper on the word of a binary we never heard from.
+        HookProbe::Unanswered if installed => {
+            tracing::error!(
+                executable = %current.display(),
+                hooks_will_use = %stable.display(),
+                ?probe_timeout,
+                "hook helper probe went unanswered; keeping the installed helper, \
+                 which may predate the running build"
+            );
+            return None;
+        }
+        // With nothing installed there is no good helper to protect: `hook_exe`
+        // resolves to this same executable either way, so declining cannot stop
+        // it from serving hooks — it only leaves the baked path a rebuild away
+        // from dead, the breakage the copy exists to prevent (#856).
+        HookProbe::Unanswered => {
+            tracing::warn!(
+                executable = %current.display(),
+                ?probe_timeout,
+                "hook helper probe went unanswered; installing it anyway since hooks \
+                 would run this executable regardless"
+            );
+        }
     }
     let stabilized = stabilize_exe(current, stable);
     if stabilized.is_none() {
         // A copy/metadata failure (unwritable bin dir, full disk) otherwise
-        // vanishes: `hook_exe` then finds no stable helper and — with the
-        // current-exe fallback gone in release builds — silently disables
-        // lifecycle hooks. Callers that only need best-effort hooks (tui-boot)
-        // ignore the return, so this is the sole place the failure is recorded.
+        // vanishes: hooks keep working off whatever `hook_exe` still resolves
+        // — a stale copy, or the `current_exe` path a rebuild invalidates — so
+        // the loss is durability, silently. Callers that only need best-effort
+        // hooks (tui-boot) ignore the return, so this is the sole place the
+        // failure is recorded.
         tracing::error!(
             executable = %current.display(),
             stable = %stable.display(),
-            "failed to install the stable hook helper; lifecycle hooks will be disabled"
+            hooks_will_use = %unrefreshed.display(),
+            "failed to install the stable hook helper; lifecycle hooks lose their \
+             durable path"
         );
     }
     stabilized
 }
 
-fn is_hook_capable_exe(candidate: &Path) -> bool {
-    is_hook_capable_exe_within(candidate, HOOK_HELPER_PROBE_TIMEOUT)
-}
-
-fn is_hook_capable_exe_within(candidate: &Path, timeout: Duration) -> bool {
+fn probe_hook_helper_within(candidate: &Path, timeout: Duration) -> HookProbe {
     use std::io::BufRead;
 
     let Ok(mut child) = std::process::Command::new(candidate)
@@ -498,7 +559,7 @@ fn is_hook_capable_exe_within(candidate: &Path, timeout: Duration) -> bool {
         .stderr(std::process::Stdio::null())
         .spawn()
     else {
-        return false;
+        return HookProbe::Incapable;
     };
 
     // Read stdout on its own thread and hand the answer back over a channel
@@ -533,14 +594,15 @@ fn is_hook_capable_exe_within(candidate: &Path, timeout: Duration) -> bool {
                 std::thread::sleep(Duration::from_millis(10));
             }
             outcome => {
-                // A timeout is not an answer, and it costs the daemon its
-                // hooks — say so, so the degradation is traceable to the probe
-                // instead of surfacing later as hooks silently doing nothing.
+                // Say so, so the degradation is traceable to the probe instead
+                // of surfacing later as hooks silently doing nothing. What it
+                // costs the daemon is decided by the caller now, not here: a
+                // timeout is not a verdict on the candidate.
                 if matches!(outcome, Ok(None)) {
                     tracing::warn!(
                         candidate = %candidate.display(),
                         ?timeout,
-                        "hook-helper probe timed out; treating the candidate as not hook-capable"
+                        "hook-helper probe timed out without an answer"
                     );
                 }
                 let _ = child.kill();
@@ -551,14 +613,21 @@ fn is_hook_capable_exe_within(candidate: &Path, timeout: Duration) -> bool {
     };
 
     let Some(status) = status else {
-        return false;
+        return HookProbe::Unanswered;
     };
     if !status.success() {
-        return false;
+        return HookProbe::Incapable;
     }
-    answer
-        .recv_timeout(HOOK_HELPER_PROBE_ANSWER_GRACE)
-        .is_ok_and(|answer| answer.trim() == HOOK_HELPER_PROBE_RESPONSE)
+    // A candidate that exits without writing hits EOF, so the reader publishes
+    // an empty line and this resolves to `Incapable` — the GUI-only build the
+    // guard is for. Only a grace expiry leaves us without any answer to judge,
+    // and that is `Unanswered`: the line is already in the pipe by then, so the
+    // one way to reach it is a reader thread that never got scheduled.
+    match answer.recv_timeout(HOOK_HELPER_PROBE_ANSWER_GRACE) {
+        Ok(answer) if answer.trim() == HOOK_HELPER_PROBE_RESPONSE => HookProbe::Capable,
+        Ok(_) => HookProbe::Incapable,
+        Err(_) => HookProbe::Unanswered,
+    }
 }
 
 /// Copy `current` to the stable `stable` path when the copy is missing or
@@ -19002,6 +19071,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The probe fixtures are `/bin/sh` scripts, so a timeout these tests could
+    /// actually reach would make them assert "this box can fork a shell within
+    /// N seconds" — the #1627 flake. It has to clear the worst real fork delay
+    /// by a wide margin: 2.01s at load average 38, and over 20s at load average
+    /// 142, both measured on a 15-core box running a lazybox fleet. So it is a
+    /// hang guard only, and no assertion here depends on its value.
+    #[cfg(unix)]
+    const TEST_PROBE_TIMEOUT: Duration = Duration::from_secs(120);
+
     #[cfg(unix)]
     #[test]
     fn stable_hook_exe_rejects_a_gui_only_executable() {
@@ -19010,7 +19088,14 @@ mod tests {
         let stable = directory.path().join("bin/lazybox");
         write_fake_exe(&gui, "#!/bin/sh\nexit 0\n");
 
-        assert_eq!(ensure_stable_hook_exe_from(&gui, &stable), None);
+        assert_eq!(
+            probe_hook_helper_within(&gui, TEST_PROBE_TIMEOUT),
+            HookProbe::Incapable
+        );
+        assert_eq!(
+            ensure_stable_hook_exe_from(&gui, &stable, TEST_PROBE_TIMEOUT),
+            None
+        );
         assert!(!stable.exists());
     }
 
@@ -19029,7 +19114,7 @@ mod tests {
         );
 
         assert_eq!(
-            ensure_stable_hook_exe_from(&cli, &stable),
+            ensure_stable_hook_exe_from(&cli, &stable, TEST_PROBE_TIMEOUT),
             Some(stable.clone())
         );
         assert!(stable.is_file());
@@ -19052,13 +19137,13 @@ mod tests {
         write_fake_exe(&wedged, "#!/bin/sh\nsleep 120\n");
 
         let started = std::time::Instant::now();
-        let capable = is_hook_capable_exe_within(&wedged, Duration::from_millis(200));
+        let outcome = probe_hook_helper_within(&wedged, Duration::from_millis(200));
         let elapsed = started.elapsed();
 
-        assert!(
-            !capable,
-            "a candidate that never answers is not hook-capable"
-        );
+        // `Unanswered`, never `Incapable`: giving up on a candidate that never
+        // spoke is not a finding about the candidate, and reporting it as one
+        // is what made a loaded box read like a GUI-only build (#1627).
+        assert_eq!(outcome, HookProbe::Unanswered);
         // Bounded well inside the suite's 10s per-test ceiling, so a
         // regression fails with this message rather than as an opaque kill
         // from the runner.
@@ -19088,7 +19173,7 @@ mod tests {
         );
 
         let started = std::time::Instant::now();
-        let capable = is_hook_capable_exe_within(&noisy, Duration::from_secs(6));
+        let outcome = probe_hook_helper_within(&noisy, Duration::from_secs(6));
         let elapsed = started.elapsed();
 
         // Both bounds sit under the suite's 10s per-test ceiling: an undrained
@@ -19098,9 +19183,56 @@ mod tests {
             elapsed < Duration::from_secs(4),
             "the probe blocked on a full stdout pipe for {elapsed:?}"
         );
-        assert!(
-            !capable,
+        // It exited and was heard from, just with the wrong thing to say — a
+        // rejection, not a timeout.
+        assert_eq!(
+            outcome,
+            HookProbe::Incapable,
             "stdout that is not exactly the probe response is not an answer"
+        );
+    }
+
+    /// An unanswered probe with nothing installed must still install. Declining
+    /// cannot stop this executable from serving hooks — `hook_exe` falls back
+    /// to `current_exe` — so it would only leave the baked path a rebuild away
+    /// from dead, which is the breakage the stable copy exists to prevent.
+    #[cfg(unix)]
+    #[test]
+    fn unanswered_probe_installs_when_no_helper_is_installed() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let hung = directory.path().join("lazybox");
+        let stable = directory.path().join("bin/lazybox");
+        write_fake_exe(&hung, "#!/bin/sh\nsleep 30\n");
+
+        assert_eq!(
+            ensure_stable_hook_exe_from(&hung, &stable, Duration::from_millis(50)),
+            Some(stable.clone())
+        );
+        assert!(stable.is_file());
+    }
+
+    /// ...but an unanswered probe must never overwrite a helper that already
+    /// answered one: that would retire a working helper on the word of a binary
+    /// we never heard from. A rejection and a timeout diverge here, which is
+    /// the point of telling them apart.
+    #[cfg(unix)]
+    #[test]
+    fn unanswered_probe_keeps_an_already_installed_helper() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let hung = directory.path().join("lazybox");
+        let stable = directory.path().join("bin/lazybox");
+        write_fake_exe(&hung, "#!/bin/sh\nsleep 30\n");
+        std::fs::create_dir_all(stable.parent().expect("stable has a parent"))
+            .expect("create bin dir");
+        write_fake_exe(&stable, "#!/bin/sh\nexit 0\n");
+
+        assert_eq!(
+            ensure_stable_hook_exe_from(&hung, &stable, Duration::from_millis(50)),
+            None
+        );
+        assert_eq!(
+            std::fs::read_to_string(&stable).expect("installed helper survives"),
+            "#!/bin/sh\nexit 0\n"
         );
     }
 
@@ -19126,7 +19258,10 @@ mod tests {
         std::fs::write(&blocker, "not a directory").expect("write blocker");
         let stable = blocker.join("lazybox");
 
-        assert_eq!(ensure_stable_hook_exe_from(&cli, &stable), None);
+        assert_eq!(
+            ensure_stable_hook_exe_from(&cli, &stable, TEST_PROBE_TIMEOUT),
+            None
+        );
     }
 
     /// The injected hook command pins the *running* binary by absolute

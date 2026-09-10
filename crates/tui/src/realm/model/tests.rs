@@ -198,7 +198,7 @@ mod agent_auth_recovery_tests {
     #[test]
     fn isolated_auth_required_drops_the_machine_wide_cascade_warning() {
         let mut model = build_model();
-        // An isolated provider (Codex → per-session `CODEX_HOME`) never
+        // An adapter that opts into credential isolation never
         // cascades, so the modal reassures instead of warning.
         model.handle_daemon_event(Event::AgentAuthRequired {
             terminal_id: TerminalId(7),

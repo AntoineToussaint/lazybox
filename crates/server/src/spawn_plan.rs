@@ -532,15 +532,88 @@ pub(crate) fn credential_home_env(
 /// starts authenticated. Best-effort: each `seed_files` entry is copied
 /// only when the destination lacks it, so a later re-auth (which rewrites
 /// the destination copy) is never clobbered, and IO failures are logged
-/// and left for the CLI's own login flow to surface. No-op for an agent
-/// that keeps the machine-wide login.
+/// and left for the CLI's own login flow to surface. Shared-login Codex
+/// imports only legacy conversations; other shared-login agents are a no-op.
 pub(crate) fn seed_credential_home(agent: &dyn Agent, session_key: &SessionKey) {
+    if agent.id() == "codex" && agent.credential_isolation().is_none() {
+        let source = lazybox_core::paths::agent_home_dir("codex", session_key.as_str());
+        let shared = machine_wide_credential_home(&CredentialIsolation {
+            home_env: "CODEX_HOME",
+            default_home: ".codex",
+            seed_files: &[],
+        });
+        // Preserve native resume after dropping the old per-workspace home.
+        // Never import its credentials, config, or SQLite databases.
+        if let Err(error) = import_codex_home(&source, &shared) {
+            tracing::warn!(%error, "could not import legacy Codex conversations");
+        }
+    }
     let Some(iso) = agent.credential_isolation() else {
         return;
     };
     let dest = lazybox_core::paths::agent_home_dir(agent.id(), session_key.as_str());
     let source = machine_wide_credential_home(&iso);
     seed_credential_files(iso.seed_files, &source, &dest);
+}
+
+/// Import once per shared home, so later spawns do not resurrect conversations
+/// the user has archived or deleted from that home.
+fn import_codex_home(source: &Path, shared: &Path) -> std::io::Result<()> {
+    if source == shared || !source.exists() {
+        return Ok(());
+    }
+    let marker = source.join(".lazybox-shared-home");
+    let destination = shared.to_string_lossy();
+    if std::fs::read_to_string(&marker).is_ok_and(|previous| previous == destination) {
+        return Ok(());
+    }
+    for directory in ["sessions", "archived_sessions"] {
+        import_codex_rollouts(&source.join(directory), &shared.join(directory))?;
+    }
+    std::fs::write(marker, destination.as_bytes())
+}
+
+/// Link legacy rollouts into the shared home without replacing existing ones.
+/// Hard links keep surviving old processes' appends visible and remain valid
+/// if the old home is removed. Cross-filesystem homes fall back to a copy.
+fn import_codex_rollouts(source: &Path, dest: &Path) -> std::io::Result<()> {
+    if source == dest || !source.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let target = dest.join(entry.file_name());
+        if kind.is_dir() {
+            import_codex_rollouts(&entry.path(), &target)?;
+        } else if kind.is_file() && entry.path().extension().is_some_and(|ext| ext == "jsonl") {
+            std::fs::create_dir_all(dest)?;
+            match std::fs::hard_link(entry.path(), &target) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(_) => {
+                    let mut original = std::fs::File::open(entry.path())?;
+                    let mut options = std::fs::OpenOptions::new();
+                    options.write(true).create_new(true);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        options.mode(0o600);
+                    }
+                    let mut copy = match options.open(&target) {
+                        Ok(file) => file,
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                        Err(error) => return Err(error),
+                    };
+                    if let Err(error) = std::io::copy(&mut original, &mut copy) {
+                        let _ = std::fs::remove_file(&target);
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Copy each `seed_files` entry from `source` into `dest`, but only where
@@ -793,23 +866,82 @@ mod tests {
     }
 
     #[test]
-    fn codex_plan_isolates_credentials_with_per_session_home() {
+    fn codex_workspaces_share_the_machine_login_on_spawn_and_resume() {
         let cfg = lazybox_config::Config::default();
-        let input = input(TerminalKind::Agent("codex".into()));
+        for key in ["github-acme-widget-657", "github-acme-widget-658"] {
+            for resume in [false, true] {
+                let mut request = input(TerminalKind::Agent("codex".into()));
+                request.session_key = SessionKey::from(key);
+                request.resume = resume;
+                let plan = build_spawn_plan(request, &cfg, &Registry::default_builtins())
+                    .expect("valid plan");
+                assert!(
+                    plan.env.iter().all(|(k, _)| k != "CODEX_HOME"),
+                    "spawn and resume must inherit the shared Codex home: {:?}",
+                    plan.env
+                );
+            }
+        }
+    }
 
-        let plan =
-            build_spawn_plan(input, &cfg, &Registry::default_builtins()).expect("valid plan");
-
-        let codex_home = plan
-            .env
-            .iter()
-            .find(|(k, _)| k == "CODEX_HOME")
-            .map(|(_, v)| v.clone())
-            .expect("codex spawn gets an isolated CODEX_HOME");
-        assert!(
-            codex_home.ends_with("agent-homes/codex/github-acme-widget-657"),
-            "unexpected CODEX_HOME: {codex_home}"
+    #[test]
+    fn legacy_codex_rollouts_remain_resumable_without_importing_auth_or_overwriting() {
+        let base = tempfile::tempdir().unwrap();
+        let old = base.path().join("old");
+        let shared = base.path().join("shared");
+        let relative = "sessions/2026/09/10/rollout-conversation.jsonl";
+        std::fs::create_dir_all(old.join("sessions/2026/09/10")).unwrap();
+        std::fs::write(old.join(relative), b"conversation").unwrap();
+        std::fs::write(old.join("auth.json"), b"old login").unwrap();
+        std::fs::write(old.join("sessions/state.sqlite"), b"old database").unwrap();
+        import_codex_rollouts(&old.join("sessions"), &shared.join("sessions")).unwrap();
+        assert_eq!(
+            std::fs::read(shared.join(relative)).unwrap(),
+            b"conversation"
         );
+        assert!(!shared.join("auth.json").exists());
+        assert!(!shared.join("sessions/state.sqlite").exists());
+        // A still-running old process appends to the same rollout inode.
+        std::fs::write(old.join(relative), b"continued conversation").unwrap();
+        assert_eq!(
+            std::fs::read(shared.join(relative)).unwrap(),
+            b"continued conversation"
+        );
+        std::fs::remove_file(shared.join(relative)).unwrap();
+        std::fs::write(shared.join(relative), b"already migrated").unwrap();
+        import_codex_rollouts(&old.join("sessions"), &shared.join("sessions")).unwrap();
+        assert_eq!(
+            std::fs::read(shared.join(relative)).unwrap(),
+            b"already migrated"
+        );
+        assert_eq!(
+            std::fs::read(old.join(relative)).unwrap(),
+            b"continued conversation"
+        );
+        import_codex_rollouts(&old.join("missing"), &shared.join("missing")).unwrap();
+        import_codex_rollouts(&shared, &shared).unwrap();
+    }
+
+    #[test]
+    fn legacy_codex_import_does_not_resurrect_deleted_conversations() {
+        let base = tempfile::tempdir().unwrap();
+        let source = base.path().join("old");
+        let shared = base.path().join("shared");
+        for directory in ["sessions", "archived_sessions"] {
+            std::fs::create_dir_all(source.join(directory)).unwrap();
+            std::fs::write(source.join(directory).join("rollout.jsonl"), b"history").unwrap();
+        }
+        import_codex_home(&source, &shared).unwrap();
+        assert!(shared.join("archived_sessions/rollout.jsonl").exists());
+        std::fs::remove_file(shared.join("sessions/rollout.jsonl")).unwrap();
+        import_codex_home(&source, &shared).unwrap();
+        assert!(!shared.join("sessions/rollout.jsonl").exists());
+        // An explicitly different shared home can import the old history too.
+        let custom = base.path().join("custom");
+        import_codex_home(&source, &custom).unwrap();
+        assert!(custom.join("sessions/rollout.jsonl").exists());
+        import_codex_home(&source, &source).unwrap();
+        import_codex_home(&base.path().join("missing"), &shared).unwrap();
     }
 
     #[test]

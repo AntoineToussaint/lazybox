@@ -145,6 +145,18 @@ GenericCli (user YAML). The server registers built-ins plus every
 `agents.<id>` entry with a `command` at startup; `spawn_handler` builds the
 worktree, env, and `SpawnCtx`, then launches through the tmux wrapper.
 
+Codex uses the same login and configuration across workspaces: the daemon's
+inherited `CODEX_HOME`, or `~/.codex` by default. Sign in once with `codex login`;
+workspace recovery refreshes that shared login without running `codex logout`.
+Both file-backed and OS credential-store logins use Codex's normal behavior.
+
+Older builds created a separate Codex home for each workspace. Restart those
+Codex terminals after upgrading to use the shared login. Lazybox imports their
+conversation rollouts on launch so native resume can still find them, leaving
+the original homes intact. Old credential and configuration copies are not
+imported. If you only signed in inside an old workspace home, sign in once to
+the shared home. Account changes now apply to all workspaces using that home.
+
 ### Test checklist
 - [ ] `s` opens a shell in the correct worktree dir.
 - [ ] `a c` / `a x` / `a u` launch the respective agent if its binary is on PATH.

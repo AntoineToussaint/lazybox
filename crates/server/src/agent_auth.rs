@@ -435,8 +435,7 @@ pub(crate) async fn detect_required(
     if config.agent_recovery.active(terminal_id).await {
         return;
     }
-    // When this agent isolates its login per session (Codex → a private
-    // `CODEX_HOME`), a re-auth only rewrites this session's own credential;
+    // With per-session isolation, re-auth only rewrites this session's credential;
     // the rest of the fleet is untouched, so there is no cascade to warn
     // about and the "other running sessions" count is moot.
     let credentials_isolated = config
@@ -772,39 +771,11 @@ async fn run_reauthentication(
 ) {
     let recovery_terminal_id = context.terminal_id;
     let display_name = agent_display_name(&config, &context.agent_id);
-    // Scope the logout/login/resume to this session's own credential home
-    // (Codex → an isolated `CODEX_HOME`) so the provider commands rewrite
-    // only this session's login, never the machine-wide one the rest of the
-    // fleet shares. Empty for an agent that keeps the machine-wide login;
-    // the resume itself re-derives the same env through the spawn plan.
+    // Auth and resume use the same credential home. Built-in Codex and Claude
+    // share the machine login, so never log out as part of a pane's recovery.
+    // A provider login can still change shared credentials itself; verify its
+    // status before resuming the conversation.
     let auth_env = auth_credential_env(&config, &context);
-    // A shared, machine-wide login (Claude keeps no per-session credential
-    // home) is used by every other running session of this agent AND the
-    // user's own interactive pane. Running the provider `logout` there signs
-    // ALL of them out at once — the acute bug (#1376): a single pane's
-    // "switch account" was logging the whole fleet, and the user, out.
-    //
-    // The clean long-term fix is per-session credential isolation (Codex →
-    // its own `CODEX_HOME`), so a `logout`/`login` rewrites only this
-    // session's copy. That path is real but not universally available: an
-    // agent that stores its login outside a relocatable home (Claude on
-    // macOS keeps it in the process-global Keychain, unscoped by
-    // `CLAUDE_CONFIG_DIR`) cannot be isolated by seeding a directory, so
-    // `credential_isolation()` returns None for it. Giving Claude a genuine
-    // per-session login is tracked separately (see the credential-isolation
-    // notes on #1376) and is out of reach here.
-    //
-    // Until then, the deliberate mitigation for a shared login is to NOT run
-    // the destructive `logout`: we downgrade "switch account" to a login-only
-    // refresh. lazybox's own code no longer invalidates the shared credential
-    // — but note this is not an absolute guarantee that the user cannot end up
-    // logged out: `login` is the provider's own subprocess, and if the user
-    // cancels it (`cancel_reauthentication` kills it) after it has cleared the
-    // credential to begin a fresh sign-in, the shared login can still be left
-    // empty. That residual window is inherent to a shared login and only fully
-    // closes with isolation above; the common case (an already-valid login the
-    // user re-triggered) is protected because a login that leaves the session
-    // valid is confirmed by the status gate below before we resume.
     let credentials_isolated = config
         .agents
         .get(&context.agent_id)
@@ -1199,9 +1170,8 @@ async fn run_reauthentication(
 }
 
 /// Isolated credential-home env for a re-auth flow. Seeds the per-session
-/// home so the provider `login` writes into this session's own
-/// `CODEX_HOME` rather than the machine-wide login every other session
-/// shares. Empty for an agent that keeps the machine-wide login.
+/// home for adapters that opt in. Empty for shared-login agents, including
+/// Codex and Claude.
 fn auth_credential_env(
     config: &ServerConfig,
     context: &AgentResumeContext,
@@ -1558,8 +1528,6 @@ mod tests {
         )
         .await;
 
-        wait_for_argv(&mock, &["codex", "logout"]).await;
-        mock.finish("mock-agent-auth-1", 0).await;
         wait_for_argv(&mock, &["codex", "login"]).await;
         let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
         let login_key = config
@@ -1612,6 +1580,8 @@ mod tests {
             vec![b"provider input\n".to_vec()]
         );
         mock.finish(&login_key, 0).await;
+        wait_for_argv(&mock, &["codex", "login", "status"]).await;
+        mock.finish("mock-agent-auth-2", 0).await;
         wait_for_argv(&mock, &["codex", "resume", "conversation-708"]).await;
 
         for _ in 0..10_000 {
@@ -1636,48 +1606,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn codex_reauthentication_scopes_provider_commands_to_the_isolated_home() {
+    async fn codex_reauthentication_shares_login_without_logging_other_workspaces_out() {
         let (config, mock, terminal_id) = recovery_fixture("codex", Some("conversation-777")).await;
         start_reauthentication(&config, terminal_id, true, None).await;
-
-        // Logout runs in this session's own CODEX_HOME, so it rewrites only
-        // this session's credential — never the machine-wide `~/.codex` the
-        // rest of the fleet shares.
-        wait_for_argv(&mock, &["codex", "logout"]).await;
-        let logout_env = mock
-            .env_for("mock-agent-auth-1")
-            .await
-            .expect("logout command spawned");
-        let codex_home = logout_env
-            .iter()
-            .find(|(k, _)| k == "CODEX_HOME")
-            .map(|(_, v)| v.clone())
-            .expect("logout is scoped to an isolated CODEX_HOME");
-        assert!(
-            codex_home.contains("agent-homes/codex/"),
-            "unexpected CODEX_HOME: {codex_home}"
-        );
-
-        // Login reuses the very same isolated home so the refreshed token
-        // lands where this session — and only this session — reads it.
-        mock.finish("mock-agent-auth-1", 0).await;
         wait_for_argv(&mock, &["codex", "login"]).await;
         let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
         let login_key = config
             .terminal
             .backend_key_for(auth_terminal_id)
             .await
-            .expect("interactive login terminal");
-        let login_env = mock
-            .env_for(&login_key)
-            .await
-            .expect("login command spawned");
+            .unwrap();
         assert!(
-            login_env
+            mock.env_for(&login_key)
+                .await
+                .unwrap()
                 .iter()
-                .any(|(k, v)| k == "CODEX_HOME" && v == &codex_home),
-            "login must reuse the same isolated CODEX_HOME: {login_env:?}"
+                .all(|(k, _)| k != "CODEX_HOME")
         );
+        assert!(
+            mock.all_argv()
+                .await
+                .iter()
+                .all(|argv| argv.as_slice() != ["codex", "logout"])
+        );
+        mock.finish(&login_key, 0).await;
+        wait_for_argv(&mock, &["codex", "login", "status"]).await;
+        assert!(
+            mock.env_for("mock-agent-auth-2")
+                .await
+                .unwrap()
+                .iter()
+                .all(|(k, _)| k != "CODEX_HOME")
+        );
+        mock.emit("mock-agent-auth-2", b"Not logged in").await;
+        mock.finish("mock-agent-auth-2", 0).await;
+        for _ in 0..10_000 {
+            if !config.agent_recovery.active(terminal_id).await {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!config.agent_recovery.active(terminal_id).await);
+        assert!(
+            mock.all_argv()
+                .await
+                .iter()
+                .all(|argv| !argv.starts_with(&["codex".into(), "resume".into()]))
+        );
+        assert!(config.agent_recovery.context(terminal_id).await.is_some());
     }
 
     #[tokio::test]
@@ -1884,14 +1860,11 @@ mod tests {
     #[tokio::test]
     async fn failed_login_keeps_the_conversation_recoverable() {
         let (config, mock, terminal_id) = recovery_fixture("codex", Some("conversation-708")).await;
-        start_reauthentication(&config, terminal_id, true, None).await;
-
-        wait_for_argv(&mock, &["codex", "logout"]).await;
         crate::spawn_handler::handle_record_user_message(
             &config,
             terminal_id,
             &UserPrompt {
-                text: "new prompt while logout starts".into(),
+                text: "new prompt before login starts".into(),
                 timestamp_ms: 2,
                 source: lazybox_ipc::PromptSource::Typed,
             },
@@ -1900,10 +1873,10 @@ mod tests {
         crate::spawn_handler::handle_record_composing_buffer(
             &config,
             terminal_id,
-            "new draft while logout starts",
+            "new draft before login starts",
         )
         .await;
-        mock.finish("mock-agent-auth-1", 0).await;
+        start_reauthentication(&config, terminal_id, true, None).await;
         wait_for_argv(&mock, &["codex", "login"]).await;
         let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
         let login_key = config
@@ -1913,7 +1886,7 @@ mod tests {
             .expect("login backend");
         mock.emit(&login_key, b"private device-code output\r\n")
             .await;
-        mock.finish("mock-agent-auth-2", 1).await;
+        mock.finish("mock-agent-auth-1", 1).await;
 
         for _ in 0..10_000 {
             if !config.agent_recovery.active(terminal_id).await {
@@ -1933,11 +1906,11 @@ mod tests {
         );
         assert_eq!(
             context.prompt_history[1].text,
-            "new prompt while logout starts"
+            "new prompt before login starts"
         );
         assert_eq!(
             context.composing_buffer.as_deref(),
-            Some("new draft while logout starts")
+            Some("new draft before login starts")
         );
         assert!(mock.all_argv().await.iter().all(|argv| !argv.starts_with(&[
             "codex".into(),
@@ -1952,11 +1925,11 @@ mod tests {
         assert!(failed.authenticating);
         assert_eq!(
             failed.prompt_history[1].text,
-            "new prompt while logout starts"
+            "new prompt before login starts"
         );
         assert_eq!(
             failed.composing_buffer.as_deref(),
-            Some("new draft while logout starts")
+            Some("new draft before login starts")
         );
         let (replay_events, _) = config.agent_recovery.replay_events(None).await;
         assert!(replay_events.iter().any(|event| matches!(
@@ -1971,28 +1944,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconnect_during_logout_keeps_the_original_terminal_addressable() {
+    async fn reconnect_during_codex_login_keeps_the_auth_terminal_addressable() {
         let (config, mock, terminal_id) = recovery_fixture("codex", Some("conversation-708")).await;
         start_reauthentication(&config, terminal_id, true, None).await;
-        wait_for_argv(&mock, &["codex", "logout"]).await;
-
+        wait_for_argv(&mock, &["codex", "login"]).await;
+        let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
         let snapshot = crate::spawn_handler::snapshot_terminals(&config).await;
         assert!(
             snapshot
                 .iter()
-                .any(|terminal| terminal.terminal_id == terminal_id),
-            "logout must not create a gap where reconnect sees no pane"
+                .any(|terminal| terminal.terminal_id == auth_terminal_id)
         );
         let (events, _) = config.agent_recovery.replay_events(None).await;
-        assert!(events.iter().any(|event| matches!(
-            event,
-            Event::AgentAuthProgress {
-                recovery_terminal_id,
-                terminal_id: current_terminal_id,
-                phase: AgentAuthPhase::LoggingOut,
-            } if *recovery_terminal_id == terminal_id && *current_terminal_id == terminal_id
+        assert!(events.iter().any(|event| matches!(event,
+            Event::AgentAuthProgress { recovery_terminal_id, terminal_id: id,
+                phase: AgentAuthPhase::LoginInteractive,
+            } if *recovery_terminal_id == terminal_id && *id == auth_terminal_id
         )));
-
         cancel_reauthentication(&config, terminal_id).await;
     }
 
@@ -2016,8 +1984,6 @@ mod tests {
             Some(lazybox_ipc::EventSender::from_unbounded(first_tx)),
         )
         .await;
-        wait_for_argv(&mock, &["codex", "logout"]).await;
-        mock.finish("mock-agent-auth-1", 0).await;
         wait_for_argv(&mock, &["codex", "login"]).await;
         let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
         let login_key = config
@@ -2074,11 +2040,9 @@ mod tests {
     async fn closing_a_failed_auth_pane_removes_its_server_side_recovery_state() {
         let (config, mock, terminal_id) = recovery_fixture("codex", Some("conversation-708")).await;
         start_reauthentication(&config, terminal_id, true, None).await;
-        wait_for_argv(&mock, &["codex", "logout"]).await;
-        mock.finish("mock-agent-auth-1", 0).await;
         wait_for_argv(&mock, &["codex", "login"]).await;
         let auth_terminal_id = wait_for_replacement(&config, terminal_id).await;
-        mock.finish("mock-agent-auth-2", 1).await;
+        mock.finish("mock-agent-auth-1", 1).await;
         for _ in 0..10_000 {
             if !config.agent_recovery.active(terminal_id).await {
                 break;
@@ -2168,7 +2132,7 @@ mod tests {
         );
 
         start_reauthentication(&config, terminal_id, true, None).await;
-        wait_for_argv(&mock, &["codex", "logout"]).await;
+        wait_for_argv(&mock, &["codex", "login"]).await;
         start_reauthentication(&config, other_terminal_id, true, None).await;
         tokio::task::yield_now().await;
 
@@ -2176,7 +2140,7 @@ mod tests {
             mock.all_argv()
                 .await
                 .iter()
-                .filter(|argv| argv.as_slice() == ["codex", "logout"])
+                .filter(|argv| argv.as_slice() == ["codex", "login"])
                 .count(),
             1
         );

@@ -1091,10 +1091,8 @@ pub mod builtins {
                 status: vec!["codex".into(), "login".into(), "status".into()],
                 logout: vec!["codex".into(), "logout".into()],
                 login: vec!["codex".into(), "login".into()],
-                // Codex isolates its login per session (its own CODEX_HOME), so
-                // re-auth does a clean logout+login and never runs the status
-                // gate; exit-code-only would suffice regardless.
-                signed_out_marker: None,
+                // Re-auth refreshes the shared login without logging other panes out.
+                signed_out_marker: Some("Not logged in"),
             })
         }
 
@@ -1102,20 +1100,11 @@ pub mod builtins {
             crate::detect::codex_auth_failure(recent_output)
         }
 
-        /// Isolate each Codex session's login under its own `CODEX_HOME` so
-        /// a re-auth (expired token / account switch) on one session never
-        /// re-logs the machine-wide `~/.codex` and disrupts the fleet. The
-        /// login lives in `auth.json` inside the home; `config.toml` carries
-        /// the user's provider/model config, so both are seeded. Claude
-        /// deliberately opts out: on macOS its OAuth credential lives in the
-        /// login Keychain, not under `CLAUDE_CONFIG_DIR`, so relocating the
-        /// config dir would not isolate the credential.
+        /// Keep the normal shared home, including an inherited CODEX_HOME.
+        /// Copying auth.json per workspace forks refresh-token state and misses
+        /// keyring credentials, forcing users to sign in repeatedly.
         fn credential_isolation(&self) -> Option<CredentialIsolation> {
-            Some(CredentialIsolation {
-                home_env: "CODEX_HOME",
-                default_home: ".codex",
-                seed_files: &["auth.json", "config.toml"],
-            })
+            None
         }
 
         /// Suppress Homebrew's implicit self-update inside a spawned Codex
@@ -1729,15 +1718,15 @@ mod tests {
     }
 
     #[test]
-    fn codex_isolates_credentials_per_session_claude_does_not() {
-        let iso = super::builtins::Codex
-            .credential_isolation()
-            .expect("codex isolates its login");
-        assert_eq!(iso.home_env, "CODEX_HOME");
-        assert_eq!(iso.default_home, ".codex");
-        assert!(iso.seed_files.contains(&"auth.json"));
-        // Claude's macOS credential lives in the Keychain, not under a
-        // relocatable config dir, so it stays on the machine-wide login.
+    fn codex_and_claude_share_the_machine_login() {
+        assert!(super::builtins::Codex.credential_isolation().is_none());
+        assert_eq!(
+            super::builtins::Codex
+                .auth_commands()
+                .unwrap()
+                .signed_out_marker,
+            Some("Not logged in")
+        );
         assert!(Claude.credential_isolation().is_none());
     }
 

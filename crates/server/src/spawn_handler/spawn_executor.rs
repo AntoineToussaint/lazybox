@@ -55,11 +55,8 @@ pub(super) async fn execute_spawn_plan(
         TerminalKind::Agent(id) => config.agents.get(id),
         _ => None,
     };
-    // Seed this session's isolated credential home from the machine-wide
-    // login before launch, so an isolating agent (Codex) starts
-    // authenticated in its own `CODEX_HOME` — the env var itself is already
-    // baked into `plan.env` by the spawn plan. No-op for agents that keep
-    // the machine-wide login.
+    // Prepare adapter credential homes and import legacy Codex conversations
+    // before launch. Codex now inherits the shared machine login.
     if let Some(agent) = &agent {
         crate::spawn_plan::seed_credential_home(agent.as_ref(), &plan.session_key);
     }

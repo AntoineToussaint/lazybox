@@ -34,6 +34,10 @@
 //!    showing) is `Some(0)` and does render.
 //! 2. **One value shape per key**, so a reader can decode it years later.
 
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
 use crate::pricing::TokenCounts;
 
 /// Trailer key: what the work spent.
@@ -169,6 +173,91 @@ impl TimeTrailer {
             parts.push(format!("work→merge {}", fmt_duration(s)));
         }
         (!parts.is_empty()).then(|| parts.join(" · "))
+    }
+}
+
+/// How much of a PR's trailer set may be written into permanent history.
+///
+/// A commit trailer cannot be deleted without rewriting history, so on a
+/// repository the world can clone, per-PR spend is a business signal anyone
+/// can aggregate. [`Shape`](Self::Shape) is the middle setting: it publishes
+/// what the work *took* — tokens, agents, turns, clocks — while withholding
+/// the commercial figure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrailerMode {
+    /// Every measured field, dollars included.
+    Full,
+    /// Everything except the dollar figure.
+    Shape,
+    /// Write nothing at all.
+    #[default]
+    Off,
+}
+
+impl TrailerMode {
+    /// `trailers` reduced to what this mode permits, or `None` when that
+    /// leaves nothing worth writing.
+    pub fn apply(self, trailers: &PrTrailers) -> Option<PrTrailers> {
+        let mut out = match self {
+            Self::Off => return None,
+            Self::Full => trailers.clone(),
+            Self::Shape => {
+                let mut out = trailers.clone();
+                if let Some(cost) = out.cost.as_mut() {
+                    cost.micros = None;
+                }
+                out
+            }
+        };
+        // A cost whose every sub-field just vanished would still render its
+        // key with an empty value; drop the whole field instead.
+        if out.cost.as_ref().is_some_and(|c| c.value().is_none()) {
+            out.cost = None;
+        }
+        (!out.is_empty()).then_some(out)
+    }
+}
+
+/// Which repositories lazybox may write trailers into, and how much.
+///
+/// Private repositories default to [`TrailerMode::Full`] — the spend is
+/// already only visible to people who can read the code. Public ones default
+/// to [`TrailerMode::Off`] and are opted in one at a time through
+/// [`repos`](Self::repos), which overrides the visibility default in both
+/// directions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrailerPolicy {
+    pub private: TrailerMode,
+    pub public: TrailerMode,
+    /// Per-repository overrides keyed by `owner/name`.
+    pub repos: BTreeMap<String, TrailerMode>,
+}
+
+impl Default for TrailerPolicy {
+    fn default() -> Self {
+        Self {
+            private: TrailerMode::Full,
+            public: TrailerMode::Off,
+            repos: BTreeMap::new(),
+        }
+    }
+}
+
+impl TrailerPolicy {
+    /// The mode governing `repo`, whose visibility is `is_private`. An
+    /// unknown repo (`None`) is treated as public: the conservative read of
+    /// "we could not establish that this is private".
+    pub fn mode_for(&self, repo: Option<&str>, is_private: bool) -> TrailerMode {
+        if let Some(mode) = repo.and_then(|repo| self.repos.get(repo)) {
+            return *mode;
+        }
+        if repo.is_some() && is_private {
+            self.private
+        } else {
+            self.public
+        }
     }
 }
 
@@ -487,6 +576,80 @@ mod tests {
         assert_eq!(fmt_duration(3_600), "1h");
         assert_eq!(fmt_duration(86_400), "1d");
         assert_eq!(fmt_duration(30), "0m");
+    }
+
+    /// `Shape` is the public-repo form: the work's shape survives, the
+    /// commercial figure does not.
+    #[test]
+    fn shape_withholds_dollars_and_keeps_everything_else() {
+        let shaped = TrailerMode::Shape.apply(&full()).expect("shape renders");
+        assert_eq!(
+            shaped.render(),
+            "Lazybox-Cost: 1.24M in · 84.1k out\n\
+             Lazybox-Agents: claude-opus-5 ×3, codex ×1\n\
+             Lazybox-Effort: 14 turns · 2 human handoffs · 3 CI repairs\n\
+             Lazybox-Time: issue→merge 3d4h · work→merge 52m",
+        );
+    }
+
+    /// Dropping the dollars from a cost-only set must drop the whole line,
+    /// not leave `Lazybox-Cost:` with an empty value.
+    #[test]
+    fn shape_of_a_dollars_only_set_writes_nothing() {
+        let dollars_only = PrTrailers {
+            cost: Some(CostTrailer {
+                micros: Some(420_000),
+                tokens: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(TrailerMode::Shape.apply(&dollars_only), None);
+    }
+
+    #[test]
+    fn off_writes_nothing_and_full_writes_everything() {
+        assert_eq!(TrailerMode::Off.apply(&full()), None);
+        assert_eq!(TrailerMode::Full.apply(&full()), Some(full()));
+        assert_eq!(TrailerMode::Full.apply(&PrTrailers::default()), None);
+    }
+
+    /// Private repos are on by default, public ones off, and a per-repo
+    /// entry overrides the visibility default in either direction.
+    #[test]
+    fn policy_defaults_to_private_only() {
+        let mut policy = TrailerPolicy::default();
+        assert_eq!(
+            policy.mode_for(Some("acme/secret"), true),
+            TrailerMode::Full
+        );
+        assert_eq!(policy.mode_for(Some("acme/open"), false), TrailerMode::Off);
+
+        policy
+            .repos
+            .insert("acme/open".to_string(), TrailerMode::Shape);
+        policy
+            .repos
+            .insert("acme/secret".to_string(), TrailerMode::Off);
+        assert_eq!(
+            policy.mode_for(Some("acme/open"), false),
+            TrailerMode::Shape
+        );
+        assert_eq!(
+            policy.mode_for(Some("acme/secret"), true),
+            TrailerMode::Off,
+            "an explicit entry can opt a private repo OUT too",
+        );
+    }
+
+    /// A repo we cannot name cannot be matched against the opt-in list, so
+    /// it is treated as public — the conservative read of "we could not
+    /// establish that this is private".
+    #[test]
+    fn an_unnamed_repo_falls_to_the_public_default() {
+        assert_eq!(
+            TrailerPolicy::default().mode_for(None, true),
+            TrailerMode::Off
+        );
     }
 
     #[test]

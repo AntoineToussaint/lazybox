@@ -35,6 +35,15 @@ const SNIPPET_KEEPMINE_KV_KEY: &str = "snippet_keepmine";
 /// string). Lets the per-workspace `$ METER · $cost` figure survive a
 /// restart (#1389).
 const SESSION_COST_KV_PREFIX: &str = "meter-cost:";
+/// kv key prefix for the "cost already reported" watermark, one row per
+/// session key (`meter-cost-mark:<session_key>` → micro-USD as a decimal
+/// string). Cost accrues to the *workspace*, but a PR is only a slice of
+/// its life, so a workspace reused after a merge would otherwise report its
+/// lifetime total on the next PR. Stamped at merge; the delta above it is
+/// what that PR cost. Absent = 0, which is deliberately what the first PR
+/// sees — the issue-phase spend `move_session_cost` folded in is part of
+/// the work that PR represents.
+const SESSION_COST_MARK_KV_PREFIX: &str = "meter-cost-mark:";
 /// kv key prefix for the mastery ledger, one row per catalog action
 /// (`mastery:<action_id>` → a JSON `{ "<via>": count }` map). Lets the
 /// per-action usage counts feed onboarding chrome and survive a restart,
@@ -214,6 +223,62 @@ pub fn clear_session_cost(store: &dyn lazybox_store::Store, session_key: &str) {
     let kv_key = format!("{SESSION_COST_KV_PREFIX}{session_key}");
     if let Err(e) = store.delete_kv(&kv_key) {
         tracing::warn!("clear session cost `{session_key}` failed: {e}");
+    }
+    // The watermark is meaningless without the total it indexes into, and a
+    // survivor would silently zero the next PR's reported cost.
+    let mark_key = format!("{SESSION_COST_MARK_KV_PREFIX}{session_key}");
+    if let Err(e) = store.delete_kv(&mark_key) {
+        tracing::warn!("clear session cost mark `{session_key}` failed: {e}");
+    }
+}
+
+/// The metered cost accrued to `session_key` since it was last reported —
+/// the figure a merge writes into the PR's trailer. `0` when nothing was
+/// metered, which callers must render as *no cost line* rather than
+/// `$0.00`.
+pub fn unreported_session_cost(store: &dyn lazybox_store::Store, session_key: &str) -> u64 {
+    let read = |prefix: &str| -> u64 {
+        store
+            .get_kv(&format!("{prefix}{session_key}"))
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    read(SESSION_COST_KV_PREFIX).saturating_sub(read(SESSION_COST_MARK_KV_PREFIX))
+}
+
+/// Advance `session_key`'s watermark by exactly `reported_micros` — the
+/// figure that was actually measured and published — so a later PR on the
+/// same workspace bills only what it spends itself.
+///
+/// Deliberately additive rather than "stamp the current total": an agent
+/// keeps spending while the merge mutation is in flight, and re-reading the
+/// total here would fold that in-flight spend into the watermark without it
+/// ever appearing in a trailer, hiding it from this PR *and* the next one.
+/// Advancing by the reported figure leaves the difference where it belongs —
+/// unreported, and billed to whatever PR comes next.
+///
+/// Production callers MUST hold `ServerConfig::session_cost_lock`, for the
+/// same reason [`move_session_cost`] must.
+pub fn mark_session_cost_reported(
+    store: &dyn lazybox_store::Store,
+    session_key: &str,
+    reported_micros: u64,
+) {
+    if reported_micros == 0 {
+        return;
+    }
+    let mark_key = format!("{SESSION_COST_MARK_KV_PREFIX}{session_key}");
+    let current = store
+        .get_kv(&mark_key)
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let advanced = current.saturating_add(reported_micros);
+    if let Err(e) = store.set_kv(&mark_key, &advanced.to_string()) {
+        tracing::warn!("mark session cost reported `{session_key}` failed: {e}");
     }
 }
 

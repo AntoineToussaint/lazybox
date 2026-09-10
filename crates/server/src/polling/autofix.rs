@@ -99,6 +99,19 @@ fn persist(store: &dyn Store, key: &str, rec: &AttemptRecord) {
     }
 }
 
+/// How many auto-fix CI repairs this workspace has taken.
+///
+/// Deliberately `CiFailure` only: the trailer renders this figure as "CI
+/// repairs", and a merge-conflict rebase is not one — folding both in
+/// publishes a number that misstates what happened, permanently.
+///
+/// Reads the same record the budget guard writes, so it inherits its rolling
+/// window: a PR repaired outside the current window reports the repairs it
+/// has had *recently*, not over its whole life.
+pub fn ci_attempts_so_far(store: &dyn Store, session_key: &str) -> u64 {
+    u64::from(load(store, &record_key(session_key, AutoFixKind::CiFailure)).attempts)
+}
+
 /// Consult the cooldown + max-attempts guard for `(session_key, kind)`.
 /// A caller records only after the repair prompt has been accepted for
 /// delivery, so waiting for a busy agent never consumes the budget.

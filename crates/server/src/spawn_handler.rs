@@ -19259,12 +19259,18 @@ mod tests {
     fn hook_probe_does_not_deadlock_on_a_candidate_that_floods_stdout() {
         let directory = tempfile::tempdir().expect("tempdir");
         let noisy = directory.path().join("lazybox");
-        // 4096 × 64 B = 256 KB, comfortably past the 64 KB pipe buffer.
+        // 64 × 4 KiB = 256 KB, comfortably past the 64 KB pipe buffer. The
+        // flood is written in a few long lines rather than thousands of short
+        // ones on purpose: what is being timed is whether the reader drains
+        // the pipe, so the shell's own per-iteration cost has to stay far
+        // below the deadline. Four thousand iterations put it within noise of
+        // the bound on a loaded machine, and this test then blamed a block
+        // that had not happened.
         write_fake_exe(
             &noisy,
             &format!(
-                "#!/bin/sh\ni=0\nwhile [ $i -lt 4096 ]; do\n  echo \"{}\"\n  i=$((i + 1))\ndone\necho {}\n",
-                "x".repeat(63),
+                "#!/bin/sh\ni=0\nwhile [ $i -lt 64 ]; do\n  echo \"{}\"\n  i=$((i + 1))\ndone\necho {}\n",
+                "x".repeat(4095),
                 HOOK_HELPER_PROBE_RESPONSE
             ),
         );

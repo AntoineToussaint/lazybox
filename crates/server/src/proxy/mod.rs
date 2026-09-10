@@ -643,14 +643,7 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
         (
             upstream.bytes_stream(),
             accumulator,
-            Some((
-                state,
-                sink,
-                agent_id,
-                session,
-                measured,
-                compacted.measured,
-            )),
+            Some((state, sink, agent_id, session, measured, compacted.measured)),
         ),
         |(mut bytes, mut acc, mut pending)| async move {
             match bytes.next().await {
@@ -683,9 +676,12 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
                             measured.against(store.entry(&format!("{agent_id}/{session}")))
                         });
-                        state
-                            .compactor
-                            .observe_usage(&session, &agent_id, &usage, compaction_measured);
+                        state.compactor.observe_usage(
+                            &session,
+                            &agent_id,
+                            &usage,
+                            compaction_measured,
+                        );
                         sink(&agent_id, &session, usage);
                     }
                     None

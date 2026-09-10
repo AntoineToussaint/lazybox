@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use hyper::header::{HeaderMap, HeaderName};
 use lazybox_agents::LlmProvider;
-use lazybox_core::PriorityTier;
+use lazybox_core::CapabilityTier;
 use lazybox_core::context_hygiene::{self, CondenseKind, CondenseTag, ContextHygiene};
 use lazybox_store::Store;
 use serde::{Deserialize, Serialize};
@@ -261,7 +261,7 @@ impl Summarizer {
     pub fn model_for(&self, agent_id: &str) -> Option<String> {
         let models = self.inner.config.agent_models(agent_id);
         models
-            .alias_for_priority(PriorityTier::Low)
+            .alias_for_capability(CapabilityTier::Low)
             .and_then(|alias| models.tier(alias))
             .and_then(|tier| tier.model_id())
             .map(str::to_string)

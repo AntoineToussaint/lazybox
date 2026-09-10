@@ -510,6 +510,7 @@ async fn an_unbilled_request_does_not_consume_a_blocks_first_send() {
         context.tool_result_resent_bytes, 0,
         "an unbilled preflight/retry must not consume the block's first send",
     );
+}
 
 /// An upstream that reads the WHOLE request — head plus `Content-Length`
 /// — before replying, and keeps serving, recording every request it saw.
@@ -691,6 +692,65 @@ async fn proxy_condenses_old_tool_results_before_the_upstream_sees_them() {
         head.to_ascii_lowercase()
             .contains(&format!("content-length: {}", forwarded.len())),
         "content-length matches the rewritten body: {head:?}"
+    );
+}
+
+/// The accounting (#1606) and the rewrite (#1609) read the same buffered
+/// body, and the rewrite mutates it. The measurement therefore has to run
+/// first, or the meter starts describing lazybox's own condensed output
+/// instead of the conversation the agent sent — a silent failure, since a
+/// rewritten body still measures as a plausible-looking conversation.
+///
+/// The agent sends a byte-identical body on both turns, so whatever the
+/// accounting reports must also be identical, even though compaction
+/// rewrites the second one.
+#[tokio::test]
+async fn the_accounting_measures_what_the_agent_sent_not_the_condensed_body() {
+    let (captured, sink) = recording_sink();
+    let (upstream, seen) = mock_upstream_recording(WARM_CACHE_TURN).await;
+    let port = start_proxy_with(upstream, sink, compactor(lazybox_core::CompactionMode::On)).await;
+
+    let sent = conversation_body(8);
+    post_conversation(port, "github-acme-widget-9", sent.clone()).await;
+    post_conversation(port, "github-acme-widget-9", sent.clone()).await;
+
+    // Guard: without an actual rewrite on the second turn this would pass
+    // for the wrong reason.
+    let requests = seen.lock().expect("lock").clone();
+    let forwarded = upstream_body(&requests[1]);
+    assert!(
+        forwarded.len() < sent.len()
+            && forwarded.contains(lazybox_core::context_hygiene::CONDENSED_MARKER),
+        "the second turn really was condensed before forwarding"
+    );
+
+    let captured = captured.lock().expect("lock");
+    assert_eq!(captured.len(), 2, "both turns reported usage");
+    let first = captured[0].2.context.expect("first turn measured");
+    let second = captured[1].2.context.expect("second turn measured");
+
+    assert_eq!(
+        second.tool_result_bytes, first.tool_result_bytes,
+        "the same body measures the same on both turns; measuring the \
+         rewritten one would report the condensed size"
+    );
+    assert!(
+        second.tool_result_bytes > forwarded.len() as u64,
+        "the accounting reflects the sent body ({}), not the forwarded one ({})",
+        second.tool_result_bytes,
+        forwarded.len()
+    );
+    assert_eq!(
+        first.large_tool_results, 8,
+        "the first turn introduced eight oversized blocks"
+    );
+    // The sharpest probe: the seen-set is keyed on the bytes of each block,
+    // so an identical re-send is wholly a re-send. Measuring the condensed
+    // body instead would hash blocks the session has never sent and report
+    // no re-send at all.
+    assert_eq!(
+        second.tool_result_resent_bytes, second.tool_result_bytes,
+        "the identical second send is recognized as a re-send"
     );
 }
 

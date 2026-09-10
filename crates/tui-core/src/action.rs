@@ -464,10 +464,11 @@ pub enum Action {
     /// (`force_new`).
     SpawnPlanner,
     /// Spawn a **Coordinator** agent for the cursor epic (`E c`, #1523).
-    /// Creates a fresh local workspace `<epic>-coordinator`, assigns it to
-    /// the epic, stamps `role:coordinator`, then starts the default agent
-    /// with the Coordinator preamble (own the epic, status from
-    /// `epic_status`, brief siblings, start workers with `spawn_worker`).
+    /// Runs in the cursor workspace — the epic's own tracking issue, when
+    /// that is what the cursor sits on (#1586) — stamping
+    /// `role:coordinator` and starting the default agent with the
+    /// Coordinator preamble (own the epic, status from `epic_status`, brief
+    /// siblings, start workers with `spawn_worker`).
     SpawnCoordinator,
     /// Move the sidebar cursor to the previous group header (`{`,
     /// #1502). Clamps at the first.
@@ -1267,7 +1268,7 @@ impl ActionDef {
                 kind: ActionKind::SpawnCoordinator,
                 default_keys: "E c",
                 label: "spawn coordinator",
-                describe: "Create a fresh local `<epic>-coordinator` workspace for the cursor epic, assign it, stamp it Coordinator, and start the default agent with the Coordinator preamble (#1523) — own the epic, read status from `epic_status`, brief siblings, and start workers with `spawn_worker`.",
+                describe: "Stamp the cursor workspace as Coordinator for its epic and start the default agent with the Coordinator preamble (#1523) — own the epic, read status from `epic_status`, brief siblings, and start workers with `spawn_worker`. It runs in the workspace under the cursor, so put the cursor on the epic's tracking issue: a coordinator never gets a workspace of its own beside the record (#1586).",
                 section: Section::Workspace,
             },
             ActionKind::JumpPrevGroup => &Self {
@@ -3483,9 +3484,9 @@ pub fn availability(kind: ActionKind, workspace: Option<&lazybox_core::Workspace
         // the workspace's existence like EditNotes/RenameWorkspace.
         | ActionKind::SetRole
         // Role-spawn chords (#1523): `E p` stamps the cursor workspace
-        // Planner and spawns; `E c` creates an `<epic>-coordinator`
-        // workspace for the cursor epic and spawns. Both need a workspace
-        // under the cursor (the epic is resolved from it at dispatch).
+        // Planner and spawns; `E c` stamps it Coordinator for its epic and
+        // spawns. Both run in the workspace under the cursor — a role never
+        // gets a row of its own beside the record (#1586).
         | ActionKind::SpawnPlanner
         | ActionKind::SpawnCoordinator
         // The autonomy latches live on the *epic*, resolved from the cursor

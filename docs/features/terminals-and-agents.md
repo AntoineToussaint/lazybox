@@ -607,9 +607,11 @@ Option<Role>`), OR-merge-safe like `hopper` / `remote`. It does three things:
   tracker is honored and stripping the label unroles the session.
 
 Roles are **advisory** except one enforced gate: the MCP `spawn_worker` tool
-(Coordinator-only) creates a workspace, assigns it to the caller's epic as a
-Worker, and spawns an agent on a brief — refusing off-role or past
-`max_epic_workers`. Merge gating/ordering is P3; automatic dispatch is P4.
+(Coordinator-only) starts a Worker **on a tracker record** — it attaches to the
+issue's own workspace, assigns it to the caller's epic as a Worker, and spawns
+an agent on a brief — refusing off-role, past `max_epic_workers`, or on a
+record it cannot resolve. Merge gating/ordering is P3; automatic dispatch is
+P4.
 
 ### How to use it
 - `E r` on a workspace opens a picker (the five roles or *none*); the choice
@@ -618,8 +620,12 @@ Worker, and spawns an agent on a brief — refusing off-role or past
   the default agent there with a kickoff prompt, so the role preamble frames
   the launch (role is set first, then the spawn is issued).
 - A Coordinator session staffs its epic from inside the agent with
-  `spawn_worker(workspace_name, repo, brief, agent?)` — the one MCP tool gated
-  on role. It refuses for any non-Coordinator caller.
+  `spawn_worker(task | create_issue, brief, agent?)` — the one MCP tool gated
+  on role. `task` is the record the worker owns (`owner/repo#N`, a GitHub
+  issue/PR URL, a Linear identifier); `create_issue { title, body, repo,
+  parent?, blocked_by? }` files it as a sub-issue of the epic first. There is
+  no `workspace_name`: a worker runs in the record's own row, never a named one
+  beside it (#1586). It refuses for any non-Coordinator caller.
 - On GitHub, the `role:*` label makes the plan legible to anyone looking at the
   tracker rather than at lazybox — and lazybox adopts it back if the field is
   unset, so the two stay in sync.
@@ -631,9 +637,9 @@ field, `commit_upsert`s, then best-effort projects the label via
 `sync_role_label_target`. `E p` / `E c` push `SetWorkspaceRole` *then* `Spawn`
 (with `force_new` and a non-empty kickoff prompt) so the daemon, draining the
 command channel in order, persists the role before the spawn handler reads it
-for preamble injection. The epic-header `<epic>-coordinator` creation path is
-deferred to where client-side epic-row rendering lands (the TUI still ignores
-`Event::EpicStatus`), so `E c`'s reachable target is the cursor workspace.
+for preamble injection. `E c`'s target is the cursor workspace — put the cursor
+on the epic's tracking issue, since a Coordinator never gets a row of its own
+beside the record (#1586).
 
 ### Test checklist
 - [ ] `E r` sets a role; the sidebar shows the matching badge and a `role:*`
@@ -643,6 +649,8 @@ deferred to where client-side epic-row rendering lands (the TUI still ignores
       a persisted field wins over a conflicting label.
 - [ ] `E p` / `E c` spawn an agent whose prompt opens with the role preamble.
 - [ ] `spawn_worker` is refused for a non-Coordinator and past `max_epic_workers`.
+- [ ] `spawn_worker` with a `task` reference lands the agent in that record's
+      existing row; passing `workspace_name` is refused with the rule.
 
 ---
 

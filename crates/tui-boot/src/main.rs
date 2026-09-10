@@ -14,9 +14,10 @@
 //!   lazybox server api              foreground JSON HTTP API gateway
 //!   lazybox worktree list           report managed worktrees + disk totals
 //!   lazybox worktree gc             reclaim safe orphaned worktrees
-//!   lazybox workspace create --name N   create a taskless pre-PR workspace via
-//!                                  the daemon socket (--project/--repo or
-//!                                  inferred from cwd; --agent spawns into it)
+//!   lazybox workspace create --issue R  attach to a tracker record's workspace
+//!                                  via the daemon socket (--issue/--pr/--ticket
+//!                                  <owner/repo#N|URL|KEY>; --name + --scratch
+//!                                  for repo-less scratch; --agent spawns into it)
 //!   lazybox sandbox ensure          provision a remote dev box (terraform);
 //!                                  wake/sleep/status/connect/destroy manage
 //!                                  its lifecycle (GCP; per-worktree handle)
@@ -380,10 +381,13 @@ Remote & services:
                               --depth N to bound the walk, --hidden for dotdirs)
   lazybox worktree list       report managed worktrees (size, orphan reasons, totals)
   lazybox worktree gc         reclaim safe orphaned worktrees (--force / --dry-run)
-  lazybox workspace create    create a taskless pre-PR workspace via the daemon
-    --name <name>             (--project <key> / --repo <owner/repo>, or inferred
-                              from cwd; --agent <id> spawns an agent into it;
-                              --socket <path> targets a non-default daemon)
+  lazybox workspace create    attach to a tracker record's workspace via the daemon
+    --issue|--pr|--ticket <R> (owner/repo#N, a GitHub URL, #N beside --repo, or a
+                              Linear key. --name <name> --scratch instead for
+                              repo-less scratch; --project <key> / --repo
+                              <owner/repo>, or inferred from cwd; --agent <id>
+                              spawns an agent into it; --socket <path> targets a
+                              non-default daemon)
 
 Advanced:
   lazybox --fresh             wipe ~/.lazybox/v2/state.db, forget the wizard answers in
@@ -681,38 +685,65 @@ async fn workspace_subcommand(args: &[String]) -> anyhow::Result<()> {
         other => {
             anyhow::bail!(
                 "unknown `lazybox workspace` verb {:?}; usage: lazybox workspace create \
-                 --name <name> [--project <key> | --repo <owner/repo>] [--agent <id>] [--cwd <path>]",
+                 (--issue|--pr|--ticket <owner/repo#N|URL|KEY> | --name <name> --scratch) \
+                 [--project <key> | --repo <owner/repo>] [--agent <id>] [--cwd <path>]",
                 other.unwrap_or("<none>"),
             );
         }
     }
 }
 
-/// `lazybox workspace create --name <name> [--project <key> | --repo
-/// <owner/repo>] [--agent <id>] [--cwd <path>]` — create a taskless pre-PR
-/// workspace by sending `Command::CreateWorkspace` to the daemon over its
-/// socket, the same IPC path `hook-ingest` uses. With `--agent`, the daemon
-/// spawns that agent into the fresh workspace so a live session lands in it.
+/// `lazybox workspace create (--issue <ref> | --pr <ref> | --ticket <KEY> |
+/// --name <name> --scratch) [--project <key> | --repo <owner/repo>] [--agent
+/// <id>] [--cwd <path>]` — attach to a tracker record's workspace, or create a
+/// scratch one, by sending `Command::CreateWorkspace` to the daemon over its
+/// socket (the same IPC path `hook-ingest` uses). With `--agent`, the daemon
+/// spawns that agent into the resolved workspace so a live session lands in it.
+///
+/// `--issue` / `--pr` / `--ticket` are the same flag under three names, each
+/// reading better at its call site: they take `owner/repo#N`, a GitHub URL, a
+/// bare `#N` beside `--repo`, or a Linear identifier, and the daemon returns
+/// the record's own row — materializing it when the poll has not reached the
+/// record yet. A bare `--name` under a repo scope is refused unless
+/// `--scratch` says it really is repo-less scratch (#1586); under a local
+/// project it stays allowed, since there is no record for it to shadow.
 ///
 /// The Project is resolved from `--project`/`--repo`, else inferred from the
 /// checkout at `--cwd` (default: the process cwd) — so an agent running in a
-/// worktree just needs `--name`. Unlike `hook-ingest`, a failure here is
+/// worktree just needs the record. Unlike `hook-ingest`, a failure here is
 /// surfaced (non-zero exit): the caller asked for a workspace and deserves to
-/// know if the daemon wasn't reachable or the project couldn't be resolved.
+/// know if the daemon wasn't reachable or the record couldn't be resolved.
 async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
     let mut args = args.to_vec();
     let name = take_value(&mut args, "--name");
+    let record = take_value(&mut args, "--issue")
+        .or_else(|| take_value(&mut args, "--pr"))
+        .or_else(|| take_value(&mut args, "--ticket"));
     let project = take_value(&mut args, "--project");
     let repo = take_value(&mut args, "--repo");
     let agent = take_value(&mut args, "--agent");
+    let scratch = take_flag(&mut args, "--scratch");
     let cwd = take_value(&mut args, "--cwd").map(PathBuf::from);
     let socket_path = take_value(&mut args, "--socket")
         .map(PathBuf::from)
         .unwrap_or_else(lifecycle::socket_path);
 
-    let Some(name) = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()) else {
-        anyhow::bail!("workspace create needs a non-empty --name");
-    };
+    if record.is_some() && name.is_some() {
+        anyhow::bail!(
+            "--name is not combinable with --issue/--pr/--ticket: the record's workspace \
+             already has a name",
+        );
+    }
+    let record = record
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty());
+    let name = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    if record.is_none() && name.is_none() {
+        anyhow::bail!(
+            "workspace create needs a tracker record (--issue/--pr/--ticket \
+             <owner/repo#N|URL|KEY>) or, for repo-less scratch, --name <name>",
+        );
+    }
     if let Some(agent) = agent.as_deref() {
         validate_agent_id(agent)?;
     }
@@ -721,12 +752,46 @@ async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
         None => std::env::current_dir()
             .map_err(|e| anyhow::anyhow!("resolve current directory: {e}"))?,
     };
-    let Some(project_key) = resolve_project_key(project, repo, &cwd).await else {
-        anyhow::bail!(
+    let resolved_project = resolve_project_key(project, repo.clone(), &cwd).await;
+    // `--repo owner/repo` (or the project key it produced) resolves the
+    // repo-less `#N` / `N` shapes an agent naturally types beside it.
+    let default_repo = repo.or_else(|| {
+        resolved_project
+            .as_ref()
+            .and_then(|key| key.unambiguous_github_slug())
+    });
+    let anchor = match record.as_deref() {
+        Some(record) => Some(
+            lazybox_core::task_ref::parse_task_ref(record, default_repo.as_deref()).ok_or_else(
+                || {
+                    anyhow::anyhow!(
+                        "could not read {record:?} as a tracker record — pass `owner/repo#N`, a \
+                         GitHub issue/PR URL, `#N` alongside --repo, or a Linear identifier like \
+                         `ENG-45`"
+                    )
+                },
+            )?,
+        ),
+        None => None,
+    };
+    // A fully-qualified record names its own repo, so an agent can attach from
+    // anywhere — a non-git cwd, another repo's worktree — without also
+    // spelling out `--repo`. The daemon ignores `project_key` on an anchored
+    // create anyway; it is sent so the wire stays uniform.
+    let project_key = match resolved_project.or_else(|| {
+        anchor
+            .as_ref()
+            .and_then(lazybox_core::task_ref::github_repo_of)
+            .and_then(|slug| slug.split_once('/'))
+            .map(|(owner, repo)| lazybox_core::ProjectKey::github(owner, repo))
+    }) {
+        Some(key) => key,
+        None => anyhow::bail!(
             "could not resolve a project: pass --project <key> or --repo <owner/repo>, \
              or run inside a git checkout so it can be inferred from the origin remote",
-        );
+        ),
     };
+    let label = name.clone().unwrap_or_default();
 
     // Use a full subscribing client, not fire-and-forget: the daemon
     // allocates the final `WorkspaceKey` (which may carry a `-2` collision
@@ -746,10 +811,12 @@ async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
 
     client
         .send(lazybox_ipc::Command::CreateWorkspace {
-            name: name.clone(),
+            name: label.clone(),
             project_key: project_key.clone(),
             spawn_agent: agent.clone(),
             client_request_id: Some(client_request_id.clone()),
+            anchor: anchor.clone(),
+            scratch,
         })
         .map_err(|e| anyhow::anyhow!("send CreateWorkspace: {e}"))?;
 
@@ -760,11 +827,13 @@ async fn workspace_create_subcommand(args: &[String]) -> anyhow::Result<()> {
     };
     let key =
         await_workspace_create_result(&mut client, &client_request_id, outcome_timeout).await?;
+    let what = match anchor.as_ref() {
+        Some(anchor) => format!("Attached to {anchor} in workspace {key}"),
+        None => format!("Created workspace {key} \"{label}\" in {project_key}"),
+    };
     match &agent {
-        Some(agent) => {
-            println!("Created workspace {key} \"{name}\" in {project_key} (started {agent})")
-        }
-        None => println!("Created workspace {key} \"{name}\" in {project_key}"),
+        Some(agent) => println!("{what} (started {agent})"),
+        None => println!("{what}"),
     }
     Ok(())
 }

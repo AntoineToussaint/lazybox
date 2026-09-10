@@ -483,6 +483,15 @@ pub enum DesktopCommand {
         name: String,
         project_key: lazybox_core::ProjectKey,
         agent: Option<String>,
+        /// The tracker record to attach to (#1586). When set, the daemon
+        /// returns the record's own workspace instead of minting a second row
+        /// beside it; `name` is then only a fallback label.
+        #[serde(default)]
+        anchor: Option<lazybox_core::TaskId>,
+        /// Declare a repo-less scratch workspace, lifting the refusal a bare
+        /// `name` under a repo-scoped project otherwise gets.
+        #[serde(default)]
+        scratch: bool,
     },
     FocusWorkspace {
         session_key: lazybox_core::SessionKey,
@@ -696,11 +705,15 @@ impl DesktopCommand {
                 name,
                 project_key,
                 agent,
+                anchor,
+                scratch,
             } => Command::CreateWorkspace {
                 name,
                 project_key,
                 spawn_agent: agent,
                 client_request_id,
+                anchor,
+                scratch,
             },
             DesktopCommand::FocusWorkspace { session_key } => {
                 Command::FocusWorkspace { session_key }

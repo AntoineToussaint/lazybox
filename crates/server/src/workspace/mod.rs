@@ -1,5 +1,7 @@
 //! Workspace and project lifecycle operations owned by the daemon.
 
+pub mod attach;
+
 use crate::ServerConfig;
 use crate::polling::{
     CommitError, commit_upsert, commit_upsert_offloaded_reported, load_workspace,

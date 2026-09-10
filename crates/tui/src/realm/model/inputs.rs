@@ -518,6 +518,13 @@ impl<T: TerminalAdapter> Model<T> {
             project_key,
             spawn_agent,
             client_request_id: Some(client_request_id),
+            // `x n` is the hand-made-workspace flow, so it carries no
+            // anchor. The daemon still checks the name against the repo's
+            // open tasks and either attaches to the record or refuses with
+            // the rule (#1586) — a named row beside a tracked item is the
+            // split this closes.
+            anchor: None,
+            scratch: false,
         }]
     }
 

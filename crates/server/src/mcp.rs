@@ -264,13 +264,16 @@ struct EpicReadyArgs {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct SpawnWorkerArgs {
-    /// Display name for the new worker workspace (slugified into its key; a
-    /// name collision gets a `-2` suffix). Keep it short and specific — the
-    /// task, not a sentence.
-    workspace_name: String,
-    /// `owner/name` of the GitHub repo the worker runs against; its project
-    /// scope. The worker's checkout and PR land here.
-    repo: String,
+    /// The tracker record the worker owns: `owner/repo#N`, a GitHub issue / PR
+    /// URL, or a Linear identifier (`ENG-45`). Its existing workspace is the
+    /// target — the worker's branch, PR, cost and claim all land on that one
+    /// row. Required unless `create_issue` is given.
+    #[serde(default)]
+    task: Option<String>,
+    /// File the issue first, then spawn on it. Use this when the work has no
+    /// ticket yet — never spawn tracked work into a named workspace.
+    #[serde(default)]
+    create_issue: Option<CreateIssueArgs>,
     /// The task brief handed to the worker as its opening prompt. It is framed
     /// with the Worker role preamble (who you are / your epic / your resolved
     /// blockers) automatically at spawn — write the task itself, not the role.
@@ -279,11 +282,35 @@ struct SpawnWorkerArgs {
     /// default agent.
     #[serde(default)]
     agent: Option<String>,
+    /// Rejected (#1586). A worker never gets a named workspace beside the
+    /// record it works on; pass `task` or `create_issue` instead.
+    #[serde(default)]
+    workspace_name: Option<String>,
 }
 
-/// The outcome of a successful [`LazyboxMcp::spawn_worker_prepare`]: the worker
-/// workspace has been created, assigned to the epic, and role-stamped, and is
-/// ready to be spawned with `agent_id`.
+/// The issue `spawn_worker` files when the work has no ticket yet.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct CreateIssueArgs {
+    title: String,
+    body: String,
+    /// `owner/name` of the repo the issue is filed in — where the worker's
+    /// checkout and PR land.
+    repo: String,
+    /// Parent issue this is a sub-issue of, as `owner/repo#N` or a URL.
+    /// Defaults to the epic's anchor, so a worker's issue joins the epic's
+    /// hierarchy without the coordinator restating it.
+    #[serde(default)]
+    parent: Option<String>,
+    /// Issues that must land first, as `owner/repo#N` or URLs. Recorded as
+    /// GitHub issue dependencies, which the epic graph reads as blocking
+    /// edges.
+    #[serde(default)]
+    blocked_by: Vec<String>,
+}
+
+/// The outcome of a successful [`LazyboxMcp::spawn_worker_prepare`]: the
+/// record's workspace has been resolved, assigned to the epic, and
+/// role-stamped, and is ready to be spawned with `agent_id`.
 #[derive(Debug)]
 struct PreparedWorker {
     key: lazybox_core::WorkspaceKey,
@@ -834,12 +861,14 @@ impl LazyboxMcp {
         lazybox_core::Workspace::decode_persisted(&json).ok()
     }
 
-    /// Resolve + validate a `spawn_worker` request and, on success, create the
-    /// worker workspace, assign it to the caller's epic, and stamp its Worker
-    /// role — everything up to (but not including) the agent spawn. Split from
-    /// the spawn so the gate and the store mutations are unit-testable without
-    /// launching an agent. Every refusal is an `invalid_request` the caller
-    /// reads: not a Coordinator, not in an epic, cap reached, bad repo/agent.
+    /// Resolve + validate a `spawn_worker` request and, on success, attach to
+    /// the target record's workspace, assign it to the caller's epic, and stamp
+    /// its Worker role — everything up to (but not including) the agent spawn.
+    /// Split from the spawn so the gate and the store mutations are
+    /// unit-testable without launching an agent. Every refusal is an
+    /// `invalid_request` the caller reads: not a Coordinator, not in an epic,
+    /// cap reached, bad agent, a `workspace_name` instead of a record, or a
+    /// reference that resolves to nothing.
     async fn spawn_worker_prepare(
         &self,
         caller: &SessionKey,
@@ -904,22 +933,8 @@ impl LazyboxMcp {
             ));
         }
 
-        // Parse the repo into a GitHub project key.
-        let (owner, name) = args
-            .repo
-            .trim()
-            .split_once('/')
-            .filter(|(o, n)| !o.is_empty() && !n.is_empty() && !n.contains('/'))
-            .ok_or_else(|| {
-                McpError::invalid_request(
-                    format!("repo must be `owner/name`, got {:?}", args.repo),
-                    None,
-                )
-            })?;
-        let project_key = lazybox_core::ProjectKey::github(owner, name);
-
         // Resolve + validate the agent id up front so a bad id fails before any
-        // workspace is created (no orphan).
+        // issue is filed (no orphan record).
         let agent_id = args
             .agent
             .as_deref()
@@ -934,15 +949,25 @@ impl LazyboxMcp {
         }
         let agent_id = agent_id.to_string();
 
-        let name = args.workspace_name.trim();
-        if name.is_empty() {
-            return Err(McpError::invalid_request("workspace_name is empty", None));
+        // Gate 4 — the target is a tracker record, never a name (#1586). A
+        // named workspace beside an issue splits the branch, activity, cost
+        // and epic graph across two rows the fleet cannot reconcile, and the
+        // issue's own row reads idle while a worker is on it.
+        if args.workspace_name.is_some() {
+            return Err(McpError::invalid_request(
+                "`workspace_name` is not accepted: a worker runs in the workspace its tracker \
+                 record already has. Pass `task` (`owner/repo#N`, an issue/PR URL, or a \
+                 Linear identifier), or `create_issue` to file the issue first.",
+                None,
+            ));
         }
+        let anchor = self.resolve_worker_task(args, epic.anchor.as_ref()).await?;
+        let key = crate::workspace::attach::attach_to_record(&self.config, &anchor)
+            .await
+            .map_err(|e| McpError::invalid_request(format!("attach to {anchor}: {e}"), None))?;
 
-        // Create → assign → set role. Each persists; the spawn (in the payload
-        // below) then picks up the Worker role and frames the brief.
-        let key = crate::workspace::create_empty_workspace(&self.config, name, project_key)
-            .map_err(|e| McpError::internal_error(format!("create workspace: {e}"), None))?;
+        // Assign → set role. Each persists; the spawn (in the payload below)
+        // then picks up the Worker role and frames the brief.
         crate::epics::assign(&self.config, &epic_key, key.clone(), true).await;
         crate::workspace::set_role(&self.config, &key, Some(lazybox_core::Role::Worker)).await;
 
@@ -950,6 +975,74 @@ impl LazyboxMcp {
             key,
             agent_id,
             epic_key,
+        })
+    }
+
+    /// The record a `spawn_worker` call targets: the `task` reference it named,
+    /// or the issue `create_issue` files. Exactly one must be given — with
+    /// neither there is nothing to attach to, and the worker would have to get
+    /// a workspace of its own.
+    async fn resolve_worker_task(
+        &self,
+        args: &SpawnWorkerArgs,
+        epic_anchor: Option<&lazybox_core::TaskId>,
+    ) -> Result<lazybox_core::TaskId, McpError> {
+        let task = args
+            .task
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        match (task, args.create_issue.as_ref()) {
+            (Some(task), _) => {
+                lazybox_core::task_ref::parse_task_ref(task, None).ok_or_else(|| {
+                    McpError::invalid_request(
+                        format!(
+                            "could not read {task:?} as a tracker record — pass `owner/repo#N`, a \
+                         GitHub issue/PR URL, or a Linear identifier like `ENG-45`"
+                        ),
+                        None,
+                    )
+                })
+            }
+            (None, Some(create)) => self.file_worker_issue(create, epic_anchor).await,
+            (None, None) => Err(McpError::invalid_request(
+                "pass `task` (the record the worker owns) or `create_issue` (to file it \
+                 first) — a worker always runs in a tracker record's own workspace",
+                None,
+            )),
+        }
+    }
+
+    /// File the worker's issue with `gh issue create` and return its id.
+    ///
+    /// The GitHub provider is read-only, so this is the write path: `gh` is
+    /// already the tool every agent in the fleet uses to file issues, carries
+    /// the operator's own credentials, and speaks `--parent` / `--blocked-by`
+    /// (the sub-issue and dependency edges the epic graph reads).
+    async fn file_worker_issue(
+        &self,
+        create: &CreateIssueArgs,
+        epic_anchor: Option<&lazybox_core::TaskId>,
+    ) -> Result<lazybox_core::TaskId, McpError> {
+        let argv = gh_issue_create_argv(create, epic_anchor)?;
+        let output = tokio::process::Command::new("gh")
+            .args(&argv)
+            .output()
+            .await
+            .map_err(|e| McpError::internal_error(format!("run `gh issue create`: {e}"), None))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(McpError::internal_error(
+                format!("`gh issue create` failed: {}", stderr.trim()),
+                None,
+            ));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        parse_gh_issue_create_output(&stdout).ok_or_else(|| {
+            McpError::internal_error(
+                format!("`gh issue create` printed no issue URL: {}", stdout.trim()),
+                None,
+            )
         })
     }
 
@@ -1072,7 +1165,7 @@ impl LazyboxMcp {
     }
 
     #[tool(
-        description = "Coordinator-only: spawn a Worker session into the epic you own. Creates a fresh workspace under `repo` (owner/name), assigns it to your epic, stamps it with the Worker role, and starts the agent with `brief` as its opening prompt — automatically framed with the Worker role preamble (who you are / your epic / your resolved blockers), so `brief` is the task itself, not the role. Refuses if you are not a Coordinator, own no epic, or the epic is at its worker cap (agent.max_epic_workers, default 6). Returns once the worker is handed off — NOT a confirmation the agent has started; verify with list_sessions / read_session."
+        description = "Coordinator-only: spawn a Worker **on an issue** into the epic you own. Pass `task` — the record the worker owns (`owner/repo#N`, a GitHub issue/PR URL, or a Linear identifier) — or `create_issue` to file it as a sub-issue of your epic first. The worker runs in THAT record's own workspace: a tracked item never gets a second workspace beside it, so there is no `workspace_name`. The workspace is assigned to your epic, stamped with the Worker role, and the agent starts with `brief` as its opening prompt — automatically framed with the Worker role preamble (who you are / your epic / your resolved blockers), so `brief` is the task itself, not the role. Refuses if you are not a Coordinator, own no epic, the epic is at its worker cap (agent.max_epic_workers, default 6), or the record cannot be resolved. Returns once the worker is handed off — NOT a confirmation the agent has started; verify with list_sessions / read_session."
     )]
     async fn spawn_worker(
         &self,
@@ -1111,6 +1204,80 @@ fn notify_handoff_payload(workspace: &str, submit: bool) -> serde_json::Value {
     })
 }
 
+/// The `gh issue create` argv for a `spawn_worker` `create_issue` request.
+/// Pure so the flag shape — especially the URL-form `--parent`, whose bare-
+/// number alternative silently resolves inside `--repo` and mis-parents a
+/// cross-repo sub-issue — is testable without running `gh`.
+fn gh_issue_create_argv(
+    create: &CreateIssueArgs,
+    epic_anchor: Option<&lazybox_core::TaskId>,
+) -> Result<Vec<String>, McpError> {
+    let repo = create.repo.trim();
+    if repo.split('/').filter(|s| !s.is_empty()).count() != 2 || repo.contains(char::is_whitespace)
+    {
+        return Err(McpError::invalid_request(
+            format!("repo must be `owner/name`, got {:?}", create.repo),
+            None,
+        ));
+    }
+    let title = create.title.trim();
+    if title.is_empty() {
+        return Err(McpError::invalid_request("issue title is empty", None));
+    }
+    let mut argv: Vec<String> = ["issue", "create", "--repo", repo, "--title", title]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    argv.push("--body".into());
+    argv.push(create.body.trim().to_string());
+
+    let parent = match create
+        .parent
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(parent) => lazybox_core::task_ref::parse_task_ref(parent, Some(repo)),
+        // Default to the epic's own anchor so a worker's issue joins the
+        // hierarchy `epic_status` reads without the coordinator restating it.
+        None => epic_anchor.cloned(),
+    };
+    if let Some(parent) = parent.as_ref().and_then(github_issue_url) {
+        argv.push("--parent".into());
+        argv.push(parent);
+    }
+    let blocked_by: Vec<String> = create
+        .blocked_by
+        .iter()
+        .filter_map(|raw| lazybox_core::task_ref::parse_task_ref(raw, Some(repo)))
+        .filter_map(|id| github_issue_url(&id))
+        .collect();
+    if !blocked_by.is_empty() {
+        argv.push("--blocked-by".into());
+        argv.push(blocked_by.join(","));
+    }
+    Ok(argv)
+}
+
+/// The id of the issue `gh issue create` just filed. It prints the new
+/// issue's URL, sometimes after progress chatter, so the *last* URL-shaped
+/// line is the answer.
+fn parse_gh_issue_create_output(stdout: &str) -> Option<lazybox_core::TaskId> {
+    stdout
+        .lines()
+        .rev()
+        .find_map(|line| lazybox_core::task_ref::parse_task_ref(line, None))
+}
+
+/// The `https://github.com/owner/repo/issues/N` URL for a GitHub task id.
+/// `gh` accepts the URL form for `--parent` / `--blocked-by` across repos,
+/// where a bare number would resolve inside `--repo` instead. `None` for a
+/// non-GitHub id.
+fn github_issue_url(id: &lazybox_core::TaskId) -> Option<String> {
+    let repo = lazybox_core::task_ref::github_repo_of(id)?;
+    Some(format!("https://github.com/{repo}/issues/{}", id.number()?))
+}
+
 /// Wrap a JSON value as a successful single-text tool result.
 fn json_result(payload: serde_json::Value) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(
@@ -1137,10 +1304,12 @@ impl ServerHandler for LazyboxMcp {
                  ready/blocked rollup) and epic_ready is the ranked queue of \
                  what's workable now — answer epic questions from these rather \
                  than re-deriving from individual PRs. If you are a Coordinator, \
-                 spawn_worker starts a Worker session into your epic (creating + \
-                 assigning + role-stamping the workspace and framing your brief \
-                 with the Worker preamble); it refuses if you aren't a Coordinator \
-                 or the epic is at its worker cap. If your own workspace hits \
+                 spawn_worker starts a Worker on an ISSUE in your epic — pass \
+                 the record (`owner/repo#N`, an issue/PR URL, a Linear \
+                 identifier) or create_issue to file it as a sub-issue first. \
+                 The worker runs in that record's own workspace, never a named \
+                 one beside it; it refuses if you aren't a Coordinator or the \
+                 epic is at its worker cap. If your own workspace hits \
                  something a human must resolve, flag it with report_blocker and \
                  clear it with clear_blocker once unblocked."
                     .to_string(),
@@ -1982,13 +2151,58 @@ mod tests {
         crate::epics::upsert(config, record).await;
     }
 
-    fn spawn_worker_args(name: &str, repo: &str, brief: &str) -> SpawnWorkerArgs {
+    /// A `spawn_worker` request targeting an existing record.
+    fn spawn_worker_args(task: &str, brief: &str) -> SpawnWorkerArgs {
         SpawnWorkerArgs {
-            workspace_name: name.to_string(),
-            repo: repo.to_string(),
+            task: Some(task.to_string()),
+            create_issue: None,
             brief: brief.to_string(),
             agent: None,
+            workspace_name: None,
         }
+    }
+
+    /// The minimum a GitHub issue `Task` needs to round-trip through the
+    /// store. Built from JSON so this stays 14 lines rather than the struct's
+    /// 44 fields, most of which the attach lookup never reads.
+    fn github_issue_task(repo: &str, number: u64) -> lazybox_core::Task {
+        serde_json::from_value(serde_json::json!({
+            "id": { "source": "github", "key": format!("{repo}#{number}") },
+            "title": "seeded issue",
+            "body": null,
+            "state": "Open",
+            "role": "Author",
+            "ci": "None",
+            "review": "None",
+            "checks": [],
+            "unread_count": 0,
+            "url": format!("https://github.com/{repo}/issues/{number}"),
+            "repo": repo,
+            "branch": null,
+            "needs_reply": false,
+            "last_commenter": null,
+            "updated_at": chrono::Utc::now(),
+        }))
+        .expect("seeded issue task")
+    }
+
+    /// Persist the workspace a poll would have built for a GitHub issue, so
+    /// `attach_to_record` resolves it without a provider round-trip.
+    fn seed_issue_workspace(config: &ServerConfig, key: &str, repo: &str, number: u64) {
+        let mut ws = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new(key),
+            "branch",
+            chrono::Utc::now(),
+        );
+        ws.gh_issues.push(github_issue_task(repo, number));
+        config
+            .store
+            .save_workspace(&lazybox_store::WorkspaceRecord {
+                key: key.to_string(),
+                created_at: chrono::Utc::now(),
+                workspace_json: Some(serde_json::to_string(&ws).unwrap()),
+            })
+            .unwrap();
     }
 
     #[tokio::test]
@@ -2000,7 +2214,7 @@ mod tests {
 
         let handler = LazyboxMcp::new(config);
         let caller = SessionKey::from("not-coord");
-        let args = spawn_worker_args("task", "acme/widget", "do the thing");
+        let args = spawn_worker_args("acme/widget#7", "do the thing");
         let err = handler
             .spawn_worker_prepare(&caller, &args, 6, "claude")
             .await
@@ -2020,7 +2234,7 @@ mod tests {
 
         let handler = LazyboxMcp::new(config);
         let caller = SessionKey::from("coord");
-        let args = spawn_worker_args("task", "acme/widget", "do the thing");
+        let args = spawn_worker_args("acme/widget#7", "do the thing");
         let err = handler
             .spawn_worker_prepare(&caller, &args, 6, "claude")
             .await
@@ -2038,7 +2252,7 @@ mod tests {
 
         let handler = LazyboxMcp::new(config);
         let caller = SessionKey::from("coord");
-        let args = spawn_worker_args("task", "acme/widget", "do the thing");
+        let args = spawn_worker_args("acme/widget#7", "do the thing");
         let err = handler
             .spawn_worker_prepare(&caller, &args, 1, "claude")
             .await
@@ -2051,33 +2265,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_worker_prepare_creates_assigns_and_role_stamps() {
+    async fn spawn_worker_targets_the_issue_workspace() {
         let config = ServerConfig::in_memory();
         seed_workspace_role(&config, "coord", lazybox_core::Role::Coordinator);
         seed_epic(&config, "e", &["coord"]).await;
 
         let handler = LazyboxMcp::new(config.clone());
         let caller = SessionKey::from("coord");
-        let args = spawn_worker_args("build the parser", "acme/widget", "implement the parser");
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+        let args = spawn_worker_args("acme/widget#7", "implement the parser");
         let prepared = handler
             .spawn_worker_prepare(&caller, &args, 6, "claude")
             .await
             .expect("prepare should succeed for an in-cap coordinator");
 
+        assert_eq!(
+            prepared.key.as_str(),
+            "github-acme-widget-7",
+            "the worker must run in the issue's own workspace, not a row beside it"
+        );
         assert_eq!(prepared.epic_key, "e");
         assert_eq!(prepared.agent_id, "claude");
 
-        // The worker workspace exists, under the github project, with the Worker role.
         let ws = handler
             .load_workspace(&prepared.key)
-            .expect("the created worker workspace is persisted");
+            .expect("the issue workspace is persisted");
         assert_eq!(ws.effective_role(), Some(lazybox_core::Role::Worker));
-        assert_eq!(
-            ws.project_key,
-            Some(lazybox_core::ProjectKey::github("acme", "widget"))
-        );
 
-        // …and it is a member of the coordinator's epic.
+        // …and that same row — not a second one — joined the epic.
         let records = crate::epics::list_all(&config).expect("epics");
         let epic = records
             .iter()
@@ -2085,25 +2300,204 @@ mod tests {
             .expect("epic e");
         assert!(
             epic.members.contains(&prepared.key),
-            "the worker must be assigned to the epic: {:?}",
+            "the issue workspace must be assigned to the epic: {:?}",
             epic.members
         );
     }
 
     #[tokio::test]
-    async fn spawn_worker_rejects_a_bad_repo() {
+    async fn spawn_worker_resolves_every_reference_shape_to_one_row() {
+        // A coordinator has whatever reference `gh` or a sibling's note handed
+        // it. Each shape must reach the record's single workspace.
+        let config = ServerConfig::in_memory();
+        seed_workspace_role(&config, "coord", lazybox_core::Role::Coordinator);
+        seed_epic(&config, "e", &["coord"]).await;
+        seed_issue_workspace(&config, "github-acme-widget-7", "acme/widget", 7);
+
+        let handler = LazyboxMcp::new(config);
+        let caller = SessionKey::from("coord");
+        for reference in [
+            "acme/widget#7",
+            "https://github.com/acme/widget/issues/7",
+            "<https://github.com/acme/widget/pull/7>",
+        ] {
+            let prepared = handler
+                .spawn_worker_prepare(&caller, &spawn_worker_args(reference, "do it"), 6, "claude")
+                .await
+                .unwrap_or_else(|e| panic!("{reference} should resolve: {}", e.message));
+            assert_eq!(prepared.key.as_str(), "github-acme-widget-7", "{reference}");
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_refuses_a_bare_name() {
+        // The whole point of #1586: asking for a named workspace is an error
+        // that explains the rule, not a silently-created second row.
         let config = ServerConfig::in_memory();
         seed_workspace_role(&config, "coord", lazybox_core::Role::Coordinator);
         seed_epic(&config, "e", &["coord"]).await;
 
         let handler = LazyboxMcp::new(config);
         let caller = SessionKey::from("coord");
-        let args = spawn_worker_args("task", "not-a-repo", "do the thing");
+        let args = SpawnWorkerArgs {
+            task: None,
+            create_issue: None,
+            brief: "do the thing".into(),
+            agent: None,
+            workspace_name: Some("build the parser".into()),
+        };
         let err = handler
             .spawn_worker_prepare(&caller, &args, 6, "claude")
             .await
-            .expect_err("a repo without owner/name must be refused");
-        assert!(err.message.contains("owner/name"), "{}", err.message);
+            .expect_err("a named workspace must be refused");
+        assert!(
+            err.message.contains("workspace_name") && err.message.contains("create_issue"),
+            "the refusal must name the rejected field and the way to comply: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_refuses_without_a_record() {
+        let config = ServerConfig::in_memory();
+        seed_workspace_role(&config, "coord", lazybox_core::Role::Coordinator);
+        seed_epic(&config, "e", &["coord"]).await;
+
+        let handler = LazyboxMcp::new(config);
+        let caller = SessionKey::from("coord");
+        let args = SpawnWorkerArgs {
+            task: None,
+            create_issue: None,
+            brief: "do the thing".into(),
+            agent: None,
+            workspace_name: None,
+        };
+        let err = handler
+            .spawn_worker_prepare(&caller, &args, 6, "claude")
+            .await
+            .expect_err("neither a task nor create_issue leaves nothing to attach to");
+        assert!(err.message.contains("create_issue"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_refuses_an_unreadable_reference() {
+        let config = ServerConfig::in_memory();
+        seed_workspace_role(&config, "coord", lazybox_core::Role::Coordinator);
+        seed_epic(&config, "e", &["coord"]).await;
+
+        let handler = LazyboxMcp::new(config);
+        let caller = SessionKey::from("coord");
+        let err = handler
+            .spawn_worker_prepare(
+                &caller,
+                &spawn_worker_args("build the parser", "do the thing"),
+                6,
+                "claude",
+            )
+            .await
+            .expect_err("prose is not a tracker record");
+        assert!(err.message.contains("owner/repo#N"), "{}", err.message);
+    }
+
+    /// `create_issue` with an epic anchor and explicit blockers: the issue is
+    /// filed as a sub-issue of the epic and carries its dependency edges, so
+    /// `epic_status` sees the new member the moment it is polled. The `gh`
+    /// round-trip itself is not exercised here — the argv and the id read back
+    /// out of its output are.
+    #[test]
+    fn spawn_worker_creates_the_issue_then_targets_it() {
+        let create = CreateIssueArgs {
+            title: "  Build the parser  ".into(),
+            body: "the brief".into(),
+            repo: "acme/widget".into(),
+            parent: None,
+            blocked_by: vec!["#3".into(), "other/repo#9".into()],
+        };
+        let anchor = lazybox_core::TaskId {
+            source: "github".into(),
+            key: "acme/widget#1".into(),
+        };
+        let argv = gh_issue_create_argv(&create, Some(&anchor)).expect("argv");
+
+        assert_eq!(
+            argv,
+            vec![
+                "issue",
+                "create",
+                "--repo",
+                "acme/widget",
+                "--title",
+                "Build the parser",
+                "--body",
+                "the brief",
+                // The URL form, never a bare number: a number resolves inside
+                // `--repo`, so a cross-repo epic anchor would silently
+                // mis-parent the sub-issue.
+                "--parent",
+                "https://github.com/acme/widget/issues/1",
+                "--blocked-by",
+                "https://github.com/acme/widget/issues/3,https://github.com/other/repo/issues/9",
+            ]
+        );
+
+        // And the id the filed issue reports is what gets attached to.
+        assert_eq!(
+            parse_gh_issue_create_output(
+                "Creating issue in acme/widget\nhttps://github.com/acme/widget/issues/42\n"
+            ),
+            Some(lazybox_core::TaskId {
+                source: "github".into(),
+                key: "acme/widget#42".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn create_issue_prefers_an_explicit_parent_over_the_epic_anchor() {
+        let create = CreateIssueArgs {
+            title: "t".into(),
+            body: "b".into(),
+            repo: "acme/widget".into(),
+            parent: Some("other/repo#5".into()),
+            blocked_by: Vec::new(),
+        };
+        let anchor = lazybox_core::TaskId {
+            source: "github".into(),
+            key: "acme/widget#1".into(),
+        };
+        let argv = gh_issue_create_argv(&create, Some(&anchor)).expect("argv");
+        let parent = argv
+            .iter()
+            .position(|a| a == "--parent")
+            .map(|i| argv[i + 1].as_str());
+        assert_eq!(parent, Some("https://github.com/other/repo/issues/5"));
+    }
+
+    #[test]
+    fn create_issue_rejects_a_bad_repo_and_an_empty_title() {
+        let mut create = CreateIssueArgs {
+            title: "t".into(),
+            body: "b".into(),
+            repo: "not-a-repo".into(),
+            parent: None,
+            blocked_by: Vec::new(),
+        };
+        assert!(
+            gh_issue_create_argv(&create, None)
+                .expect_err("bad repo")
+                .message
+                .contains("owner/name")
+        );
+        create.repo = "acme/widget".into();
+        create.title = "   ".into();
+        assert!(
+            gh_issue_create_argv(&create, None)
+                .expect_err("empty title")
+                .message
+                .contains("title")
+        );
+        create.title = "t".into();
+        assert!(gh_issue_create_argv(&create, None).is_ok());
     }
 
     #[test]

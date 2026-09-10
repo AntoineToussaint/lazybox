@@ -1617,6 +1617,7 @@ mod effects_tests {
                 project_key,
                 spawn_agent,
                 client_request_id,
+                ..
             } => {
                 assert_eq!(name, "my-feature");
                 assert_eq!(project_key, &pk);
@@ -1756,6 +1757,8 @@ mod effects_tests {
             project_key: lazybox_core::ProjectKey::local("project"),
             spawn_agent: Some("claude".into()),
             client_request_id: Some(request_id.clone()),
+            anchor: None,
+            scratch: false,
         }]);
 
         assert!(!m.pending_workspace_creates.contains_key(&request_id));

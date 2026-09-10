@@ -3303,6 +3303,8 @@ mod tests {
                 name: "first workspace".to_string(),
                 project_key: lazybox_core::ProjectKey::github("acme", "widget"),
                 agent: Some("codex".to_string()),
+                anchor: None,
+                scratch: false,
             }),
             Command::CreateWorkspace {
                 name,

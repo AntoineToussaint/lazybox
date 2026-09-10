@@ -25,6 +25,7 @@ mod session_key;
 pub mod slug;
 pub mod stack;
 mod task;
+pub mod task_ref;
 pub mod time;
 mod workspace;
 

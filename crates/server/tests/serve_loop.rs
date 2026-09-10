@@ -787,6 +787,8 @@ fn all_non_shutdown_commands() -> Vec<Command> {
             project_key: pkey(),
             spawn_agent: None,
             client_request_id: None,
+            anchor: None,
+            scratch: false,
         },
         Command::CreateProject { name: "p".into() },
         Command::SetSessionLayout {
@@ -1722,4 +1724,232 @@ fn env_isolation_guard_restores_state() {
             )
         }
     }
+}
+
+/// Drive one `CreateWorkspace` through the daemon and collect the events it
+/// produced for that request, giving up once the request reaches a terminal
+/// outcome (`WorkspaceCreated` + `CommandCompleted`, or `CommandFailed`).
+async fn create_workspace_outcome(
+    config: ServerConfig,
+    command: Command,
+    request_id: &str,
+) -> (Option<lazybox_core::WorkspaceKey>, Vec<String>) {
+    let (mut client, server) = channel::pair();
+    tokio::spawn(async move { Server::new(config).serve(server).await.unwrap() });
+    client.send(Command::Subscribe).unwrap();
+    let _ = client.recv().await.expect("snapshot");
+    client.send(command).unwrap();
+
+    let mut key = None;
+    let mut messages = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let Ok(Some(event)) = tokio::time::timeout_at(deadline, client.recv()).await else {
+            break;
+        };
+        match event {
+            Event::WorkspaceCreated {
+                client_request_id,
+                workspace_key,
+            } if client_request_id == request_id => key = Some(workspace_key),
+            Event::Notification { body, .. } => messages.push(body),
+            Event::CommandFailed {
+                client_request_id,
+                message,
+            } if client_request_id == request_id => {
+                messages.push(message);
+                break;
+            }
+            Event::CommandCompleted { client_request_id } if client_request_id == request_id => {
+                break;
+            }
+            _ => {}
+        }
+    }
+    (key, messages)
+}
+
+/// Persist the row a poll would have built for one open GitHub issue.
+fn seed_open_issue(config: &ServerConfig, key: &str, repo: &str, number: u64, title: &str) {
+    let mut ws = lazybox_core::Workspace::empty(
+        lazybox_core::WorkspaceKey::new(key),
+        "branch",
+        chrono::Utc::now(),
+    );
+    let (owner, name) = repo.split_once('/').expect("owner/repo");
+    ws.project_key = Some(lazybox_core::ProjectKey::github(owner, name));
+    ws.gh_issues.push(
+        serde_json::from_value(serde_json::json!({
+            "id": { "source": "github", "key": format!("{repo}#{number}") },
+            "title": title,
+            "body": null,
+            "state": "Open",
+            "role": "Author",
+            "ci": "None",
+            "review": "None",
+            "checks": [],
+            "unread_count": 0,
+            "url": format!("https://github.com/{repo}/issues/{number}"),
+            "repo": repo,
+            "branch": null,
+            "needs_reply": false,
+            "last_commenter": null,
+            "updated_at": chrono::Utc::now(),
+        }))
+        .expect("seeded issue"),
+    );
+    config
+        .store
+        .save_workspace(&lazybox_store::WorkspaceRecord {
+            key: key.to_string(),
+            created_at: chrono::Utc::now(),
+            workspace_json: Some(serde_json::to_string(&ws).expect("serialize")),
+        })
+        .expect("save");
+}
+
+#[tokio::test]
+async fn named_create_matching_an_open_issue_attaches() {
+    // #1586: a named create whose name is really a reference to an open task
+    // in that repo lands ON the task's row, and says so, instead of building
+    // a second row beside it.
+    let config = ServerConfig::in_memory();
+    seed_open_issue(
+        &config,
+        "github-acme-widget-7",
+        "acme/widget",
+        7,
+        "Fix the parser",
+    );
+
+    let (key, messages) = create_workspace_outcome(
+        config,
+        Command::CreateWorkspace {
+            name: "Fix the parser".into(),
+            project_key: lazybox_core::ProjectKey::github("acme", "widget"),
+            spawn_agent: None,
+            client_request_id: Some("req".into()),
+            anchor: None,
+            scratch: false,
+        },
+        "req",
+    )
+    .await;
+
+    assert_eq!(
+        key.as_ref().map(|k| k.as_str()),
+        Some("github-acme-widget-7"),
+        "the create must resolve to the issue's own workspace"
+    );
+    assert!(
+        messages.iter().any(|m| m.contains("acme/widget#7")),
+        "the redirect must be told to the caller: {messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn named_create_under_a_repo_without_scratch_is_refused() {
+    let config = ServerConfig::in_memory();
+    let (key, messages) = create_workspace_outcome(
+        config.clone(),
+        Command::CreateWorkspace {
+            name: "spike the cache".into(),
+            project_key: lazybox_core::ProjectKey::github("acme", "widget"),
+            spawn_agent: None,
+            client_request_id: Some("req".into()),
+            anchor: None,
+            scratch: false,
+        },
+        "req",
+    )
+    .await;
+
+    assert_eq!(key, None, "nothing may be created");
+    assert!(
+        messages.iter().any(|m| m.contains("gh issue create")),
+        "the refusal must carry the way to comply: {messages:?}"
+    );
+    assert!(
+        config
+            .store
+            .list_workspaces()
+            .expect("list")
+            .iter()
+            .all(|r| r.key != "spike-the-cache"),
+        "no row may be persisted for a refused create"
+    );
+}
+
+#[tokio::test]
+async fn a_scratch_create_under_a_repo_is_allowed() {
+    let config = ServerConfig::in_memory();
+    let (key, _) = create_workspace_outcome(
+        config,
+        Command::CreateWorkspace {
+            name: "spike the cache".into(),
+            project_key: lazybox_core::ProjectKey::github("acme", "widget"),
+            spawn_agent: None,
+            client_request_id: Some("req".into()),
+            anchor: None,
+            scratch: true,
+        },
+        "req",
+    )
+    .await;
+    assert_eq!(key.as_ref().map(|k| k.as_str()), Some("spike-the-cache"));
+}
+
+#[tokio::test]
+async fn an_anchored_create_returns_the_records_workspace() {
+    let config = ServerConfig::in_memory();
+    seed_open_issue(
+        &config,
+        "github-acme-widget-7",
+        "acme/widget",
+        7,
+        "Fix the parser",
+    );
+
+    let (key, _) = create_workspace_outcome(
+        config,
+        Command::CreateWorkspace {
+            // A wildly different name must not matter: the anchor decides.
+            name: "whatever".into(),
+            project_key: lazybox_core::ProjectKey::github("acme", "widget"),
+            spawn_agent: None,
+            client_request_id: Some("req".into()),
+            anchor: Some(lazybox_core::TaskId {
+                source: "github".into(),
+                key: "acme/widget#7".into(),
+            }),
+            scratch: false,
+        },
+        "req",
+    )
+    .await;
+    assert_eq!(
+        key.as_ref().map(|k| k.as_str()),
+        Some("github-acme-widget-7")
+    );
+}
+
+#[tokio::test]
+async fn a_named_create_under_a_local_project_still_works() {
+    // Repo-less scratch is what named workspaces are FOR; the rule must not
+    // block it.
+    let config = ServerConfig::in_memory();
+    let (key, _) = create_workspace_outcome(
+        config,
+        Command::CreateWorkspace {
+            name: "notes".into(),
+            project_key: lazybox_core::ProjectKey::local("scratch"),
+            spawn_agent: None,
+            client_request_id: Some("req".into()),
+            anchor: None,
+            scratch: false,
+        },
+        "req",
+    )
+    .await;
+    assert_eq!(key.as_ref().map(|k| k.as_str()), Some("notes"));
 }

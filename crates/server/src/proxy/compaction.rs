@@ -139,6 +139,24 @@ pub struct Rewritten {
     /// about whether compaction is hurting the cache, and judging it would
     /// read its naturally cold cache as compaction's fault.
     pub measured: bool,
+    /// What this pass would add to the session's tally, held until the
+    /// response reports usage — see [`Compactor::observe_usage`].
+    pub pending: Option<Pending>,
+}
+
+/// One pass's contribution to a session's tally, applied only once the
+/// provider bills the request it came from.
+///
+/// Claude Code preflights `count_tokens` with the whole transcript and
+/// re-sends the same body verbatim after a 429. Both are separate passes
+/// over an identical, fully eligible conversation, so folding a saving in
+/// at inspection time books it two or three times for one turn actually
+/// paid for.
+pub struct Pending {
+    condensed: u64,
+    saved_bytes: u64,
+    saved_micros: u64,
+    rewrote: bool,
 }
 
 /// What one request may do, read off the session's state under one lock.
@@ -153,6 +171,7 @@ impl Rewritten {
         Self {
             body,
             measured: false,
+            pending: None,
         }
     }
 }
@@ -247,7 +266,11 @@ impl Compactor {
         }
 
         let saved_micros = self.estimate_saved_micros(plan.model.as_deref(), plan.saved_bytes);
-        self.record(session, &plan, saved_micros.unwrap_or(0), rewriting);
+        // A held turn forwarded the original bytes, so in `on` mode it saved
+        // nothing and must not book a saving. Shadow mode books every
+        // eligible pass: its figure is explicitly the hypothetical one,
+        // which is the whole point of the mode.
+        let books_saving = !self.policy.mode.rewrites() || rewriting;
 
         // A model with no rate card leaves the bytes as the only honest
         // figure — better than a confident "$0.00".
@@ -271,6 +294,20 @@ impl Compactor {
             // is measured on, and rewritten turns are what it is measured
             // against.
             measured: true,
+            pending: Some(Pending {
+                condensed: plan.condensed as u64,
+                saved_bytes: if books_saving {
+                    plan.saved_bytes as u64
+                } else {
+                    0
+                },
+                saved_micros: if books_saving {
+                    saved_micros.unwrap_or(0)
+                } else {
+                    0
+                },
+                rewrote: rewriting,
+            }),
         }
     }
 
@@ -284,7 +321,21 @@ impl Compactor {
     /// key and start from a cold cache — and three of those in a row would
     /// otherwise read as a sustained regression and disable compaction for
     /// the whole workspace.
-    pub fn observe_usage(&self, session: &str, agent_id: &str, usage: &AgentUsage, measured: bool) {
+    pub fn observe_usage(
+        &self,
+        session: &str,
+        agent_id: &str,
+        usage: &AgentUsage,
+        measured: bool,
+        pending: Option<Pending>,
+    ) {
+        // Reaching here at all means the provider reported usage for this
+        // request, which is what makes it the one pass of a turn whose
+        // saving is real. Folded before the kill-switch guards below, since
+        // shadow mode never passes them and its tally is the mode's output.
+        if let Some(pending) = pending {
+            self.record(session, &pending);
+        }
         if !self.policy.mode.rewrites() || !measured {
             return;
         }
@@ -366,17 +417,17 @@ impl Compactor {
         })
     }
 
-    fn record(&self, session: &str, plan: &Plan, saved_micros: u64, rewrote: bool) {
+    fn record(&self, session: &str, pending: &Pending) {
         let mut sessions = self.sessions.lock().expect("compaction sessions");
         let Some(state) = entry(&mut sessions, session) else {
             return;
         };
-        state.condensed = plan.condensed as u64;
+        state.condensed = pending.condensed;
         // The saving, by contrast, IS recurring: those bytes would have
         // been paid for again on every turn the blocks survive.
-        state.saved_bytes += plan.saved_bytes as u64;
-        state.saved_micros += saved_micros;
-        state.rewrote |= rewrote;
+        state.saved_bytes += pending.saved_bytes;
+        state.saved_micros += pending.saved_micros;
+        state.rewrote |= pending.rewrote;
     }
 
     /// What the elided bytes would have cost: prompt tokens the model
@@ -953,11 +1004,27 @@ mod tests {
             body,
             "no baseline yet, so the original goes upstream"
         );
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        compactor.observe_usage("ws", "claude", &usage(100, 900), true, None);
         assert!(
             compactor.rewrite("ws", "claude", body.clone()).body.len() < body.len(),
             "with a baseline in hand, the rewrite proceeds"
         );
+    }
+
+    /// One full proxy pass: inspect the request, then report the response's
+    /// usage. Booking a saving takes both halves — `rewrite` alone is a
+    /// `count_tokens` preflight or a 429 retry, which the provider never
+    /// bills.
+    fn turn(compactor: &Compactor, session: &str, body: &Bytes) -> Bytes {
+        let out = compactor.rewrite(session, "claude", body.clone());
+        compactor.observe_usage(
+            session,
+            "claude",
+            &usage(100, 900),
+            out.measured,
+            out.pending,
+        );
+        out.body
     }
 
     #[test]
@@ -969,8 +1036,8 @@ mod tests {
             Arc::new(|_, _| {}),
             tags(),
         );
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
-        let sent = compactor.rewrite("ws", "claude", body.clone()).body;
+        compactor.observe_usage("ws", "claude", &usage(100, 900), true, None);
+        let sent = turn(&compactor, "ws", &body);
         assert!(sent.len() < body.len(), "the rewritten body is smaller");
         let (blocks, saved, regressions) = compactor.stats("ws");
         assert_eq!((blocks, regressions), (4, 0));
@@ -980,10 +1047,93 @@ mod tests {
         // count is what the conversation currently carries condensed — not
         // a tally that counts one block again on every turn — while the
         // saving does accumulate, because it is paid again every turn.
-        compactor.rewrite("ws", "claude", body.clone());
+        turn(&compactor, "ws", &body);
         let (blocks_again, saved_again, _) = compactor.stats("ws");
         assert_eq!(blocks_again, 4, "still four condensed blocks, not eight");
         assert!(saved_again > saved, "the saving recurs each turn");
+    }
+
+    /// Claude Code preflights `count_tokens` with the whole transcript and
+    /// re-sends the same body verbatim after a 429. Both carry an identical,
+    /// fully eligible conversation, and neither is billed. Booking a saving
+    /// per inspection rather than per billed turn inflates the figure by the
+    /// preflight-to-turn ratio — and that figure is what someone reads to
+    /// decide whether to move `mode` from `shadow` to `on`.
+    #[test]
+    fn an_unbilled_pass_does_not_book_a_saving() {
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+        let compactor = Compactor::new(
+            policy(CompactionMode::On),
+            Arc::new(std::collections::BTreeMap::new()),
+            Arc::new(|_, _| {}),
+            tags(),
+        );
+        compactor.observe_usage("ws", "claude", &usage(100, 900), true, None);
+
+        // A `count_tokens` preflight and a 429 retry: inspected, forwarded,
+        // never billed — so their pending savings are simply dropped.
+        compactor.rewrite("ws", "claude", body.clone());
+        compactor.rewrite("ws", "claude", body.clone());
+        let (_, saved_unbilled, _) = compactor.stats("ws");
+        assert_eq!(saved_unbilled, 0.0, "an unbilled pass books nothing at all");
+
+        // The real turn, carrying the same transcript.
+        turn(&compactor, "ws", &body);
+        let (_, saved_once, _) = compactor.stats("ws");
+        assert!(saved_once > 0.0, "the billed turn books its saving");
+
+        // A second billed turn doubles it, which is the only thing that may.
+        turn(&compactor, "ws", &body);
+        let (_, saved_twice, _) = compactor.stats("ws");
+        assert!(
+            (saved_twice - 2.0 * saved_once).abs() < f64::EPSILON,
+            "two billed turns book exactly twice one turn: {saved_once} then {saved_twice}"
+        );
+    }
+
+    /// The first eligible turn of a session is deliberately held — the
+    /// original bytes go upstream so the kill switch gets a pre-rewrite
+    /// cache reading. Nothing was condensed on the wire, so nothing was
+    /// saved, and `on` mode must not book the saving it declined to take.
+    #[test]
+    fn a_held_turn_books_no_saving_in_on_mode() {
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+        let compactor = Compactor::new(
+            policy(CompactionMode::On),
+            Arc::new(std::collections::BTreeMap::new()),
+            Arc::new(|_, _| {}),
+            tags(),
+        );
+
+        // No baseline yet, so this turn is held.
+        let sent = turn(&compactor, "ws", &body);
+        assert_eq!(sent, body, "the held turn forwarded the original bytes");
+        let (_, saved, _) = compactor.stats("ws");
+        assert_eq!(saved, 0.0, "a turn that saved nothing books nothing");
+
+        // With a baseline in hand the next turn rewrites, and books.
+        turn(&compactor, "ws", &body);
+        let (_, saved_after, _) = compactor.stats("ws");
+        assert!(saved_after > 0.0, "the rewritten turn books its saving");
+    }
+
+    /// Shadow mode never rewrites, so every eligible pass is "held" — but
+    /// its tally is explicitly the hypothetical saving, which is the whole
+    /// reason the mode exists. Gating on an actual rewrite must not empty it.
+    #[test]
+    fn shadow_mode_still_books_the_hypothetical_saving() {
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+        let compactor = Compactor::new(
+            policy(CompactionMode::Shadow),
+            Arc::new(std::collections::BTreeMap::new()),
+            Arc::new(|_, _| {}),
+            tags(),
+        );
+        let sent = turn(&compactor, "ws", &body);
+        assert_eq!(sent, body, "shadow never alters the wire");
+        let (blocks, saved, _) = compactor.stats("ws");
+        assert_eq!(blocks, 4);
+        assert!(saved > 0.0, "shadow reports what it would have saved");
     }
 
     #[test]
@@ -1049,8 +1199,8 @@ mod tests {
             Arc::new(|_, _| {}),
             tags(),
         );
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
-        compactor.observe_usage("other-ws", "claude", &usage(100, 900), true);
+        compactor.observe_usage("ws", "claude", &usage(100, 900), true, None);
+        compactor.observe_usage("other-ws", "claude", &usage(100, 900), true, None);
         let first = compactor.rewrite("ws", "claude", body.clone()).body;
         let second = compactor.rewrite("ws", "claude", body.clone()).body;
         assert_eq!(
@@ -1082,7 +1232,7 @@ mod tests {
                 Arc::new(|_, _| {}),
                 source,
             );
-            compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+            compactor.observe_usage("ws", "claude", &usage(100, 900), true, None);
             compactor.rewrite("ws", "claude", body.clone()).body
         };
 
@@ -1392,13 +1542,13 @@ mod tests {
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
 
         // Before any rewrite: a healthy 90% of the prompt served from cache.
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
-        let rewritten = compactor.rewrite("ws", "claude", body.clone()).body;
+        compactor.observe_usage("ws", "claude", &usage(100, 900), true, None);
+        let rewritten = turn(&compactor, "ws", &body);
         assert!(rewritten.len() < body.len(), "the first turn rewrites");
 
         // Three turns where the cache share collapses and never recovers.
         for _ in 0..3 {
-            compactor.observe_usage("ws", "claude", &usage(900, 100), true);
+            compactor.observe_usage("ws", "claude", &usage(900, 100), true, None);
         }
         assert_eq!(
             notices.lock().expect("lock").len(),
@@ -1422,12 +1572,12 @@ mod tests {
         // cache as compaction's fault and disable the whole workspace.
         let (compactor, notices) = compactor_with_notices();
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        compactor.observe_usage("ws", "claude", &usage(100, 900), true, None);
         assert!(compactor.rewrite("ws", "claude", body.clone()).body.len() < body.len());
 
         // Ten cold subagent turns — not requests compaction acted on.
         for _ in 0..10 {
-            compactor.observe_usage("ws", "claude", &usage(900, 0), false);
+            compactor.observe_usage("ws", "claude", &usage(900, 0), false, None);
         }
         assert!(notices.lock().expect("lock").is_empty());
         assert!(
@@ -1450,16 +1600,16 @@ mod tests {
     fn a_cache_dip_that_recovers_does_not_trip_the_kill_switch() {
         let (compactor, notices) = compactor_with_notices();
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        compactor.observe_usage("ws", "claude", &usage(100, 900), true, None);
         let rewritten = compactor.rewrite("ws", "claude", body.clone()).body;
         assert!(rewritten.len() < body.len());
 
         // Two degraded turns — the deliberate miss on the rewritten turn and
         // one more — then the prefix settles and the cache warms back up.
-        compactor.observe_usage("ws", "claude", &usage(900, 100), true);
-        compactor.observe_usage("ws", "claude", &usage(900, 100), true);
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
-        compactor.observe_usage("ws", "claude", &usage(900, 100), true);
+        compactor.observe_usage("ws", "claude", &usage(900, 100), true, None);
+        compactor.observe_usage("ws", "claude", &usage(900, 100), true, None);
+        compactor.observe_usage("ws", "claude", &usage(100, 900), true, None);
+        compactor.observe_usage("ws", "claude", &usage(900, 100), true, None);
 
         assert!(notices.lock().expect("lock").is_empty());
         assert!(

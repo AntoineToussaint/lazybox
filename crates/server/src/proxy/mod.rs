@@ -590,6 +590,8 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
     // are condensed before the expensive model ever sees them (#1609).
     // `off` and `shadow` hand the original bytes straight back.
     let compacted = state.compactor.rewrite(&session, &agent_id, body_bytes);
+    let compaction_pending = compacted.pending;
+    let judged = compacted.measured;
     let body_bytes = compacted.body;
 
     let upstream = state
@@ -645,7 +647,15 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
         (
             upstream.bytes_stream(),
             accumulator,
-            Some((state, sink, agent_id, session, measured, compacted.measured)),
+            Some((
+                state,
+                sink,
+                agent_id,
+                session,
+                measured,
+                judged,
+                compaction_pending,
+            )),
         ),
         |(mut bytes, mut acc, mut pending)| async move {
             match bytes.next().await {
@@ -658,7 +668,15 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
                     Some((Err(BoxErr::from(error)), (bytes, acc, pending)))
                 }
                 None => {
-                    if let Some((state, sink, agent_id, session, measured, judged)) = pending.take()
+                    if let Some((
+                        state,
+                        sink,
+                        agent_id,
+                        session,
+                        measured,
+                        judged,
+                        compaction_pending,
+                    )) = pending.take()
                         && let Some(mut usage) = acc.finish()
                     {
                         // Fold the request's blocks into the session's
@@ -677,9 +695,13 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
                                 .unwrap_or_else(std::sync::PoisonError::into_inner);
                             measured.against(store.entry(&format!("{agent_id}/{session}")))
                         });
-                        state
-                            .compactor
-                            .observe_usage(&session, &agent_id, &usage, judged);
+                        state.compactor.observe_usage(
+                            &session,
+                            &agent_id,
+                            &usage,
+                            judged,
+                            compaction_pending,
+                        );
                         sink(&agent_id, &session, usage);
                     }
                     None

@@ -258,13 +258,13 @@ async fn live_provider_auth_failure_emits_recovery_without_stopping_the_agent() 
 /// actually answers: every other test of this path drives a stand-in daemon
 /// written to match my own assumptions, so a serve loop that dropped or gated
 /// the reply would leave the feature silently dead with every test green.
-/// Second, the connection is deliberately NOT subscribed — `hook-ingest` asks
-/// one question and waits for one answer — and must therefore receive its
-/// reply while receiving none of the fleet's bus traffic. Forwarding the bus
-/// to it meant serializing every terminal's PTY output into a process that
-/// decodes and discards it, once per full-file read.
+/// Second, the connection is a request/response one — `hook-ingest` asks one
+/// question and waits for one answer — so once it has asked, the fleet's bus
+/// traffic must not be forwarded into it. Forwarding it meant serializing
+/// every terminal's PTY output to a process that decodes and discards it,
+/// once per full-file read.
 #[tokio::test]
-async fn decide_tool_use_answers_an_unsubscribed_connection_without_bus_traffic() {
+async fn decide_tool_use_answers_without_forwarding_bus_traffic() {
     timeout(TEST_DEADLINE, async {
         let (config, mock) = ServerConfig::in_memory_with_mock();
         let server = std::sync::Arc::new(Server::new(config));
@@ -277,14 +277,8 @@ async fn decide_tool_use_answers_an_unsubscribed_connection_without_bus_traffic(
         tui.send(Command::Subscribe).unwrap();
         let _snapshot = tui.recv().await.expect("snapshot");
 
-        // The hook's connection is open BEFORE the bus gets busy, which is
-        // the window the gate has to cover.
-        let (mut hook, hook_conn) = channel::pair();
-        let hook_server = server.clone();
-        tokio::spawn(async move {
-            let _ = hook_server.serve(hook_conn).await;
-        });
-
+        // Spawn first so there is a live terminal (and a backend key) for the
+        // decision to resolve against.
         tui.send(Command::Spawn {
             model_alias: None,
             access: lazybox_ipc::AgentRunAccess::Default,
@@ -300,19 +294,24 @@ async fn decide_tool_use_answers_an_unsubscribed_connection_without_bus_traffic(
             role: None,
         })
         .expect("spawn");
-        // Proves the bus is live and carrying events the hook connection
-        // would have received before the gate.
         wait_for(
             &mut tui,
             |event| matches!(event, Event::TerminalSpawned { .. }),
             Duration::from_secs(2),
         )
         .await
-        .expect("the spawn must put traffic on the bus");
+        .expect("spawned");
         let key = mock.list().await.unwrap().into_iter().next().unwrap();
 
+        // The hook's connection: connect, ask, wait — exactly what
+        // `request_tool_use_decision` does.
+        let (mut hook, hook_conn) = channel::pair();
+        let hook_server = server.clone();
+        tokio::spawn(async move {
+            let _ = hook_server.serve(hook_conn).await;
+        });
         hook.send(Command::DecideToolUse {
-            backend_key: Some(key),
+            backend_key: Some(key.clone()),
             request: lazybox_ipc::ToolUseRequest {
                 tool_name: "Read".into(),
                 file_path: "/no/such/file".into(),
@@ -321,19 +320,53 @@ async fn decide_tool_use_answers_an_unsubscribed_connection_without_bus_traffic(
         })
         .expect("decide");
 
-        let first = timeout(Duration::from_secs(2), hook.recv())
+        let reply = timeout(Duration::from_secs(2), hook.recv())
             .await
             .expect("the daemon must answer a decision request")
             .expect("event");
         assert!(
             matches!(
-                &first,
+                &reply,
                 Event::ToolUseDecided { client_request_id, decision }
                     if client_request_id == "decide-1"
                         && *decision == lazybox_ipc::ToolUseDecision::Allow
             ),
-            "an unsubscribed connection must see its own reply first and no \
-             bus traffic at all, got {first:?}",
+            "expected the correlated decision, got {reply:?}",
+        );
+
+        // Now put real traffic on the bus and prove none of it reaches the
+        // connection that asked. The subscribed client still gets it, so this
+        // is suppression on one connection, not a dead bus.
+        mock.emit(&key, b"fleet output the hook must never be sent\n")
+            .await;
+        tui.send(Command::Spawn {
+            model_alias: None,
+            access: lazybox_ipc::AgentRunAccess::Default,
+            session_key: "test:ws-other".into(),
+            session_id: None,
+            client_request_id: None,
+            kind: TerminalKind::Shell,
+            cwd: test_cwd(),
+            initial_prompt: None,
+            initial_snippet: None,
+            on_main: false,
+            force_new: false,
+            role: None,
+        })
+        .expect("second spawn");
+        wait_for(
+            &mut tui,
+            |event| matches!(event, Event::TerminalSpawned { .. }),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect("the bus is live for subscribers");
+
+        assert!(
+            timeout(Duration::from_millis(250), hook.recv())
+                .await
+                .is_err(),
+            "a request/response connection must receive no bus traffic",
         );
     })
     .await

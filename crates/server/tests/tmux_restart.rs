@@ -204,7 +204,103 @@ done"#
     }
 }
 
+fn case_snapshot<'a>(
+    case: &PromptCase,
+    snapshots: &'a [TerminalSnapshot],
+) -> Option<&'a TerminalSnapshot> {
+    snapshots.iter().find(|snapshot| {
+        snapshot.session_key == case.session_key
+            && matches!(&snapshot.kind, TerminalKind::Agent(agent) if agent == &case.agent)
+    })
+}
+
+/// Has the composer actually been painted into `replay` yet?
+///
+/// The reattach path writes tmux's `capture-pane` seed into the replay
+/// ring, and the fresh attach client then clears the pane and repaints it
+/// as a separate, later burst. A ring read between the clear and the
+/// repaint renders an entirely empty screen — the pane is mid-redraw, not
+/// reconstructed wrongly — and one caught partway through the repaint is
+/// missing its bottom rows. Both are transient, so a replay whose render
+/// lacks the composer means "read it again", not "assert on it".
+///
+/// Deliberately weaker than the byte-faithfulness assertions it gates: it
+/// only asks that the marker row and the draft's last line be on screen,
+/// so a genuinely mis-reconstructed composer still fails the comparison
+/// instead of being polled away.
+fn composer_painted(replay: &[u8], marker: &str, draft: &str) -> bool {
+    let rows = active_rows(replay, 120, 32);
+    let final_line = draft.lines().last().expect("non-empty draft");
+    rows.iter().any(|row| row.contains(marker)) && rows.iter().any(|row| row.contains(final_line))
+}
+
+/// The two transient reattach states `composer_painted` exists to reject:
+/// the pane cleared with its repaint still in flight, and a repaint caught
+/// partway down the screen. Both rendered as a composer that had "changed"
+/// under load (#1661).
+#[test]
+fn a_pane_caught_mid_reattach_redraw_is_not_painted() {
+    const MARKER: &str = "MARKER-codex-multi";
+    const DRAFT: &str = "first-line\n  second-line";
+    let seed =
+        "MARKER-codex-multi\r\nCODEX\r\n\r\n\x1b[1m\u{203a}\x1b[0m first-line\r\n  second-line";
+    assert!(
+        composer_painted(seed.as_bytes(), MARKER, DRAFT),
+        "the capture-pane seed alone already renders the composer"
+    );
+
+    let cleared = format!("{seed}\x1b[?1h\x1b=\x1b[H\x1b[2J\x1b[5;14H");
+    assert!(
+        !composer_painted(cleared.as_bytes(), MARKER, DRAFT),
+        "a pane cleared by the fresh attach client has nothing on screen yet"
+    );
+
+    let partial = format!("{cleared}\x1b[H{MARKER}\r\nCODEX\r\n");
+    assert!(
+        !composer_painted(partial.as_bytes(), MARKER, DRAFT),
+        "a repaint that has not reached the draft's last line is incomplete"
+    );
+}
+
+fn prompt_transition_painted(
+    cases: &[PromptCase],
+    snapshots: &[TerminalSnapshot],
+    resyncs: &[(TerminalId, Vec<u8>)],
+) -> bool {
+    cases.iter().all(|case| {
+        let Some(snapshot) = case_snapshot(case, snapshots) else {
+            return false;
+        };
+        let Some(replay) = resyncs.iter().find_map(|(terminal_id, replay)| {
+            (*terminal_id == snapshot.terminal_id).then_some(replay)
+        }) else {
+            return false;
+        };
+        composer_painted(&snapshot.replay, &case.marker, &case.draft)
+            && composer_painted(replay, &case.marker, &case.draft)
+    })
+}
+
+/// Take a client-observed snapshot + resync, retaking it while any pane is
+/// still mid-redraw. Bounded like the fixture's readiness loops: once the
+/// budget is spent the last read is handed back so the comparison reports
+/// the real difference rather than a timeout.
 async fn snapshot_and_resync_via_client(
+    config: ServerConfig,
+    cases: &[PromptCase],
+    transition: &str,
+) -> (Vec<TerminalSnapshot>, Vec<(TerminalId, Vec<u8>)>) {
+    for attempt in 0..100 {
+        let captured = capture_via_client(config.clone(), transition).await;
+        if attempt == 99 || prompt_transition_painted(cases, &captured.0, &captured.1) {
+            return captured;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    unreachable!("the loop returns on its final attempt")
+}
+
+async fn capture_via_client(
     config: ServerConfig,
     transition: &str,
 ) -> (Vec<TerminalSnapshot>, Vec<(TerminalId, Vec<u8>)>) {
@@ -268,16 +364,7 @@ fn assert_prompt_snapshots(cases: &[PromptCase], snapshots: &[TerminalSnapshot],
         "{transition}: every tmux session must have a snapshot"
     );
     for case in cases {
-        let snapshot = snapshots
-            .iter()
-            .find(|snapshot| {
-                snapshot.session_key == case.session_key
-                    && matches!(
-                        &snapshot.kind,
-                        TerminalKind::Agent(agent) if agent == &case.agent
-                    )
-            })
-            .expect("case snapshot");
+        let snapshot = case_snapshot(case, snapshots).expect("case snapshot");
         assert_eq!(
             snapshot.composing_buffer.as_deref(),
             Some(case.draft.as_str()),
@@ -310,16 +397,7 @@ fn assert_prompt_resyncs(
     transition: &str,
 ) {
     for case in cases {
-        let snapshot = snapshots
-            .iter()
-            .find(|snapshot| {
-                snapshot.session_key == case.session_key
-                    && matches!(
-                        &snapshot.kind,
-                        TerminalKind::Agent(agent) if agent == &case.agent
-                    )
-            })
-            .expect("case snapshot");
+        let snapshot = case_snapshot(case, snapshots).expect("case snapshot");
         let replay = resyncs
             .iter()
             .find_map(|(terminal_id, replay)| {
@@ -763,7 +841,7 @@ async fn tmux_prompt_transition_matrix_is_byte_faithful() {
         for cycle in 0..4 {
             let transition = format!("client reattach cycle {cycle}");
             let (snapshots, resyncs) =
-                snapshot_and_resync_via_client(config.clone(), &transition).await;
+                snapshot_and_resync_via_client(config.clone(), &prompt_cases, &transition).await;
             assert_prompt_snapshots(&prompt_cases, &snapshots, &transition);
             assert_prompt_resyncs(
                 &prompt_cases,
@@ -806,7 +884,7 @@ async fn tmux_prompt_transition_matrix_is_byte_faithful() {
         for cycle in 0..4 {
             let transition = format!("post-rebadge client reattach cycle {cycle}");
             let (snapshots, resyncs) =
-                snapshot_and_resync_via_client(config.clone(), &transition).await;
+                snapshot_and_resync_via_client(config.clone(), &prompt_cases, &transition).await;
             assert_prompt_snapshots(&prompt_cases, &snapshots, &transition);
             assert_prompt_resyncs(
                 &prompt_cases,
@@ -842,8 +920,12 @@ async fn tmux_prompt_transition_matrix_is_byte_faithful() {
 
         for cycle in 0..4 {
             let transition = format!("post-restart client reattach cycle {cycle}");
-            let (snapshots, resyncs) =
-                snapshot_and_resync_via_client(restarted_config.clone(), &transition).await;
+            let (snapshots, resyncs) = snapshot_and_resync_via_client(
+                restarted_config.clone(),
+                &prompt_cases,
+                &transition,
+            )
+            .await;
             assert_prompt_snapshots(&prompt_cases, &snapshots, &transition);
             assert_prompt_resyncs(
                 &prompt_cases,

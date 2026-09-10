@@ -1324,6 +1324,9 @@ impl<T: TerminalAdapter> Model<T> {
                 // The client sidebar/overview UI that consumes it is deferred
                 // to a follow-up, so ignore it here.
                 | IpcEvent::EpicStatus { .. }
+                // The compaction saving (#1621) is accounting the daemon
+                // rolls up into the stats screen; it patches no workspace.
+                | IpcEvent::AgentCompaction { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }
@@ -2407,6 +2410,9 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::MasteryLedger { .. }
             // Epic status (#1522) is a derived-status push, not a sync attempt.
             | IpcEvent::EpicStatus { .. }
+            // Nor is the compaction saving (#1621) — it rides live agent
+            // traffic through the proxy, not a provider poll.
+            | IpcEvent::AgentCompaction { .. }
             | IpcEvent::ResourcePosture(..) => {}
         }
         // Keep the empty-inbox doctor's sync facts (polled-ok /
@@ -2746,6 +2752,7 @@ impl<T: TerminalAdapter> Model<T> {
                 // Epic status (#1522): no poll-indicator / mutation-failure
                 // semantics; the consuming client UI is a deferred follow-up.
                 | IpcEvent::EpicStatus { .. }
+                | IpcEvent::AgentCompaction { .. }
                 | IpcEvent::ResourcePosture(..) => {}
             }
         }

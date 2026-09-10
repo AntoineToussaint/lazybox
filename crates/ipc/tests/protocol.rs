@@ -1377,6 +1377,14 @@ fn all_events() -> Vec<Event> {
                 },
             ],
         },
+        Event::AgentCompaction {
+            agent_id: "claude".into(),
+            session_key: Some(lazybox_core::SessionKey::from("github:o/r#1")),
+            blocks: 4,
+            saved_bytes: 18_422,
+            saved_cost_micros: Some(61_000),
+            regressions: 0,
+        },
     ]
 }
 
@@ -1598,6 +1606,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::KeepAwakeStatus { .. } => "KeepAwakeStatus",
         Event::MasteryLedger { .. } => "MasteryLedger",
         Event::EpicStatus { .. } => "EpicStatus",
+        Event::AgentCompaction { .. } => "AgentCompaction",
     }
 }
 
@@ -1614,7 +1623,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        103,
+        104,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

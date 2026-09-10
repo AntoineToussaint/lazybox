@@ -552,6 +552,11 @@ pub struct ServerConfig {
     /// per-conversation tag: it rewrites blocks that must stay byte-stable
     /// across the turns of one conversation, which this layer never does.
     pub(crate) condense_tag: lazybox_core::context_hygiene::CondenseTag,
+    /// Files the `PreToolUse` intercept has already condensed, per session
+    /// (#1610). The hook has no recency window to honour, so this is what
+    /// keeps a model that genuinely needs a file's bytes from being held off
+    /// it — see [`read_intercept::DeniedReads`].
+    pub(crate) denied_reads: Arc<read_intercept::DeniedReads>,
     /// MCP cross-agent coordination runtime (#1420): the per-session bearer
     /// → `SessionKey` registry the MCP server reads to identify a tool caller,
     /// and the bound endpoint URL set once [`mcp::start`] runs. Shared (Arc)
@@ -700,6 +705,7 @@ impl ServerConfig {
             condense_tag: lazybox_core::context_hygiene::CondenseTag::new(
                 &uuid::Uuid::new_v4().simple().to_string(),
             ),
+            denied_reads: Arc::new(read_intercept::DeniedReads::default()),
             mcp: Arc::new(mcp::McpRuntime::default()),
         }
     }
@@ -707,6 +713,12 @@ impl ServerConfig {
     /// This daemon run's condense tag (see [`ServerConfig::condense_tag`]).
     pub(crate) fn condense_tag(&self) -> &lazybox_core::context_hygiene::CondenseTag {
         &self.condense_tag
+    }
+
+    /// Files the read intercept has already condensed this run (see
+    /// [`ServerConfig::denied_reads`]).
+    pub(crate) fn denied_reads(&self) -> &read_intercept::DeniedReads {
+        &self.denied_reads
     }
 
     /// Register a detached maintenance task's completion latch so the
@@ -1169,6 +1181,23 @@ impl Server {
                         bus_suppressed = false;
                     }
                     if matches!(&cmd, lazybox_ipc::Command::DecideToolUse { .. }) {
+                        // Suppression is what makes the decision round-trip
+                        // cheap, but it is destructive to a connection that
+                        // wanted the bus: it would silently stop receiving
+                        // events with nothing to attribute it to. A subscriber
+                        // asking for a decision is therefore refused outright
+                        // rather than quietly cut off — `hook-ingest` opens its
+                        // own connection and never subscribes, so nothing
+                        // legitimate takes this path.
+                        if subscribed {
+                            let _ = conn.tx.send(Event::CommandRejected {
+                                command: "DecideToolUse".into(),
+                                message: "a subscribed connection cannot ask for a tool-use \
+                                          decision; use a dedicated connection"
+                                    .into(),
+                            });
+                            continue;
+                        }
                         bus_suppressed = true;
                     }
                     // Per-command name at INFO so a stalled IPC channel is

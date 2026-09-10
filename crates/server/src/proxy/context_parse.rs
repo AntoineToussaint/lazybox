@@ -141,9 +141,15 @@ impl Measured {
 pub(crate) fn measure(body: &Value, large_lines: usize) -> Option<Measured> {
     let array = conversation(body)?;
 
+    // Counted through the same sink the blocks use rather than
+    // `to_string(...).len()`: the length is all that is wanted, and
+    // materializing it allocates a copy of the whole conversation on every
+    // request — on the hot path, for a body that grows all session.
+    let mut total = Digest::default();
+    serde_json::to_writer(&mut total, array).ok()?;
     let mut out = Measured {
         accounting: ContextAccounting {
-            message_bytes: serde_json::to_string(array).ok()?.len() as u64,
+            message_bytes: total.bytes,
             ..ContextAccounting::default()
         },
         blocks: Vec::new(),
@@ -320,6 +326,24 @@ mod tests {
         assert_eq!(
             got.tool_result_resent_bytes, 0,
             "first send is not a re-send"
+        );
+    }
+
+    /// `message_bytes` is the denominator every share is computed against,
+    /// so the counting sink must agree with the serialization exactly — a
+    /// sink that drifted by even a byte would skew every reported ratio.
+    #[test]
+    fn message_bytes_is_the_serialized_length_of_the_conversation() {
+        let body = anthropic_body("all 42 tests passed");
+        let value: Value = serde_json::from_slice(body.as_bytes()).expect("json");
+        let array = conversation(&value).expect("a conversation array");
+        let expected = serde_json::to_string(array).expect("serialize").len() as u64;
+
+        let mut seen = SeenBlocks::default();
+        let got = measure_against(body.as_bytes(), &mut seen, 350).expect("measured");
+        assert_eq!(
+            got.message_bytes, expected,
+            "counted length matches the serialized length"
         );
     }
 

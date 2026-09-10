@@ -210,6 +210,24 @@ impl Store for SqliteStore {
         Ok(())
     }
 
+    fn set_kv_if_absent(&self, key: &str, value: &str) -> Result<String, StoreError> {
+        // The connection guard is held across both statements, so an
+        // in-process race resolves here; `DO NOTHING` is what makes the
+        // decision atomic against a second process on the same file.
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO kv (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO NOTHING",
+            (&key, &value),
+        )
+        .map_err(|e| StoreError::Backend(e.to_string()))?;
+        let mut stmt = conn
+            .prepare("SELECT value FROM kv WHERE key = ?1")
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        stmt.query_row([key], |row| row.get::<_, String>(0))
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
     fn delete_kv(&self, key: &str) -> Result<(), StoreError> {
         let conn = self.conn();
         conn.execute("DELETE FROM kv WHERE key = ?1", [&key])

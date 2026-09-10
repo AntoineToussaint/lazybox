@@ -1385,6 +1385,9 @@ fn all_events() -> Vec<Event> {
                 },
             ],
         },
+        Event::EpicGone {
+            key: "auth-refactor".into(),
+        },
         Event::ToolUseDecided {
             client_request_id: "req-1".into(),
             decision: lazybox_ipc::ToolUseDecision::Deny {
@@ -1612,6 +1615,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::KeepAwakeStatus { .. } => "KeepAwakeStatus",
         Event::MasteryLedger { .. } => "MasteryLedger",
         Event::EpicStatus { .. } => "EpicStatus",
+        Event::EpicGone { .. } => "EpicGone",
         Event::ToolUseDecided { .. } => "ToolUseDecided",
     }
 }
@@ -1629,7 +1633,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        104,
+        105,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

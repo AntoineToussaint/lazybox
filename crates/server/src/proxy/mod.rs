@@ -710,9 +710,9 @@ mod tests {
     /// still in use rather than replacing it.
     #[tokio::test]
     async fn a_restart_reclaims_the_remembered_port_and_a_held_one_falls_back() {
-        for attempt in 0..8 {
+        for _ in 0..8 {
             let config = crate::ServerConfig::in_memory();
-            let remembered = free_static_ports(22000 + attempt * 100, 1)[0];
+            let remembered = free_static_ports(1, 1)[0];
             config
                 .store
                 .set_kv(PORTS_KV_KEY, &remembered.to_string())
@@ -747,8 +747,8 @@ mod tests {
         }
         panic!(
             "the remembered port was never reclaimed — either bind_listener \
-             stopped reading the history, or every candidate port was taken \
-             by another process on this host"
+             stopped reading the history, or a process outside this test \
+             suite is binding ports inside this run's reserved block"
         );
     }
 
@@ -763,12 +763,15 @@ mod tests {
     /// refuses to bind — so the kernel resolves ownership.
     #[tokio::test]
     async fn each_daemon_reclaims_its_own_port_when_the_other_restarts() {
-        for attempt in 0..8 {
+        for _ in 0..8 {
             let config = crate::ServerConfig::in_memory();
-            // Static ports: an ephemeral one can be handed to a sibling test
-            // in the window where this test releases it to simulate a
-            // restart. A candidate lost anyway is retried, not asserted on.
-            let ports = free_static_ports(23000 + attempt * 100, 2);
+            // Static ports: an ephemeral one can be handed to a sibling
+            // process in the window where this test releases it to simulate a
+            // restart. The lane is reserved for this process, so losing a
+            // candidate here means a non-test process took it — that is
+            // retried, while the reclaim below is asserted, because `stop`
+            // has made the release deterministic.
+            let ports = free_static_ports(2, 2);
             config
                 .store
                 .set_kv(PORTS_KV_KEY, &format!("{},{}", ports[0], ports[1]))
@@ -790,18 +793,33 @@ mod tests {
 
             // A stops, B restarts: B must reclaim `b_port`, NOT the port A's
             // agents are still baked with, even though `a_port` is free now.
-            drop(a);
-            drop(b);
+            stop(a);
+            stop(b);
+            // `stop` waits for the port to come back, but proving a port
+            // bindable means binding and closing it, and that close re-arms
+            // the same window — so a reclaim can still lose the draw. Retry
+            // it rather than assert on one: only a wiring bug loses every
+            // attempt, since a daemon that reclaims the wrong port never
+            // matches here, however lucky the draw.
             let (b_again, b_reclaimed) = bind_listener(&config).await.expect("B restarts");
-            assert_eq!(b_reclaimed, b_port, "B comes back on its own port");
+            if b_reclaimed != b_port {
+                continue;
+            }
 
             // A restarts too and finds its own port waiting behind B's.
             let (_a_again, a_reclaimed) = bind_listener(&config).await.expect("A restarts");
-            assert_eq!(a_reclaimed, a_port, "A comes back on its own port");
-            drop(b_again);
+            if a_reclaimed != a_port {
+                continue;
+            }
+            stop(b_again);
             return;
         }
-        panic!("every candidate port pair was taken by another process on this host");
+        panic!(
+            "neither daemon ever came back on its own port — either \
+             bind_listener stopped claiming the most recent port that binds, \
+             or every candidate was lost to a process outside this test suite \
+             binding inside this run's reserved block"
+        );
     }
 
     /// The upgrade itself must not strand agents: a store written by the
@@ -810,9 +828,9 @@ mod tests {
     /// so the first run of the new code reclaims it rather than binding fresh.
     #[tokio::test]
     async fn the_pre_1616_single_port_key_seeds_the_history() {
-        for attempt in 0..8 {
+        for _ in 0..8 {
             let config = crate::ServerConfig::in_memory();
-            let legacy = free_static_ports(21000 + attempt * 100, 1)[0];
+            let legacy = free_static_ports(0, 1)[0];
             config
                 .store
                 .set_kv(LEGACY_PORT_KV_KEY, &legacy.to_string())
@@ -829,26 +847,211 @@ mod tests {
             );
             return;
         }
-        panic!("every candidate port was taken by another process on this host");
+        panic!(
+            "the legacy port was never reclaimed — the block is reserved for \
+             this process, so something outside this test suite is binding \
+             ports inside it"
+        );
     }
 
-    /// Free ports from `base`, outside every platform's ephemeral range so a
-    /// sibling test's ephemeral bind can never be handed one between a
-    /// release here and the reclaim under test. Each caller scans its own
-    /// range, so two tests running in parallel cannot pick the same port.
-    /// The probes are held until all are found, then released together, so
-    /// the ports are distinct.
-    fn free_static_ports(base: u16, count: usize) -> Vec<u16> {
+    /// Total wall clock this process may spend waiting for ports to come
+    /// back, across every `stop`.
+    ///
+    /// nextest SIGKILLs a test that outruns its `slow-timeout`
+    /// (`.config/nextest.toml`), and a killed test never unwinds, so an
+    /// assertion that would have named the failure never prints. The budget
+    /// is process-wide rather than per-wait because one test stops several
+    /// listeners: bounding each wait on its own would let their sum outrun
+    /// the kill anyway, which is the failure this budget exists to prevent.
+    /// `the_port_release_budget_stays_inside_nextests_kill` pins the ordering.
+    const PORT_RELEASE_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+
+    /// The in-test budget only produces a readable failure if it fires before
+    /// nextest kills the process, so the two are a matched pair: raising the
+    /// budget alone trades a named assertion for a bare `TIMED OUT`. These
+    /// tests carry no nextest override, so they run under whichever profile
+    /// is selected — every one of them has to outlast the budget.
+    #[test]
+    fn the_port_release_budget_stays_inside_nextests_kill() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.config/nextest.toml");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+
+        for profile in ["[profile.default]", "[profile.ci]"] {
+            let body = text
+                .split(profile)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{profile} is gone from nextest.toml"));
+            let body = body.split("\n[").next().unwrap_or(body);
+            let period = body
+                .lines()
+                .find_map(|line| {
+                    let rest = line.trim().strip_prefix("slow-timeout")?;
+                    let secs = rest.split_once("period = \"")?.1.split_once("s\"")?.0;
+                    secs.parse::<u64>().ok().map(std::time::Duration::from_secs)
+                })
+                .unwrap_or_else(|| panic!("{profile} declares no slow-timeout period"));
+            assert!(
+                PORT_RELEASE_BUDGET < period,
+                "the {PORT_RELEASE_BUDGET:?} port-release budget must run out \
+                 before {profile}'s {period:?} kill, or the test dies by \
+                 SIGKILL with no diagnostic",
+            );
+        }
+    }
+
+    /// Stop a daemon and wait for its port to come back, the way a restart
+    /// gets for free: the process that held it is gone before the next one
+    /// binds. Closing a socket the tokio driver had registered leaves the
+    /// port refusing binds for tens of milliseconds under a loaded suite —
+    /// no process owns it, the kernel simply has not released it yet — and
+    /// the reclaim under test reads that as a live peer holding its port and
+    /// falls back to a fresh one (#1655). The probe is a plain std listener,
+    /// which the kernel does hand straight back.
+    fn stop(listener: TcpListener) -> u16 {
+        let port = listener.local_addr().expect("listener address").port();
+        drop(listener);
+        await_port_release(port);
+        port
+    }
+
+    /// Block until `port` accepts a bind again. Split out of `stop` because
+    /// it is the part with a contract worth testing on its own: a wait that
+    /// returned early would hand back a port that still refuses binds, which
+    /// is the whole failure being fixed.
+    fn await_port_release(port: u16) {
+        static SPENT_MICROS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        const POLL: std::time::Duration = std::time::Duration::from_millis(2);
+
+        while std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).is_err() {
+            std::thread::sleep(POLL);
+            let spent = std::time::Duration::from_micros(
+                SPENT_MICROS.fetch_add(
+                    POLL.as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                ) + POLL.as_micros() as u64,
+            );
+            assert!(
+                spent < PORT_RELEASE_BUDGET,
+                "port {port} has not come back, and this process has spent \
+                 {spent:?} waiting for ports to be released — past the \
+                 {PORT_RELEASE_BUDGET:?} budget that keeps this assertion \
+                 ahead of nextest's kill",
+            );
+        }
+    }
+
+    /// The wait's contract: it returns only once the port is genuinely
+    /// bindable. Holding the port from another thread makes that testable
+    /// without waiting for the kernel's own deferred release, which is real
+    /// but far too rare to build a test around — a wait that returned early
+    /// fails here every run.
+    #[tokio::test]
+    async fn the_release_wait_returns_only_once_the_port_is_free() {
+        let port = free_static_ports(3, 1)[0];
+        let holder =
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).expect("hold");
+        let holding = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            drop(holder);
+        });
+
+        await_port_release(port);
+        let reclaimed = crate::mcp::bind_loopback_port(port)
+            .unwrap_or_else(|err| panic!("the wait returned while {port} was still held: {err}"));
+
+        stop(reclaimed);
+        holding.join().expect("holder thread");
+    }
+
+    /// Free ports from one of this process's lanes, below the ephemeral floor
+    /// so a sibling's `:0` bind can never be handed one between a release
+    /// here and the reclaim under test. Each caller scans its own lane, so
+    /// two tests running in parallel cannot pick the same port. The probes
+    /// are held until all are found, so the ports are distinct, then released
+    /// through `stop` — a probe dropped without that wait leaves its port
+    /// refusing binds for milliseconds, and the caller binding it right back
+    /// is exactly the race these fixtures exist to avoid (#1655).
+    fn free_static_ports(lane: u16, count: usize) -> Vec<u16> {
+        let base = static_port_lane(lane);
         let mut held = Vec::new();
-        for port in base..base + 100 {
+        for port in base..base + LANE_WIDTH {
             if let Ok(listener) = crate::mcp::bind_loopback_port(port) {
-                held.push((listener, port));
+                held.push(listener);
             }
             if held.len() == count {
-                return held.iter().map(|(_, port)| *port).collect();
+                return held.into_iter().map(stop).collect();
             }
         }
         panic!("no {count} free static ports from {base}");
+    }
+
+    const LANE_WIDTH: u16 = 100;
+    const LANES: u16 = 4;
+    const BLOCK_WIDTH: u16 = LANE_WIDTH * LANES;
+    const FIRST_BLOCK: u16 = 20_000;
+    const PAST_LAST_BLOCK: u16 = 32_000;
+
+    /// Linux's default `ip_local_port_range` starts at 32768 and macOS's at
+    /// 49152, so nothing below the lower of the two is handed out as an
+    /// ephemeral port. A host that lowers its range re-opens that overlap,
+    /// and no reservation here can defend against it.
+    const EPHEMERAL_FLOOR: u16 = 32_768;
+    const _: () = assert!(PAST_LAST_BLOCK + BLOCK_WIDTH <= EPHEMERAL_FLOOR);
+
+    /// The base of one of this test process's static-port lanes.
+    ///
+    /// The lanes were fixed numbers, which made them machine-global: two
+    /// suites running at once on this box — routine here — scanned the same
+    /// range and could hand each other the same ports. That is not what made
+    /// #1655 fail; the deferred release `stop` waits for was. It does leave a
+    /// real window, though: a sibling process binding one of our candidates
+    /// between `stop`'s probe closing and the reclaim binding. The block
+    /// closes that window, claimed the way the ports themselves are — the
+    /// process that binds a block's first port owns the block for its
+    /// lifetime, and that sentinel stays bound so no sibling can scan into it.
+    ///
+    /// Lanes keep the tests that share a process under `cargo test` off each
+    /// other's ports. nextest, which CI runs, gives every test its own
+    /// process, so there each test claims a block and uses a single lane of
+    /// it.
+    fn static_port_lane(lane: u16) -> u16 {
+        assert!(lane < LANES, "lane {lane} is outside the block");
+        static BLOCK: std::sync::OnceLock<(std::net::TcpListener, u16)> =
+            std::sync::OnceLock::new();
+        let (_sentinel, base) = BLOCK.get_or_init(|| {
+            let mut base = FIRST_BLOCK;
+            while base < PAST_LAST_BLOCK {
+                if let Ok(sentinel) =
+                    std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, base))
+                {
+                    return (sentinel, base);
+                }
+                base += BLOCK_WIDTH;
+            }
+            panic!("no free static-port block in {FIRST_BLOCK}..{PAST_LAST_BLOCK}");
+        });
+        base + lane * LANE_WIDTH
+    }
+
+    /// The lanes are private to this process: the block is held for the run,
+    /// so a concurrent suite picks a different one instead of competing for
+    /// the ports these tests pin.
+    #[test]
+    fn the_static_port_block_is_reserved_for_this_process() {
+        let base = static_port_lane(0);
+        assert_eq!(static_port_lane(0), base, "the block is claimed once");
+        assert_eq!(static_port_lane(1), base + LANE_WIDTH);
+        assert_eq!(static_port_lane(2), base + 2 * LANE_WIDTH);
+        assert!(
+            (FIRST_BLOCK..PAST_LAST_BLOCK).contains(&base),
+            "the claimed block came from outside the searched space"
+        );
+        assert!(
+            std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, base)).is_err(),
+            "the sentinel is held, so no sibling process can claim this block"
+        );
     }
 
     #[test]

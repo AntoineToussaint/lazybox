@@ -3508,9 +3508,18 @@ pub enum Event {
         snapshot: EpicSnapshot,
         delta: Vec<EpicDelta>,
     },
+    /// An epic stopped being live — archived, or its record deleted. No
+    /// further [`Event::EpicStatus`] will name it, so a client holding a
+    /// cached snapshot must drop it: nothing else ever invalidates one, and
+    /// a stale snapshot keeps rendering a dead epic (and keeps lifting its
+    /// members out of their repo groups) until the process restarts.
+    EpicGone {
+        key: String,
+    },
     /// Answer to [`Command::DecideToolUse`], correlated by
     /// `client_request_id` (#1610). Appended last (bincode is
-    /// ordinal-sensitive).
+    /// ordinal-sensitive) — after `EpicGone`, which already holds its
+    /// ordinal on `main`.
     ToolUseDecided {
         client_request_id: String,
         decision: ToolUseDecision,

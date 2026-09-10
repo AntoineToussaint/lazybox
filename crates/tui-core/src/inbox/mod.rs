@@ -104,6 +104,15 @@ pub struct ComputeInputs<'a> {
     /// the no-op identity (everything Live).
     pub source_attention: &'a BTreeMap<String, lazybox_config::SourceAttention>,
     pub agents: &'a HashMap<SessionKey, lazybox_ipc::AgentState>,
+    /// Live epic snapshots the daemon derived (#1517 §4d), keyed by epic
+    /// key. Each epic with a visible member emits an `EpicHeader` tier above
+    /// the Space / repo headers, its members lifted out of their repo groups
+    /// and ordered by the wave the resolver assigned. Empty is the no-op
+    /// identity — the tree keeps its pre-epic shape exactly.
+    pub epics: &'a BTreeMap<String, lazybox_ipc::EpicSnapshot>,
+    /// Epic keys whose member rows the user folded away. Mirrors
+    /// `collapsed_spaces` one tier up.
+    pub collapsed_epics: &'a BTreeSet<String>,
     pub now: chrono::DateTime<chrono::Utc>,
     /// Free-text search, or `None`. When `Some` with a non-empty
     /// query, a scoped search (`scope: Some`) keeps only that
@@ -450,6 +459,36 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         )
     });
 
+    // Epic sections (#1517 §4d): a live epic's members are lifted out of
+    // their repo groups into a cross-repo tier, in the wave order the
+    // resolver assigned. A workspace already lifted into Focused or Hopper
+    // stays there — those are explicit personal placements, and the epic
+    // header's counts come from the snapshot rather than from the rows on
+    // screen, so the status line reads the same either way. A workspace two
+    // epics both claim lands under the first, keeping the tree a tree.
+    let mut epic_sections: Vec<(&str, Vec<(&SessionKey, &Workspace)>)> = Vec::new();
+    let mut epic_member_set: HashSet<&str> = HashSet::new();
+    for (key, snapshot) in input.epics {
+        let mut rows: Vec<(&SessionKey, &Workspace)> = Vec::new();
+        for member in &snapshot.members {
+            let id = member.key.as_str();
+            if focused_set.contains(id) || epic_member_set.contains(id) {
+                continue;
+            }
+            let Some(row) = filtered_by_key.get(id).copied() else {
+                continue;
+            };
+            if row.1.hopper.is_some() {
+                continue;
+            }
+            epic_member_set.insert(id);
+            rows.push(row);
+        }
+        if !rows.is_empty() {
+            epic_sections.push((key.as_str(), rows));
+        }
+    }
+
     // Step 2: bucket the non-focused workspaces by project. A
     // workspace's parent project is looked up via
     // `lazybox_core::workspace_project_key` → resolved through the
@@ -458,7 +497,10 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
     // orphans whose task.repo failed to derive) land under `(no repo)`.
     let mut by_repo: BTreeMap<String, Vec<(&SessionKey, &Workspace)>> = BTreeMap::new();
     for (k, w) in &filtered {
-        if focused_set.contains(k.as_str()) || w.hopper.is_some() {
+        if focused_set.contains(k.as_str())
+            || w.hopper.is_some()
+            || epic_member_set.contains(k.as_str())
+        {
             continue;
         }
         by_repo
@@ -597,6 +639,23 @@ pub fn compute_visible(input: ComputeInputs<'_>) -> ComputeOutcome {
         visible.push(VisibleRow::HopperHeader);
         emit_workspace_forest(
             &hopper_rows,
+            input.collapsed_tickets,
+            &context_only,
+            &mut visible,
+            &mut ticket_tree,
+        );
+    }
+
+    // Step 5b-bis: the epic tier, below the personal shortlists and above
+    // every Space / repo header. A collapsed epic keeps its header — the
+    // header line *is* the status — and folds its members away.
+    for (key, rows) in &epic_sections {
+        visible.push(VisibleRow::EpicHeader((*key).to_string()));
+        if input.collapsed_epics.contains(*key) {
+            continue;
+        }
+        emit_workspace_forest(
+            rows,
             input.collapsed_tickets,
             &context_only,
             &mut visible,
@@ -1429,6 +1488,8 @@ mod tests {
             BTreeMap::new();
         static NO_COLLAPSED_TICKETS: std::sync::LazyLock<HashSet<TaskId>> =
             std::sync::LazyLock::new(HashSet::new);
+        static NO_EPICS: BTreeMap<String, lazybox_ipc::EpicSnapshot> = BTreeMap::new();
+        static NO_COLLAPSED_EPICS: BTreeSet<String> = BTreeSet::new();
         ComputeInputs {
             workspaces,
             mailbox: Mailbox::Inbox,
@@ -1445,6 +1506,8 @@ mod tests {
             collapsed_tickets: &NO_COLLAPSED_TICKETS,
             attention,
             agents: asking,
+            epics: &NO_EPICS,
+            collapsed_epics: &NO_COLLAPSED_EPICS,
             now: fixed_time(),
             search: None,
         }
@@ -1786,6 +1849,211 @@ mod tests {
             })
             .collect();
         assert_eq!(headers, ["owner/c", "owner/a", "owner/b"]);
+    }
+
+    /// Build a one-member-per-key snapshot in the given wave order.
+    fn epic_snapshot(key: &str, members: &[&str]) -> lazybox_ipc::EpicSnapshot {
+        lazybox_ipc::EpicSnapshot {
+            key: key.to_string(),
+            name: key.to_string(),
+            members: members
+                .iter()
+                .enumerate()
+                .map(|(i, m)| lazybox_ipc::EpicMember {
+                    key: lazybox_core::WorkspaceKey::new(*m),
+                    wave: i as u16,
+                    status: lazybox_ipc::EpicMemberStatus::Ready,
+                    blocked_by: Vec::new(),
+                    external_blockers: Vec::new(),
+                    blockers: Vec::new(),
+                    blocked_reason: None,
+                })
+                .collect(),
+            done: 0,
+            total: members.len() as u32,
+            ready: members.len() as u32,
+            blocked: 0,
+            asking: 0,
+            failing: 0,
+            blockers_needing_operator: 0,
+            cycle: false,
+            critical_path: Vec::new(),
+            edges: Vec::new(),
+            merge_order: Vec::new(),
+            policies: lazybox_core::EpicPolicies::default(),
+            computed_at: 0,
+        }
+    }
+
+    /// An epic's members are lifted out of their repo groups into a
+    /// cross-repo `EpicHeader` section, in the snapshot's wave order, and
+    /// are not re-listed under their repos.
+    #[test]
+    fn epic_members_lift_into_a_cross_repo_section() {
+        let mut ws = HashMap::new();
+        for (k, repo) in [("ka", "owner/a"), ("kb", "owner/b"), ("kc", "owner/c")] {
+            let w = workspace_with_task(k, Some(repo), 10);
+            ws.insert(SessionKey::from(&w.key), w);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        // Wave order deliberately reverses the alphabetical repo order.
+        let mut epics = BTreeMap::new();
+        epics.insert("auth".to_string(), epic_snapshot("auth", &["kc", "ka"]));
+        let mut inp = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        inp.epics = &epics;
+        let out = compute_visible(inp);
+
+        assert!(matches!(&out.visible[0], VisibleRow::EpicHeader(k) if k == "auth"));
+        assert!(matches!(&out.visible[1], VisibleRow::Workspace(k) if k.as_str() == "kc"));
+        assert!(matches!(&out.visible[2], VisibleRow::Workspace(k) if k.as_str() == "ka"));
+
+        // Each member appears exactly once — lifted, not duplicated.
+        for member in ["ka", "kc"] {
+            let count = out
+                .visible
+                .iter()
+                .filter(|r| matches!(r, VisibleRow::Workspace(k) if k.as_str() == member))
+                .count();
+            assert_eq!(count, 1, "{member} duplicated");
+        }
+        // The non-member still renders under its own repo header.
+        assert!(
+            out.visible
+                .iter()
+                .any(|r| matches!(r, VisibleRow::Workspace(k) if k.as_str() == "kb"))
+        );
+    }
+
+    /// A collapsed epic keeps its header — the header line *is* the status
+    /// — and folds its member rows away.
+    #[test]
+    fn collapsed_epic_keeps_its_header_and_hides_members() {
+        let mut ws = HashMap::new();
+        let w = workspace_with_task("ka", Some("owner/a"), 10);
+        ws.insert(SessionKey::from(&w.key), w);
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        let mut epics = BTreeMap::new();
+        epics.insert("auth".to_string(), epic_snapshot("auth", &["ka"]));
+        let collapsed_epics: BTreeSet<String> = ["auth".to_string()].into_iter().collect();
+        let mut inp = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        inp.epics = &epics;
+        inp.collapsed_epics = &collapsed_epics;
+        let out = compute_visible(inp);
+
+        assert!(matches!(&out.visible[0], VisibleRow::EpicHeader(k) if k == "auth"));
+        assert!(
+            !out.visible
+                .iter()
+                .any(|r| matches!(r, VisibleRow::Workspace(k) if k.as_str() == "ka")),
+            "collapsed epic still emitted its member"
+        );
+    }
+
+    /// A starred member stays in `★ Focused` rather than moving into the
+    /// epic section, and is never listed twice.
+    #[test]
+    fn starred_epic_member_stays_in_focused() {
+        let mut ws = HashMap::new();
+        for (k, repo) in [("ka", "owner/a"), ("kb", "owner/b")] {
+            let w = workspace_with_task(k, Some(repo), 10);
+            ws.insert(SessionKey::from(&w.key), w);
+        }
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        let mut epics = BTreeMap::new();
+        epics.insert("auth".to_string(), epic_snapshot("auth", &["ka", "kb"]));
+        let focus = vec![SessionKey::from("ka")];
+        let mut inp = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        inp.epics = &epics;
+        inp.focused_workspaces = &focus;
+        let out = compute_visible(inp);
+
+        assert!(matches!(out.visible[0], VisibleRow::FocusedHeader));
+        assert!(matches!(&out.visible[1], VisibleRow::Workspace(k) if k.as_str() == "ka"));
+        let ka_rows = out
+            .visible
+            .iter()
+            .filter(|r| matches!(r, VisibleRow::Workspace(k) if k.as_str() == "ka"))
+            .count();
+        assert_eq!(ka_rows, 1);
+        // The epic section still renders for its remaining member.
+        let epic_at = out
+            .visible
+            .iter()
+            .position(|r| matches!(r, VisibleRow::EpicHeader(k) if k == "auth"))
+            .expect("epic header");
+        assert!(
+            matches!(&out.visible[epic_at + 1], VisibleRow::Workspace(k) if k.as_str() == "kb")
+        );
+    }
+
+    /// A member two epics both claim lands under the first only, so the
+    /// tree stays a tree.
+    #[test]
+    fn a_member_two_epics_claim_renders_once() {
+        let mut ws = HashMap::new();
+        let w = workspace_with_task("ka", Some("owner/a"), 10);
+        ws.insert(SessionKey::from(&w.key), w);
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        let mut epics = BTreeMap::new();
+        epics.insert("aaa".to_string(), epic_snapshot("aaa", &["ka"]));
+        epics.insert("zzz".to_string(), epic_snapshot("zzz", &["ka"]));
+        let mut inp = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        inp.epics = &epics;
+        let out = compute_visible(inp);
+
+        let ka_rows = out
+            .visible
+            .iter()
+            .filter(|r| matches!(r, VisibleRow::Workspace(k) if k.as_str() == "ka"))
+            .count();
+        assert_eq!(ka_rows, 1);
+        // The second epic has no rows left, so it emits no header at all.
+        assert!(
+            !out.visible
+                .iter()
+                .any(|r| matches!(r, VisibleRow::EpicHeader(k) if k == "zzz"))
+        );
+    }
+
+    /// An epic whose members are all filtered out of this mailbox emits no
+    /// header — an empty section is pure chrome.
+    #[test]
+    fn epic_with_no_visible_member_emits_no_header() {
+        let mut ws = HashMap::new();
+        let w = workspace_with_task("ka", Some("owner/a"), 10);
+        ws.insert(SessionKey::from(&w.key), w);
+        let sub = BTreeSet::new();
+        let col = BTreeSet::new();
+        let att = lazybox_config::AttentionConfig::default();
+        let asking = HashMap::new();
+        let projects = BTreeMap::new();
+        let mut epics = BTreeMap::new();
+        epics.insert("auth".to_string(), epic_snapshot("auth", &["gone"]));
+        let mut inp = inputs(&ws, &sub, &col, &att, &asking, &projects);
+        inp.epics = &epics;
+        let out = compute_visible(inp);
+
+        assert!(
+            !out.visible
+                .iter()
+                .any(|r| matches!(r, VisibleRow::EpicHeader(_)))
+        );
     }
 
     /// A starred workspace is lifted into the `★ Focused` section at the

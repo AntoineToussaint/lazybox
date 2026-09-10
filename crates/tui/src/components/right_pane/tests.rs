@@ -2516,6 +2516,7 @@ mod overview_tests {
             }],
             roster_total: 1,
             rollup: Vec::new(),
+            epic: None,
         }
     }
 

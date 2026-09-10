@@ -965,6 +965,91 @@ impl Sidebar {
                     }
                     Line::from(spans)
                 }
+                VisibleRow::EpicHeader(key) => {
+                    // The cross-repo tier (#1517 §4d). The header line *is*
+                    // the status: every count comes straight off the daemon's
+                    // snapshot, so nothing here re-derives what the resolver
+                    // already decided.
+                    let collapsed = self.collapsed_epics.contains(key);
+                    let glyph = if collapsed { "\u{25b8}" } else { "\u{25be}" };
+                    let is_cursor = i == self.cursor;
+                    let row_bg = theme.row_band(is_cursor, focused, false);
+                    let glyph_style = match row_bg {
+                        Some(bg) => bg,
+                        None => Style::default().fg(theme.text_dim),
+                    };
+                    let snapshot = self.epics.get(key);
+                    let name = snapshot.map(|s| s.name.as_str()).unwrap_or(key.as_str());
+                    let mut spans: Vec<Span> = vec![
+                        Span::styled(format!("{glyph} "), glyph_style),
+                        Span::styled(
+                            format!("\u{25c8} {name}"),
+                            row_bg
+                                .unwrap_or_default()
+                                .fg(theme.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ];
+                    if let Some(snapshot) = snapshot {
+                        // Armed autonomy latches ride the title as pills
+                        // (#1525) — a pill marks a deviation from "you
+                        // drive", so an epic with nothing armed shows none.
+                        let armed = snapshot.policies.armed_latches();
+                        if !armed.is_empty() {
+                            let pills: Vec<&str> = armed.iter().map(|l| l.pill()).collect();
+                            spans.push(Span::styled(
+                                format!(" \u{b7} {}", pills.join(" ")),
+                                row_bg
+                                    .unwrap_or_default()
+                                    .fg(theme.accent)
+                                    .add_modifier(Modifier::DIM),
+                            ));
+                        }
+                        // Blockers lead (§4k): what is stuck is the first
+                        // thing the line answers, and an operator-owned
+                        // blocker earns the `!`.
+                        if snapshot.blocked > 0 {
+                            let mark = if snapshot.blockers_needing_operator > 0 {
+                                "!"
+                            } else {
+                                ""
+                            };
+                            spans.push(Span::styled(
+                                format!("  \u{2297}{}{mark}", snapshot.blocked),
+                                row_bg
+                                    .unwrap_or_default()
+                                    .fg(theme.error)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                        }
+                        if snapshot.asking > 0 {
+                            spans.push(Span::styled(
+                                format!("  ?{}", snapshot.asking),
+                                row_bg.unwrap_or_default().fg(theme.warn),
+                            ));
+                        }
+                        if snapshot.failing > 0 {
+                            spans.push(Span::styled(
+                                format!("  \u{2717}{}", snapshot.failing),
+                                row_bg.unwrap_or_default().fg(theme.error),
+                            ));
+                        }
+                        if snapshot.ready > 0 {
+                            spans.push(Span::styled(
+                                format!("  \u{25b8}{}", snapshot.ready),
+                                row_bg.unwrap_or_default().fg(theme.text_dim),
+                            ));
+                        }
+                        spans.push(Span::styled(
+                            format!("  {}/{}", snapshot.done, snapshot.total),
+                            row_bg.unwrap_or_default().fg(theme.text_dim),
+                        ));
+                    }
+                    if let Some(bg) = row_bg {
+                        extend_cursor_fill(&mut spans, row_budget, bg);
+                    }
+                    Line::from(spans)
+                }
                 VisibleRow::RepoHeader(name) => {
                     use crate::components::icons;
                     let collapsed = self.collapsed_repos.contains(name);

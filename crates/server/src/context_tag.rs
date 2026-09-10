@@ -25,16 +25,25 @@
 //! inside the marker — where the model can read it, and where content the
 //! agent reads must not be able to forge it — reveals nothing about the
 //! secret or about any other session's token.
+//!
+//! **The secret is forgery-grade key material.** Session keys are public
+//! (`github:owner/repo#42` is on screen), so whoever holds the secret can
+//! compute every session's token, past and future, and mint text carrying
+//! lazybox's provenance marker — the trust boundary #1611 built. That is a
+//! wider blast radius than the per-session random token it replaces, which
+//! compromised only its own session. It lives in `state.db` (0600), beside
+//! the agent transcripts that already carry live tokens, rather than in the
+//! OS keystore `crates/identity` uses for device keys: the marker
+//! authenticates nothing outside this process, so the file mode is the
+//! protection that matters. There is deliberately **no rotation path** —
+//! rotating re-renders every condensed block at once, which needs the
+//! cache-cost accounting #1621 owns.
 
 use lazybox_core::CondenseTag;
 use sha2::{Digest, Sha256};
 
 /// kv key holding the installation's condensation secret.
 const SECRET_KV_KEY: &str = "context-hygiene:secret";
-
-/// Digest bytes kept as the token. 128 bits is far past guessing and short
-/// enough that the marker stays readable in a transcript.
-const TOKEN_BYTES: usize = 16;
 
 /// Derives each session's [`CondenseTag`] from one persisted secret.
 #[derive(Debug, Clone)]
@@ -43,38 +52,60 @@ pub struct TagSource {
 }
 
 impl TagSource {
-    /// Load the installation secret, generating and persisting one the
-    /// first time.
+    /// Load the installation secret, seeding one the first time.
     ///
-    /// Call this **once per daemon** and hand the result to every
-    /// enforcement point: two concurrent loads on a store with no secret
-    /// yet would each generate one and race to persist it, leaving the two
-    /// callers deriving different tokens for the same session. It touches
-    /// the store, and the derived tokens are then pure computation on the
-    /// request path.
+    /// Callers converge without coordinating: the seed is a conditional
+    /// insert, so concurrent loads — two enforcement points in one daemon,
+    /// or two daemons on one `state.db` — all read back the single value
+    /// that won, rather than each keeping the one it proposed. Touching the
+    /// store is confined to here; deriving a token afterwards is pure
+    /// computation on the request path.
     pub async fn load(config: &crate::ServerConfig) -> Self {
-        if let Ok(Some(secret)) =
-            crate::store_blocking(&config.store, |store| store.get_kv(SECRET_KV_KEY)).await
-            && !secret.trim().is_empty()
-        {
-            return Self::from_secret(secret.trim());
-        }
-        let secret = uuid::Uuid::new_v4().simple().to_string();
-        let persisted = secret.clone();
-        if let Err(error) = crate::store_blocking(&config.store, move |store| {
-            store.set_kv(SECRET_KV_KEY, &persisted)
+        let candidate = uuid::Uuid::new_v4().simple().to_string();
+        let proposed = candidate.clone();
+        let seeded = crate::store_blocking(&config.store, move |store| {
+            store.set_kv_if_absent(SECRET_KV_KEY, &proposed)
         })
-        .await
-        {
-            // Not fatal — the secret works for this process. What is lost
-            // is recognition of, and byte-stability for, everything
-            // condensed before the next restart, so say so.
-            tracing::warn!(
-                "context hygiene: persisting the condensation secret failed ({error}); \
-                 blocks condensed by this daemon will re-render differently after a restart"
-            );
+        .await;
+
+        match seeded {
+            Ok(secret) if !secret.trim().is_empty() => Self::from_secret(secret.trim()),
+            Ok(_) => {
+                // Nothing here writes an empty secret, so the row was
+                // corrupted from outside. Repair it: deriving every token
+                // from an empty string would share them across
+                // installations, and running ephemeral would re-render every
+                // condensed block on every start for as long as the row sat
+                // there.
+                let repair = candidate.clone();
+                if let Err(error) = crate::store_blocking(&config.store, move |store| {
+                    store.set_kv(SECRET_KV_KEY, &repair)
+                })
+                .await
+                {
+                    tracing::warn!(
+                        "context hygiene: the stored condensation secret is empty and \
+                         replacing it failed ({error}); using an ephemeral one"
+                    );
+                }
+                Self::from_secret(candidate)
+            }
+            Err(error) => {
+                // A read that failed is not a key that is absent. Seeding
+                // over a secret we merely could not read would replace it
+                // for good — the kv write upserts — and every block
+                // condensed under the old one re-renders on its next turn,
+                // for every session, permanently. That is the cache collapse
+                // this module exists to prevent, so an unreadable store buys
+                // an ephemeral secret and a warning, never a write.
+                tracing::warn!(
+                    "context hygiene: reading the condensation secret failed ({error}); \
+                     using an ephemeral one, so blocks condensed by this daemon will \
+                     re-render after a restart"
+                );
+                Self::from_secret(candidate)
+            }
         }
-        Self::from_secret(secret)
     }
 
     pub fn from_secret(secret: impl Into<String>) -> Self {
@@ -96,8 +127,8 @@ impl TagSource {
             hasher.update(field.as_bytes());
         }
         let digest = hasher.finalize();
-        let mut token = String::with_capacity(TOKEN_BYTES * 2);
-        for byte in &digest[..TOKEN_BYTES] {
+        let mut token = String::with_capacity(digest.len() * 2);
+        for byte in digest.iter() {
             use std::fmt::Write as _;
             let _ = write!(token, "{byte:02x}");
         }
@@ -108,6 +139,7 @@ impl TagSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lazybox_store::Store as _;
 
     #[test]
     fn a_session_tag_is_stable_and_distinct_per_session() {
@@ -164,6 +196,110 @@ mod tests {
             first.tag("ws").prefix(),
             second.tag("ws").prefix(),
             "a restart over the same store keeps condensed bytes stable"
+        );
+    }
+
+    /// Durability is the whole point, and it runs through SQLite in
+    /// production — an in-memory map round-tripping proves the derivation,
+    /// not the storage.
+    #[tokio::test]
+    async fn the_secret_round_trips_through_sqlite_across_a_reopen() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("state.db");
+        let load_once = |store: std::sync::Arc<dyn lazybox_store::Store>| async move {
+            TagSource::load(&crate::ServerConfig::with_store(store)).await
+        };
+
+        let first = load_once(std::sync::Arc::new(
+            lazybox_store::SqliteStore::open(&db).expect("open"),
+        ))
+        .await;
+        let second = load_once(std::sync::Arc::new(
+            lazybox_store::SqliteStore::open(&db).expect("reopen"),
+        ))
+        .await;
+
+        assert_eq!(
+            first.tag("ws").prefix(),
+            second.tag("ws").prefix(),
+            "a real daemon restart over the same file keeps condensed bytes stable"
+        );
+    }
+
+    /// Two enforcement points in one daemon — or two daemons on one file —
+    /// must not each keep the secret they proposed. Seeding is a
+    /// conditional insert precisely so the losers adopt the winner.
+    #[tokio::test]
+    async fn concurrent_loads_converge_on_one_secret() {
+        let config = crate::ServerConfig::in_memory();
+        let (first, second) = tokio::join!(TagSource::load(&config), TagSource::load(&config));
+        assert_eq!(
+            first.tag("ws").prefix(),
+            second.tag("ws").prefix(),
+            "concurrent loads must agree on the secret that won the seed"
+        );
+    }
+
+    /// A store holding a real secret whose *reads* fail — the shape a
+    /// `SQLITE_BUSY` from a second process on the same file takes. Both
+    /// read paths fail (the plain get and the conditional seed) while
+    /// writes land on the inner store, so a caller that reacts to a failed
+    /// read by writing does visible damage rather than a silent no-op.
+    #[derive(Default)]
+    struct UnreadableStore {
+        inner: lazybox_store::MemoryStore,
+    }
+
+    impl lazybox_store::Store for UnreadableStore {
+        fn set_kv_if_absent(
+            &self,
+            _key: &str,
+            _value: &str,
+        ) -> Result<String, lazybox_store::StoreError> {
+            Err(lazybox_store::StoreError::Backend(
+                "database is locked".to_string(),
+            ))
+        }
+
+        fn get_kv(&self, _key: &str) -> Result<Option<String>, lazybox_store::StoreError> {
+            Err(lazybox_store::StoreError::Backend(
+                "database is locked".to_string(),
+            ))
+        }
+
+        fn set_kv(&self, key: &str, value: &str) -> Result<(), lazybox_store::StoreError> {
+            self.inner.set_kv(key, value)
+        }
+    }
+
+    /// The destructive case. A failed read is not an absent key: writing a
+    /// fresh secret here would upsert over one that is merely unreadable,
+    /// and every block condensed under it re-renders from then on, for
+    /// every session, permanently.
+    #[tokio::test]
+    async fn a_failed_seed_never_replaces_the_secret_it_could_not_read() {
+        let store = std::sync::Arc::new(UnreadableStore::default());
+        store
+            .inner
+            .set_kv(SECRET_KV_KEY, "the-installation-secret")
+            .expect("seed the existing secret");
+        let config = crate::ServerConfig::with_store(
+            store.clone() as std::sync::Arc<dyn lazybox_store::Store>
+        );
+
+        let source = TagSource::load(&config).await;
+
+        assert_eq!(
+            store.inner.get_kv(SECRET_KV_KEY).expect("read back"),
+            Some("the-installation-secret".to_string()),
+            "the stored secret must survive a store that could not be seeded"
+        );
+        assert_ne!(
+            source.tag("ws").prefix(),
+            TagSource::from_secret("the-installation-secret")
+                .tag("ws")
+                .prefix(),
+            "and this daemon runs ephemeral rather than claiming it read that secret"
         );
     }
 }

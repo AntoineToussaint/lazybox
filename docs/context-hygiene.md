@@ -218,9 +218,15 @@ random secret per installation, persisted in the store, and
   a block the hook condensed, and would condense the summary again.
 
 Derived means no per-session write on the request path and nothing to lose across
-a restart. `TagSource::load` is called **once per daemon** and the result handed
-to every enforcement point; two concurrent loads on a store with no secret yet
-would race to persist one and then derive different tokens.
+a restart. Callers do not have to coordinate: the secret is seeded with a
+conditional insert (`Store::set_kv_if_absent`), so concurrent loads — two
+enforcement points in one daemon, or two daemons on one `state.db` — all read
+back the single value that won rather than each keeping the one it proposed.
+
+A load whose store read *fails* is the one case that does not write. An
+unreadable key is not an absent key, and seeding over a secret that merely could
+not be read would replace it permanently, re-rendering every block condensed
+under it. That daemon runs on an ephemeral secret and warns instead.
 
 ## Slices
 

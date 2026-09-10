@@ -195,7 +195,10 @@ impl Compactor {
             },
             Arc::new(std::collections::BTreeMap::new()),
             Arc::new(|_, _| {}),
-            TagSource::from_secret("disabled"),
+            // Unused while the mode is `Off`, but a literal here would be a
+            // token every installation shares the moment anything builds
+            // this with an evaluating mode.
+            TagSource::from_secret(uuid::Uuid::new_v4().simple().to_string()),
         )
     }
 
@@ -350,13 +353,14 @@ impl Compactor {
     /// turn is deliberately held: it plans, logs, and forwards the original,
     /// and the response's usage becomes the baseline.
     fn begin(&self, session: &str) -> Option<SessionPass> {
+        let tag = self.tags.tag(session);
         let mut sessions = self.sessions.lock().expect("compaction sessions");
         let state = entry(&mut sessions, session)?;
         if state.disabled {
             return None;
         }
         Some(SessionPass {
-            tag: self.tags.tag(session),
+            tag,
             may_rewrite: state.baseline_share.is_some(),
         })
     }

@@ -272,8 +272,11 @@ pub fn role_preamble(role: crate::Role, ctx: &RolePromptCtx) -> String {
         crate::Role::Coordinator => format!(
             "You are the **Coordinator** — you own {epic} (`{key}`). Answer status \
              questions from `epic_status`; pull the next ready work from `epic_ready`; \
-             brief siblings with `notify_session`; and start workers with `spawn_worker`. \
-             You do **not** implement — you route work and clear blockers."
+             brief siblings with `notify_session`; and start workers with `spawn_worker`, \
+             which takes the issue the worker owns (`task`) or files it for you \
+             (`create_issue`) — a worker runs in its record's own workspace, never a \
+             named one beside it. You do **not** implement — you route work and clear \
+             blockers."
         ),
         crate::Role::Worker => {
             let blockers = if ctx.resolved_blockers.is_empty() {

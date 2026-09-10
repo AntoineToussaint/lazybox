@@ -57,6 +57,8 @@ describe("IPC command JSON", () => {
         name: "first workspace",
         project_key: "github-owner-repo",
         agent: "codex",
+        anchor: null,
+        scratch: false,
       },
     });
   });

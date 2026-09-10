@@ -3,6 +3,7 @@ import type { ActivityFingerprint } from "./ActivityFingerprint";
 import type { PolicyArm } from "./PolicyArm";
 import type { ProjectKey } from "./ProjectKey";
 import type { SessionKey } from "./SessionKey";
+import type { TaskId } from "./TaskId";
 import type { TerminalId } from "./TerminalId";
 import type { WorkspaceDiffTarget } from "./WorkspaceDiffTarget";
 import type { WorkspaceKey } from "./WorkspaceKey";
@@ -31,4 +32,15 @@ on_main: boolean, } } | { "SpawnShell": { session_key: SessionKey,
  * Spawn the shell on the repo's shared main checkout instead of an
  * isolated worktree. See [`DesktopCommand::SpawnAgent::on_main`].
  */
-on_main: boolean, } } | { "CreateWorkspace": { name: string, project_key: ProjectKey, agent: string | null, } } | { "FocusWorkspace": { session_key: SessionKey, } } | { "MarkRead": { session_key: SessionKey, } } | { "RenameWorkspace": { session_key: SessionKey, name: string, } } | { "PostReply": { session_key: SessionKey, body: string, } } | { "MergePr": { session_key: SessionKey, } } | { "UpdateBranch": { session_key: SessionKey, } } | { "Archive": { session_key: SessionKey, } } | { "CloseIssue": { session_key: SessionKey, } } | { "DeleteOrClose": { session_key: SessionKey, } } | { "DeliverSnippet": { terminal_id: TerminalId, snippet_key: string, category: string, body: string, } } | { "InjectPrompt": { terminal_id: TerminalId, body: string, } } | { "WriteShell": { terminal_id: TerminalId, body: string, } } | { "MarkActivityRead": { session_key: SessionKey, index: number, fingerprint: ActivityFingerprint, } } | { "KeepWorkspace": { session_key: SessionKey, } } | { "RemoveMergedWorkspace": { session_key: SessionKey, } } | { "AdoptSessions": { source_workspace_key: WorkspaceKey, target_workspace_key: WorkspaceKey, } } | { "RequestReviewers": { workspace_key: WorkspaceKey, logins: Array<string>, } } | { "SetAssignees": { workspace_key: WorkspaceKey, logins: Array<string>, } } | { "SetLabels": { workspace_key: WorkspaceKey, names: Array<string>, } } | { "SetAutoMergeOnGreen": { session_key: SessionKey, enabled: boolean, } } | { "SetTrackMain": { session_key: SessionKey, enabled: boolean, } } | { "SetAutoFixPolicies": { session_key: SessionKey, ci: PolicyArm, conflict: PolicyArm, } } | { "Snooze": { session_key: SessionKey, until: string, } } | { "Unsnooze": { session_key: SessionKey, } } | { "SyncWorkspace": { session_key: SessionKey, } } | { "SetNotes": { session_key: SessionKey, notes: string, } } | { "InspectWorkspaceDiff": { session_key: SessionKey, target: WorkspaceDiffTarget, } } | "Refresh";
+on_main: boolean, } } | { "CreateWorkspace": { name: string, project_key: ProjectKey, agent: string | null,
+/**
+ * The tracker record to attach to (#1586). When set, the daemon
+ * returns the record's own workspace instead of minting a second row
+ * beside it; `name` is then only a fallback label.
+ */
+anchor: TaskId | null,
+/**
+ * Declare a repo-less scratch workspace, lifting the refusal a bare
+ * `name` under a repo-scoped project otherwise gets.
+ */
+scratch: boolean, } } | { "FocusWorkspace": { session_key: SessionKey, } } | { "MarkRead": { session_key: SessionKey, } } | { "RenameWorkspace": { session_key: SessionKey, name: string, } } | { "PostReply": { session_key: SessionKey, body: string, } } | { "MergePr": { session_key: SessionKey, } } | { "UpdateBranch": { session_key: SessionKey, } } | { "Archive": { session_key: SessionKey, } } | { "CloseIssue": { session_key: SessionKey, } } | { "DeleteOrClose": { session_key: SessionKey, } } | { "DeliverSnippet": { terminal_id: TerminalId, snippet_key: string, category: string, body: string, } } | { "InjectPrompt": { terminal_id: TerminalId, body: string, } } | { "WriteShell": { terminal_id: TerminalId, body: string, } } | { "MarkActivityRead": { session_key: SessionKey, index: number, fingerprint: ActivityFingerprint, } } | { "KeepWorkspace": { session_key: SessionKey, } } | { "RemoveMergedWorkspace": { session_key: SessionKey, } } | { "AdoptSessions": { source_workspace_key: WorkspaceKey, target_workspace_key: WorkspaceKey, } } | { "RequestReviewers": { workspace_key: WorkspaceKey, logins: Array<string>, } } | { "SetAssignees": { workspace_key: WorkspaceKey, logins: Array<string>, } } | { "SetLabels": { workspace_key: WorkspaceKey, names: Array<string>, } } | { "SetAutoMergeOnGreen": { session_key: SessionKey, enabled: boolean, } } | { "SetTrackMain": { session_key: SessionKey, enabled: boolean, } } | { "SetAutoFixPolicies": { session_key: SessionKey, ci: PolicyArm, conflict: PolicyArm, } } | { "Snooze": { session_key: SessionKey, until: string, } } | { "Unsnooze": { session_key: SessionKey, } } | { "SyncWorkspace": { session_key: SessionKey, } } | { "SetNotes": { session_key: SessionKey, notes: string, } } | { "InspectWorkspaceDiff": { session_key: SessionKey, target: WorkspaceDiffTarget, } } | "Refresh";

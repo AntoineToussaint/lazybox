@@ -89,9 +89,10 @@ delivery, so verify with `read_session`.\n\
 workspace joins — the daemon derives status, so answer \"what's blocked / what's next\" \
 from them, not from re-reading the graph; `report_blocker` flags this workspace as \
 blocked (a reason a sibling can see) and `clear_blocker` lifts it.\n\
-  - `spawn_worker` (Coordinator only) creates a workspace, assigns it to your epic as a \
-Worker, and spawns an agent on a brief; it refuses off-role or past the epic's worker \
-cap."
+  - `spawn_worker` (Coordinator only) starts a Worker **on an issue**: pass `task` \
+(`owner/repo#N`, a URL, a Linear key) or `create_issue` to file it under your epic \
+first. It runs in that record's own workspace, never a named one beside it, and \
+refuses off-role or past the epic's worker cap."
 }
 
 /// The full briefing an MCP-wired agent gets: the base blurb plus the

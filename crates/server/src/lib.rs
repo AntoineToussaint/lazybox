@@ -2224,21 +2224,65 @@ pub async fn dispatch_command(
             project_key,
             spawn_agent,
             client_request_id,
+            anchor,
+            scratch,
         } => {
-            // create_empty_workspace returns the final key — which may
-            // carry a `-2` collision suffix the client can't predict — so
-            // chain any requested spawn off it here rather than
-            // round-tripping through the client. Bare interactive spawn
-            // (no prompt) keeps the human-in-the-loop approval gate.
-            let key = match workspace::create_empty_workspace(config, &name, project_key) {
-                Ok(key) => key,
-                Err(error) => {
-                    if let Some(client_request_id) = client_request_id {
-                        let _ = config.bus.send(lazybox_ipc::Event::CommandFailed {
-                            client_request_id,
-                            message: format!("workspace was not created: {error}"),
+            // "The tracker record is the workspace" (#1586): an anchored
+            // create attaches to the record's own row, and an anchor-less one
+            // under a repo scope must either resolve to an open task or
+            // declare itself scratch. Only what survives that gate reaches
+            // `create_empty_workspace`.
+            // A refusal has to reach whoever asked, or it reads as a silent
+            // no-op. A correlated client gets `CommandFailed` (the TUI renders
+            // it as an error against the request); an uncorrelated one has no
+            // such channel, so the same text goes out as a notice.
+            let fail = |message: String| {
+                let event = match client_request_id.clone() {
+                    Some(client_request_id) => lazybox_ipc::Event::CommandFailed {
+                        client_request_id,
+                        message,
+                    },
+                    None => lazybox_ipc::Event::Notification {
+                        title: "Workspace not created".to_string(),
+                        body: message,
+                    },
+                };
+                let _ = config.bus.send(event);
+            };
+            let anchor = match anchor {
+                Some(anchor) => Some(anchor),
+                None => match workspace::attach::resolve_named_create(
+                    config,
+                    &name,
+                    &project_key,
+                    scratch,
+                ) {
+                    workspace::attach::NamedCreate::Create => None,
+                    workspace::attach::NamedCreate::Attach { anchor, notice } => {
+                        let _ = config.bus.send(lazybox_ipc::Event::Notification {
+                            title: "Attached to the tracker record".to_string(),
+                            body: notice,
                         });
+                        Some(anchor)
                     }
+                    workspace::attach::NamedCreate::Refuse { message } => {
+                        tracing::warn!(%name, project = %project_key, "{message}");
+                        fail(message);
+                        return;
+                    }
+                },
+            };
+            let created = match anchor {
+                Some(anchor) => workspace::attach::attach_to_record(config, &anchor)
+                    .await
+                    .map_err(|error| error.to_string()),
+                None => workspace::create_empty_workspace(config, &name, project_key)
+                    .map_err(|error| format!("workspace was not created: {error}")),
+            };
+            let key = match created {
+                Ok(key) => key,
+                Err(message) => {
+                    fail(message);
                     return;
                 }
             };

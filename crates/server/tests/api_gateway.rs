@@ -317,6 +317,8 @@ fn desktop_compatibility_fixture_is_current() {
             name: "first workspace".into(),
             project_key: lazybox_core::ProjectKey::github("o", "r"),
             agent: Some("codex".into()),
+            anchor: None,
+            scratch: false,
         },
         DesktopCommand::FocusWorkspace {
             session_key: session_key.clone(),

@@ -45,6 +45,111 @@ worktree layout on startup.
 
 ---
 
+## One workspace per tracker record
+
+**Status:** stable
+**Crate(s):** `server` (`src/workspace/attach.rs`, `src/mcp.rs`,
+`src/polling/mod.rs`), `core` (`src/task_ref.rs`), `tui-boot`
+**Config / flags:** `--issue` / `--pr` / `--ticket` / `--scratch` on
+`lazybox workspace create`
+**Key bindings:** `x n` (named create, now attach-or-refuse under a repo)
+
+### What it does
+Every GitHub issue / PR and every Linear ticket gets **exactly one** lazybox
+workspace, and all work on it — by a human, an agent, a coordinator, the CLI,
+or the JSON gateway — happens in that row. Nothing creates a second, named
+workspace beside a tracker record. Named / local workspaces are for repo-less
+scratch only.
+
+A side workspace splits the branch, the activity feed, the cost, the working
+claim and the epic graph across two rows the fleet cannot reconcile: the
+operator sees two things for one unit of work, `epic_status` counts it wrong,
+and the record's own row reads idle while an agent is actually on it (#1586).
+
+### How to use it
+- **Agents / coordinators:** `spawn_worker` takes the record, not a name —
+  `task: "owner/repo#N"` (a GitHub issue/PR URL and a Linear identifier work
+  too), or `create_issue: { title, body, repo, parent?, blocked_by? }` to file
+  it as a sub-issue of the epic first. Passing `workspace_name` is an error
+  that explains the rule.
+- **CLI:** `lazybox workspace create --issue owner/repo#N` (also `--pr` /
+  `--ticket`; `#N` resolves against `--repo`). Repo-less scratch is
+  `--name <name> --scratch`.
+- **TUI:** `x n` under a repo group either attaches to the open task the name
+  names, or is refused with the rule; under a local project it creates as
+  before.
+
+### How it works (brief)
+`lazybox_core::task_ref::parse_task_ref` maps every reference shape
+(`owner/repo#N`, a GitHub issue/PR URL, `#N` beside a repo, `ENG-45`, a Linear
+URL) onto the `TaskId` the providers mint. `workspace::attach::attach_to_record`
+then finds the workspace whose `hierarchy_task_ids()` contains it — matching on
+the whole hierarchy, so an issue still resolves after the issue→PR fold made
+the PR the headline task — and, when the poll has not reached the record yet,
+runs a single-item fetch + upsert first so an issue filed seconds ago is
+workable in the same turn.
+
+`Command::CreateWorkspace` carries `anchor: Option<TaskId>` and `scratch:
+bool`. With an anchor the daemon attaches; without one, under a tracker-backed
+project (GitHub, Linear, Jira), `workspace::attach::resolve_named_create`
+normalizes the name and checks it against that project's open tasks — an
+explicit `#N`, a provider identifier like `ENG-45`, or the task title. A match
+returns the existing key plus an "attached to #N instead of creating a
+workspace beside it" notification; no match is refused unless `scratch` is set.
+
+`scratch` suppresses the **refusal only, never the attach**: if the name names
+a record, that record's row is the answer no matter who is asking. Only the
+refusal is a judgement about intent that a caller may override. A *bare*
+number is deliberately not a reference — `#7` means the record, `7` is an
+ordinary scratch name — so a create can never be silently redirected by a name
+that merely looks numeric.
+
+The TUI's `x n` (and the Start sheet's rows) therefore send `scratch: true`:
+there is no keybinding for "yes, this is scratch", and a human who opened the
+New-workspace modal and typed a name has already declared intent. They keep
+the attach, so `x n` "#1586" still lands on that issue's row. The refusal
+exists to teach agents and scripts, which reach the daemon through the CLI,
+MCP, or gateway and can pass `--scratch` deliberately.
+
+The poll closes the last gap: `collapse_candidate_keys` treats a hand-created
+(`local`, task-less) workspace as a fold candidate for a PR whose head branch
+it sits on in the same repo, or whose body carries a `lazybox:<workspace-key>`
+marker. The existing issue→PR collapse machinery then moves its sessions,
+activity, cost and notes onto the PR's row and archives the scratch one.
+
+### Test checklist
+- [ ] `spawn_worker` with `task: "owner/repo#N"` lands the agent in that
+      record's row inside the epic hierarchy, not a new one.
+- [ ] `spawn_worker` with `workspace_name` is refused, naming `task` /
+      `create_issue`.
+- [ ] `lazybox workspace create --name foo --repo owner/repo` is refused with
+      the rule; adding `--scratch` succeeds.
+- [ ] `--scratch` still attaches when the name is a record (`--name '#7'`).
+- [ ] `x n` under a repo group creates without refusing, but `x n` "#7"
+      attaches to issue #7's row.
+- [ ] `x n` under a Linear team project is guarded the same way.
+- [ ] `lazybox workspace create --issue <url>` prints `Attached to …` and the
+      record's existing key.
+- [ ] A scratch workspace whose branch becomes a PR's head folds into the PR's
+      row on the next poll.
+
+### Known sharp edges
+- `create_issue` shells out to `gh issue create`; a `gh` that is missing or
+  unauthenticated surfaces as a tool error rather than a lazybox-side refusal.
+  The subprocess is bounded at 60s — past that the tool reports that the issue
+  may or may not have been filed, since it cannot tell which.
+- A Linear ticket with no polled workspace cannot be materialized on demand —
+  the targeted fetch needs the node id the identifier alone does not carry, so
+  attaching waits for the Linear poll. The named-create guard covers Linear and
+  Jira projects; only the on-demand materialize is GitHub-only.
+- An archived record (`x x` deletes the row and tombstones the key, which
+  `upsert` then skips) reports that it was archived and points at the Inactive
+  mailbox, rather than being silently resurrected or reported as invisible.
+- The name-match dedupe only sees tasks already in the store; a name matching
+  an issue the poll has never fetched is refused rather than attached.
+
+---
+
 ## Worktree manager
 
 **Status:** stable
@@ -175,6 +280,8 @@ workspace ready for an agent or shell.
 
 ### Known sharp edges
 - Needs a repo context to branch from; behavior with no scoped repo is undefined.
+- Under a repo group this is attach-or-refuse, not create — see
+  [One workspace per tracker record](#one-workspace-per-tracker-record).
 
 ---
 

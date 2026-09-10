@@ -773,11 +773,11 @@ pub const COORDINATOR_KICKOFF: &str = "Begin: take ownership of this epic — re
 /// role preamble. Requires a selected workspace and a non-empty agent id
 /// (an empty id can't spawn — `NoOp` rather than a bare process).
 ///
-/// The epic-header path from the spec (`E c` on an epic header creates a
-/// fresh `<epic>-coordinator` workspace) is deferred to wherever epic-row
-/// rendering lands client-side — the sidebar carries no epic headers today
-/// (`IpcEvent::EpicStatus` is ignored), so the reachable target is always
-/// the cursor workspace.
+/// The target is always the cursor workspace, never a row minted beside it:
+/// a Planner carves the issue it sits on, and a Coordinator owns its epic
+/// from the epic's own tracking-issue row (#1586). A named
+/// `<epic>-coordinator` workspace would split the epic's activity and cost
+/// off the record the operator actually watches.
 pub fn resolve_spawn_role(
     workspace: Option<&Workspace>,
     agent_id: &str,

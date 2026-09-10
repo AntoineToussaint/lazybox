@@ -178,6 +178,8 @@ async fn workspace_create_infers_project_from_cwd_and_reports_the_daemon_key() {
             project_key,
             spawn_agent,
             client_request_id,
+            anchor,
+            scratch,
         } => {
             assert_eq!(name, "flaky-test investigation");
             assert_eq!(
@@ -186,6 +188,11 @@ async fn workspace_create_infers_project_from_cwd_and_reports_the_daemon_key() {
             );
             assert_eq!(spawn_agent.as_deref(), Some("claude"));
             assert!(client_request_id.is_some());
+            assert_eq!(anchor, None);
+            // The CLI does not decide the rule — the daemon owns the
+            // attach-or-refuse gate, so a bare `--name` reaches it
+            // undeclared and comes back refused (#1586).
+            assert!(!scratch);
         }
         other => panic!("expected CreateWorkspace, got {other:?}"),
     }
@@ -207,6 +214,7 @@ async fn workspace_create_uses_explicit_project_without_a_checkout() {
         &[
             "--name",
             "  scratch  ",
+            "--scratch",
             "--project",
             "local-sandbox",
             "--cwd",
@@ -233,11 +241,15 @@ async fn workspace_create_uses_explicit_project_without_a_checkout() {
             project_key,
             spawn_agent,
             client_request_id,
+            anchor,
+            scratch,
         } => {
             assert_eq!(name, "scratch");
             assert_eq!(project_key, lazybox_core::ProjectKey::new("local-sandbox"));
             assert_eq!(spawn_agent, None);
             assert!(client_request_id.is_some());
+            assert_eq!(anchor, None);
+            assert!(scratch);
         }
         other => panic!("expected CreateWorkspace, got {other:?}"),
     }
@@ -285,4 +297,170 @@ async fn workspace_create_rejects_an_unknown_agent_without_connecting() {
         connected.is_err(),
         "unknown --agent must not connect to the daemon"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_create_issue_anchors_the_command_on_the_record() {
+    // #1586: `--issue` sends the record, not a name — the daemon then returns
+    // the workspace that record already has rather than minting one beside it.
+    let temp = tempfile::tempdir().expect("tempdir");
+    let socket_path = temp.path().join("daemon.sock");
+    let listener = transport::Listener::bind(&socket_path)
+        .await
+        .expect("bind test socket");
+    let server = fake_daemon(listener, "github-acme-widget-7");
+
+    let binary = env!("CARGO_BIN_EXE_lazybox");
+    let child = run_workspace_create(
+        binary,
+        &[
+            "--issue",
+            "https://github.com/acme/widget/issues/7",
+            "--repo",
+            "acme/widget",
+            "--cwd",
+            &temp.path().to_string_lossy(),
+            "--socket",
+            &socket_path.to_string_lossy(),
+        ],
+        temp.path().join("home"),
+    );
+
+    let output = tokio::time::timeout(Duration::from_secs(10), child)
+        .await
+        .expect("cli exits")
+        .expect("cli task");
+    assert!(output.status.success(), "workspace create exited non-zero");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Attached to github:acme/widget#7")
+            && stdout.contains("github-acme-widget-7"),
+        "stdout should report the attach and the daemon's key, got: {stdout:?}"
+    );
+
+    let command = tokio::time::timeout(Duration::from_secs(1), server)
+        .await
+        .expect("cli sends command")
+        .expect("server task");
+    match command {
+        Command::CreateWorkspace { anchor, name, .. } => {
+            assert_eq!(
+                anchor,
+                Some(lazybox_core::TaskId {
+                    source: "github".into(),
+                    key: "acme/widget#7".into(),
+                })
+            );
+            assert!(
+                name.is_empty(),
+                "the record supplies the name, got {name:?}"
+            );
+        }
+        other => panic!("expected CreateWorkspace, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_create_resolves_a_bare_number_against_repo() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let socket_path = temp.path().join("daemon.sock");
+    let listener = transport::Listener::bind(&socket_path)
+        .await
+        .expect("bind test socket");
+    let server = fake_daemon(listener, "github-acme-widget-7");
+
+    let child = run_workspace_create(
+        env!("CARGO_BIN_EXE_lazybox"),
+        &[
+            "--pr",
+            "#7",
+            "--repo",
+            "acme/widget",
+            "--cwd",
+            &temp.path().to_string_lossy(),
+            "--socket",
+            &socket_path.to_string_lossy(),
+        ],
+        temp.path().join("home"),
+    );
+
+    let output = tokio::time::timeout(Duration::from_secs(10), child)
+        .await
+        .expect("cli exits")
+        .expect("cli task");
+    assert!(output.status.success(), "workspace create exited non-zero");
+
+    let command = tokio::time::timeout(Duration::from_secs(1), server)
+        .await
+        .expect("cli sends command")
+        .expect("server task");
+    match command {
+        Command::CreateWorkspace { anchor, .. } => assert_eq!(
+            anchor,
+            Some(lazybox_core::TaskId {
+                source: "github".into(),
+                key: "acme/widget#7".into(),
+            })
+        ),
+        other => panic!("expected CreateWorkspace, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_create_rejects_an_unreadable_record_without_connecting() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let socket_path = temp.path().join("daemon.sock");
+    let listener = transport::Listener::bind(&socket_path)
+        .await
+        .expect("bind test socket");
+    let server = tokio::spawn(async move { listener.accept().await.map(|_| ()) });
+
+    let child = run_workspace_create(
+        env!("CARGO_BIN_EXE_lazybox"),
+        &[
+            "--issue",
+            "some workspace name",
+            "--project",
+            "local-sandbox",
+            "--socket",
+            &socket_path.to_string_lossy(),
+        ],
+        temp.path().join("home"),
+    );
+    let output = tokio::time::timeout(Duration::from_secs(10), child)
+        .await
+        .expect("cli exits")
+        .expect("cli task");
+    assert!(
+        !output.status.success(),
+        "prose is not a tracker record and must fail the command"
+    );
+    let connected = tokio::time::timeout(Duration::from_millis(500), server).await;
+    assert!(
+        connected.is_err(),
+        "an unreadable record must not connect to the daemon"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_create_needs_a_record_or_a_name() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let socket_path = temp.path().join("daemon.sock");
+    let output = tokio::time::timeout(
+        Duration::from_secs(10),
+        run_workspace_create(
+            env!("CARGO_BIN_EXE_lazybox"),
+            &[
+                "--project",
+                "local-sandbox",
+                "--socket",
+                &socket_path.to_string_lossy(),
+            ],
+            temp.path().join("home"),
+        ),
+    )
+    .await
+    .expect("cli exits")
+    .expect("cli task");
+    assert!(!output.status.success(), "a target-less create must fail");
 }

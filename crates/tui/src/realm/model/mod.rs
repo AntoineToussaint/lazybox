@@ -843,6 +843,92 @@ struct PendingWorkspaceCreate {
     workspace_key: Option<lazybox_core::SessionKey>,
 }
 
+/// The local spawns of one bulk fan-out, tracked together so their
+/// provisioning reports once instead of once per member (#1636).
+///
+/// A single spawn keeps the checklist modal — it's the terminal the
+/// user is about to land in. Two or more leaving together cannot each
+/// own the single `worktree_progress` slot, so the members provision
+/// silently (the sidebar's per-row spawning arc already shows each one
+/// coming) and the footer carries one aggregate notice instead.
+#[derive(Debug, Clone)]
+pub(crate) struct BulkSpawnBatch {
+    /// Members still provisioning. A member leaves on its first
+    /// `TerminalSpawned` (ready) or `Failed` step; the batch clears
+    /// once this empties.
+    pending: std::collections::HashSet<lazybox_core::SessionKey>,
+    total: usize,
+    ready: usize,
+    failed: usize,
+    /// When the fan-out left. A spawn the daemon drops never reports
+    /// either way, so the batch is abandoned after
+    /// [`BULK_SPAWN_BATCH_TTL`] rather than swallowing the checklist of
+    /// a later single spawn on one of those rows.
+    armed_at: std::time::Instant,
+}
+
+/// How long a [`BulkSpawnBatch`] keeps claiming its members.
+pub(crate) const BULK_SPAWN_BATCH_TTL: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
+
+impl BulkSpawnBatch {
+    pub(crate) fn new(
+        members: impl IntoIterator<Item = lazybox_core::SessionKey>,
+        now: std::time::Instant,
+    ) -> Self {
+        let pending: std::collections::HashSet<_> = members.into_iter().collect();
+        Self {
+            total: pending.len(),
+            pending,
+            ready: 0,
+            failed: 0,
+            armed_at: now,
+        }
+    }
+
+    fn expired(&self, now: std::time::Instant) -> bool {
+        now.duration_since(self.armed_at) >= BULK_SPAWN_BATCH_TTL
+    }
+
+    fn retire(&mut self, session_key: &lazybox_core::SessionKey, ok: bool) -> bool {
+        if !self.pending.remove(session_key) {
+            return false;
+        }
+        if ok {
+            self.ready += 1;
+        } else {
+            self.failed += 1;
+        }
+        true
+    }
+
+    fn done(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    /// "starting 10 agents · 4/10 ready" while members are still
+    /// landing.
+    fn progress_notice(&self) -> String {
+        format!(
+            "starting {} agents · {}/{} ready",
+            self.total, self.ready, self.total
+        )
+    }
+
+    /// "8 agents started, 2 failed" once the last member reported.
+    fn summary_notice(&self) -> String {
+        let plural = if self.ready == 1 { "" } else { "s" };
+        if self.failed == 0 {
+            format!("{} agent{plural} started", self.ready)
+        } else {
+            format!(
+                "{} agent{plural} started, {} failed",
+                self.ready, self.failed
+            )
+        }
+    }
+}
+
 /// One queued workspace-removal prompt. Surfaced one at a time as a
 /// Confirm modal by `maybe_mount_next_removal_prompt`.
 #[derive(Debug, Clone)]
@@ -2096,6 +2182,13 @@ pub struct Model<T: TerminalAdapter> {
     /// clears when provisioning finishes or fails so a later re-spawn on
     /// the same workspace announces again.
     autonomous_spawn_notified: std::collections::HashSet<lazybox_core::SessionKey>,
+    /// The local spawns of the bulk fan-out currently provisioning
+    /// (#1636), if any. Members route to one aggregate footer notice
+    /// instead of each superseding the others in the single
+    /// `worktree_progress` slot. Armed by `run_bulk_agent_steps` when
+    /// two or more local spawns leave together; cleared when the last
+    /// member lands or fails, or once it expires.
+    bulk_spawn_batch: Option<BulkSpawnBatch>,
     /// Transient UI status (polling spinner + footer notice). See
     /// `StatusCtx`.
     status: StatusCtx,
@@ -2736,6 +2829,7 @@ impl<T: TerminalAdapter> Model<T> {
             worktree_progress: None,
             worktree_progress_dismissed: None,
             autonomous_spawn_notified: std::collections::HashSet::new(),
+            bulk_spawn_batch: None,
             status: StatusCtx::new(),
             ui_defaults: lazybox_config::UiDefaults::default(),
             auto_fix_opt_out_labels: lazybox_core::AutoFixSettings::default().opt_out_labels,

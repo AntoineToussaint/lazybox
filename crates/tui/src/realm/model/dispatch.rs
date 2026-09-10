@@ -3059,6 +3059,27 @@ impl<T: TerminalAdapter> Model<T> {
         &mut self,
         steps: Vec<super::BulkAgentStep>,
     ) -> Vec<IpcCommand> {
+        // Two or more local spawns leaving together can't each own the
+        // single worktree-progress slot, so they'd walk the user through
+        // one checklist modal per member (#1636). Track them as one
+        // batch: they provision silently behind one aggregate footer
+        // notice. A lone spawn keeps its checklist — it's the terminal
+        // the user is about to land in.
+        let members: Vec<lazybox_core::SessionKey> = steps
+            .iter()
+            .filter_map(|step| match step {
+                super::BulkAgentStep::Spawn(IpcCommand::Spawn { session_key, .. }) => {
+                    Some(session_key.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        if members.len() >= 2 {
+            self.bulk_spawn_batch = Some(super::BulkSpawnBatch::new(
+                members,
+                std::time::Instant::now(),
+            ));
+        }
         let mut cmds = Vec::new();
         for step in steps {
             match step {

@@ -1292,6 +1292,12 @@ impl DaemonPty {
     /// consumer had to dedup, and a same-seq delivery the seq-ordering
     /// assertion read as a reordering — #1635), never neither (the
     /// lost-output window that snapshotting first would leave).
+    ///
+    /// Attaching a receiver inside the ring lock is safe because the
+    /// order is ring → broadcast-tail at every site that takes both —
+    /// the reader thread and `resize` hold the ring across their
+    /// `send`, and nothing takes the tail first. The section holds no
+    /// await, so the reader thread never waits on a descheduled task.
     pub async fn subscribe(&self) -> Subscription {
         let ring = self.ring.lock().await;
         let live = self.output_tx.subscribe();
@@ -2064,7 +2070,10 @@ mod seed_tests {
         // so the next delivered seq is still greater than the last seen.
         let mut prev = sub.last_seq;
         let mut received = 0u32;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // Inside nextest's 10s per-test kill, so a stream too slow to reach
+        // 3000 chunks fails on the count below instead of dying as a bare
+        // `TIMED OUT` — this test's failures have to name their own cause.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while received < 3000 && std::time::Instant::now() < deadline {
             match tokio::time::timeout(std::time::Duration::from_millis(200), sub.live.recv()).await
             {
@@ -2108,7 +2117,12 @@ mod seed_tests {
             &[
                 "/bin/sh".to_string(),
                 "-c".to_string(),
-                "while :; do printf 'xxxxxxxx'; done".to_string(),
+                // The leading sleep outlasts the per-recv budget below, so
+                // the first sample ALWAYS times out: the sampling loop has
+                // to treat a child that has not reached its first `printf`
+                // as a slow start rather than a verdict, on every run and
+                // not just on a loaded runner.
+                "sleep 0.3; while :; do printf 'xxxxxxxx'; done".to_string(),
             ],
             small(),
             None,
@@ -2117,7 +2131,10 @@ mod seed_tests {
         )
         .expect("spawn");
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // Inside nextest's 10s per-test kill (`.config/nextest.toml`): a
+        // deadline AT the ceiling is SIGKILLed as a bare `TIMED OUT`
+        // instead of failing with the assertion below.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut checked = 0u32;
         while checked < 500 && std::time::Instant::now() < deadline {
             let mut sub = pty.subscribe().await;
@@ -2135,7 +2152,10 @@ mod seed_tests {
                 }
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
                 Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
-                Err(_) => break,
+                // Keep sampling until the deadline. A child that has not
+                // reached its first `printf` yet — a fork+exec on a loaded
+                // runner — is a slow start, not a verdict.
+                Err(_) => continue,
             }
             tokio::task::yield_now().await;
         }

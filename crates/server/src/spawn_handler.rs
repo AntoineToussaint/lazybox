@@ -9678,6 +9678,9 @@ async fn pump_recovered_session(
                 let Some(chunk) = chunk else {
                     break;
                 };
+                // Not dead now that `subscribe` cuts atomically: the resync
+                // below re-seeds `last_seq` from a `snapshot_only` taken
+                // while this receiver already held chunks under it.
                 if chunk.seq <= last_seq {
                     config
                         .terminal

@@ -593,7 +593,16 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
     // a condensed block a new identity the turn it is rewritten — reading its
     // re-send as a first send. Measuring first keeps the accounting
     // independent of whether the compactor fired.
-    let measured = context_parse::measure(&body_bytes, state.compactor.min_lines());
+    // Both passes read the same buffered body, so it is parsed once here
+    // (#1623) rather than once each — a conversation body grows for the
+    // length of a session, and this is the hot path of every request a
+    // metered agent makes. The bytes and their parse travel together so the
+    // two cannot drift apart, and `measure` borrowing it while `rewrite`
+    // consumes it makes the ordering above a compile error, not a comment.
+    let request = compaction::ParsedBody::new(body_bytes);
+    let measured = request
+        .value()
+        .and_then(|body| context_parse::measure(body, state.compactor.min_lines()));
 
     // The one place the proxy is not transparent: old, large tool results
     // are condensed before the expensive model ever sees them (#1609).
@@ -603,7 +612,7 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
     // counted, or may never complete at all.
     let compacted = state
         .compactor
-        .rewrite(&session, &agent_id, !count_only, body_bytes);
+        .rewrite(&session, &agent_id, !count_only, request);
     let body_bytes = compacted.body;
     let saving = compacted.pending;
 

@@ -137,9 +137,8 @@ impl Measured {
 /// context-hygiene line floor (`agent.context_hygiene.min_lines`). `None`
 /// when the body isn't JSON carrying a recognized conversation array — a
 /// health probe, a shape lazybox doesn't know.
-pub(crate) fn measure(body: &[u8], large_lines: usize) -> Option<Measured> {
-    let value: Value = serde_json::from_slice(body).ok()?;
-    let array = conversation(&value)?;
+pub(crate) fn measure(body: &Value, large_lines: usize) -> Option<Measured> {
+    let array = conversation(body)?;
 
     let mut out = Measured {
         accounting: ContextAccounting {
@@ -260,7 +259,8 @@ mod tests {
         seen: &mut SeenBlocks,
         large_lines: usize,
     ) -> Option<ContextAccounting> {
-        Some(measure(body, large_lines)?.against(seen))
+        let body: Value = serde_json::from_slice(body).ok()?;
+        Some(measure(&body, large_lines)?.against(seen))
     }
 
     /// An Anthropic Messages body: one user turn, one tool_result block.

@@ -90,6 +90,14 @@ impl Store for MemoryStore {
         Ok(())
     }
 
+    fn set_kv_if_absent(&self, key: &str, value: &str) -> Result<String, StoreError> {
+        let mut kv = self.kv_lock();
+        Ok(kv
+            .entry(key.to_string())
+            .or_insert_with(|| value.to_string())
+            .clone())
+    }
+
     fn delete_kv(&self, key: &str) -> Result<(), StoreError> {
         self.kv_lock().remove(key);
         Ok(())

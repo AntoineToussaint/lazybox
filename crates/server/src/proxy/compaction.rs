@@ -50,6 +50,7 @@ use lazybox_ipc::AgentUsage;
 use serde_json::{Map, Value};
 
 use super::usage_parse::PriceOverrides;
+use crate::context_tag::TagSource;
 
 /// Callback for a user-facing notice — the kill switch firing is the only
 /// thing here a user must be told about, since it silently changes what
@@ -105,12 +106,8 @@ impl Plan {
 
 /// Per-session compaction state: what it saved, and whether the prompt
 /// cache still likes it.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct SessionState {
-    /// The token marking this session's condensations. Random per session so
-    /// tool output — which is exactly the material an attacker controls —
-    /// cannot forge a marker and pass arbitrary text off as ours.
-    tag: CondenseTag,
     disabled: bool,
     /// Blocks condensed in the most recent inspected request — how many
     /// this conversation currently carries condensed, not a per-turn tally
@@ -129,22 +126,6 @@ struct SessionState {
     baseline_share: Option<f64>,
     degraded_turns: u32,
     regressions: u64,
-}
-
-impl Default for SessionState {
-    fn default() -> Self {
-        Self {
-            tag: CondenseTag::new(&uuid::Uuid::new_v4().simple().to_string()),
-            disabled: false,
-            condensed: 0,
-            saved_bytes: 0,
-            saved_micros: 0,
-            rewrote: false,
-            baseline_share: None,
-            degraded_turns: 0,
-            regressions: 0,
-        }
-    }
 }
 
 /// The outcome of one inspection: the bytes to forward, and whether this
@@ -181,15 +162,25 @@ pub struct Compactor {
     policy: ContextHygiene,
     prices: PriceOverrides,
     notice: NoticeSink,
+    /// Derives each session's marker token. Derived rather than drawn per
+    /// session so the bytes a block renders to survive a daemon restart —
+    /// see `crate::context_tag`.
+    tags: TagSource,
     sessions: Mutex<HashMap<String, SessionState>>,
 }
 
 impl Compactor {
-    pub fn new(policy: ContextHygiene, prices: PriceOverrides, notice: NoticeSink) -> Self {
+    pub fn new(
+        policy: ContextHygiene,
+        prices: PriceOverrides,
+        notice: NoticeSink,
+        tags: TagSource,
+    ) -> Self {
         Self {
             policy,
             prices,
             notice,
+            tags,
             sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -204,6 +195,10 @@ impl Compactor {
             },
             Arc::new(std::collections::BTreeMap::new()),
             Arc::new(|_, _| {}),
+            // Unused while the mode is `Off`, but a literal here would be a
+            // token every installation shares the moment anything builds
+            // this with an evaluating mode.
+            TagSource::from_secret(uuid::Uuid::new_v4().simple().to_string()),
         )
     }
 
@@ -358,13 +353,14 @@ impl Compactor {
     /// turn is deliberately held: it plans, logs, and forwards the original,
     /// and the response's usage becomes the baseline.
     fn begin(&self, session: &str) -> Option<SessionPass> {
+        let tag = self.tags.tag(session);
         let mut sessions = self.sessions.lock().expect("compaction sessions");
         let state = entry(&mut sessions, session)?;
         if state.disabled {
             return None;
         }
         Some(SessionPass {
-            tag: state.tag.clone(),
+            tag,
             may_rewrite: state.baseline_share.is_some(),
         })
     }
@@ -765,10 +761,17 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// A fixed tag. Production draws a random token per session; a test
-    /// asserting byte-stability across turns needs a constant one.
+    /// The fixture installation secret. A test comparing a `plan` to what
+    /// a `Compactor` actually sends has to derive its tag the same way the
+    /// compactor does, or the two render different bytes.
+    fn tags() -> TagSource {
+        TagSource::from_secret("fixture-secret")
+    }
+
+    /// The fixture session's tag. Byte-stability assertions need a constant
+    /// one, which is what deriving it from a fixed secret gives.
     fn tag() -> CondenseTag {
-        CondenseTag::new("test-token")
+        tags().tag("ws")
     }
 
     fn policy(mode: CompactionMode) -> ContextHygiene {
@@ -914,6 +917,7 @@ mod tests {
             policy(CompactionMode::Shadow),
             Arc::new(std::collections::BTreeMap::new()),
             Arc::new(|_, _| {}),
+            tags(),
         );
         let sent = compactor.rewrite("ws", "claude", body.clone()).body;
         assert_eq!(sent, body, "shadow mode never alters bytes on the wire");
@@ -941,6 +945,7 @@ mod tests {
             policy(CompactionMode::On),
             Arc::new(std::collections::BTreeMap::new()),
             Arc::new(|_, _| {}),
+            tags(),
         );
         assert_eq!(
             compactor.rewrite("ws", "claude", body.clone()).body,
@@ -961,6 +966,7 @@ mod tests {
             policy(CompactionMode::On),
             Arc::new(std::collections::BTreeMap::new()),
             Arc::new(|_, _| {}),
+            tags(),
         );
         compactor.observe_usage("ws", "claude", &usage(100, 900), true);
         let sent = compactor.rewrite("ws", "claude", body.clone()).body;
@@ -1040,6 +1046,7 @@ mod tests {
             policy(CompactionMode::On),
             Arc::new(std::collections::BTreeMap::new()),
             Arc::new(|_, _| {}),
+            tags(),
         );
         compactor.observe_usage("ws", "claude", &usage(100, 900), true);
         compactor.observe_usage("other-ws", "claude", &usage(100, 900), true);
@@ -1056,6 +1063,40 @@ mod tests {
             "a different session marks its condensations with its own token"
         );
         assert!(other.len() < body.len(), "and still condenses");
+    }
+
+    #[test]
+    fn a_restart_renders_the_same_block_to_the_same_bytes() {
+        // The condensed text lives only in the request body, so every turn
+        // re-renders it from the agent's original transcript — under the
+        // session's token, which is part of the rendered bytes. A token
+        // drawn per process would therefore rewrite, on the first turn
+        // after a restart, every block the upstream was serving from its
+        // prompt cache: the one cost compaction cannot pay.
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+        let sent_by = |source: TagSource| {
+            let compactor = Compactor::new(
+                policy(CompactionMode::On),
+                Arc::new(std::collections::BTreeMap::new()),
+                Arc::new(|_, _| {}),
+                source,
+            );
+            compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+            compactor.rewrite("ws", "claude", body.clone()).body
+        };
+
+        let before = sent_by(tags());
+        assert!(before.len() < body.len(), "the pre-restart turn condenses");
+        assert_eq!(
+            before,
+            sent_by(tags()),
+            "a fresh daemon over the same persisted secret re-renders identical bytes"
+        );
+        assert_ne!(
+            before,
+            sent_by(TagSource::from_secret("another-installation")),
+            "and the token is still installation-specific"
+        );
     }
 
     #[test]
@@ -1242,6 +1283,7 @@ mod tests {
             Arc::new(move |title: String, _body: String| {
                 recorder.lock().expect("lock").push(title);
             }),
+            tags(),
         );
         (compactor, notices)
     }

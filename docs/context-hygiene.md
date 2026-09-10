@@ -202,6 +202,43 @@ not part of the cache key. This closes the structural hole — lazybox no longer
 acts on forged markers — but it cannot stop a model from believing a
 plausible-looking line it reads in a file, which no marker scheme can.
 
+In the **proxy** the token is **derived, not drawn**
+(`crates/server/src/context_tag.rs`): one random secret per installation,
+persisted in the store, and `TagSource::tag(session)` a one-way function of it.
+The reason is that "constant within a session" is a stronger claim than it looks.
+The condensed text is never written back to the agent's transcript — the proxy
+rewrites bytes in flight, so every turn re-renders the block from the original,
+under the token. A token drawn per process would therefore re-render every
+already-condensed block differently on the first turn after a daemon restart,
+invalidating exactly the prompt-cache prefix compaction exists to protect.
+
+The **hook** does not share that token. It renders under
+`ServerConfig::condense_tag`, random per daemon run and not persisted (#1610).
+That is sound for byte stability, and for the opposite reason: hook output is
+*durable* — it is written into the transcript once and re-sent verbatim on later
+turns, so it is stable as stored bytes and never re-rendered, which is precisely
+what the proxy cannot rely on.
+
+What the two tokens do cost is **recognition across the enforcement points**. A
+block the hook condensed arrives in the proxy's next request body carrying the
+hook's token, so `is_condensed(text, &proxy_tag)` is false and the proxy sees an
+ordinary tool result. At the shipped `min_lines: 350` nothing follows from that —
+a summary is tens of lines, so it is skipped as `BelowLineFloor`. Lower the floor
+(`min_lines: 20` parses fine) and the proxy will condense lazybox's own summary,
+which is the monotonicity rule this module exists to enforce. Unifying the two is
+tracked separately; it needs the hook side's agreement, not a third token.
+
+Derived means no per-session write on the request path and nothing to lose across
+a restart. Callers do not have to coordinate: the secret is seeded with a
+conditional insert (`Store::set_kv_if_absent`), so concurrent loads — two
+enforcement points in one daemon, or two daemons on one `state.db` — all read
+back the single value that won rather than each keeping the one it proposed.
+
+A load whose store read *fails* is the one case that does not write. An
+unreadable key is not an absent key, and seeding over a secret that merely could
+not be read would replace it permanently, re-rendering every block condensed
+under it. That daemon runs on an ephemeral secret and warns instead.
+
 ## Slices
 
 | | | |

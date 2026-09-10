@@ -214,6 +214,23 @@ pub trait Store: Send + Sync {
         Ok(())
     }
 
+    /// Insert `value` only when `key` is absent, returning whatever is
+    /// stored afterwards — the pre-existing value when there was one,
+    /// otherwise `value`.
+    ///
+    /// What matters is that the *decision* is atomic: two callers racing to
+    /// seed the same key must both come away with the single winner, not
+    /// each with the value it proposed. A backend whose conditional insert
+    /// is atomic should override this; the default is a read-then-write for
+    /// stubs that keep no kv at all.
+    fn set_kv_if_absent(&self, key: &str, value: &str) -> Result<String, StoreError> {
+        if let Some(existing) = self.get_kv(key)? {
+            return Ok(existing);
+        }
+        self.set_kv(key, value)?;
+        Ok(value.to_string())
+    }
+
     /// Remove a kv entry. Idempotent — missing key is not an error.
     fn delete_kv(&self, _key: &str) -> Result<(), StoreError> {
         Ok(())

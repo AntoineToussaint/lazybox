@@ -1071,6 +1071,20 @@ impl Server {
         // manufacture an arbitrarily large structured-event backlog; live
         // recovery uses the bus-lag snapshot and RequestTerminalResync paths.
         let mut subscribed = false;
+        // Set by a connection that asked one question and wants one answer:
+        // `lazybox hook-ingest`'s `PreToolUse` decision round-trip (#1610). It
+        // holds the connection open for its deadline, and forwarding the bus
+        // into it meant serializing every terminal's PTY output to a process
+        // that decodes and discards it, once per full-file read.
+        //
+        // Keyed on the command actually sent, NOT on "never subscribed":
+        // `Subscribe` gates the snapshot, and connections that skip it still
+        // legitimately consume bus events — the structured agent-run clients
+        // (`StartAgentRun` → `AgentRunStarted`/`AgentRunFinished`) do exactly
+        // that. Inferring intent from a missing `Subscribe` cut them off.
+        // Command replies are unaffected either way: `dispatch_command`
+        // writes those straight to `conn.tx`, never via the bus.
+        let mut bus_suppressed = false;
         // Debounce for bus-lag recovery snapshots (2026-08-19 audit,
         // M7): a genuinely slow client lags again WHILE the expensive
         // snapshot builds — lag → rebuild → more lag, a positive
@@ -1150,6 +1164,10 @@ impl Server {
                             continue;
                         }
                         subscribed = true;
+                        bus_suppressed = false;
+                    }
+                    if matches!(&cmd, lazybox_ipc::Command::DecideToolUse { .. }) {
+                        bus_suppressed = true;
                     }
                     // Per-command name at INFO so a stalled IPC channel is
                     // visible at a glance — historically we'd see `daemon
@@ -1410,30 +1428,21 @@ impl Server {
                     }
                 }
                 bus = bus_rx.recv() => {
-                    // Bus traffic belongs to SUBSCRIBERS. A connection that
-                    // never subscribed asked one question and is waiting on
-                    // its own answer — `lazybox hook-ingest`'s `PreToolUse`
-                    // decision round-trip (#1610) is the case that forced
-                    // this: it holds a connection open for its deadline, and
-                    // forwarding the fleet's `TerminalOutput` into it meant
-                    // serializing every terminal's PTY output to a process
-                    // that decodes and discards it, once per full-file read.
-                    // Command replies are unaffected — `dispatch_command`
-                    // writes those straight to `conn.tx`, never via the bus.
-                    // We still drain `bus_rx` so the broadcast channel does
-                    // not report this connection as lagging.
+                    // `bus_rx` is drained either way, so a suppressed
+                    // connection never makes the broadcast channel report it
+                    // as lagging — only the forwarding is skipped.
                     match bus {
                         Ok(evt) => {
-                            if subscribed {
+                            if !bus_suppressed {
                                 let _ = conn.tx.send(evt);
                             }
                         }
-                        // An unsubscribed connection has no state to heal —
-                        // it never received a snapshot to fall behind.
-                        Err(broadcast::error::RecvError::Lagged(n)) if !subscribed => {
+                        // A suppressed connection has no stream to heal: it
+                        // never took a snapshot to fall behind.
+                        Err(broadcast::error::RecvError::Lagged(n)) if bus_suppressed => {
                             tracing::debug!(
                                 lagged = n,
-                                "unsubscribed connection lagged the bus — nothing to recover"
+                                "request/response connection lagged the bus — nothing to recover"
                             );
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {

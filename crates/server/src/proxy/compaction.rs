@@ -77,6 +77,25 @@ const BYTES_PER_TOKEN: u64 = 4;
 /// baseline before a turn counts as degraded.
 const CACHE_SHARE_FLOOR: f64 = 0.75;
 
+/// The smallest pre-rewrite cache-read share that can serve as a baseline.
+///
+/// The degradation test is *relative* (`share < baseline * CACHE_SHARE_FLOOR`),
+/// so a baseline at or near zero makes it unsatisfiable and the kill switch
+/// can never fire. That is not a hypothetical: the first turn compaction
+/// finds eligible is, for a resumed conversation or a session recovered
+/// across a daemon restart, the turn that *writes* the transcript into a cold
+/// cache — `cache_read_input_tokens: 0` against a large
+/// `cache_creation_input_tokens`, a share of exactly 0.0. Latching that would
+/// disarm the guard permanently for precisely the long-transcript population
+/// the held first turn exists to protect.
+///
+/// So a cold reading is not a baseline, it is a cold cache: keep holding and
+/// keep looking. A session whose share never rises this far is never
+/// compacted, which is the same stance [`Compactor::rewrite`] already takes
+/// for a session key it cannot attribute — compaction that cannot be guarded
+/// does not run.
+const MIN_BASELINE_SHARE: f64 = 0.10;
+
 /// Consecutive degraded turns before compaction backs out of a session.
 /// One or two are expected — the turn a block is first condensed is a
 /// deliberate cache miss — so the window has to outlast the miss it
@@ -157,10 +176,24 @@ impl Rewritten {
     }
 }
 
+/// Where the compactor reads its policy from, evaluated per request.
+///
+/// The epic's premise is that both enforcement points act on *the same*
+/// policy: "two enforcement points that disagree are worse than one." The hook
+/// resolves its policy live, per decision ([`crate::read_intercept`] calls
+/// `Config::load`, which is cached behind a file stamp). A compactor holding a
+/// snapshot taken at `proxy::spawn` would therefore disagree with it for the
+/// whole life of the daemon after any config edit: flipping `mode` to `on`
+/// would start denying reads at the hook while the proxy still forwarded
+/// originals, and flipping it back to `off` would stop the denies while the
+/// proxy kept rewriting bodies. Reading through the same source on both sides
+/// is what makes the shared policy actually shared.
+pub type PolicySource = Arc<dyn Fn() -> ContextHygiene + Send + Sync>;
+
 /// The proxy's compaction pass: policy, per-session accounting, and the
 /// kill switch.
 pub struct Compactor {
-    policy: ContextHygiene,
+    policy: PolicySource,
     prices: PriceOverrides,
     notice: NoticeSink,
     /// Derives each session's marker token. Derived rather than drawn per
@@ -171,8 +204,36 @@ pub struct Compactor {
 }
 
 impl Compactor {
+    /// A compactor pinned to one policy — for tests, and for
+    /// [`Compactor::disabled`].
     pub fn new(
         policy: ContextHygiene,
+        prices: PriceOverrides,
+        notice: NoticeSink,
+        tags: TagSource,
+    ) -> Self {
+        Self::with_policy_source(Arc::new(move || policy.clone()), prices, notice, tags)
+    }
+
+    /// A compactor that re-reads the policy from config on every request, so
+    /// an edit takes effect at the same moment it does at the hook — see
+    /// [`PolicySource`].
+    pub fn live(prices: PriceOverrides, notice: NoticeSink, tags: TagSource) -> Self {
+        Self::with_policy_source(
+            Arc::new(|| {
+                lazybox_config::Config::load()
+                    .unwrap_or_default()
+                    .agent
+                    .context_hygiene
+            }),
+            prices,
+            notice,
+            tags,
+        )
+    }
+
+    pub fn with_policy_source(
+        policy: PolicySource,
         prices: PriceOverrides,
         notice: NoticeSink,
         tags: TagSource,
@@ -184,6 +245,15 @@ impl Compactor {
             tags,
             sessions: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The line floor in force right now. #1606's instrumentation counts
+    /// "blocks over N lines" with this same number, so what is measured and
+    /// what is rewritten cannot drift — including across a config edit, which
+    /// is why the measurement side reads it from here rather than keeping its
+    /// own copy.
+    pub fn min_lines(&self) -> usize {
+        (self.policy)().min_lines
     }
 
     /// A compactor that never inspects anything — for the proxy paths that
@@ -209,7 +279,11 @@ impl Compactor {
     /// exists to prove the saving is real before taking it, and a shadow
     /// run that altered the wire would prove nothing.
     pub fn rewrite(&self, session: &str, agent_id: &str, body: Bytes) -> Rewritten {
-        if !self.policy.mode.evaluates() || body.is_empty() {
+        // Read once per request and use that value throughout, so a config
+        // edit landing mid-request cannot make this pass decide under one
+        // policy and log under another.
+        let policy = (self.policy)();
+        if !policy.mode.evaluates() || body.is_empty() {
             return Rewritten::passed(body);
         }
         // A spawn with no resolvable session key would share one bucket with
@@ -223,12 +297,12 @@ impl Compactor {
         let Some(pass) = self.begin(session) else {
             return Rewritten::passed(body);
         };
-        let Some(plan) = plan(&body, &self.policy, &pass.tag) else {
+        let Some(plan) = plan(&body, &policy, &pass.tag) else {
             return Rewritten::passed(body);
         };
         // Rewriting waits for a pre-rewrite cache reading (see `begin`).
-        let rewriting = self.policy.mode.rewrites() && pass.may_rewrite;
-        let mode = match (self.policy.mode.rewrites(), pass.may_rewrite) {
+        let rewriting = policy.mode.rewrites() && pass.may_rewrite;
+        let mode = match (policy.mode.rewrites(), pass.may_rewrite) {
             (true, true) => "on",
             (true, false) => "on/awaiting-cache-baseline",
             _ => "shadow",
@@ -285,7 +359,7 @@ impl Compactor {
     /// otherwise read as a sustained regression and disable compaction for
     /// the whole workspace.
     pub fn observe_usage(&self, session: &str, agent_id: &str, usage: &AgentUsage, measured: bool) {
-        if !self.policy.mode.rewrites() || !measured {
+        if !(self.policy)().mode.rewrites() || !measured {
             return;
         }
         let Some(share) = cache_read_share(usage) else {
@@ -299,7 +373,13 @@ impl Compactor {
             return;
         }
         if !state.rewrote {
-            state.baseline_share = Some(share);
+            // Only a reading that shows the upstream actually serving from
+            // cache can anchor a relative test — see `MIN_BASELINE_SHARE`. A
+            // cold turn leaves the baseline unset, so the next eligible turn
+            // is held too and this runs again.
+            if share >= MIN_BASELINE_SHARE {
+                state.baseline_share = Some(share);
+            }
             return;
         }
         let Some(baseline) = state.baseline_share else {
@@ -906,6 +986,36 @@ mod tests {
     }
 
     #[test]
+    fn a_block_condensed_under_another_tag_is_still_not_recondensed() {
+        // `is_condensed` only recognizes our own tag, and the tag differs
+        // across a daemon restart and between the two enforcement points — so
+        // a block the hook condensed, or one this session condensed before a
+        // restart, arrives unrecognized. What actually stops it being
+        // summarized a second time is `MIN_SAVED_FRACTION`: a condensed block
+        // is already almost all head and tail, so re-condensing saves nothing.
+        // Docs credited recognition alone for monotonicity; this pins the
+        // mechanism that carries it when recognition cannot.
+        let once = planned(&anthropic_body(6), CompactionMode::On)
+            .body
+            .expect("rewritten");
+        let stranger = CondenseTag::new("a-different-daemon-run");
+        let again = plan(&once, &policy(CompactionMode::On), &stranger).expect("still has results");
+
+        assert_eq!(
+            again.condensed, 0,
+            "an unrecognized condensed block must still not be rewritten"
+        );
+        assert!(
+            again
+                .skipped
+                .iter()
+                .any(|(reason, _)| *reason == SkipReason::BelowLineFloor),
+            "and the reason is the saving floor, not recognition: {:?}",
+            again.skipped
+        );
+    }
+
+    #[test]
     fn shadow_mode_plans_the_same_rewrite_but_the_compactor_sends_the_original() {
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
         assert_eq!(
@@ -1414,6 +1524,61 @@ mod tests {
         );
     }
 
+    /// A resumed conversation's first turn: the whole transcript is *written*
+    /// into the cache, so nothing is read from it.
+    fn cold_usage() -> AgentUsage {
+        AgentUsage {
+            input_tokens: Some(100),
+            output_tokens: Some(10),
+            cache_creation_input_tokens: Some(900),
+            cache_read_input_tokens: Some(0),
+            cost_usd_micros: None,
+            context: None,
+        }
+    }
+
+    #[test]
+    fn a_cold_first_turn_is_not_latched_as_the_cache_baseline() {
+        // The regression this pins: the first turn compaction finds eligible
+        // is, on a resumed conversation or a restart-recovered session, the
+        // turn that writes the transcript into a cold cache — share 0.0.
+        // Latching that made the degradation test `share < 0.0 * 0.75`, which
+        // no share can satisfy, so the kill switch was permanently disarmed
+        // for exactly the long-transcript sessions the held turn protects.
+        let (compactor, notices) = compactor_with_notices();
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+
+        assert_eq!(
+            compactor.rewrite("ws", "claude", body.clone()).body,
+            body,
+            "the first eligible turn is held"
+        );
+        compactor.observe_usage("ws", "claude", &cold_usage(), true);
+        assert_eq!(
+            compactor.rewrite("ws", "claude", body.clone()).body,
+            body,
+            "a cold reading is not a baseline, so the turn is held again \
+             rather than rewriting with a guard that can never fire"
+        );
+
+        // A warm turn is a real baseline, and compaction proceeds from there.
+        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        assert!(
+            compactor.rewrite("ws", "claude", body.clone()).body.len() < body.len(),
+            "with a usable baseline the rewrite proceeds"
+        );
+
+        // The point of all of it: the switch is actually armed.
+        for _ in 0..CACHE_REGRESSION_TURNS {
+            compactor.observe_usage("ws", "claude", &usage(900, 100), true);
+        }
+        assert_eq!(
+            notices.lock().expect("lock").len(),
+            1,
+            "a session that started cold must still be guarded"
+        );
+    }
+
     #[test]
     fn traffic_compaction_did_not_touch_never_trips_the_kill_switch() {
         // One workspace session issues more than its main conversation:
@@ -1465,6 +1630,47 @@ mod tests {
         assert!(
             compactor.rewrite("ws", "claude", body.clone()).body.len() < body.len(),
             "compaction is still on"
+        );
+    }
+
+    #[test]
+    fn the_policy_is_re_read_per_request_so_a_config_edit_takes_effect() {
+        // The proxy used to capture the policy at `proxy::spawn` while the
+        // hook resolved it live on every decision, so after a config edit the
+        // two enforcement points disagreed about `mode` for the rest of the
+        // daemon's life: flipping to `on` denied reads at the hook while the
+        // proxy still forwarded originals, and flipping back to `off` left the
+        // proxy rewriting bodies indefinitely.
+        let mode = Arc::new(Mutex::new(CompactionMode::On));
+        let source = mode.clone();
+        let compactor = Compactor::with_policy_source(
+            Arc::new(move || ContextHygiene {
+                mode: *source.lock().expect("mode"),
+                ..ContextHygiene::default()
+            }),
+            Arc::new(std::collections::BTreeMap::new()),
+            Arc::new(|_, _| {}),
+            tags(),
+        );
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+
+        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        assert!(
+            compactor.rewrite("ws", "claude", body.clone()).body.len() < body.len(),
+            "on: the body is rewritten"
+        );
+
+        // The user edits the config. No restart.
+        *mode.lock().expect("mode") = CompactionMode::Off;
+        assert_eq!(
+            compactor.rewrite("ws", "claude", body.clone()).body,
+            body,
+            "off must stop the rewrite without waiting for a daemon restart"
+        );
+        assert_eq!(
+            compactor.min_lines(),
+            ContextHygiene::default().min_lines,
+            "and the instrumentation's line floor reads the same live policy"
         );
     }
 

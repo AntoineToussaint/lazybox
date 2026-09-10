@@ -99,8 +99,11 @@ async fn start_proxy_with(
     };
     let quota_sink: proxy::QuotaSink = std::sync::Arc::new(|_, _, _| {});
     let prices = std::sync::Arc::new(std::collections::BTreeMap::new());
+    // The 350-line floor the instrumentation uses now comes from the
+    // compactor's own policy, so it cannot drift from the set that gets
+    // rewritten — `Compactor::disabled()` carries the default 350.
     tokio::spawn(proxy::serve(
-        listener, upstreams, sink, quota_sink, prices, compactor, 350,
+        listener, upstreams, sink, quota_sink, prices, compactor,
     ));
     port
 }

@@ -405,6 +405,7 @@ pub async fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHand
             saved_bytes: saving.saved_bytes,
             saved_cost_micros: saving.saved_micros,
             regressions: saving.regressions,
+            rewrote: saving.rewrote,
         });
     });
     let compactor = Arc::new(
@@ -682,18 +683,23 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
                 None => {
                     if let Some((state, sink, agent_id, session, measured, judged, saving)) =
                         pending.take()
+                        && let Some(mut usage) = acc.finish()
                     {
-                        // The saving commits on a clean stream end even when
-                        // the body carried no parseable usage — the bytes
-                        // were still elided from a turn that completed.
-                        // `commit` precedes `observe_usage` so the turn that
-                        // rewrote is marked before the kill switch judges it.
+                        // The saving is committed on exactly the condition
+                        // that reports the cost — a parsed usage block on a
+                        // clean stream end — because the two are compared
+                        // against each other. A response that streams
+                        // cleanly but carries no usage (a 200 whose body is
+                        // an error frame) would otherwise contribute a
+                        // saving against no cost, inflating the very ratio
+                        // the rollout decision reads, and would do it in
+                        // precisely the turns the kill switch also cannot
+                        // judge. `commit` precedes `observe_usage` so the
+                        // turn that rewrote is marked before the kill
+                        // switch judges its cache share.
                         if let Some(saving) = saving {
                             state.compactor.commit(&session, &agent_id, saving);
                         }
-                        let Some(mut usage) = acc.finish() else {
-                            return None;
-                        };
                         // Fold the request's blocks into the session's
                         // seen-set only now, on the same condition that
                         // reports usage: a request the provider never billed

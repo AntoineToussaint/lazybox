@@ -1399,6 +1399,7 @@ fn all_events() -> Vec<Event> {
             saved_bytes: 18_422,
             saved_cost_micros: Some(61_000),
             regressions: 0,
+            rewrote: true,
         },
     ]
 }
@@ -1640,7 +1641,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        105,
+        106,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

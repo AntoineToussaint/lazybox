@@ -829,3 +829,32 @@ async fn a_turn_whose_upstream_never_answered_reports_no_saving() {
         "and no cost either — the two stay on one clock"
     );
 }
+
+/// #1621: the saving and the cost it is compared against must be reported
+/// on one condition, not two. Committing the saving on a clean stream end
+/// while the cost waits for a parsed `usage` block lets a 200 whose body
+/// carries no usage — an error frame delivered with a success status —
+/// contribute a saving against no cost at all, inflating exactly the ratio
+/// the shadow-mode rollout decision reads. Worse, those are the same turns
+/// the kill switch cannot judge, so the least-supervised traffic would have
+/// been the most flattering.
+#[tokio::test]
+async fn a_completed_turn_without_usage_reports_neither_cost_nor_saving() {
+    let (captured, sink) = recording_sink();
+    // A clean 200 that streams to completion and names no usage.
+    let upstream =
+        mock_upstream("{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}").await;
+    let (compactor, savings) = compactor_reporting(lazybox_core::CompactionMode::On);
+    let port = start_proxy_with(upstream, sink, compactor).await;
+
+    post_conversation(port, "github-acme-widget-7", conversation_body(8)).await;
+
+    assert!(
+        captured.lock().expect("lock").is_empty(),
+        "no usage block, so no cost is reported"
+    );
+    assert!(
+        savings.lock().expect("lock").is_empty(),
+        "and therefore no saving either — the two stay on one clock"
+    );
+}

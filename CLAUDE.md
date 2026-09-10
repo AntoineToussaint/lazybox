@@ -173,6 +173,23 @@ crates/
   with `gh` and `git`. Lazybox does not wrap *repo actions* behind an
   MCP/tool-approval layer — the agent has the same tools it would in any
   other worktree.
+- **Cost trailers on merge** (#1592): lazybox performs the merge itself, so
+  both `g m` and merge-on-green write what the PR took into the merge
+  commit as `Lazybox-Cost` / `Lazybox-Agents` / `Lazybox-Effort` /
+  `Lazybox-Time` git trailers — the format contract is
+  `crates/core/src/pr_trailers.rs`, the producer
+  `crates/server/src/pr_trailers.rs`. Three invariants the code exists to
+  hold: `commitBody` *replaces* GitHub's default squash log, so the default
+  is read back (`viewerMergeBodyText`) and appended to — a body that can't
+  be resolved merges with **no** trailer rather than a truncated log; an
+  unmetered PR gets no `Lazybox-Cost` line at all, never `$0.00`; and
+  because a trailer is permanent and public, `providers.github.pr_trailers`
+  gates it — `full` on private repos, `off` on public ones, opted in
+  per-repo (`shape` publishes tokens/effort without the dollars). A
+  `REBASE`-only repo has no merge commit to carry them and gets one sticky
+  comment, edited in place. Cost is billed per PR, not per workspace: the
+  `meter-cost-mark:` watermark is stamped at merge so a reused workspace's
+  next PR starts from zero.
 - **The tracker record is the workspace**: a tracked item never gets a
   *second* workspace beside the one it already has — an agent, a
   coordinator, the CLI, or the JSON gateway attaches to that workspace

@@ -904,7 +904,38 @@ pub fn update_branch_body(pull_request_node_id: &str) -> serde_json::Value {
 /// method github.com's "Merge pull request" button pre-selects. A repo
 /// that disables merge commits (squash/rebase only) reports SQUASH or
 /// REBASE here; we feed it straight into the merge mutation.
+///
+/// `isPrivate` rides along because it gates whether lazybox may write
+/// cost trailers into the repo's permanent history, and this query is
+/// already cached per repo — one extra field, no extra round-trip.
 const PR_MERGE_METHOD_QUERY: &str = r#"
+query($id: ID!) {
+  node(id: $id) {
+    ... on PullRequest {
+      repository { viewerDefaultMergeMethod isPrivate }
+    }
+  }
+  rateLimit { cost limit remaining resetAt used }
+}
+"#;
+
+pub fn pr_merge_method_body(pull_request_node_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "query": PR_MERGE_METHOD_QUERY,
+        "variables": { "id": pull_request_node_id },
+    })
+}
+
+/// [`PR_MERGE_METHOD_QUERY`] without `isPrivate` — the selection set as it
+/// stood before repository visibility was needed.
+///
+/// Resolving the merge method is on the critical path: a host that rejects
+/// the query cannot merge at all. GitHub Enterprise Server is known to
+/// reject otherwise-valid PR selection sets (see the GHES 3.18 note on the
+/// hot batch query), so the visibility field must never be able to take the
+/// merge down with it — a failure here falls back to this shape and merges
+/// with visibility unknown.
+const PR_MERGE_METHOD_ONLY_QUERY: &str = r#"
 query($id: ID!) {
   node(id: $id) {
     ... on PullRequest {
@@ -915,9 +946,9 @@ query($id: ID!) {
 }
 "#;
 
-pub fn pr_merge_method_body(pull_request_node_id: &str) -> serde_json::Value {
+pub fn pr_merge_method_only_body(pull_request_node_id: &str) -> serde_json::Value {
     serde_json::json!({
-        "query": PR_MERGE_METHOD_QUERY,
+        "query": PR_MERGE_METHOD_ONLY_QUERY,
         "variables": { "id": pull_request_node_id },
     })
 }
@@ -943,6 +974,55 @@ pub struct GqlMergeMethodNode {
 #[serde(rename_all = "camelCase")]
 pub struct GqlMergeMethodRepository {
     pub viewer_default_merge_method: String,
+    #[serde(default)]
+    pub is_private: bool,
+}
+
+/// GraphQL query for the commit body GitHub would write by itself for
+/// `mergeType` — the concatenated commit log a squash produces, or the PR
+/// body for a single-commit PR. Passing `commitBody` to the merge mutation
+/// *replaces* that default, so it has to be read back and appended to, never
+/// substituted.
+const PR_MERGE_BODY_QUERY: &str = r#"
+query($id: ID!, $method: PullRequestMergeMethod!) {
+  node(id: $id) {
+    ... on PullRequest {
+      viewerMergeBodyText(mergeType: $method)
+    }
+  }
+  rateLimit { cost limit remaining resetAt used }
+}
+"#;
+
+pub fn pr_merge_body_text_body(
+    pull_request_node_id: &str,
+    merge_method: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "query": PR_MERGE_BODY_QUERY,
+        "variables": {
+            "id": pull_request_node_id,
+            "method": merge_method,
+        },
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlMergeBodyResponse {
+    pub data: Option<GqlMergeBodyData>,
+    #[serde(default)]
+    pub errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GqlMergeBodyData {
+    pub node: Option<GqlMergeBodyNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GqlMergeBodyNode {
+    pub viewer_merge_body_text: String,
 }
 
 /// GraphQL mutation that merges the PR — same effect as clicking
@@ -958,9 +1038,14 @@ pub struct GqlMergeMethodRepository {
 /// between "lazybox observed the PR green at OID X" and "the merge
 /// landed". The input field is nullable, so passing `null` preserves
 /// the old unguarded behavior for callers with no known head.
+///
+/// `commitBody` REPLACES the body GitHub would have written — for a
+/// squash, the concatenated commit log. Callers that want to add to it
+/// must read the default back first (`PR_MERGE_BODY_QUERY`); `null`
+/// leaves GitHub's default in place.
 const MERGE_PR_MUTATION: &str = r#"
-mutation($id: ID!, $method: PullRequestMergeMethod!, $expectedHeadOid: GitObjectID) {
-  mergePullRequest(input: { pullRequestId: $id, mergeMethod: $method, expectedHeadOid: $expectedHeadOid }) {
+mutation($id: ID!, $method: PullRequestMergeMethod!, $expectedHeadOid: GitObjectID, $commitBody: String) {
+  mergePullRequest(input: { pullRequestId: $id, mergeMethod: $method, expectedHeadOid: $expectedHeadOid, commitBody: $commitBody }) {
     pullRequest { id state merged }
   }
 }
@@ -1129,6 +1214,7 @@ pub fn merge_pr_body(
     pull_request_node_id: &str,
     merge_method: &str,
     expected_head_oid: Option<&str>,
+    commit_body: Option<&str>,
 ) -> serde_json::Value {
     serde_json::json!({
         "query": MERGE_PR_MUTATION,
@@ -1138,6 +1224,8 @@ pub fn merge_pr_body(
             // `null` when the caller has no known head — the input
             // field is nullable and GitHub then skips the guard.
             "expectedHeadOid": expected_head_oid,
+            // `null` keeps GitHub's own default body.
+            "commitBody": commit_body,
         },
     })
 }
@@ -4123,7 +4211,7 @@ mod tests {
     /// "skip the guard" value), preserving the unguarded manual path.
     #[test]
     fn merge_pr_body_pins_expected_head_oid() {
-        let body = merge_pr_body("PR_kwDO", "SQUASH", Some("abc123"));
+        let body = merge_pr_body("PR_kwDO", "SQUASH", Some("abc123"), None);
         assert_eq!(body["variables"]["expectedHeadOid"], "abc123");
         let query = body["query"].as_str().unwrap();
         assert!(
@@ -4131,7 +4219,7 @@ mod tests {
             "the mutation input must wire the variable through"
         );
 
-        let unguarded = merge_pr_body("PR_kwDO", "SQUASH", None);
+        let unguarded = merge_pr_body("PR_kwDO", "SQUASH", None, None);
         assert!(
             unguarded["variables"]["expectedHeadOid"].is_null(),
             "no known head must serialize as null, not be omitted"

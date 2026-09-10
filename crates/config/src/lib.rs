@@ -3772,6 +3772,22 @@ pub struct GithubConfig {
     /// `https://<host>/api/v3` and GraphQL at `https://<host>/api/graphql`.
     #[serde(default)]
     pub host: Option<String>,
+    /// Which repos get lazybox's `Lazybox-*` cost trailers written into
+    /// their merge commits, and how much of the set. Defaults to `full` on
+    /// private repos and `off` on public ones — a trailer is permanent and
+    /// cannot be removed without rewriting history, so a public repo is
+    /// opted in one at a time:
+    ///
+    /// ```yaml
+    /// providers:
+    ///   github:
+    ///     pr_trailers:
+    ///       public: off
+    ///       repos:
+    ///         acme/openthing: shape   # tokens and effort, no dollars
+    /// ```
+    #[serde(default)]
+    pub pr_trailers: lazybox_core::TrailerPolicy,
 }
 
 impl GithubConfig {
@@ -3795,6 +3811,7 @@ impl Default for GithubConfig {
             background_budget_share: 0.55,
             include_accessible_repos: false,
             host: None,
+            pr_trailers: lazybox_core::TrailerPolicy::default(),
         }
     }
 }
@@ -4391,6 +4408,47 @@ mod tests {
         assert_eq!(
             cfg.providers.github.repo_refresh_interval,
             Duration::from_secs(120)
+        );
+    }
+
+    /// Cost trailers are on for private repos and off for public ones out
+    /// of the box, and a public repo is opted in by name.
+    #[test]
+    fn pr_trailer_policy_defaults_and_parses() {
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.providers
+                .github
+                .pr_trailers
+                .mode_for(Some("acme/secret"), true),
+            lazybox_core::TrailerMode::Full,
+        );
+        assert_eq!(
+            cfg.providers
+                .github
+                .pr_trailers
+                .mode_for(Some("acme/open"), false),
+            lazybox_core::TrailerMode::Off,
+        );
+
+        let cfg: Config = serde_yaml::from_str(
+            "providers:\n  github:\n    pr_trailers:\n      private: shape\n      repos:\n        acme/open: full\n",
+        )
+        .expect("parses");
+        let policy = &cfg.providers.github.pr_trailers;
+        assert_eq!(
+            policy.mode_for(Some("acme/secret"), true),
+            lazybox_core::TrailerMode::Shape,
+        );
+        assert_eq!(
+            policy.mode_for(Some("acme/open"), false),
+            lazybox_core::TrailerMode::Full,
+            "a named repo overrides the visibility default",
+        );
+        assert_eq!(
+            policy.mode_for(Some("acme/other"), false),
+            lazybox_core::TrailerMode::Off,
+            "an unnamed public repo keeps the default",
         );
     }
 

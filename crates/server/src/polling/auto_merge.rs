@@ -362,15 +362,16 @@ pub trait MergeBackend {
         number: u64,
     ) -> Result<Option<(Task, Option<String>)>, String>;
 
-    /// Merge the workspace's PR, pinned to `expected_head_oid` when
-    /// known. Returns the typed [`lazybox_core::ProviderError`] — not a
+    /// Merge the workspace's PR under `options` — pinned to its
+    /// `expected_head_oid` when known, and carrying the trailers this merge
+    /// should record. Returns the typed [`lazybox_core::ProviderError`] — not a
     /// flattened `String` — so the attempt can tell a transient secondary rate limit
     /// (retry on the next green poll) from a genuine rejection (stand down).
     async fn merge(
         &self,
         ws: &Workspace,
-        expected_head_oid: Option<&str>,
-    ) -> Result<(), lazybox_core::ProviderError>;
+        options: &lazybox_core::MergeOptions<'_>,
+    ) -> Result<lazybox_core::TrailerOutcome, lazybox_core::ProviderError>;
 
     /// When GitHub has the token on a rate-limit pause (a secondary
     /// cooldown or an exhausted primary window), the instant it lifts;
@@ -404,9 +405,9 @@ impl MergeBackend for lazybox_gh::GhClient {
     async fn merge(
         &self,
         ws: &Workspace,
-        expected_head_oid: Option<&str>,
-    ) -> Result<(), lazybox_core::ProviderError> {
-        lazybox_core::TaskProvider::merge(self, ws, expected_head_oid).await
+        options: &lazybox_core::MergeOptions<'_>,
+    ) -> Result<lazybox_core::TrailerOutcome, lazybox_core::ProviderError> {
+        lazybox_core::TaskProvider::merge(self, ws, options).await
     }
 
     fn paused_until(&self) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -706,9 +707,34 @@ pub async fn run_attempt<B: MergeBackend>(
     // Merge, pinned to the head the fresh fetch just verified green.
     // A force-push landing between that fetch and this mutation is
     // rejected by GitHub ("Head branch was modified…").
-    match backend.merge(&probe, head.as_deref()).await {
-        Ok(()) => {
+    //
+    // This flow has no human in it at all, so it is the one that most needs
+    // the record: without the trailer, an auto-merged PR's cost exists
+    // nowhere anyone will look.
+    let trailers = crate::pr_trailers::measure(config, &probe, chrono::Utc::now()).await;
+    let merge_options = lazybox_core::MergeOptions {
+        expected_head_oid: head.as_deref(),
+        trailers: Some(trailers.clone()),
+        trailer_policy: lazybox_config::Config::load()
+            .unwrap_or_default()
+            .providers
+            .github
+            .pr_trailers,
+    };
+    match backend.merge(&probe, &merge_options).await {
+        Ok(outcome) => {
             tracing::info!(workspace = %key, "auto-merged PR (merge-on-green)");
+            crate::pr_trailers::mark_reported(config, key, &trailers).await;
+            // Nobody is watching this flow, so a lost cost record has to
+            // announce itself or it is lost silently and for good.
+            if let lazybox_core::TrailerOutcome::Dropped { reason } = outcome {
+                let _ = config.bus.send(Event::provider_error_retryable(
+                    "auto-merge",
+                    format!(
+                        "auto-merged {pr_label}, but the cost record was not written: {reason}"
+                    ),
+                ));
+            }
             settle(Some(Latch::Done(head)));
             // Mirror `handle_merge_pr`: the local Task still reads
             // `Open` — broadcast `PrMerged` so clients flash the notice
@@ -2315,8 +2341,9 @@ mod tests {
     /// Recording fake: scripted fetch result + merge result.
     struct FakeBackend {
         fetch: Result<Option<(Task, Option<String>)>, String>,
-        merge_result: Result<(), lazybox_core::ProviderError>,
+        merge_result: Result<lazybox_core::TrailerOutcome, lazybox_core::ProviderError>,
         merges: parking_lot::Mutex<Vec<Option<String>>>,
+        trailers: parking_lot::Mutex<Vec<Option<lazybox_core::PrTrailers>>>,
         paused_until: Option<chrono::DateTime<Utc>>,
         fetches: parking_lot::Mutex<u32>,
     }
@@ -2325,8 +2352,9 @@ mod tests {
         fn merging(fresh: Task, head: &str) -> Self {
             Self {
                 fetch: Ok(Some((fresh, Some(head.into())))),
-                merge_result: Ok(()),
+                merge_result: Ok(lazybox_core::TrailerOutcome::InCommit),
                 merges: parking_lot::Mutex::new(Vec::new()),
+                trailers: parking_lot::Mutex::new(Vec::new()),
                 paused_until: None,
                 fetches: parking_lot::Mutex::new(0),
             }
@@ -2339,6 +2367,7 @@ mod tests {
                 fetch: Ok(Some((fresh, Some(head.into())))),
                 merge_result: Err(err),
                 merges: parking_lot::Mutex::new(Vec::new()),
+                trailers: parking_lot::Mutex::new(Vec::new()),
                 paused_until: None,
                 fetches: parking_lot::Mutex::new(0),
             }
@@ -2363,11 +2392,12 @@ mod tests {
         async fn merge(
             &self,
             _ws: &Workspace,
-            expected_head_oid: Option<&str>,
-        ) -> Result<(), lazybox_core::ProviderError> {
+            options: &lazybox_core::MergeOptions<'_>,
+        ) -> Result<lazybox_core::TrailerOutcome, lazybox_core::ProviderError> {
             self.merges
                 .lock()
-                .push(expected_head_oid.map(|s| s.to_string()));
+                .push(options.expected_head_oid.map(|s| s.to_string()));
+            self.trailers.lock().push(options.trailers.clone());
             self.merge_result.clone()
         }
     }
@@ -2414,6 +2444,36 @@ mod tests {
         );
         let evt = rx.try_recv().expect("PrMerged must be broadcast");
         assert!(matches!(evt, Event::PrMerged { .. }), "got {evt:?}");
+    }
+
+    /// Merge-on-green carries the cost record too. This is the flow with no
+    /// human in it at all: without the trailer, an auto-merged PR's spend
+    /// exists nowhere anyone will look. The marker is stamped on success, so
+    /// the same workspace's next PR bills only what it spends itself.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_merge_writes_the_cost_trailer_and_closes_the_slice() {
+        let ws = armed_ws("o/r#1");
+        let store = Arc::new(MemoryStore::new());
+        seed(&store, &ws);
+        store
+            .set_kv(&format!("meter-cost:{}", ws.key.as_str()), "13893891")
+            .expect("seed the metered cost");
+        let config = ServerConfig::with_store(store.clone());
+        let backend = FakeBackend::merging(green_task("o/r#1"), "abc123");
+
+        run_attempt(&config, ticket(&ws, None), &own_policy(), &backend).await;
+
+        let sent = backend.trailers.lock().clone();
+        assert_eq!(
+            sent.into_iter().next().flatten().map(|t| t.render()),
+            Some("Lazybox-Cost: $13.89".to_string()),
+            "the auto-merge must carry what the work cost",
+        );
+        assert_eq!(
+            crate::client_kv::unreported_session_cost(&*store, ws.key.as_str()),
+            0,
+            "the merged slice is marked reported, so the next PR starts at zero",
+        );
     }
 
     /// Issue #969: an armed, green PR that is stacked on a still-open
@@ -2620,8 +2680,9 @@ mod tests {
         fresh.review = ReviewStatus::ChangesRequested;
         let backend = FakeBackend {
             fetch: Ok(Some((fresh, Some("abc123".into())))),
-            merge_result: Ok(()),
+            merge_result: Ok(lazybox_core::TrailerOutcome::InCommit),
             merges: parking_lot::Mutex::new(Vec::new()),
+            trailers: parking_lot::Mutex::new(Vec::new()),
             paused_until: None,
             fetches: parking_lot::Mutex::new(0),
         };
@@ -2910,8 +2971,9 @@ mod tests {
         let config = config_with(&ws);
         let backend = FakeBackend {
             fetch: Err("rate limited".into()),
-            merge_result: Ok(()),
+            merge_result: Ok(lazybox_core::TrailerOutcome::InCommit),
             merges: parking_lot::Mutex::new(Vec::new()),
+            trailers: parking_lot::Mutex::new(Vec::new()),
             paused_until: None,
             fetches: parking_lot::Mutex::new(0),
         };

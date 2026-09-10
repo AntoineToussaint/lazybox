@@ -23,7 +23,7 @@
 //! `polling::upsert`.
 
 pub mod auto_merge;
-mod autofix;
+pub(crate) mod autofix;
 mod handlers;
 mod mutate;
 mod scheduler;

@@ -134,6 +134,7 @@ pub(crate) async fn store_blocking<T: Send + 'static>(
 
 pub mod metrics;
 pub mod polling;
+pub mod pr_trailers;
 pub mod proxy;
 pub mod pty;
 pub mod registries;

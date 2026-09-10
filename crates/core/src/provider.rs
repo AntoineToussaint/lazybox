@@ -23,7 +23,7 @@
 
 use std::future::Future;
 
-use crate::{Task, Workspace};
+use crate::{PrTrailers, Task, TrailerPolicy, Workspace};
 
 /// Default safety cap for provider cursor walks.
 pub const DEFAULT_MAX_PAGES: usize = 20;
@@ -422,6 +422,61 @@ impl std::fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
+/// Everything a merge needs beyond the workspace itself.
+#[derive(Debug, Clone, Default)]
+pub struct MergeOptions<'a> {
+    /// The head commit the caller verified as merge-ready. The backend
+    /// rejects the merge if the head has since moved (GitHub's
+    /// `expectedHeadOid` compare-and-swap), closing the force-push window
+    /// between "observed green" and "merged". `None` skips the guard;
+    /// providers without an equivalent concept ignore it.
+    pub expected_head_oid: Option<&'a str>,
+    /// What the work took, to be recorded in the merge commit. `None` when
+    /// nothing was measurable. Whether it is actually written is the
+    /// provider's call: only it knows the repository's visibility, which
+    /// [`trailer_policy`](Self::trailer_policy) gates on.
+    pub trailers: Option<PrTrailers>,
+    pub trailer_policy: TrailerPolicy,
+}
+
+impl<'a> MergeOptions<'a> {
+    /// A merge that records nothing — the shape every non-cost caller wants.
+    pub fn head(expected_head_oid: Option<&'a str>) -> Self {
+        Self {
+            expected_head_oid,
+            ..Default::default()
+        }
+    }
+}
+
+/// What became of the trailers a merge was asked to record.
+///
+/// A merge that lands while silently dropping the cost record reproduces the
+/// exact failure the trailers exist to fix — the number was measured and
+/// never reached GitHub. The provider does the writing, but only the server
+/// can tell the user, so the verdict travels back rather than ending in a log
+/// line.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum TrailerOutcome {
+    /// Nothing was measurable, or the repository's policy withheld it.
+    #[default]
+    Nothing,
+    /// Written into the merge commit body.
+    InCommit,
+    /// Recorded out of band, because this repo's merge method writes no
+    /// commit of its own to carry them.
+    InComment,
+    /// Measured and permitted, but lost. `reason` is user-facing.
+    Dropped { reason: String },
+}
+
+impl TrailerOutcome {
+    /// Did the record actually land somewhere durable?
+    pub fn is_recorded(&self) -> bool {
+        matches!(self, Self::InCommit | Self::InComment)
+    }
+}
+
 /// A source of tasks (PRs, issues, tickets) — and the place where
 /// the user's mutations (merge, request reviewers, …) land.
 ///
@@ -454,21 +509,15 @@ pub trait TaskProvider: Send + Sync {
     /// will check `workspace.pr` (or equivalent) is ready and
     /// dispatch to the backend's merge mutation.
     ///
-    /// `expected_head_oid` — when the caller knows which head commit it
-    /// verified as merge-ready — asks the backend to reject the merge
-    /// if the head has since moved (GitHub's `expectedHeadOid`
-    /// compare-and-swap). `None` skips the guard; providers without an
-    /// equivalent concept may ignore it.
-    ///
     /// Idempotency: if the task is already merged, return `Ok(())`
     /// rather than `Permanent` — the polling cycle will reconcile
     /// the local copy regardless.
     async fn merge(
         &self,
         workspace: &Workspace,
-        expected_head_oid: Option<&str>,
-    ) -> Result<(), ProviderError> {
-        let _ = (workspace, expected_head_oid);
+        options: &MergeOptions<'_>,
+    ) -> Result<TrailerOutcome, ProviderError> {
+        let _ = (workspace, options);
         Err(ProviderError::unsupported(self.name(), "merge"))
     }
 

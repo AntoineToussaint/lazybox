@@ -10299,7 +10299,14 @@ mod modal_input_responsiveness_tests {
             fable.excluded_from_default(),
             "a Fable-class tier is not default-eligible",
         );
-        for tier in &models.tiers {
+        assert!(
+            models
+                .tier("XL")
+                .expect("the built-in menu ships a Fable tier")
+                .excluded_from_default(),
+            "the built-in Fable tier is not default-eligible either",
+        );
+        for tier in models.tiers.iter().filter(|t| t.alias != "XL") {
             assert!(
                 !tier.excluded_from_default(),
                 "the standard {} tier stays default-eligible",

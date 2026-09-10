@@ -106,23 +106,44 @@ template, or existing terminal yourself.
 ## Let GitHub choose the model and effort
 
 A GitHub task can select its compute profile before an agent starts. Add a
-case-insensitive `high`, `medium`, or `low` label, or put `@high`, `@medium`,
-or `@low` in the task body:
+case-insensitive `model:<tier>` label, or put `@model:<tier>` in the task body.
+The token names a tier of the target agent's own menu, matched against its
+alias, its label, or the model id it pins — so all three of these select
+Claude's Opus tier:
 
-| GitHub priority | Intended tier |
+| Declaration | Matched on |
 | --- | --- |
-| `high` / `@high` | strongest or deepest configured tier |
-| `medium` / `@medium` | balanced configured tier |
-| `low` / `@low` | fastest or cheapest configured tier |
+| `model:l` | the tier alias |
+| `model:opus` | the tier label |
+| `model:claude-opus-5` | the model id the tier pins |
 
-This is agent routing, not merely inbox sorting. At spawn time, lazybox maps
-the task priority through the target agent's `models.priority` table, then
-appends that tier's `args` to the agent command. Those arguments can choose
-both a concrete model and its reasoning effort.
+Claude's built-in menu ships four tiers: `S` Haiku, `M` Sonnet, `L` Opus
+(the default), and `XL` Fable — the strongest model, reachable only when a task
+asks for it by name. Create the labels with descriptions that say what they
+do, not how urgent the work is:
 
-Claude ships a built-in mapping: `low` → Haiku (`S`), `medium` → Sonnet (`M`),
-and `high` → Opus (`L`). Other agents can define their own meanings for the
-same three priorities:
+```bash
+repo=owner/name
+gh label create model:s  --repo "$repo" --color 0E8A16 \
+  --description "Agent runs on the small/fastest tier (Claude: Haiku). Model choice only — not priority."
+gh label create model:m  --repo "$repo" --color 1D76DB \
+  --description "Agent runs on the balanced tier (Claude: Sonnet). Model choice only — not priority."
+gh label create model:l  --repo "$repo" --color 5319E7 \
+  --description "Agent runs on the strong tier (Claude: Opus). Model choice only — not priority."
+gh label create model:xl --repo "$repo" --color B60205 \
+  --description "Agent runs on the strongest tier (Claude: Fable). Model choice only — not priority."
+```
+
+This is agent routing, not inbox sorting: the label picks the engine, never
+the order work is picked up in, and nothing about it starts an agent. Keep
+`critical` / `now` / `high` for ordering, and let `model:*` carry capability —
+an urgent typo fix should not burn the strongest model, and a gnarly
+non-urgent refactor should.
+
+At spawn time lazybox resolves the declaration to a tier and appends that
+tier's `args` to the agent command. Those arguments can choose both a concrete
+model and its reasoning effort. Every agent defines its own menu, so the same
+`model:l` label routes to whatever that agent calls its strong tier:
 
 ```yaml
 agents:
@@ -139,44 +160,89 @@ agents:
         - alias: L
           label: Deep / high effort
           args: ["-m", "your-strong-model", "-c", 'model_reasoning_effort="high"']
-      priority:
-        low: S
-        medium: M
-        high: L
 ```
 
 Replace the example model ids and flags with values supported by your agent
 CLI. The labels become `◆ Fast / low effort`-style terminal badges.
 
-Priority is resolved only when a terminal is spawned. If `w w` injects into an
-already-running agent, that session keeps its current model. A priority label
-wins over a body marker; if several labels or several markers are present, the
-strongest one wins.
+The model is resolved only when a terminal is spawned. If `w w` injects into an
+already-running agent, that session keeps its current model.
 
-### Override the priority in the TUI
+Resolution rules, in order:
+
+- **A label wins over a body marker**, and a `model:` declaration wins over a
+  legacy key from the same source — so a repo can migrate label by label.
+- **A token no tier defines is skipped, not fatal.** If a task carries
+  `model:v2` (a repo that versions its own ML models, say) alongside `high`,
+  the unresolvable token falls through and `high` still routes. Only when
+  nothing the task declares names a tier does the spawn keep the agent's
+  default.
+- **Two labels that name different tiers select nothing.** GitHub does not
+  promise an order for a task's labels, so `model:s` plus `model:xl` would
+  otherwise make the model a coin flip between polls; lazybox falls back to the
+  default and logs the contradiction instead. Labels that name the *same* tier
+  by different spellings (`model:l` and `model:opus`) agree and are fine.
+- **An agent started by someone else reads labels only.** Attaching a label
+  needs write access to the repository; anyone can open an issue and write its
+  body. So when lazybox starts an agent on a trigger it did not get from you,
+  it ignores `@model:` and `@best` markers in the body and honors only the
+  task's labels — a drive-by issue cannot pick your most expensive tier on the
+  unattended path.
+
+### The deprecated `best` / `high` / `medium` / `low` keys
+
+The model axis was originally declared with an urgency word: a `best`,
+`high`, `medium`, or `low` label (or the matching `@` marker). Those
+names say *when* to do the work but decide *what runs it*, so they are
+deprecated in favour of `model:*` — a `high` label changes nothing about
+ordering or pickup, which is the opposite of what it reads like.
+
+They still work. Each routes through the target agent's `models.priority`
+table, which for Claude maps `best` → Fable (`XL`), `high` → Opus (`L`),
+`medium` → Sonnet (`M`), `low` → Haiku (`S`). A spawn that resolves through
+one logs a deprecation naming the `model:` label that replaces it. Other
+agents can remap them:
+
+```yaml
+agents:
+  codex:
+    models:
+      priority:
+        low: S
+        medium: M
+        high: L
+        best: L
+```
+
+A `model:*` declaration outranks a legacy one on the same task, so a repo can
+migrate label by label. If several legacy labels or markers are present, the
+strongest wins.
+
+### Override the model in the TUI
 
 Use `w S`, `w M`, or `w L` when you want to choose the tier directly. These
 chords build the same contextual brief and target the same running/default
-agent as `w w`, but the explicit tier wins over the GitHub priority for a new
-spawn. `a S` / `a M` / `a L` spawn the default agent at a tier without the
-contextual work brief.
+agent as `w w`, but the explicit tier wins over the task's declaration for a
+new spawn. `a S` / `a M` / `a L` spawn the default agent at a tier without the
+contextual work brief. Only single-character aliases get a chord, so Claude's
+`XL` (Fable) tier is reached by label, not by keystroke.
 
 ## Trigger the whole workflow from GitHub
 
-Put the priority marker and trigger in the issue body:
+Put the model marker and trigger in the issue body:
 
 ```text
-@high
+@model:l
 @lazybox codex
 ```
 
 When the next full GitHub sweep finds the trigger, lazybox authenticates it,
-opens the issue's workspace, chooses Codex's configured `high` tier, and starts
-the agent with the issue-implementation brief. Under normal polling, full sweeps
-run at daemon startup and roughly every ten minutes by default, so a new trigger
-can wait about ten minutes before it starts. The issue chooses the work, agent,
-model, and reasoning effort without opening the TUI. A `high` label plus a bare
-`@lazybox` trigger does the same with Claude.
+opens the issue's workspace, chooses Codex's `L` tier, and starts the agent
+with the issue-implementation brief. Under normal polling, full sweeps run at
+daemon startup and roughly every ten minutes by default, so a new trigger can
+wait about ten minutes before it starts. The issue chooses the work, agent,
+model, and reasoning effort without opening the TUI. A `model:l` label plus a
+bare `@lazybox` trigger does the same with Claude.
 
 See [Trigger agents with @lazybox mentions](/docs/how-to/lazybox-mentions/)
 for the allowlist and autonomous-permission settings.

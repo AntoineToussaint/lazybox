@@ -416,6 +416,12 @@ pub struct DesktopAgentInfo {
 pub struct DesktopModelTier {
     pub alias: String,
     pub label: String,
+    /// True for a creative-class tier (Fable) that must never be
+    /// reached implicitly — the TUI keeps these off bare spawns and off
+    /// the default-model picker, and gives them no chord. A client that
+    /// renders a tier list needs the same predicate, or it offers the
+    /// most expensive model in the menu as an ordinary one-tap row.
+    pub excluded_from_default: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1582,6 +1588,7 @@ fn desktop_spawnable_agents(config: &lazybox_config::Config) -> Vec<DesktopAgent
                     .map(|tier| DesktopModelTier {
                         alias: tier.alias.clone(),
                         label: tier.label.clone(),
+                        excluded_from_default: tier.excluded_from_default(),
                     })
                     .collect(),
                 default_tier: models.default,

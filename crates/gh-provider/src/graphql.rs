@@ -96,7 +96,7 @@ query($query: String!, $first: Int!, $after: String) {
             }
           }
         }
-        labels(first: 10) { nodes { name color } }
+        labels(first: 25) { nodes { name color } }
         assignees(first: 5) { nodes { login } }
         reviewRequests(first: 5) {
           nodes {
@@ -1977,7 +1977,7 @@ query($owner: String!, $name: String!, $number: Int!) {
           }
         }
       }
-      labels(first: 10) { nodes { name color } }
+      labels(first: 25) { nodes { name color } }
       assignees(first: 10) { nodes { login } }
       reviewRequests(first: 10) {
         nodes {
@@ -2121,7 +2121,7 @@ macro_rules! issue_task_fields {
       closedAt
       state
       author { login }
-      labels(first: 10) { nodes { name color } }
+      labels(first: 25) { nodes { name color } }
       assignees(first: 10) { nodes { login } }
       reactions(content: EYES) { viewerHasReacted }
       comments(first: 15) {
@@ -2244,7 +2244,7 @@ query($ids: [ID!]!) {
           }
         }
       }
-      labels(first: 10) { nodes { name color } }
+      labels(first: 25) { nodes { name color } }
       assignees(first: 10) { nodes { login } }
       reviewRequests(first: 10) {
         nodes {
@@ -4582,7 +4582,7 @@ mod tests {
             "author { login }",
             // Colour included: see `task_queries_select_the_label_colour`
             // for why `{ name }` alone is a silent data-loss bug.
-            "labels(first: 10) { nodes { name color } }",
+            "labels(first: 25) { nodes { name color } }",
             "assignees(first: 10)",
             "comments(first: 15)",
             "repository { nameWithOwner }",
@@ -5428,10 +5428,15 @@ mod tests {
     fn pr_query_connection_sizes_are_pinned_low() {
         // Sidebar-rendering fields stay in the inbox query but
         // shrunk so 100 PRs/page × N fields doesn't compound.
-        // First label / first few assignees / reviewers is all the
-        // sidebar renders.
+        // Labels are control plane, not decoration: the working claim
+        // (`working` + `lazybox:w:…`), `role:*`, the auto-fix opt-outs
+        // and the `model:<tier>` selector all ride them, and a task
+        // whose labels are truncated loses that state silently. The cap
+        // was sized when the sidebar's first label was all that
+        // mattered; it now has to clear a real triage set plus
+        // lazybox's own.
         assert!(
-            SEARCH_QUERY.contains("labels(first: 10)"),
+            SEARCH_QUERY.contains("labels(first: 25)"),
             "labels cap drifted",
         );
         assert!(

@@ -152,6 +152,7 @@ interface ActiveTerminal {
 interface DesktopModelTier {
   alias: string;
   label: string;
+  excluded_from_default: boolean;
 }
 
 interface DesktopAgentOption {
@@ -5388,9 +5389,10 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
             label: "Claude Code",
             available: true,
             models: [
-              { alias: "S", label: "Haiku" },
-              { alias: "M", label: "Sonnet" },
-              { alias: "L", label: "Opus" },
+              { alias: "S", label: "Haiku", excluded_from_default: false },
+              { alias: "M", label: "Sonnet", excluded_from_default: false },
+              { alias: "L", label: "Opus", excluded_from_default: false },
+              { alias: "XL", label: "Fable", excluded_from_default: true },
             ],
             default_tier: "L",
           },
@@ -5528,7 +5530,8 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
   function renderModelOptions(agentId: string): void {
     const agent = setupState?.agents.find((option) => option.id === agentId);
     const tiers = agent?.models ?? [];
-    defaultModelField.classList.toggle("hidden", tiers.length === 0);
+    const selectable = tiers.filter((tier) => !tier.excluded_from_default);
+    defaultModelField.classList.toggle("hidden", selectable.length === 0);
     defaultModelSelect.replaceChildren();
     // When the agent has no configured default tier, offer an explicit
     // "agent default" entry (empty value → saved as null) rather than
@@ -5540,7 +5543,12 @@ export function init(root: Document | HTMLElement = document): DesktopApp {
       none.textContent = "Agent default";
       defaultModelSelect.append(none);
     }
-    for (const tier of tiers) {
+    // A creative-class tier (Fable) can never *be* the default: the
+    // daemon re-points such a default at an eligible tier on load, so
+    // offering it here would save a setting that silently reverts. The
+    // TUI's picker filters on the same predicate; the tier stays
+    // spawnable from the per-tier Start menu.
+    for (const tier of selectable) {
       const option = document.createElement("option");
       option.value = tier.alias;
       option.textContent = tier.label;

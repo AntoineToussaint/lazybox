@@ -110,15 +110,23 @@
           "models": [
             {
               "alias": "S",
+              "excluded_from_default": false,
               "label": "Haiku"
             },
             {
               "alias": "M",
+              "excluded_from_default": false,
               "label": "Sonnet"
             },
             {
               "alias": "L",
+              "excluded_from_default": false,
               "label": "Opus"
+            },
+            {
+              "alias": "XL",
+              "excluded_from_default": true,
+              "label": "Fable"
             }
           ]
         },

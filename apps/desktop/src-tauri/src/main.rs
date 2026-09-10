@@ -1905,6 +1905,7 @@ fn detect_agent_options(config: &lazybox_config::Config) -> Vec<DesktopAgentOpti
                 .map(|tier| DesktopModelTier {
                     alias: tier.alias.clone(),
                     label: tier.label.clone(),
+                    excluded_from_default: tier.excluded_from_default(),
                 })
                 .collect();
             DesktopAgentOption {

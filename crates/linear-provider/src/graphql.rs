@@ -50,7 +50,7 @@ const ISSUE_NODE_FIELDS: &str = r#"
       creator { id name }
       team { key }
       parent { id identifier }
-      labels(first: 10) { nodes { name } }
+      labels(first: 25) { nodes { name } }
       attachments(first: 20) { nodes { url } }
       inverseRelations(first: 20) { nodes { type issue { id identifier } } }
       comments(first: 20, orderBy: createdAt) { nodes { id body createdAt user { id name } } }

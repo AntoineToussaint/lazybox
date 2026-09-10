@@ -1,9 +1,13 @@
 //! Model-**capability** tier a task declares, and the pure resolver that
 //! reads it off a [`Task`].
 //!
-//! A task can request a right-sized model by declaring a capability
-//! tier: a `best` / `high` / `medium` / `low` **label**, or an `@best` /
-//! `@high` / `@medium` / `@low` **marker** in its body. The autonomous
+//! A task names the model two ways. The explicit spelling is a
+//! **`model:<token>` label** (or an `@model:<token>` body marker) —
+//! `model:l` names a tier alias, `model:opus` a tier label,
+//! `model:claude-opus-5` the id a tier pins (#1600). The older spelling
+//! is a capability tier: a `best` / `high` / `medium` / `low` **label**,
+//! or an `@best` / `@high` / `@medium` / `@low` **marker** in its body,
+//! routed through the agent's `models.capability` map. The autonomous
 //! ("pilot") spawn paths and a bare interactive spawn resolve the tier
 //! here; the spawn path then maps it to one of the target agent's
 //! model-tier aliases
@@ -45,6 +49,10 @@ impl CapabilityTier {
     /// `Best` (the stronger wins).
     const ORDER: [CapabilityTier; 4] = [Self::Best, Self::High, Self::Medium, Self::Low];
 
+    /// Every tier, strongest first — for callers that walk the whole
+    /// set rather than resolve one off a task.
+    pub const ALL: [CapabilityTier; 4] = Self::ORDER;
+
     /// Lowercase token this tier is declared with — the label name and
     /// the `@`-marker suffix (`best` / `high` / `medium` / `low`).
     pub fn as_str(self) -> &'static str {
@@ -57,26 +65,176 @@ impl CapabilityTier {
     }
 }
 
-/// Resolve the [`CapabilityTier`] a task declares, if any.
+/// Namespace prefix of an explicit model label (`model:opus`) and of
+/// the body marker that spells the same thing (`@model:opus`).
+const MODEL_PREFIX: &str = "model:";
+
+/// Which of a task's fields a resolve may read.
 ///
-/// Precedence:
-/// 1. A `best` / `high` / `medium` / `low` **label** (case-insensitive)
-///    wins over a body marker.
-/// 2. Otherwise a `@best` / `@high` / `@medium` / `@low` **marker** in
-///    the body, matched at a word boundary (so `@highest` / `email@high`
-///    don't count).
-///
-/// When a source declares more than one tier (two tier labels, or two
-/// markers), the stronger tier wins — `CapabilityTier::ORDER` is
-/// scanned strongest-first.
-///
-/// Returns `None` when nothing is declared; the caller falls back to
-/// the agent's configured default tier.
-pub fn resolve_capability_tier(task: &Task) -> Option<CapabilityTier> {
-    tier_from_labels(task).or_else(|| tier_from_body(task.body.as_deref().unwrap_or("")))
+/// Attaching a **label** needs write access to the repository;
+/// **anyone** can open an issue and write its body. So a spawn whose
+/// trigger came from a foreign actor reads labels only — otherwise a
+/// drive-by issue body could pick the most expensive tier on the
+/// autonomous path, the one path with no human at the keyboard (#1600).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclarationScope {
+    /// Labels and body.
+    All,
+    /// Labels only — the body is untrusted for this spawn.
+    LabelsOnly,
 }
 
-fn tier_from_labels(task: &Task) -> Option<CapabilityTier> {
+/// What a task declares about the model it wants.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelRequest {
+    /// A `model:<token>` label or `@model:<token>` marker. The token
+    /// names a tier of the target agent's own menu — see
+    /// [`AgentModels::tier_for_token`](crate::AgentModels::tier_for_token).
+    Tier(String),
+    /// A capability word, routed through the agent's `capability` map.
+    Capability(CapabilityTier),
+}
+
+impl ModelRequest {
+    /// The token as declared, for logs and notices.
+    pub fn token(&self) -> &str {
+        match self {
+            Self::Tier(token) => token,
+            Self::Capability(tier) => tier.as_str(),
+        }
+    }
+
+    /// True for the capability-word spelling, which names urgency but
+    /// selects a model — reported at spawn so the rename is
+    /// discoverable (#1600).
+    pub fn is_capability_word(&self) -> bool {
+        matches!(self, Self::Capability(_))
+    }
+}
+
+/// Every model declaration on `task`, grouped into **precedence ranks**
+/// and ordered highest rank first:
+///
+/// 1. `model:<token>` **labels**.
+/// 2. The strongest capability **label**.
+/// 3. `@model:<token>` **body markers**.
+/// 4. The strongest capability **marker**, matched at a word boundary
+///    (so `@highest` / `email@high` miss).
+///
+/// A label outranks a body marker, and within each source the explicit
+/// spelling outranks the capability word — a repo mid-migration carries
+/// both without the old word winning.
+///
+/// Ranks rather than a single winner because a declaration is only
+/// meaningful against an agent's menu, which this crate cannot see:
+/// picking one token here and handing back a dead end would let an
+/// unrelated `model:*` label (a repo that versions its own ML models,
+/// say, or a plain typo) *suppress* a `high` label that would have
+/// resolved, silently dropping the task to the agent's default. The
+/// menu walks the ranks and takes the first that resolves — see
+/// [`AgentModels::choose_model`](crate::AgentModels::choose_model).
+///
+/// Members of a rank are equally authoritative, so their order carries
+/// no meaning: the provider does not promise a stable label order, and
+/// `choose_model` refuses a rank whose members name different tiers
+/// rather than let that order decide which model runs.
+///
+/// Empty when the task declares nothing; the caller then falls back to
+/// the agent's configured default tier.
+pub fn resolve_model_requests(task: &Task, scope: DeclarationScope) -> Vec<Vec<ModelRequest>> {
+    let body = match scope {
+        DeclarationScope::All => task.body.as_deref().unwrap_or(""),
+        DeclarationScope::LabelsOnly => "",
+    };
+    [
+        model_from_labels(task),
+        capability_from_labels(task)
+            .map(ModelRequest::Capability)
+            .into_iter()
+            .collect(),
+        model_from_body(body),
+        capability_from_body(body)
+            .map(ModelRequest::Capability)
+            .into_iter()
+            .collect(),
+    ]
+    .into_iter()
+    .filter(|rank: &Vec<ModelRequest>| !rank.is_empty())
+    .collect()
+}
+
+/// The capability tier a task declares, if any — the `best` / `high` /
+/// `medium` / `low` word on its own, ignoring the explicit `model:`
+/// spelling that outranks it.
+///
+/// [`resolve_model_requests`] is what the spawn path uses; this stays
+/// as the narrow question "which capability word is on this task?",
+/// which is what the boundary tests below pin down.
+pub fn resolve_capability_tier(task: &Task) -> Option<CapabilityTier> {
+    capability_from_labels(task)
+        .or_else(|| capability_from_body(task.body.as_deref().unwrap_or("")))
+}
+
+/// Every `model:<token>` label, in the order the provider reported them
+/// — one precedence rank, so the order is not allowed to matter.
+fn model_from_labels(task: &Task) -> Vec<ModelRequest> {
+    task.labels
+        .iter()
+        .filter_map(|label| {
+            let name = label.name.trim();
+            let prefix = name.get(..MODEL_PREFIX.len())?;
+            if !prefix.eq_ignore_ascii_case(MODEL_PREFIX) {
+                return None;
+            }
+            let token = name[MODEL_PREFIX.len()..].trim();
+            (!token.is_empty()).then(|| ModelRequest::Tier(token.to_string()))
+        })
+        .collect()
+}
+
+/// Every `@model:<token>` marker in `body`, with the same pre-boundary
+/// rule as [`contains_at_marker`] (the `@` must not be glued to a
+/// preceding login char, so `me@model:l` is an address, not a marker).
+///
+/// The token runs to the first char that can't appear in a tier alias,
+/// label word or model id — ids carry `-` and `.`
+/// (`claude-haiku-4-5`), so a trailing `.` is shed as sentence
+/// punctuation rather than read as part of the id.
+fn model_from_body(body: &str) -> Vec<ModelRequest> {
+    let mut found = Vec::new();
+    let bytes = body.as_bytes();
+    let needle = format!("@{MODEL_PREFIX}");
+    let n = needle.len();
+    if bytes.len() < n {
+        return found;
+    }
+    for i in 0..=bytes.len() - n {
+        if !bytes[i..i + n]
+            .iter()
+            .zip(needle.as_bytes())
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        {
+            continue;
+        }
+        if i > 0 {
+            let prev = bytes[i - 1];
+            if is_login_char(prev) || prev == b'@' {
+                continue;
+            }
+        }
+        let token: String = body[i + n..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            .collect();
+        let token = token.trim_end_matches('.');
+        if !token.is_empty() {
+            found.push(ModelRequest::Tier(token.to_string()));
+        }
+    }
+    found
+}
+
+fn capability_from_labels(task: &Task) -> Option<CapabilityTier> {
     CapabilityTier::ORDER.into_iter().find(|tier| {
         task.labels
             .iter()
@@ -84,7 +242,7 @@ fn tier_from_labels(task: &Task) -> Option<CapabilityTier> {
     })
 }
 
-fn tier_from_body(body: &str) -> Option<CapabilityTier> {
+fn capability_from_body(body: &str) -> Option<CapabilityTier> {
     CapabilityTier::ORDER
         .into_iter()
         .find(|tier| contains_at_marker(body, tier.as_str()))

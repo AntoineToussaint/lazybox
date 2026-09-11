@@ -137,10 +137,10 @@ pub const CLAUDE_BLOCKING_INTERSTITIAL_PHRASES: &[&str] = &[
 /// produces constantly ("I answered `Yes, I trust this folder`"), and the file
 /// this very table lives in contains them. A match is only a live gate when
 /// the gate's own option chrome is on screen too; that pairing is
-/// [`trust_gate_pos`], which is what the classifier consumes.
+/// `trust_gate_pos`, which is what the classifier consumes.
 ///
 /// Matched space-free like every other phrase table, and — via
-/// [`trust_gate_pos`] — newline-free as well, so a narrow pane that wraps the
+/// `trust_gate_pos` — newline-free as well, so a narrow pane that wraps the
 /// long question mid-phrase does not hide the gate. The readiness veto in
 /// [`claude_ready_for_prompt`] matches them directly (spaces only) because
 /// there the conservative direction is to veto, not to classify.
@@ -161,8 +161,7 @@ pub const CLAUDE_TRUST_GATE_PHRASES: &[&str] = &[
 /// its default selection is `No, exit` — a nudge that misread the arrow
 /// position would EXIT the agent instead of trusting the folder. It stays
 /// unanswered-but-visible (`InputNeeded`) rather than answered wrongly.
-pub const CLAUDE_TRUST_GATE_NUMBERED_PHRASES: &[&str] =
-    &["do you trust the files in this folder"];
+pub const CLAUDE_TRUST_GATE_NUMBERED_PHRASES: &[&str] = &["do you trust the files in this folder"];
 
 /// Phrases Claude Code renders ONLY when it has hit its provider usage /
 /// monthly / weekly limit and paused on the "limit reached — Wait?" prompt
@@ -1214,7 +1213,9 @@ fn trust_gate_pos(compact: &str) -> Option<usize> {
     // Chrome first: two `rfind`s over tokens that essentially never occur in
     // ordinary agent output, so the common chunk pays only those and skips
     // the phrase scan entirely.
-    let chrome = compact.rfind("no,exit").max(compact.rfind("entertoconfirm"))?;
+    let chrome = compact
+        .rfind("no,exit")
+        .max(compact.rfind("entertoconfirm"))?;
     // The phrase is matched against a NEWLINE-STRIPPED copy, and only as a
     // presence test — `chrome` is the recency anchor. `compact_lower` removes
     // spaces but keeps newlines, so a pane narrow enough to wrap the long
@@ -1222,7 +1223,10 @@ fn trust_gate_pos(compact: &str) -> Option<usize> {
     // match and the gate read as `Idle` again — the original freeze, surviving
     // in exactly the split panes `]]v` exists to create. Recency is unaffected
     // because the gate paints its chrome below its question.
-    let flat: String = compact.chars().filter(|c| *c != '\n' && *c != '\r').collect();
+    let flat: String = compact
+        .chars()
+        .filter(|c| *c != '\n' && *c != '\r')
+        .collect();
     last_compact_match_pos(&flat, CLAUDE_TRUST_GATE_PHRASES)?;
     Some(chrome)
 }
@@ -3429,7 +3433,10 @@ mod tests {
             "  folder\n",
             "Enter to confirm · Esc to cancel\n",
         );
-        assert_eq!(claude_state(narrow.as_bytes()), Some(AgentState::InputNeeded));
+        assert_eq!(
+            claude_state(narrow.as_bytes()),
+            Some(AgentState::InputNeeded)
+        );
 
         // The chrome alone is not a trust gate — some other modal's decline
         // label must not conjure one out of nothing.

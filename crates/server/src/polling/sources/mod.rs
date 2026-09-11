@@ -40,11 +40,10 @@ fn full_sweep_commit(
 
 fn full_sweep_admitted(
     will_full_sweep: bool,
-    manual_refresh: bool,
     governor_plan: &lazybox_gh::BackgroundPlan,
     required_points: u32,
 ) -> bool {
-    will_full_sweep && governor_plan.admits_complete_graphql_unit(manual_refresh, required_points)
+    will_full_sweep && governor_plan.admits_complete_graphql_unit(required_points)
 }
 
 /// Consecutive due-but-deferred full-sweep ticks before the daemon raises
@@ -67,8 +66,8 @@ pub(super) enum DeferralSignal {
     /// rising edge it already missed. The client dedupes the attention
     /// flash to the moment it first sees the level.
     Behind,
-    /// A previously-asserted stall recovered (sweep admitted, no longer
-    /// due, or a manual refresh): retract the indicator. Emitted once, on
+    /// A previously-asserted stall recovered (sweep admitted or no longer
+    /// due): retract the indicator. Emitted once, on
     /// the falling edge.
     Recovered,
 }
@@ -82,16 +81,15 @@ pub(super) enum DeferralSignal {
 /// once the streak crosses [`DISCOVERY_BEHIND_TICKS`], so late-subscribing
 /// clients converge on the state rather than missing a one-shot edge.
 /// [`DeferralSignal::Recovered`] is the single falling edge when a
-/// previously-asserted stall clears (admitted, not due, or manual refresh),
+/// previously-asserted stall clears (admitted or not due),
 /// re-arming for a later re-stall.
 fn note_full_sweep_deferral(
     streak: &mut u32,
     notified: &mut bool,
     sweep_due: bool,
     admitted: bool,
-    manual_refresh: bool,
 ) -> DeferralSignal {
-    if !sweep_due || admitted || manual_refresh {
+    if !sweep_due || admitted {
         *streak = 0;
         if *notified {
             *notified = false;
@@ -134,7 +132,7 @@ fn schedule_github_tick(
         max_repos,
         now,
     );
-    if manual_refresh {
+    if manual_refresh && full_sweep_admitted {
         scheduling.run_global = true;
     }
     scheduling
@@ -167,6 +165,18 @@ mod schedule_github_tick_tests {
         ));
 
         let max_repos = 3; // governor-shaped cap
+        let mut deferred_state = crate::polling::scheduler::RoundRobinState::default();
+        for repo in &sessioned {
+            deferred_state.record_sync(repo, now);
+        }
+        deferred_state.tick = 1;
+        let deferred =
+            schedule_github_tick(&mut deferred_state, &sessioned, true, false, max_repos, now);
+        // The scheduler uses run_global=true as the empty-pick sentinel
+        // on non-sweep ticks. The fetch plan, not that sentinel, decides
+        // whether any full-sweep request runs.
+        assert!(deferred.repos.is_empty());
+        assert!(!matches!(gh_fetch_plan(false, true), GhFetchPlan::Full));
         let scheduling = schedule_github_tick(&mut state, &sessioned, true, true, max_repos, now);
         assert!(
             scheduling.run_global,
@@ -216,6 +226,21 @@ mod full_sweep_commit_tests {
     }
 
     #[test]
+    fn manual_refresh_waits_for_a_complete_sweep_allowance() {
+        let mut plan = lazybox_gh::BackgroundPlan {
+            graphql_points: 30,
+            rest_core_points: 1,
+            graphql_budget_current: true,
+            pressure: false,
+            next_eligible_at: None,
+            tick_interval: Duration::from_secs(60),
+        };
+        assert!(!full_sweep_admitted(true, &plan, 40));
+        plan.graphql_points = 40;
+        assert!(full_sweep_admitted(true, &plan, 40));
+    }
+
+    #[test]
     fn an_unknown_graphql_budget_only_admits_the_bootstrap_request() {
         let plan = lazybox_gh::BackgroundPlan {
             graphql_points: 4,
@@ -225,8 +250,7 @@ mod full_sweep_commit_tests {
             next_eligible_at: None,
             tick_interval: Duration::from_secs(60),
         };
-        assert!(!full_sweep_admitted(true, false, &plan, 3));
-        assert!(full_sweep_admitted(true, true, &plan, 3));
+        assert!(!full_sweep_admitted(true, &plan, 3));
     }
 }
 
@@ -260,11 +284,10 @@ mod discovery_behind_tests {
     fn run(
         sweep_due: bool,
         admitted: bool,
-        manual: bool,
         streak: &mut u32,
         notified: &mut bool,
     ) -> DeferralSignal {
-        note_full_sweep_deferral(streak, notified, sweep_due, admitted, manual)
+        note_full_sweep_deferral(streak, notified, sweep_due, admitted)
     }
 
     #[test]
@@ -274,7 +297,7 @@ mod discovery_behind_tests {
         // threshold.
         for tick in 1..DISCOVERY_BEHIND_TICKS {
             assert_eq!(
-                run(true, false, false, &mut streak, &mut notified),
+                run(true, false, &mut streak, &mut notified),
                 DeferralSignal::None,
                 "tick {tick} is still within the quiet window"
             );
@@ -285,7 +308,7 @@ mod discovery_behind_tests {
         // Recovered is emitted while still deferred.
         for tick in 0..3 {
             assert_eq!(
-                run(true, false, false, &mut streak, &mut notified),
+                run(true, false, &mut streak, &mut notified),
                 DeferralSignal::Behind,
                 "deferred tick {tick} past threshold re-asserts the level"
             );
@@ -296,7 +319,7 @@ mod discovery_behind_tests {
     fn a_single_deferred_tick_stays_quiet() {
         let (mut streak, mut notified) = (0, false);
         assert_eq!(
-            run(true, false, false, &mut streak, &mut notified),
+            run(true, false, &mut streak, &mut notified),
             DeferralSignal::None
         );
         assert_eq!(streak, 1);
@@ -306,31 +329,31 @@ mod discovery_behind_tests {
     fn admission_after_behind_emits_exactly_one_recovered() {
         let (mut streak, mut notified) = (0, false);
         for _ in 0..DISCOVERY_BEHIND_TICKS {
-            run(true, false, false, &mut streak, &mut notified);
+            run(true, false, &mut streak, &mut notified);
         }
         assert!(notified);
         // The sweep finally lands → one Recovered edge, streak reset, latch re-armed.
         assert_eq!(
-            run(true, true, false, &mut streak, &mut notified),
+            run(true, true, &mut streak, &mut notified),
             DeferralSignal::Recovered
         );
         assert_eq!(streak, 0);
         assert!(!notified);
         // A second admitted tick is a no-op — Recovered fires ONCE, not every tick.
         assert_eq!(
-            run(true, true, false, &mut streak, &mut notified),
+            run(true, true, &mut streak, &mut notified),
             DeferralSignal::None
         );
         // A later re-stall asserts Behind again at the threshold.
         for tick in 1..DISCOVERY_BEHIND_TICKS {
             assert_eq!(
-                run(true, false, false, &mut streak, &mut notified),
+                run(true, false, &mut streak, &mut notified),
                 DeferralSignal::None,
                 "re-stall tick {tick}"
             );
         }
         assert_eq!(
-            run(true, false, false, &mut streak, &mut notified),
+            run(true, false, &mut streak, &mut notified),
             DeferralSignal::Behind
         );
     }
@@ -342,11 +365,11 @@ mod discovery_behind_tests {
         // admitted: resetting an un-asserted streak must NOT emit a
         // spurious Recovered.
         assert_eq!(
-            run(true, false, false, &mut streak, &mut notified),
+            run(true, false, &mut streak, &mut notified),
             DeferralSignal::None
         );
         assert_eq!(
-            run(true, true, false, &mut streak, &mut notified),
+            run(true, true, &mut streak, &mut notified),
             DeferralSignal::None
         );
     }
@@ -358,7 +381,7 @@ mod discovery_behind_tests {
         // must not accumulate toward the advisory.
         for _ in 0..10 {
             assert_eq!(
-                run(false, false, false, &mut streak, &mut notified),
+                run(false, false, &mut streak, &mut notified),
                 DeferralSignal::None
             );
         }
@@ -366,17 +389,16 @@ mod discovery_behind_tests {
     }
 
     #[test]
-    fn manual_refresh_is_never_a_deferral() {
+    fn manual_refresh_does_not_hide_a_deferred_sweep() {
         let (mut streak, mut notified) = (0, false);
-        // A manual Shift-R always admits, so it can't be the thing that's
-        // behind — and it resets an accumulating streak.
-        run(true, false, false, &mut streak, &mut notified);
+        // Requesting a refresh does not prove that it was admitted.
+        run(true, false, &mut streak, &mut notified);
         assert_eq!(streak, 1);
         assert_eq!(
-            run(true, false, true, &mut streak, &mut notified),
+            run(true, false, &mut streak, &mut notified),
             DeferralSignal::None
         );
-        assert_eq!(streak, 0);
+        assert_eq!(streak, 2);
     }
 }
 
@@ -2207,11 +2229,7 @@ impl TaskSource for GhSource {
         Box::pin(async move {
             let result = async {
                 self.set_retry_after_secs(None);
-                let manual_refresh = self.client.manual_refresh_pending();
-                if self.client.should_full_sweep()
-                    && !manual_refresh
-                    && !self.governor_plan.graphql_budget_current
-                {
+                if self.client.should_full_sweep() && !self.governor_plan.graphql_budget_current {
                     self.emit_progress("Learning the current GitHub GraphQL budget…");
                     self.client
                         .bootstrap_graphql_budget()
@@ -2223,7 +2241,6 @@ impl TaskSource for GhSource {
                 let required_sweep_points = self.required_sweep_points();
                 let full_sweep_admitted = full_sweep_admitted(
                     self.client.should_full_sweep(),
-                    manual_refresh,
                     &self.governor_plan,
                     required_sweep_points,
                 );
@@ -4396,12 +4413,8 @@ async fn push_github_source(
         global_due,
         DEFAULT_ROUND_ROBIN_N,
     );
-    let full_sweep_admitted = full_sweep_admitted(
-        will_full_sweep,
-        manual_refresh,
-        &governor_plan,
-        required_sweep_points,
-    );
+    let full_sweep_admitted =
+        full_sweep_admitted(will_full_sweep, &governor_plan, required_sweep_points);
     // Make a persistent full-sweep deferral visible where the user is
     // looking (#1391). A due sweep the governor can't admit for several
     // ticks running means new-issue/PR reconcile discovery has silently
@@ -4420,7 +4433,6 @@ async fn push_github_source(
         &mut state.discovery_behind_notified,
         sweep_deferrable,
         full_sweep_admitted,
-        manual_refresh,
     ) {
         // A DEDICATED standing signal, not a `ProviderError`: the client
         // holds it as a persistent, self-retracting indicator (so it can't

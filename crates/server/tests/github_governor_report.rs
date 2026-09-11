@@ -122,7 +122,7 @@ fn governed(changed_targets: u32, external_pressure: bool) -> HourReplay {
             lazybox_server::polling::DEFAULT_ROUND_ROBIN_N,
         );
         let required = forecast.required_points(global_due, true);
-        let admitted = sweep_due && plan.admits_complete_graphql_unit(false, required);
+        let admitted = sweep_due && plan.admits_complete_graphql_unit(required);
         let max_repos = forecast.repo_capacity(
             plan.graphql_points,
             global_due,

@@ -3,7 +3,7 @@
 lazybox uses one governor for scheduled GitHub reads, interactive
 provider actions, and retries. Its default policy permits background
 work to use at most 55% of each observed primary resource budget. The
-remaining 45% is reserved for `gh`, spawned agents, explicit refreshes,
+remaining 45% is reserved for merge/reply actions, `gh`, spawned agents,
 and unexpected bursts.
 
 Configure the background share only when the default is inappropriate:
@@ -14,10 +14,14 @@ providers:
     background_budget_share: 0.55
 ```
 
-Finite values are clamped to 5–90%. A manual `Shift-R` is interactive:
-it can preempt scheduled work while still respecting GitHub's hard
-primary limit, the shared secondary-limit circuit, and the local
-concurrency cap.
+Finite values are clamped to 5–90%. A manual `Shift-R` requests a full
+sweep with an allowance drawn from the remaining non-reserved window,
+rather than a single tick’s grant. The scheduler checks that allowance
+before starting; every page still respects pacing and the action reserve.
+Targeted interactive requests and mutations can use that reserve, including
+the last 100 emergency points,
+provided their forecast fits the remaining quota. Actual primary
+exhaustion still blocks requests until reset.
 
 ## Admission and accounting
 
@@ -29,7 +33,7 @@ observed budget.
 GitHub's secondary (abuse) limit keys on burst rate and concurrency
 rather than the primary budget, so a sweep with plenty of primary
 headroom can still trip it. Beyond the concurrency gate, request
-*starts* are spaced by a minimum gap (200 ms baseline) so a sweep
+*starts* are spaced by a minimum gap (500 ms baseline) so a sweep
 cannot fire its whole allowance at once. The gap adapts: it widens
 while a secondary limit is recent, and widens with the measured
 external burn on the shared token so the daemon leaves inter-request

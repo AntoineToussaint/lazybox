@@ -15069,6 +15069,40 @@ mod merge_focus_follow_tests {
         ws
     }
 
+    #[test]
+    fn draft_merge_confirmation_names_ready_transition_and_cancel_sends_nothing() {
+        use lazybox_tui_core::action::Action;
+        let mut m = build_model();
+        let mut ws = workspace("owner/repo#1", true, Duration::hours(1));
+        ws.pr.as_mut().unwrap().state = lazybox_core::TaskState::Draft;
+        let key = SessionKey::from(&ws.key);
+        m.handle_daemon_event(IpcEvent::WorkspaceUpserted(std::sync::Arc::new(ws)));
+        assert!(m.sidebar.focus_workspace_key(&key));
+        let prompt = m
+            .action_confirm_override(&Action::MergePr, None)
+            .expect("draft override");
+        assert!(prompt.contains("ready for review") && prompt.contains("merge"));
+        let bulk = m.bulk_confirm_prompt(&Action::MergePr, &[ActionConfirmTarget::Workspace(key)]);
+        assert!(bulk.contains("1 draft PR will be marked ready"));
+        assert!(m.dispatch_action(&Action::MergePr).is_empty());
+        assert!(m.handle_confirmed(false).is_empty());
+        assert!(m.dispatch_action(&Action::MergePr).is_empty());
+        let commands = m.handle_confirmed(true);
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|c| matches!(c, IpcCommand::MergePr { .. }))
+                .count(),
+            1
+        );
+        assert!(
+            !commands
+                .iter()
+                .any(|c| matches!(c, IpcCommand::MarkPrReady { .. })),
+            "the daemon sequences ready and merge; the UI must not race two commands"
+        );
+    }
+
     /// Issue #969: `g m` on a PR stacked on a still-open parent warns
     /// that merging lands the stack out of order, naming the parent — so
     /// the user restacks the children instead of discovering the retarget

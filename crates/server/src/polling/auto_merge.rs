@@ -720,6 +720,7 @@ pub async fn run_attempt<B: MergeBackend>(
     // nowhere anyone will look.
     let trailers = crate::pr_trailers::measure(config, &probe, chrono::Utc::now()).await;
     let merge_options = lazybox_core::MergeOptions {
+        progress: Default::default(),
         expected_head_oid: head.as_deref(),
         trailers: Some(trailers.clone()),
         trailer_policy: lazybox_config::Config::load()
@@ -758,7 +759,13 @@ pub async fn run_attempt<B: MergeBackend>(
         }
         Ok(lazybox_core::MergeOutcome::Merged(outcome)) => {
             tracing::info!(workspace = %key, "auto-merged PR (merge-on-green)");
-            crate::pr_trailers::mark_reported(config, key, &trailers).await;
+            crate::pr_trailers::mark_merge_reported(
+                config,
+                key,
+                &trailers,
+                &merge_options.progress,
+            )
+            .await;
             // Nobody is watching this flow, so a lost cost record has to
             // announce itself or it is lost silently and for good.
             if let lazybox_core::TrailerOutcome::Dropped { reason } = outcome {

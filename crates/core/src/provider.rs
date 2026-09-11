@@ -422,9 +422,58 @@ impl std::fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
+/// Confirmed prerequisites of one logical merge, shared by all its retries.
+/// This is operation-local progress, never a substitute for GitHub's checks.
+#[derive(Debug, Clone, Default)]
+pub struct MergeProgress {
+    ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    reconciled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl MergeProgress {
+    pub fn mark_ready(&self) {
+        self.ready.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn was_marked_ready(&self) -> bool {
+        self.ready.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The final state was observed, but this operation did not confirm
+    /// delivery of its trailers. Callers must retain the unreported costs.
+    pub fn mark_reconciled(&self) {
+        self.reconciled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn was_reconciled(&self) -> bool {
+        self.reconciled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod merge_progress_tests {
+    #[test]
+    fn confirmed_readiness_survives_retry_clones_but_not_new_operations() {
+        let progress = super::MergeProgress::default();
+        let retry = progress.clone();
+        assert!(!retry.was_marked_ready());
+        progress.mark_ready();
+        assert!(retry.was_marked_ready());
+        assert!(!retry.was_reconciled());
+        progress.mark_reconciled();
+        assert!(retry.was_reconciled());
+        assert!(!super::MergeProgress::default().was_marked_ready());
+        assert!(!super::MergeProgress::default().was_reconciled());
+    }
+}
+
 /// Everything a merge needs beyond the workspace itself.
 #[derive(Debug, Clone, Default)]
 pub struct MergeOptions<'a> {
+    /// Preserve successful prerequisites even when a later stage fails.
+    /// Callers publish this progress before retrying or reporting failure.
+    pub progress: MergeProgress,
     /// The head commit the caller verified as merge-ready. The backend
     /// rejects the merge if the head has since moved (GitHub's
     /// `expectedHeadOid` compare-and-swap), closing the force-push window

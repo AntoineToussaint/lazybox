@@ -5,8 +5,8 @@
 //! both APIs. `RateBudget` models those facts in one lock shared by all
 //! `GhClient` clones. Scheduled work receives a sustainable per-tick
 //! allowance that protects a configurable reserve; interactive work is
-//! admitted against GitHub's real remaining capacity and the emergency
-//! floor only.
+//! admitted against GitHub's real remaining capacity, including the
+//! emergency buffer protected from scheduled work.
 
 use chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -42,7 +42,7 @@ const LATENCY_SAMPLE_CAPACITY: usize = 1024;
 /// its whole allowance back-to-back trips it with thousands of primary
 /// points still unspent. The concurrency gate bounds in-flight
 /// requests; this bounds how fast new ones may launch.
-pub(crate) const DEFAULT_MIN_REQUEST_GAP: Duration = Duration::from_millis(200);
+pub(crate) const DEFAULT_MIN_REQUEST_GAP: Duration = Duration::from_millis(500);
 /// Ceiling on the adaptive gap so a hot token never stalls a request
 /// for longer than the poll cadence would tolerate.
 const MAX_REQUEST_GAP: Duration = Duration::from_secs(5);
@@ -381,8 +381,8 @@ pub struct BackgroundPlan {
 }
 
 impl BackgroundPlan {
-    pub fn admits_complete_graphql_unit(&self, manual: bool, required_points: u32) -> bool {
-        manual || (self.graphql_budget_current && self.graphql_points >= required_points)
+    pub fn admits_complete_graphql_unit(&self, required_points: u32) -> bool {
+        self.graphql_budget_current && self.graphql_points >= required_points
     }
 }
 
@@ -741,6 +741,38 @@ impl RateBudget {
         }
     }
 
+    /// A requested reconcile may spend the available background window, not
+    /// just one tick's sustainable grant. Reserve and pacing still apply to
+    /// every page. Charge actual spending normally so subsequent ticks yield.
+    pub(crate) fn begin_full_refresh_tick(
+        &mut self,
+        interval: Duration,
+        wall_now: DateTime<Utc>,
+        mono_now: Instant,
+    ) -> BackgroundPlan {
+        let mut plan = self.begin_background_tick(interval, wall_now, mono_now);
+        for resource in ["graphql", "core"] {
+            let Some(state) = self
+                .resources
+                .get(resource)
+                .filter(|s| s.reset_at > wall_now)
+            else {
+                // Preserve bootstrap admission until the resource is known.
+                continue;
+            };
+            let allowance = state
+                .remaining
+                .saturating_sub(reserve_for(state.limit, self.background_share));
+            self.tick_allowance.insert(resource.into(), allowance);
+            if resource == "graphql" {
+                plan.graphql_points = allowance;
+            } else {
+                plan.rest_core_points = allowance;
+            }
+        }
+        plan
+    }
+
     /// Compatibility helper for callers that only need the local/global
     /// admission result and do not participate in a background plan.
     pub fn try_acquire(&mut self) -> Result<(), AcquireError> {
@@ -831,7 +863,11 @@ impl RateBudget {
             && state.reset_at > wall_now
         {
             let emergency_floor = LOW_THRESHOLD.min(state.limit.div_ceil(50).max(1));
-            if state.remaining <= emergency_floor || state.remaining < forecast {
+            // The emergency buffer exists to serve user actions. Blocking
+            // those too stranded merges with 70 usable points until reset.
+            if (priority.is_scheduled() && state.remaining <= emergency_floor)
+                || state.remaining < forecast
+            {
                 return Err(AcquireError::RemoteLow {
                     remaining: state.remaining,
                     reset_at: state.reset_at,
@@ -1668,18 +1704,158 @@ mod tests {
     }
 
     #[test]
-    fn low_remote_blocks_even_with_local_tokens() {
+    fn exhausted_remote_blocks_even_with_local_tokens() {
         let mut budget = RateBudget::new(100, 60.0);
         budget.observe(remote(
             5000,
-            5,
+            0,
             Instant::now(),
             Utc::now() + chrono::Duration::seconds(60),
         ));
         assert!(matches!(
             budget.try_acquire(),
-            Err(AcquireError::RemoteLow { remaining: 5, .. })
+            Err(AcquireError::CircuitOpen { reason, .. })
+                if reason == "graphql primary budget exhausted"
         ));
+    }
+
+    #[test]
+    fn full_refresh_finishes_beyond_tick_grant_without_spending_reserve() {
+        let mut budget = RateBudget::new(100, 60.0);
+        let wall = Utc::now();
+        let mono = Instant::now();
+        let reset = wall + chrono::Duration::hours(1);
+        budget.observe_primary("graphql", 5000, 2400, 2600, reset, mono);
+        let ordinary = budget.begin_background_tick(Duration::from_secs(60), wall, mono);
+        assert!(ordinary.graphql_points < 40);
+        let refresh = budget.begin_full_refresh_tick(Duration::from_secs(60), wall, mono);
+        assert!(refresh.admits_complete_graphql_unit(40));
+        for page in 0..4 {
+            budget
+                .admit_at(
+                    ApiResource::Graphql,
+                    "PR search",
+                    RequestPriority::Recent,
+                    10,
+                    wall,
+                    mono,
+                )
+                .expect("every page of the admitted sweep fits");
+            budget.observe_primary(
+                "graphql",
+                5000,
+                2400 - (page + 1) * 10,
+                2600 + (page + 1) * 10,
+                reset,
+                mono,
+            );
+        }
+        assert_eq!(budget.tick_scheduled["graphql"], 40);
+        budget.observe_primary("graphql", 5000, 2250, 2750, reset, mono);
+        assert!(matches!(
+            budget.admit_at(
+                ApiResource::Graphql,
+                "PR search",
+                RequestPriority::Recent,
+                1,
+                wall,
+                mono
+            ),
+            Err(AcquireError::ReserveProtected { .. })
+        ));
+        budget
+            .admit_at(
+                ApiResource::Graphql,
+                "merge",
+                RequestPriority::Interactive,
+                1,
+                wall,
+                mono,
+            )
+            .expect("refresh preserves the action reserve");
+        let next = budget.begin_background_tick(Duration::from_secs(60), wall, mono);
+        assert!(!next.admits_complete_graphql_unit(40));
+    }
+
+    #[test]
+    fn full_refresh_bootstraps_but_never_admits_an_unknown_or_oversized_sweep() {
+        let mut budget = RateBudget::new(100, 60.0);
+        let wall = Utc::now();
+        let mono = Instant::now();
+        let plan = budget.begin_full_refresh_tick(Duration::from_secs(60), wall, mono);
+        assert!(!plan.admits_complete_graphql_unit(1));
+        budget
+            .admit_at(
+                ApiResource::Graphql,
+                "budget-bootstrap",
+                RequestPriority::Recent,
+                1,
+                wall,
+                mono,
+            )
+            .expect("manual refresh can learn the budget");
+        budget.observe_primary(
+            "graphql",
+            5000,
+            2260,
+            2740,
+            wall + chrono::Duration::hours(1),
+            mono,
+        );
+        let plan = budget.begin_full_refresh_tick(Duration::from_secs(60), wall, mono);
+        assert!(plan.admits_complete_graphql_unit(10));
+        assert!(!plan.admits_complete_graphql_unit(11));
+    }
+
+    #[test]
+    fn emergency_buffer_serves_actions_but_blocks_sync() {
+        for resource in [ApiResource::Graphql, ApiResource::rest("core")] {
+            let mut budget = RateBudget::new(100, 60.0);
+            let wall = Utc::now();
+            let mono = Instant::now();
+            budget.observe_primary(
+                resource.key(),
+                5000,
+                70,
+                4930,
+                wall + chrono::Duration::minutes(10),
+                mono,
+            );
+            assert!(matches!(
+                budget.admit_at(
+                    resource.clone(),
+                    "sync",
+                    RequestPriority::Recent,
+                    1,
+                    wall,
+                    mono
+                ),
+                Err(AcquireError::RemoteLow { .. })
+            ));
+            for op in ["pre-merge", "merge-method", "merge"] {
+                budget
+                    .admit_at(
+                        resource.clone(),
+                        op,
+                        RequestPriority::Interactive,
+                        1,
+                        wall,
+                        mono,
+                    )
+                    .expect("action can spend emergency buffer");
+            }
+            assert!(matches!(
+                budget.admit_at(
+                    resource,
+                    "too-expensive",
+                    RequestPriority::Interactive,
+                    71,
+                    wall,
+                    mono
+                ),
+                Err(AcquireError::RemoteLow { .. })
+            ));
+        }
     }
 
     #[test]

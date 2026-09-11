@@ -68,6 +68,19 @@ pub async fn measure(
     }
 }
 
+/// A reconciled terminal state confirms the merge, not trailer delivery.
+/// Preserve the pending cost watermark when the write was never confirmed.
+pub(crate) async fn mark_merge_reported(
+    config: &ServerConfig,
+    key: &WorkspaceKey,
+    trailers: &PrTrailers,
+    progress: &lazybox_core::MergeProgress,
+) {
+    if !progress.was_reconciled() {
+        mark_reported(config, key, trailers).await;
+    }
+}
+
 /// Close this workspace's cost slice by exactly the figure `trailers`
 /// carried, so a later PR on the same workspace bills only what it spends
 /// itself.
@@ -341,6 +354,30 @@ mod tests {
             second.cost.and_then(|c| c.micros),
             Some(250_000),
             "the reused workspace bills only what it spent since the merge",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reconciled_merge_keeps_unwritten_costs_pending() {
+        let store: Arc<dyn Store> = Arc::new(MemoryStore::new());
+        store.set_kv("meter-cost:github:o/r#42", "900000").unwrap();
+        let config = config_with(store.clone());
+        let ws = workspace();
+        let trailers = measure(&config, &ws, at(600)).await;
+        let progress = lazybox_core::MergeProgress::default();
+        progress.mark_reconciled();
+        mark_merge_reported(&config, &ws.key, &trailers, &progress).await;
+        assert_eq!(
+            client_kv::unreported_session_cost(&*store, ws.key.as_str()),
+            900_000,
+            "observing MERGED must not claim the missing trailer was written"
+        );
+
+        // A normal confirmed merge still closes exactly its measured slice.
+        mark_merge_reported(&config, &ws.key, &trailers, &Default::default()).await;
+        assert_eq!(
+            client_kv::unreported_session_cost(&*store, ws.key.as_str()),
+            0
         );
     }
 

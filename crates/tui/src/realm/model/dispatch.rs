@@ -646,6 +646,26 @@ impl<T: TerminalAdapter> Model<T> {
                     })
                     .count();
                 let skipped = n - ready;
+                let drafts = targets
+                    .iter()
+                    .filter(|t| match t {
+                        ActionConfirmTarget::Workspace(k) => {
+                            self.sidebar.workspace_by_key(k).is_some_and(|w| {
+                                w.pr.as_ref()
+                                    .is_some_and(|pr| pr.state == lazybox_core::TaskState::Draft)
+                            })
+                        }
+                        ActionConfirmTarget::Project(_) => false,
+                    })
+                    .count();
+                let list = if drafts > 0 {
+                    let plural = if drafts == 1 { "" } else { "s" };
+                    format!(
+                        "{drafts} draft PR{plural} will be marked ready for review first. {list}"
+                    )
+                } else {
+                    list
+                };
                 if ready == 0 {
                     format!(
                         "None of the {n} selected PRs are merge-ready — merge anyway is a no-op. {list}"
@@ -1255,6 +1275,11 @@ impl<T: TerminalAdapter> Model<T> {
         // of a stack (no open parent) merges with the default prompt.
         if matches!(action, Action::MergePr) {
             let sk = target_ws_key.or_else(|| self.sidebar.selected_workspace_key())?;
+            let draft = self
+                .sidebar
+                .workspace_by_key(sk)
+                .and_then(|w| w.pr.as_ref())
+                .is_some_and(|pr| pr.state == lazybox_core::TaskState::Draft);
             if let Some(stack) = self.sidebar.stack_info(sk)
                 && let Some(parent) = stack.parent.as_ref().and_then(|p| p.number())
             {
@@ -1264,14 +1289,19 @@ impl<T: TerminalAdapter> Model<T> {
                     .and_then(|w| w.pr.as_ref())
                     .and_then(|pr| pr.id.number());
                 let this = this.map_or_else(|| "this PR".to_string(), |n| format!("#{n}"));
+                let ready = if draft {
+                    "Mark this draft ready for review first. "
+                } else {
+                    ""
+                };
                 return Some(format!(
-                    "{this} is stacked on #{parent}, which is still open. Merging it \
+                    "{ready}{this} is stacked on #{parent}, which is still open. Merging it \
                      first lands the stack out of order — GitHub will retarget the rest \
                      onto its base, so you'll need to restack (update branch) the \
                      children. Merge {this} anyway?"
                 ));
             }
-            return None;
+            return draft.then(|| "Mark this draft ready for review and merge? GitHub checks and review requirements still apply.".to_string());
         }
         // Delete/close names its exact target — the number + title of
         // the issue/PR the confirmed keypress destroys — so the modal

@@ -947,6 +947,12 @@ fn mutation_error_response(operation: &str, errors: &[graphql::GqlError]) -> GhE
     classified
 }
 
+fn queue_required_message(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("changes must be made through the merge queue")
+}
+
 /// Map a mutation's [`GhError`] to a [`ProviderError`] preserving the
 /// rate-limit classification: a secondary-rate-limited write becomes a
 /// `Retryable` carrying the reset hint (the daemon queues + retries it),
@@ -1427,6 +1433,12 @@ pub struct GhClient {
     /// requested id set each batch and cleared by `force_full_sweep` so
     /// an explicit refresh always re-fetches.
     hot_freshness: std::sync::Arc<parking_lot::Mutex<std::collections::HashMap<String, String>>>,
+    /// Queue-required rejections are scoped to a base branch, not a repo.
+    /// Expire with the branch-rule cache; a non-rate enqueue rejection also
+    /// invalidates the hint so the next attempt discovers changed rules.
+    merge_queue_branches: std::sync::Arc<
+        parking_lot::Mutex<std::collections::HashMap<(String, String), std::time::Instant>>,
+    >,
     /// `owner/name` → the repo's merge default and visibility, learned by
     /// the first merge in that repo. Shared across clones, so an untrailed
     /// merge is ONE request (the mutation) instead of two, which matters
@@ -1614,6 +1626,9 @@ impl GhClient {
             hot_freshness: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            merge_queue_branches: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             repo_merge_methods: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
@@ -1657,6 +1672,9 @@ impl GhClient {
             mutation_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             notifications_state: NotificationsState::shared(),
             hot_freshness: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            merge_queue_branches: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
             repo_merge_methods: std::sync::Arc::new(parking_lot::Mutex::new(
@@ -1732,11 +1750,13 @@ impl GhClient {
         &self,
         interval: std::time::Duration,
     ) -> crate::rate_budget::BackgroundPlan {
-        self.budget.lock().begin_background_tick(
-            interval,
-            chrono::Utc::now(),
-            std::time::Instant::now(),
-        )
+        let manual = self.manual_refresh_pending();
+        let mut budget = self.budget.lock();
+        if manual {
+            budget.begin_full_refresh_tick(interval, chrono::Utc::now(), std::time::Instant::now())
+        } else {
+            budget.begin_background_tick(interval, chrono::Utc::now(), std::time::Instant::now())
+        }
     }
 
     pub fn governor_summary(&self) -> String {
@@ -2311,10 +2331,10 @@ impl GhClient {
     /// underlying `AcquireError` Display already describes the
     /// situation.
     fn acquire_or_block(&self, op: &str) -> Result<(), GhError> {
-        let (resource, mut priority) = request_profile(op);
-        if self.notifications_state.lock().force_full_sweep {
-            priority = crate::rate_budget::RequestPriority::Interactive;
-        }
+        // Refresh changes what we discover, not its spending priority.
+        // Promoting a whole sweep (and concurrent background requests) to
+        // Interactive lets it consume the reserve intended for merge/reply.
+        let (resource, priority) = request_profile(op);
         if let Err(reason) = self.budget.lock().admit(resource, op, priority, 1) {
             tracing::warn!("{op} blocked by rate budget: {reason}");
             let retry_after_secs = reason.retry_after_secs(chrono::Utc::now());
@@ -6425,7 +6445,7 @@ impl GhClient {
             )
             .await
         {
-            Err(GhError::Graphql(error)) if from_cache => {
+            Err(GhError::Graphql(error)) if from_cache && !queue_required_message(&error) => {
                 // The cached method may be stale (repo settings changed).
                 // Refetch; retry once only when it actually differs, so a
                 // genuine rejection (conflict, blocked checks) is not
@@ -6653,6 +6673,88 @@ impl GhClient {
         Ok(())
     }
 
+    fn merge_queue_key(pr: &lazybox_core::Task) -> Option<(String, String)> {
+        Some((pr.repo.clone()?, pr.base_branch.clone()?))
+    }
+
+    fn queue_requirement_cached(&self, pr: &lazybox_core::Task) -> bool {
+        let Some(key) = Self::merge_queue_key(pr) else {
+            return false;
+        };
+        let mut cache = self.merge_queue_branches.lock();
+        cache.retain(|_, observed| observed.elapsed() < BRANCH_GATE_TTL);
+        cache.contains_key(&key)
+    }
+
+    fn remember_queue_requirement(&self, pr: &lazybox_core::Task) {
+        if let Some(key) = Self::merge_queue_key(pr) {
+            self.merge_queue_branches
+                .lock()
+                .insert(key, std::time::Instant::now());
+        }
+    }
+
+    async fn enqueue_merge(
+        &self,
+        pr: &lazybox_core::Task,
+        node_id: &str,
+        options: &lazybox_core::MergeOptions<'_>,
+    ) -> Result<lazybox_core::MergeOutcome, lazybox_core::ProviderError> {
+        match self.enqueue_pr(node_id, options.expected_head_oid).await {
+            Ok(()) => Ok(lazybox_core::MergeOutcome::Queued),
+            Err(error) => {
+                if matches!(&error, GhError::Graphql(_))
+                    && let Some(key) = Self::merge_queue_key(pr)
+                {
+                    self.merge_queue_branches.lock().remove(&key);
+                }
+                self.reconcile_merge_failure(pr, options, mutation_provider_error(error))
+                    .await
+            }
+        }
+    }
+
+    /// Submit through GitHub's required queue, preserving the verified head
+    /// and normal queue order. The queue owns the eventual merge method.
+    async fn enqueue_pr(&self, node_id: &str, expected_head: Option<&str>) -> Result<(), GhError> {
+        #[derive(serde::Deserialize)]
+        struct Response {
+            data: Option<serde_json::Value>,
+            errors: Option<Vec<graphql::GqlError>>,
+        }
+        self.acquire_or_block("enqueuePullRequest mutation")?;
+        let body = serde_json::json!({
+            "query": "mutation($id: ID!, $head: GitObjectID) { enqueuePullRequest(input: {pullRequestId: $id, expectedHeadOid: $head, jump: false}) { mergeQueueEntry { id } } }",
+            "variables": { "id": node_id, "head": expected_head },
+        });
+        let response: Response = self
+            .post_graphql_with_retry("enqueuePullRequest mutation", &body)
+            .await?;
+        if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
+            if errors.iter().all(|error| {
+                !error.is_rate_limited()
+                    && lazybox_core::is_already_in_merge_queue(&error.human().to_ascii_lowercase())
+            }) {
+                return Ok(());
+            }
+            return Err(mutation_error_response("enqueuePullRequest", &errors));
+        }
+        if response
+            .data
+            .as_ref()
+            .and_then(|data| data.pointer("/enqueuePullRequest/mergeQueueEntry/id"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+        {
+            Ok(())
+        } else {
+            Err(GhError::Graphql(
+                "enqueuePullRequest returned no queue entry; queue submission was not confirmed"
+                    .into(),
+            ))
+        }
+    }
+
     /// Best-effort: is `pr` already merged on GitHub right now? Used to
     /// disambiguate an ambiguous merge rejection — GitHub returns a
     /// generic "not mergeable" for an already-merged PR, indistinguishable
@@ -6669,6 +6771,25 @@ impl GhClient {
             self.fetch_single_pr_interactive(owner, name, number).await,
             Ok(Some(task)) if task.state == lazybox_core::TaskState::Merged
         )
+    }
+
+    /// Every stage of a merge can lose a successful response. A failed
+    /// prerequisite or enqueue must reconcile the final goal too, rather
+    /// than making the standalone ready action accept terminal PRs.
+    async fn reconcile_merge_failure(
+        &self,
+        pr: &lazybox_core::Task,
+        options: &lazybox_core::MergeOptions<'_>,
+        error: lazybox_core::ProviderError,
+    ) -> Result<lazybox_core::MergeOutcome, lazybox_core::ProviderError> {
+        if self.pr_already_merged(pr).await {
+            options.progress.mark_reconciled();
+            Ok(lazybox_core::MergeOutcome::Merged(
+                lazybox_core::TrailerOutcome::Nothing,
+            ))
+        } else {
+            Err(error)
+        }
     }
 
     /// Idempotency re-check for the draft toggles, mirroring
@@ -7143,6 +7264,19 @@ impl lazybox_core::TaskProvider for GhClient {
                 "PR has no node_id (poll first)",
             ));
         };
+        // A confirmed merge includes making a draft ready. Await this
+        // prerequisite before merging; a failure must never race or fall
+        // through to the merge mutation. The existing mark-ready path
+        // reconciles an already-ready PR after a lost response/retry.
+        if pr.state == lazybox_core::TaskState::Draft && !options.progress.was_marked_ready() {
+            if let Err(error) = lazybox_core::TaskProvider::mark_ready(self, workspace).await {
+                return self.reconcile_merge_failure(pr, options, error).await;
+            }
+            options.progress.mark_ready();
+        }
+        if self.queue_requirement_cached(pr) {
+            return self.enqueue_merge(pr, node_id, options).await;
+        }
         match self
             .merge_pr_in_repo(pr.repo.as_deref(), node_id, options)
             .await
@@ -7181,6 +7315,12 @@ impl lazybox_core::TaskProvider for GhClient {
                     );
                     return Ok(lazybox_core::MergeOutcome::Queued);
                 }
+                // A queue-required rejection is not an enqueue: submit
+                // explicitly and only report Queued once GitHub confirms it.
+                if matches!(&err, GhError::Graphql(message) if queue_required_message(message)) {
+                    self.remember_queue_requirement(pr);
+                    return self.enqueue_merge(pr, node_id, options).await;
+                }
                 // GitHub rejects a merge of an ALREADY-merged PR with a
                 // generic "not mergeable" — indistinguishable by message
                 // from a real conflict. Re-check: if the PR is in fact
@@ -7188,6 +7328,7 @@ impl lazybox_core::TaskProvider for GhClient {
                 // returning Ok lets the caller mark the row merged,
                 // correcting a poll that hadn't caught the merge yet.
                 if self.pr_already_merged(pr).await {
+                    options.progress.mark_reconciled();
                     tracing::info!(
                         "merge {}: PR already merged on GitHub — treating as no-op success",
                         pr.id.key
@@ -8553,6 +8694,44 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn full_refresh_protects_action_reserve() {
+        let client = GhClient::stub_with_rate_limit_for_tests(
+            "test",
+            "fp",
+            2000,
+            5000,
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+        )
+        .expect("stub client");
+        client.force_full_sweep();
+        for op in [
+            "PR search",
+            "hot-target batch query",
+            "single-PR notification deep-fetch",
+        ] {
+            assert!(
+                matches!(
+                    client.acquire_or_block(op),
+                    Err(GhError::RateLimited {
+                        self_throttle: true,
+                        ..
+                    })
+                ),
+                "{op}"
+            );
+        }
+        for op in [
+            "single-PR interactive sync",
+            "pr merge-method query",
+            "mergePullRequest mutation",
+        ] {
+            client
+                .acquire_or_block(op)
+                .expect("merge must retain its reserve");
+        }
+    }
+
     #[test]
     fn pr_detail_prefetch_is_scheduled_while_user_fetch_stays_interactive() {
         let (_, user_priority) = request_profile("PR details lazy-fetch");
@@ -9372,6 +9551,9 @@ mod tests {
             hot_freshness: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            merge_queue_branches: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             repo_merge_methods: std::sync::Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
@@ -9470,6 +9652,325 @@ mod tests {
             lazybox_core::MergeOutcome::Queued,
             "GitHub has the PR — report it queued, never `merged` and never a rejection"
         );
+    }
+
+    const MERGED_SINGLE_PR: &str = r#"{"data":{"repository":{"pullRequest":{
+        "number":1,"title":"test","url":"https://github.com/o/r/pull/1",
+        "updatedAt":"2026-09-11T12:00:00Z","isDraft":false,"state":"MERGED",
+        "merged":true,"headRefName":"feat","baseRefName":"main",
+        "labels":{"nodes":[]},"assignees":{"nodes":[]},"reviewRequests":{"nodes":[]},
+        "comments":{"nodes":[]},"commits":{"nodes":[]}
+    }}}}"#;
+    const MERGE_METHOD: &str =
+        r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"SQUASH"}}}}"#;
+    const QUEUE_REQUIRED: &str =
+        r#"{"errors":[{"message":"Changes must be made through the merge queue"}]}"#;
+    const ENQUEUED_PR: &str =
+        r#"{"data":{"enqueuePullRequest":{"mergeQueueEntry":{"id":"MQ_1"}}}}"#;
+    const UNMERGEABLE: &str = r#"{"errors":[{"message":"Pull request is not mergeable"}]}"#;
+
+    fn merge_workspace(draft: bool) -> Workspace {
+        let mut task = task_without_node_id(TaskKind::Pr);
+        task.node_id = Some("PR_1".into());
+        if draft {
+            task.state = TaskState::Draft;
+        }
+        Workspace::from_task(task, chrono::Utc::now())
+    }
+
+    #[tokio::test]
+    async fn draft_ready_rejection_reconciles_a_concurrent_merge() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_recording_response_server(
+            vec![UNMERGEABLE, MERGED_SINGLE_PR, MERGED_SINGLE_PR],
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&uri);
+        let result =
+            TaskProvider::merge(&client, &merge_workspace(true), &Default::default()).await;
+        assert_eq!(
+            result,
+            Ok(lazybox_core::MergeOutcome::Merged(
+                lazybox_core::TrailerOutcome::Nothing
+            ))
+        );
+        assert!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|r| !r.contains("mergePullRequest(input"))
+        );
+    }
+
+    #[tokio::test]
+    async fn enqueue_rejection_reconciles_a_merge_after_a_lost_response() {
+        // Equivalent to the terminal rejection returned by the transport
+        // retry after the first enqueue landed and the queue drained.
+        let uri = spawn_sequenced_response_server(vec![
+            MERGE_METHOD,
+            QUEUE_REQUIRED,
+            UNMERGEABLE,
+            MERGED_SINGLE_PR,
+        ])
+        .await;
+        let options = lazybox_core::MergeOptions::default();
+        let result =
+            TaskProvider::merge(&make_client(&uri), &merge_workspace(false), &options).await;
+        assert_eq!(
+            result,
+            Ok(lazybox_core::MergeOutcome::Merged(
+                lazybox_core::TrailerOutcome::Nothing
+            ))
+        );
+        assert!(
+            options.progress.was_reconciled(),
+            "terminal state does not prove trailer delivery"
+        );
+    }
+
+    #[tokio::test]
+    async fn enqueue_rejection_is_not_success_when_terminal_state_is_unconfirmed() {
+        let uri = spawn_sequenced_response_server(vec![
+            MERGE_METHOD,
+            QUEUE_REQUIRED,
+            UNMERGEABLE,
+            r#"{"data":{"repository":null}}"#,
+        ])
+        .await;
+        let error = TaskProvider::merge(
+            &make_client(&uri),
+            &merge_workspace(false),
+            &Default::default(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("not mergeable"));
+    }
+
+    #[tokio::test]
+    async fn ready_progress_survives_failure_and_retry_without_repeating_ready() {
+        const READY: &str =
+            r#"{"data":{"markPullRequestReadyForReview":{"pullRequest":{"id":"PR_1"}}}}"#;
+        const MERGED: &str = r#"{"data":{"mergePullRequest":{"pullRequest":{"merged":true}}}}"#;
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_recording_response_server(
+            vec![
+                READY,
+                MERGE_METHOD,
+                UNMERGEABLE,
+                r#"{"data":{"repository":null}}"#,
+                MERGED,
+            ],
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&uri);
+        let options = lazybox_core::MergeOptions::head(Some("verified-head"));
+        let ws = merge_workspace(true);
+        assert!(TaskProvider::merge(&client, &ws, &options).await.is_err());
+        assert!(options.progress.was_marked_ready());
+        assert!(matches!(
+            TaskProvider::merge(&client, &ws, &options).await,
+            Ok(lazybox_core::MergeOutcome::Merged(_))
+        ));
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| r.contains("markPullRequestReadyForReview"))
+                .count(),
+            1
+        );
+        assert!(requests[4].contains("verified-head"));
+    }
+
+    #[tokio::test]
+    async fn known_queue_branch_skips_direct_merge_and_settings_refresh() {
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_recording_response_server(
+            vec![QUEUE_REQUIRED, ENQUEUED_PR, ENQUEUED_PR],
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&uri);
+        client
+            .repo_merge_methods
+            .lock()
+            .insert("o/r".into(), squash_settings());
+        let ws = merge_workspace(false);
+        let options = lazybox_core::MergeOptions::head(Some("verified-head"));
+        for _ in 0..2 {
+            assert_eq!(
+                TaskProvider::merge(&client, &ws, &options).await.unwrap(),
+                lazybox_core::MergeOutcome::Queued
+            );
+        }
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            3,
+            "first direct rejection must not refresh merge settings"
+        );
+        assert!(requests[0].contains("mergePullRequest"));
+        assert!(
+            requests[1..]
+                .iter()
+                .all(|r| r.contains("enqueuePullRequest") && r.contains("verified-head"))
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_hint_survives_rate_limits_and_changed_rules_use_direct_merge_next_time() {
+        const LIMITED: &str =
+            r#"{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}"#;
+        const UNKNOWN: &str = r#"{"data":{"repository":null}}"#;
+        const MERGED: &str = r#"{"data":{"mergePullRequest":{"pullRequest":{"merged":true}}}}"#;
+        let uri = spawn_sequenced_response_server(vec![LIMITED, UNKNOWN]).await;
+        let client = make_client(&uri);
+        let ws = merge_workspace(false);
+        client.remember_queue_requirement(ws.pr.as_ref().unwrap());
+        assert!(
+            TaskProvider::merge(&client, &ws, &Default::default())
+                .await
+                .unwrap_err()
+                .is_retryable()
+        );
+        assert!(client.queue_requirement_cached(ws.pr.as_ref().unwrap()));
+
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_recording_response_server(
+            vec![UNMERGEABLE, UNKNOWN, MERGE_METHOD, MERGED],
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&uri);
+        client.remember_queue_requirement(ws.pr.as_ref().unwrap());
+        assert!(
+            TaskProvider::merge(&client, &ws, &Default::default())
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            TaskProvider::merge(&client, &ws, &Default::default()).await,
+            Ok(lazybox_core::MergeOutcome::Merged(_))
+        ));
+        let requests = requests.lock().unwrap();
+        assert!(requests[0].contains("enqueuePullRequest"));
+        assert!(requests[3].contains("mergePullRequest"));
+    }
+
+    #[tokio::test]
+    async fn queue_hint_is_branch_scoped_expires_and_invalidates_on_rejection() {
+        let uri =
+            spawn_sequenced_response_server(vec![UNMERGEABLE, r#"{"data":{"repository":null}}"#])
+                .await;
+        let client = make_client(&uri);
+        let ws = merge_workspace(false);
+        let pr = ws.pr.as_ref().unwrap();
+        client.remember_queue_requirement(pr);
+        let mut other = pr.clone();
+        other.base_branch = Some("release".into());
+        assert!(!client.queue_requirement_cached(&other));
+        other.base_branch = None;
+        assert!(!client.queue_requirement_cached(&other));
+        assert!(
+            TaskProvider::merge(&client, &ws, &Default::default())
+                .await
+                .is_err()
+        );
+        assert!(!client.queue_requirement_cached(pr));
+        client.merge_queue_branches.lock().insert(
+            GhClient::merge_queue_key(pr).unwrap(),
+            std::time::Instant::now() - BRANCH_GATE_TTL,
+        );
+        assert!(!client.queue_requirement_cached(pr));
+    }
+
+    #[tokio::test]
+    async fn queue_required_merge_enqueues_the_verified_head_in_normal_order() {
+        const READY: &str =
+            r#"{"data":{"markPullRequestReadyForReview":{"pullRequest":{"id":"PR_1"}}}}"#;
+        const METHOD: &str =
+            r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"SQUASH"}}}}"#;
+        const REQUIRED: &str = r#"{"errors":[{"message":"Repository rule violations found\nChanges must be made through the merge queue"}]}"#;
+        const ENQUEUED: &str =
+            r#"{"data":{"enqueuePullRequest":{"mergeQueueEntry":{"id":"MQ_1"}}}}"#;
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_recording_response_server(
+            vec![READY, METHOD, REQUIRED, ENQUEUED],
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&uri);
+        let mut task = task_without_node_id(TaskKind::Pr);
+        task.node_id = Some("PR_1".into());
+        task.state = TaskState::Draft;
+        let ws = Workspace::from_task(task, chrono::Utc::now());
+        let result = TaskProvider::merge(
+            &client,
+            &ws,
+            &lazybox_core::MergeOptions::head(Some("checked-head")),
+        )
+        .await
+        .expect("explicit enqueue succeeds");
+        assert_eq!(result, lazybox_core::MergeOutcome::Queued);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[0].contains("markPullRequestReadyForReview"));
+        assert!(requests[3].contains("enqueuePullRequest"));
+        assert!(requests[3].contains("checked-head"));
+        assert!(requests[3].contains("jump: false"));
+        assert!(!requests[3].contains("mergeMethod"));
+    }
+
+    #[tokio::test]
+    async fn enqueue_requires_confirmation_and_preserves_failures() {
+        for (response, expected) in [
+            (r#"{"data":{"enqueuePullRequest":null}}"#, "no queue entry"),
+            (
+                r#"{"errors":[{"message":"Head branch was modified"}]}"#,
+                "Head branch was modified",
+            ),
+            (
+                r#"{"errors":[{"message":"Required checks have not passed"}]}"#,
+                "Required checks have not passed",
+            ),
+            (
+                r#"{"errors":[{"message":"Pull Request is already in the merge queue"},{"message":"Head branch was modified"}]}"#,
+                "Head branch was modified",
+            ),
+        ] {
+            let uri = spawn_sequenced_response_server(vec![response]).await;
+            let client = make_client(&uri);
+            let error = client
+                .enqueue_pr("PR_1", Some("checked-head"))
+                .await
+                .expect_err("must not claim queued");
+            assert!(error.to_string().contains(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn enqueue_already_queued_is_idempotent_and_rate_limits_stay_retryable() {
+        let uri = spawn_sequenced_response_server(vec![
+            r#"{"errors":[{"message":"Pull Request is already in the merge queue"}]}"#,
+        ])
+        .await;
+        make_client(&uri)
+            .enqueue_pr("PR_1", None)
+            .await
+            .expect("already queued is success");
+        let uri = spawn_sequenced_response_server(vec![
+            r#"{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}"#,
+        ])
+        .await;
+        assert!(matches!(
+            make_client(&uri).enqueue_pr("PR_1", None).await,
+            Err(GhError::RateLimited { .. })
+        ));
     }
 
     /// The queue marker must survive `GhError`'s Display wrapper: the
@@ -9801,6 +10302,63 @@ mod tests {
               "errors": null
             }}"#
         )
+    }
+
+    #[tokio::test]
+    async fn manual_refresh_finishes_paginated_search_beyond_normal_tick_credit() {
+        let reset = chrono::Utc::now() + chrono::Duration::hours(1);
+        let mut pages = Vec::new();
+        for (number, info) in [(1, (true, Some("CUR1"))), (2, (false, None))] {
+            let mut page: serde_json::Value =
+                serde_json::from_str(&pr_search_page(number, Some(info))).unwrap();
+            page["data"]["rateLimit"] = serde_json::json!({
+                "cost": 20, "limit": 5000, "remaining": 2400 - number * 20, "resetAt": reset
+            });
+            pages.push(&*Box::leak(page.to_string().into_boxed_str()));
+        }
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_recording_response_server(pages, requests.clone()).await;
+        let client = make_client(&uri);
+        client
+            .budget
+            .lock()
+            .observe(crate::rate_budget::RemoteRateLimit {
+                remaining: 2400,
+                limit: 5000,
+                reset_at: reset,
+                observed_at: std::time::Instant::now(),
+            });
+        assert!(
+            client
+                .begin_background_tick(std::time::Duration::from_secs(60))
+                .graphql_points
+                < 40
+        );
+        client.force_full_sweep();
+        assert!(
+            client
+                .begin_background_tick(std::time::Duration::from_secs(60))
+                .admits_complete_graphql_unit(40)
+        );
+        let tasks = client
+            .fetch_pr_search_paginated("is:open is:pr repo:o/r")
+            .await
+            .unwrap();
+        assert_eq!(
+            tasks.len(),
+            2,
+            "the tail must be discovered in the same sweep"
+        );
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "no repeated prefix pages");
+        assert!(requests[1].contains("CUR1"));
+        assert!(
+            client
+                .rate_snapshot()
+                .resources
+                .iter()
+                .all(|r| r.remaining >= r.reserve)
+        );
     }
 
     /// Data-loss regression: the companion searches (merged-sweep,
@@ -10412,6 +10970,66 @@ mod tests {
             .expect("merge success must not report a false failure");
     }
 
+    #[tokio::test]
+    async fn draft_merge_marks_ready_before_merging_and_preserves_head_pin() {
+        use lazybox_core::{TaskProvider, Workspace};
+        const READY: &str = r#"{"data":{"markPullRequestReadyForReview":{"pullRequest":{"id":"PR_1","isDraft":false}}}}"#;
+        const METHOD: &str =
+            r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"SQUASH"}}}}"#;
+        const MERGED: &str =
+            r#"{"data":{"mergePullRequest":{"pullRequest":{"id":"PR_1","merged":true}}}}"#;
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri =
+            spawn_recording_response_server(vec![READY, METHOD, MERGED], requests.clone()).await;
+        let client = make_client(&uri);
+        let mut task = task_without_node_id(TaskKind::Pr);
+        task.node_id = Some("PR_1".into());
+        task.state = lazybox_core::TaskState::Draft;
+        let ws = Workspace::from_task(task, chrono::Utc::now());
+        client
+            .merge(
+                &ws,
+                &lazybox_core::MergeOptions::head(Some("verified-head")),
+            )
+            .await
+            .expect("draft merge succeeds");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].contains("markPullRequestReadyForReview"));
+        assert!(requests[2].contains("mergePullRequest"));
+        assert!(requests[2].contains("verified-head"));
+    }
+
+    #[tokio::test]
+    async fn draft_merge_stops_when_mark_ready_fails() {
+        use lazybox_core::{TaskProvider, Workspace};
+        const REFUSED: &str = r#"{"errors":[{"message":"Cannot mark this pull request ready"}]}"#;
+        const NOT_FOUND: &str = r#"{"data":{"repository":null}}"#;
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_recording_response_server(vec![REFUSED, NOT_FOUND], requests.clone()).await;
+        let client = make_client(&uri);
+        let mut task = task_without_node_id(TaskKind::Pr);
+        task.node_id = Some("PR_1".into());
+        task.state = lazybox_core::TaskState::Draft;
+        let ws = Workspace::from_task(task, chrono::Utc::now());
+        let err = client
+            .merge(&ws, &lazybox_core::MergeOptions::default())
+            .await
+            .expect_err("ready failure stops merge");
+        assert!(
+            err.to_string()
+                .contains("Cannot mark this pull request ready")
+        );
+        assert!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|r| !r.contains("mutation MergePullRequest")
+                    && !r.contains("mergePullRequest(input"))
+        );
+    }
+
     /// Issue #469: a repo that disallows merge commits reports SQUASH
     /// (or REBASE) as its `viewerDefaultMergeMethod`. `merge_pr` must
     /// pin that method on the mutation — omitting it makes GitHub
@@ -10534,6 +11152,7 @@ mod tests {
         policy: lazybox_core::TrailerPolicy,
     ) -> lazybox_core::MergeOptions<'a> {
         lazybox_core::MergeOptions {
+            progress: Default::default(),
             expected_head_oid: None,
             trailers: Some(trailers.clone()),
             trailer_policy: policy,

@@ -55,10 +55,26 @@ async fn smoke_script_reuses_a_pre_enrolled_box_identity() {
 
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../scripts/smoke-hosted-relay.sh");
+    // Force the scheduling order seen on CI: the parent polls the log before
+    // the background shell opens its redirection. Run a copy of the shipping
+    // script with only that launch delayed, without changing its polling logic.
+    let source = std::fs::read_to_string(script).unwrap();
+    let launch = r#"LAZYBOX_HOME="$box_home" "$lazybox_bin" serve \"#;
+    let redirect = r#">"$work/serve.log" 2>&1 &"#;
+    assert_eq!(source.matches(launch).count(), 1);
+    assert_eq!(source.matches(redirect).count(), 1);
+    let delayed_script = box_home.path().join("smoke-hosted-relay.sh");
+    std::fs::write(
+        &delayed_script,
+        source
+            .replacen(launch, &format!("(sleep 0.2;\nexec env {launch}"), 1)
+            .replacen(redirect, r#">"$work/serve.log" 2>&1) &"#, 1),
+    )
+    .unwrap();
     let output = tokio::time::timeout(
         Duration::from_secs(30),
         tokio::process::Command::new("bash")
-            .arg(script)
+            .arg(delayed_script)
             .arg(relay_addr)
             .env("LAZYBOX_BIN", env!("CARGO_BIN_EXE_lazybox"))
             .env("LAZYBOX_SMOKE_BOX_HOME", box_home.path())

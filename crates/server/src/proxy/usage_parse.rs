@@ -9,21 +9,14 @@
 //! `prompt_tokens_details.cached_tokens`), and Codex's Responses API
 //! nests it a further level under `response`.
 //!
-//! Rather than branch on provider and protocol, [`UsageAccumulator`] scans
-//! the response for *every* object named `usage`, reads whichever token
-//! keys are present, and keeps a per-field high-water mark. That single
-//! rule is correct across all four cases:
-//!   - non-streaming: one `usage` object → its values.
-//!   - Anthropic streaming: `message_start` carries input/cache, each
-//!     `message_delta` carries the growing cumulative output — the max of
-//!     each field reassembles the turn's total.
-//!   - OpenAI chat streaming: usage rides only the final chunk.
-//!   - Codex/OpenAI Responses streaming: usage nests under
-//!     `response.usage` on the completion event.
-//!
-//! The scan is line-oriented so it costs O(1) memory over an arbitrarily
-//! long stream: complete `\n`-terminated lines are parsed as they arrive
-//! and dropped; only a partial trailing line is retained.
+//! Anthropic start/delta counters are merged as high-water marks. Responses
+//! streams instead publish an immutable snapshot from their terminal event.
+//! SSE framing accepts LF, CRLF and CR, including multiline data. A bounded
+//! JSON projection discards output payloads while preserving usage metadata.
+
+#[path = "usage_json.rs"]
+mod usage_json;
+use usage_json::UsageJson;
 
 use lazybox_core::ModelPrice;
 use lazybox_core::pricing::{self, TokenCounts};
@@ -77,10 +70,12 @@ impl Merged {
 /// the client, then call [`finish`](Self::finish) once the stream ends.
 #[derive(Debug, Default)]
 pub struct UsageAccumulator {
-    /// Bytes of the current line not yet terminated by `\n`. For a
-    /// non-streaming (single-JSON) body this holds the whole document
-    /// until `finish`.
-    residual: Vec<u8>,
+    json: UsageJson,
+    wire: Wire,
+    line: Line,
+    line_nonempty: bool,
+    event_data: bool,
+    after_cr: bool,
     merged: Merged,
     /// The model id seen in the stream (`message.model` / `response.model`),
     /// last non-empty wins. Needed to price the tokens in [`finish`].
@@ -91,12 +86,35 @@ pub struct UsageAccumulator {
     /// of the rate card. Used for traffic lazybox can't price — a ChatGPT
     /// subscription pays a flat fee, so its per-token cost is meaningless.
     count_only: bool,
+    responses: Responses,
 }
 
-/// A partial line longer than this without a newline is parsed and
-/// cleared to bound memory — far above any real compact JSON body, so
-/// only a pathological upstream ever trips it.
-const MAX_RESIDUAL: usize = 8 * 1024 * 1024;
+/// Terminal-without-usage is distinct from a stream still in progress: neither
+/// may fall back to a provisional aggregate, including at HTTP EOF.
+#[derive(Debug, Default)]
+enum Responses {
+    #[default]
+    Unseen,
+    Streaming,
+    Terminal(Option<AgentUsage>),
+}
+
+#[derive(Debug, Default)]
+enum Wire {
+    #[default]
+    Detect,
+    Json,
+    Sse,
+}
+
+#[derive(Debug, Default)]
+enum Line {
+    #[default]
+    Start,
+    Prefix(usize),
+    Data,
+    Ignore,
+}
 
 impl UsageAccumulator {
     /// An accumulator that prices its result with `prices` layered over the
@@ -118,27 +136,85 @@ impl UsageAccumulator {
         self
     }
 
-    /// Feed one response chunk. Complete lines are parsed and dropped;
-    /// the trailing partial line is retained for the next chunk.
+    /// Feed arbitrary transport chunks without buffering output payloads.
     pub fn push(&mut self, chunk: &[u8]) {
-        self.residual.extend_from_slice(chunk);
-        while let Some(nl) = self.residual.iter().position(|&b| b == b'\n') {
-            let line: Vec<u8> = self.residual.drain(..=nl).collect();
-            self.scan_line(&line[..line.len() - 1]);
-        }
-        if self.residual.len() > MAX_RESIDUAL {
-            let line = std::mem::take(&mut self.residual);
-            self.scan_line(&line);
+        for &byte in chunk {
+            if matches!(self.responses, Responses::Terminal(_)) {
+                break;
+            }
+            if matches!(self.wire, Wire::Detect) {
+                if byte.is_ascii_whitespace() {
+                    continue;
+                }
+                self.wire = if byte == b'{' { Wire::Json } else { Wire::Sse };
+            }
+            if matches!(self.wire, Wire::Json) {
+                self.json.push(byte);
+                continue;
+            }
+            if self.after_cr && byte == b'\n' {
+                self.after_cr = false;
+                continue;
+            }
+            self.after_cr = byte == b'\r';
+            if matches!(byte, b'\r' | b'\n') {
+                if !self.line_nonempty {
+                    self.end_event();
+                } else if matches!(self.line, Line::Data) {
+                    self.json.push(b'\n');
+                }
+                self.line = Line::Start;
+                self.line_nonempty = false;
+                continue;
+            }
+            self.line_nonempty = true;
+            match self.line {
+                Line::Start if byte == b'd' => self.line = Line::Prefix(1),
+                Line::Prefix(n) if byte == b"data:"[n] => {
+                    self.line = if n == 4 {
+                        self.event_data = true;
+                        Line::Data
+                    } else {
+                        Line::Prefix(n + 1)
+                    };
+                }
+                Line::Data => self.json.push(byte),
+                _ => self.line = Line::Ignore,
+            }
         }
     }
 
-    /// Finish the stream and return the merged usage, or `None` when the
-    /// body carried no `usage` object at all.
-    pub fn finish(mut self) -> Option<AgentUsage> {
-        if !self.residual.is_empty() {
-            let line = std::mem::take(&mut self.residual);
-            self.scan_line(&line);
+    fn end_event(&mut self) {
+        if self.event_data || matches!(self.wire, Wire::Json) {
+            if let Some(value) = std::mem::take(&mut self.json).finish() {
+                self.scan_value(value);
+            }
+            self.event_data = false;
         }
+    }
+
+    /// Finish the body. A Responses stream without valid terminal totals
+    /// must not promote provisional counters into a final report at EOF.
+    pub fn finish(mut self) -> Option<AgentUsage> {
+        self.end_event();
+        match self.responses {
+            Responses::Terminal(usage) => usage,
+            Responses::Streaming => None,
+            Responses::Unseen => self.usage(),
+        }
+    }
+
+    /// Final usage after a terminal Responses API event, before HTTP EOF.
+    /// Callers publish this before forwarding the terminal event to clients that
+    /// stop reading there; they must suppress a second report at EOF.
+    pub fn completed_usage(&self) -> Option<AgentUsage> {
+        match &self.responses {
+            Responses::Terminal(usage) => usage.clone(),
+            _ => None,
+        }
+    }
+
+    fn usage(&self) -> Option<AgentUsage> {
         if self.merged.is_empty() {
             return None;
         }
@@ -174,29 +250,43 @@ impl UsageAccumulator {
         })
     }
 
-    fn scan_line(&mut self, line: &[u8]) {
-        let text = match std::str::from_utf8(line) {
-            Ok(t) => t.trim(),
-            Err(_) => return,
-        };
-        // SSE payload lines are `data: {json}`; `event:`/`id:`/comment
-        // lines and the `[DONE]` sentinel carry no usage.
-        let json = text.strip_prefix("data:").unwrap_or(text).trim();
-        if json.is_empty() || json == "[DONE]" || !json.starts_with('{') {
+    fn scan_value(&mut self, value: Value) {
+        if matches!(self.responses, Responses::Terminal(_)) {
             return;
         }
-        let Ok(value) = serde_json::from_str::<Value>(json) else {
+        if let Some(kind) = value.get("type").and_then(Value::as_str)
+            && kind.starts_with("response.")
+        {
+            self.responses = Responses::Streaming;
+            if matches!(
+                kind,
+                "response.completed" | "response.incomplete" | "response.failed"
+            ) {
+                self.responses = Responses::Terminal(None);
+                // Only the terminal response owns definitive counts. Never fill
+                // missing final fields from provisional or diagnostic records.
+                if let Some(usage) = value.pointer("/response/usage").and_then(Value::as_object) {
+                    let totals = extract(usage);
+                    if valid_response_usage(usage) {
+                        self.merged = totals;
+                        self.model = value
+                            .pointer("/response/model")
+                            .and_then(Value::as_str)
+                            .filter(|name| !name.is_empty())
+                            .map(str::to_owned);
+                        self.responses = Responses::Terminal(self.usage());
+                    }
+                }
+            }
             return;
-        };
+        }
         collect_usage(&value, &mut self.merged, &mut self.model);
     }
 }
 
-/// Recursively fold every `usage` object reachable from `value` into
-/// `merged`. Keying on the field name (rather than sniffing token-shaped
-/// objects) keeps it precise: it catches the top-level `usage`,
-/// Anthropic's `message.usage`, and Codex's `response.usage` without ever
-/// mistaking an unrelated object for a usage report.
+/// Fold provider-owned metadata retained by the JSON projection into the
+/// generic aggregate. Output/tool payloads have already been discarded, so
+/// nested user content cannot impersonate a provider usage or model field.
 fn collect_usage(value: &Value, merged: &mut Merged, model: &mut Option<String>) {
     match value {
         Value::Object(map) => {
@@ -223,6 +313,40 @@ fn collect_usage(value: &Value, merged: &mut Merged, model: &mut Option<String>)
         }
         _ => {}
     }
+}
+
+/// A terminal Responses report requires both totals and numeric optional
+/// cache counts. Reject malformed fields instead of pricing them as zero.
+fn valid_response_usage(usage: &serde_json::Map<String, Value>) -> bool {
+    if !["input_tokens", "output_tokens"]
+        .iter()
+        .all(|key| usage.get(*key).and_then(Value::as_u64).is_some())
+    {
+        return false;
+    }
+    for key in [
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "cached_input_tokens",
+    ] {
+        if usage.get(key).is_some_and(|value| value.as_u64().is_none()) {
+            return false;
+        }
+    }
+    for key in ["input_tokens_details", "prompt_tokens_details"] {
+        if let Some(details) = usage.get(key) {
+            let Some(details) = details.as_object() else {
+                return false;
+            };
+            if details
+                .get("cached_tokens")
+                .is_some_and(|value| value.as_u64().is_none())
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Read the token counts from one `usage` object, accepting either
@@ -317,6 +441,177 @@ mod tests {
         assert_eq!(u.input_tokens, Some(500));
         assert_eq!(u.output_tokens, Some(25));
         assert_eq!(u.cache_read_input_tokens, Some(100));
+    }
+
+    #[test]
+    fn responses_usage_is_final_only_after_the_complete_completion_line() {
+        let mut acc = UsageAccumulator::default();
+        acc.push(b"data: {\"type\":\"response.created\",\"response\":{\"usage\":{\"input_tokens\":5}}}\n\n");
+        assert!(acc.completed_usage().is_none());
+        acc.push(b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":500,");
+        assert!(acc.completed_usage().is_none());
+        acc.push(b"\"output_tokens\":25}}}\n\n");
+        let usage = acc.completed_usage().expect("finalized usage");
+        assert_eq!(usage.input_tokens, Some(500));
+        assert_eq!(usage.output_tokens, Some(25));
+        let final_usage = acc.finish().expect("usage at EOF");
+        assert_eq!(final_usage.input_tokens, usage.input_tokens);
+        assert_eq!(final_usage.output_tokens, usage.output_tokens);
+    }
+
+    #[test]
+    fn completion_without_usage_does_not_finalize_an_earlier_usage_report() {
+        let mut acc = UsageAccumulator::default();
+        acc.push(b"data: {\"usage\":{\"input_tokens\":5}}\n\n");
+        acc.push(b"data: {\"type\":\"response.completed\",\"response\":{\"usage\":null}}\n\n");
+        assert!(acc.completed_usage().is_none());
+        assert!(acc.finish().is_none());
+    }
+
+    #[test]
+    fn responses_reject_invalid_final_totals_even_at_eof() {
+        for usage in [
+            "null",
+            "{}",
+            r#"{"input_tokens":500}"#,
+            r#"{"input_tokens":"500","output_tokens":25}"#,
+            r#"{"input_tokens":-1,"output_tokens":25}"#,
+            r#"{"input_tokens":500,"output_tokens":25,"input_tokens_details":{"cached_tokens":"100"}}"#,
+        ] {
+            let mut acc = UsageAccumulator::default();
+            acc.push(b"data: {\"type\":\"response.in_progress\",\"response\":{\"usage\":{\"input_tokens\":500,\"output_tokens\":1}}}\n\n");
+            acc.push(
+                format!(
+                    r#"data: {{"type":"response.completed","response":{{"usage":{usage}}}}}
+
+"#
+                )
+                .as_bytes(),
+            );
+            assert!(acc.completed_usage().is_none(), "{usage}");
+            assert!(acc.finish().is_none(), "{usage}");
+        }
+        let mut acc = UsageAccumulator::default();
+        acc.push(b"data: {\"type\":\"response.in_progress\",\"response\":{\"usage\":{\"input_tokens\":500,\"output_tokens\":1}}}\n\n");
+        assert!(
+            acc.finish().is_none(),
+            "interrupted Responses stream is not definitive"
+        );
+    }
+
+    #[test]
+    fn all_terminal_kinds_require_their_own_totals_and_model() {
+        for kind in [
+            "response.completed",
+            "response.incomplete",
+            "response.failed",
+        ] {
+            for response in [
+                serde_json::json!({}),
+                serde_json::json!({"usage":null}),
+                serde_json::json!({"usage":{"input_tokens":0,"output_tokens":0}}),
+            ] {
+                let mut acc = UsageAccumulator::default();
+                acc.push(
+                    b"data: {\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":999}}\n\n",
+                );
+                acc.push(
+                    format!(
+                        "data: {}\n\n",
+                        serde_json::json!({"type":kind,"response":response})
+                    )
+                    .as_bytes(),
+                );
+                let finalized = acc.completed_usage();
+                if response["usage"].is_object() {
+                    let usage = finalized.expect("zero totals are valid");
+                    assert_eq!(usage.input_tokens, Some(0));
+                    assert_eq!(usage.output_tokens, Some(0));
+                    assert_eq!(
+                        usage.cost_usd_micros, None,
+                        "do not inherit an unrelated model"
+                    );
+                } else {
+                    assert!(finalized.is_none());
+                    assert!(acc.finish().is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_snapshot_is_independent_of_trailing_records_and_chunking() {
+        let stream = concat!(
+            "data: {\"type\":\"response.in_progress\",\"response\":{\"model\":\"wrong\",\"usage\":{\"input_tokens\":9000000,\"output_tokens\":99}}}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"model\":\"claude-sonnet-4-5\",\"output\":[{\"model\":\"wrong\",\"usage\":{\"input_tokens\":9999999}}],\"usage\":{\"input_tokens\":1000000,\"output_tokens\":0}}}\n\n",
+            "data: {\"type\":\"gateway.diagnostic\",\"model\":\"wrong\",\"usage\":{\"input_tokens\":9000000,\"output_tokens\":99}}\n\n",
+        );
+        for size in [1, 17, stream.len()] {
+            let mut acc = UsageAccumulator::default();
+            for chunk in stream.as_bytes().chunks(size) {
+                acc.push(chunk);
+            }
+            let usage = acc.completed_usage().expect("terminal usage");
+            assert_eq!(usage.input_tokens, Some(1_000_000));
+            assert_eq!(usage.output_tokens, Some(0));
+            assert_eq!(usage.cost_usd_micros, Some(3_000_000));
+            assert_eq!(acc.finish().unwrap().cost_usd_micros, Some(3_000_000));
+        }
+    }
+
+    #[test]
+    fn sse_delimiters_and_multiline_data_survive_every_chunk_boundary() {
+        for newline in ["\n", "\r\n", "\r"] {
+            let stream = format!(
+                "event: response.incomplete{newline}data: {{\"type\":\"response.incomplete\",{newline}: comment{newline}data: \"response\":{{\"usage\":{{\"input_tokens\":500,\"output_tokens\":25}}}}}}{newline}{newline}"
+            );
+            for split in 0..=stream.len() {
+                let mut acc = UsageAccumulator::default();
+                acc.push(&stream.as_bytes()[..split]);
+                acc.push(&stream.as_bytes()[split..]);
+                assert_eq!(
+                    acc.completed_usage()
+                        .expect("usage before EOF")
+                        .output_tokens,
+                    Some(25)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn large_responses_preserve_usage_with_bounded_storage() {
+        let payload = serde_json::json!({"type":"response.completed", "response": {
+            "output": [{"type":"image_generation_call", "result": "a".repeat(9 * 1024 * 1024)}],
+            "usage": {"input_tokens":500, "output_tokens":25}
+        }});
+        let stream = format!("data: {payload}\n\n");
+        for size in [16 * 1024, stream.len()] {
+            let mut acc = UsageAccumulator::default();
+            for chunk in stream.as_bytes().chunks(size) {
+                acc.push(chunk);
+            }
+            assert_eq!(
+                acc.completed_usage()
+                    .expect("large event usage")
+                    .input_tokens,
+                Some(500)
+            );
+        }
+        // A large number of output items must not accumulate retained objects.
+        let mut acc = UsageAccumulator::default();
+        acc.push(b"data: {\"type\":\"response.completed\",\"response\":{\"output\":[");
+        for _ in 0..100_000 {
+            acc.push(b"{\"text\":\"ignored\"},");
+        }
+        acc.push(b"null],\"usage\":{\"input_tokens\":500,\"output_tokens\":25}}}\n\n");
+        assert_eq!(acc.completed_usage().unwrap().output_tokens, Some(25));
+    }
+
+    #[test]
+    fn pretty_printed_nonstreaming_json_keeps_usage() {
+        let u = feed(&["{\n  \"model\": \"claude-sonnet-4-5\",\n  \"usage\": {\n    \"input_tokens\": 1000000,\n    \"output_tokens\": 0\n  }\n}"]).unwrap();
+        assert_eq!(u.cost_usd_micros, Some(3_000_000));
     }
 
     #[test]

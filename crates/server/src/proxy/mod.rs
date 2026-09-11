@@ -669,39 +669,65 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
         *headers = forwarded_headers(upstream.headers());
     }
 
-    // Tee the response to the client while feeding the usage parser. The
-    // sink fires exactly once, when the upstream stream ends cleanly —
-    // partial/aborted responses (an error frame) never report a total.
-    //
-    // Known small under-count (#1389): a response the client aborts, or that
-    // errors mid-stream, drops the tokens it did consume. Capturing those
-    // partials would mean pricing an incomplete `usage` block the upstream
-    // never finalized (and often never sent) — deliberately not done, since a
-    // wrong partial is worse than a missing one for a cost meter. The gap is
-    // bounded to interrupted turns and documented rather than guessed.
+    // Responses API clients can stop reading at response.completed without
+    // consuming HTTP EOF. Publish finalized usage before forwarding that event.
+    // Other protocols retain the clean-EOF fallback; incomplete streams do not
+    // publish partial totals. Taking this closure makes either path report once.
     let sink = state.sink.clone();
     let accumulator = {
         let acc = UsageAccumulator::with_prices(state.prices.clone());
         if count_only { acc.counting_only() } else { acc }
     };
+    let judged = compacted.measured;
+    let report = move |mut usage: AgentUsage| {
+        // The saving is committed on exactly the condition
+        // that reports the cost — a parsed usage block on a
+        // finalized response — because the two are compared
+        // against each other. A response that streams
+        // cleanly but carries no usage (a 200 whose body is
+        // an error frame) would otherwise contribute a
+        // saving against no cost, inflating the very ratio
+        // the rollout decision reads, and would do it in
+        // precisely the turns the kill switch also cannot
+        // judge. `commit` precedes `observe_usage` so the
+        // turn that rewrote is marked before the kill
+        // switch judges its cache share.
+        if let Some(saving) = saving {
+            state.compactor.commit(&session, &agent_id, saving);
+        }
+        // Fold the request's blocks into the session's
+        // seen-set only now, on the same condition that
+        // reports usage: a request the provider never billed
+        // must not consume a block's first send. Claude Code
+        // preflights `count_tokens` with the whole transcript
+        // and retries the same body after a 429 — neither
+        // reports usage, and folding those would make the
+        // *first* real send of every block read as a
+        // mechanical re-send.
+        usage.context = measured.map(|measured| {
+            let mut store = state
+                .seen_blocks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            measured.against(store.entry(&format!("{agent_id}/{session}")))
+        });
+        state
+            .compactor
+            .observe_usage(&session, &agent_id, &usage, judged);
+        sink(&agent_id, &session, usage);
+    };
     let stream = futures::stream::unfold(
-        (
-            upstream.bytes_stream(),
-            accumulator,
-            Some((
-                state,
-                sink,
-                agent_id,
-                session,
-                measured,
-                compacted.measured,
-                saving,
-            )),
-        ),
+        (upstream.bytes_stream(), accumulator, Some(report)),
         |(mut bytes, mut acc, mut pending)| async move {
             match bytes.next().await {
                 Some(Ok(chunk)) => {
                     acc.push(&chunk);
+                    if pending.is_some()
+                        && let Some(usage) = acc.completed_usage()
+                        && let Some(report) = pending.take()
+                    {
+                        report(usage);
+                    }
                     Some((Ok(Frame::data(chunk)), (bytes, acc, pending)))
                 }
                 Some(Err(error)) => {
@@ -709,45 +735,10 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
                     Some((Err(BoxErr::from(error)), (bytes, acc, pending)))
                 }
                 None => {
-                    if let Some((state, sink, agent_id, session, measured, judged, saving)) =
-                        pending.take()
-                        && let Some(mut usage) = acc.finish()
+                    if let Some(report) = pending.take()
+                        && let Some(usage) = acc.finish()
                     {
-                        // The saving is committed on exactly the condition
-                        // that reports the cost — a parsed usage block on a
-                        // clean stream end — because the two are compared
-                        // against each other. A response that streams
-                        // cleanly but carries no usage (a 200 whose body is
-                        // an error frame) would otherwise contribute a
-                        // saving against no cost, inflating the very ratio
-                        // the rollout decision reads, and would do it in
-                        // precisely the turns the kill switch also cannot
-                        // judge. `commit` precedes `observe_usage` so the
-                        // turn that rewrote is marked before the kill
-                        // switch judges its cache share.
-                        if let Some(saving) = saving {
-                            state.compactor.commit(&session, &agent_id, saving);
-                        }
-                        // Fold the request's blocks into the session's
-                        // seen-set only now, on the same condition that
-                        // reports usage: a request the provider never billed
-                        // must not consume a block's first send. Claude Code
-                        // preflights `count_tokens` with the whole transcript
-                        // and retries the same body after a 429 — neither
-                        // reports usage, and folding those would make the
-                        // *first* real send of every block read as a
-                        // mechanical re-send.
-                        usage.context = measured.map(|measured| {
-                            let mut store = state
-                                .seen_blocks
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            measured.against(store.entry(&format!("{agent_id}/{session}")))
-                        });
-                        state
-                            .compactor
-                            .observe_usage(&session, &agent_id, &usage, judged);
-                        sink(&agent_id, &session, usage);
+                        report(usage);
                     }
                     None
                 }

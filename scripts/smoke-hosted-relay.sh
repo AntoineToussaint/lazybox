@@ -67,6 +67,8 @@ while [ ! -S "$box_home/run/daemon.sock" ]; do
   sleep 1
 done
 
+# The parent may poll before the background shell opens its redirection.
+: >"$work/serve.log"
 LAZYBOX_HOME="$box_home" "$lazybox_bin" serve \
   --relay "$relay_addr" --box-id "$box_id" \
   >"$work/serve.log" 2>&1 &

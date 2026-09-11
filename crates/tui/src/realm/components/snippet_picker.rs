@@ -327,6 +327,15 @@ impl SnippetPicker {
                             bg(Style::default().fg(theme.warn)),
                         ));
                     }
+                    // What invoking the row can *do* rides the row itself, not
+                    // just the preview — a skill that bundles scripts is an
+                    // execution surface you should see before you pick it (#1671).
+                    if !r.tag.is_empty() {
+                        spans.push(Span::styled(
+                            format!("  {}", r.tag),
+                            bg(Style::default().fg(theme.warn)),
+                        ));
+                    }
                     lines.push(Line::from(spans));
                 }
             }
@@ -335,7 +344,7 @@ impl SnippetPicker {
     }
 
     /// Render the right preview pane: the highlighted snippet's title,
-    /// category + origin, and full wrapped body — so the user sees
+    /// category + origin + tag, and full wrapped body — so the user sees
     /// exactly what auto-submit will send.
     fn render_preview(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let Some(c) = self.cursor else {
@@ -391,6 +400,10 @@ impl SnippetPicker {
                 r.badge.clone(),
                 Style::default().fg(color).italic(),
             ));
+        }
+        if !r.tag.is_empty() {
+            meta.push(Span::styled("  ·  ", Style::default().fg(theme.text_dim)));
+            meta.push(Span::styled(r.tag.clone(), Style::default().fg(theme.warn)));
         }
         lines.push(Line::from(meta));
         lines.push(Line::raw(""));
@@ -1172,6 +1185,35 @@ mod tests {
             out.contains("review please") || out.contains("open pr"),
             "preview body: {out}"
         );
+    }
+
+    /// #1671: a skill that bundles `scripts/` carries its `⚠ runs code`
+    /// tag on the row itself, not only in the preview — you see the
+    /// execution surface while choosing, and the preview spells out the
+    /// path and that lazybox vetted none of it.
+    #[test]
+    fn render_shows_the_skill_runs_code_tag_and_disclosure() {
+        let skill = |name: &str, bundles_scripts: bool| lazybox_config::Skill {
+            name: name.into(),
+            description: format!("{name} desc"),
+            scope: lazybox_config::SkillScope::Repo,
+            folder: std::path::PathBuf::from("/w/.agents/skills").join(name),
+            bundles_scripts,
+        };
+        let rows = vec![
+            PickerRow::for_skill(skill("audit", true)),
+            PickerRow::for_skill(skill("notes", false)),
+        ];
+        let mut picker = SnippetPicker::new(rows, String::new()).with_title("Skills");
+        let out = render(&mut picker, 92, 20);
+        assert!(out.contains("⚠ runs code"), "row tag: {out}");
+        assert_eq!(
+            out.matches("⚠ runs code").count(),
+            2,
+            "the tag rides both the row and the highlighted row's preview meta: {out}",
+        );
+        assert!(out.contains("/w/.agents/skills/audit"), "path: {out}");
+        assert!(out.contains("not vetted by lazybox"), "disclosure: {out}");
     }
 
     /// A library taller than the list viewport scrolls to keep the

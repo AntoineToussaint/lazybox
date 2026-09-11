@@ -44,6 +44,12 @@ pub struct PickerRow {
     /// mere provenance.
     #[serde(default)]
     pub attention: bool,
+    /// Capability tag — what invoking this row can *do*, as opposed to
+    /// where it came from. Empty for snippets, which carry no execution
+    /// surface; the skills picker sets `"⚠ runs code"` on a skill that
+    /// bundles `scripts/` (#1671).
+    #[serde(default)]
+    pub tag: String,
 }
 
 impl PickerRow {
@@ -59,6 +65,43 @@ impl PickerRow {
             origin: snippet.origin.label().to_string(),
             badge: String::new(),
             attention: false,
+            tag: String::new(),
+        }
+    }
+
+    /// A discovered agent skill as a picker row (#797, #1671). The key is
+    /// the skill's invocation name and the category its scope, so repo
+    /// skills group above user ones. The body is the preview pane's
+    /// *disclosure*, not a payload — picking a skill sends "Use the
+    /// `<name>` skill.", so the pane instead spends its space on what the
+    /// user needs before invoking: where the skill lives, whether it
+    /// bundles code, and that lazybox has not vetted it. The literature on
+    /// malicious skills agrees on exactly one control — review before
+    /// invoke — and a picker that reads as a catalog of blessed
+    /// capabilities quietly removes it.
+    pub fn for_skill(skill: lazybox_config::Skill) -> Self {
+        let surface = if skill.bundles_scripts {
+            "bundles scripts/ — invoking this can run code with the agent's permissions"
+        } else {
+            "instructions only — no bundled scripts/"
+        };
+        Self {
+            key: skill.name,
+            description: skill.description,
+            category: skill.scope.label().to_string(),
+            body: format!(
+                "{}\n\n{surface}\nnot vetted by lazybox — read SKILL.md before invoking",
+                skill.folder.display(),
+            ),
+            origin: String::new(),
+            // Skills aren't overrides of built-in snippets — no badge.
+            badge: String::new(),
+            attention: false,
+            tag: if skill.bundles_scripts {
+                "⚠ runs code".to_string()
+            } else {
+                String::new()
+            },
         }
     }
 
@@ -548,6 +591,35 @@ mod tests {
         assert_eq!(view.auto_submit.as_deref(), Some("rev"));
         assert_eq!(view.visible_count, 1);
         assert!(view.groups.iter().all(|g| g.category != RECENT_CAT));
+    }
+
+    /// #1671: a skill row spends its preview body on review-before-invoke
+    /// material — path, execution surface, and the standing "lazybox vets
+    /// nothing" note — and tags a scripts-bundling skill on the row itself.
+    #[test]
+    fn skill_row_discloses_path_scripts_and_that_nothing_is_vetted() {
+        let skill = lazybox_config::Skill {
+            name: "code-review".into(),
+            description: "Review a diff.".into(),
+            scope: lazybox_config::SkillScope::User,
+            folder: std::path::PathBuf::from("/home/u/.agents/skills/code-review"),
+            bundles_scripts: true,
+        };
+        let row = PickerRow::for_skill(skill.clone());
+        assert_eq!(row.key, "code-review");
+        assert_eq!(row.category, "User");
+        assert_eq!(row.tag, "⚠ runs code");
+        assert!(row.body.contains("/home/u/.agents/skills/code-review"));
+        assert!(row.body.contains("bundles scripts/"));
+        assert!(row.body.contains("not vetted by lazybox"));
+
+        let prose = PickerRow::for_skill(lazybox_config::Skill {
+            bundles_scripts: false,
+            ..skill
+        });
+        assert_eq!(prose.tag, "", "no bundled scripts, no runs-code tag");
+        assert!(prose.body.contains("instructions only"));
+        assert!(prose.body.contains("not vetted by lazybox"));
     }
 
     #[test]

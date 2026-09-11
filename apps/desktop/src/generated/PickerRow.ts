@@ -26,4 +26,11 @@ badge: string,
  * copy), so the picker can color it as attention-worthy rather than
  * mere provenance.
  */
-attention: boolean, };
+attention: boolean,
+/**
+ * Capability tag — what invoking this row can *do*, as opposed to
+ * where it came from. Empty for snippets, which carry no execution
+ * surface; the skills picker sets `"⚠ runs code"` on a skill that
+ * bundles `scripts/` (#1671).
+ */
+tag: string, };

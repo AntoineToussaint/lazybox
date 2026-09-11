@@ -361,7 +361,7 @@ pub enum Id {
     SnippetPicker,
     /// Skills picker mounted from the terminal pane on `]]k` (issue
     /// #797). Same `SnippetPicker` component as `Id::SnippetPicker`, fed
-    /// the focused agent's discovered Claude Code skills; the pick
+    /// the focused agent's discovered skills; the pick
     /// injects an explicit "Use the `<skill>` skill." instruction through
     /// the same settle-gated path snippets use. See `mount_skill_picker`.
     SkillPicker,
@@ -3993,16 +3993,18 @@ impl<T: TerminalAdapter> Model<T> {
         lazybox_config::classify_snippet(active, builtin, kept)
     }
 
-    /// Mount the skills picker (`]]l`, issue #797): the Claude Code skills
-    /// available to the focused agent, discovered from `.claude/skills/`
-    /// in its worktree plus `~/.claude/skills/`. Reuses the `SnippetPicker`
-    /// component — rows carry the skill *name* as a
-    /// [`ChoicePayload::Text`], grouped by scope (Repo/User) and previewed
-    /// by their `description`. Picking injects an explicit "Use the
-    /// `<skill>` skill." instruction through the same settle-gated path
-    /// snippets use, so a model-side capability gains a deterministic
-    /// trigger. Skills only apply to an agent conversation, so a
-    /// non-agent (shell/log) terminal gets a nudge instead of the picker.
+    /// Mount the skills picker (`]]l`, issue #797): the skills available
+    /// to the focused agent, discovered from every [Agent
+    /// Skills](https://agentskills.io) root — `.claude/skills/` and
+    /// `.agents/skills/` in its worktree, plus the user-level roots.
+    /// Reuses the `SnippetPicker` component — rows carry the skill *name*
+    /// as a [`ChoicePayload::Text`], grouped by scope (Repo/User) and
+    /// previewed by their `description`. Picking injects an explicit "Use
+    /// the `<skill>` skill." instruction through the same settle-gated
+    /// path snippets use, so a model-side capability gains a
+    /// deterministic trigger. Skills only apply to an agent conversation,
+    /// so a non-agent (shell/log) terminal gets a nudge instead of the
+    /// picker.
     pub(crate) fn mount_skill_picker(&mut self, initial_filter: String) {
         let Some(terminal_id) = self.terminals.active_terminal_id() else {
             self.flash_info("no active terminal — open an agent session first");
@@ -4030,7 +4032,7 @@ impl<T: TerminalAdapter> Model<T> {
             return;
         }
         // Discovery reads the *local* filesystem. Over `--connect` the
-        // agent's worktree and `~/.claude/skills` live on the daemon host,
+        // agent's worktree and the user skill roots live on the daemon host,
         // not here, so a scan would silently surface the wrong machine's
         // skills. Gate on `remote` — the same flag the local-editor path
         // uses for server-side `worktree_path` actions (#742).
@@ -4040,22 +4042,12 @@ impl<T: TerminalAdapter> Model<T> {
         }
         let skills = lazybox_config::discover_skills(worktree.as_deref());
         if skills.is_empty() {
-            self.flash_info("no skills found — add SKILL.md folders under .claude/skills/");
+            self.flash_info(
+                "no skills found — add SKILL.md folders under .claude/skills/ or .agents/skills/",
+            );
             return;
         }
-        let rows: Vec<PickerRow> = skills
-            .into_iter()
-            .map(|skill| PickerRow {
-                key: skill.name,
-                description: skill.description.clone(),
-                category: skill.scope.label().to_string(),
-                body: skill.description,
-                origin: String::new(),
-                // Skills aren't overrides of built-in snippets — no badge.
-                badge: String::new(),
-                attention: false,
-            })
-            .collect();
+        let rows: Vec<PickerRow> = skills.into_iter().map(PickerRow::for_skill).collect();
         let picker = SnippetPicker::new(rows, initial_filter)
             .with_recent(self.recent_skills.clone())
             .with_title("Skills");
@@ -4063,7 +4055,7 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// The worktree of the focused terminal's workspace — the repo root
-    /// under which `.claude/skills/` is scanned. `None` when the terminal
+    /// under which the skill roots are scanned. `None` when the terminal
     /// has no session or the workspace carries no session yet.
     ///
     /// Resolution is workspace-grained on purpose: a terminal slot carries
@@ -4071,14 +4063,14 @@ impl<T: TerminalAdapter> Model<T> {
     /// id, so there is no finer "this terminal's session" to key off. That
     /// is sound for skills — every session in a workspace is a checkout of
     /// the *same* repo (a managed worktree, or the shared main checkout for
-    /// on-main/linked sessions), so each carries the same `.claude/skills/`.
+    /// on-main/linked sessions), so each carries the same skill roots.
     /// `first()` therefore yields a valid repo root regardless of which
     /// session the focused terminal belongs to (mirrors the editor flow).
     fn active_terminal_worktree(&self) -> Option<std::path::PathBuf> {
         self.workspace_worktree(self.terminals.active_session()?)
     }
 
-    /// The repo root under which a workspace's `.claude/skills/` are
+    /// The repo root under which a workspace's skills are
     /// scanned — its first session's worktree. Used by the sidebar `]]l`
     /// (#871), which scans the cursor workspace rather than the focused
     /// terminal's. `None` when the workspace carries no session yet. See

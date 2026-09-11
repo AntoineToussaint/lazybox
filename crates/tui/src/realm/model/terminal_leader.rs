@@ -22,8 +22,9 @@ pub(super) enum LeaderCmd {
     /// `]]s` — open the snippet picker.
     Snippets,
     /// `]]l` — open the skills picker: the focused agent's available
-    /// Claude Code skills (`.claude/skills/` + `~/.claude/skills/`),
-    /// triggered explicitly instead of waiting on the model to self-select
+    /// skills (every Agent Skills root — `.claude/skills/`,
+    /// `.agents/skills/`, and their user-level siblings), triggered
+    /// explicitly instead of waiting on the model to self-select
     /// one (issue #797). Keyed `l` (not `k`): the armed leader routes
     /// `j`/`k` to popup-highlight navigation before command dispatch, so a
     /// `k` command would be unreachable via its direct chord.
@@ -109,7 +110,7 @@ const FIXED_COMMANDS: &[FixedCommandSpec] = &[
         key: 'l',
         command: LeaderCmd::Skills,
         menu_label: "skills",
-        reference: "Open the skills picker — trigger one of the focused agent's Claude Code skills explicitly (typing a full name auto-submits)",
+        reference: "Open the skills picker — trigger one of the focused agent's skills explicitly (typing a full name auto-submits)",
         sidebar: true,
     },
     FixedCommandSpec {

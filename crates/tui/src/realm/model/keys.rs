@@ -1296,7 +1296,7 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// `]]l` from the sidebar — trigger one of the cursor workspace agent's
-    /// Claude Code skills. Retargets the skill picker at that agent and
+    /// skills. Retargets the skill picker at that agent and
     /// discovers skills from its worktree.
     fn sidebar_send_skill(&mut self) {
         let Some(key) = self.sidebar.selected_workspace_key().cloned() else {

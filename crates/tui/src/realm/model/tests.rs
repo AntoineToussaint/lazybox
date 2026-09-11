@@ -6299,6 +6299,31 @@ snippets:
         assert_eq!(m.recent_skills, vec!["code-review".to_string()]);
     }
 
+    /// #1671: a repo that ships its skills under the open standard's
+    /// `.agents/skills` — as a Codex session reads them — opens the
+    /// picker rather than the "no skills found" nudge.
+    #[test]
+    fn mount_skill_picker_finds_agents_dir_skills() {
+        let worktree = std::env::temp_dir().join(format!(
+            "lazybox-skilltest-{}-agents-root",
+            std::process::id(),
+        ));
+        let skill_dir = worktree.join(".agents").join("skills").join("audit");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: audit\ndescription: Audit the diff.\n---\nbody\n",
+        )
+        .unwrap();
+        let mut m = model_with_agent_at_worktree(worktree);
+        m.mount_skill_picker(String::new());
+        assert!(
+            matches!(m.modal_stack.last(), Some(Id::SkillPicker)),
+            "a .agents/skills skill must open the picker, notice: {:?}",
+            m.status.notice,
+        );
+    }
+
     /// A temp worktree carrying one repo skill under `.claude/skills/`,
     /// plus a model whose focused agent terminal is rooted there — the
     /// fixture for the end-to-end `]]l` chord tests.

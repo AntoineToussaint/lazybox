@@ -298,7 +298,11 @@ name to type), `Repository…` (the `x p` repo picker), `Workspace` (the
 render their keys from the catalog, so a remap never shows a stale key,
 and `lazybox --fresh` forgets the wizard answers + onboarding markers in
 `config.yaml` (not just `state.db`) so setup and the coach replay,
-`]` browse snippets (read-only catalog; `e` there opens the YAML),
+`]` browse snippets (read-only catalog; `e` there opens the YAML,
+`x` exports the snippet you're reading as a portable `SKILL.md` under
+`~/.claude/skills` — the CLI half is `lazybox snippet export <key>`
+`[--to repo|user] [--agent-dir claude|agents] [--force] [--check]`, and
+`--check` flags an export whose body drifted from its snippet, #1672),
 `Shift-R` refresh (sweep every scoped repo now — an unwindowed
 repo-first reconcile), `Ctrl-L` force a full repaint (recovery for a
 stale/garbled screen; resize and focus-regain also repaint

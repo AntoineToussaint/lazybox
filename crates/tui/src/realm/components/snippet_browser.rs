@@ -11,8 +11,10 @@
 //! Deliberately read-only: editing snippets stays "edit the YAML file"
 //! by design (see `docs/snippets.md`). `e` is the bridge to that —
 //! it closes the browser and opens `~/.lazybox/snippets.yaml` in the
-//! configured editor (`Msg::OpenSnippetsFile`). Navigation keys scroll;
-//! any other key dismisses.
+//! configured editor (`Msg::OpenSnippetsFile`). `x` exports the snippet
+//! you are reading as a portable `SKILL.md` under `~/.claude/skills`
+//! (#1672) — the user-level root, matching `e`'s user-level YAML.
+//! Navigation keys scroll; any other key dismisses.
 
 use crate::components::comment_render::wrap_one;
 use crate::realm::components::scrollable::{
@@ -68,6 +70,15 @@ pub struct SnippetBrowser {
     scroll: u16,
     /// Body viewport height, cached in `view` for page jumps + clamping.
     body_height: u16,
+    /// Where each row's heading starts in the rendered body, recorded by
+    /// `body_lines` so `x` can name the snippet you are actually reading.
+    /// Width-dependent (wrapping moves every heading), so it is refreshed
+    /// on each render rather than computed once.
+    row_starts: Vec<(usize, String)>,
+    /// Total rendered body lines, recorded alongside `row_starts` so the
+    /// last row's extent — and whether the whole catalog fits on screen —
+    /// are known without re-wrapping.
+    body_lines_total: usize,
     /// Live terminal leader character, so examples follow a remap.
     escape_char: char,
 }
@@ -78,6 +89,8 @@ impl SnippetBrowser {
             rows,
             scroll: 0,
             body_height: 0,
+            row_starts: Vec::new(),
+            body_lines_total: 0,
             escape_char,
         }
     }
@@ -85,10 +98,12 @@ impl SnippetBrowser {
     /// The scrollable body, wrapped to `width` cells. Pre-wrapped (not
     /// `Paragraph::wrap`) so the scroll offset — which ratatui counts in
     /// pre-wrap lines — stays in step with what's drawn. Re-derived each
-    /// render so theme + width changes are picked up. Pure given
-    /// `(theme, width)`, so tests can assert wrapping without a frame.
-    fn body_lines(&self, theme: &crate::theme::Theme, width: u16) -> Vec<Line<'static>> {
+    /// render so theme + width changes are picked up. A function of
+    /// `(theme, width)`, so tests can assert wrapping without a frame; the
+    /// only state it touches is `row_starts`, the heading index `x` reads.
+    fn body_lines(&mut self, theme: &crate::theme::Theme, width: u16) -> Vec<Line<'static>> {
         let dim = Style::default().fg(theme.text_dim);
+        self.row_starts.clear();
         if self.rows.is_empty() {
             let line = Line::from(Span::styled(
                 "No snippets configured — add some to ~/.lazybox/snippets.yaml.",
@@ -97,10 +112,12 @@ impl SnippetBrowser {
             return wrap_one(line, width);
         }
         let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut starts: Vec<(usize, String)> = Vec::with_capacity(self.rows.len());
         for (i, r) in self.rows.iter().enumerate() {
             if i > 0 {
                 lines.push(Line::raw(""));
             }
+            starts.push((lines.len(), r.key.clone()));
             // Heading: `]]s<key>   description   [origin]`.
             let mut head: Vec<Span<'static>> = vec![Span::styled(
                 format!("{0}{0}s{1}", self.escape_char, r.key,),
@@ -147,7 +164,43 @@ impl SnippetBrowser {
                 lines.extend(indent_wrapped(body_line, width, dim));
             }
         }
+        self.row_starts = starts;
+        self.body_lines_total = lines.len();
         lines
+    }
+
+    /// The snippet `x` acts on. Scrolling *is* the selection here — the
+    /// browser has no cursor — so the target is the snippet the viewport
+    /// is actually showing, and the hint names it either way.
+    ///
+    /// Two rules, because neither alone is right. Owning the top visible
+    /// line is wrong once you scroll past a boundary: with a long snippet
+    /// above, one trailing line of it at the top made `x` target that
+    /// snippet while the next one filled the other nineteen rows. Owning
+    /// the most visible lines is wrong when the whole catalog fits on
+    /// screen and nothing has been scrolled at all — then it targets the
+    /// *longest* snippet rather than the one under the reader's eye. So:
+    /// unscrollable means the first row, otherwise the row occupying the
+    /// most of the viewport, ties going to the earlier row.
+    fn visible_key(&self) -> Option<&str> {
+        if self.body_lines_total <= self.body_height.max(1) as usize {
+            return self.row_starts.first().map(|(_, key)| key.as_str());
+        }
+        let top = self.scroll as usize;
+        let bottom = top + self.body_height.max(1) as usize;
+        let mut best: Option<(usize, &str)> = None;
+        for (i, (start, key)) in self.row_starts.iter().enumerate() {
+            let end = self
+                .row_starts
+                .get(i + 1)
+                .map(|(next, _)| *next)
+                .unwrap_or(self.body_lines_total);
+            let visible = end.min(bottom).saturating_sub((*start).max(top));
+            if best.is_none_or(|(most, _)| visible > most) {
+                best = Some((visible, key.as_str()));
+            }
+        }
+        best.map(|(_, key)| key)
     }
 }
 
@@ -202,10 +255,16 @@ impl Component for SnippetBrowser {
 
         // Hint reflects whether there's more below, so the user knows to
         // scroll instead of assuming the list ends at the fold.
-        let hint = if self.scroll < max {
-            "↑/↓ scroll (more below) · e edit YAML · any other key to close"
+        let scroll_hint = if self.scroll < max {
+            "↑/↓ scroll (more below)"
         } else {
-            "↑/↓ scroll · e edit YAML · any other key to close"
+            "↑/↓ scroll"
+        };
+        let hint = match self.visible_key() {
+            Some(key) => format!(
+                "{scroll_hint} · x export {key} as a skill · e edit YAML · any other key to close"
+            ),
+            None => format!("{scroll_hint} · e edit YAML · any other key to close"),
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(hint, theme.hint()))),
@@ -236,6 +295,15 @@ impl AppComponent<Msg, UserEvent> for SnippetBrowser {
         match key.code {
             // `e` hands off to the editor on the YAML file.
             Key::Char('e') => Some(Msg::OpenSnippetsFile),
+            // `x` exports the snippet on screen as a `SKILL.md` (#1672).
+            // The browser stays open so a run of exports is one key each;
+            // with an empty catalog there is nothing to export and `x`
+            // closes like any other unbound key.
+            Key::Char('x') => Some(
+                self.visible_key()
+                    .map(|key| Msg::ExportSnippetSkill(key.to_string()))
+                    .unwrap_or(Msg::ModalDismissed),
+            ),
             // Any other key (Esc, q, Enter, …) closes the browser.
             _ => Some(Msg::ModalDismissed),
         }
@@ -298,6 +366,22 @@ mod tests {
             .join("\n")
     }
 
+    fn row_snippet(body: &str) -> Snippet {
+        Snippet {
+            description: "desc".into(),
+            category: String::new(),
+            body: body.into(),
+            skill: None,
+            provider: None,
+            next: Vec::new(),
+            origin: SnippetOrigin::BuiltIn,
+        }
+    }
+
+    fn state() -> lazybox_config::SnippetState {
+        lazybox_config::SnippetState::Builtin
+    }
+
     fn keyed(code: Key) -> Event<UserEvent> {
         Event::Keyboard(KeyEvent {
             code,
@@ -336,7 +420,7 @@ mod tests {
     #[test]
     fn long_body_wraps_and_continuations_stay_indented() {
         let long = "alpha bravo charlie delta echo foxtrot golf hotel india juliet";
-        let comp = SnippetBrowser::new(
+        let mut comp = SnippetBrowser::new(
             vec![BrowserRow::new(
                 "rev",
                 &Snippet {
@@ -385,6 +469,106 @@ mod tests {
                 <= width as usize),
             "no line wider than the viewport",
         );
+    }
+
+    /// `x` targets the snippet the viewport is showing, and the hint
+    /// names it — the browser has no cursor, so scrolling is the
+    /// selection and the target must never be implicit.
+    #[test]
+    fn x_exports_the_snippet_on_screen_and_the_hint_names_it() {
+        // Bodies long enough that the second snippet can actually be
+        // scrolled to: `view` clamps the offset to the content height.
+        let long = "line\n".repeat(10);
+        let rows = ["pr", "rev"]
+            .into_iter()
+            .map(|key| {
+                BrowserRow::new(
+                    key,
+                    &Snippet {
+                        description: "desc".into(),
+                        category: String::new(),
+                        body: long.clone(),
+                        skill: None,
+                        provider: None,
+                        next: Vec::new(),
+                        origin: SnippetOrigin::BuiltIn,
+                    },
+                    lazybox_config::SnippetState::Builtin,
+                )
+            })
+            .collect();
+        let mut comp = SnippetBrowser::new(rows, ']');
+        let out = render(&mut comp, 90, 10);
+        assert!(out.contains("x export pr as a skill"), "{out}");
+        assert_eq!(
+            comp.on(&keyed(Key::Char('x'))),
+            Some(Msg::ExportSnippetSkill("pr".into())),
+        );
+
+        // Scroll into the second snippet's block: the target follows.
+        comp.scroll = comp
+            .row_starts
+            .last()
+            .map(|(start, _)| *start as u16)
+            .expect("two rows");
+        let out = render(&mut comp, 90, 10);
+        assert!(out.contains("x export rev as a skill"), "{out}");
+        assert_eq!(
+            comp.on(&keyed(Key::Char('x'))),
+            Some(Msg::ExportSnippetSkill("rev".into())),
+        );
+    }
+
+    /// One trailing line of a long snippet at the top of the viewport
+    /// used to make `x` target *that* snippet while the next one filled
+    /// the rest of the screen. The target is the snippet the viewport is
+    /// actually showing.
+    #[test]
+    fn x_targets_the_snippet_filling_the_viewport_not_the_one_scrolled_past() {
+        let rows = vec![
+            BrowserRow::new("pr", &row_snippet(&"line\n".repeat(20)), state()),
+            BrowserRow::new("rev", &row_snippet(&"line\n".repeat(20)), state()),
+        ];
+        let mut comp = SnippetBrowser::new(rows, ']');
+        let _ = render(&mut comp, 90, 10);
+        // `pr` spans 0..=20 (heading + 20 body lines), a blank at 21,
+        // `rev`'s heading at 22. Park the top line on `pr`'s last body
+        // line: one line of `pr` on screen, the rest `rev`.
+        let rev_start = comp.row_starts.last().map(|(s, _)| *s).expect("two rows");
+        comp.scroll = (rev_start - 2) as u16;
+        let out = render(&mut comp, 90, 10);
+        assert!(out.contains("x export rev as a skill"), "{out}");
+        assert_eq!(
+            comp.on(&keyed(Key::Char('x'))),
+            Some(Msg::ExportSnippetSkill("rev".into())),
+        );
+    }
+
+    /// …but when the whole catalog fits on screen there is nothing to
+    /// scroll and no "dominant" row worth inferring: the target is the
+    /// first one, not whichever body happens to be longest.
+    #[test]
+    fn x_targets_the_first_snippet_when_everything_fits_on_screen() {
+        let rows = vec![
+            BrowserRow::new("pr", &row_snippet("one line"), state()),
+            BrowserRow::new("rev", &row_snippet(&"line\n".repeat(5)), state()),
+        ];
+        let mut comp = SnippetBrowser::new(rows, ']');
+        let out = render(&mut comp, 90, 24);
+        assert!(out.contains("x export pr as a skill"), "{out}");
+        assert_eq!(
+            comp.on(&keyed(Key::Char('x'))),
+            Some(Msg::ExportSnippetSkill("pr".into())),
+        );
+    }
+
+    /// With nothing to export, `x` is just another key and closes.
+    #[test]
+    fn x_on_an_empty_library_dismisses() {
+        let mut comp = SnippetBrowser::new(vec![], ']');
+        let out = render(&mut comp, 80, 12);
+        assert!(!out.contains("x export"), "{out}");
+        assert_eq!(comp.on(&keyed(Key::Char('x'))), Some(Msg::ModalDismissed));
     }
 
     #[test]

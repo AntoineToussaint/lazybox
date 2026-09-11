@@ -3881,6 +3881,137 @@ snippets:
         assert_eq!(rev.body, "please review");
     }
 
+    /// `x` in the browser writes the snippet out as a `SKILL.md` and
+    /// says where it landed; a second press is a no-op, not a rewrite.
+    #[test]
+    fn export_snippet_writes_a_skill_and_reports_the_path() {
+        let root = std::env::temp_dir()
+            .join(format!("lazybox-model-export-{}-write", std::process::id(),));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut m = build_model();
+        m.apply_snippets(snippets_from_yaml(
+            "export-write",
+            "snippets:\n  rev:\n    description: Review the diff\n    body: please review\n",
+        ));
+
+        m.export_snippet_into("rev", &root);
+        let written = root.join("rev").join("SKILL.md");
+        assert!(written.is_file(), "SKILL.md written");
+        let notice = m.status.notice.as_ref().expect("notice");
+        assert!(notice.message.contains("exported rev"), "{notice:?}");
+
+        m.export_snippet_into("rev", &root);
+        let notice = m.status.notice.as_ref().expect("notice");
+        assert!(notice.message.contains("already exported"), "{notice:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An edited `SKILL.md` is never overwritten from the TUI: discarding
+    /// someone's edit takes the CLI's explicit `--force`.
+    #[test]
+    fn export_snippet_refuses_to_clobber_an_edited_skill() {
+        let root = std::env::temp_dir().join(format!(
+            "lazybox-model-export-{}-edited",
+            std::process::id(),
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut m = build_model();
+        m.apply_snippets(snippets_from_yaml(
+            "export-edited",
+            "snippets:\n  rev:\n    description: Review the diff\n    body: please review\n",
+        ));
+        m.export_snippet_into("rev", &root);
+
+        let written = root.join("rev").join("SKILL.md");
+        let edited = std::fs::read_to_string(&written)
+            .unwrap()
+            .replace("please review", "please skim");
+        std::fs::write(&written, &edited).unwrap();
+
+        m.export_snippet_into("rev", &root);
+        let notice = m.status.notice.as_ref().expect("notice");
+        assert!(notice.message.contains("edited in place"), "{notice:?}");
+        assert_eq!(std::fs::read_to_string(&written).unwrap(), edited);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A snippet that moves after its export gets a startup nudge — the
+    /// generated copy must never become a second, softer authority on a
+    /// workflow without anyone noticing.
+    #[test]
+    fn startup_flags_an_export_that_drifted_from_its_snippet() {
+        let root = std::env::temp_dir()
+            .join(format!("lazybox-model-export-{}-drift", std::process::id(),));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut m = build_model();
+        m.apply_snippets(snippets_from_yaml(
+            "export-drift-before",
+            "snippets:\n  rev:\n    description: Review the diff\n    body: please review\n",
+        ));
+        m.export_snippet_into("rev", &root);
+        m.status.notice = None;
+
+        m.flash_snippet_export_drift_in(&root);
+        assert!(m.status.notice.is_none(), "an in-sync export says nothing");
+
+        m.apply_snippets(snippets_from_yaml(
+            "export-drift-after",
+            "snippets:\n  rev:\n    description: Review the diff\n    body: review harder\n",
+        ));
+        m.flash_snippet_export_drift_in(&root);
+        let notice = m.status.notice.as_ref().expect("drift notice");
+        assert!(notice.message.contains("rev"), "{notice:?}");
+        assert!(notice.message.contains("stale"), "{notice:?}");
+
+        // The boot sequence raises this immediately before
+        // `flash_model_pin_warning`, which replaces it in the footer. As a
+        // Hint it was dropped there and never recorded, so the whole
+        // startup half of the guard was silent for anyone carrying a
+        // pinned-model warning. It must survive in the durable log.
+        m.flash_hint("pinned model warning stands in for the real one");
+        assert!(
+            m.status
+                .messages
+                .recent()
+                .any(|e| e.message.contains("exported skill rev")),
+            "a displaced drift notice must still reach the Shift-M log",
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Over `--connect` the agents run on the daemon host, so scanning
+    /// this machine's `~/.claude/skills` reports drift about files no
+    /// agent there reads. The check could not see the flag while it lived
+    /// in `Model::new` (`with_remote()` is applied after the constructor
+    /// returns), which is why it now runs from `run_loop`.
+    #[test]
+    fn the_startup_drift_check_stays_quiet_over_connect() {
+        let root = std::env::temp_dir().join(format!(
+            "lazybox-model-export-{}-remote",
+            std::process::id(),
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut m = build_model();
+        m.apply_snippets(snippets_from_yaml(
+            "export-remote-before",
+            "snippets:\n  rev:\n    description: Review the diff\n    body: please review\n",
+        ));
+        m.export_snippet_into("rev", &root);
+        m.apply_snippets(snippets_from_yaml(
+            "export-remote-after",
+            "snippets:\n  rev:\n    description: Review the diff\n    body: review harder\n",
+        ));
+        m.status.notice = None;
+
+        m = m.with_remote();
+        m.flash_snippet_export_drift();
+        assert!(
+            m.status.notice.is_none(),
+            "a remote client must not report the local home's exports",
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A global override that differs from the built-in classifies as
     /// stale, and "keep mine" flips it to an intentional up-to-date
     /// override, recording the built-in-hashed target locally (#1312).
@@ -6449,6 +6580,65 @@ snippets:
         m.focus = PaneFocus::Terminals;
         m.set_focus_attr();
         m
+    }
+
+    /// The #1672 round trip, end to end: a snippet exported into a
+    /// worktree's `.claude/skills` is discovered by `]]l`, and its preview
+    /// names the snippet it came from — so an exported skill reads as the
+    /// same workflow `]]s` fires, not an unrelated third-party one.
+    #[test]
+    fn an_exported_snippet_round_trips_into_the_skills_picker() {
+        let worktree = std::env::temp_dir().join(format!(
+            "lazybox-skillexport-{}-roundtrip",
+            std::process::id(),
+        ));
+        let _ = std::fs::remove_dir_all(&worktree);
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let mut m = model_with_agent_at_worktree(worktree.clone());
+        // A key no real skill can collide with: discovery also scans the
+        // developer's own `~/.claude/skills`, and the filter must leave
+        // exactly this row highlighted for the preview assertion to mean
+        // anything.
+        m.apply_snippets(snippets_from_yaml(
+            "roundtrip",
+            "snippets:\n  zzexportprobe:\n    description: Review the current diff\n    \
+             body: please review\n",
+        ));
+        m.export_snippet_into("zzexportprobe", &worktree.join(".claude").join("skills"));
+
+        m.mount_skill_picker("zzexportprobe".to_string());
+        assert!(
+            matches!(m.top_modal(), Some(Id::SkillPicker)),
+            "the exported skill is discoverable",
+        );
+        use tuirealm::ratatui::Terminal;
+        use tuirealm::ratatui::backend::TestBackend;
+        let mut term = Terminal::new(TestBackend::new(120, 30)).expect("test terminal");
+        term.draw(|f| m.app.view(&Id::SkillPicker, f, Rect::new(0, 0, 120, 30)))
+            .expect("draw the picker");
+        let buf = term.backend().buffer();
+        let out: String = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(out.contains("zzexportprobe"), "the skill lists:\n{out}");
+        // The provenance rides #1671's disclosure notice (a skill has no
+        // body to preview), stated as the claim it is — and alongside,
+        // never instead of, the standing "not vetted" line.
+        assert!(
+            out.contains("marked as exported from the lazybox"),
+            "the disclosure names the source snippet:\n{out}",
+        );
+        assert!(
+            out.contains("not vetted by lazybox"),
+            "the #1671 disclosure still stands on an exported skill:\n{out}",
+        );
+        let _ = std::fs::remove_dir_all(&worktree);
     }
 
     /// End-to-end: arming the leader and pressing `l` opens the skills

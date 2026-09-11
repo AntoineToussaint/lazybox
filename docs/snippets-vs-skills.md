@@ -25,8 +25,11 @@ supply-chain record on published skills is poor. lazybox's `]]l` picker
 therefore shows what it can *see* and nothing more: the skill's scope,
 its path on disk, whether the folder bundles a `scripts/` directory
 (a `⚠ runs code` tag — a directory-exists test, not a scan), and a
-standing `not vetted by lazybox` note. Read the `SKILL.md` before you
-invoke one.
+standing `not vetted by lazybox` note. A skill whose frontmatter marks it
+as a lazybox export (#1672) says so too — as a claim, since the marker is
+frontmatter anyone can write, and alongside the standing note rather than
+in place of it; `lazybox snippet export --check` is what verifies it.
+Read the `SKILL.md` before you invoke one.
 
 Two details keep that disclosure honest rather than merely present. The
 tag **leads** the row instead of trailing the description, because the
@@ -39,6 +42,11 @@ name by its own: so the preview names every candidate folder, and the
 scripts-bundling copy is never presented as instructions-only. lazybox deliberately offers no install path: discovering
 what is already on disk is a different job from being the channel that
 puts it there.
+
+The two bridges are built. A snippet can *dispatch* a skill (`skill:`),
+and a snippet can *become* one (`lazybox snippet export <key>`, or `x` in
+the `]` browser) — see [Export a workflow as a
+skill](snippets.md#export-a-workflow-as-a-skill).
 
 ## The axis that matters: who *can* trigger it
 
@@ -73,7 +81,7 @@ inside lazybox is exactly the follow-up in the recommendation below.)
 | Scope / layering | built-in → global → launch-dir (`~/.lazybox/snippets.yaml`) | per-repo `.claude/skills/` + `.agents/skills/`, shadowing the user-level `~/.claude`, `~/.agents`, `~/.codex` roots |
 | Authoring | YAML + "Ask Lazybox" confirm-and-write | Author a `SKILL.md` folder by hand or via the agent |
 | lazybox memory | MRU **Recent**, per-workspace `]N` badge, broadcast rollout | None — skill invocation is agent-internal |
-| Portability | lazybox-only | An open standard — the same folder runs in Claude Code, Codex, Cursor and 40+ other tools, with or without lazybox |
+| Portability | lazybox-only — until exported as a `SKILL.md` (`lazybox snippet export`), which any agent reading the standard then loads | An open standard — the same folder runs in Claude Code, Codex, Cursor and 40+ other tools, with or without lazybox |
 | Determinism | High — you know exactly what fires | Lower — depends on the model's read of `description` |
 
 ## When to use which
@@ -130,6 +138,15 @@ truth, and it lives in the snippet body.**
   skip rules have one authored source and one test guarding them. A skill
   that quietly relaxes the wording would reintroduce precisely the drift
   this decision exists to prevent.
+- **Export (#1672) is that "embed", made mechanical.** `lazybox snippet
+  export rev` writes a `SKILL.md` whose body is the snippet's, byte for
+  byte, and records a byte-exact hash of it; `--check` (and a startup
+  notice) reports an exported skill that has come apart from its snippet,
+  whether because the snippet moved or because the file was edited in
+  place. Nothing is ever read back from a skill into a snippet. So the
+  portable copy is a *build artifact* of the one authored standard, not a
+  second voice on it — and the #1145 tests keep guarding the single copy
+  they always did.
 
 ## Recommendation and where this is headed
 
@@ -150,6 +167,11 @@ Bridging the two is scoped as follow-up work rather than built blind:
   / broadcast UX while a real skill does the heavy lifting.
 - **Let "Ask Lazybox" scaffold a skill** (not just a snippet) when a
   request is genuinely multi-step or needs bundled code.
+- **Export a curated snippet as a skill**, so lazybox's vetted library is
+  portable rather than lazybox-only — skills as an export format, not an
+  import one. Notably *not* an install pipeline: lazybox publishes what it
+  authored and vouches for, and does not become the delivery path for
+  skills it did not write. (Shipped as `lazybox snippet export`, #1672.)
 
 See the issues linked from
 [#793](https://github.com/AntoineToussaint/lazybox/issues/793) for the

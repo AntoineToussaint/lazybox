@@ -1229,6 +1229,7 @@ mod tests {
             folder: std::path::PathBuf::from("/w/.agents/skills").join(name),
             also_at: Vec::new(),
             bundles_scripts,
+            from_snippet: None,
         };
         let rows = vec![
             PickerRow::for_skill(skill("audit", true)),

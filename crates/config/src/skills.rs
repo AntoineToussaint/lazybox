@@ -3,7 +3,7 @@
 //! A snippet is human-triggered; a skill is model-triggered — the agent
 //! reads each skill's `description` and decides *itself* whether to
 //! invoke it, progressively loading the `SKILL.md` body and any bundled
-//! files. This module owns two filesystem-facing halves of lazybox's
+//! files. This module owns the filesystem-facing halves of lazybox's
 //! skill support (see `docs/snippets-vs-skills.md`):
 //!
 //! - **Discovery** (#797, #1671): scan the [Agent
@@ -14,6 +14,9 @@
 //! - **Scaffolding** (#799): write a `.claude/skills/<name>/SKILL.md`
 //!   folder from an "Ask Lazybox" request when the ask is genuinely
 //!   multi-step (or wants bundled scripts/reference files).
+//! - **Export** (#1672): write one of lazybox's curated snippets out as
+//!   a `SKILL.md`, so a vetted workflow is portable to any agent that
+//!   reads the format — and stays checkable against its source snippet.
 //!
 //! Layout: each skill is a folder holding a `SKILL.md` whose YAML
 //! frontmatter carries `name` and `description`, optionally beside a
@@ -73,6 +76,18 @@ pub struct Skill {
     /// never be presented as instructions-only just because lazybox's
     /// own precedence happened to pick the inert one.
     pub bundles_scripts: bool,
+    /// The lazybox snippet this skill's frontmatter *claims* it was
+    /// exported from (#1672), read from `metadata.lazybox.snippet`.
+    /// `None` for every skill carrying no such marker — which is most of
+    /// them.
+    ///
+    /// A claim, not a verdict: like every other field here it is
+    /// third-party YAML, and nothing stops a hand-authored skill from
+    /// writing the marker. Discovery has no snippet catalog to check it
+    /// against, so the picker reports it as marked and leaves the
+    /// verifying to `lazybox snippet export --check`. In particular it
+    /// must not retract the "not vetted by lazybox" disclosure (#1671).
+    pub from_snippet: Option<String>,
 }
 
 /// Which agents read a given skill root. lazybox spawns three agents and
@@ -103,10 +118,19 @@ impl RootOwner {
 }
 
 /// The frontmatter fields we read; every other key is ignored.
+///
+/// `metadata` stays an untyped [`serde_yaml::Value`] on purpose: a
+/// third-party skill may put anything under that key, and a typed field
+/// would fail the *whole* frontmatter parse on a shape we don't expect —
+/// dropping that skill's name and description from discovery. Digging the
+/// one nested path we care about ([`lazybox_export_meta`]) keeps an odd
+/// `metadata:` harmless.
 #[derive(serde::Deserialize)]
 struct SkillFrontmatter {
     name: Option<String>,
     description: Option<String>,
+    #[serde(default)]
+    metadata: serde_yaml::Value,
 }
 
 /// Discover the skills an `agent_id` session rooted at `repo_root` can
@@ -229,15 +253,19 @@ fn scan_dir(dir: &Path, scope: SkillScope, out: &mut Vec<Skill>) {
 /// silently vanishing.
 fn read_skill(folder: PathBuf, folder_name: String, scope: SkillScope) -> Skill {
     let front = read_frontmatter(&folder.join("SKILL.md"));
-    let (name, description) = match front {
-        Some(front) => (
-            front
-                .name
-                .filter(|name| !name.trim().is_empty())
-                .unwrap_or(folder_name),
-            front.description.unwrap_or_default(),
-        ),
-        None => (folder_name, String::new()),
+    let (name, description, from_snippet) = match front {
+        Some(front) => {
+            let from_snippet = lazybox_export_meta(&front).map(|meta| meta.snippet);
+            (
+                front
+                    .name
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or(folder_name),
+                front.description.unwrap_or_default(),
+                from_snippet,
+            )
+        }
+        None => (folder_name, String::new(), None),
     };
     Skill {
         name: name.trim().to_string(),
@@ -246,6 +274,7 @@ fn read_skill(folder: PathBuf, folder_name: String, scope: SkillScope) -> Skill 
         bundles_scripts: folder.join("scripts").is_dir(),
         also_at: Vec::new(),
         folder,
+        from_snippet,
     }
 }
 
@@ -303,6 +332,10 @@ pub enum SkillError {
     Frontmatter(#[from] serde_yaml::Error),
     #[error("failed to write skill: {0}")]
     Io(#[from] std::io::Error),
+    #[error("{0} was edited in place — re-export with --force to discard that edit")]
+    ExportEdited(PathBuf),
+    #[error("{0} is not a lazybox snippet export — re-export with --force to replace it")]
+    ExportForeign(PathBuf),
 }
 
 /// A skill's home directory: `<repo_root>/.claude/skills/<name>`.
@@ -396,6 +429,353 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), SkillError> {
     Ok(())
 }
 
+// ── Export: a snippet becomes a portable skill (#1672) ───────────────
+//
+// The inverse of the `skill:` bridge (#798, where a snippet *dispatches*
+// a skill): here a curated lazybox snippet is written out AS a `SKILL.md`
+// so the same vetted workflow reaches any agent that reads the format,
+// with or without lazybox. Nothing ever flows the other way — a skill is
+// never read back into a snippet, so the snippet body stays the single
+// authored copy of a workflow (the #1145 rule).
+
+/// Which skill root an export is written into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillTarget {
+    /// `<repo_root>/<dir>/skills` — travels with the repo.
+    Repo,
+    /// `$HOME/<dir>/skills` — follows the user across repos.
+    User,
+}
+
+/// Which directory convention the target agent reads. `.claude` is Claude
+/// Code's; `.agents` is the open Agent Skills spec's, which Codex and
+/// others read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillAgentDir {
+    Claude,
+    Agents,
+}
+
+impl SkillAgentDir {
+    fn segment(self) -> &'static str {
+        match self {
+            SkillAgentDir::Claude => ".claude",
+            SkillAgentDir::Agents => ".agents",
+        }
+    }
+
+    /// Parse the `--agent-dir` value. `None` for anything else, so the
+    /// caller reports the typo instead of silently picking a default.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "claude" => Some(SkillAgentDir::Claude),
+            "agents" => Some(SkillAgentDir::Agents),
+            _ => None,
+        }
+    }
+}
+
+impl SkillTarget {
+    /// Parse the `--to` value.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "repo" => Some(SkillTarget::Repo),
+            "user" => Some(SkillTarget::User),
+            _ => None,
+        }
+    }
+}
+
+/// The skills root an export lands in — `<repo_root>/.claude/skills`,
+/// `$HOME/.agents/skills`, and so on. `None` when the target's base is
+/// unavailable: `Repo` without a repo root, or `User` without a `$HOME`.
+pub fn skills_root(
+    target: SkillTarget,
+    agent_dir: SkillAgentDir,
+    repo_root: Option<&Path>,
+) -> Option<PathBuf> {
+    let base = match target {
+        SkillTarget::Repo => repo_root?.to_path_buf(),
+        SkillTarget::User => {
+            PathBuf::from(std::env::var_os("HOME").filter(|home| !home.is_empty())?)
+        }
+    };
+    Some(base.join(agent_dir.segment()).join("skills"))
+}
+
+/// The `SKILL.md` an exported snippet is written to.
+pub fn exported_skill_path(root: &Path, key: &str) -> PathBuf {
+    root.join(key).join("SKILL.md")
+}
+
+/// How an exported `SKILL.md` relates to the snippet it came from.
+///
+/// Both drift directions are distinguished because they call for
+/// opposite responses: a *stale* export is regenerated freely (the file
+/// is generated, nothing is lost), while an *edited* one holds a change
+/// that only `--force` may discard — and whose right home is the snippet
+/// body, since a skill never writes back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportState {
+    /// Nothing exported under this key yet.
+    Missing,
+    /// The exported body still matches the snippet's.
+    InSync,
+    /// The snippet changed after the export — regenerate.
+    Stale,
+    /// The `SKILL.md` body was edited in place, away from the version it
+    /// recorded.
+    Edited,
+    /// A `SKILL.md` is there but carries no lazybox export marker — a
+    /// hand-authored or third-party skill that happens to share the name.
+    Foreign,
+}
+
+impl ExportState {
+    /// Whether this state is drift worth reporting — what `--check` and
+    /// the startup notice flag.
+    pub fn is_drift(self) -> bool {
+        matches!(self, ExportState::Stale | ExportState::Edited)
+    }
+
+    /// One-word label for CLI / notice output.
+    pub fn label(self) -> &'static str {
+        match self {
+            ExportState::Missing => "not exported",
+            ExportState::InSync => "up to date",
+            ExportState::Stale => "stale",
+            ExportState::Edited => "edited",
+            ExportState::Foreign => "not a lazybox export",
+        }
+    }
+}
+
+/// One snippet's export status under a given skills root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportStatus {
+    pub key: String,
+    pub path: PathBuf,
+    pub state: ExportState,
+}
+
+/// What an export call did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportOutcome {
+    /// The `SKILL.md` was written (created or regenerated).
+    Written(PathBuf),
+    /// Already byte-current — nothing written.
+    Unchanged(PathBuf),
+}
+
+impl ExportOutcome {
+    pub fn path(&self) -> &Path {
+        match self {
+            ExportOutcome::Written(p) | ExportOutcome::Unchanged(p) => p,
+        }
+    }
+}
+
+/// The lazybox provenance an exported skill records under
+/// `metadata.lazybox`.
+struct ExportMeta {
+    /// The source snippet key.
+    snippet: String,
+    /// Hash of the body as exported — the drift anchor.
+    version: String,
+}
+
+/// Dig `metadata.lazybox.{snippet,version}` out of a parsed frontmatter.
+/// `None` for any skill that isn't a lazybox export.
+fn lazybox_export_meta(front: &SkillFrontmatter) -> Option<ExportMeta> {
+    let lazybox = front.metadata.get("lazybox")?;
+    Some(ExportMeta {
+        snippet: lazybox.get("snippet")?.as_str()?.to_string(),
+        version: lazybox.get("version")?.as_str()?.to_string(),
+    })
+}
+
+/// Split a `SKILL.md` into its frontmatter YAML and the body that
+/// follows the closing fence. `None` when there is no complete
+/// frontmatter block.
+fn split_skill_md(contents: &str) -> Option<(String, String)> {
+    // Both line endings, because the sibling `read_frontmatter` accepts
+    // both (its `trim_end` absorbs the `\r`): an LF-only opening fence
+    // here made a CRLF `SKILL.md` — a checkout under `eol=crlf`, or any
+    // editor configured that way — parse as no frontmatter at all, so it
+    // classified as `Foreign` and `drifted_exports` filtered it out of
+    // the sweep entirely. An export lazybox could no longer read is the
+    // last thing `--check` should report as clean.
+    let rest = contents
+        .strip_prefix("---\n")
+        .or_else(|| contents.strip_prefix("---\r\n"))?;
+    let mut consumed = 0usize;
+    for line in rest.split_inclusive('\n') {
+        if line.trim_end() == "---" {
+            let body = &rest[consumed + line.len()..];
+            return Some((
+                rest[..consumed].to_string(),
+                body.trim_start_matches('\n').to_string(),
+            ));
+        }
+        consumed += line.len();
+    }
+    None
+}
+
+/// Human-readable provider label for the scope note an export carries.
+fn provider_label(provider: &str) -> String {
+    match provider {
+        "github" => "GitHub".to_string(),
+        "linear" => "Linear".to_string(),
+        "slack" => "Slack".to_string(),
+        other => {
+            let mut chars = other.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        }
+    }
+}
+
+/// The exported skill's `description`. A `provider:`-scoped snippet
+/// states the scope in prose: a skill has no provider filter, so the
+/// only place that constraint can survive the export is the text the
+/// model reads when deciding whether the skill applies.
+fn export_description(snippet: &crate::Snippet) -> String {
+    let description = snippet.description.trim();
+    match snippet.provider.as_deref() {
+        None => description.to_string(),
+        Some(provider) => format!(
+            "{description} ({} workspaces only)",
+            provider_label(provider)
+        ),
+    }
+}
+
+/// Render the `SKILL.md` a snippet exports to: frontmatter carrying the
+/// skill `name` / `description` plus lazybox provenance, then the
+/// snippet's delivery body verbatim.
+///
+/// No `scripts/` and no bundled files — a snippet is text, so the
+/// exported skill has no execution surface.
+pub fn render_snippet_skill(key: &str, snippet: &crate::Snippet) -> Result<String, SkillError> {
+    validate_skill_name(key)?;
+    // Checked before the scope suffix is appended: a scoped snippet with
+    // no description of its own would otherwise export as the bare
+    // "(GitHub workspaces only)", which tells the model nothing.
+    if snippet.description.trim().is_empty() {
+        return Err(SkillError::MissingDescription);
+    }
+    let description = export_description(snippet);
+    let body = snippet.dispatch_body();
+    if body.trim().is_empty() {
+        return Err(SkillError::MissingBody);
+    }
+
+    let mut lazybox = serde_yaml::Mapping::new();
+    lazybox.insert("snippet".into(), key.into());
+    let category = snippet.category.trim();
+    if !category.is_empty() {
+        lazybox.insert("category".into(), category.into());
+    }
+    lazybox.insert("version".into(), crate::export_body_hash(&body).into());
+    let mut metadata = serde_yaml::Mapping::new();
+    metadata.insert("lazybox".into(), serde_yaml::Value::Mapping(lazybox));
+
+    let mut front = serde_yaml::Mapping::new();
+    front.insert("name".into(), key.into());
+    front.insert("description".into(), description.into());
+    front.insert("metadata".into(), serde_yaml::Value::Mapping(metadata));
+    let yaml = serde_yaml::to_string(&serde_yaml::Value::Mapping(front))?;
+    Ok(format!("---\n{yaml}---\n\n{}\n", body.trim_end()))
+}
+
+/// Classify the export of `key` under `root` against the live snippet.
+pub fn export_status(root: &Path, key: &str, snippet: &crate::Snippet) -> ExportStatus {
+    let path = exported_skill_path(root, key);
+    let state = match std::fs::read_to_string(&path) {
+        Err(_) => ExportState::Missing,
+        Ok(contents) => classify_export(&contents, key, snippet),
+    };
+    ExportStatus {
+        key: key.to_string(),
+        path,
+        state,
+    }
+}
+
+/// The pure core of [`export_status`], against an already-read file.
+///
+/// The recorded `version` is the anchor for *both* comparisons: the
+/// file's own body against it says whether the file was edited, and the
+/// snippet's current body against it says whether the snippet moved. An
+/// edit wins the tie — it is the one that would be destroyed by a
+/// regenerate, so it is the one the user must be told about.
+fn classify_export(contents: &str, key: &str, snippet: &crate::Snippet) -> ExportState {
+    let Some((yaml, body)) = split_skill_md(contents) else {
+        return ExportState::Foreign;
+    };
+    let Ok(front) = serde_yaml::from_str::<SkillFrontmatter>(&yaml) else {
+        return ExportState::Foreign;
+    };
+    let Some(meta) = lazybox_export_meta(&front) else {
+        return ExportState::Foreign;
+    };
+    if meta.snippet != key {
+        return ExportState::Foreign;
+    }
+    if crate::export_body_hash(&body) != meta.version {
+        return ExportState::Edited;
+    }
+    if snippet.dispatch_hash() != meta.version {
+        return ExportState::Stale;
+    }
+    ExportState::InSync
+}
+
+/// Export `snippet` as `<root>/<key>/SKILL.md` and report what happened.
+///
+/// An existing export is regenerated freely when it is this snippet's own
+/// and unedited (`InSync` — a no-op — or `Stale`). An `Edited` or
+/// `Foreign` file is refused unless `force`, so a regenerate can never
+/// silently destroy a hand-written change or someone else's skill.
+pub fn export_snippet_skill(
+    root: &Path,
+    key: &str,
+    snippet: &crate::Snippet,
+    force: bool,
+) -> Result<ExportOutcome, SkillError> {
+    let contents = render_snippet_skill(key, snippet)?;
+    let status = export_status(root, key, snippet);
+    if !force {
+        match status.state {
+            ExportState::Edited => return Err(SkillError::ExportEdited(status.path)),
+            ExportState::Foreign => return Err(SkillError::ExportForeign(status.path)),
+            ExportState::InSync => return Ok(ExportOutcome::Unchanged(status.path)),
+            ExportState::Missing | ExportState::Stale => {}
+        }
+    }
+    std::fs::create_dir_all(root.join(key))?;
+    write_atomically(&status.path, contents.as_bytes())?;
+    Ok(ExportOutcome::Written(status.path))
+}
+
+/// Every snippet whose export under `root` has drifted — the `--check`
+/// report and the startup notice. Ordered by key (the catalog's order);
+/// a missing root yields nothing, so the common "never exported
+/// anything" case costs one failed `read_dir`.
+pub fn drifted_exports(root: &Path, snippets: &crate::Snippets) -> Vec<ExportStatus> {
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    snippets
+        .all()
+        .map(|(key, snippet)| export_status(root, key, snippet))
+        .filter(|status| status.state.is_drift())
+        .collect()
+}
+
 #[cfg(test)]
 mod discovery_tests {
     use super::*;
@@ -414,7 +794,7 @@ mod discovery_tests {
             .collect()
     }
 
-    fn repo_only(dir: &Path) -> Vec<(PathBuf, SkillScope)> {
+    pub(super) fn repo_only(dir: &Path) -> Vec<(PathBuf, SkillScope)> {
         roots(&[(dir, SkillScope::Repo)])
     }
 
@@ -844,5 +1224,421 @@ mod scaffold_tests {
             Err(SkillError::InvalidName(_))
         ));
         assert!(!root.join(".claude").exists());
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+    use crate::{Snippet, SnippetOrigin, Snippets};
+
+    fn tmp_root(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "lazybox-export-test-{}-{tag}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed),
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn snippet(body: &str) -> Snippet {
+        Snippet {
+            description: "Review the current diff".into(),
+            category: "Review".into(),
+            body: body.into(),
+            skill: None,
+            provider: None,
+            next: Vec::new(),
+            origin: SnippetOrigin::BuiltIn,
+        }
+    }
+
+    /// The acceptance case: exporting `rev` yields a `SKILL.md` whose
+    /// frontmatter validates and whose body is the snippet's delivery
+    /// body byte for byte.
+    #[test]
+    fn exports_a_valid_skill_md_with_the_delivery_body() {
+        let root = tmp_root("valid");
+        let rev = Snippets::builtin()
+            .get("rev")
+            .cloned()
+            .expect("built-in rev");
+        let outcome = export_snippet_skill(&root, "rev", &rev, false).unwrap();
+        assert_eq!(
+            outcome,
+            ExportOutcome::Written(exported_skill_path(&root, "rev"))
+        );
+
+        let written = std::fs::read_to_string(outcome.path()).unwrap();
+        let (yaml, body) = split_skill_md(&written).expect("frontmatter block");
+        let front: SkillFrontmatter = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(front.name.as_deref(), Some("rev"));
+        assert_eq!(front.description.as_deref(), Some(rev.description.as_str()));
+        assert_eq!(body.trim_end(), rev.dispatch_body().trim_end());
+
+        let meta = lazybox_export_meta(&front).expect("lazybox metadata");
+        assert_eq!(meta.snippet, "rev");
+        assert_eq!(meta.version, rev.dispatch_hash());
+        assert_eq!(
+            front
+                .metadata
+                .get("lazybox")
+                .and_then(|m| m.get("category"))
+                .and_then(|c| c.as_str()),
+            Some("Review"),
+        );
+    }
+
+    /// Round-trip: what `export_snippet_skill` writes is what
+    /// `discover_skills_in` finds, name and description intact.
+    #[test]
+    fn an_exported_skill_is_discovered_by_the_picker_scan() {
+        let repo = tmp_root("roundtrip");
+        let root = repo.join(".claude").join("skills");
+        export_snippet_skill(&root, "rev", &snippet("Review it."), false).unwrap();
+        let skills = discover_skills_in(&super::discovery_tests::repo_only(&root));
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "rev");
+        assert_eq!(skills[0].description, "Review the current diff");
+        assert_eq!(skills[0].from_snippet.as_deref(), Some("rev"));
+    }
+
+    /// A skill lazybox did not write carries no snippet provenance — the
+    /// picker must not imply lazybox vouches for a third-party skill.
+    #[test]
+    fn a_hand_authored_skill_carries_no_snippet_provenance() {
+        let repo = tmp_root("provenance");
+        std::fs::create_dir_all(repo.join("deploy")).unwrap();
+        std::fs::write(
+            repo.join("deploy").join("SKILL.md"),
+            "---\nname: deploy\ndescription: ship it\nmetadata: not-a-mapping\n---\nGo.\n",
+        )
+        .unwrap();
+        let skills = discover_skills_in(&super::discovery_tests::repo_only(&repo));
+        assert_eq!(skills.len(), 1);
+        // An odd `metadata:` must not cost the skill its name/description.
+        assert_eq!(skills[0].name, "deploy");
+        assert_eq!(skills[0].description, "ship it");
+        assert_eq!(skills[0].from_snippet, None);
+    }
+
+    /// A snippet body that moves after the export reads as stale, and a
+    /// plain re-export (no `--force`) is what fixes it.
+    #[test]
+    fn a_changed_snippet_makes_the_export_stale() {
+        let root = tmp_root("stale");
+        let before = snippet("Review it.");
+        export_snippet_skill(&root, "rev", &before, false).unwrap();
+        assert_eq!(
+            export_status(&root, "rev", &before).state,
+            ExportState::InSync
+        );
+
+        let after = snippet("Review it, adversarially.");
+        assert_eq!(
+            export_status(&root, "rev", &after).state,
+            ExportState::Stale
+        );
+        export_snippet_skill(&root, "rev", &after, false).unwrap();
+        assert_eq!(
+            export_status(&root, "rev", &after).state,
+            ExportState::InSync
+        );
+    }
+
+    /// Editing the `SKILL.md` reads as edited — a different drift from
+    /// stale, and one a re-export refuses to discard without `--force`.
+    #[test]
+    fn an_edited_skill_md_is_reported_and_not_silently_overwritten() {
+        let root = tmp_root("edited");
+        let rev = snippet("Review it.");
+        let path = exported_skill_path(&root, "rev");
+        export_snippet_skill(&root, "rev", &rev, false).unwrap();
+
+        let edited = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("Review it.", "Review it, but softly.");
+        std::fs::write(&path, &edited).unwrap();
+        assert_eq!(export_status(&root, "rev", &rev).state, ExportState::Edited);
+
+        let err = export_snippet_skill(&root, "rev", &rev, false).unwrap_err();
+        assert!(matches!(err, SkillError::ExportEdited(_)), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+
+        export_snippet_skill(&root, "rev", &rev, true).unwrap();
+        assert_eq!(export_status(&root, "rev", &rev).state, ExportState::InSync);
+    }
+
+    /// The drift anchor must be byte-exact, not whitespace-normalized.
+    /// Reflowing a body into paragraphs is the commonest prompt edit
+    /// there is, and it changes prose a model reads — under the #1312
+    /// whitespace-insensitive `body_hash` the export reported "up to
+    /// date" forever, the exact silent divergence export exists to catch.
+    #[test]
+    fn reflowing_a_snippet_body_makes_the_export_stale() {
+        let root = tmp_root("reflow");
+        let flat = snippet("Pass 1: design. Pass 2: stress. Pass 3: blast radius.");
+        export_snippet_skill(&root, "rev", &flat, false).unwrap();
+        assert_eq!(
+            export_status(&root, "rev", &flat).state,
+            ExportState::InSync,
+        );
+
+        // Same words, new shape: whitespace-only, and still a real change
+        // to the exported prompt.
+        let reflowed = snippet("Pass 1: design.\n\nPass 2: stress.\n\nPass 3: blast radius.");
+        assert_eq!(
+            export_status(&root, "rev", &reflowed).state,
+            ExportState::Stale,
+            "a whitespace-only body change still changes the exported prompt",
+        );
+        export_snippet_skill(&root, "rev", &reflowed, false).unwrap();
+        assert_eq!(
+            export_status(&root, "rev", &reflowed).state,
+            ExportState::InSync,
+        );
+    }
+
+    /// The trailing newline the file format appends is the one whitespace
+    /// difference that is NOT drift — otherwise every export would report
+    /// itself edited the moment it was written.
+    #[test]
+    fn the_formats_trailing_newline_is_not_drift() {
+        let root = tmp_root("trailing");
+        let s = snippet("Review it.");
+        export_snippet_skill(&root, "rev", &s, false).unwrap();
+        let path = exported_skill_path(&root, "rev");
+
+        // An editor that strips the final newline, and one that adds
+        // several, both leave the body itself untouched.
+        let written = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, written.trim_end()).unwrap();
+        assert_eq!(export_status(&root, "rev", &s).state, ExportState::InSync);
+        std::fs::write(&path, format!("{}\n\n\n", written.trim_end())).unwrap();
+        assert_eq!(export_status(&root, "rev", &s).state, ExportState::InSync);
+    }
+
+    /// A `SKILL.md` saved with CRLF endings still parses as the lazybox
+    /// export it is. It reads as `Edited` (the bytes really did change,
+    /// so a regenerate would discard someone's save) rather than
+    /// `Foreign`, which `drifted_exports` filtered out of the sweep —
+    /// leaving `--check` reporting "no drifted exports" for a file
+    /// lazybox could no longer read.
+    #[test]
+    fn a_crlf_export_is_still_recognized_and_reported() {
+        let root = tmp_root("crlf");
+        let s = snippet("Review it.");
+        export_snippet_skill(&root, "rev", &s, false).unwrap();
+        let path = exported_skill_path(&root, "rev");
+        let crlf = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace('\n', "\r\n");
+        std::fs::write(&path, crlf).unwrap();
+
+        assert_eq!(export_status(&root, "rev", &s).state, ExportState::Edited);
+        let yaml = root.join("snippets.yaml");
+        std::fs::write(
+            &yaml,
+            "snippets:\n  rev:\n    description: d\n    body: Review it.\n",
+        )
+        .unwrap();
+        let catalog = Snippets::load_from(&yaml, SnippetOrigin::Global).unwrap();
+        let drifted = drifted_exports(&root, &catalog);
+        assert_eq!(drifted.len(), 1, "the sweep must not go blind: {drifted:?}");
+        assert_eq!(drifted[0].state, ExportState::Edited);
+    }
+
+    /// A hand-authored skill that happens to share a snippet's key is
+    /// never a lazybox export, so it is never regenerated over.
+    #[test]
+    fn a_foreign_skill_is_refused_without_force() {
+        let root = tmp_root("foreign");
+        let path = exported_skill_path(&root, "rev");
+        std::fs::create_dir_all(root.join("rev")).unwrap();
+        std::fs::write(
+            &path,
+            "---\nname: rev\ndescription: mine\n---\nHand written.\n",
+        )
+        .unwrap();
+
+        let rev = snippet("Review it.");
+        assert_eq!(
+            export_status(&root, "rev", &rev).state,
+            ExportState::Foreign
+        );
+        let err = export_snippet_skill(&root, "rev", &rev, false).unwrap_err();
+        assert!(matches!(err, SkillError::ExportForeign(_)), "{err}");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("Hand written.")
+        );
+    }
+
+    /// A `SKILL.md` whose lazybox marker names a *different* snippet is
+    /// foreign too — two snippets can't share one exported folder.
+    #[test]
+    fn an_export_of_another_snippet_is_foreign() {
+        let root = tmp_root("mismatch");
+        let rev = snippet("Review it.");
+        let contents = render_snippet_skill("rev", &rev).unwrap();
+        std::fs::create_dir_all(root.join("nit")).unwrap();
+        std::fs::write(exported_skill_path(&root, "nit"), contents).unwrap();
+        assert_eq!(
+            export_status(&root, "nit", &rev).state,
+            ExportState::Foreign
+        );
+    }
+
+    /// Re-exporting an unchanged snippet writes nothing.
+    #[test]
+    fn an_up_to_date_export_is_a_no_op() {
+        let root = tmp_root("noop");
+        let rev = snippet("Review it.");
+        export_snippet_skill(&root, "rev", &rev, false).unwrap();
+        let outcome = export_snippet_skill(&root, "rev", &rev, false).unwrap();
+        assert_eq!(
+            outcome,
+            ExportOutcome::Unchanged(exported_skill_path(&root, "rev"))
+        );
+    }
+
+    /// A skill has no provider filter, so a `provider:`-scoped snippet
+    /// has to state the scope where the model will read it.
+    #[test]
+    fn a_provider_scoped_snippet_states_its_scope_in_the_description() {
+        let root = tmp_root("scoped");
+        let mut scoped = snippet("Reply to the review threads.");
+        scoped.description = "Address the PR review comments".into();
+        scoped.provider = Some("github".into());
+        export_snippet_skill(&root, "respond", &scoped, false).unwrap();
+        let written = std::fs::read_to_string(exported_skill_path(&root, "respond")).unwrap();
+        assert!(
+            written.contains("Address the PR review comments (GitHub workspaces only)"),
+            "{written}",
+        );
+    }
+
+    /// A skill-dispatching snippet (#798) exports the invocation it
+    /// actually delivers, not the raw body.
+    #[test]
+    fn a_skill_dispatching_snippet_exports_its_dispatch_body() {
+        let root = tmp_root("dispatch");
+        let mut bridge = snippet("Rank findings by severity.");
+        bridge.skill = Some("code-review".into());
+        export_snippet_skill(&root, "rev", &bridge, false).unwrap();
+        let written = std::fs::read_to_string(exported_skill_path(&root, "rev")).unwrap();
+        assert!(written.contains("Use the `code-review` skill"), "{written}");
+        assert_eq!(
+            export_status(&root, "rev", &bridge).state,
+            ExportState::InSync
+        );
+    }
+
+    /// A description-less snippet can't be model-selected, so the export
+    /// refuses rather than writing a skill the agent can never pick.
+    #[test]
+    fn export_requires_a_description_and_a_body() {
+        let root = tmp_root("empty");
+        let mut blank = snippet("Review it.");
+        blank.description = "  ".into();
+        assert!(matches!(
+            export_snippet_skill(&root, "rev", &blank, false),
+            Err(SkillError::MissingDescription),
+        ));
+        // Still refused with a provider scope, whose suffix would
+        // otherwise stand in for the missing description.
+        blank.provider = Some("github".into());
+        assert!(matches!(
+            export_snippet_skill(&root, "rev", &blank, false),
+            Err(SkillError::MissingDescription),
+        ));
+        let mut bodyless = snippet("   ");
+        bodyless.skill = None;
+        assert!(matches!(
+            export_snippet_skill(&root, "rev", &bodyless, false),
+            Err(SkillError::MissingBody),
+        ));
+        assert!(!root.join("rev").exists());
+    }
+
+    /// A key that isn't a portable folder name is rejected before any
+    /// filesystem join — the same guard scaffolding uses.
+    #[test]
+    fn export_rejects_a_key_that_is_not_a_valid_skill_name() {
+        let root = tmp_root("badkey");
+        assert!(matches!(
+            export_snippet_skill(&root, "../escape", &snippet("b"), false),
+            Err(SkillError::InvalidName(_)),
+        ));
+    }
+
+    /// The `--check` / startup-notice report: only drifted exports, in
+    /// key order, and nothing at all when nothing was ever exported.
+    #[test]
+    fn drift_report_lists_only_drifted_exports() {
+        let root = tmp_root("drift");
+        assert!(drifted_exports(&root, &Snippets::builtin()).is_empty());
+
+        let stale_before = snippet("Review it.");
+        export_snippet_skill(&root, "rev", &stale_before, false).unwrap();
+        export_snippet_skill(&root, "nit", &snippet("Nitpick it."), false).unwrap();
+
+        let yaml = root.join("snippets.yaml");
+        std::fs::write(
+            &yaml,
+            "snippets:\n  rev:\n    description: d\n    body: Review it, harder.\n\
+             \x20 nit:\n    description: d\n    body: Nitpick it.\n",
+        )
+        .unwrap();
+        let catalog = Snippets::load_from(&yaml, SnippetOrigin::Global).unwrap();
+
+        let drifted = drifted_exports(&root, &catalog);
+        assert_eq!(drifted.len(), 1, "{drifted:?}");
+        assert_eq!(drifted[0].key, "rev");
+        assert_eq!(drifted[0].state, ExportState::Stale);
+    }
+
+    #[test]
+    fn skills_root_follows_the_target_and_agent_dir() {
+        let repo = Path::new("/repo");
+        assert_eq!(
+            skills_root(SkillTarget::Repo, SkillAgentDir::Claude, Some(repo)),
+            Some(PathBuf::from("/repo/.claude/skills")),
+        );
+        assert_eq!(
+            skills_root(SkillTarget::Repo, SkillAgentDir::Agents, Some(repo)),
+            Some(PathBuf::from("/repo/.agents/skills")),
+        );
+        // A repo target without a repo root has no home.
+        assert_eq!(
+            skills_root(SkillTarget::Repo, SkillAgentDir::Claude, None),
+            None
+        );
+    }
+
+    #[test]
+    fn target_and_agent_dir_parse_their_cli_values() {
+        assert_eq!(SkillTarget::parse("repo"), Some(SkillTarget::Repo));
+        assert_eq!(SkillTarget::parse("user"), Some(SkillTarget::User));
+        assert_eq!(SkillTarget::parse("global"), None);
+        assert_eq!(SkillAgentDir::parse("claude"), Some(SkillAgentDir::Claude));
+        assert_eq!(SkillAgentDir::parse("agents"), Some(SkillAgentDir::Agents));
+        assert_eq!(SkillAgentDir::parse("codex"), None);
+    }
+
+    /// The body split must stop at the *first* closing fence: a rendered
+    /// review body is full of `---`-looking prose and markdown rules.
+    #[test]
+    fn body_split_stops_at_the_first_closing_fence() {
+        let (yaml, body) = split_skill_md("---\nname: x\n---\n\nbody\n---\nmore\n").unwrap();
+        assert_eq!(yaml, "name: x\n");
+        assert_eq!(body, "body\n---\nmore\n");
+        assert!(split_skill_md("no frontmatter\n").is_none());
+        assert!(split_skill_md("---\nname: x\nunterminated\n").is_none());
     }
 }

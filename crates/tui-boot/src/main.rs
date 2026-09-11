@@ -14,6 +14,9 @@
 //!   lazybox server api              foreground JSON HTTP API gateway
 //!   lazybox worktree list           report managed worktrees + disk totals
 //!   lazybox worktree gc             reclaim safe orphaned worktrees
+//!   lazybox snippet export KEY      write a snippet out as a portable SKILL.md
+//!                                  (--to repo|user, --agent-dir claude|agents,
+//!                                  --force, --check)
 //!   lazybox workspace create --issue R  attach to a tracker record's workspace
 //!                                  via the daemon socket (--issue/--pr/--ticket
 //!                                  <owner/repo#N|URL|KEY>; --name + --scratch
@@ -388,6 +391,14 @@ Remote & services:
                               <owner/repo>, or inferred from cwd; --agent <id>
                               spawns an agent into it; --socket <path> targets a
                               non-default daemon)
+  lazybox snippet export <key>
+                              write a snippet out as a portable SKILL.md so the
+                              workflow travels to any agent that reads the format
+                              (--to repo|user, default repo; --agent-dir
+                              claude|agents, default claude; --force to
+                              regenerate over an edited file; --check reports
+                              exports that drifted from their snippet, and with
+                              no key checks every one)
 
 Advanced:
   lazybox --fresh             wipe ~/.lazybox/v2/state.db, forget the wizard answers in
@@ -463,6 +474,14 @@ async fn main() -> anyhow::Result<()> {
     if wants_version(&args) {
         println!("lazybox {}", lazybox_ipc::BUILD_VERSION);
         return Ok(());
+    }
+
+    // `snippet` is a pure config + filesystem command: no daemon, no
+    // tracing. Dispatch it before `init_tracing()` redirects stderr into
+    // the log file, so a refused overwrite or an unknown key is reported
+    // to the shell that ran it rather than buried in /tmp/lazybox.log.
+    if matches!(args.first().map(String::as_str), Some("snippet")) {
+        return snippet_subcommand(&args[1..]).await;
     }
 
     // A lifecycle hook must never hard-error: Claude renders any non-zero
@@ -691,6 +710,160 @@ async fn workspace_subcommand(args: &[String]) -> anyhow::Result<()> {
             );
         }
     }
+}
+
+/// `lazybox snippet <verb>` — the snippet library's CLI surface. Today
+/// the only verb is `export`.
+async fn snippet_subcommand(args: &[String]) -> anyhow::Result<()> {
+    match args.first().map(String::as_str) {
+        Some("export") => snippet_export_subcommand(&args[1..]),
+        other => {
+            anyhow::bail!(
+                "unknown `lazybox snippet` verb {:?}; usage: lazybox snippet export <key> \
+                 [--to repo|user] [--agent-dir claude|agents] [--force] [--check]",
+                other.unwrap_or("<none>"),
+            );
+        }
+    }
+}
+
+/// `lazybox snippet export <key> [--to repo|user] [--agent-dir claude|agents]
+/// [--force] [--check] [--cwd <path>]` — write a curated snippet out as a
+/// portable `SKILL.md` (#1672).
+///
+/// Export is one-directional by design: the snippet body stays the single
+/// authored copy of a workflow and the `SKILL.md` is generated from it, so
+/// `--check` is the guard that says when the two have come apart — the
+/// export is *stale* (the snippet moved) or *edited* (the file was changed
+/// in place, which only `--force` discards). Nothing ever flows back from a
+/// skill into a snippet.
+///
+/// `--check` without a key reports every drifted export under the resolved
+/// root and exits non-zero when there is any, so it works as a CI gate.
+fn snippet_export_subcommand(args: &[String]) -> anyhow::Result<()> {
+    use lazybox_config::{ExportOutcome, SkillAgentDir, SkillTarget};
+
+    let mut args = args.to_vec();
+    let check = take_flag(&mut args, "--check");
+    let force = take_flag(&mut args, "--force");
+    let to = take_value(&mut args, "--to");
+    let agent_dir = take_value(&mut args, "--agent-dir");
+    let cwd = take_value(&mut args, "--cwd").map(PathBuf::from);
+    // Unlike `hook-ingest`, an unrecognized flag is rejected rather than
+    // walked past: `--fore` silently dropping the force, or its value
+    // being taken for the snippet key, is worse than a typo report.
+    if let Some(unknown) = args.iter().find(|a| a.starts_with('-')) {
+        anyhow::bail!(
+            "unknown flag {unknown:?}; usage: lazybox snippet export <key> [--to repo|user] \
+             [--agent-dir claude|agents] [--force] [--check] [--cwd <path>]",
+        );
+    }
+    // `--check` returns before `force` is ever consulted, so accepting
+    // both silently dropped the one the user typed — the same failure the
+    // unknown-flag rejection above exists to prevent.
+    if check && force {
+        anyhow::bail!(
+            "--check and --force are mutually exclusive: --check reports drift without \
+             writing, --force regenerates over it",
+        );
+    }
+    let key = args.first().cloned();
+
+    let target = match to.as_deref() {
+        None => SkillTarget::Repo,
+        Some(value) => SkillTarget::parse(value)
+            .ok_or_else(|| anyhow::anyhow!("--to must be `repo` or `user`, got {value:?}"))?,
+    };
+    let agent_dir = match agent_dir.as_deref() {
+        None => SkillAgentDir::Claude,
+        Some(value) => SkillAgentDir::parse(value).ok_or_else(|| {
+            anyhow::anyhow!("--agent-dir must be `claude` or `agents`, got {value:?}")
+        })?,
+    };
+    let cwd = match cwd {
+        Some(path) => path,
+        None => std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("resolve current directory: {e}"))?,
+    };
+    let repo_root = enclosing_repo_root(&cwd);
+    let root = lazybox_config::skills_root(target, agent_dir, repo_root.as_deref()).ok_or_else(
+        || match target {
+            SkillTarget::Repo => anyhow::anyhow!(
+                "--to repo needs a git checkout; {} is not inside one (use --cwd, or --to user)",
+                cwd.display(),
+            ),
+            SkillTarget::User => anyhow::anyhow!("--to user needs $HOME to be set"),
+        },
+    )?;
+
+    let snippets = lazybox_config::Snippets::load_for_launch_dir(Some(&cwd));
+    if check && key.is_none() {
+        let drifted = lazybox_config::drifted_exports(&root, &snippets);
+        if drifted.is_empty() {
+            println!("no drifted exports under {}", root.display());
+            return Ok(());
+        }
+        for status in &drifted {
+            println!(
+                "{}: {}  {}",
+                status.key,
+                status.state.label(),
+                status.path.display()
+            );
+        }
+        anyhow::bail!(
+            "{} exported skill(s) drifted from their snippets — re-export, or move the edit \
+             into the snippet body",
+            drifted.len(),
+        );
+    }
+
+    let key = key.ok_or_else(|| {
+        anyhow::anyhow!(
+            "snippet export needs a key: lazybox snippet export <key> [--to repo|user] \
+             [--agent-dir claude|agents] [--force] [--check]",
+        )
+    })?;
+    let snippet = snippets.get(&key).ok_or_else(|| {
+        anyhow::anyhow!("no snippet named {key:?} — see `]` in the TUI for the catalog")
+    })?;
+
+    if check {
+        let status = lazybox_config::export_status(&root, &key, snippet);
+        println!("{key}: {}  {}", status.state.label(), status.path.display());
+        if status.state.is_drift() {
+            anyhow::bail!("{key} drifted from its snippet");
+        }
+        return Ok(());
+    }
+
+    match lazybox_config::export_snippet_skill(&root, &key, snippet, force)? {
+        ExportOutcome::Written(path) => println!("wrote {}", path.display()),
+        ExportOutcome::Unchanged(path) => {
+            println!("{} is already up to date", path.display());
+        }
+    }
+    // A scoped snippet loses its provider filter on the way out; the
+    // description says so, but the person running the export should hear
+    // it too.
+    if let Some(provider) = snippet.provider.as_deref() {
+        println!(
+            "note: this snippet is scoped to {provider} workspaces — a skill has no provider \
+             filter, so the scope survives only as prose in the description",
+        );
+    }
+    Ok(())
+}
+
+/// The repo root enclosing `cwd`: the nearest ancestor holding a `.git`
+/// entry. A linked worktree's `.git` is a file, not a directory, so both
+/// shapes count — and the worktree root is the right answer there, since
+/// that is the checkout an agent running in it reads `.claude/skills`
+/// from.
+fn enclosing_repo_root(cwd: &std::path::Path) -> Option<PathBuf> {
+    cwd.ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .map(std::path::Path::to_path_buf)
 }
 
 /// `lazybox workspace create (--issue <ref> | --pr <ref> | --ticket <KEY> |
@@ -2726,6 +2899,122 @@ async fn server_config_from_user() -> anyhow::Result<ServerConfig> {
             );
             Err(error.into())
         }
+    }
+}
+
+#[cfg(test)]
+mod snippet_export_tests {
+    use super::*;
+
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A throwaway checkout root: a `.git` marker so `--to repo`
+    /// resolves, and a pinned `LAZYBOX_HOME` so the catalog is the
+    /// built-in library rather than the developer's own snippets.
+    fn repo(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+    }
+
+    fn exported(dir: &std::path::Path, key: &str) -> PathBuf {
+        dir.join(".claude")
+            .join("skills")
+            .join(key)
+            .join("SKILL.md")
+    }
+
+    #[test]
+    fn exports_into_the_repo_root_and_checks_clean() {
+        let _root = crate::test_env::PinnedStateRoot::enter();
+        let tmp = tempfile::tempdir().unwrap();
+        repo(tmp.path());
+        let cwd = tmp.path().to_string_lossy().to_string();
+
+        snippet_export_subcommand(&args(&["rev", "--cwd", &cwd])).unwrap();
+        assert!(exported(tmp.path(), "rev").is_file());
+        snippet_export_subcommand(&args(&["--check", "--cwd", &cwd])).unwrap();
+        snippet_export_subcommand(&args(&["rev", "--check", "--cwd", &cwd])).unwrap();
+    }
+
+    /// A repo-local snippets file that overrides the exported key makes
+    /// the export stale, and `--check` fails — the drift gate.
+    #[test]
+    fn check_fails_once_the_snippet_moves() {
+        let _root = crate::test_env::PinnedStateRoot::enter();
+        let tmp = tempfile::tempdir().unwrap();
+        repo(tmp.path());
+        let cwd = tmp.path().to_string_lossy().to_string();
+        snippet_export_subcommand(&args(&["rev", "--cwd", &cwd])).unwrap();
+
+        std::fs::create_dir_all(tmp.path().join(".lazybox")).unwrap();
+        std::fs::write(
+            tmp.path().join(".lazybox").join("snippets.yaml"),
+            "snippets:\n  rev:\n    description: Review current diff\n    body: Review it.\n",
+        )
+        .unwrap();
+        assert!(snippet_export_subcommand(&args(&["--check", "--cwd", &cwd])).is_err());
+        assert!(snippet_export_subcommand(&args(&["rev", "--check", "--cwd", &cwd])).is_err());
+
+        // A plain re-export (no --force) clears it: the file is generated,
+        // so a stale one has nothing worth preserving.
+        snippet_export_subcommand(&args(&["rev", "--cwd", &cwd])).unwrap();
+        snippet_export_subcommand(&args(&["--check", "--cwd", &cwd])).unwrap();
+    }
+
+    #[test]
+    fn the_agent_dir_flag_picks_the_directory_convention() {
+        let _root = crate::test_env::PinnedStateRoot::enter();
+        let tmp = tempfile::tempdir().unwrap();
+        repo(tmp.path());
+        let cwd = tmp.path().to_string_lossy().to_string();
+        snippet_export_subcommand(&args(&["rev", "--agent-dir", "agents", "--cwd", &cwd])).unwrap();
+        assert!(tmp.path().join(".agents/skills/rev/SKILL.md").is_file());
+        assert!(!exported(tmp.path(), "rev").exists());
+    }
+
+    #[test]
+    fn a_repo_target_outside_a_checkout_is_refused() {
+        let _root = crate::test_env::PinnedStateRoot::enter();
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().to_string_lossy().to_string();
+        let err = snippet_export_subcommand(&args(&["rev", "--cwd", &cwd])).unwrap_err();
+        assert!(format!("{err}").contains("needs a git checkout"), "{err}");
+    }
+
+    #[test]
+    fn bad_flag_values_and_unknown_keys_are_reported() {
+        let _root = crate::test_env::PinnedStateRoot::enter();
+        let tmp = tempfile::tempdir().unwrap();
+        repo(tmp.path());
+        let cwd = tmp.path().to_string_lossy().to_string();
+        for bad in [
+            args(&["rev", "--to", "global", "--cwd", &cwd]),
+            args(&["rev", "--agent-dir", "codex", "--cwd", &cwd]),
+            args(&["no-such-snippet", "--cwd", &cwd]),
+            args(&["--cwd", &cwd]),
+            args(&["rev", "--fore", "--cwd", &cwd]),
+            args(&["rev", "--check", "--force", "--cwd", &cwd]),
+        ] {
+            assert!(
+                snippet_export_subcommand(&bad).is_err(),
+                "{bad:?} should be refused",
+            );
+        }
+    }
+
+    /// The `.git` of a linked worktree is a *file*, not a directory, and
+    /// that worktree root is the checkout an agent running in it reads
+    /// `.claude/skills` from.
+    #[test]
+    fn repo_root_resolves_through_a_linked_worktree_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("crates").join("config");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(tmp.path().join(".git"), "gitdir: /elsewhere\n").unwrap();
+        assert_eq!(enclosing_repo_root(&nested).as_deref(), Some(tmp.path()),);
+        let orphan = tempfile::tempdir().unwrap();
+        assert_eq!(enclosing_repo_root(orphan.path()), None);
     }
 }
 

@@ -70,8 +70,10 @@ palette. This read-only catalog is provider-scoped like the picker (see
 [Provider-scoped workflows](#provider-scoped-workflows)): it shows every
 workflow relevant to the focused workspace with its key, origin,
 description, and full body — open it from Settings with no session
-focused to see the whole merged catalog. `↑`/`↓` scrolls and `e` opens
-the global YAML file in your editor.
+focused to see the whole merged catalog. `↑`/`↓` scrolls, `e` opens the
+global YAML file in your editor, and `x` exports the workflow you are
+reading as a `SKILL.md` (see [Export a workflow as a
+skill](#export-a-workflow-as-a-skill)).
 
 ## Understand Recent and the `]N` workspace badge
 
@@ -244,6 +246,77 @@ per-workspace badge, and `Shift-B` broadcast all track a
 skill-dispatching snippet like any other. The skill must already exist
 for the focused agent — lazybox constructs the invocation but does not
 create the skill.
+
+## Export a workflow as a skill
+
+The inverse of dispatching one. A snippet is lazybox's layer; a
+`SKILL.md` is the portable one — the same format is read by Claude Code,
+Codex, Cursor and a long tail of other tools. Exporting writes a snippet
+out as a skill so a workflow you rely on travels to an agent that has
+never heard of lazybox:
+
+```
+lazybox snippet export rev
+```
+
+writes `<repo>/.claude/skills/rev/SKILL.md`:
+
+```markdown
+---
+name: rev
+description: Review the current diff
+metadata:
+  lazybox:
+    snippet: rev
+    category: Review
+    version: 92cdc592f45c1f44
+---
+
+Review the current diff (`git diff` against the base branch) as a rigorous,
+adversarial code review — …
+```
+
+Flags:
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--to repo\|user` | `repo` | `<repo>/…/skills` (travels with the repo) or `$HOME/…/skills` (follows you) |
+| `--agent-dir claude\|agents` | `claude` | `.claude/skills` (Claude Code's convention) or `.agents/skills` (the open spec's) |
+| `--force` | off | Regenerate over a file that was edited in place, or over a skill lazybox didn't write |
+| `--check` | off | Report drift instead of writing. With no key, checks every export under the root and exits non-zero if any drifted |
+| `--cwd <path>` | process cwd | Where the repo root and the `.lazybox/snippets.yaml` layer are resolved from |
+
+`x` in the `]` browser exports the snippet you are reading, always to
+`~/.claude/skills` — the user-level root, matching `e`'s user-level YAML,
+so browsing can never drop an untracked file into a checkout.
+
+There is no `scripts/` folder and no bundled files. A snippet is text, so
+the exported skill has no execution surface — which is the point: it is a
+skill you can read in full before you trust it.
+
+### The snippet stays the source
+
+The `SKILL.md` is **generated**, never hand-edited. Its frontmatter
+records a `version` hash of the exported body — byte-exact, so reflowing
+a body into paragraphs counts as a change even though the words are the
+same — and that hash is the anchor for both drift directions:
+
+- **stale** — the snippet changed after the export. Re-export; the file
+  is generated, so nothing is lost.
+- **edited** — the `SKILL.md` body itself was changed. A plain re-export
+  refuses, because the change would be destroyed. Move it into the
+  snippet body (that is where a workflow is authored) and re-export, or
+  `--force` to discard it.
+
+Nothing ever flows back from a skill into a snippet, so a workflow has
+exactly one authored copy. `lazybox snippet export --check` reports drift
+for scripting and CI, and lazybox flashes a notice at startup when a
+user-level export has come apart from its snippet.
+
+A `provider:`-scoped snippet exports with the scope written into its
+description ("… (GitHub workspaces only)"): a skill has no provider
+filter, so prose the model reads is the only place that constraint can
+survive.
 
 ## Provider-scoped workflows
 

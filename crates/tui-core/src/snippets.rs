@@ -105,6 +105,17 @@ impl PickerRow {
             "\ninstructions only — no bundled scripts/"
         });
         notice.push_str("\nnot vetted by lazybox — read SKILL.md before invoking");
+        // #1672 provenance, stated as the claim it is. The marker is
+        // frontmatter like any other, so a hand-authored skill can write
+        // it; naming the verifier is the whole value, and it is added
+        // *below* the disclosure rather than in place of it — a forgeable
+        // field must never retract "not vetted by lazybox".
+        if let Some(snippet) = &skill.from_snippet {
+            notice.push_str(&format!(
+                "\nmarked as exported from the lazybox snippet `{snippet}` — verify with \
+                 `lazybox snippet export --check`",
+            ));
+        }
         Self {
             key: skill.name,
             description: skill.description,
@@ -624,6 +635,7 @@ mod tests {
             folder: std::path::PathBuf::from("/home/u/.agents/skills/code-review"),
             also_at: Vec::new(),
             bundles_scripts: true,
+            from_snippet: None,
         };
         let row = PickerRow::for_skill(skill.clone());
         assert_eq!(row.key, "code-review");
@@ -641,6 +653,31 @@ mod tests {
         assert_eq!(prose.tag, "", "no bundled scripts, no runs-code tag");
         assert!(prose.notice.contains("instructions only"));
         assert!(prose.notice.contains("not vetted by lazybox"));
+
+        // #1672: a skill marked as a lazybox export says so — as a claim,
+        // since the marker is frontmatter anyone can write — and that
+        // claim must not displace the standing disclosure.
+        let exported = PickerRow::for_skill(lazybox_config::Skill {
+            from_snippet: Some("rev".into()),
+            ..skill.clone()
+        });
+        assert!(
+            exported
+                .notice
+                .contains("marked as exported from the lazybox snippet `rev`"),
+            "{:?}",
+            exported.notice,
+        );
+        assert!(
+            exported.notice.contains("not vetted by lazybox"),
+            "a forgeable marker must not retract the disclosure: {:?}",
+            exported.notice,
+        );
+        assert!(
+            !row.notice.contains("marked as exported"),
+            "an unmarked skill claims nothing: {:?}",
+            row.notice,
+        );
 
         // A name the agent could resolve to another root names every
         // candidate — the disclosure must not describe one file while a

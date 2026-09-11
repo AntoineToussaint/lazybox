@@ -397,14 +397,50 @@ impl Snippet {
     /// overriding just the `description`/`category`/binding is not a body
     /// divergence.
     pub fn content_hash(&self) -> String {
-        let normalized = self.body.split_whitespace().collect::<Vec<_>>().join(" ");
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for byte in normalized.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        format!("{hash:016x}")
+        body_hash(&self.body)
     }
+
+    /// Stable hash of the *delivered* text — [`Snippet::dispatch_body`],
+    /// not the raw `body`. This is what a skill export records as its
+    /// `metadata.lazybox.version` (#1672), so drift is measured against
+    /// the bytes the export actually carries.
+    pub fn dispatch_hash(&self) -> String {
+        export_body_hash(&self.dispatch_body())
+    }
+}
+
+/// Stable content hash of prompt text, whitespace-normalized so
+/// reflowing or re-indenting the YAML block doesn't change it (#1312).
+/// FNV-1a/64 rendered as hex — deterministic across platforms and
+/// builds, unlike `std`'s `DefaultHasher`.
+pub fn body_hash(text: &str) -> String {
+    fnv1a_hex(&text.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// Byte-exact hash of exported prompt text — the skill-export drift
+/// anchor (#1672), deliberately NOT [`body_hash`].
+///
+/// The whitespace-insensitivity that is right for #1312 (a re-indented
+/// YAML block is not a body divergence) is wrong here: an exported
+/// `SKILL.md` is prose a model reads, so reflowing one paragraph into
+/// three sections changes the prompt even though the words are
+/// identical. Under `body_hash` that edit left the export reporting "up
+/// to date" forever, which is precisely the silent divergence export
+/// exists to catch. Only trailing whitespace is normalized, since the
+/// file format itself appends a final newline the snippet body has no
+/// say over.
+pub fn export_body_hash(text: &str) -> String {
+    fnv1a_hex(text.trim_end())
+}
+
+/// FNV-1a/64 over `text`, rendered as hex.
+fn fnv1a_hex(text: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// Top-level wire shape of a snippets file. The outer key in
@@ -2315,6 +2351,37 @@ snippets:
                      priority body a weasel phrase is quoted at most once, where it is \
                      forbidden; a repeat is the signature of it being used as an actual \
                      dismissal rather than banned (#1145)",
+                );
+            }
+        }
+    }
+
+    /// #1145 in the export direction (#1672): an exported `SKILL.md` is a
+    /// generated *copy* of a snippet, never a second authored source. Pin
+    /// that the export carries the body verbatim — if the export path ever
+    /// reworded, trimmed, or softened a body on the way out, the review
+    /// standard would have two authorities and the guards above would be
+    /// policing only one of them.
+    #[test]
+    fn exported_review_skills_carry_the_snippet_body_verbatim() {
+        let builtin = Snippets::builtin();
+        for key in ["rev", "deepreview", "fixall"] {
+            let snippet = builtin.get(key).expect("ships built-in");
+            let md = crate::render_snippet_skill(key, snippet).expect("renders");
+            assert!(
+                md.contains(snippet.body.trim_end()),
+                "the exported `{key}` SKILL.md no longer carries the snippet body \
+                 word-for-word — export must copy the one authored standard, not \
+                 restate it (#1145, #1672)",
+            );
+            let exported = md.to_ascii_lowercase();
+            let authored = snippet.body.to_ascii_lowercase();
+            for phrase in BANNED_DISMISSALS {
+                assert_eq!(
+                    exported.matches(*phrase).count(),
+                    authored.matches(*phrase).count(),
+                    "exporting `{key}` changed how often the banned phrase `{phrase}` \
+                     appears — the ban list must survive the trip intact (#1145)",
                 );
             }
         }

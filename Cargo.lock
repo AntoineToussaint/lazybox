@@ -1894,6 +1894,7 @@ name = "lazybox-config"
 version = "0.1.15"
 dependencies = [
  "chrono",
+ "fs2",
  "humantime-serde",
  "lazybox-core",
  "libc",

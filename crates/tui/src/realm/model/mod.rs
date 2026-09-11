@@ -1332,6 +1332,12 @@ pub enum Msg {
     /// override so the (improved) built-in shows through on reload (#1312).
     /// Carries the key.
     SnippetAdopt(String),
+    /// `Ctrl-X` on a snippet row — delete a user-defined snippet from the
+    /// file that defines it (#1678). Carries the key. The Model decides
+    /// what that means: a purely custom snippet is removed outright, an
+    /// override is dropped so the built-in underneath shows through, and a
+    /// built-in itself cannot be deleted at all.
+    SnippetDelete(String),
     /// `a` in the Settings editors panel (#1102) — start the add-editor
     /// input flow (id → launch command).
     EditorAdd,
@@ -3895,7 +3901,8 @@ impl<T: TerminalAdapter> Model<T> {
         }
         let picker = SnippetPicker::new(self.scoped_picker_rows(), initial_filter)
             .with_recent(self.recent_snippets.clone())
-            .with_insert_without_submit();
+            .with_insert_without_submit()
+            .with_delete();
         self.mount_modal(Id::SnippetPicker, picker);
     }
 
@@ -3917,7 +3924,9 @@ impl<T: TerminalAdapter> Model<T> {
         }
         let picker = SnippetPicker::new(self.follow_up_picker_rows(keys), String::new())
             .with_title(format!(" Follow-up to ]{from} "))
-            .with_insert_without_submit();
+            .with_insert_without_submit()
+            .with_delete()
+            .restricted();
         self.mount_modal(Id::SnippetPicker, picker);
         self.leader_target = Some(terminal_id);
     }
@@ -4440,9 +4449,9 @@ impl<T: TerminalAdapter> Model<T> {
             lazybox_config::SnippetOrigin::Global => {
                 match lazybox_config::Snippets::delete_global_snippet(key) {
                     Ok(()) => {
-                        self.apply_snippets(lazybox_config::Snippets::load_for_launch_dir(
-                            std::env::current_dir().ok().as_deref(),
-                        ));
+                        if !self.reload_snippets_after_delete(key) {
+                            return;
+                        }
                         self.flash_info(format!(
                             "adopted built-in `{key}` (dropped your override)"
                         ));
@@ -4459,14 +4468,101 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
-    /// Re-mount the snippet picker with freshly-classified rows so a
-    /// keep-mine or adopt is reflected immediately (badge cleared, or the
-    /// adopted row now showing the built-in). No-op unless the picker is the
-    /// top modal.
+    /// `Ctrl-X` in the snippet picker: delete a user-defined snippet
+    /// (#1678).
+    ///
+    /// lazybox could already *add* a snippet (`upsert_global_snippet`, which
+    /// the Ask-Lazybox add action uses) but had no way to remove one: the
+    /// browser is read-only and its only write path is `e`, which opens the
+    /// YAML in an editor. So a snippet the product created could only be
+    /// removed by hand-editing the file — which is how a stray `hello`
+    /// outlives every attempt to get rid of it.
+    ///
+    /// Deliberately reuses `delete_global_snippet`, the same edit "adopt
+    /// built-in" makes, so there is ONE file-mutating path for snippets.
+    /// The outcomes differ and are named, because "deleted" means two
+    /// different things: a purely custom snippet is gone for good, while
+    /// deleting an override only reveals the built-in beneath it.
+    fn delete_user_snippet(&mut self, key: &str) {
+        let Some(origin) = self.snippets.get(key).map(|s| s.origin) else {
+            return;
+        };
+        let shadows_builtin = lazybox_config::Snippets::builtin().get(key).is_some();
+        match origin {
+            // A built-in is shipped in the binary, not in any file the user
+            // owns — there is nothing to delete. Say what WOULD work instead
+            // of failing silently.
+            lazybox_config::SnippetOrigin::BuiltIn => {
+                self.flash_info(format!(
+                    "`{key}` is built-in — it can't be deleted, only overridden in snippets.yaml"
+                ));
+            }
+            lazybox_config::SnippetOrigin::Global => {
+                match lazybox_config::Snippets::delete_global_snippet(key) {
+                    Ok(()) => {
+                        if !self.reload_snippets_after_delete(key) {
+                            return;
+                        }
+                        self.flash_info(if shadows_builtin {
+                            format!("deleted your `{key}` — the built-in is back")
+                        } else {
+                            format!("deleted `{key}`")
+                        });
+                        self.refresh_open_snippet_picker();
+                    }
+                    Err(e) => self.flash_error(format!("couldn't delete `{key}`: {e}")),
+                }
+            }
+            // A repo-local file is checked in and shared with everyone on the
+            // repo, so lazybox never edits it behind the user's back — the
+            // same rule "adopt built-in" follows.
+            lazybox_config::SnippetOrigin::Repo | lazybox_config::SnippetOrigin::Unknown => {
+                self.flash_info(format!(
+                    "`{key}` is repo-local — edit .lazybox/snippets.yaml to remove it"
+                ));
+            }
+        }
+    }
+
+    /// A completed write and a successful reload are separate outcomes. Never
+    /// install fallback built-ins when another layer could not be read.
+    fn reload_snippets_after_delete(&mut self, key: &str) -> bool {
+        let result = std::env::current_dir()
+            .map_err(lazybox_config::SnippetsError::from)
+            .and_then(|dir| lazybox_config::Snippets::try_load_for_launch_dir(Some(&dir)));
+        match result {
+            Ok(snippets) => {
+                self.apply_snippets(snippets);
+                true
+            }
+            Err(e) => {
+                self.flash_error(format!(
+                    "deleted `{key}` on disk, but couldn't reload snippets: {e}; keeping the previous catalog"
+                ));
+                false
+            }
+        }
+    }
+
+    /// Refresh catalog rows in place: closing a modal clears its delivery target.
     fn refresh_open_snippet_picker(&mut self) {
+        use crate::realm::components::snippet_picker::SnippetPicker;
         if matches!(self.modal_stack.last(), Some(Id::SnippetPicker)) {
-            self.pop_modal();
-            self.mount_snippet_picker(String::new());
+            let rows = self
+                .app
+                .get_component(&Id::SnippetPicker)
+                .and_then(|component| component.as_any().downcast_ref::<SnippetPicker>())
+                .and_then(|picker| picker.restricted_keys())
+                .map(|keys| self.follow_up_picker_rows(keys))
+                .unwrap_or_else(|| self.scoped_picker_rows());
+            if let Some(picker) = self
+                .app
+                .get_component_mut(&Id::SnippetPicker)
+                .and_then(|component| component.as_any_mut().downcast_mut::<SnippetPicker>())
+            {
+                picker.refresh_rows(rows, self.recent_snippets.clone());
+            }
+            self.redraw = true;
         }
     }
 
@@ -7582,6 +7678,7 @@ impl<T: TerminalAdapter> Model<T> {
             Msg::SnippetCompare(key) => self.compare_snippet_override(&key),
             Msg::SnippetKeepMine(key) => self.keep_mine_snippet_override(&key),
             Msg::SnippetAdopt(key) => self.adopt_builtin_snippet(&key),
+            Msg::SnippetDelete(key) => self.delete_user_snippet(&key),
             Msg::EditorAdd => self.start_editor_add(),
             Msg::EditorEdit(id) => self.start_editor_edit(&id),
             Msg::EditorRemove(id) => self.prompt_remove_editor(id),

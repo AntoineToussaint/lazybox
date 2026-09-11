@@ -66,6 +66,22 @@ const BANNED_DISMISSALS: &[&str] = &[
     "left as an exercise",
 ];
 
+/// Lock a stable sibling inode, not the YAML inode replaced by rename.
+/// Every application writer holds this across the entire read-modify-write.
+fn lock_snippets(path: &Path) -> Result<std::fs::File, SnippetsError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path.with_extension("yaml.lock"))?;
+    fs2::FileExt::lock_exclusive(&lock)?;
+    Ok(lock)
+}
+
 /// Serialize `value` and write it to `path` atomically: a sibling
 /// `.tmp` file, then a rename, so a crash mid-write can never leave a
 /// half-written (and unparseable) snippets file behind. Creates the
@@ -78,6 +94,9 @@ fn write_yaml_atomically(path: &Path, value: &serde_yaml::Value) -> Result<(), S
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
 
+    // A generic YAML mapping can still contain invalid snippet fields. Validate
+    // the complete result before replacing any of the user's definitions.
+    let _: SnippetsFile = serde_yaml::from_value(value.clone())?;
     let yaml = serde_yaml::to_string(value)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1737,6 +1756,10 @@ impl Snippets {
     /// comments are not preserved, matching [`Self::upsert_snippet_at`]),
     /// and only rewrites the file when the key was actually present.
     fn delete_snippet_at(path: &Path, key: &str) -> Result<(), SnippetsError> {
+        if !path.try_exists()? {
+            return Ok(());
+        }
+        let _lock = lock_snippets(path)?;
         let raw = match std::fs::read_to_string(path) {
             Ok(raw) => raw,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1845,6 +1868,7 @@ impl Snippets {
         key: &str,
         snippet: &Snippet,
     ) -> Result<PathBuf, SnippetsError> {
+        let _lock = lock_snippets(path)?;
         let existing = match std::fs::read_to_string(path) {
             Ok(raw) => Some(raw),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -1892,6 +1916,17 @@ impl Snippets {
         let global = Self::load_global();
         let repo = launch_dir.map(Self::load_repo).unwrap_or_default();
         Self::merged(Self::merged(Self::builtin(), global), repo)
+    }
+
+    /// Reload after an edit without silently discarding an unreadable layer.
+    /// Callers must keep their last valid catalog when this returns an error.
+    pub fn try_load_for_launch_dir(launch_dir: Option<&Path>) -> Result<Self, SnippetsError> {
+        let global = Self::load_from(&Self::default_global_path(), SnippetOrigin::Global)?;
+        let repo = match launch_dir {
+            Some(dir) => Self::load_from(&Self::default_repo_path(dir), SnippetOrigin::Repo)?,
+            None => Self::default(),
+        };
+        Ok(Self::merged(Self::merged(Self::builtin(), global), repo))
     }
 
     /// Exact lookup by shortcut key.
@@ -3328,5 +3363,89 @@ snippets:
             std::fs::read_to_string(&path).unwrap().contains("- one"),
             "original content intact",
         );
+    }
+    #[test]
+    fn delete_and_upsert_refuse_invalid_sibling_without_changing_file() {
+        let path = write_tmp(
+            "invalid-sibling",
+            "snippets:\n  hello:\n    body: unwanted\n  rev:\n    body: MY RULES\n  broken:\n    body: []\n",
+        );
+        let before = std::fs::read(&path).unwrap();
+        assert!(Snippets::delete_snippet_at(&path, "hello").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let snippet = Snippets::builtin().get("rev").unwrap().clone();
+        assert!(Snippets::upsert_snippet_at(&path, "new", &snippet).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn strict_reload_rejects_invalid_repo_layer() {
+        let path = write_tmp("strict-reload", "snippets:\n  broken:\n    body: []\n");
+        let dir = path.parent().unwrap();
+        std::fs::create_dir_all(dir.join(".lazybox")).unwrap();
+        std::fs::copy(&path, Snippets::default_repo_path(dir)).unwrap();
+        assert!(Snippets::try_load_for_launch_dir(Some(dir)).is_err());
+    }
+
+    #[test]
+    fn snippet_writer_process_child() {
+        let Ok(path) = std::env::var("LAZYBOX_SNIPPET_TEST_PATH") else {
+            return;
+        };
+        let operation = std::env::var("LAZYBOX_SNIPPET_TEST_OPERATION").unwrap();
+        let path = PathBuf::from(path);
+        std::fs::write(path.with_extension(format!("{operation}.ready")), "ready").unwrap();
+        if operation == "delete" {
+            Snippets::delete_snippet_at(&path, "hello").unwrap();
+        } else {
+            let snippet = Snippets::builtin().get("rev").unwrap().clone();
+            Snippets::upsert_snippet_at(&path, "new", &snippet).unwrap();
+        }
+    }
+
+    #[test]
+    fn snippet_writers_lock_before_reading_across_processes() {
+        let path = write_tmp(
+            "concurrent-writers",
+            "snippets:\n  hello:\n    body: unwanted\n",
+        );
+        let lock = lock_snippets(&path).unwrap();
+        let mut children = Vec::new();
+        for operation in ["delete", "upsert"] {
+            let ready = path.with_extension(format!("{operation}.ready"));
+            let _ = std::fs::remove_file(&ready);
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "snippets::tests::snippet_writer_process_child"])
+                .env("LAZYBOX_SNIPPET_TEST_PATH", &path)
+                .env("LAZYBOX_SNIPPET_TEST_OPERATION", operation)
+                .spawn()
+                .unwrap();
+            children.push(child);
+            let start = std::time::Instant::now();
+            while !ready.exists() {
+                assert!(start.elapsed() < std::time::Duration::from_secs(10));
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let blocked = children
+            .iter_mut()
+            .all(|child| child.try_wait().unwrap().is_none());
+        // This update occurs after both workers started. They must read it
+        // after acquiring the lock, even though their operations were queued earlier.
+        std::fs::write(
+            &path,
+            "snippets:\n  hello:\n    body: unwanted\n  keep:\n    body: concurrent edit\n",
+        )
+        .unwrap();
+        drop(lock);
+        for mut child in children {
+            assert!(child.wait().unwrap().success());
+        }
+        assert!(blocked, "both writers must wait for the transaction lock");
+        let loaded = Snippets::load_from(&path, SnippetOrigin::Global).unwrap();
+        assert!(loaded.get("hello").is_none());
+        assert!(loaded.get("new").is_some());
+        assert_eq!(loaded.get("keep").unwrap().body, "concurrent edit");
     }
 }

@@ -109,9 +109,19 @@ struct SkillFrontmatter {
     description: Option<String>,
 }
 
-/// Discover the skills a `agent_id` session rooted at `repo_root` can
+/// Discover the skills an `agent_id` session rooted at `repo_root` can
 /// actually load, per the [Agent Skills](https://agentskills.io)
-/// standard (#1671). See [`skill_roots`] for the roots and their order.
+/// standard (#1671).
+///
+/// Scans the repo tier (`.claude/skills`, `.agents/skills`) then the
+/// user tier under `$HOME` (`.claude`, `.agents`, `.codex`), keeping
+/// only the roots that agent reads: `.agents/` is the standard's shared
+/// root, while `.claude/` and `.codex/` belong to one agent each. The
+/// first root to claim a name wins it, so a repo skill shadows a user
+/// skill and, inside a tier, the agent-specific root shadows the shared
+/// one — the losers stay reviewable in [`Skill::also_at`] rather than
+/// being dropped. Sorted by name, so the picker's key-sorted-rows
+/// invariant holds.
 pub fn discover_skills(repo_root: Option<&Path>, agent_id: Option<&str>) -> Vec<Skill> {
     let home = std::env::var_os("HOME")
         .filter(|home| !home.is_empty())
@@ -119,14 +129,9 @@ pub fn discover_skills(repo_root: Option<&Path>, agent_id: Option<&str>) -> Vec<
     discover_skills_in(&skill_roots(repo_root, agent_id, home.as_deref()))
 }
 
-/// The ordered skill roots an `agent_id` session reads: the repo tier
-/// (`.claude/skills`, `.agents/skills`) then the user tier under `home`
-/// (`.claude`, `.agents`, `.codex`), each kept only when that agent
-/// reads it. `~/.codex/skills` is Codex's historical root.
-///
-/// Roots are scanned in this order and the first to claim a name wins,
-/// so a repo skill shadows a user skill and, inside a tier, the
-/// agent-specific root shadows the shared one.
+/// The ordered roots [`discover_skills`] scans, filtered by
+/// [`RootOwner::read_by`] to the ones `agent_id` reads. `~/.codex/skills`
+/// is Codex's historical root.
 ///
 /// `home` is a parameter rather than read from `$HOME` here so the order
 /// and the ownership filter are testable without reaching into the

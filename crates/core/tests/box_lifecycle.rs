@@ -555,45 +555,86 @@ mod behavior {
         }
     }
 
-    /// A fixture that burns a quota of *CPU it was actually handed*, not a
-    /// stretch of wall clock: the child loops until its own `times` accounting
-    /// clocks `quota` whole seconds — writing that running total to `progress`
-    /// after every chunk — and then idles, still alive so the tree walk keeps
-    /// seeing it, on a bounded sleep so a hard-aborted test leaks nothing past
-    /// the process-group Drop guard.
+    /// How long the quota fixture's wait gives the box to hand out that CPU.
+    ///
+    /// Far past `CPU_DELTA_TIMEOUT`, and affordable for the same reason the
+    /// quota exists: the child stops burning the moment it owes nothing, so a
+    /// starved box stretches this wait in wall clock without costing it any
+    /// more CPU, and the wait returns the instant the delta lands — a healthy
+    /// box pays none of it. #1640 reported a box handing the child under 3% of
+    /// a core, where a single second of CPU takes ~35 seconds to accumulate;
+    /// the old 30-second bound was the half of that failure no measured burn
+    /// can fix on its own.
+    const CPU_QUOTA_TIMEOUT: Duration = Duration::from_secs(120);
+
+    /// How far past the wait the quota child stays alive once it has idled.
+    /// A child that exits mid-wait takes the tree with it, and the wait then
+    /// reports an empty tree — the one diagnosis more misleading than the zero
+    /// delta this fixture exists to explain.
+    const CPU_QUOTA_IDLE_BACKSTOP: Duration = Duration::from_secs(60);
+
+    /// A fixture whose child burns a quota of *CPU it was actually handed*
+    /// rather than a stretch of wall clock, then idles — still alive, so the
+    /// tree walk keeps seeing it — until the backstop reaps it.
     ///
     /// A wall-clock spinner reads the scheduler's output as if it were an
     /// input: on a loaded box it stops spinning while still short of the CPU
-    /// the assertion needs, and no deadline on the waiting side can recover
-    /// that. A quota child never stops short, so the deadline bounds only how
-    /// long the box gets to hand the CPU out, and `progress` records how much
-    /// of it landed (#1640).
+    /// the assertion needs, which no deadline on the waiting side can recover.
+    /// A quota child never stops short and never overshoots, so the wait can
+    /// afford to sit out a starved box (#1640).
     ///
     /// `times` is a builtin and the redirect keeps it in-process, so the
     /// numbers are the subshell's own — a command substitution would fork and
-    /// report the fork's (empty) accounting instead.
-    fn cpu_quota_child(quota: u64, progress: &Path) -> String {
-        let progress = progress.display();
-        format!(
+    /// report the fork's (empty) accounting instead. The trailing `exit`
+    /// matters too: without it bash execs the idle `sleep` over the subshell,
+    /// leaving the CPU this fixture is all about riding on whether the
+    /// platform carries accounting across `execve`.
+    fn spawn_cpu_quota_child(
+        bash: &Path,
+        argv0: &str,
+        quota: u64,
+        progress: &Path,
+    ) -> FixtureProcessGroup {
+        // 100ms of headroom: `times` prints its counters rounded, so a bare
+        // `>= quota` can stand for a shade under the quota — and the child
+        // stops burning at that point, leaving `ps` a second short forever.
+        // Whole milliseconds, because truncating user and system separately
+        // loses up to two of the seconds being counted.
+        let quota_ms = quota * 1_000 + 100;
+        let idle = CPU_QUOTA_TIMEOUT.as_secs() + CPU_QUOTA_IDLE_BACKSTOP.as_secs();
+        // ~0.2 CPU-seconds per chunk on a current machine: short enough that
+        // the quota is not overshot by much, long enough that re-reading the
+        // accounting is not itself the workload.
+        let program = format!(
             "( burned=0
-               while (( burned < {quota} )); do
+               while (( burned < {quota_ms} )); do
                  for (( i = 0; i < 200000; i++ )); do :; done
-                 times > '{progress}'
-                 read -r user sys < '{progress}'
+                 times > \"$LAZYBOX_FIXTURE_CPU\"
+                 read -r user sys < \"$LAZYBOX_FIXTURE_CPU\"
                  burned=0
                  for field in \"$user\" \"$sys\"; do
                    minutes=${{field%%m*}}
                    seconds=${{field#*m}}
-                   burned=$(( burned + minutes * 60 + ${{seconds%.*}} ))
+                   seconds=${{seconds%s}}
+                   burned=$(( burned + (minutes * 60 + ${{seconds%.*}}) * 1000 + 10#${{seconds#*.}} ))
                  done
                done
-               sleep 30 ) & wait"
-        )
+               sleep {idle}
+               exit 0 ) & wait"
+        );
+        let mut command = Command::new(bash);
+        command
+            .args(["-c", &program, argv0])
+            .env("LAZYBOX_FIXTURE_CPU", progress)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        FixtureProcessGroup::spawn(command)
     }
 
     /// What the quota child's own accounting says it managed to clock up. A
     /// zero delta on its own cannot tell a starved box from a broken tree
-    /// walk; this is the box's half of that answer.
+    /// walk; this is the box's half of that answer, at the sub-second
+    /// resolution `ps` rounds away.
     fn child_cpu_burned(progress: &Path) -> String {
         match fs::read_to_string(progress) {
             Ok(body) => match body.lines().next() {
@@ -657,30 +698,26 @@ mod behavior {
     /// only process burning CPU invisible to the wait, which then spun out its
     /// whole deadline on a perfectly idle box and blamed the load.
     ///
-    /// The child owes a CPU quota rather than a stretch of wall clock, so a
-    /// box that hands it a tenth of a core makes the wait longer instead of
-    /// making the delta smaller (#1640).
+    /// The child owes a CPU quota rather than a stretch of wall clock, and the
+    /// wait outlasts a box that hands out a fraction of a core, so starving
+    /// the fixture makes the wait longer instead of making the delta smaller
+    /// (#1640).
     #[test]
     fn a_pid_missing_from_the_snapshot_still_counts_toward_the_delta() {
         let Ok(bash) = which_bash() else { return };
         let dir = scratch("unsnapshotted_child");
         let progress = dir.join("child-cpu");
-        // The quota is the threshold itself, and meeting it is enough:
-        // `times` truncates user and system seconds separately before the
-        // child sums them, so a quota it reports as met always stands for at
-        // least that many whole seconds of the CPU `ps` will read back.
-        let program = cpu_quota_child(AGENT_CPU_SECS, &progress);
-        let mut command = Command::new(&bash);
-        command
-            .args(["-c", &program, "lazybox-test-unsnapshotted-child"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let agent = FixtureProcessGroup::spawn(command);
+        let agent = spawn_cpu_quota_child(
+            &bash,
+            "lazybox-test-unsnapshotted-child",
+            AGENT_CPU_SECS,
+            &progress,
+        );
 
         // A baseline that knows the shell but not the child it forked — what a
         // tick that ran before the fork leaves behind.
         let prev = HashMap::from([(agent.pid(), 0)]);
-        let deadline = Instant::now() + CPU_DELTA_TIMEOUT;
+        let deadline = Instant::now() + CPU_QUOTA_TIMEOUT;
         let mut reading = read_tree(agent.pid(), &prev);
         while !reading.reads_busy() && Instant::now() < deadline {
             sleep(CPU_POLL_INTERVAL);
@@ -702,7 +739,7 @@ mod behavior {
         assert!(
             busy,
             "a child the snapshot never saw must still carry the tree past the \
-             threshold: {reading}; {burned} within {CPU_DELTA_TIMEOUT:?}"
+             threshold: {reading}; {burned} within {CPU_QUOTA_TIMEOUT:?}"
         );
     }
 

@@ -1026,6 +1026,22 @@ fn model_badge_spans(ctx: &WorkspaceRowCtx<'_>, letter: char, model: &str) -> Ve
     // must resolve its declared short verbatim, not be split at the `·`
     // and have the effort mistaken for a Codex reasoning suffix.
     match model.split_once(" · ") {
+        // A reasoning effort that IS the model's default says nothing — it is
+        // the absence of a choice — so rendering ` ·def` spent five columns of
+        // a sidebar row to report "nothing unusual" (#1690). The `◆` badge is
+        // a deviation marker (a single agent on its default tier shows no
+        // badge at all); the effort suffix has to honour the same rule, so
+        // Codex's own `default` / `none` labels collapse to the bare `◆g`.
+        // Every real effort — `xhigh`, `high`, `low`, `max` — still reads.
+        Some((name, effort))
+            if effort_is_default(effort)
+                && !ctx.model_shorts.contains_key(&(letter, model.to_string())) =>
+        {
+            vec![Span::styled(
+                format!("◆{} ", model_short(ctx, letter, name)),
+                badge_style,
+            )]
+        }
         Some((name, effort)) if !ctx.model_shorts.contains_key(&(letter, model.to_string())) => {
             vec![
                 Span::styled(format!("◆{}", model_short(ctx, letter, name)), badge_style),
@@ -1068,6 +1084,13 @@ fn model_short(ctx: &WorkspaceRowCtx<'_>, letter: char, name: &str) -> String {
 /// token Codex emits (`CODEX_EFFORT_TOKENS`): the verbose ones shorten and
 /// the already-short ones (`max`, `none`) pass through, as does any unknown
 /// token a future provider might introduce.
+/// Whether a reasoning-effort token means "the model's own default" — the
+/// two labels Codex uses for *no explicit choice* (`CODEX_EFFORT_TOKENS`).
+/// These carry no information a sidebar row should spend width on (#1690).
+fn effort_is_default(effort: &str) -> bool {
+    matches!(effort.trim(), "default" | "none")
+}
+
 fn abbreviate_effort(effort: &str) -> &str {
     match effort {
         "xhigh" => "xhi",
@@ -2630,6 +2653,35 @@ mod tests {
             text, " X ◆⚡ ",
             "codex's `Fast` short must not pick up claude's"
         );
+    }
+
+    /// Regression (#1690): an effort that IS the model's default carries no
+    /// information, so it must not spend sidebar width. Codex renders
+    /// `default` / `none` for "no explicit choice"; those collapse to the
+    /// bare `◆g`, matching the `◆` badge's own deviation-only rule.
+    #[test]
+    fn cell_badge_drops_a_default_reasoning_effort() {
+        let task = make_task("owner/repo#1", "x");
+        let ws = Workspace::from_task(task.clone(), fixed_time());
+        let theme = theme();
+
+        for effort in ["default", "none"] {
+            let mut ctx = ctx_for(&ws, &task, &theme);
+            ctx.badges = vec![('X', 1)];
+            ctx.agent_models = vec![('X', format!("gpt-5.5 · {effort}"))];
+            let cell = cell_badge_agent(&ctx);
+            let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(text, " X ◆g ", "`{effort}` must not reach the row");
+        }
+
+        // A real effort still reads — this trims noise, it does not blind the
+        // badge.
+        let mut ctx = ctx_for(&ws, &task, &theme);
+        ctx.badges = vec![('X', 1)];
+        ctx.agent_models = vec![('X', "gpt-5.5 · high".to_string())];
+        let cell = cell_badge_agent(&ctx);
+        let text: String = cell.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, " X ◆g ·hi ");
     }
 
     /// #803/#1068: a Codex-style `<model> · <effort>` label keeps its

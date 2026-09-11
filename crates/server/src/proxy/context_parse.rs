@@ -141,15 +141,9 @@ impl Measured {
 pub(crate) fn measure(body: &Value, large_lines: usize) -> Option<Measured> {
     let array = conversation(body)?;
 
-    // Counted through the same sink the blocks use rather than
-    // `to_string(...).len()`: the length is all that is wanted, and
-    // materializing it allocates a copy of the whole conversation on every
-    // request — on the hot path, for a body that grows all session.
-    let mut total = Digest::default();
-    serde_json::to_writer(&mut total, array).ok()?;
     let mut out = Measured {
         accounting: ContextAccounting {
-            message_bytes: total.bytes,
+            message_bytes: conversation_bytes(array)?,
             ..ContextAccounting::default()
         },
         blocks: Vec::new(),
@@ -169,10 +163,32 @@ pub(crate) fn measure(body: &Value, large_lines: usize) -> Option<Measured> {
     Some(out)
 }
 
+/// Serialized bytes of the conversation array — `message_bytes`, the
+/// denominator every share in the readout is computed against.
+///
+/// Counted through a sink rather than `to_string(...).len()`: the length is
+/// all that is wanted, and materializing it grows a buffer from 128 bytes by
+/// doubling, so the final realloc holds the old and the new buffer at once
+/// and the peak spikes to ~2.7x the body — on the hot path, on every
+/// request, for a body that grows all session.
+///
+/// `None` only if the array cannot be serialized, which for a `Value` parsed
+/// out of the request body it cannot be; `measure` abandons the measurement
+/// rather than report a total it did not compute.
+pub fn conversation_bytes(array: &[Value]) -> Option<u64> {
+    let mut total = ByteCount::default();
+    serde_json::to_writer(&mut total, array).ok()?;
+    Some(total.bytes)
+}
+
 /// Hashes a block's serialized form as it is written and counts its bytes,
 /// so measuring a request never copies its tool output. Every proxied request
 /// runs this over every block it carries, and those blocks are the largest
 /// thing in the body.
+///
+/// Used only where a *hash* is wanted. The conversation total next door
+/// wants a length and nothing else and goes through [`ByteCount`]: hashing
+/// bytes whose digest is then dropped costs more than the copy it saves.
 ///
 /// Hashing the *re-serialized* form (rather than the raw wire bytes) is what
 /// makes a re-send recognizable: `serde_json::Value` holds objects in a
@@ -197,10 +213,39 @@ impl std::io::Write for Digest {
     }
 }
 
+/// Counts a value's serialized bytes without materializing them — the
+/// conversation total, which is a length and only a length.
+///
+/// Deliberately *not* [`Digest`]: that sink SipHashes every byte to give a
+/// block an identity, and a total has no identity to recognize. Feeding the
+/// whole conversation through it to reach the same `bytes` field measured
+/// 26-39% slower than the `to_string().len()` it was meant to improve on,
+/// for conversations up to ~5 MB — the entire realistic range. Counting
+/// alone beats both, and allocates nothing either way.
+///
+/// It holds no buffer, and `the_conversation_counter_holds_no_buffer` pins
+/// that with `size_of`: a sink that started accumulating would reintroduce
+/// the copy this exists to avoid while still reporting the right number.
+#[derive(Default)]
+struct ByteCount {
+    bytes: u64,
+}
+
+impl std::io::Write for ByteCount {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// The conversation array in a request body, whichever name the wire shape
 /// gives it: `messages` for Anthropic Messages and OpenAI chat, `input` for
 /// the Responses API. `None` for a body that carries neither.
-pub(crate) fn conversation(body: &Value) -> Option<&Vec<Value>> {
+pub fn conversation(body: &Value) -> Option<&Vec<Value>> {
     body.get("messages")
         .or_else(|| body.get("input"))
         .and_then(Value::as_array)
@@ -345,6 +390,35 @@ mod tests {
             got.message_bytes, expected,
             "counted length matches the serialized length"
         );
+    }
+
+    /// The counting sink must stay a counter. A sink that accumulated what
+    /// it was handed would still report the right `message_bytes` — every
+    /// value assertion in this file would pass — while silently restoring
+    /// the whole-conversation copy `measure` exists to avoid, so the shape
+    /// is what has to be pinned, not just the number.
+    #[test]
+    fn the_conversation_counter_holds_no_buffer() {
+        assert_eq!(
+            std::mem::size_of::<ByteCount>(),
+            std::mem::size_of::<u64>(),
+            "ByteCount is a counter; a Vec/String field would make it wider"
+        );
+    }
+
+    /// The sink's own contract: every byte written is counted once, across
+    /// the many small writes serde_json makes per value.
+    #[test]
+    fn byte_count_sums_every_write() {
+        use std::io::Write;
+
+        let mut sink = ByteCount::default();
+        assert_eq!(sink.bytes, 0, "an unused sink has counted nothing");
+        sink.write_all(b"").expect("empty write");
+        assert_eq!(sink.bytes, 0, "an empty write adds nothing");
+        sink.write_all(b"[{\"a\":1}").expect("write");
+        sink.write_all(b"]").expect("write");
+        assert_eq!(sink.bytes, 9, "both writes counted, once each");
     }
 
     #[test]

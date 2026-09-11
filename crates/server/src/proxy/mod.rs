@@ -32,6 +32,12 @@
 
 pub(crate) mod compaction;
 mod context_parse;
+// The two order-free halves of the accounting, re-exported for
+// `benches/context_parse.rs`. Narrow on purpose: `context_parse`'s own
+// module docs reference private siblings, so publishing the *module* would
+// make those links public and dangling, and `measure` must stay crate-private
+// so `measure_then_compact` remains the only way to reach the accounting.
+pub use context_parse::{conversation, conversation_bytes};
 mod quota_parse;
 mod usage_parse;
 

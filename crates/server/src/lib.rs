@@ -1095,11 +1095,14 @@ impl Server {
             )
             .await;
         });
-        // Subscribe is a connection-establishment command, not a general
-        // snapshot endpoint. Re-running its full store/terminal snapshot can
-        // manufacture an arbitrarily large structured-event backlog; live
-        // recovery uses the bus-lag snapshot and RequestTerminalResync paths.
+        // Initial Subscribe establishes the terminal baseline. Repeats refresh
+        // inbox rows through the live stream, never replay healthy terminals.
         let mut subscribed = false;
+        let mut refresh = SubscriptionRefresh::default();
+        // Retain the yield across select turns: recreating it whenever a bus
+        // event wins would starve refresh delivery on a continuously busy bus.
+        let refresh_yield = tokio::task::yield_now();
+        tokio::pin!(refresh_yield);
         // Set by a connection that asked one question and wants one answer:
         // `lazybox hook-ingest`'s `PreToolUse` decision round-trip (#1610). It
         // holds the connection open for its deadline, and forwarding the bus
@@ -1143,6 +1146,7 @@ impl Server {
         // service-owned watch channel.
         let mut graceful_stop = self.graceful_stop.clone();
         loop {
+            refresh.start(&self.config);
             while mutations.try_join_next().is_some() {}
             while let Some(cmd) = pending_terminal_io.pop_front() {
                 if let Err(error) = terminal_io_tx.try_send(cmd) {
@@ -1186,10 +1190,7 @@ impl Server {
                     let Some(cmd) = cmd else { break };
                     if matches!(&cmd, lazybox_ipc::Command::Subscribe) {
                         if subscribed {
-                            let _ = conn.tx.send(Event::CommandRejected {
-                                command: "Subscribe".into(),
-                                message: "this connection is already subscribed".into(),
-                            });
+                            refresh.requested = true;
                             continue;
                         }
                         subscribed = true;
@@ -1476,12 +1477,35 @@ impl Server {
                         }
                     }
                 }
+                result = async {
+                    match refresh.task.as_mut() {
+                        Some(task) => task.await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    refresh.task = None;
+                    match result {
+                        Ok(events) => refresh.events = events.into(),
+                        Err(error) => {
+                            tracing::error!(%error, "subscription refresh failed");
+                            let _ = conn.tx.send(Event::CommandRejected {
+                                command: "Subscribe".into(),
+                                message: "inbox refresh failed; existing state was preserved".into(),
+                            });
+                        }
+                    }
+                }
+                _ = &mut refresh_yield, if !refresh.events.is_empty() => {
+                    refresh.deliver_next(&conn.tx);
+                    refresh_yield.set(tokio::task::yield_now());
+                }
                 bus = bus_rx.recv() => {
                     // `bus_rx` is drained either way, so a suppressed
                     // connection never makes the broadcast channel report it
                     // as lagging — only the forwarding is skipped.
                     match bus {
                         Ok(evt) => {
+                            refresh.observe(&evt);
                             if !bus_suppressed {
                                 let _ = conn.tx.send(evt);
                             }
@@ -1569,6 +1593,9 @@ impl Server {
                 }
             }
         }
+        if let Some(task) = refresh.task.take() {
+            task.abort();
+        }
         drop(terminal_io_tx);
         drop(terminal_persist_tx);
         // Drain detached mutation tasks before returning — `Shutdown =>
@@ -1599,6 +1626,201 @@ impl Server {
             let _ = forward_task.await;
         }
         Ok(())
+    }
+}
+
+/// A subscribed connection already receives removals through the reliable
+/// live stream (bus lag has its own recovery). Refresh persisted inbox rows
+/// with ordinary upserts: a full Snapshot would throw away terminal history
+/// that has already fallen out of the daemon's bounded replay ring.
+#[derive(Default)]
+struct SubscriptionRefresh {
+    task: Option<tokio::task::JoinHandle<Vec<Event>>>,
+    requested: bool,
+    events: std::collections::VecDeque<Event>,
+    changed_workspaces: std::collections::HashSet<lazybox_core::WorkspaceKey>,
+    changed_projects: std::collections::HashSet<lazybox_core::ProjectKey>,
+}
+
+impl SubscriptionRefresh {
+    fn start(&mut self, config: &ServerConfig) {
+        if !self.requested || self.task.is_some() || !self.events.is_empty() {
+            return;
+        }
+        self.requested = false;
+        self.changed_workspaces.clear();
+        self.changed_projects.clear();
+        let store = config.store.clone();
+        // One read in flight and one pending refresh per connection. SQLite
+        // and configuration I/O cannot hold the command/bus select loop.
+        self.task = Some(tokio::task::spawn_blocking(move || {
+            let workspaces = load_workspaces(&*store);
+            let projects = load_projects(&*store, &configured_github_scopes());
+            let errors = workspaces.errors.len() + projects.errors.len();
+            let mut events = Vec::new();
+            for project in projects.values {
+                events.push(Event::ProjectUpserted(Box::new(project)));
+            }
+            for workspace in workspaces.values {
+                events.push(Event::WorkspaceUpserted(Arc::new(workspace)));
+            }
+            if errors > 0 {
+                events.push(storage_recovery_event(errors));
+            }
+            // Setup can also change spawn choices and policies. Refresh these
+            // settings without replaying auth sessions or terminal byte streams.
+            match lazybox_config::Config::load() {
+                Ok(config) => {
+                    events.push(Event::ShellCommandConfig {
+                        command: config.shell.resolved_command(),
+                        configured: config.shell.configured_command().is_some(),
+                    });
+                    events.push(Event::AgentAvailabilityConfig {
+                        agents: spawnable_agents(&config),
+                        default_agent: config.setup.default_agent.clone(),
+                    });
+                    let auto_fix = config.auto_fix.to_settings();
+                    events.push(Event::AutoFixPolicyConfig {
+                        enabled: auto_fix.enabled,
+                        opt_out_labels: auto_fix.opt_out_labels,
+                    });
+                }
+                Err(error) => {
+                    events.push(Event::CommandRejected {
+                        command: "Subscribe".into(),
+                        message: format!(
+                            "settings refresh failed; existing settings were preserved: {error}"
+                        ),
+                    });
+                }
+            }
+            events
+        }));
+        config.poll.wake(true);
+    }
+
+    fn observe(&mut self, event: &Event) {
+        if self.task.is_none() && self.events.is_empty() {
+            return;
+        }
+        match event {
+            Event::WorkspaceUpserted(workspace) => {
+                self.changed_workspaces.insert(workspace.key.clone());
+            }
+            Event::WorkspaceRemoved(key) => {
+                self.changed_workspaces.insert(key.clone());
+            }
+            Event::ProjectUpserted(project) => {
+                self.changed_projects.insert(project.key.clone());
+            }
+            Event::ProjectRemoved(key) => {
+                self.changed_projects.insert(key.clone());
+            }
+            _ => {}
+        }
+    }
+
+    fn deliver_next(&mut self, tx: &lazybox_ipc::EventSender) {
+        // Yield between rows so command dispatch and the event forwarder get
+        // turns even when the inbox contains thousands of workspaces.
+        if let Some(event) = self.events.pop_front() {
+            // Live changes delivered during the read win over its older rows;
+            // in particular, a concurrent deletion must not resurrect a row.
+            let superseded = match &event {
+                Event::WorkspaceUpserted(workspace) => {
+                    self.changed_workspaces.contains(&workspace.key)
+                }
+                Event::ProjectUpserted(project) => self.changed_projects.contains(&project.key),
+                _ => false,
+            };
+            if !superseded {
+                let _ = tx.send(event);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod subscription_refresh_tests {
+    use super::*;
+
+    #[test]
+    fn refresh_does_not_overwrite_rows_updated_while_delivery_was_pending() {
+        let workspace = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new("local:updated"),
+            "main",
+            chrono::Utc::now(),
+        );
+        let project = lazybox_core::Project::new(
+            lazybox_core::ProjectKey::local("removed"),
+            "removed",
+            chrono::Utc::now(),
+        );
+        let mut refresh = SubscriptionRefresh::default();
+        refresh
+            .events
+            .push_back(Event::WorkspaceUpserted(Arc::new(workspace.clone())));
+        refresh
+            .events
+            .push_back(Event::ProjectUpserted(Box::new(project.clone())));
+        refresh.observe(&Event::WorkspaceUpserted(Arc::new(workspace)));
+        refresh.observe(&Event::ProjectRemoved(project.key));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = lazybox_ipc::EventSender::from_unbounded(tx);
+        refresh.deliver_next(&tx);
+        refresh.deliver_next(&tx);
+        assert!(
+            rx.try_recv().is_err(),
+            "live updates and removals win over queued refresh rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_coalesces_requests_and_does_not_resurrect_live_removed_rows() {
+        let config = ServerConfig::in_memory();
+        let (release, held) = tokio::sync::oneshot::channel();
+        let mut refresh = SubscriptionRefresh {
+            task: Some(tokio::spawn(async move {
+                let _ = held.await;
+                Vec::new()
+            })),
+            ..Default::default()
+        };
+        let original = refresh.task.as_ref().expect("running read").id();
+        for _ in 0..100 {
+            refresh.requested = true;
+            refresh.start(&config);
+        }
+        assert_eq!(refresh.task.as_ref().expect("same read").id(), original);
+        assert!(refresh.requested, "one trailing read remains pending");
+
+        let workspace = lazybox_core::Workspace::empty(
+            lazybox_core::WorkspaceKey::new("local:removed"),
+            "main",
+            chrono::Utc::now(),
+        );
+        refresh.observe(&Event::WorkspaceRemoved(workspace.key.clone()));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx = lazybox_ipc::EventSender::from_unbounded(tx);
+        refresh
+            .events
+            .push_back(Event::WorkspaceUpserted(Arc::new(workspace)));
+        refresh.deliver_next(&tx);
+        assert!(
+            rx.try_recv().is_err(),
+            "stale read must not undo a deletion"
+        );
+        release.send(()).expect("release read");
+        refresh.task.take().expect("read").await.expect("completed");
+        refresh.start(&config);
+        assert!(!refresh.requested);
+        assert!(refresh.changed_workspaces.is_empty());
+        refresh
+            .task
+            .take()
+            .expect("trailing read")
+            .await
+            .expect("completed");
     }
 }
 

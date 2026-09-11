@@ -265,61 +265,132 @@ async fn rejected_snippet_delivery_does_not_update_recent_history() {
     }
 }
 
+/// Re-subscribing refreshes changed store rows without replacing a live
+/// terminal's longer client-side history with its bounded replay ring.
 #[tokio::test]
-async fn subscribe_is_admitted_only_once_per_connection() {
-    let (mut client, server) = channel::pair();
-    tokio::spawn(async move {
-        Server::new(ServerConfig::in_memory())
-            .serve(server)
-            .await
-            .unwrap();
+async fn resubscribe_refreshes_rows_without_replaying_terminals() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let key = mock.spawn(&[], None, &[], "refresh-history").await.unwrap();
+    config
+        .terminal
+        .register_terminal(
+            TerminalId(1694),
+            key.clone(),
+            lazybox_core::SessionKey::new("local:refresh"),
+            TerminalKind::Shell,
+        )
+        .await;
+    let (mut client, conn) = channel::pair();
+    let daemon_config = config.clone();
+    let daemon = tokio::spawn(async move {
+        Server::new(daemon_config).serve(conn).await.unwrap();
     });
-
-    client.send(Command::Subscribe).expect("first subscribe");
-    assert!(matches!(client.recv().await, Some(Event::Snapshot { .. })));
-    assert!(matches!(
-        client.recv().await,
-        Some(Event::ShellCommandConfig {
-            command,
-            configured: _,
-        }) if !command.is_empty()
-    ));
-    // The first subscribe also pushes the spawnable-agent config and then
-    // the auto-fix policy config after the shell config; drain both so the
-    // next event is the duplicate-subscribe rejection.
-    assert!(matches!(
-        client.recv().await,
-        Some(Event::AgentAvailabilityConfig { .. })
-    ));
-    assert!(matches!(
-        client.recv().await,
-        Some(Event::KeepAwakeStatus { .. })
-    ));
-    assert!(matches!(
-        client.recv().await,
-        Some(Event::SnippetKeepMine { .. })
-    ));
-    assert!(matches!(
-        client.recv().await,
-        Some(Event::SessionCosts { .. })
-    ));
-    assert!(matches!(
-        client.recv().await,
-        Some(Event::MasteryLedger { .. })
-    ));
-    assert!(matches!(
-        client.recv().await,
-        Some(Event::AutoFixPolicyConfig { .. })
-    ));
-    client
-        .send(Command::Subscribe)
-        .expect("duplicate reaches daemon");
-    assert!(matches!(
-        client.recv().await,
-        Some(Event::CommandRejected { command, message })
-            if command == "Subscribe" && message.contains("already subscribed")
-    ));
+    client.send(Command::Subscribe).unwrap();
+    drain_initial_subscription(&mut client).await;
+    // Successful snapshots of a wrapped ring are still replay_available.
+    // A full Snapshot here would discard history retained only by the client.
+    mock.mark_snapshot_incomplete(&key).await;
+    let workspace = lazybox_core::Workspace::empty(
+        lazybox_core::WorkspaceKey::new("local:refresh"),
+        "fresh row",
+        chrono::Utc::now(),
+    );
+    config
+        .store
+        .save_workspace(&lazybox_store::WorkspaceRecord {
+            key: workspace.key.as_str().into(),
+            created_at: workspace.created_at,
+            workspace_json: Some(serde_json::to_string(&workspace).unwrap()),
+        })
+        .unwrap();
+    client.send(Command::Subscribe).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut saw_row = false;
+        loop {
+            match client.recv().await.expect("refresh response") {
+                Event::WorkspaceUpserted(row) if row.key == workspace.key => {
+                    assert_eq!(
+                        serde_json::to_value(&*row).unwrap(),
+                        serde_json::to_value(&workspace).unwrap()
+                    );
+                    saw_row = true;
+                }
+                Event::AutoFixPolicyConfig { .. } => {
+                    assert!(saw_row, "refresh must load the newly persisted row");
+                    break;
+                }
+                Event::Snapshot { .. } | Event::TerminalResync { .. } => {
+                    panic!("an inbox refresh must preserve existing terminal streams");
+                }
+                Event::CommandRejected { .. } => panic!("refresh was rejected"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("updated store row is delivered without waiting for a poll");
+    client.send(Command::Shutdown).unwrap();
+    daemon.await.unwrap();
 }
+
+async fn drain_initial_subscription(client: &mut lazybox_ipc::Client) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        assert!(matches!(client.recv().await, Some(Event::Snapshot { .. })));
+        while !matches!(
+            client.recv().await.expect("initial replay"),
+            Event::AutoFixPolicyConfig { .. }
+        ) {}
+    })
+    .await
+    .expect("initial subscription completes");
+}
+
+/// A repeat cannot wait for any terminal's replay, even when the backend
+/// hangs. Keep virtual time fixed while the command is dispatched: the old
+/// inline handler cannot make progress until its 500ms timeout fires.
+#[tokio::test]
+async fn resubscribe_does_not_block_input_on_a_wedged_snapshot() {
+    let (config, mock) = ServerConfig::in_memory_with_mock();
+    let key = mock.spawn(&[], None, &[], "refresh-write").await.unwrap();
+    config
+        .terminal
+        .register_terminal(
+            TerminalId(1695),
+            key.clone(),
+            lazybox_core::SessionKey::new("local:write"),
+            TerminalKind::Shell,
+        )
+        .await;
+    let (mut client, conn) = channel::pair();
+    let daemon = tokio::spawn(async move {
+        Server::new(config).serve(conn).await.unwrap();
+    });
+    client.send(Command::Subscribe).unwrap();
+    drain_initial_subscription(&mut client).await;
+    mock.wedge_snapshot(&key).await;
+    tokio::time::pause();
+    client.send(Command::Subscribe).unwrap();
+    client
+        .send(Command::Write {
+            terminal_id: TerminalId(1695),
+            bytes: b"still responsive".to_vec(),
+            intent: TerminalInputIntent::Compose,
+        })
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while mock.writes_for(&key).await.is_empty() && std::time::Instant::now() < deadline {
+        // A ready task prevents Tokio's paused clock from auto-advancing.
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        mock.writes_for(&key).await,
+        vec![b"still responsive".to_vec()]
+    );
+    tokio::time::resume();
+    client.send(Command::Shutdown).unwrap();
+    daemon.await.unwrap();
+}
+
 #[tokio::test]
 async fn shutdown_closes_loop_cleanly() {
     let (client, server) = channel::pair();

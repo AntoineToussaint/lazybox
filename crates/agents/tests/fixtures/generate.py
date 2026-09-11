@@ -103,6 +103,53 @@ write("trust_folder_prompt.bin", [
     cup(9, 3), sgr(2), b"Esc to cancel", RESET,
 ])
 
+# ── trust-folder prompt, MODERN wording: UNNUMBERED, arrow-selected ──────
+# The shape the numbered-chooser rule structurally cannot see (#1641): the
+# options carry no keys, so `❯`+`1.`/`2.` never matches and this read as Idle
+# while the agent sat blocked. Painted the way tmux delivers it — full-screen
+# redraw, the long question wrapped across rows, the option labels and the
+# footer landing as separate absolute-positioned writes.
+write("trust_folder_modern.bin", [
+    ESC + b"[2J", HIDE_CUR, cup(1, 1),
+    sgr(2), b"Accessing workspace:", RESET, b"\r\n",
+    cup(2, 1), os.fsencode("/Users/me/.lazybox/v2/github-o-r/issue-96"), b"\r\n",
+    cup(4, 1), CLEAR_LINE,
+    sgr(1), b"Quick safety check:", RESET, cup(4, 21), b"Is this a project you",
+    cup(5, 1), CLEAR_LINE, b"created or one you trust? (Like your own code, a",
+    cup(6, 1), CLEAR_LINE, b"well-known open source project, or work from your",
+    cup(7, 1), CLEAR_LINE, b"team).",
+    cup(9, 1), CLEAR_LINE,
+    "Claude Code'll be able to read, edit, and execute".encode("utf-8"),
+    cup(10, 1), b"files here.",
+    cup(12, 1), sgr(4), b"Security guide", RESET,
+    cup(14, 3), sgr(7), "❯".encode("utf-8"), RESET, cup(14, 5), b"No, exit",
+    cup(15, 5), b"Yes, I trust this folder",
+    cup(17, 3), sgr(2), b"Enter to confirm", cup(17, 20), "·".encode("utf-8"),
+    cup(17, 22), b"Esc to cancel", RESET,
+    SHOW_CUR,
+])
+
+# The same gate, ANSWERED: the agent got past it and the composer is painted
+# back beneath. The question and the affirmative label are still in the
+# window, so only the newer footer distinguishes this from the live gate —
+# without that check an agent that merely TALKED about folder trust (the
+# label `Yes, I trust this folder` is ordinary prose) latched a sticky `?`.
+write("trust_folder_modern_answered.bin", [
+    cup(4, 1), b"Quick safety check: Is this a project you created or one",
+    cup(5, 1), b"you trust?",
+    cup(14, 3), "❯ No, exit".encode("utf-8"), b"\r\n",
+    cup(15, 5), b"Yes, I trust this folder", b"\r\n",
+    cup(20, 1), CLEAR_LINE,
+    sgr(2), "● Done — I answered the trust prompt and ran the suite.".encode("utf-8"),
+    RESET, b"\r\n",
+    cup(22, 1), sgr(90), "╭─────────────────────────────────────────╮".encode("utf-8"),
+    RESET, b"\r\n",
+    sgr(90), "│".encode("utf-8"), RESET, b" > ",
+    cup(23, 44), sgr(90), "│".encode("utf-8"), RESET, b"\r\n",
+    sgr(90), "╰─────────────────────────────────────────╯".encode("utf-8"), RESET, b"\r\n",
+    cup(25, 3), sgr(2, 90), b"? for shortcuts", RESET,
+])
+
 # ── conversational question: freeform `?`, NO structural marker → Idle ───
 # The dominant historical false-positive. Composer footer below, no chooser.
 write("conversational_question.bin", [

@@ -893,6 +893,20 @@ pub mod builtins {
             detect::claude_state_chunked(recent_output, last_chunk_start)
         }
 
+        /// Semantic observation — the state plus the interaction shape of
+        /// the prompt behind it. Overridden (rather than taking the blanket
+        /// `InputNeeded → Chooser` default) because Claude's modern
+        /// folder-trust gate has unnumbered, arrow-selected options that no
+        /// bare keystroke answers. See
+        /// [`crate::detect::claude_observation_chunked`].
+        fn detect_observation_chunked(
+            &self,
+            recent_output: &[u8],
+            last_chunk_start: usize,
+        ) -> Option<AgentObservation> {
+            detect::claude_observation_chunked(recent_output, last_chunk_start)
+        }
+
         /// Stale-hook demotion evidence — see
         /// [`crate::detect::claude_working_supersedes_dialog`].
         fn working_reading_supersedes_dialog(&self, recent_output: &[u8]) -> bool {

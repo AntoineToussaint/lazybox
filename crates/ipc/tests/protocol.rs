@@ -693,6 +693,10 @@ fn all_events() -> Vec<Event> {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
             pr_label: "o/r#2".into(),
         },
+        Event::PrQueued {
+            workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
+            pr_label: "o/r#2".into(),
+        },
         Event::PrMergeFailed {
             workspace_key: lazybox_core::WorkspaceKey::new("github:o/r#2"),
             pr_label: "o/r#2".into(),
@@ -1537,6 +1541,7 @@ fn event_tag(event: &Event) -> &'static str {
         Event::WorkspaceMergePending { .. } => "WorkspaceMergePending",
         Event::WorkspaceMerged { .. } => "WorkspaceMerged",
         Event::PrMerged { .. } => "PrMerged",
+        Event::PrQueued { .. } => "PrQueued",
         Event::PrMergeFailed { .. } => "PrMergeFailed",
         Event::AutoMergeNotice { .. } => "AutoMergeNotice",
         Event::IssueClosed { .. } => "IssueClosed",
@@ -1646,7 +1651,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
     );
     assert_eq!(
         event_tags.len(),
-        106,
+        107,
         "Event gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
 }

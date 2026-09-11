@@ -7130,7 +7130,7 @@ impl lazybox_core::TaskProvider for GhClient {
         &self,
         workspace: &lazybox_core::Workspace,
         options: &lazybox_core::MergeOptions<'_>,
-    ) -> Result<lazybox_core::TrailerOutcome, lazybox_core::ProviderError> {
+    ) -> Result<lazybox_core::MergeOutcome, lazybox_core::ProviderError> {
         let Some(pr) = workspace.pr.as_ref() else {
             return Err(lazybox_core::ProviderError::permanent(
                 "github",
@@ -7147,15 +7147,40 @@ impl lazybox_core::TaskProvider for GhClient {
             .merge_pr_in_repo(pr.repo.as_deref(), node_id, options)
             .await
         {
-            Ok(PendingTrailers::Nothing) => Ok(lazybox_core::TrailerOutcome::Nothing),
-            Ok(PendingTrailers::InCommit) => Ok(lazybox_core::TrailerOutcome::InCommit),
-            Ok(PendingTrailers::Dropped { reason }) => {
-                Ok(lazybox_core::TrailerOutcome::Dropped { reason })
-            }
-            Ok(PendingTrailers::NeedsComment(trailers)) => {
-                Ok(self.write_sticky_trailer_comment(pr, &trailers).await)
-            }
+            Ok(PendingTrailers::Nothing) => Ok(lazybox_core::MergeOutcome::Merged(
+                lazybox_core::TrailerOutcome::Nothing,
+            )),
+            Ok(PendingTrailers::InCommit) => Ok(lazybox_core::MergeOutcome::Merged(
+                lazybox_core::TrailerOutcome::InCommit,
+            )),
+            Ok(PendingTrailers::Dropped { reason }) => Ok(lazybox_core::MergeOutcome::Merged(
+                lazybox_core::TrailerOutcome::Dropped { reason },
+            )),
+            Ok(PendingTrailers::NeedsComment(trailers)) => Ok(lazybox_core::MergeOutcome::Merged(
+                self.write_sticky_trailer_comment(pr, &trailers).await,
+            )),
             Err(err) => {
+                // The PR is in the repository's merge queue — the sibling of
+                // the already-merged recovery below, and resolved in the same
+                // place for the same reason: GitHub has the PR and will land
+                // it, so this is a success shape, not a rejection (#1669).
+                //
+                // Checked FIRST because it costs nothing: GitHub already told
+                // us the answer, so there is no need to spend the
+                // `pr_already_merged` round trip asking. On a queue-enabled
+                // repo with merge-on-green armed this rejection recurs every
+                // poll, so that saved call is not incidental.
+                //
+                // Classified on the FULL error text, not a caller's
+                // `user_message()` — that is the first line only for a
+                // `Permanent` error and would drop a marker on a later line.
+                if lazybox_core::is_already_in_merge_queue(&err.to_string().to_ascii_lowercase()) {
+                    tracing::info!(
+                        "merge {}: PR is in the merge queue — GitHub will land it",
+                        pr.id.key
+                    );
+                    return Ok(lazybox_core::MergeOutcome::Queued);
+                }
                 // GitHub rejects a merge of an ALREADY-merged PR with a
                 // generic "not mergeable" — indistinguishable by message
                 // from a real conflict. Re-check: if the PR is in fact
@@ -7169,7 +7194,9 @@ impl lazybox_core::TaskProvider for GhClient {
                     );
                     // Nothing was written: this merge landed elsewhere, so its
                     // body is already fixed and carries no trailer.
-                    return Ok(lazybox_core::TrailerOutcome::Nothing);
+                    return Ok(lazybox_core::MergeOutcome::Merged(
+                        lazybox_core::TrailerOutcome::Nothing,
+                    ));
                 }
                 Err(mutation_provider_error(
                     self.name_rule_violation(err, pr).await,
@@ -9413,6 +9440,51 @@ mod tests {
             contracts: vec![],
             blocked_on: None,
         }
+    }
+
+    /// Regression (#1669): GitHub answering a merge with "Pull Request is
+    /// in the merge queue." is a SUCCESS shape — the PR is queued and
+    /// GitHub will land it. Resolved here, in the provider, beside the
+    /// already-merged recovery, so both merge call sites (the manual `g m`
+    /// handler and the merge-on-green latch) get it; a caller-side string
+    /// match covered only the caller it was written in.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_queued_pr_reports_queued_not_a_rejection() {
+        const METHOD: &str =
+            r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"MERGE"}}}}"#;
+        const QUEUED: &str = r#"{"errors":[{"message":"Pull Request is in the merge queue."}]}"#;
+        // Only two responses: the queue verdict is conclusive, so the
+        // `pr_already_merged` round trip must not be spent asking again.
+        let base_uri = spawn_sequenced_response_server(vec![METHOD, QUEUED]).await;
+        let client = make_client(&base_uri);
+
+        let mut task = task_without_node_id(TaskKind::Pr);
+        task.node_id = Some("PR_kwDO".to_string());
+        let ws = Workspace::from_task(task, chrono::Utc::now());
+
+        let outcome = TaskProvider::merge(&client, &ws, &lazybox_core::MergeOptions::default())
+            .await
+            .expect("a queued PR is not a merge failure");
+        assert_eq!(
+            outcome,
+            lazybox_core::MergeOutcome::Queued,
+            "GitHub has the PR — report it queued, never `merged` and never a rejection"
+        );
+    }
+
+    /// The queue marker must survive `GhError`'s Display wrapper: the
+    /// provider classifies on `err.to_string()`, which prefixes
+    /// "GraphQL error: ". A matcher anchored too tightly to the bare
+    /// GitHub sentence would silently stop firing.
+    #[test]
+    fn the_queue_marker_survives_the_error_display_wrapper() {
+        let rendered = GhError::Graphql("Pull Request is in the merge queue.".to_string())
+            .to_string()
+            .to_ascii_lowercase();
+        assert!(
+            lazybox_core::is_already_in_merge_queue(&rendered),
+            "the wrapped error must still classify as queued: {rendered}"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -2611,6 +2611,22 @@ pub enum Event {
         workspace_key: lazybox_core::WorkspaceKey,
         pr_label: String,
     },
+    /// `Command::MergePr` reached GitHub and the PR is now in the
+    /// repository's **merge queue** — GitHub will land it when it reaches
+    /// the front (#1669). The mutation succeeded; the PR is not merged
+    /// yet, so this is deliberately neither [`Self::PrMerged`] (which
+    /// latches the row MERGED) nor [`Self::PrMergeFailed`].
+    ///
+    /// Carries `workspace_key` because it must clear a stale
+    /// `✗ merge failed` still pinned to that row from an earlier attempt
+    /// — a red failure sitting on a PR GitHub is about to merge is the
+    /// exact misleading state #1669 set out to remove — and `pr_label`
+    /// so a bulk merge over a selection names which PR was queued rather
+    /// than flashing an unattributed line per target.
+    PrQueued {
+        workspace_key: lazybox_core::WorkspaceKey,
+        pr_label: String,
+    },
     /// `Command::MergePr` failed at the GitHub merge API — the user
     /// pressed `g m` and the merge did NOT happen. Distinct from a
     /// generic retryable `ProviderError`: the TUI surfaces this as a

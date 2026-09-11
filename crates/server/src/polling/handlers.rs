@@ -110,7 +110,7 @@ impl ProviderHandle {
         &self,
         ws: &lazybox_core::Workspace,
         options: &lazybox_core::MergeOptions<'_>,
-    ) -> Result<lazybox_core::TrailerOutcome, lazybox_core::ProviderError> {
+    ) -> Result<lazybox_core::MergeOutcome, lazybox_core::ProviderError> {
         match self {
             Self::Github(c) => lazybox_core::TaskProvider::merge(c, ws, options).await,
             Self::Linear(c) => lazybox_core::TaskProvider::merge(c, ws, options).await,
@@ -888,9 +888,49 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey, force
         });
         return;
     }
+    // GitHub accepted the mutation by QUEUEING the PR rather than merging
+    // it (#1669). Not a failure — the failure machinery above would file a
+    // persistent `✗ merge failed` for a PR GitHub is about to land — but
+    // not a merge either, so none of the merged bookkeeping below may run:
+    //
+    // - no `mark_reported`: the queue builds its own merge commit, so
+    //   nothing this call passed was written. Stamping the cost watermark
+    //   here would retire a cost record that never reached GitHub, and the
+    //   next PR from this workspace would start from zero having reported
+    //   nothing.
+    // - no `PrMerged`: that latches the row MERGED (`apply_merge_latch`)
+    //   and would force a merged state onto a PR still sitting in a queue
+    //   that can eject it.
+    //
+    // GitHub just told us the PR is queued, so our cached
+    // `is_in_merge_queue` was stale — exactly the shape of the conflict
+    // correction above. Set it and upsert so the row's QUEUED pill
+    // (`StatusTag::Queued`) appears now instead of waiting out a poll.
+    if matches!(merge_result, Ok(lazybox_core::MergeOutcome::Queued)) {
+        tracing::info!("merge {workspace_key}: PR is in the merge queue");
+        if let Some(mut pr) = merge_ws.pr.clone()
+            && !pr.is_in_merge_queue
+        {
+            pr.is_in_merge_queue = true;
+            super::upsert(config, pr).await;
+        }
+        let _ = config.bus.send(Event::PrQueued {
+            workspace_key: workspace_key.clone(),
+            pr_label: pr_label
+                .clone()
+                .unwrap_or_else(|| workspace_key.as_str().to_string()),
+        });
+        // Wake the poll so the queue's progress (and the eventual merge)
+        // lands promptly rather than waiting out the repo's rotation slot.
+        config.poll.wake(true);
+        return;
+    }
     tracing::info!("merged PR for workspace {workspace_key}");
     crate::pr_trailers::mark_reported(config, &workspace_key, &trailers).await;
-    if let Ok(lazybox_core::TrailerOutcome::Dropped { reason }) = merge_result {
+    if let Ok(lazybox_core::MergeOutcome::Merged(lazybox_core::TrailerOutcome::Dropped {
+        reason,
+    })) = merge_result
+    {
         let _ = config.bus.send(Event::provider_error_retryable(
             "merge",
             format!("merged, but the cost record was not written: {reason}"),

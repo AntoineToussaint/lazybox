@@ -734,7 +734,8 @@ mod behavior {
 
         assert!(
             saw_unsnapshotted_child,
-            "the fixture's child must show up in the tree with no baseline: {reading}"
+            "the fixture's child must show up in the tree with no baseline: \
+             {reading}; {burned}"
         );
         assert!(
             busy,

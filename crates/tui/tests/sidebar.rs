@@ -1649,6 +1649,7 @@ fn show_inactive_in_inbox_surfaces_merged_and_closed() {
         BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
+        BTreeSet::new(),
         None,
         &display,
     );
@@ -2008,6 +2009,7 @@ fn desktop_notify_off_suppresses_os_banner_but_keeps_footer_notice() {
         BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
+        BTreeSet::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
     );
@@ -2108,6 +2110,7 @@ fn ci_failure_transition_respects_desktop_notify_off() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
@@ -2463,6 +2466,7 @@ fn pinned_repo_config_floats_group_to_top() {
         BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
+        BTreeSet::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
     );
@@ -2680,6 +2684,7 @@ fn apply_config_dedups_focused_workspaces() {
         BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
+        BTreeSet::new(),
         None,
         &lazybox_config::DisplayConfig::default(),
     );
@@ -2719,6 +2724,7 @@ fn focused_header_honors_ascii_glyphs() {
         Vec::new(),
         Vec::new(),
         Vec::new(),
+        BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
         BTreeSet::new(),
@@ -2829,6 +2835,7 @@ fn apply_persisted(s: &mut Sidebar, focused: Vec<SessionKey>, pinned: Vec<String
         pinned,
         focused,
         Vec::new(),
+        std::collections::BTreeSet::new(),
         std::collections::BTreeSet::new(),
         std::collections::BTreeSet::new(),
         std::collections::BTreeSet::new(),

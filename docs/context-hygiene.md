@@ -130,6 +130,46 @@ plus the per-workspace / Space / `meter_all` routing. On an unmetered fleet this
 is inert — which also means a `0%` on the stats screen means "not measured
 here", not "no waste here".
 
+### The dial is per workspace (#1622)
+
+`mode` alone is fleet-wide, which is the wrong granularity for a pass that
+rewrites what a model sees: the saving has to be proven on one row before every
+row carries it. So `on` composes the same way metering's canary does — a
+per-workspace flag, a Space, or the global mode, OR'd:
+
+```yaml
+agent:
+  compacted_spaces: [obin-ai]       # Space tier, resolved through ui.spaces
+```
+
+- `Workspace::compact_context` — the per-row canary, toggled with `x h` on a
+  workspace row. Off until chosen: unlike the meter, which is on by default
+  because counting is harmless, this one is opted into a row at a time.
+- `agent.compacted_spaces` — the Space tier, `x h` on a Space header, so a
+  rollout widens from one workspace to one repo group without touching `mode`.
+- `mode: 'on'` — the whole fleet.
+
+`mode: off` is not promotable. It is the configured kill switch, the one setting
+that means "not on my traffic", so a flag left on a row cannot resurrect the
+rewrite under it — the same way no per-workspace meter overrides
+`metering_proxy: false`.
+
+The proxy resolves this **per request**, not at spawn: the session segment of the
+proxy path names the workspace, so flipping the canary lands on that workspace's
+next turn rather than its next agent. Membership (the flag, the Space) is
+resolved by the daemon; promotion is `ContextHygiene::mode_for`, shared with the
+hook enforcement point so the two cannot disagree about which sessions are
+rewriting. It is resolved exactly once per request and carried on that request's
+session pass, so the response's kill-switch accounting judges the turn under the
+mode the turn actually ran under.
+
+**Only `mode` is re-read live.** The rest of the block — `keep_recent`,
+`min_lines`, the condense knobs — is snapshotted when the proxy starts, as it
+always was; changing those still needs a daemon restart. And when the config
+cannot be parsed at all, the per-request read falls back to the mode that was in
+force at startup rather than to the built-in default, so a half-saved
+`config.yaml` cannot quietly lift a configured `mode: off`.
+
 ## The constraints that shape every slice
 
 **Prompt caching is make-or-break.** Claude Code re-sends the whole conversation

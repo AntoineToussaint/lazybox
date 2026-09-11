@@ -599,6 +599,10 @@ fn all_commands() -> Vec<Command> {
             },
             client_request_id: "req-1".into(),
         },
+        Command::SetContextCompaction {
+            session_key: lazybox_core::SessionKey::from("github-acme-widget-7"),
+            enabled: true,
+        },
         Command::Shutdown,
     ]
 }
@@ -1500,6 +1504,7 @@ fn command_tag(command: &Command) -> &'static str {
         Command::AdoptWorktreeBranch { .. } => "AdoptWorktreeBranch",
         Command::SetEpicPolicies { .. } => "SetEpicPolicies",
         Command::DecideToolUse { .. } => "DecideToolUse",
+        Command::SetContextCompaction { .. } => "SetContextCompaction",
     }
 }
 
@@ -1626,7 +1631,7 @@ fn round_trip_corpus_covers_every_wire_variant() {
 
     assert_eq!(
         command_tags.len(),
-        100,
+        101,
         "Command gained/lost a variant: update the exhaustive tag and add a corpus sample",
     );
     assert_eq!(

@@ -237,6 +237,7 @@ Press the leader key, then the second key. Every menu shows a which-key popup wh
 | `x k` | close & kill *(confirmed first)* |
 | `x w` | reset agent *(confirmed first)* |
 | `x $` | meter |
+| `x h` | compact context |
 | `x u` | move up |
 | `x d` | move down |
 | `x t` | move to top |

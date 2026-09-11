@@ -58,6 +58,16 @@ use crate::context_tag::TagSource;
 /// the proxy does to their traffic.
 pub type NoticeSink = Arc<dyn Fn(String, String) + Send + Sync>;
 
+/// Whether one session's workspace opted into compaction (#1622).
+///
+/// The dial is per workspace, not per fleet: the session key off the request
+/// path names a workspace, and that workspace may be the canary running the
+/// real rewrite while everything else stays in shadow. This contributes only
+/// the opt-in; [`ContextHygiene::mode_for`] decides what it promotes, so the
+/// [`PolicySource`] stays the one place a mode comes from and the canary
+/// cannot disagree with the hook about anything else in the policy.
+pub type CanaryOptIn = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 /// Lines kept from the head and the tail of a condensed block. The head
 /// carries what the material *is* (a file's imports, a command's
 /// invocation); the tail carries how it ended (the error, the summary
@@ -140,6 +150,12 @@ struct SessionState {
     /// sets it — nothing on the wire changed, so there is nothing to
     /// attribute a cache regression to).
     rewrote: bool,
+    /// Whether the most recent request for this session ran under a mode
+    /// that rewrites (#1622). Written by `begin` from the one resolution
+    /// that request made, read by `observe_usage` when the response lands:
+    /// the response must be judged under its own request's mode, not under
+    /// whatever the dial says by the time it arrives.
+    rewriting: bool,
     /// The last cache-read share seen *before* the first rewrite. Without
     /// one there is no baseline to judge against, so the kill switch stays
     /// out of the way rather than guessing.
@@ -200,6 +216,10 @@ pub struct Compactor {
     /// session so the bytes a block renders to survive a daemon restart —
     /// see `crate::context_tag`.
     tags: TagSource,
+    /// Which sessions opted into the canary (#1622). Absent means none did —
+    /// the shape before the canary, and what every test that isn't about it
+    /// wants.
+    opted_in: Option<CanaryOptIn>,
     sessions: Mutex<HashMap<String, SessionState>>,
 }
 
@@ -243,7 +263,29 @@ impl Compactor {
             prices,
             notice,
             tags,
+            opted_in: None,
             sessions: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Promote this session to `on` when `opt_in` says its workspace is a
+    /// canary (#1622).
+    pub fn with_canary(mut self, opt_in: CanaryOptIn) -> Self {
+        self.opted_in = Some(opt_in);
+        self
+    }
+
+    /// The policy in force for one session: the shared live policy, with the
+    /// mode promoted when this session's workspace opted in (#1622).
+    fn policy_for(&self, session: &str) -> ContextHygiene {
+        let policy = (self.policy)();
+        let opted_in = self
+            .opted_in
+            .as_ref()
+            .is_some_and(|opted_in| opted_in(session));
+        ContextHygiene {
+            mode: policy.mode_for(opted_in),
+            ..policy
         }
     }
 
@@ -279,10 +321,11 @@ impl Compactor {
     /// exists to prove the saving is real before taking it, and a shadow
     /// run that altered the wire would prove nothing.
     pub fn rewrite(&self, session: &str, agent_id: &str, body: Bytes) -> Rewritten {
-        // Read once per request and use that value throughout, so a config
-        // edit landing mid-request cannot make this pass decide under one
-        // policy and log under another.
-        let policy = (self.policy)();
+        // Read once per request and used throughout, so a config edit landing
+        // mid-request cannot make this pass decide under one policy and log
+        // under another. The session's canary opt-in is folded in here, so a
+        // fleet in `shadow` still promotes one workspace to `on`.
+        let policy = self.policy_for(session);
         if !policy.mode.evaluates() || body.is_empty() {
             return Rewritten::passed(body);
         }
@@ -294,7 +337,7 @@ impl Compactor {
         if session.is_empty() {
             return Rewritten::passed(body);
         }
-        let Some(pass) = self.begin(session) else {
+        let Some(pass) = self.begin(session, policy.mode.rewrites()) else {
             return Rewritten::passed(body);
         };
         let Some(plan) = plan(&body, &policy, &pass.tag) else {
@@ -359,7 +402,7 @@ impl Compactor {
     /// otherwise read as a sustained regression and disable compaction for
     /// the whole workspace.
     pub fn observe_usage(&self, session: &str, agent_id: &str, usage: &AgentUsage, measured: bool) {
-        if !(self.policy)().mode.rewrites() || !measured {
+        if !measured {
             return;
         }
         let Some(share) = cache_read_share(usage) else {
@@ -370,6 +413,14 @@ impl Compactor {
             return;
         };
         if state.disabled {
+            return;
+        }
+        // The mode this session's request ran under, not the dial's current
+        // value (#1622). Re-resolving here would let a flip between request
+        // and response drop the sample: the turn rewrote, but the response
+        // would be judged as shadow and never folded into the baseline the
+        // kill switch later compares against.
+        if !state.rewriting {
             return;
         }
         if !state.rewrote {
@@ -433,13 +484,16 @@ impl Compactor {
     /// — would otherwise run permanently unguarded. So the first eligible
     /// turn is deliberately held: it plans, logs, and forwards the original,
     /// and the response's usage becomes the baseline.
-    fn begin(&self, session: &str) -> Option<SessionPass> {
+    fn begin(&self, session: &str, rewrites: bool) -> Option<SessionPass> {
         let tag = self.tags.tag(session);
         let mut sessions = self.sessions.lock().expect("compaction sessions");
         let state = entry(&mut sessions, session)?;
         if state.disabled {
             return None;
         }
+        // The response's accounting reads this back, so it judges the turn
+        // under the mode the turn ran under (#1622).
+        state.rewriting = rewrites;
         Some(SessionPass {
             tag,
             may_rewrite: state.baseline_share.is_some(),
@@ -1034,6 +1088,18 @@ mod tests {
         assert_eq!(sent, body, "shadow mode never alters bytes on the wire");
     }
 
+    /// Drive the real pre-rewrite handshake for `session`: one held turn
+    /// (see `begin`), then the response whose cache reading becomes the
+    /// baseline. Seeding a baseline by calling `observe_usage` alone cannot
+    /// happen in production — `measured` is threaded out of `rewrite`, so a
+    /// response is only ever accounted for when its own request already went
+    /// through `begin`.
+    fn seed_baseline(compactor: &Compactor, session: &str, body: &Bytes) {
+        let held = compactor.rewrite(session, "claude", body.clone());
+        assert_eq!(held.body, *body, "the first eligible turn is held");
+        compactor.observe_usage(session, "claude", &usage(100, 900), true);
+    }
+
     fn usage(input: u64, cache_read: u64) -> AgentUsage {
         AgentUsage {
             input_tokens: Some(input),
@@ -1079,7 +1145,7 @@ mod tests {
             Arc::new(|_, _| {}),
             tags(),
         );
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        seed_baseline(&compactor, "ws", &body);
         let sent = compactor.rewrite("ws", "claude", body.clone()).body;
         assert!(sent.len() < body.len(), "the rewritten body is smaller");
         let (blocks, saved, regressions) = compactor.stats("ws");
@@ -1159,8 +1225,8 @@ mod tests {
             Arc::new(|_, _| {}),
             tags(),
         );
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
-        compactor.observe_usage("other-ws", "claude", &usage(100, 900), true);
+        seed_baseline(&compactor, "ws", &body);
+        seed_baseline(&compactor, "other-ws", &body);
         let first = compactor.rewrite("ws", "claude", body.clone()).body;
         let second = compactor.rewrite("ws", "claude", body.clone()).body;
         assert_eq!(
@@ -1192,7 +1258,7 @@ mod tests {
                 Arc::new(|_, _| {}),
                 source,
             );
-            compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+            seed_baseline(&compactor, "ws", &body);
             compactor.rewrite("ws", "claude", body.clone()).body
         };
 
@@ -1496,15 +1562,109 @@ mod tests {
         (compactor, notices)
     }
 
+    /// A compactor whose canary opt-in covers one session (#1622): that
+    /// session rewrites while the fleet's configured `shadow` leaves every
+    /// other session's bytes alone.
+    fn canary_compactor(canary: &'static str) -> Compactor {
+        Compactor::new(
+            policy(CompactionMode::Shadow),
+            Arc::new(std::collections::BTreeMap::new()),
+            Arc::new(|_, _| {}),
+            tags(),
+        )
+        .with_canary(Arc::new(move |session: &str| session == canary))
+    }
+
+    #[test]
+    fn only_the_opted_in_session_gets_its_bytes_rewritten() {
+        let compactor = canary_compactor("canary");
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+
+        // The canary's first eligible turn is held for a baseline like any
+        // other rewriting session, then it rewrites.
+        seed_baseline(&compactor, "canary", &body);
+        assert!(
+            compactor
+                .rewrite("canary", "claude", body.clone())
+                .body
+                .len()
+                < body.len(),
+            "the opted-in session sends condensed bytes",
+        );
+
+        // The fleet stays in shadow: it plans and logs, and sends originals.
+        assert_eq!(
+            compactor.rewrite("fleet", "claude", body.clone()).body,
+            body,
+            "every other session sends the originals",
+        );
+        compactor.observe_usage("fleet", "claude", &usage(100, 900), true);
+        assert_eq!(
+            compactor.rewrite("fleet", "claude", body.clone()).body,
+            body,
+            "and stays in shadow on the turn after a baseline exists",
+        );
+    }
+
+    /// #1622: the response is judged under the mode its own request ran
+    /// under. Flipping the canary off between a rewritten request and its
+    /// response must not drop that turn's cache sample — dropping it strands
+    /// the kill switch comparing a later share against a stale baseline.
+    #[test]
+    fn a_mid_turn_flip_still_accounts_for_the_turn_that_rewrote() {
+        let flipped = Arc::new(Mutex::new(false));
+        let reader = flipped.clone();
+        let compactor = Compactor::new(
+            policy(CompactionMode::Shadow),
+            Arc::new(std::collections::BTreeMap::new()),
+            Arc::new(|_, _| {}),
+            tags(),
+        )
+        .with_canary(Arc::new(move |_: &str| !*reader.lock().expect("lock")));
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+
+        // Held baseline turn, then a turn that really rewrites.
+        seed_baseline(&compactor, "ws", &body);
+        let out = compactor.rewrite("ws", "claude", body.clone());
+        assert!(out.body.len() < body.len(), "this turn rewrote");
+
+        // The user flips the canary off before the response lands.
+        *flipped.lock().expect("lock") = true;
+        for _ in 0..3 {
+            compactor.observe_usage("ws", "claude", &usage(900, 100), true);
+        }
+        let (_, _, regressions) = compactor.stats("ws");
+        assert_eq!(
+            regressions, 1,
+            "the rewritten turn's collapse is still attributed to compaction",
+        );
+    }
+
+    /// Without a resolver the compactor is exactly what it was before the
+    /// canary existed: the configured mode, for every session.
+    #[test]
+    fn no_resolver_means_the_configured_mode_for_every_session() {
+        let compactor = Compactor::new(
+            policy(CompactionMode::Off),
+            Arc::new(std::collections::BTreeMap::new()),
+            Arc::new(|_, _| {}),
+            tags(),
+        );
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+        let out = compactor.rewrite("a", "claude", body.clone());
+        assert_eq!(out.body, body, "an off policy inspects nothing");
+        assert!(!out.measured);
+    }
+
     #[test]
     fn a_sustained_cache_regression_trips_the_kill_switch() {
         let (compactor, notices) = compactor_with_notices();
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
 
-        // Before any rewrite: a healthy 90% of the prompt served from cache.
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        // A healthy 90% of the prompt served from cache becomes the baseline.
+        seed_baseline(&compactor, "ws", &body);
         let rewritten = compactor.rewrite("ws", "claude", body.clone()).body;
-        assert!(rewritten.len() < body.len(), "the first turn rewrites");
+        assert!(rewritten.len() < body.len(), "the next turn rewrites");
 
         // Three turns where the cache share collapses and never recovers.
         for _ in 0..3 {
@@ -1587,7 +1747,7 @@ mod tests {
         // cache as compaction's fault and disable the whole workspace.
         let (compactor, notices) = compactor_with_notices();
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        seed_baseline(&compactor, "ws", &body);
         assert!(compactor.rewrite("ws", "claude", body.clone()).body.len() < body.len());
 
         // Ten cold subagent turns — not requests compaction acted on.
@@ -1615,7 +1775,7 @@ mod tests {
     fn a_cache_dip_that_recovers_does_not_trip_the_kill_switch() {
         let (compactor, notices) = compactor_with_notices();
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        seed_baseline(&compactor, "ws", &body);
         let rewritten = compactor.rewrite("ws", "claude", body.clone()).body;
         assert!(rewritten.len() < body.len());
 
@@ -1654,7 +1814,7 @@ mod tests {
         );
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
 
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        seed_baseline(&compactor, "ws", &body);
         assert!(
             compactor.rewrite("ws", "claude", body.clone()).body.len() < body.len(),
             "on: the body is rewritten"

@@ -1,5 +1,5 @@
 {
-  "schema": 12,
+  "schema": 13,
   "key": "github-acme-widget-7",
   "project_key": "github-acme-widget",
   "local": true,
@@ -432,8 +432,8 @@
   ],
   "seen_count": 1,
   "read_indices": [
-    0,
-    2
+    2,
+    0
   ],
   "snoozed_until": "2026-03-14T18:00:00Z",
   "snooze_wake": "ci-settled",
@@ -442,6 +442,7 @@
   "native_auto_merge_by_lazybox": true,
   "track_main": true,
   "metered": true,
+  "compact_context": true,
   "base_branch": "main",
   "track_main_behind": true,
   "policies": {

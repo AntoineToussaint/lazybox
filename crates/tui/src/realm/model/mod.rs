@@ -3437,6 +3437,7 @@ impl<T: TerminalAdapter> Model<T> {
             user_config.ui.collapsed_spaces.clone(),
             user_config.ui.collapsed_epics.clone(),
             user_config.agent.metered_spaces.clone(),
+            user_config.agent.compacted_spaces.clone(),
             user_config.setup.default_agent.clone(),
             &user_config.display,
             &ui_defaults,
@@ -3568,6 +3569,7 @@ impl<T: TerminalAdapter> Model<T> {
         collapsed_spaces: std::collections::BTreeSet<String>,
         collapsed_epics: std::collections::BTreeSet<String>,
         metered_spaces: std::collections::BTreeSet<String>,
+        compacted_spaces: std::collections::BTreeSet<String>,
         default_agent: Option<String>,
         display: &lazybox_config::DisplayConfig,
         ui: &lazybox_config::UiDefaults,
@@ -3591,6 +3593,7 @@ impl<T: TerminalAdapter> Model<T> {
             collapsed_spaces,
             collapsed_epics,
             metered_spaces,
+            compacted_spaces,
             default_agent,
             display,
         );

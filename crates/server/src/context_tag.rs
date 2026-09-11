@@ -272,6 +272,25 @@ mod tests {
         }
     }
 
+    /// The sharing #1645 needs is not the persistence. A daemon whose store
+    /// cannot be read runs on an *ephemeral* secret, so two loads of it would
+    /// mint different tokens for one session — and the proxy would stop
+    /// recognizing what the hook condensed, the failure the shipped default's
+    /// line floor merely hid. Both enforcement points therefore reach the one
+    /// source the config holds rather than loading their own.
+    #[tokio::test]
+    async fn every_caller_shares_one_source_even_on_an_ephemeral_secret() {
+        let config =
+            crate::ServerConfig::with_store(std::sync::Arc::new(UnreadableStore::default()));
+        let also = config.clone();
+        let (proxy, hook) = tokio::join!(config.condense_tags(), also.condense_tags());
+        assert_eq!(
+            proxy.tag("ws").prefix(),
+            hook.tag("ws").prefix(),
+            "the hook and the proxy must condense under one token"
+        );
+    }
+
     /// The destructive case. A failed read is not an absent key: writing a
     /// fresh secret here would upsert over one that is merely unreadable,
     /// and every block condensed under it re-renders from then on, for

@@ -419,13 +419,9 @@ pub async fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHand
         });
     });
     let compactor = Arc::new(
-        Compactor::live(
-            prices.clone(),
-            notice,
-            crate::context_tag::TagSource::load(config).await,
-        )
-        .with_canary(crate::workspace::compaction_opt_in(config))
-        .with_saving_sink(saving),
+        Compactor::live(prices.clone(), notice, config.condense_tags().await.clone())
+            .with_canary(crate::workspace::compaction_opt_in(config))
+            .with_saving_sink(saving),
     );
 
     tracing::info!("metering proxy listening on 127.0.0.1:{port}");

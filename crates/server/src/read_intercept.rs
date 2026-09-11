@@ -89,8 +89,8 @@ impl DeniedReads {
     }
 }
 
-/// The fence the condensed text sits inside, and what the model is told after
-/// it.
+/// The fence the condensed summary sits inside, and what the model is told
+/// after it. The condensation header stays outside — see [`deny_reason`].
 ///
 /// Two things are load-bearing. The affordance: `render_condensed`'s header
 /// points at re-reading the file, which is true for the compactor but would
@@ -137,10 +137,24 @@ fn fence_safe(text: &str) -> String {
 }
 
 /// The refusal text Claude hands the model in place of the file.
+///
+/// The condensation's keyed header leads, and the fence opens *after* it, for
+/// two reasons that coincide. The header is lazybox speaking — the provenance
+/// marker itself — so fencing it as untrusted content mislabels it, while the
+/// summary it introduces really is copied file bytes. And the refusal lands
+/// back in the transcript as a tool result, which the compactor then sees on
+/// every later turn: `is_condensed` matches the marker at the *start* of a
+/// block, so a header buried under a fence line is a block the proxy would
+/// condense again (#1645). Both halves still go through [`fence_safe`] — the
+/// header carries the read's path, which is no more trustworthy than the file.
 fn deny_reason(condensed: &str) -> String {
+    // `render_condensed` builds exactly `header\nsummary`, and refuses an empty
+    // summary, so the split is the format's own boundary rather than a guess.
+    let (header, summary) = condensed.split_once('\n').unwrap_or((condensed, ""));
     format!(
-        "{FENCE_OPEN}\n{}\n{FENCE_CLOSE}\n\n{REREAD_AFFORDANCE}",
-        fence_safe(condensed)
+        "{}\n{FENCE_OPEN}\n{}\n{FENCE_CLOSE}\n\n{REREAD_AFFORDANCE}",
+        fence_safe(header),
+        fence_safe(summary)
     )
 }
 
@@ -198,10 +212,11 @@ async fn decide(
         crate::spawn_handler::load_workspace(config, &WorkspaceKey::new(session_key.as_str()))
             .is_ok_and(|workspace| crate::spawn_handler::workspace_is_metered(&cfg, &workspace));
 
+    let tag = config.condense_tags().await.tag(session_key.as_str());
     rule(
         &crate::proxy::compaction::live_policy(),
         metered,
-        config.condense_tag(),
+        &tag,
         config.denied_reads(),
         session_key.as_str(),
         request,
@@ -457,8 +472,12 @@ mod tests {
         let reason = denied(rule_once(&on_policy(350), true, &tag(), &request).await);
 
         assert!(
-            reason.starts_with(FENCE_OPEN),
-            "condensed file content must be fenced as untrusted: {reason}"
+            is_condensed(&reason, &tag()),
+            "the keyed marker must lead, or the compactor re-condenses this: {reason}"
+        );
+        assert!(
+            reason.contains(&format!("\n{FENCE_OPEN}\n")),
+            "and the file content under it must be fenced as untrusted: {reason}"
         );
         assert!(reason.contains(FENCE_CLOSE));
         assert!(
@@ -480,6 +499,7 @@ mod tests {
     /// identical bytes. (The inputs themselves differ — the compactor sees a
     /// `cat -n` tool result, the hook sees the file — which is why this pins
     /// equality of the function, not of the two layers' output for one file.)
+    /// The fence sits between the two halves, so each is pinned on its own.
     #[tokio::test]
     async fn the_hook_embeds_exactly_what_the_compactor_would_render() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -490,11 +510,18 @@ mod tests {
         };
         let compactor_bytes =
             crate::proxy::compaction::condense(&contents, &kind, 400, &tag()).expect("condensable");
+        let (header, summary) = compactor_bytes
+            .split_once('\n')
+            .expect("header and summary");
 
         let reason = denied(rule_once(&on_policy(350), true, &tag(), &request).await);
         assert!(
-            reason.contains(&compactor_bytes),
-            "the hook must embed the compactor's exact rendering, unmodified"
+            reason.starts_with(&format!("{header}\n{FENCE_OPEN}")),
+            "the compactor's header must lead, with the fence opening after it: {reason}"
+        );
+        assert!(
+            reason.contains(summary),
+            "and the summary must be embedded unmodified: {reason}"
         );
         assert!(
             is_condensed(&compactor_bytes, &tag()),
@@ -503,26 +530,47 @@ mod tests {
     }
 
     /// The deny lands back in the transcript as a tool result, so the
-    /// compactor sees it on every later turn. It must not be condensed again.
+    /// compactor sees it on every later turn. It must not be condensed again —
+    /// and the reason it is not must be *recognition*, not the line floor
+    /// (#1645). `min_lines: 350` hid the question: a summary is tens of lines,
+    /// so the deny was skipped as `BelowLineFloor` whatever token it carried.
+    /// A floor the config accepts and a summary clears puts the monotonicity
+    /// rule itself on the line.
     #[tokio::test]
-    async fn a_denied_read_is_too_small_for_the_compactor_to_condense_again() {
+    async fn the_compactor_recognizes_a_deny_the_hook_rendered_for_the_session() {
         let dir = tempfile::tempdir().expect("tempdir");
         let request = read_of(&dir, 4_000);
-        let policy = on_policy(350);
-        let reason = denied(rule_once(&policy, true, &tag(), &request).await);
+        let policy = on_policy(20);
+        // Both layers mint from one source, so the compactor derives the tag
+        // it checks with from the session key alone — it never sees the hook's.
+        let tags = crate::context_tag::TagSource::from_secret("installation-secret");
+        let reason = denied(rule_once(&policy, true, &tags.tag("ws"), &request).await);
 
         let kind = file_read();
-        let facts = ToolResultFacts::in_sequence(
-            Some(&kind),
-            reason.lines().count(),
-            0,
-            1,
-            is_condensed(&reason, &tag()),
+        // Placed behind the recency window, where the compactor would actually
+        // reach it: the deny sits in the transcript and later turns push it back
+        // past `keep_recent`.
+        let facts = |already| {
+            ToolResultFacts::in_sequence(Some(&kind), reason.lines().count(), 0, 10, already)
+        };
+        assert!(
+            policy.eligibility(&facts(false)).is_condense(),
+            "the floor must not be what saves this deny, or the test proves nothing: \
+             {} lines",
+            reason.lines().count()
         );
         assert!(
-            !policy.eligibility(&facts).is_condense(),
-            "a re-condensed deny would double-summarize: {} lines",
-            reason.lines().count()
+            is_condensed(&reason, &tags.tag("ws")),
+            "the compactor must recognize the block as ours: {reason}"
+        );
+        assert!(
+            !policy.eligibility(&facts(true)).is_condense(),
+            "a re-condensed deny would summarize a summary"
+        );
+        assert!(
+            !is_condensed(&reason, &tags.tag("another-ws")),
+            "and another session's token must not recognize it, or the marker \
+             stops being keyed"
         );
     }
 

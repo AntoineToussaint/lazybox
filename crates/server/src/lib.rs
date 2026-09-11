@@ -544,15 +544,16 @@ pub struct ServerConfig {
     /// worktree removals) so shutdown can wait for them — see
     /// `register_maintenance_latch` / `drain_maintenance_tasks`.
     pub(crate) maintenance_done: Arc<parking_lot::Mutex<Vec<tokio::sync::oneshot::Receiver<()>>>>,
-    /// Token marking condensations this daemon run renders outside the proxy
-    /// — the `PreToolUse` large-read intercept (#1610). Random per run and
-    /// unguessable by file content, for the reason
-    /// [`lazybox_core::context_hygiene::CondenseTag`] documents; constant
-    /// within the run so the same file renders the same bytes every time,
-    /// which is what prompt caching needs. The proxy compactor keeps its own
-    /// per-conversation tag: it rewrites blocks that must stay byte-stable
-    /// across the turns of one conversation, which this layer never does.
-    pub(crate) condense_tag: lazybox_core::context_hygiene::CondenseTag,
+    /// The one mint point for every condensation token this daemon renders
+    /// — the proxy compactor (#1609) and the `PreToolUse` large-read
+    /// intercept (#1610) alike (#1645). Loaded once per run because
+    /// [`context_tag::TagSource::load`] touches the store, then shared: two
+    /// sources would converge on the same secret anyway, but a token minted
+    /// per enforcement point would not, and recognizing our own output is
+    /// what keeps rewriting monotone. Lazy rather than built in the
+    /// constructor because the constructor is synchronous and most of its
+    /// callers never condense anything.
+    pub(crate) condense_tags: Arc<tokio::sync::OnceCell<context_tag::TagSource>>,
     /// Files the `PreToolUse` intercept has already condensed, per session
     /// (#1610). The hook has no recency window to honour, so this is what
     /// keeps a model that genuinely needs a file's bytes from being held off
@@ -715,17 +716,18 @@ impl ServerConfig {
             worktree_ownership_lock: Arc::new(Mutex::new(())),
             provisioning_worktree_claims: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             maintenance_done: Arc::new(parking_lot::Mutex::new(Vec::new())),
-            condense_tag: lazybox_core::context_hygiene::CondenseTag::new(
-                &uuid::Uuid::new_v4().simple().to_string(),
-            ),
+            condense_tags: Arc::new(tokio::sync::OnceCell::new()),
             denied_reads: Arc::new(read_intercept::DeniedReads::default()),
             mcp: Arc::new(mcp::McpRuntime::default()),
         }
     }
 
-    /// This daemon run's condense tag (see [`ServerConfig::condense_tag`]).
-    pub(crate) fn condense_tag(&self) -> &lazybox_core::context_hygiene::CondenseTag {
-        &self.condense_tag
+    /// This installation's condensation tag source, loaded on first use (see
+    /// [`ServerConfig::condense_tags`]).
+    pub(crate) async fn condense_tags(&self) -> &context_tag::TagSource {
+        self.condense_tags
+            .get_or_init(|| context_tag::TagSource::load(self))
+            .await
     }
 
     /// Files the read intercept has already condensed this run (see

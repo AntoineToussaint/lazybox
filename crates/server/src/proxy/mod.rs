@@ -51,7 +51,7 @@ use lazybox_agents::LlmProvider;
 use lazybox_ipc::{AgentUsage, ProviderQuota};
 use tokio::net::{TcpListener, TcpStream};
 
-pub use compaction::{Compactor, NoticeSink, PolicySource};
+pub use compaction::{Compactor, NoticeSink, Pending, PolicySource, Rewritten, Saving, SavingSink};
 pub use usage_parse::UsageAccumulator;
 
 /// The loopback port the running proxy bound, published once at startup so
@@ -396,11 +396,26 @@ pub async fn spawn(config: &crate::ServerConfig) -> Option<tokio::task::JoinHand
     // rest of the daemon's life after any config edit (#1611). The line floor
     // the instrumentation uses rides the same source, so "large" still means
     // one thing.
-    let compactor = Arc::new(Compactor::live(
-        prices.clone(),
-        notice,
-        crate::context_tag::TagSource::load(config).await,
-    ));
+    let saving_bus = config.bus.clone();
+    let saving: SavingSink = Arc::new(move |agent_id: &str, session: &str, saving: Saving| {
+        let _ = saving_bus.send(lazybox_ipc::Event::AgentCompaction {
+            agent_id: agent_id.to_string(),
+            session_key: session_key_opt(session),
+            blocks: saving.blocks,
+            saved_bytes: saving.saved_bytes,
+            saved_cost_micros: saving.saved_micros,
+            regressions: saving.regressions,
+            rewrote: saving.rewrote,
+        });
+    });
+    let compactor = Arc::new(
+        Compactor::live(
+            prices.clone(),
+            notice,
+            crate::context_tag::TagSource::load(config).await,
+        )
+        .with_saving_sink(saving),
+    );
 
     tracing::info!("metering proxy listening on 127.0.0.1:{port}");
     Some(tokio::spawn(serve(
@@ -583,8 +598,14 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
     // The one place the proxy is not transparent: old, large tool results
     // are condensed before the expensive model ever sees them (#1609).
     // `off` and `shadow` hand the original bytes straight back.
-    let compacted = state.compactor.rewrite(&session, &agent_id, body_bytes);
+    // The accounting rides `pending` to the end of the response instead of
+    // landing here (#1621): this request may be a retry of a turn already
+    // counted, or may never complete at all.
+    let compacted = state
+        .compactor
+        .rewrite(&session, &agent_id, !count_only, body_bytes);
     let body_bytes = compacted.body;
+    let saving = compacted.pending;
 
     let upstream = state
         .client
@@ -639,7 +660,15 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
         (
             upstream.bytes_stream(),
             accumulator,
-            Some((state, sink, agent_id, session, measured, compacted.measured)),
+            Some((
+                state,
+                sink,
+                agent_id,
+                session,
+                measured,
+                compacted.measured,
+                saving,
+            )),
         ),
         |(mut bytes, mut acc, mut pending)| async move {
             match bytes.next().await {
@@ -652,9 +681,25 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
                     Some((Err(BoxErr::from(error)), (bytes, acc, pending)))
                 }
                 None => {
-                    if let Some((state, sink, agent_id, session, measured, judged)) = pending.take()
+                    if let Some((state, sink, agent_id, session, measured, judged, saving)) =
+                        pending.take()
                         && let Some(mut usage) = acc.finish()
                     {
+                        // The saving is committed on exactly the condition
+                        // that reports the cost — a parsed usage block on a
+                        // clean stream end — because the two are compared
+                        // against each other. A response that streams
+                        // cleanly but carries no usage (a 200 whose body is
+                        // an error frame) would otherwise contribute a
+                        // saving against no cost, inflating the very ratio
+                        // the rollout decision reads, and would do it in
+                        // precisely the turns the kill switch also cannot
+                        // judge. `commit` precedes `observe_usage` so the
+                        // turn that rewrote is marked before the kill
+                        // switch judges its cache share.
+                        if let Some(saving) = saving {
+                            state.compactor.commit(&session, &agent_id, saving);
+                        }
                         // Fold the request's blocks into the session's
                         // seen-set only now, on the same condition that
                         // reports usage: a request the provider never billed

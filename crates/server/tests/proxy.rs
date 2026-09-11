@@ -433,15 +433,32 @@ fn conversation_body(results: usize) -> String {
 }
 
 fn compactor(mode: lazybox_core::CompactionMode) -> Arc<proxy::Compactor> {
-    Arc::new(proxy::Compactor::new(
-        lazybox_core::ContextHygiene {
-            mode,
-            ..lazybox_core::ContextHygiene::default()
-        },
-        Arc::new(std::collections::BTreeMap::new()),
-        Arc::new(|_, _| {}),
-        lazybox_server::context_tag::TagSource::from_secret("fixture-secret"),
-    ))
+    compactor_reporting(mode).0
+}
+
+/// The savings a compactor reported, newest last.
+type Savings = Arc<Mutex<Vec<proxy::Saving>>>;
+
+/// A compactor plus what its saving sink observed — the durable stats
+/// rollup's view of a turn (#1621).
+fn compactor_reporting(mode: lazybox_core::CompactionMode) -> (Arc<proxy::Compactor>, Savings) {
+    let savings: Savings = Arc::new(Mutex::new(Vec::new()));
+    let recorder = savings.clone();
+    let compactor = Arc::new(
+        proxy::Compactor::new(
+            lazybox_core::ContextHygiene {
+                mode,
+                ..lazybox_core::ContextHygiene::default()
+            },
+            Arc::new(std::collections::BTreeMap::new()),
+            Arc::new(|_, _| {}),
+            lazybox_server::context_tag::TagSource::from_secret("fixture-secret"),
+        )
+        .with_saving_sink(Arc::new(move |_: &str, _: &str, saving: proxy::Saving| {
+            recorder.lock().expect("lock").push(saving);
+        })),
+    );
+    (compactor, savings)
 }
 
 fn upstream_body(request: &str) -> &str {
@@ -769,5 +786,75 @@ async fn an_unbilled_request_does_not_consume_a_blocks_first_send() {
     assert_eq!(
         context.tool_result_resent_bytes, 0,
         "an unbilled preflight/retry must not consume the block's first send",
+    );
+}
+
+/// The saving is accounted on the same clock as the cost it will be
+/// compared against (#1621): a turn whose response never arrived was never
+/// billed, so claiming a saving for it inflates exactly the ratio the
+/// shadow-mode rollout decision reads. Reporting from the request path —
+/// before the upstream is even dialled — made a retry storm against an
+/// overloaded upstream look like a large saving against no cost at all.
+#[tokio::test]
+async fn a_turn_whose_upstream_never_answered_reports_no_saving() {
+    let (captured, sink) = recording_sink();
+    // Port 1 is privileged and unbound: the connection is refused, so the
+    // request is inspected and rewritten but no response ever streams.
+    let (compactor, savings) = compactor_reporting(lazybox_core::CompactionMode::On);
+    let port = start_proxy_with("http://127.0.0.1:1".to_string(), sink, compactor).await;
+
+    for _ in 0..3 {
+        let response = reqwest::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{port}/anthropic/claude/github-acme-widget-7/v1/messages"
+            ))
+            .header("content-type", "application/json")
+            .body(conversation_body(8))
+            .send()
+            .await
+            .expect("proxy request");
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::BAD_GATEWAY,
+            "the upstream refused the connection"
+        );
+    }
+
+    assert!(
+        savings.lock().expect("lock").is_empty(),
+        "three unanswered attempts report no saving"
+    );
+    assert!(
+        captured.lock().expect("lock").is_empty(),
+        "and no cost either — the two stay on one clock"
+    );
+}
+
+/// #1621: the saving and the cost it is compared against must be reported
+/// on one condition, not two. Committing the saving on a clean stream end
+/// while the cost waits for a parsed `usage` block lets a 200 whose body
+/// carries no usage — an error frame delivered with a success status —
+/// contribute a saving against no cost at all, inflating exactly the ratio
+/// the shadow-mode rollout decision reads. Worse, those are the same turns
+/// the kill switch cannot judge, so the least-supervised traffic would have
+/// been the most flattering.
+#[tokio::test]
+async fn a_completed_turn_without_usage_reports_neither_cost_nor_saving() {
+    let (captured, sink) = recording_sink();
+    // A clean 200 that streams to completion and names no usage.
+    let upstream =
+        mock_upstream("{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}").await;
+    let (compactor, savings) = compactor_reporting(lazybox_core::CompactionMode::On);
+    let port = start_proxy_with(upstream, sink, compactor).await;
+
+    post_conversation(port, "github-acme-widget-7", conversation_body(8)).await;
+
+    assert!(
+        captured.lock().expect("lock").is_empty(),
+        "no usage block, so no cost is reported"
+    );
+    assert!(
+        savings.lock().expect("lock").is_empty(),
+        "and therefore no saving either — the two stay on one clock"
     );
 }

@@ -257,7 +257,7 @@ impl Sidebar {
     /// chip row (row 1) since #1535, so it no longer backs a header-height
     /// reservation — there is only ever the cursor row to describe, and the
     /// render right-aligns whatever of it fits after the filter chips.
-    fn stats_row_spans(
+    pub(super) fn stats_row_spans(
         &self,
         inner_width: usize,
         theme: &crate::theme::Theme,
@@ -292,13 +292,13 @@ impl Sidebar {
                 Some((
                     "AUTO-MERGE · GitHub, works offline",
                     "◆ auto-merge (GitHub)",
-                    theme.accent,
+                    theme.text_dim,
                 ))
             } else if workspace.auto_merge_on_green {
                 Some((
                     "MERGE ON GREEN · lazybox only",
                     "⚡ on-green (lazybox)",
-                    theme.success,
+                    theme.text_dim,
                 ))
             } else {
                 None
@@ -358,21 +358,27 @@ impl Sidebar {
         // forms keep #794's distinction — which system will do the merge,
         // `(GitHub)` or `(lazybox)` — because that, not the wording, is
         // what the label exists to convey.
-        let styled = |text: String, color| {
-            vec![Span::styled(
-                text,
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            )]
-        };
+        //
+        // Dim and unbolded, continuing #1535's direction (#1692). This
+        // phrase is ambient configuration of the row under the cursor, not
+        // state that needs acting on, so it must sit BELOW the attention
+        // counters (`✗ 5 CI`, `◔ 1 review`) that legitimately own colour and
+        // weight in this header. Bold `success` green made an armed policy
+        // the loudest thing on screen and misused the palette twice over:
+        // green reads "this is good news" for what is merely a setting, and
+        // spending the success hue here devalues it where it means a real
+        // outcome. The GitHub / lazybox distinction the label exists for
+        // lives in its wording, which is unchanged.
+        let styled = |text: String, style| vec![Span::styled(text, style)];
         let append_either = |dst: &mut Vec<Span<'static>>,
                              used: &mut usize,
                              full: String,
                              compact: String,
-                             color| {
+                             style| {
             let before = dst.len();
-            try_append(dst, used, budget, styled(full, color));
+            try_append(dst, used, budget, styled(full, style));
             if dst.len() == before {
-                try_append(dst, used, budget, styled(compact, color));
+                try_append(dst, used, budget, styled(compact, style));
             }
         };
         if let Some((full, compact, color)) = focused_merge {
@@ -381,7 +387,7 @@ impl Sidebar {
                 &mut used,
                 full.to_string(),
                 compact.to_string(),
-                color,
+                Style::default().fg(color),
             );
         }
         if let Some((full, compact)) = focused_auto_fix {
@@ -390,7 +396,7 @@ impl Sidebar {
                 &mut used,
                 full.to_string(),
                 compact.to_string(),
-                theme.warn,
+                Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
             );
         }
         stats_spans

@@ -6653,6 +6653,47 @@ impl GhClient {
         Ok(())
     }
 
+    /// Submit through GitHub's required queue, preserving the verified head
+    /// and normal queue order. The queue owns the eventual merge method.
+    async fn enqueue_pr(&self, node_id: &str, expected_head: Option<&str>) -> Result<(), GhError> {
+        #[derive(serde::Deserialize)]
+        struct Response {
+            data: Option<serde_json::Value>,
+            errors: Option<Vec<graphql::GqlError>>,
+        }
+        self.acquire_or_block("enqueuePullRequest mutation")?;
+        let body = serde_json::json!({
+            "query": "mutation($id: ID!, $head: GitObjectID) { enqueuePullRequest(input: {pullRequestId: $id, expectedHeadOid: $head, jump: false}) { mergeQueueEntry { id } } }",
+            "variables": { "id": node_id, "head": expected_head },
+        });
+        let response: Response = self
+            .post_graphql_with_retry("enqueuePullRequest mutation", &body)
+            .await?;
+        if let Some(errors) = response.errors.filter(|errors| !errors.is_empty()) {
+            if errors.iter().all(|error| {
+                !error.is_rate_limited()
+                    && lazybox_core::is_already_in_merge_queue(&error.human().to_ascii_lowercase())
+            }) {
+                return Ok(());
+            }
+            return Err(mutation_error_response("enqueuePullRequest", &errors));
+        }
+        if response
+            .data
+            .as_ref()
+            .and_then(|data| data.pointer("/enqueuePullRequest/mergeQueueEntry/id"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+        {
+            Ok(())
+        } else {
+            Err(GhError::Graphql(
+                "enqueuePullRequest returned no queue entry; queue submission was not confirmed"
+                    .into(),
+            ))
+        }
+    }
+
     /// Best-effort: is `pr` already merged on GitHub right now? Used to
     /// disambiguate an ambiguous merge rejection — GitHub returns a
     /// generic "not mergeable" for an already-merged PR, indistinguishable
@@ -7186,6 +7227,16 @@ impl lazybox_core::TaskProvider for GhClient {
                         "merge {}: PR is in the merge queue — GitHub will land it",
                         pr.id.key
                     );
+                    return Ok(lazybox_core::MergeOutcome::Queued);
+                }
+                // A queue-required rejection is not an enqueue: submit
+                // explicitly and only report Queued once GitHub confirms it.
+                if matches!(&err, GhError::Graphql(message)
+                    if message.to_ascii_lowercase().contains("changes must be made through the merge queue"))
+                {
+                    self.enqueue_pr(node_id, options.expected_head_oid)
+                        .await
+                        .map_err(mutation_provider_error)?;
                     return Ok(lazybox_core::MergeOutcome::Queued);
                 }
                 // GitHub rejects a merge of an ALREADY-merged PR with a
@@ -9515,6 +9566,90 @@ mod tests {
             lazybox_core::MergeOutcome::Queued,
             "GitHub has the PR — report it queued, never `merged` and never a rejection"
         );
+    }
+
+    #[tokio::test]
+    async fn queue_required_merge_enqueues_the_verified_head_in_normal_order() {
+        const READY: &str =
+            r#"{"data":{"markPullRequestReadyForReview":{"pullRequest":{"id":"PR_1"}}}}"#;
+        const METHOD: &str =
+            r#"{"data":{"node":{"repository":{"viewerDefaultMergeMethod":"SQUASH"}}}}"#;
+        const REQUIRED: &str = r#"{"errors":[{"message":"Repository rule violations found\nChanges must be made through the merge queue"}]}"#;
+        const ENQUEUED: &str =
+            r#"{"data":{"enqueuePullRequest":{"mergeQueueEntry":{"id":"MQ_1"}}}}"#;
+        let requests = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let uri = spawn_recording_response_server(
+            vec![READY, METHOD, REQUIRED, ENQUEUED],
+            requests.clone(),
+        )
+        .await;
+        let client = make_client(&uri);
+        let mut task = task_without_node_id(TaskKind::Pr);
+        task.node_id = Some("PR_1".into());
+        task.state = TaskState::Draft;
+        let ws = Workspace::from_task(task, chrono::Utc::now());
+        let result = TaskProvider::merge(
+            &client,
+            &ws,
+            &lazybox_core::MergeOptions::head(Some("checked-head")),
+        )
+        .await
+        .expect("explicit enqueue succeeds");
+        assert_eq!(result, lazybox_core::MergeOutcome::Queued);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[0].contains("markPullRequestReadyForReview"));
+        assert!(requests[3].contains("enqueuePullRequest"));
+        assert!(requests[3].contains("checked-head"));
+        assert!(requests[3].contains("jump: false"));
+        assert!(!requests[3].contains("mergeMethod"));
+    }
+
+    #[tokio::test]
+    async fn enqueue_requires_confirmation_and_preserves_failures() {
+        for (response, expected) in [
+            (r#"{"data":{"enqueuePullRequest":null}}"#, "no queue entry"),
+            (
+                r#"{"errors":[{"message":"Head branch was modified"}]}"#,
+                "Head branch was modified",
+            ),
+            (
+                r#"{"errors":[{"message":"Required checks have not passed"}]}"#,
+                "Required checks have not passed",
+            ),
+            (
+                r#"{"errors":[{"message":"Pull Request is already in the merge queue"},{"message":"Head branch was modified"}]}"#,
+                "Head branch was modified",
+            ),
+        ] {
+            let uri = spawn_sequenced_response_server(vec![response]).await;
+            let client = make_client(&uri);
+            let error = client
+                .enqueue_pr("PR_1", Some("checked-head"))
+                .await
+                .expect_err("must not claim queued");
+            assert!(error.to_string().contains(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn enqueue_already_queued_is_idempotent_and_rate_limits_stay_retryable() {
+        let uri = spawn_sequenced_response_server(vec![
+            r#"{"errors":[{"message":"Pull Request is already in the merge queue"}]}"#,
+        ])
+        .await;
+        make_client(&uri)
+            .enqueue_pr("PR_1", None)
+            .await
+            .expect("already queued is success");
+        let uri = spawn_sequenced_response_server(vec![
+            r#"{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}"#,
+        ])
+        .await;
+        assert!(matches!(
+            make_client(&uri).enqueue_pr("PR_1", None).await,
+            Err(GhError::RateLimited { .. })
+        ));
     }
 
     /// The queue marker must survive `GhError`'s Display wrapper: the

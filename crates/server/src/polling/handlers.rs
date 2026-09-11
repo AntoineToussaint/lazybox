@@ -912,6 +912,12 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey, force
             && !pr.is_in_merge_queue
         {
             pr.is_in_merge_queue = true;
+            // Successful queue admission also confirms a draft was made
+            // ready by the merge operation. Do not leave the DRAFT pill
+            // masking the newly queued state until the next poll.
+            if pr.state == lazybox_core::TaskState::Draft {
+                pr.state = lazybox_core::TaskState::Open;
+            }
             super::upsert(config, pr).await;
         }
         let _ = config.bus.send(Event::PrQueued {

@@ -555,6 +555,55 @@ mod behavior {
         }
     }
 
+    /// A fixture that burns a quota of *CPU it was actually handed*, not a
+    /// stretch of wall clock: the child loops until its own `times` accounting
+    /// clocks `quota` whole seconds — writing that running total to `progress`
+    /// after every chunk — and then idles, still alive so the tree walk keeps
+    /// seeing it, on a bounded sleep so a hard-aborted test leaks nothing past
+    /// the process-group Drop guard.
+    ///
+    /// A wall-clock spinner reads the scheduler's output as if it were an
+    /// input: on a loaded box it stops spinning while still short of the CPU
+    /// the assertion needs, and no deadline on the waiting side can recover
+    /// that. A quota child never stops short, so the deadline bounds only how
+    /// long the box gets to hand the CPU out, and `progress` records how much
+    /// of it landed (#1640).
+    ///
+    /// `times` is a builtin and the redirect keeps it in-process, so the
+    /// numbers are the subshell's own — a command substitution would fork and
+    /// report the fork's (empty) accounting instead.
+    fn cpu_quota_child(quota: u64, progress: &Path) -> String {
+        let progress = progress.display();
+        format!(
+            "( burned=0
+               while (( burned < {quota} )); do
+                 for (( i = 0; i < 200000; i++ )); do :; done
+                 times > '{progress}'
+                 read -r user sys < '{progress}'
+                 burned=0
+                 for field in \"$user\" \"$sys\"; do
+                   minutes=${{field%%m*}}
+                   seconds=${{field#*m}}
+                   burned=$(( burned + minutes * 60 + ${{seconds%.*}} ))
+                 done
+               done
+               sleep 30 ) & wait"
+        )
+    }
+
+    /// What the quota child's own accounting says it managed to clock up. A
+    /// zero delta on its own cannot tell a starved box from a broken tree
+    /// walk; this is the box's half of that answer.
+    fn child_cpu_burned(progress: &Path) -> String {
+        match fs::read_to_string(progress) {
+            Ok(body) => match body.lines().next() {
+                Some(line) => format!("child burned {line} of user/sys CPU"),
+                None => "child wrote no CPU accounting".into(),
+            },
+            Err(_) => "child never reached its first CPU reading".into(),
+        }
+    }
+
     fn write_exec(path: &Path, body: &str) {
         use std::os::unix::fs::PermissionsExt;
         fs::write(path, body).expect("write stub");
@@ -607,16 +656,23 @@ mod behavior {
     /// tick that establishes the baseline. Dropping snapshot-less pids made the
     /// only process burning CPU invisible to the wait, which then spun out its
     /// whole deadline on a perfectly idle box and blamed the load.
+    ///
+    /// The child owes a CPU quota rather than a stretch of wall clock, so a
+    /// box that hands it a tenth of a core makes the wait longer instead of
+    /// making the delta smaller (#1640).
     #[test]
     fn a_pid_missing_from_the_snapshot_still_counts_toward_the_delta() {
         let Ok(bash) = which_bash() else { return };
+        let dir = scratch("unsnapshotted_child");
+        let progress = dir.join("child-cpu");
+        // The quota is the threshold itself, and meeting it is enough:
+        // `times` truncates user and system seconds separately before the
+        // child sums them, so a quota it reports as met always stands for at
+        // least that many whole seconds of the CPU `ps` will read back.
+        let program = cpu_quota_child(AGENT_CPU_SECS, &progress);
         let mut command = Command::new(&bash);
         command
-            .args([
-                "-c",
-                "( end=$((SECONDS+30)); while (( SECONDS < end )); do :; done ) & wait",
-                "lazybox-test-unsnapshotted-child",
-            ])
+            .args(["-c", &program, "lazybox-test-unsnapshotted-child"])
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let agent = FixtureProcessGroup::spawn(command);
@@ -635,6 +691,7 @@ mod behavior {
             .iter()
             .any(|(pid, prev, _)| *pid != agent.pid() && prev.is_none());
         let busy = reading.reads_busy();
+        let burned = child_cpu_burned(&progress);
 
         drop(agent);
 
@@ -645,7 +702,7 @@ mod behavior {
         assert!(
             busy,
             "a child the snapshot never saw must still carry the tree past the \
-             threshold: {reading}"
+             threshold: {reading}; {burned} within {CPU_DELTA_TIMEOUT:?}"
         );
     }
 
@@ -702,6 +759,24 @@ mod behavior {
             !idle_tree_with_no_baseline.has_baseline(),
             "a tree the snapshot never covered is not a baseline"
         );
+    }
+
+    /// The other half of that reporting: when the wait does end empty-handed,
+    /// the quota child's own accounting says whether the box ever handed it
+    /// the CPU — the difference between a starved fixture and a tree walk
+    /// that lost the only process burning any.
+    #[test]
+    fn a_starved_child_reports_the_cpu_it_was_handed() {
+        let dir = scratch("child_cpu_accounting");
+        let progress = dir.join("child-cpu");
+        assert!(
+            child_cpu_burned(&progress).contains("never reached its first CPU reading"),
+            "a child that never completed a chunk has no accounting to show"
+        );
+
+        fs::write(&progress, "0m0.400s 0m0.020s\n0m0.000s 0m0.000s\n").expect("write accounting");
+        let rendered = child_cpu_burned(&progress);
+        assert!(rendered.contains("0m0.400s 0m0.020s"), "{rendered}");
     }
 
     #[test]

@@ -1147,6 +1147,48 @@ mod effects_tests {
         );
     }
 
+    /// Regression (#1669): the same self-clearing must happen when the PR
+    /// goes into the merge queue. The first cut of the fix flashed a bare
+    /// global `AutoMergeNotice`, which never clears the workspace-tagged
+    /// banner — leaving a red `✗ merge failed` pinned to a PR GitHub was
+    /// about to land, the exact misleading state #1669 set out to remove.
+    #[test]
+    fn pr_queued_clears_a_stale_merge_failed_banner() {
+        use lazybox_ipc::Event as IpcEvent;
+
+        let mut m = build_model();
+        m.status.polling = None;
+        let ws = lazybox_core::WorkspaceKey::new("github:o/r#1");
+
+        m.handle_daemon_event(IpcEvent::PrMergeFailed {
+            workspace_key: ws.clone(),
+            pr_label: "o/r#1".into(),
+            reason: "base branch was modified".into(),
+            conflict: false,
+        });
+        assert!(m.status.notice.is_some(), "error banner is up");
+
+        m.handle_daemon_event(IpcEvent::PrQueued {
+            workspace_key: ws,
+            pr_label: "o/r#1".into(),
+        });
+        let n = m
+            .status
+            .notice
+            .as_ref()
+            .expect("the queued notice replaces it");
+        assert!(
+            n.message.contains("merge queue"),
+            "the queued notice must show, not the stale error: {}",
+            n.message,
+        );
+        assert!(
+            n.message.contains("o/r#1"),
+            "the notice must name the PR so a bulk merge says which one was queued: {}",
+            n.message,
+        );
+    }
+
     /// Self-clearing is workspace-scoped: a success for a *different*
     /// workspace must not wipe another workspace's failure banner.
     #[test]

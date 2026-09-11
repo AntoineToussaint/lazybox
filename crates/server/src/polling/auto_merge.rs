@@ -371,7 +371,7 @@ pub trait MergeBackend {
         &self,
         ws: &Workspace,
         options: &lazybox_core::MergeOptions<'_>,
-    ) -> Result<lazybox_core::TrailerOutcome, lazybox_core::ProviderError>;
+    ) -> Result<lazybox_core::MergeOutcome, lazybox_core::ProviderError>;
 
     /// When GitHub has the token on a rate-limit pause (a secondary
     /// cooldown or an exhausted primary window), the instant it lifts;
@@ -406,7 +406,7 @@ impl MergeBackend for lazybox_gh::GhClient {
         &self,
         ws: &Workspace,
         options: &lazybox_core::MergeOptions<'_>,
-    ) -> Result<lazybox_core::TrailerOutcome, lazybox_core::ProviderError> {
+    ) -> Result<lazybox_core::MergeOutcome, lazybox_core::ProviderError> {
         lazybox_core::TaskProvider::merge(self, ws, options).await
     }
 
@@ -446,6 +446,13 @@ pub fn transient_merge_rejection(message: &str) -> bool {
     ]
     .iter()
     .any(|marker| lower.contains(marker))
+        // Belt-and-braces for the merge queue (#1669). `GhClient::merge`
+        // converts the queue rejection into `MergeOutcome::Queued` before
+        // it can reach here, so this is only for a phrasing that matcher
+        // misses. Such a message must still be a "not yet" — a queued PR
+        // is going to land, and `Rejected` would stand the head down until
+        // a new commit and never retry if the queue ejected it.
+        || lazybox_core::is_already_in_merge_queue(&lower)
 }
 
 /// Resolve the real GitHub client and run the attempt. A missing
@@ -722,7 +729,34 @@ pub async fn run_attempt<B: MergeBackend>(
             .pr_trailers,
     };
     match backend.merge(&probe, &merge_options).await {
-        Ok(outcome) => {
+        // GitHub took the PR into its merge queue instead of merging it
+        // now (#1669). The mutation was ACCEPTED, so this is the `Done`
+        // latch exactly as a merge is — GitHub owns the landing and the
+        // poll releases the latch when the terminal state arrives. Before
+        // this, the queue rejection fell through to the `Err` arm below
+        // and produced a red `PrMergeFailed` plus a `Rejected` latch that
+        // stood the head down until a new commit: if the queue later
+        // ejected the PR, nothing retried it.
+        //
+        // Deliberately NOT `mark_reported`: the queue builds its own merge
+        // commit, so nothing this call passed was written and the cost
+        // record is still owed. Stamping the watermark here would retire a
+        // record that never reached GitHub.
+        Ok(lazybox_core::MergeOutcome::Queued) => {
+            tracing::info!(workspace = %key, "auto-merge: PR is in the merge queue");
+            settle(Some(Latch::Done(head)));
+            // Surface the QUEUED pill now rather than a poll later.
+            // `commit_fresh_task`, not `upsert` — the latter would
+            // recursively re-enter the auto-merge hook.
+            fresh.is_in_merge_queue = true;
+            let _ = config.bus.send(Event::PrQueued {
+                workspace_key: key.clone(),
+                pr_label,
+            });
+            commit_fresh_task(config, key, fresh).await;
+            config.poll.wake(true);
+        }
+        Ok(lazybox_core::MergeOutcome::Merged(outcome)) => {
             tracing::info!(workspace = %key, "auto-merged PR (merge-on-green)");
             crate::pr_trailers::mark_reported(config, key, &trailers).await;
             // Nobody is watching this flow, so a lost cost record has to
@@ -2267,6 +2301,13 @@ mod tests {
             "Base branch was modified. Review and try the merge again.",
             "Merge already in progress",
             "At least 1 approving review is required",
+            // #1669. `GhClient::merge` converts this into
+            // `MergeOutcome::Queued` before it reaches the classifier, so
+            // this is the fallback for a phrasing that matcher misses: a
+            // queued PR is going to land, and `Rejected` would stand the
+            // head down until a new commit — never retrying if the queue
+            // ejected it.
+            "Pull Request is in the merge queue.",
         ] {
             assert!(transient_merge_rejection(msg), "{msg}");
         }
@@ -2341,7 +2382,7 @@ mod tests {
     /// Recording fake: scripted fetch result + merge result.
     struct FakeBackend {
         fetch: Result<Option<(Task, Option<String>)>, String>,
-        merge_result: Result<lazybox_core::TrailerOutcome, lazybox_core::ProviderError>,
+        merge_result: Result<lazybox_core::MergeOutcome, lazybox_core::ProviderError>,
         merges: parking_lot::Mutex<Vec<Option<String>>>,
         trailers: parking_lot::Mutex<Vec<Option<lazybox_core::PrTrailers>>>,
         paused_until: Option<chrono::DateTime<Utc>>,
@@ -2352,11 +2393,22 @@ mod tests {
         fn merging(fresh: Task, head: &str) -> Self {
             Self {
                 fetch: Ok(Some((fresh, Some(head.into())))),
-                merge_result: Ok(lazybox_core::TrailerOutcome::InCommit),
+                merge_result: Ok(lazybox_core::MergeOutcome::Merged(
+                    lazybox_core::TrailerOutcome::InCommit,
+                )),
                 merges: parking_lot::Mutex::new(Vec::new()),
                 trailers: parking_lot::Mutex::new(Vec::new()),
                 paused_until: None,
                 fetches: parking_lot::Mutex::new(0),
+            }
+        }
+
+        /// A backend whose merge is answered by GitHub taking the PR into
+        /// the repository's merge queue (#1669) — accepted, but not merged.
+        fn queueing(fresh: Task, head: &str) -> Self {
+            Self {
+                merge_result: Ok(lazybox_core::MergeOutcome::Queued),
+                ..Self::merging(fresh, head)
             }
         }
 
@@ -2393,7 +2445,7 @@ mod tests {
             &self,
             _ws: &Workspace,
             options: &lazybox_core::MergeOptions<'_>,
-        ) -> Result<lazybox_core::TrailerOutcome, lazybox_core::ProviderError> {
+        ) -> Result<lazybox_core::MergeOutcome, lazybox_core::ProviderError> {
             self.merges
                 .lock()
                 .push(options.expected_head_oid.map(|s| s.to_string()));
@@ -2420,6 +2472,63 @@ mod tests {
             skip_if_head: None,
             restore: Some(Latch::Blocked(Some(head.to_string()))),
         }
+    }
+
+    /// Regression (#1669): a PR GitHub takes into its merge queue is NOT
+    /// an auto-merge failure. The original fix handled only the manual
+    /// `g m` handler, so this path — the one the commit message itself
+    /// named as a repro — still produced a red `PrMergeFailed` and a
+    /// `Rejected` latch that stood the head down until a new commit,
+    /// meaning a queue that later ejected the PR was never retried.
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_pr_is_not_an_auto_merge_failure() {
+        let ws = armed_ws("o/r#1");
+        let config = config_with(&ws);
+        let mut rx = config.bus.subscribe();
+        let backend = FakeBackend::queueing(green_task("o/r#1"), "abc123");
+
+        run_attempt(&config, ticket(&ws, None), &own_policy(), &backend).await;
+
+        let evt = rx.try_recv().expect("an event must be broadcast");
+        assert!(
+            matches!(evt, Event::PrQueued { .. }),
+            "a queued PR must report as queued, never as a merge failure; got {evt:?}"
+        );
+        assert_eq!(
+            config.poll.auto_merge.lock().latch(&ws.key),
+            Some(&Latch::Done(Some("abc123".into()))),
+            "the mutation was accepted — GitHub owns the landing, so the latch is Done. \
+             `Rejected` would stand the head down until a new commit and never retry \
+             if the queue ejected the PR"
+        );
+    }
+
+    /// A queue answer must NOT close the cost slice (#1592/#1669). The
+    /// queue builds its own merge commit, so nothing this call passed was
+    /// written; marking it reported would retire a cost record that
+    /// reached GitHub nowhere, and the next PR from this workspace would
+    /// start from zero having reported nothing. Mirror of
+    /// `auto_merge_writes_the_cost_trailer_and_closes_the_slice`, which
+    /// pins the opposite for a real merge.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_queued_pr_does_not_close_the_cost_slice() {
+        let ws = armed_ws("o/r#1");
+        let store = Arc::new(MemoryStore::new());
+        seed(&store, &ws);
+        store
+            .set_kv(&format!("meter-cost:{}", ws.key.as_str()), "13893891")
+            .expect("seed the metered cost");
+        let config = ServerConfig::with_store(store.clone());
+        let backend = FakeBackend::queueing(green_task("o/r#1"), "abc123");
+
+        run_attempt(&config, ticket(&ws, None), &own_policy(), &backend).await;
+
+        assert_eq!(
+            crate::client_kv::unreported_session_cost(&*store, ws.key.as_str()),
+            13_893_891,
+            "the PR is only QUEUED — nothing was written, so the cost is still owed \
+             and must survive for whatever records the eventual merge",
+        );
     }
 
     /// The happy path merges exactly once, pinned to the freshly
@@ -2680,7 +2789,9 @@ mod tests {
         fresh.review = ReviewStatus::ChangesRequested;
         let backend = FakeBackend {
             fetch: Ok(Some((fresh, Some("abc123".into())))),
-            merge_result: Ok(lazybox_core::TrailerOutcome::InCommit),
+            merge_result: Ok(lazybox_core::MergeOutcome::Merged(
+                lazybox_core::TrailerOutcome::InCommit,
+            )),
             merges: parking_lot::Mutex::new(Vec::new()),
             trailers: parking_lot::Mutex::new(Vec::new()),
             paused_until: None,
@@ -2971,7 +3082,9 @@ mod tests {
         let config = config_with(&ws);
         let backend = FakeBackend {
             fetch: Err("rate limited".into()),
-            merge_result: Ok(lazybox_core::TrailerOutcome::InCommit),
+            merge_result: Ok(lazybox_core::MergeOutcome::Merged(
+                lazybox_core::TrailerOutcome::InCommit,
+            )),
             merges: parking_lot::Mutex::new(Vec::new()),
             trailers: parking_lot::Mutex::new(Vec::new()),
             paused_until: None,

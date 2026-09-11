@@ -1239,6 +1239,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::WorkspaceMergePending { .. }
                 | IpcEvent::WorkspaceMerged { .. }
                 | IpcEvent::PrMerged { .. }
+                | IpcEvent::PrQueued { .. }
                 | IpcEvent::PrMergeFailed { .. }
                 | IpcEvent::BranchUpdated { .. }
                 | IpcEvent::BranchUpdateFailed { .. }
@@ -1722,6 +1723,27 @@ impl<T: TerminalAdapter> Model<T> {
             // lacks). The `Refresh` below wakes that poll so the prompt
             // follows within a few seconds.
             self.send_cmd(IpcCommand::Refresh);
+            self.redraw = true;
+            return;
+        }
+        // `g m` reached GitHub and the PR went into the repository's merge
+        // queue (#1669). GitHub will land it, so this is a success shape:
+        // clear any stale `✗ merge failed` still pinned to this row from an
+        // earlier attempt — a red failure sitting on a PR about to merge is
+        // the exact misleading state #1669 removes — and name the PR, so a
+        // bulk merge over a selection says which one was queued. NOT
+        // `mark_workspace_merged`: the PR is queued, not merged, and the
+        // queue can still eject it; the durable per-row signal is the
+        // QUEUED pill the daemon just upserted.
+        if let IpcEvent::PrQueued {
+            workspace_key,
+            pr_label,
+        } = &event
+        {
+            self.clear_action_error(workspace_key);
+            self.flash_info(format!(
+                "{pr_label} is in the merge queue — GitHub will merge it when it reaches the front"
+            ));
             self.redraw = true;
             return;
         }
@@ -2331,6 +2353,7 @@ impl<T: TerminalAdapter> Model<T> {
             | IpcEvent::WorkspaceMergePending { .. }
             | IpcEvent::WorkspaceMerged { .. }
             | IpcEvent::PrMerged { .. }
+            | IpcEvent::PrQueued { .. }
             | IpcEvent::PrMergeFailed { .. }
             | IpcEvent::BranchUpdated { .. }
             | IpcEvent::BranchUpdateFailed { .. }
@@ -2679,6 +2702,7 @@ impl<T: TerminalAdapter> Model<T> {
                 | IpcEvent::WorkspaceMergePending { .. }
                 | IpcEvent::WorkspaceMerged { .. }
                 | IpcEvent::PrMerged { .. }
+                | IpcEvent::PrQueued { .. }
                 | IpcEvent::PrMergeFailed { .. }
                 | IpcEvent::BranchUpdated { .. }
                 | IpcEvent::BranchUpdateFailed { .. }

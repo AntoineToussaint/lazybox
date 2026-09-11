@@ -477,6 +477,54 @@ impl TrailerOutcome {
     }
 }
 
+/// True when GitHub refused a merge because the PR is **already in the
+/// merge queue** — the raw GraphQL string is `Pull Request is in the merge
+/// queue.` (#1669). Takes an already-lowercased message.
+///
+/// This is not a failure: the PR is queued and GitHub will merge it when it
+/// reaches the front. It is also unavoidable rather than user error — on a
+/// queue-enabled repo a merge lands a PR in the queue, so a second `g m`, a
+/// bulk merge over a selection, or the merge-on-green latch firing again all
+/// reproduce it.
+///
+/// Anchored on the affirmative `is in` / `already in` rather than a bare
+/// `in the merge queue`, for the reason `transient_merge_rejection` spells
+/// out about its own markers: GitHub's dequeue-side rejection reads
+/// `... is not in the merge queue`, which the loose form would read as a
+/// success and swallow a real failure.
+pub fn is_already_in_merge_queue(lower: &str) -> bool {
+    lower.contains("is in the merge queue") || lower.contains("already in the merge queue")
+}
+
+/// How a merge mutation actually settled.
+///
+/// GitHub answers a merge on a queue-enabled repository with a rejection
+/// (`Pull Request is in the merge queue.`) that is not a failure at all:
+/// the PR is queued and GitHub will land it when it reaches the front.
+/// Reporting that as `✗ merge failed` read as "your merge is broken" when
+/// the merge was in fact already under way (#1669).
+///
+/// The verdict is resolved by the **provider**, next to the equivalent
+/// already-merged recovery, rather than by each caller string-matching the
+/// rejection it gets back — there are two merge call sites (the manual
+/// `g m` handler and the merge-on-green latch) and a caller-side check
+/// covers only the one it was written in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeOutcome {
+    /// The merge landed. Carries what became of the trailers it was asked
+    /// to record.
+    Merged(TrailerOutcome),
+    /// GitHub has the PR in its merge queue and will merge it when it
+    /// reaches the front. The mutation was accepted; the PR is **not**
+    /// merged yet, so callers must not announce it as merged.
+    ///
+    /// No [`TrailerOutcome`]: the queue builds its own merge commit, so
+    /// nothing this call passed was written and nothing may be marked as
+    /// reported — the cost record is still owed by whatever observes the
+    /// eventual merge.
+    Queued,
+}
+
 /// A source of tasks (PRs, issues, tickets) — and the place where
 /// the user's mutations (merge, request reviewers, …) land.
 ///
@@ -516,7 +564,7 @@ pub trait TaskProvider: Send + Sync {
         &self,
         workspace: &Workspace,
         options: &MergeOptions<'_>,
-    ) -> Result<TrailerOutcome, ProviderError> {
+    ) -> Result<MergeOutcome, ProviderError> {
         let _ = (workspace, options);
         Err(ProviderError::unsupported(self.name(), "merge"))
     }
@@ -1035,5 +1083,34 @@ mod tests {
         let fetch_outcome = partial.into_fetch_outcome();
         assert_eq!(fetch_outcome.items, vec![1]);
         assert_eq!(fetch_outcome.coverage, FetchCoverage::Partial);
+    }
+
+    /// #1669. The affirmative phrasing is the success shape; the
+    /// dequeue-side NEGATION is not, and a loose `contains("in the merge
+    /// queue")` would read it as one and swallow a real failure.
+    #[test]
+    fn merge_queue_matcher_is_anchored_on_the_affirmative() {
+        assert!(is_already_in_merge_queue(
+            "pull request is in the merge queue."
+        ));
+        assert!(is_already_in_merge_queue(
+            "github: graphql error: pull request is in the merge queue."
+        ));
+        assert!(is_already_in_merge_queue(
+            "pr is already in the merge queue"
+        ));
+
+        assert!(
+            !is_already_in_merge_queue("pull request is not in the merge queue"),
+            "the negation must never read as success"
+        );
+        assert!(
+            !is_already_in_merge_queue("pull request has merge conflicts"),
+            "a conflict is a real rejection"
+        );
+        assert!(
+            !is_already_in_merge_queue("changes must be made through the merge queue"),
+            "a queue-required ruleset rejection is not a queued PR"
+        );
     }
 }

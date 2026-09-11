@@ -204,6 +204,83 @@ done"#
     }
 }
 
+/// The alt-screen fixtures may not issue `smcup` until the test has
+/// re-allowed the alternate screen on their window: tmux drops the request
+/// outright while the option is off — and `spawn` itself re-pushes the
+/// global denial after `new-session` — so a pane that gets there first
+/// never enters the alt screen at all. The fixture therefore waits for a
+/// gate file the test writes once `set-option` has returned; the wall-clock
+/// sleep this replaces lost that race whenever spawn plus set-option
+/// outran it under load (#1664).
+///
+/// The wait is bounded, and POSIX `sleep` takes whole seconds only — so the
+/// fixture probes for the fractional extension instead of assuming it, and
+/// sizes its budget to whichever step it got. Both matter for a pane that
+/// outlives its test: an assert that fires before the gate is written skips
+/// `kill_test_server`, and a pane still in the loop would fork `sleep`
+/// roughly fifty times a second for as long as the box lived — forever on a
+/// `sleep` that rejects `0.02` and fails instantly. Bounded, it falls
+/// through to `exec sleep 300`, which ends the session and lets the
+/// orphaned tmux server clean itself up, exactly as the pre-gate fixture
+/// did. `ALT_GATE_TRIES` overrides the budget so the bound itself is
+/// testable without a ten-second wait.
+const ALT_SCREEN_FIXTURE: &str = r#"if sleep 0.02 2>/dev/null; then
+  step=0.02
+  tries=500
+else
+  step=1
+  tries=10
+fi
+i=0
+while [ ! -f "$ALT_GATE" ] && [ "$i" -lt "${ALT_GATE_TRIES:-$tries}" ]; do
+  sleep "$step"
+  i=$((i + 1))
+done
+printf '\033[?1049h'
+echo on-alt
+exec sleep 300"#;
+
+/// Spawn a pane that requests the alternate screen only once `gate` opens,
+/// re-allow the alt screen on its window (simulating the pre-fix server
+/// config), then open the gate — in that order, which is the whole point of
+/// the gate.
+async fn spawn_alt_screen_pane(
+    backend: &TmuxBackend,
+    socket: &str,
+    gate: &std::path::Path,
+    hint: &str,
+) -> String {
+    let key = backend
+        .spawn(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                ALT_SCREEN_FIXTURE.to_string(),
+            ],
+            None,
+            &[("ALT_GATE".into(), gate.to_string_lossy().into_owned())],
+            hint,
+        )
+        .await
+        .expect("tmux spawn");
+    let allow = std::process::Command::new("tmux")
+        .args([
+            "-L",
+            socket,
+            "set-option",
+            "-w",
+            "-t",
+            &key,
+            "alternate-screen",
+            "on",
+        ])
+        .output()
+        .expect("set-option");
+    assert!(allow.status.success(), "re-allow alternate-screen");
+    std::fs::write(gate, b"").expect("open the alt-screen gate");
+    key
+}
+
 fn case_snapshot<'a>(
     case: &PromptCase,
     snapshots: &'a [TerminalSnapshot],
@@ -1151,37 +1228,10 @@ async fn alt_screen_pane_serves_no_deep_scrollback() {
     }
     let socket = format!("lazybox-test-altfetch-{}", std::process::id());
     let result = timeout(TEST_DEADLINE, async {
+        let gate_dir = tempfile::TempDir::new().expect("gate dir");
+        let gate = gate_dir.path().join("altfetch.gate");
         let backend = TmuxBackend::with_socket(&socket).expect("conf written");
-        let key = backend
-            .spawn(
-                &[
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    // Give the test a beat to re-allow the alt screen
-                    // (simulating the pre-fix server config) before the
-                    // program requests it.
-                    "sleep 1; printf '\\033[?1049h'; echo on-alt; exec sleep 300".to_string(),
-                ],
-                None,
-                &[],
-                "altfetch-test",
-            )
-            .await
-            .expect("tmux spawn");
-        let allow = std::process::Command::new("tmux")
-            .args([
-                "-L",
-                &socket,
-                "set-option",
-                "-w",
-                "-t",
-                &key,
-                "alternate-screen",
-                "on",
-            ])
-            .output()
-            .expect("set-option");
-        assert!(allow.status.success(), "re-allow alternate-screen");
+        let key = spawn_alt_screen_pane(&backend, &socket, &gate, "altfetch-test").await;
 
         let mut ticker = tokio::time::interval(Duration::from_millis(100));
         for attempt in 0.. {
@@ -1201,7 +1251,11 @@ async fn alt_screen_pane_serves_no_deep_scrollback() {
             if String::from_utf8_lossy(&out.stdout).trim() == "1" {
                 break;
             }
-            assert!(attempt < 100, "pane never entered the alternate screen");
+            assert!(
+                attempt < 100,
+                "pane never entered the alternate screen (gate opened: {})",
+                gate.exists()
+            );
         }
 
         assert!(
@@ -1341,6 +1395,66 @@ async fn alt_screen_agent_retains_scrollable_history() {
     result.expect("test timed out");
 }
 
+/// A pane whose gate never opens must stop waiting on its own. A test that
+/// panics before writing the gate skips `kill_test_server`, so the pane
+/// outlives the run: looping, it forks `sleep` ~50x/s for as long as the box
+/// lives and holds the orphaned tmux server open with it; bounded, it falls
+/// through to `exec sleep 300` and the server ends itself, which is what the
+/// pre-gate fixture did. `on-alt` lands on the primary screen here because
+/// this pane's window was never re-allowed the alternate screen.
+#[tokio::test]
+async fn alt_screen_fixture_stops_waiting_for_a_gate_that_never_opens() {
+    if modern_tmux_version().is_none() {
+        eprintln!("tmux missing or too old — skipping alt-screen gate bound test");
+        return;
+    }
+    let socket = format!("lazybox-test-altgate-{}", std::process::id());
+    let result = timeout(TEST_DEADLINE, async {
+        let gate_dir = tempfile::TempDir::new().expect("gate dir");
+        let gate = gate_dir.path().join("never.gate");
+        let backend = TmuxBackend::with_socket(&socket).expect("conf written");
+        let key = backend
+            .spawn(
+                &[
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    ALT_SCREEN_FIXTURE.to_string(),
+                ],
+                None,
+                &[
+                    ("ALT_GATE".into(), gate.to_string_lossy().into_owned()),
+                    ("ALT_GATE_TRIES".into(), "3".into()),
+                ],
+                "altgate-test",
+            )
+            .await
+            .expect("tmux spawn");
+
+        let mut ticker = tokio::time::interval(Duration::from_millis(100));
+        for attempt in 0.. {
+            ticker.tick().await;
+            let sub = backend.subscribe(&key).await.expect("subscribe");
+            if String::from_utf8_lossy(&sub.replay).contains("on-alt") {
+                break;
+            }
+            assert!(
+                attempt < 100,
+                "the fixture must give up on a gate that never opens, not \
+                 loop until the box dies"
+            );
+        }
+        assert!(
+            !gate.exists(),
+            "the pane must have fallen through the wait, not been released"
+        );
+
+        let _ = backend.kill(&key).await;
+    })
+    .await;
+    kill_test_server(&socket);
+    result.expect("test timed out");
+}
+
 /// A pane stuck on the alternate screen — spawned on a stale/older-build
 /// tmux server that still allowed it — retains ZERO history and can't be
 /// pulled back out in place (tmux ignores rmcup while `alternate-screen
@@ -1356,6 +1470,8 @@ async fn zero_history_alt_pane_warns_client_to_reopen() {
     let socket = format!("lazybox-test-altwarn-{}", std::process::id());
     let result = timeout(TEST_DEADLINE, async {
         let store = Arc::new(MemoryStore::new());
+        let gate_dir = tempfile::TempDir::new().expect("gate dir");
+        let gate = gate_dir.path().join("altwarn.gate");
         let backend = Arc::new(TmuxBackend::with_socket(&socket).expect("conf written"));
 
         // A healthy full-screen agent: output scrolls into retained history.
@@ -1376,33 +1492,7 @@ async fn zero_history_alt_pane_warns_client_to_reopen() {
         // A pane stuck on the alternate screen: re-allow the alt screen at
         // the window level (simulating the pre-fix server config) so the
         // program's smcup sticks and no history ever accumulates.
-        let alt_key = backend
-            .spawn(
-                &[
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    "sleep 1; printf '\\033[?1049h'; echo on-alt; exec sleep 300".to_string(),
-                ],
-                None,
-                &[],
-                "alt",
-            )
-            .await
-            .expect("spawn alt");
-        let allow = std::process::Command::new("tmux")
-            .args([
-                "-L",
-                &socket,
-                "set-option",
-                "-w",
-                "-t",
-                &alt_key,
-                "alternate-screen",
-                "on",
-            ])
-            .output()
-            .expect("re-allow alternate-screen");
-        assert!(allow.status.success(), "re-allow alternate-screen");
+        let alt_key = spawn_alt_screen_pane(&backend, &socket, &gate, "alt").await;
 
         // Wait for the healthy pane's output and the alt pane's entry.
         let mut ticker = tokio::time::interval(Duration::from_millis(100));
@@ -1432,7 +1522,11 @@ async fn zero_history_alt_pane_warns_client_to_reopen() {
             if healthy_ready && alt_ready {
                 break;
             }
-            assert!(attempt < 100, "panes never reached the expected state");
+            assert!(
+                attempt < 100,
+                "panes never reached the expected state (alt gate opened: {})",
+                gate.exists()
+            );
         }
 
         // Direct backend classification: only the alt pane is broken.

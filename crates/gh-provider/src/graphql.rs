@@ -1703,7 +1703,6 @@ query($id: ID!) {
                     conclusion
                     status
                     permalink
-                    checkSuite { conclusion }
                   }
                   ... on StatusContext {
                     context
@@ -2067,7 +2066,6 @@ query($owner: String!, $name: String!, $number: Int!) {
                     conclusion
                     status
                     permalink
-                    checkSuite { conclusion }
                   }
                   ... on StatusContext {
                     context
@@ -2159,6 +2157,142 @@ query($owner: String!, $name: String!, $number: Int!) {
   }
 }
 "#;
+
+/// How many rollup contexts [`PR_CHECK_ROLLUP_QUERY`] pages in.
+///
+/// Deliberately far above [`ROLLUP_CONTEXT_PAGE`]: a commit that ran two
+/// workflow runs carries every check TWICE, which is exactly the shape
+/// this query exists to read — paging at 20 would truncate the very PRs
+/// it is asked about. A full page means the rollup may continue past
+/// what we can see, and [`ci_failure_recheck`] refuses to call a failure
+/// gone from a partial page.
+pub(crate) const RECHECK_CONTEXT_PAGE: usize = 100;
+
+/// The recheck must see further than the budgeted queries, or it could
+/// not distinguish a superseded failure from a truncated page.
+const _: () = assert!(RECHECK_CONTEXT_PAGE > ROLLUP_CONTEXT_PAGE);
+
+/// Just the head commit's check rollup for one PR, paged deep enough to
+/// see every run (#1662).
+///
+/// Separate from [`SINGLE_PR_QUERY`] rather than folded into it: that
+/// query feeds `Task::checks`, whose length is load-bearing for the
+/// native auto-merge coverage gate at [`ROLLUP_CONTEXT_PAGE`], and it
+/// runs on every notification deep-fetch. This one runs only when an
+/// auto-fix is about to spend an agent session, so it can afford the
+/// deeper page.
+const PR_CHECK_ROLLUP_QUERY: &str = r#"
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              state
+              contexts(first: 100) {
+                nodes {
+                  __typename
+                  ... on CheckRun {
+                    name
+                    conclusion
+                    status
+                    permalink
+                    checkSuite { conclusion }
+                  }
+                  ... on StatusContext {
+                    context
+                    state
+                    targetUrl
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  rateLimit { cost limit remaining resetAt used }
+}
+"#;
+
+pub fn pr_check_rollup_body(owner: &str, name: &str, number: u64) -> serde_json::Value {
+    serde_json::json!({
+        "query": PR_CHECK_ROLLUP_QUERY,
+        "variables": { "owner": owner, "name": name, "number": number },
+    })
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlPrCheckRollupResponse {
+    pub data: Option<GqlPrCheckRollupData>,
+    pub errors: Option<Vec<GqlError>>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlPrCheckRollupData {
+    pub repository: Option<GqlPrCheckRollupRepository>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlPrCheckRollupRepository {
+    #[serde(rename = "pullRequest")]
+    pub pull_request: Option<GqlPrCheckRollupPr>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct GqlPrCheckRollupPr {
+    pub commits: GqlCommits,
+}
+
+/// Whether a CI failure that was queued for auto-fix still stands once
+/// the rollup is read per workflow run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiFailureRecheck {
+    /// A check outside any superseded run is failing — spend the agent.
+    Stands,
+    /// Nothing that still counts is failing: every failing check belongs
+    /// to a run concurrency superseded, or the (complete) rollup carries
+    /// no failure at all.
+    Gone,
+}
+
+/// Read one commit's rollup per workflow run and decide whether a
+/// queued CI auto-fix still has something to fix (#1662).
+///
+/// GitHub's aggregate `statusCheckRollup.state` — what queues the fix —
+/// folds in the jobs of runs that concurrency cancelled the moment a
+/// newer event fired on the same head. Those jobs keep a fully green PR
+/// rolling up FAILURE indefinitely, and each false spawn is a whole
+/// agent session that reads the logs, finds nothing, and exits.
+///
+/// Answers [`CiFailureRecheck::Gone`] only from evidence that proves it:
+/// a page that may be truncated can always be hiding the failure the
+/// aggregate saw, so a full page stands rather than guessing. Erring
+/// toward `Stands` costs a false spawn — the bug as it exists today —
+/// while erring the other way would silence a real failing PR.
+pub fn ci_failure_recheck(commits: &GqlCommits) -> CiFailureRecheck {
+    let Some(rollup) = commits
+        .nodes
+        .first()
+        .and_then(|node| node.commit.status_check_rollup.as_ref())
+    else {
+        return CiFailureRecheck::Stands;
+    };
+    let Some(ctxs) = rollup.contexts.as_ref() else {
+        return CiFailureRecheck::Stands;
+    };
+    let live_failure = ctxs
+        .nodes
+        .iter()
+        .filter(|ctx| !is_superseded(ctx))
+        .any(|ctx| check_context_status(ctx) == CiStatus::Failure);
+    if live_failure || ctxs.nodes.len() >= RECHECK_CONTEXT_PAGE {
+        return CiFailureRecheck::Stands;
+    }
+    CiFailureRecheck::Gone
+}
 
 pub fn single_pr_body(owner: &str, name: &str, number: u64) -> serde_json::Value {
     serde_json::json!({
@@ -2335,7 +2469,6 @@ query($ids: [ID!]!) {
                     conclusion
                     status
                     permalink
-                    checkSuite { conclusion }
                   }
                   ... on StatusContext {
                     context
@@ -3370,37 +3503,6 @@ fn is_superseded(ctx: &GqlCheckContext) -> bool {
     }
 }
 
-/// The rollup contexts that still say something about the commit, plus
-/// whether any were dropped as superseded. `None` when the query didn't
-/// select `contexts` at all (the inbox-scan shape).
-fn live_check_contexts(rollup: &GqlStatusRollup) -> Option<(Vec<&GqlCheckContext>, bool)> {
-    let all = &rollup.contexts.as_ref()?.nodes;
-    let live: Vec<&GqlCheckContext> = all.iter().filter(|ctx| !is_superseded(ctx)).collect();
-    let dropped = live.len() < all.len();
-    Some((live, dropped))
-}
-
-/// Roll a set of contexts up the way GitHub's aggregate `state` would:
-/// any failure loses, otherwise anything in flight is pending,
-/// otherwise a single success carries it.
-fn ci_status_from_contexts(ctxs: &[&GqlCheckContext]) -> CiStatus {
-    let mut pending = false;
-    let mut success = false;
-    for ctx in ctxs {
-        match check_context_status(ctx) {
-            CiStatus::Failure => return CiStatus::Failure,
-            CiStatus::Pending | CiStatus::Running => pending = true,
-            CiStatus::Success => success = true,
-            _ => {}
-        }
-    }
-    match (pending, success) {
-        (true, _) => CiStatus::Pending,
-        (false, true) => CiStatus::Success,
-        (false, false) => CiStatus::None,
-    }
-}
-
 fn extract_ci_status_inner(commits: &GqlCommits) -> CiStatus {
     let Some(commit_node) = commits.nodes.first() else {
         return CiStatus::None;
@@ -3408,18 +3510,14 @@ fn extract_ci_status_inner(commits: &GqlCommits) -> CiStatus {
     let Some(rollup) = &commit_node.commit.status_check_rollup else {
         return CiStatus::None;
     };
-    // GitHub folds a superseded run's cancelled jobs into the aggregate
-    // `state`, so a commit whose every surviving job passed still rolls
-    // up FAILURE. Whenever the response carries contexts we can see
-    // that happen — and once it has, the aggregate is known wrong, so
-    // re-derive the verdict from the runs that still count (#1662).
-    // With nothing superseded the aggregate is authoritative and is
-    // kept: it sees the checks a truncated `contexts` page does not.
-    if let Some((live, dropped)) = live_check_contexts(rollup)
-        && dropped
-    {
-        return ci_status_from_contexts(&live);
-    }
+    // The aggregate stays authoritative here even though it folds in the
+    // jobs of runs concurrency superseded (#1662). It is the only signal
+    // computed over the WHOLE rollup: `contexts` is paged, so re-deriving
+    // the verdict from a page would answer from a subset and could erase
+    // a failure the page never reached — and `merge_block_reason` /
+    // `auto_merge_block_reason` both merge on this field. The superseded
+    // read is confined to the auto-fix trigger, which is what actually
+    // misreads it: see [`ci_failure_recheck`].
     match rollup.state.as_str() {
         "SUCCESS" => CiStatus::Success,
         "FAILURE" | "ERROR" => CiStatus::Failure,
@@ -3705,13 +3803,18 @@ fn extract_check_runs_inner(commits: &GqlCommits) -> Vec<CheckRun> {
     let Some(rollup) = &commit_node.commit.status_check_rollup else {
         return vec![];
     };
-    // Inbox-scan path: contexts are dropped from `SEARCH_QUERY` to cut
-    // cost. `pr.checks` stays empty until lazy-fetch
-    // (`PR_DETAILS_QUERY`) populates it via `merge_pr_details`.
-    let Some((live, _)) = live_check_contexts(rollup) else {
+    let Some(ctxs) = rollup.contexts.as_ref() else {
+        // Inbox-scan path: contexts are dropped from `SEARCH_QUERY`
+        // to cut cost. `pr.checks` stays empty until lazy-fetch
+        // (`PR_DETAILS_QUERY`) populates it via `merge_pr_details`.
         return vec![];
     };
-    live.into_iter().map(to_check_run).collect()
+    // Every context is kept, superseded ones included. `checks.len()`
+    // is how `BranchMergeGate::shortfall_for` detects a truncated page
+    // and declines to prove coverage from it (#1596); filtering entries
+    // out here would drop the count under `ROLLUP_CONTEXT_PAGE` and
+    // make a truncated list look complete.
+    ctxs.nodes.iter().map(to_check_run).collect()
 }
 
 /// One rollup context's verdict. The two shapes GitHub returns —
@@ -5112,8 +5215,8 @@ mod tests {
     /// Build the `commits` shape a rollup response deserializes into,
     /// from `(check name, job conclusion, parent run conclusion)`
     /// triples and the aggregate `state` GitHub rolled them up as.
-    /// Goes through serde so the test also pins the `checkSuite`
-    /// selection the queries ask for.
+    /// Goes through serde so the tests also pin the `checkSuite`
+    /// selection the recheck query asks for.
     fn rollup(state: &str, jobs: &[(&str, &str, Option<&str>)]) -> GqlCommits {
         let nodes: Vec<_> = jobs
             .iter()
@@ -5140,33 +5243,22 @@ mod tests {
         .expect("rollup fixture deserializes")
     }
 
-    /// Regression for #1662. A push immediately followed by a base
-    /// change fires two workflow runs on the same head; concurrency
-    /// cancels the first, but its jobs stay in the rollup and GitHub
-    /// folds them into the aggregate `state`. Reading that aggregate —
-    /// or the job conclusions flat — makes a fully green commit look
-    /// half-failed, and auto-fix spawns an agent that can only conclude
-    /// "nothing to fix".
+    /// The reported #1662 shape: a push immediately followed by a base
+    /// change fires two runs on one head, concurrency cancels the first,
+    /// and its dead jobs stay in the rollup. Nothing that still counts
+    /// is failing, so the queued auto-fix has nothing to fix.
     #[test]
-    fn superseded_run_does_not_make_a_green_commit_fail() {
+    fn a_superseded_run_leaves_no_failure_to_fix() {
         let commits = rollup(
             "FAILURE",
             &[
-                ("test", "CANCELLED", Some("CANCELLED")),
-                ("test", "SUCCESS", Some("SUCCESS")),
-                ("clippy", "CANCELLED", Some("CANCELLED")),
-                ("clippy", "SUCCESS", Some("SUCCESS")),
+                ("test (ubuntu-22.04)", "CANCELLED", Some("CANCELLED")),
+                ("test (ubuntu-22.04)", "SUCCESS", Some("SUCCESS")),
+                ("sandbox (all features)", "CANCELLED", Some("CANCELLED")),
+                ("sandbox (all features)", "SUCCESS", Some("SUCCESS")),
             ],
         );
-
-        assert_eq!(extract_ci_status_inner(&commits), CiStatus::Success);
-
-        let checks = extract_check_runs_inner(&commits);
-        assert_eq!(checks.len(), 2, "the cancelled run's jobs must be dropped");
-        assert!(
-            checks.iter().all(|c| c.status == CiStatus::Success),
-            "surviving checks: {checks:?}",
-        );
+        assert_eq!(ci_failure_recheck(&commits), CiFailureRecheck::Gone);
     }
 
     /// The workflow guard that asserts an upstream job succeeded fails
@@ -5174,7 +5266,7 @@ mod tests {
     /// carry a literal `FAILURE` that reads as a real content failure.
     /// It is still superseded.
     #[test]
-    fn superseded_run_failure_is_not_a_real_failure() {
+    fn a_superseded_runs_literal_failure_is_not_a_failure() {
         let commits = rollup(
             "FAILURE",
             &[
@@ -5182,13 +5274,13 @@ mod tests {
                 ("typos", "SUCCESS", Some("SUCCESS")),
             ],
         );
-        assert_eq!(extract_ci_status_inner(&commits), CiStatus::Success);
+        assert_eq!(ci_failure_recheck(&commits), CiFailureRecheck::Gone);
     }
 
-    /// A failure in a run that was NOT superseded still fails, even
+    /// A failure in a run that was NOT superseded still stands, even
     /// beside a cancelled sibling run.
     #[test]
-    fn live_run_failure_survives_the_superseded_filter() {
+    fn a_live_run_failure_still_stands() {
         let commits = rollup(
             "FAILURE",
             &[
@@ -5196,73 +5288,50 @@ mod tests {
                 ("test", "FAILURE", Some("FAILURE")),
             ],
         );
-        assert_eq!(extract_ci_status_inner(&commits), CiStatus::Failure);
-    }
-
-    /// Nothing superseded → GitHub's aggregate stays authoritative. It
-    /// sees checks a truncated `contexts` page does not, so the derived
-    /// rollup must not quietly replace it.
-    #[test]
-    fn aggregate_wins_when_no_run_was_superseded() {
-        let commits = rollup("FAILURE", &[("test", "SUCCESS", Some("SUCCESS"))]);
-        assert_eq!(extract_ci_status_inner(&commits), CiStatus::Failure);
+        assert_eq!(ci_failure_recheck(&commits), CiFailureRecheck::Stands);
     }
 
     /// A run cancelled while its jobs are still in flight has no
-    /// conclusion yet, so nothing is dropped and the aggregate holds.
+    /// conclusion yet, so it is not superseded and its cancelled job
+    /// still counts.
     #[test]
     fn a_run_without_a_conclusion_is_not_superseded() {
         let commits = rollup("FAILURE", &[("test", "CANCELLED", None)]);
-        assert_eq!(extract_ci_status_inner(&commits), CiStatus::Failure);
-        assert_eq!(extract_check_runs_inner(&commits).len(), 1);
+        assert_eq!(ci_failure_recheck(&commits), CiFailureRecheck::Stands);
     }
 
-    /// Every context superseded (the `contexts` page landed entirely on
-    /// the dead run) leaves nothing that says anything about the
-    /// commit — which is not a failure, and must not spawn a fix.
+    /// A query that doesn't select `checkSuite` at all leaves the field
+    /// absent from the payload. It must deserialize (the enum is
+    /// `untagged`, so a failure here would silently reinterpret the node
+    /// as a `StatusContext` and fail the whole response) and must read
+    /// as "not superseded" rather than dropping a real failure.
     #[test]
-    fn an_all_superseded_page_reports_nothing_rather_than_failure() {
-        let commits = rollup(
-            "FAILURE",
-            &[
-                ("test", "CANCELLED", Some("CANCELLED")),
-                ("clippy", "CANCELLED", Some("CANCELLED")),
-            ],
-        );
-        assert_eq!(extract_ci_status_inner(&commits), CiStatus::None);
-        assert!(extract_check_runs_inner(&commits).is_empty());
+    fn an_absent_check_suite_is_not_superseded() {
+        let commits: GqlCommits = serde_json::from_value(serde_json::json!({
+            "nodes": [{
+                "commit": {
+                    "statusCheckRollup": {
+                        "state": "FAILURE",
+                        "contexts": { "nodes": [
+                            { "name": "test", "conclusion": "FAILURE",
+                              "status": "COMPLETED", "permalink": null },
+                        ]},
+                    }
+                }
+            }]
+        }))
+        .expect("a context without checkSuite must still deserialize");
+
+        assert_eq!(ci_failure_recheck(&commits), CiFailureRecheck::Stands);
+        let checks = extract_check_runs_inner(&commits);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].status, CiStatus::Failure);
     }
 
-    /// The symptom #1662 was filed for: the PR is green, but the
-    /// aggregate still says FAILURE because a superseded run's jobs are
-    /// folded into it — and auto-fix spawns a full agent session that
-    /// can only read the logs, find nothing, and exit.
+    /// Commit statuses (`StatusContext`) have no parent workflow run, so
+    /// nothing can supersede them.
     #[test]
-    fn a_superseded_run_is_not_an_auto_fix_candidate() {
-        let mut pr = make_pr(1649, "alice");
-        pr.commits = rollup(
-            "FAILURE",
-            &[
-                ("test (ubuntu-22.04)", "CANCELLED", Some("CANCELLED")),
-                ("test (ubuntu-22.04)", "SUCCESS", Some("SUCCESS")),
-                ("typos", "FAILURE", Some("CANCELLED")),
-                ("typos", "SUCCESS", Some("SUCCESS")),
-            ],
-        );
-        let task = pr_to_task(&pr, "alice");
-
-        assert_eq!(task.role, TaskRole::Author, "guard precondition");
-        assert_eq!(
-            lazybox_core::auto_fix_candidate(&task),
-            None,
-            "a green PR behind a superseded run must not queue an auto-fix",
-        );
-    }
-
-    /// Commit statuses (`StatusContext`) have no parent run to be
-    /// superseded by, and must pass through untouched.
-    #[test]
-    fn status_contexts_are_never_superseded() {
+    fn a_status_context_failure_always_stands() {
         let commits: GqlCommits = serde_json::from_value(serde_json::json!({
             "nodes": [{
                 "commit": {
@@ -5279,10 +5348,95 @@ mod tests {
         }))
         .expect("mixed-context fixture deserializes");
 
-        assert_eq!(extract_ci_status_inner(&commits), CiStatus::Failure);
+        assert_eq!(ci_failure_recheck(&commits), CiFailureRecheck::Stands);
+    }
+
+    /// A full page may be hiding the failure the aggregate saw, so the
+    /// fix stands rather than being called gone from a partial read.
+    /// Erring this way costs a false spawn; erring the other way would
+    /// silence a genuinely failing PR.
+    #[test]
+    fn a_truncated_page_cannot_prove_a_failure_is_gone() {
+        let jobs: Vec<(String, &str, Option<&str>)> = (0..RECHECK_CONTEXT_PAGE)
+            .map(|i| (format!("check-{i}"), "CANCELLED", Some("CANCELLED")))
+            .collect();
+        let borrowed: Vec<(&str, &str, Option<&str>)> = jobs
+            .iter()
+            .map(|(name, conclusion, suite)| (name.as_str(), *conclusion, *suite))
+            .collect();
+        let commits = rollup("FAILURE", &borrowed);
+
+        assert_eq!(
+            ci_failure_recheck(&commits),
+            CiFailureRecheck::Stands,
+            "a page at the cap may continue past what we can see",
+        );
+    }
+
+    /// Regression for the #1596 native auto-merge coverage gate.
+    /// `BranchMergeGate::shortfall_for` detects a truncated check list by
+    /// `checks.len() >= ROLLUP_CONTEXT_PAGE` and declines to prove
+    /// coverage from it. Dropping superseded entries here would pull the
+    /// count under the cap and make a truncated list look complete — so
+    /// GitHub gets armed on an unproven subset and merges a PR whose
+    /// unseen, non-required check is red.
+    #[test]
+    fn superseded_contexts_stay_in_the_check_list() {
+        let commits = rollup(
+            "FAILURE",
+            &[
+                ("test", "CANCELLED", Some("CANCELLED")),
+                ("test", "SUCCESS", Some("SUCCESS")),
+            ],
+        );
         let checks = extract_check_runs_inner(&commits);
-        assert_eq!(checks.len(), 1);
-        assert_eq!(checks[0].name, "buildkite");
+        assert_eq!(
+            checks.len(),
+            2,
+            "the truncation detector counts entries, so none may be filtered out",
+        );
+    }
+
+    /// Regression for the merge gates. `Task::ci` must keep coming from
+    /// GitHub's aggregate, which is computed over the WHOLE rollup:
+    /// `contexts` is paged, so re-deriving the verdict from a page could
+    /// erase a failure the page never reached, and both
+    /// `merge_block_reason` and `auto_merge_block_reason` merge on this
+    /// field. The superseded read belongs to the auto-fix trigger alone.
+    #[test]
+    fn the_aggregate_still_decides_the_ci_verdict() {
+        let commits = rollup(
+            "FAILURE",
+            &[
+                ("test", "CANCELLED", Some("CANCELLED")),
+                ("test", "SUCCESS", Some("SUCCESS")),
+            ],
+        );
+        assert_eq!(extract_ci_status_inner(&commits), CiStatus::Failure);
+
+        // And the converse: a superseded entry must not turn a green
+        // aggregate into "no CI", which would stall merge-on-green
+        // (it requires a positive Success).
+        let skipped = rollup(
+            "SUCCESS",
+            &[
+                ("test", "CANCELLED", Some("CANCELLED")),
+                ("test", "SKIPPED", Some("SUCCESS")),
+            ],
+        );
+        assert_eq!(extract_ci_status_inner(&skipped), CiStatus::Success);
+    }
+
+    /// The recheck query must page deep enough to see BOTH runs of a
+    /// double-fired commit — the shape it exists to read carries every
+    /// check twice, so paging at `ROLLUP_CONTEXT_PAGE` would truncate
+    /// exactly the PRs it is asked about.
+    #[test]
+    fn recheck_query_pages_contexts_at_its_own_cap() {
+        assert!(
+            PR_CHECK_ROLLUP_QUERY.contains(&format!("contexts(first: {RECHECK_CONTEXT_PAGE})")),
+            "PR_CHECK_ROLLUP_QUERY must page contexts at RECHECK_CONTEXT_PAGE",
+        );
     }
 
     fn verdict(login: &str, state: &str) -> GqlReviewerVerdict {

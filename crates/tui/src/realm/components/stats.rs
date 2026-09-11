@@ -199,7 +199,12 @@ impl Stats {
     /// `−$0.00` beside a real saving is what talks a reader out of the
     /// rollout the number exists to justify.
     fn compaction_saved(&self, unpriced: &str, bytes: &str, micros: &str) -> String {
-        if self.total(unpriced) > 0 {
+        // A saving under half a cent renders `−$0.00` through a two-decimal
+        // format — the same confident zero the unpriced branch exists to
+        // avoid, reached by rounding instead of by a missing rate card. It is
+        // most reachable early in a rollout, on one workspace, which is
+        // exactly when the number is being read to decide anything.
+        if self.total(unpriced) > 0 || self.total(micros) < MIN_RENDERABLE_MICROS {
             format!("−{}", fmt_bytes(self.total(bytes)))
         } else {
             // "gross" because condensing also shortens the cacheable prefix,
@@ -228,6 +233,32 @@ impl Stats {
             self.compaction_saved(unpriced, bytes, micros),
             fmt_int(self.total(blocks)),
         )
+    }
+
+    /// The back-out count, or `—` when the *active tab* saw no compaction at
+    /// all. Like its sibling rows this is gated on the whole window so it
+    /// does not flicker across Today⇄Week, so a quiet day would otherwise
+    /// render a confident `0` — safety evidence for a day on which the pass
+    /// never ran, which is the one number here that must be earned.
+    fn compaction_regressions(&self) -> String {
+        let quiet = [
+            stats::COMPACTION_BLOCKS,
+            stats::COMPACTION_SAVED_BYTES,
+            stats::COMPACTION_SAVED_MICROS,
+            stats::COMPACTION_UNPRICED_BYTES,
+            stats::COMPACTION_PROJECTED_BLOCKS,
+            stats::COMPACTION_PROJECTED_BYTES,
+            stats::COMPACTION_PROJECTED_MICROS,
+            stats::COMPACTION_PROJECTED_UNPRICED_BYTES,
+            stats::COMPACTION_REGRESSIONS,
+        ]
+        .iter()
+        .all(|metric| self.total(metric) == 0);
+        if quiet {
+            "—".to_string()
+        } else {
+            fmt_int(self.total(stats::COMPACTION_REGRESSIONS))
+        }
     }
 
     /// Distinct local days that saw any activity, over the shipped window.
@@ -373,10 +404,7 @@ impl Stats {
             ));
         }
         if realized || projected {
-            lines.push(row(
-                "Regressions",
-                fmt_int(self.total(stats::COMPACTION_REGRESSIONS)),
-            ));
+            lines.push(row("Regressions", self.compaction_regressions()));
         }
         lines.push(Line::from(""));
 
@@ -517,6 +545,10 @@ fn fmt_compact(n: i64) -> String {
 fn fmt_cost(micros: i64) -> String {
     format!("${:.2}", micros as f64 / 1_000_000.0)
 }
+
+/// Below this a two-decimal dollar figure rounds to `$0.00`, so the saving is
+/// reported in bytes instead — true at any scale.
+const MIN_RENDERABLE_MICROS: i64 = 5_000;
 
 /// Byte counts at the scale a condensed conversation reaches: `812 B`,
 /// `41.6 KB`, `3.2 MB`. Decimal units, matching `fmt_compact`'s `k`/`M`.
@@ -876,6 +908,72 @@ mod tests {
         comp.toggle_view();
         let week = render(&mut comp, 50, 40);
         assert!(week.contains("Regressions  1"), "{week}");
+    }
+
+    /// #1621: a two-decimal dollar figure rounds a real saving away. The
+    /// unpriced branch already exists to avoid exactly this string; reaching
+    /// it by rounding instead of by a missing rate card is the same misread,
+    /// and it is most reachable on one workspace early in a rollout — when
+    /// the number is being read to decide whether to flip anything at all.
+    #[test]
+    fn a_sub_cent_saving_reports_bytes_rather_than_a_rounded_away_zero() {
+        let mut comp = Stats::new(
+            vec![
+                bucket("2026-08-25", stats::COMPACTION_SAVED_MICROS, 2_893),
+                bucket("2026-08-25", stats::COMPACTION_SAVED_BYTES, 23_144),
+                bucket("2026-08-25", stats::COMPACTION_BLOCKS, 4),
+            ],
+            today(),
+            false,
+        );
+        let out = render(&mut comp, 60, 40);
+        let row = compaction_row(&out);
+        assert!(
+            !row.contains("$0.00"),
+            "a real saving never renders as a rounded-away zero: {out}",
+        );
+        assert!(
+            row.contains("23.1 KB"),
+            "it reports the bytes instead: {out}"
+        );
+        assert!(row.contains("4 blocks"), "{out}");
+    }
+
+    /// #1621: the rows are gated on the whole window so they do not flicker
+    /// across Today⇄Week, which leaves a day with no compaction rendering a
+    /// confident `0` back-outs — safety evidence for a day on which the pass
+    /// never ran. That is the one number here that has to be earned.
+    #[test]
+    fn a_tab_with_no_compaction_reports_no_back_out_count() {
+        let mut comp = Stats::new(
+            vec![
+                // Six days back — inside the shipped window, outside today.
+                bucket("2026-08-19", stats::COMPACTION_SAVED_BYTES, 1_240_000),
+                bucket("2026-08-19", stats::COMPACTION_SAVED_MICROS, 1_840_000),
+                bucket("2026-08-19", stats::COMPACTION_BLOCKS, 12),
+            ],
+            today(),
+            false,
+        );
+        let out = render(&mut comp, 60, 40);
+        let row = out
+            .lines()
+            .find(|line| line.contains("Regressions"))
+            .expect("the row stays present across the window");
+        assert!(
+            row.contains("\u{2014}"),
+            "a day with no compaction reports nothing, not zero: {out}",
+        );
+
+        // The week did see the pass run, and saw no back-out — there, `0` is
+        // a fact the window actually supports.
+        comp.toggle_view();
+        let week = render(&mut comp, 60, 40);
+        let row = week
+            .lines()
+            .find(|line| line.contains("Regressions"))
+            .expect("a regressions row");
+        assert!(row.contains('0'), "{week}");
     }
 
     /// The context ratios (#1606): the fleet-wide pair from the daily

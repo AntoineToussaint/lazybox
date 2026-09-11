@@ -230,6 +230,17 @@ impl SeenBlocks {
     /// True when `id` had not been seen, so the caller counts it as new.
     fn insert(&mut self, id: &str) -> bool {
         if self.ids.contains(id) {
+            // Re-sent, so the transcript still carries it: move it to the
+            // back. Insertion order is not liveness — a tool result stays in
+            // the transcript once it is there, so the *oldest* identities are
+            // the ones most likely to still be re-sent, and evicting by
+            // arrival forgets exactly those. Eviction now forgets what the
+            // agent stopped sending.
+            if let Some(position) = self.order.iter().position(|seen| &**seen == id)
+                && let Some(found) = self.order.remove(position)
+            {
+                self.order.push_back(found);
+            }
             return false;
         }
         let id: Arc<str> = Arc::from(id);
@@ -254,9 +265,12 @@ impl SeenBlocks {
 #[derive(Debug, Default)]
 struct SessionState {
     disabled: bool,
-    /// Distinct block identities this session has condensed — the figure
-    /// [`Compactor::stats`] reports. A counter rather than the length of
-    /// `seen`, which forgets its oldest entries to stay bounded.
+    /// Distinct block identities this session has condensed, summed across
+    /// both reporting axes — the figure [`Compactor::stats`] reports. A block
+    /// proven in `shadow` and later actually elided counts on each, so this
+    /// is condensations reported, not blocks the conversation carries. A
+    /// counter rather than a set's length, because the sets forget their
+    /// oldest entries to stay bounded.
     condensed_total: u64,
     /// Identities kept to count a block once however many turns it
     /// survives. A set, not a level, because a level is wrong in both
@@ -266,9 +280,27 @@ struct SessionState {
     /// workspace session key (#1310 allows that), each request re-counting
     /// the other's blocks as new. Set difference is correct under
     /// restarts, interleaving, and retries alike.
-    seen: SeenBlocks,
+    seen_realized: SeenBlocks,
+    /// The same, for turns that only computed the saving. Held apart from
+    /// `seen_realized` because `rewrote` is a second axis the de-duplication
+    /// has to respect, and one shared set silently loses the realized count:
+    /// a baseline can only be measured on an eligible turn, so the *first*
+    /// eligible turn of every session is held (see `begin`) and commits as
+    /// projected — consuming the identities before a single byte has been
+    /// elided. Every later realized turn then reports `0 blocks` beside a
+    /// real dollar saving, and a session proven in `shadow` before the flip
+    /// to `on` loses its whole batch that way.
+    seen_projected: SeenBlocks,
+    /// Bytes and dollars that actually left the wire elided — never a
+    /// projection. The kill switch's notice reports these, and a session
+    /// that ran `shadow` before flipping to `on` would otherwise be told it
+    /// saved what it had only ever modelled.
     saved_bytes: u64,
     saved_micros: u64,
+    /// Realized bytes on turns that could not be priced (an unpriced model,
+    /// or a flat-fee route). Counted here rather than as zero dollars, so a
+    /// large saving on a subscription plan cannot render as `$0.00`.
+    unpriced_bytes: u64,
     /// A rewrite has actually gone out for this session (shadow mode never
     /// sets it — nothing on the wire changed, so there is nothing to
     /// attribute a cache regression to).
@@ -285,6 +317,19 @@ struct SessionState {
     baseline_share: Option<f64>,
     degraded_turns: u32,
     regressions: u64,
+}
+
+impl SessionState {
+    /// The identity set for one reporting axis. A block proven in `shadow`
+    /// and later actually elided is one projected block *and* one realized
+    /// block: they answer different questions, so each is counted once.
+    fn seen(&mut self, rewrote: bool) -> &mut SeenBlocks {
+        if rewrote {
+            &mut self.seen_realized
+        } else {
+            &mut self.seen_projected
+        }
+    }
 }
 
 /// The outcome of one inspection: the bytes to forward, and whether this
@@ -609,8 +654,10 @@ impl Compactor {
             if state.degraded_turns >= CACHE_REGRESSION_TURNS {
                 state.disabled = true;
                 state.regressions += 1;
-                state.seen.clear();
-                let saved = state.saved_micros as f64 / 1_000_000.0;
+                state.seen_realized.clear();
+                state.seen_projected.clear();
+                let saved =
+                    describe_saved(state.saved_micros, state.saved_bytes, state.unpriced_bytes);
                 drop(sessions);
                 tracing::warn!(
                     "compaction: cache-read share fell from {baseline:.2} to {share:.2} for {agent_id}/{session} and did not recover in {CACHE_REGRESSION_TURNS} turns — compaction disabled for this session"
@@ -618,7 +665,7 @@ impl Compactor {
                 (self.notice)(
                     "Context compaction disabled".to_string(),
                     format!(
-                        "{agent_id}: prompt-cache reads dropped after compaction and did not recover in {CACHE_REGRESSION_TURNS} turns. Compaction is off for this session (saved ≈${saved:.2} before backing out)."
+                        "{agent_id}: prompt-cache reads dropped after compaction and did not recover in {CACHE_REGRESSION_TURNS} turns. Compaction is off for this session (saved {saved} before backing out)."
                     ),
                 );
                 if let Some(sink) = &self.saving {
@@ -688,20 +735,38 @@ impl Compactor {
         let Some(state) = entry(&mut sessions, session) else {
             return Saving::default();
         };
-        // Only identities this session has never condensed are new. A block
-        // re-sent verbatim for twenty turns is counted once, and a second
-        // conversation on the same session key contributes its own blocks
-        // instead of cancelling the first's.
+        // Only identities this session has never condensed *on this axis*
+        // are new. A block re-sent verbatim for twenty turns is counted
+        // once, and a second conversation on the same session key
+        // contributes its own blocks instead of cancelling the first's.
+        // Counting per axis is what keeps the realized row honest: the held
+        // first turn and any `shadow` phase commit as projected, so a shared
+        // set would hand them the identities and leave every realized turn
+        // reporting `0 blocks` next to the dollars it really did save.
+        let seen = state.seen(pending.rewrote);
         let blocks = pending
             .condensed_ids
             .iter()
-            .filter(|id| state.seen.insert(id.as_str()))
+            .filter(|id| seen.insert(id.as_str()))
             .count() as u64;
         state.condensed_total += blocks;
         // The saving, by contrast, IS recurring: those bytes would have
         // been paid for again on every turn the blocks survive.
-        state.saved_bytes += pending.saved_bytes as u64;
-        state.saved_micros += pending.saved_micros.unwrap_or(0);
+        //
+        // Only a turn that actually rewrote moves the session totals. They
+        // feed the kill switch's notice, which speaks in the past tense
+        // about money the bill did not carry; folding a `shadow` estimate in
+        // would report a projection as a payment — and `shadow` is the
+        // shipped default, so that is the ordinary case, not the corner.
+        if pending.rewrote {
+            state.saved_bytes += pending.saved_bytes as u64;
+            match pending.saved_micros {
+                Some(micros) => state.saved_micros += micros,
+                // Pricing an unpriced route at zero is precisely how a large
+                // saving comes to read as `$0.00`.
+                None => state.unpriced_bytes += pending.saved_bytes as u64,
+            }
+        }
         state.rewrote |= pending.rewrote;
         Saving {
             blocks,
@@ -734,6 +799,23 @@ impl Compactor {
         )
     }
 }
+
+/// A dollar figure only when one was actually priced and is large enough to
+/// survive rounding; bytes otherwise. A saving the route cannot price, or one
+/// under half a cent, renders `$0.00` through a two-decimal format — the exact
+/// confident zero the readout goes out of its way never to print, and no more
+/// welcome in a notice than on the screen.
+fn describe_saved(micros: u64, bytes: u64, unpriced_bytes: u64) -> String {
+    if unpriced_bytes > 0 || micros < MIN_RENDERABLE_MICROS {
+        format!("{bytes} bytes of context")
+    } else {
+        format!("≈${:.2}", micros as f64 / 1_000_000.0)
+    }
+}
+
+/// Below this a two-decimal dollar figure rounds to `$0.00`, so the saving is
+/// reported in bytes instead.
+const MIN_RENDERABLE_MICROS: u64 = 5_000;
 
 /// Sessions tracked at once. The key comes off the request path, so a
 /// loopback client that invented paths could otherwise grow this map
@@ -1778,8 +1860,11 @@ mod tests {
         let compactor = Compactor::new(
             policy(CompactionMode::On),
             Arc::new(std::collections::BTreeMap::new()),
-            Arc::new(move |title: String, _body: String| {
-                recorder.lock().expect("lock").push(title);
+            Arc::new(move |title: String, body: String| {
+                recorder
+                    .lock()
+                    .expect("lock")
+                    .push(format!("{title} | {body}"));
             }),
             tags(),
         )
@@ -1837,9 +1922,11 @@ mod tests {
     fn an_on_mode_saving_is_reported_as_realized() {
         let (compactor, _notices, savings) = compactor_with_notices();
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
 
-        turn(&compactor, "ws", &body);
+        // Production order: the first eligible turn is held and sets the
+        // baseline, the second is the one that actually elides bytes.
+        production_turn(&compactor, "ws", &body);
+        production_turn(&compactor, "ws", &body);
 
         let savings = savings.lock().expect("lock");
         assert!(
@@ -1861,17 +1948,17 @@ mod tests {
         let mut state = SessionState::default();
         for index in 0..(MAX_CONDENSED_IDS + 500) {
             assert!(
-                state.seen.insert(&format!("call_{index}")),
+                state.seen_realized.insert(&format!("call_{index}")),
                 "every distinct identity is new the first time",
             );
             state.condensed_total += 1;
         }
         assert_eq!(
-            state.seen.ids.len(),
+            state.seen_realized.ids.len(),
             MAX_CONDENSED_IDS,
             "the set is capped, not unbounded",
         );
-        assert_eq!(state.seen.order.len(), MAX_CONDENSED_IDS);
+        assert_eq!(state.seen_realized.order.len(), MAX_CONDENSED_IDS);
         assert_eq!(
             state.condensed_total,
             (MAX_CONDENSED_IDS + 500) as u64,
@@ -1879,8 +1966,14 @@ mod tests {
         );
         // The newest identities are the ones still worth remembering: they
         // are the ones the agent can still re-send.
-        assert!(!state.seen.insert("call_2547"), "the newest is remembered");
-        assert!(state.seen.insert("call_0"), "the oldest was forgotten");
+        assert!(
+            !state.seen_realized.insert("call_2547"),
+            "the newest is remembered",
+        );
+        assert!(
+            state.seen_realized.insert("call_0"),
+            "the oldest was forgotten"
+        );
         drop(compactor);
     }
 
@@ -1900,7 +1993,7 @@ mod tests {
                 .expect("lock")
                 .get("ws")
                 .expect("session")
-                .seen
+                .seen_realized
                 .ids
                 .is_empty(),
             "the turn left identities behind",
@@ -1914,7 +2007,10 @@ mod tests {
         let state = sessions.get("ws").expect("session");
         assert!(state.disabled, "the kill switch fired");
         assert!(
-            state.seen.ids.is_empty() && state.seen.order.is_empty(),
+            state.seen_realized.ids.is_empty()
+                && state.seen_realized.order.is_empty()
+                && state.seen_projected.ids.is_empty()
+                && state.seen_projected.order.is_empty(),
             "and released identities it can never consult again",
         );
         assert!(
@@ -1929,6 +2025,166 @@ mod tests {
         if let Some(pending) = done.pending {
             compactor.commit(session, "claude", pending);
         }
+    }
+
+    /// Drive a session the way the proxy does. A cache baseline can only be
+    /// measured on an *eligible* turn's response — `observe_usage` is called
+    /// with `compacted.measured`, true only when a plan was non-empty — so the
+    /// first eligible turn of every session is necessarily the held one. A
+    /// test that seeds a baseline before any `rewrite` describes a state
+    /// production cannot reach, and hides what the held turn does to the
+    /// accounting.
+    fn production_turn_priced(compactor: &Compactor, session: &str, body: &Bytes, priced: bool) {
+        let done = compactor.rewrite(session, "claude", priced, body.clone());
+        let measured = done.measured;
+        if let Some(pending) = done.pending {
+            compactor.commit(session, "claude", pending);
+        }
+        compactor.observe_usage(session, "claude", &usage(100, 900), measured);
+    }
+
+    fn production_turn(compactor: &Compactor, session: &str, body: &Bytes) {
+        production_turn_priced(compactor, session, body, true);
+    }
+
+    /// #1621: the held first turn commits as *projected*, so a single
+    /// de-duplication set hands it every block identity and leaves the
+    /// realized row reporting `0 blocks` beside the dollars it really saved.
+    /// Every session has a held first turn, so this was the ordinary `on`
+    /// reading, not an edge case.
+    #[test]
+    fn the_held_first_turn_does_not_consume_the_realized_block_count() {
+        let (compactor, _notices, savings) = compactor_with_notices();
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+
+        production_turn(&compactor, "ws", &body);
+        production_turn(&compactor, "ws", &body);
+
+        let savings = savings.lock().expect("lock");
+        let projected = savings
+            .iter()
+            .find(|saving| !saving.rewrote)
+            .expect("the held turn reports a projection");
+        let realized = savings
+            .iter()
+            .find(|saving| saving.rewrote)
+            .expect("the next turn actually elides");
+        assert!(projected.blocks > 0, "the held turn counted the blocks");
+        assert_eq!(
+            realized.blocks, projected.blocks,
+            "the realized row counts the blocks it actually elided, not zero",
+        );
+    }
+
+    /// The same defect on the path the feature exists for: prove it in
+    /// `shadow`, then flip the workspace to `on`. One shared set lets the
+    /// shadow phase consume every identity, so the realized row reports a
+    /// real saving against `0 blocks` — the reading most likely to be taken
+    /// as "compaction stopped working" and flipped straight back.
+    #[test]
+    fn a_shadow_phase_does_not_consume_the_realized_block_count() {
+        let mode = Arc::new(Mutex::new(CompactionMode::Shadow));
+        let source = mode.clone();
+        let savings: Savings = Arc::new(Mutex::new(Vec::new()));
+        let recorder = savings.clone();
+        let compactor = Compactor::with_policy_source(
+            Arc::new(move || ContextHygiene {
+                mode: *source.lock().expect("mode"),
+                ..ContextHygiene::default()
+            }),
+            Arc::new(std::collections::BTreeMap::new()),
+            Arc::new(|_, _| {}),
+            tags(),
+        )
+        .with_saving_sink(Arc::new(move |_: &str, _: &str, saving: Saving| {
+            recorder.lock().expect("lock").push(saving);
+        }));
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+
+        production_turn(&compactor, "ws", &body);
+        production_turn(&compactor, "ws", &body);
+        let projected = savings.lock().expect("lock")[0].blocks;
+        assert!(projected > 0, "shadow proved a block count");
+
+        *mode.lock().expect("mode") = CompactionMode::On;
+        production_turn(&compactor, "ws", &body);
+        production_turn(&compactor, "ws", &body);
+
+        let savings = savings.lock().expect("lock");
+        let realized = savings
+            .iter()
+            .find(|saving| saving.rewrote)
+            .expect("the flip elides bytes for real");
+        assert_eq!(
+            realized.blocks, projected,
+            "flipping to `on` reports the blocks it now actually elides",
+        );
+    }
+
+    /// #1621: the session totals feed a notice that speaks in the past tense
+    /// about money the bill did not carry. A `shadow` estimate folded in
+    /// reports a projection as a payment — and `shadow` is the default.
+    #[test]
+    fn a_shadow_phase_adds_no_money_to_the_session_total() {
+        let (compactor, savings) = shadow_compactor_reporting();
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+
+        production_turn(&compactor, "ws", &body);
+        production_turn(&compactor, "ws", &body);
+
+        assert!(
+            savings.lock().expect("lock").iter().any(|s| s.blocks > 0),
+            "shadow still reports a projection on the wire",
+        );
+        assert_eq!(
+            compactor.stats("ws").1,
+            0.0,
+            "but the session banked no money, because none was saved",
+        );
+    }
+
+    /// An unpriced route saves real bytes and no dollars. Counting that as
+    /// zero makes the back-out notice claim a large saving was `$0.00`.
+    #[test]
+    fn the_back_out_notice_reports_bytes_when_the_route_is_unpriced() {
+        let (compactor, notices, _savings) = compactor_with_notices();
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+
+        production_turn_priced(&compactor, "ws", &body, false);
+        production_turn_priced(&compactor, "ws", &body, false);
+        for _ in 0..CACHE_REGRESSION_TURNS {
+            compactor.observe_usage("ws", "claude", &usage(900, 100), true);
+        }
+
+        let notices = notices.lock().expect("lock");
+        let notice = notices.last().expect("the kill switch raised a notice");
+        assert!(
+            !notice.contains("$0.00"),
+            "an unpriced saving is never a confident zero: {notice}",
+        );
+        assert!(
+            notice.contains("bytes of context"),
+            "it reports the figure that is true without a rate card: {notice}",
+        );
+    }
+
+    /// #1621: eviction by arrival order forgets exactly the blocks the agent
+    /// is still re-sending — a tool result stays in the transcript, so the
+    /// oldest identities are the live ones. Forgetting one re-counts it.
+    #[test]
+    fn a_re_sent_identity_is_not_evicted_for_having_arrived_first() {
+        let mut seen = SeenBlocks::default();
+        assert!(seen.insert("call_live"));
+        for index in 0..MAX_CONDENSED_IDS {
+            // The agent re-sends the same original every turn, which is the
+            // whole reason the identity is being kept.
+            assert!(!seen.insert("call_live"), "still the same block");
+            seen.insert(&format!("call_{index}"));
+        }
+        assert!(
+            !seen.insert("call_live"),
+            "a block the agent still re-sends is remembered, so it is counted once",
+        );
     }
 
     /// Like [`anthropic_body`], but with tool-call ids from a different

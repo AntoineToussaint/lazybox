@@ -559,6 +559,40 @@ fn empty_body() -> ProxyBody {
         .boxed()
 }
 
+/// Run both passes over one request body: measure what the agent sent
+/// (#1606), then condense old, large tool results out of it (#1609).
+///
+/// They are one function because the order between them is load-bearing and
+/// has no other enforcement. The accounting has to describe the conversation
+/// the *agent* sent; compaction mutates that conversation into lazybox's own
+/// output. Measuring afterwards would report the proxy's rewrite as the
+/// agent's context, and would give a condensed block a new identity the turn
+/// it is rewritten — reading its re-send as a first send. Both are silent on
+/// the wire: plausible numbers, no error. Keeping the two calls in one
+/// function, rather than two reorderable lines at a call site, is what gives
+/// `the_accounting_describes_the_body_the_agent_sent` a single place to hold.
+///
+/// The body is parsed once and the tree handed to both (#1623) — a
+/// conversation body grows for the length of a session, and this is the hot
+/// path of every request a metered agent makes. `measure` borrows the tree;
+/// `plan` consumes and mutates it.
+fn measure_then_compact(
+    compactor: &Compactor,
+    session: &str,
+    agent_id: &str,
+    priced: bool,
+    body: Bytes,
+) -> (Option<context_parse::Measured>, compaction::Rewritten) {
+    let parsed = serde_json::from_slice::<serde_json::Value>(&body).ok();
+    let measured = parsed
+        .as_ref()
+        .and_then(|tree| context_parse::measure(tree, compactor.min_lines()));
+    (
+        measured,
+        compactor.rewrite(session, agent_id, priced, body, parsed),
+    )
+}
+
 async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<ProxyBody> {
     let (parts, body) = request.into_parts();
 
@@ -586,29 +620,16 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
         }
     };
 
-    // What this request is *made of* (#1606), parsed off the body already
-    // buffered for forwarding. Only the parse happens here; the blocks are
-    // folded into the session's seen-set at the far end, together with the
-    // usage report, so that only a *billed* request consumes a block's first
-    // send — see the fold below.
-    //
-    // This must stay *above* the compaction rewrite below: `rewrite` rebinds
-    // `body_bytes` to lazybox's own output. Measuring afterwards would both
-    // report the proxy's rewrite as the conversation the agent sent, and give
-    // a condensed block a new identity the turn it is rewritten — reading its
-    // re-send as a first send. Measuring first keeps the accounting
-    // independent of whether the compactor fired.
-    let measured = context_parse::measure(&body_bytes, state.compactor.min_lines());
-
-    // The one place the proxy is not transparent: old, large tool results
-    // are condensed before the expensive model ever sees them (#1609).
-    // `off` and `shadow` hand the original bytes straight back.
     // The accounting rides `pending` to the end of the response instead of
     // landing here (#1621): this request may be a retry of a turn already
     // counted, or may never complete at all.
-    let compacted = state
-        .compactor
-        .rewrite(&session, &agent_id, !count_only, body_bytes);
+    let (measured, compacted) = measure_then_compact(
+        &state.compactor,
+        &session,
+        &agent_id,
+        !count_only,
+        body_bytes,
+    );
     let body_bytes = compacted.body;
     let saving = compacted.pending;
 
@@ -742,6 +763,116 @@ async fn handle(state: Arc<ProxyState>, request: Request<Incoming>) -> Response<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The accounting must describe the conversation the *agent* sent, not
+    /// the one compaction is about to forward. Both numbers come out of
+    /// [`measure_then_compact`], so a reorder inside it fails here — which
+    /// the previous home for this test, beside the compactor's fixtures,
+    /// could not do: it rebuilt the ordering itself and passed whatever the
+    /// seam did.
+    #[test]
+    fn the_accounting_describes_the_body_the_agent_sent() {
+        use lazybox_core::{CompactionMode, ContextHygiene};
+
+        let body = conversation_with_large_results(8);
+        let compactor = Compactor::new(
+            ContextHygiene {
+                mode: CompactionMode::On,
+                ..ContextHygiene::default()
+            },
+            Arc::new(std::collections::BTreeMap::new()),
+            Arc::new(|_, _| {}),
+            crate::context_tag::TagSource::from_secret("fixture-secret"),
+        );
+        // The first eligible turn is held so its response can anchor the
+        // kill switch's baseline, and `observe_usage` only counts a turn the
+        // session actually ran a pass for (#1622) — so the baseline has to be
+        // seeded through the seam, exactly as a live session does it. Without
+        // it the turn below is held too and every assertion is vacuous.
+        let (_, held) = measure_then_compact(&compactor, "ws", "claude", true, body.clone());
+        assert_eq!(held.body, body, "the first eligible turn is held");
+        compactor.observe_usage(
+            "ws",
+            "claude",
+            &AgentUsage {
+                input_tokens: Some(100),
+                output_tokens: Some(10),
+                cache_creation_input_tokens: Some(0),
+                cache_read_input_tokens: Some(900),
+                cost_usd_micros: None,
+                context: None,
+            },
+            true,
+        );
+
+        let (measured, compacted) =
+            measure_then_compact(&compactor, "ws", "claude", true, body.clone());
+        assert!(
+            compacted.body.len() < body.len(),
+            "the fixture must actually be rewritten for this to test anything"
+        );
+
+        let sent = measured
+            .expect("a conversation")
+            .against(&mut context_parse::SeenBlocks::default());
+        let forwarded = context_parse::measure(
+            &serde_json::from_slice::<serde_json::Value>(&compacted.body).expect("json"),
+            compactor.min_lines(),
+        )
+        .expect("a conversation")
+        .against(&mut context_parse::SeenBlocks::default());
+
+        assert!(
+            sent.tool_result_bytes > forwarded.tool_result_bytes,
+            "the tool-output share must be the agent's, not lazybox's output: \
+             sent {} vs forwarded {}",
+            sent.tool_result_bytes,
+            forwarded.tool_result_bytes
+        );
+        assert!(
+            sent.large_tool_results > forwarded.large_tool_results,
+            "and the oversized-block count must be the agent's: sent {} vs \
+             forwarded {}",
+            sent.large_tool_results,
+            forwarded.large_tool_results
+        );
+    }
+
+    /// A conversation carrying `results` tool results, each comfortably over
+    /// the default line floor so the compactor has something to condense.
+    fn conversation_with_large_results(results: usize) -> Bytes {
+        let mut messages =
+            vec![serde_json::json!({"role": "user", "content": [{"type": "text", "text": "go"}]})];
+        for index in 0..results {
+            messages.push(serde_json::json!({
+                "role": "assistant",
+                "content": [{
+                    "type": "tool_use",
+                    "id": format!("call_{index}"),
+                    "name": "Read",
+                    "input": {"file_path": format!("src/file_{index}.rs")},
+                }],
+            }));
+            let text = (0..400)
+                .map(|line| format!("block {index} line {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            messages.push(serde_json::json!({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": format!("call_{index}"),
+                    "content": text,
+                }],
+            }));
+        }
+        Bytes::from(
+            serde_json::to_vec(
+                &serde_json::json!({"model": "claude-opus-5", "messages": messages}),
+            )
+            .expect("serialize"),
+        )
+    }
 
     /// A fresh install has nothing to reclaim: it takes an ephemeral port and
     /// remembers it, so the next restart has something to come back to.

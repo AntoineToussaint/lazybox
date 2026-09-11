@@ -204,6 +204,47 @@ done"#
     }
 }
 
+/// The alt-screen fixtures may not issue `smcup` until the test has
+/// re-allowed the alternate screen on their window: tmux drops the request
+/// outright while the option is off, so a pane that gets there first never
+/// enters the alt screen at all. The fixture blocks on a gate file the test
+/// writes once `set-option` has returned — a wall-clock sleep loses that
+/// race whenever spawn plus set-option outruns it under load (#1664).
+const ALT_SCREEN_FIXTURE: &str = "while [ ! -f \"$ALT_GATE\" ]; do sleep 0.02; done; \
+     printf '\\033[?1049h'; echo on-alt; exec sleep 300";
+
+fn alt_screen_fixture_argv() -> Vec<String> {
+    vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        ALT_SCREEN_FIXTURE.to_string(),
+    ]
+}
+
+fn alt_screen_gate_env(gate: &std::path::Path) -> Vec<(String, String)> {
+    vec![("ALT_GATE".into(), gate.to_string_lossy().into_owned())]
+}
+
+/// Re-allow the alternate screen on `key`'s window (simulating the pre-fix
+/// server config), then release the fixture waiting on `gate`.
+fn allow_alt_screen(socket: &str, key: &str, gate: &std::path::Path) {
+    let allow = std::process::Command::new("tmux")
+        .args([
+            "-L",
+            socket,
+            "set-option",
+            "-w",
+            "-t",
+            key,
+            "alternate-screen",
+            "on",
+        ])
+        .output()
+        .expect("set-option");
+    assert!(allow.status.success(), "re-allow alternate-screen");
+    std::fs::write(gate, b"").expect("open the alt-screen gate");
+}
+
 fn case_snapshot<'a>(
     case: &PromptCase,
     snapshots: &'a [TerminalSnapshot],
@@ -1151,37 +1192,19 @@ async fn alt_screen_pane_serves_no_deep_scrollback() {
     }
     let socket = format!("lazybox-test-altfetch-{}", std::process::id());
     let result = timeout(TEST_DEADLINE, async {
+        let gate_dir = tempfile::TempDir::new().expect("gate dir");
+        let gate = gate_dir.path().join("altfetch.gate");
         let backend = TmuxBackend::with_socket(&socket).expect("conf written");
         let key = backend
             .spawn(
-                &[
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    // Give the test a beat to re-allow the alt screen
-                    // (simulating the pre-fix server config) before the
-                    // program requests it.
-                    "sleep 1; printf '\\033[?1049h'; echo on-alt; exec sleep 300".to_string(),
-                ],
+                &alt_screen_fixture_argv(),
                 None,
-                &[],
+                &alt_screen_gate_env(&gate),
                 "altfetch-test",
             )
             .await
             .expect("tmux spawn");
-        let allow = std::process::Command::new("tmux")
-            .args([
-                "-L",
-                &socket,
-                "set-option",
-                "-w",
-                "-t",
-                &key,
-                "alternate-screen",
-                "on",
-            ])
-            .output()
-            .expect("set-option");
-        assert!(allow.status.success(), "re-allow alternate-screen");
+        allow_alt_screen(&socket, &key, &gate);
 
         let mut ticker = tokio::time::interval(Duration::from_millis(100));
         for attempt in 0.. {
@@ -1356,6 +1379,8 @@ async fn zero_history_alt_pane_warns_client_to_reopen() {
     let socket = format!("lazybox-test-altwarn-{}", std::process::id());
     let result = timeout(TEST_DEADLINE, async {
         let store = Arc::new(MemoryStore::new());
+        let gate_dir = tempfile::TempDir::new().expect("gate dir");
+        let gate = gate_dir.path().join("altwarn.gate");
         let backend = Arc::new(TmuxBackend::with_socket(&socket).expect("conf written"));
 
         // A healthy full-screen agent: output scrolls into retained history.
@@ -1378,31 +1403,14 @@ async fn zero_history_alt_pane_warns_client_to_reopen() {
         // program's smcup sticks and no history ever accumulates.
         let alt_key = backend
             .spawn(
-                &[
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    "sleep 1; printf '\\033[?1049h'; echo on-alt; exec sleep 300".to_string(),
-                ],
+                &alt_screen_fixture_argv(),
                 None,
-                &[],
+                &alt_screen_gate_env(&gate),
                 "alt",
             )
             .await
             .expect("spawn alt");
-        let allow = std::process::Command::new("tmux")
-            .args([
-                "-L",
-                &socket,
-                "set-option",
-                "-w",
-                "-t",
-                &alt_key,
-                "alternate-screen",
-                "on",
-            ])
-            .output()
-            .expect("re-allow alternate-screen");
-        assert!(allow.status.success(), "re-allow alternate-screen");
+        allow_alt_screen(&socket, &alt_key, &gate);
 
         // Wait for the healthy pane's output and the alt pane's entry.
         let mut ticker = tokio::time::interval(Duration::from_millis(100));

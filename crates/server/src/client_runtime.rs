@@ -66,6 +66,10 @@ impl ClientRuntime {
         tasks.push(crate::working_claims::spawn(config.clone()));
         tasks.push(crate::working_watchdog::spawn(&config));
         log_model_pin_warnings();
+        // Take the context-hygiene snapshot while the config is known to
+        // parse: a file broken later must freeze the dial where the user left
+        // it, and it can only do that once a good value has been read (#1667).
+        crate::proxy::compaction::live_policy();
         tasks.push(crate::error_inbox::spawn(&config));
         tasks.push(crate::epics::spawn(&config));
         tasks.push(crate::stats_accumulator::spawn(&config));

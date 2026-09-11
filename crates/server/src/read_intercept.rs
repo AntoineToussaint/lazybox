@@ -199,7 +199,7 @@ async fn decide(
             .is_ok_and(|workspace| crate::spawn_handler::workspace_is_metered(&cfg, &workspace));
 
     rule(
-        &cfg.agent.context_hygiene,
+        &crate::proxy::compaction::live_policy(),
         metered,
         config.condense_tag(),
         config.denied_reads(),

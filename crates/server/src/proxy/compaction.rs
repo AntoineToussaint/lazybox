@@ -369,7 +369,7 @@ impl Rewritten {
 /// The epic's premise is that both enforcement points act on *the same*
 /// policy: "two enforcement points that disagree are worse than one." The hook
 /// resolves its policy live, per decision ([`crate::read_intercept`] calls
-/// `Config::load`, which is cached behind a file stamp). A compactor holding a
+/// `live_policy`, which is cached behind a file stamp). A compactor holding a
 /// snapshot taken at `proxy::spawn` would therefore disagree with it for the
 /// whole life of the daemon after any config edit: flipping `mode` to `on`
 /// would start denying reads at the hook while the proxy still forwarded
@@ -377,6 +377,55 @@ impl Rewritten {
 /// proxy kept rewriting bodies. Reading through the same source on both sides
 /// is what makes the shared policy actually shared.
 pub type PolicySource = Arc<dyn Fn() -> ContextHygiene + Send + Sync>;
+
+/// The live policy, with the last successfully parsed one retained.
+///
+/// `Config::load` returns `Err` for as long as `config.yaml` does not parse —
+/// which includes an editor saving a partial file and any hand-edit with a
+/// typo. Falling back to `Default` there resets `mode` to `shadow`, and
+/// `shadow` *evaluates*: on a canary workspace [`ContextHygiene::mode_for`]
+/// then promotes it to `on`, so a transient parse failure would start
+/// rewriting bodies the user had switched the pass off for (#1667). `off` is
+/// the kill switch; a malformed file must not be able to lift it.
+///
+/// So a failed read freezes the dial where the user last left it instead of
+/// resetting it. Retained once for the process rather than per compactor:
+/// both enforcement points resolve through here, and a policy each of them
+/// froze separately is the disagreement [`PolicySource`] exists to prevent.
+#[derive(Default)]
+pub struct RetainedPolicy {
+    last_good: Mutex<Option<ContextHygiene>>,
+}
+
+impl RetainedPolicy {
+    /// Resolve one read. `loaded` is `None` when the config did not parse.
+    pub fn resolve(&self, loaded: Option<ContextHygiene>) -> ContextHygiene {
+        let mut last_good = self.last_good.lock().unwrap_or_else(|e| e.into_inner());
+        match loaded {
+            Some(policy) => {
+                *last_good = Some(policy.clone());
+                policy
+            }
+            None => last_good.clone().unwrap_or_default(),
+        }
+    }
+}
+
+fn retained_policy() -> &'static RetainedPolicy {
+    static RETAINED: std::sync::OnceLock<RetainedPolicy> = std::sync::OnceLock::new();
+    RETAINED.get_or_init(RetainedPolicy::default)
+}
+
+/// The shared context-hygiene policy as both enforcement points see it: read
+/// from config on every call, falling back to the last value that parsed
+/// rather than to `Default` — see [`RetainedPolicy`].
+pub fn live_policy() -> ContextHygiene {
+    retained_policy().resolve(
+        lazybox_config::Config::load()
+            .ok()
+            .map(|cfg| cfg.agent.context_hygiene),
+    )
+}
 
 /// The proxy's compaction pass: policy, per-session accounting, and the
 /// kill switch.
@@ -414,17 +463,7 @@ impl Compactor {
     /// an edit takes effect at the same moment it does at the hook — see
     /// [`PolicySource`].
     pub fn live(prices: PriceOverrides, notice: NoticeSink, tags: TagSource) -> Self {
-        Self::with_policy_source(
-            Arc::new(|| {
-                lazybox_config::Config::load()
-                    .unwrap_or_default()
-                    .agent
-                    .context_hygiene
-            }),
-            prices,
-            notice,
-            tags,
-        )
+        Self::with_policy_source(Arc::new(live_policy), prices, notice, tags)
     }
 
     pub fn with_policy_source(
@@ -2776,6 +2815,79 @@ mod tests {
             ContextHygiene::default().min_lines,
             "and the instrumentation's line floor reads the same live policy"
         );
+    }
+
+    /// #1667: the kill switch has to survive a config that stops parsing.
+    /// `Default` is `shadow`, which *evaluates*, so falling back to it on a
+    /// failed read would let a canary workspace promote the pass back to `on`
+    /// and start rewriting bodies the user had switched it off for.
+    #[test]
+    fn a_failed_read_keeps_the_last_policy_that_parsed() {
+        let retained = RetainedPolicy::default();
+        assert_eq!(
+            retained.resolve(Some(policy(CompactionMode::Off))).mode,
+            CompactionMode::Off,
+        );
+        assert_eq!(
+            retained.resolve(None).mode,
+            CompactionMode::Off,
+            "a config that will not parse freezes the dial, it does not reset it",
+        );
+        assert_eq!(
+            retained.resolve(Some(policy(CompactionMode::On))).mode,
+            CompactionMode::On,
+            "and the next read that parses is what moves it again",
+        );
+        assert_eq!(retained.resolve(None).mode, CompactionMode::On);
+    }
+
+    /// Before anything has parsed there is no user intent to retain, so the
+    /// shipped default is all a read can yield.
+    #[test]
+    fn a_failed_read_with_nothing_retained_yields_the_default() {
+        assert_eq!(
+            RetainedPolicy::default().resolve(None),
+            ContextHygiene::default(),
+        );
+    }
+
+    /// The composition that makes #1667 a kill-switch bug rather than a
+    /// reporting wobble: an opted-in canary session, whose `mode_for` would
+    /// promote any evaluating fallback to `on`.
+    #[test]
+    fn a_broken_config_cannot_rewrite_an_opted_in_canarys_bytes() {
+        let retained = Arc::new(RetainedPolicy::default());
+        let parses = Arc::new(Mutex::new(true));
+        let source = retained.clone();
+        let reader = parses.clone();
+        let compactor = Compactor::with_policy_source(
+            Arc::new(move || {
+                let loaded = (*reader.lock().expect("parses")).then(|| policy(CompactionMode::Off));
+                source.resolve(loaded)
+            }),
+            Arc::new(std::collections::BTreeMap::new()),
+            Arc::new(|_, _| {}),
+            tags(),
+        )
+        .with_canary(Arc::new(|_: &str| true));
+        let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
+
+        let out = compactor.rewrite("ws", "claude", true, body.clone(), parsed(&body));
+        assert_eq!(out.body, body, "off stays off even on a canary row");
+        assert!(!out.measured, "and off inspects nothing");
+
+        // The user's editor saves a partial file. Two turns, so the second is
+        // past the held-for-a-baseline first one a rewriting mode starts on.
+        *parses.lock().expect("parses") = false;
+        for turn in 0..2 {
+            let out = compactor.rewrite("ws", "claude", true, body.clone(), parsed(&body));
+            assert_eq!(
+                out.body, body,
+                "a config that will not parse must not lift the kill switch (turn {turn})",
+            );
+            assert!(!out.measured, "still off, so still nothing to judge");
+            compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        }
     }
 
     #[test]

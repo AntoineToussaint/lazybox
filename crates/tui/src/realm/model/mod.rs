@@ -1329,6 +1329,12 @@ pub enum Msg {
     /// override so the (improved) built-in shows through on reload (#1312).
     /// Carries the key.
     SnippetAdopt(String),
+    /// `Ctrl-X` on a snippet row — delete a user-defined snippet from the
+    /// file that defines it (#1678). Carries the key. The Model decides
+    /// what that means: a purely custom snippet is removed outright, an
+    /// override is dropped so the built-in underneath shows through, and a
+    /// built-in itself cannot be deleted at all.
+    SnippetDelete(String),
     /// `a` in the Settings editors panel (#1102) — start the add-editor
     /// input flow (id → launch command).
     EditorAdd,
@@ -4456,6 +4462,62 @@ impl<T: TerminalAdapter> Model<T> {
         }
     }
 
+    /// `Ctrl-X` in the snippet picker: delete a user-defined snippet
+    /// (#1678).
+    ///
+    /// lazybox could already *add* a snippet (`upsert_global_snippet`, which
+    /// the Ask-Lazybox add action uses) but had no way to remove one: the
+    /// browser is read-only and its only write path is `e`, which opens the
+    /// YAML in an editor. So a snippet the product created could only be
+    /// removed by hand-editing the file — which is how a stray `hello`
+    /// outlives every attempt to get rid of it.
+    ///
+    /// Deliberately reuses `delete_global_snippet`, the same edit "adopt
+    /// built-in" makes, so there is ONE file-mutating path for snippets.
+    /// The outcomes differ and are named, because "deleted" means two
+    /// different things: a purely custom snippet is gone for good, while
+    /// deleting an override only reveals the built-in beneath it.
+    fn delete_user_snippet(&mut self, key: &str) {
+        let Some(origin) = self.snippets.get(key).map(|s| s.origin) else {
+            return;
+        };
+        let shadows_builtin = lazybox_config::Snippets::builtin().get(key).is_some();
+        match origin {
+            // A built-in is shipped in the binary, not in any file the user
+            // owns — there is nothing to delete. Say what WOULD work instead
+            // of failing silently.
+            lazybox_config::SnippetOrigin::BuiltIn => {
+                self.flash_info(format!(
+                    "`{key}` is built-in — it can't be deleted, only overridden in snippets.yaml"
+                ));
+            }
+            lazybox_config::SnippetOrigin::Global => {
+                match lazybox_config::Snippets::delete_global_snippet(key) {
+                    Ok(()) => {
+                        self.apply_snippets(lazybox_config::Snippets::load_for_launch_dir(
+                            std::env::current_dir().ok().as_deref(),
+                        ));
+                        self.flash_info(if shadows_builtin {
+                            format!("deleted your `{key}` — the built-in is back")
+                        } else {
+                            format!("deleted `{key}`")
+                        });
+                        self.refresh_open_snippet_picker();
+                    }
+                    Err(e) => self.flash_error(format!("couldn't delete `{key}`: {e}")),
+                }
+            }
+            // A repo-local file is checked in and shared with everyone on the
+            // repo, so lazybox never edits it behind the user's back — the
+            // same rule "adopt built-in" follows.
+            lazybox_config::SnippetOrigin::Repo | lazybox_config::SnippetOrigin::Unknown => {
+                self.flash_info(format!(
+                    "`{key}` is repo-local — edit .lazybox/snippets.yaml to remove it"
+                ));
+            }
+        }
+    }
+
     /// Re-mount the snippet picker with freshly-classified rows so a
     /// keep-mine or adopt is reflected immediately (badge cleared, or the
     /// adopted row now showing the built-in). No-op unless the picker is the
@@ -7491,6 +7553,7 @@ impl<T: TerminalAdapter> Model<T> {
             Msg::SnippetCompare(key) => self.compare_snippet_override(&key),
             Msg::SnippetKeepMine(key) => self.keep_mine_snippet_override(&key),
             Msg::SnippetAdopt(key) => self.adopt_builtin_snippet(&key),
+            Msg::SnippetDelete(key) => self.delete_user_snippet(&key),
             Msg::EditorAdd => self.start_editor_add(),
             Msg::EditorEdit(id) => self.start_editor_edit(&id),
             Msg::EditorRemove(id) => self.prompt_remove_editor(id),

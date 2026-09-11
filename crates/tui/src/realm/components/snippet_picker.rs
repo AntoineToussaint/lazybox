@@ -459,6 +459,17 @@ impl SnippetPicker {
         self.highlighted_row()
             .is_some_and(|r| !r.badge.is_empty() && r.badge != "custom")
     }
+
+    /// Whether the highlighted row is user-defined — anything the user owns
+    /// in a snippets.yaml, i.e. a purely `custom` snippet OR an override of a
+    /// built-in. Drives the delete hint (#1678), which is broader than the
+    /// reconcile hints: those only make sense against a built-in, while
+    /// delete applies to every row that came from a file. A plain built-in
+    /// carries an empty badge and is correctly excluded — there is no file
+    /// entry to remove.
+    fn highlighted_is_user_defined(&self) -> bool {
+        self.highlighted_row().is_some_and(|r| !r.badge.is_empty())
+    }
 }
 
 impl FilterableList for SnippetPicker {
@@ -551,6 +562,12 @@ impl FilterableList for SnippetPicker {
             }
             Key::Char('a') if self.insert_without_submit => {
                 self.highlighted_key().map(Msg::SnippetAdopt)
+            }
+            // Delete the highlighted user-defined snippet (#1678). Ctrl-
+            // modified like its siblings because a bare letter types into the
+            // filter; `x` rather than `d`, which compare already owns.
+            Key::Char('x') if self.insert_without_submit => {
+                self.highlighted_key().map(Msg::SnippetDelete)
             }
             _ => None,
         }
@@ -716,6 +733,13 @@ impl Component for SnippetPicker {
                 Style::default().fg(theme.accent).bold(),
             ));
             help.push(Span::raw(" adopt  "));
+        }
+        if self.insert_without_submit && self.highlighted_is_user_defined() {
+            help.push(Span::styled(
+                "Ctrl-X",
+                Style::default().fg(theme.accent).bold(),
+            ));
+            help.push(Span::raw(" delete  "));
         }
         help.push(Span::styled("Esc", Style::default().fg(theme.error).bold()));
         help.push(Span::raw(" cancel"));
@@ -1104,6 +1128,38 @@ mod tests {
         let mut picker = SnippetPicker::new(make_rows(), String::new());
         let out = picker.on_key(&key(Key::Esc));
         assert!(matches!(out, Some(Msg::ModalDismissed)));
+    }
+
+    /// Regression (#1678): `Ctrl-X` deletes the highlighted user-defined
+    /// snippet. lazybox could add a snippet but never remove one — the
+    /// browser is read-only and its only write path opens the YAML in an
+    /// editor — so an unwanted entry survived every attempt to drop it.
+    ///
+    /// Ctrl-modified like its `Ctrl-D`/`K`/`A` siblings because a bare letter
+    /// types into the filter, and `x` rather than `d`, which compare owns.
+    #[test]
+    fn ctrl_x_deletes_the_highlighted_user_snippet() {
+        let ctrl_x = KeyEvent::new(Key::Char('x'), KeyModifiers::CONTROL);
+
+        let mut picker = SnippetPicker::new(make_rows(), String::new());
+        picker.insert_without_submit = true;
+        let key = picker.highlighted_key().expect("a highlighted row");
+        assert_eq!(
+            picker.on_key(&ctrl_x),
+            Some(Msg::SnippetDelete(key)),
+            "Ctrl-X asks the Model to delete the highlighted snippet",
+        );
+
+        // The reuses that are not the snippet picker (skills, broadcast) do
+        // not own the reconcile actions, so Ctrl-X must stay inert there
+        // rather than deleting a row out from under a different flow.
+        let mut reuse = SnippetPicker::new(make_rows(), String::new());
+        reuse.insert_without_submit = false;
+        assert_eq!(
+            reuse.on_key(&ctrl_x),
+            None,
+            "only the snippet picker owns delete",
+        );
     }
 
     #[test]

@@ -1239,6 +1239,7 @@ fn request_profile(
         }
         "single-PR notification deep-fetch"
         | "single-issue notification deep-fetch"
+        | "auto-fix CI recheck"
         | "PR details background prefetch"
         | "PR search"
         | "authored-PR probe"
@@ -3716,6 +3717,55 @@ impl GhClient {
             let head = pr.head_ref_oid.clone();
             (graphql::pr_to_task(&pr, &self.user), head)
         }))
+    }
+
+    /// Re-read one PR's check rollup per workflow run, to decide whether
+    /// a queued CI auto-fix still has something to fix (#1662).
+    ///
+    /// GitHub's aggregate `statusCheckRollup.state` — which is what
+    /// queues the fix — folds in the jobs of runs concurrency
+    /// superseded, so a green PR can roll up FAILURE for as long as it
+    /// stays open. This reads the rollup grouped by run, paged deep
+    /// enough (`RECHECK_CONTEXT_PAGE`) to see both runs of a
+    /// double-fired commit.
+    ///
+    /// Admitted with `acquire_paced`, not `acquire_or_block`: a short
+    /// self-imposed governor wait must be slept out, because a caller
+    /// that treats "the budget said wait" as "no failure" would switch
+    /// auto-fix off entirely and silently on a busy install. A
+    /// GitHub-imposed limit still propagates as `Err`.
+    ///
+    /// `Ok(None)` when the PR is no longer visible, with the same
+    /// semantics as [`fetch_single_pr`](Self::fetch_single_pr).
+    pub async fn fetch_ci_failure_recheck(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+    ) -> Result<Option<graphql::CiFailureRecheck>, GhError> {
+        const OPERATION: &str = "auto-fix CI recheck";
+        self.acquire_paced(OPERATION).await?;
+        let body = graphql::pr_check_rollup_body(owner, repo, number);
+        let response: graphql::GqlPrCheckRollupResponse =
+            self.post_graphql_with_retry(OPERATION, &body).await?;
+        if let Some(errors) = response.errors {
+            if gql_errors_all_not_visible(&errors) {
+                tracing::debug!("ci recheck {owner}/{repo}#{number}: not visible — skipping");
+                return Ok(None);
+            }
+            let joined = errors
+                .iter()
+                .map(|e| e.full())
+                .collect::<Vec<_>>()
+                .join("; ");
+            tracing::warn!("ci recheck {owner}/{repo}#{number}: {joined}");
+            return Err(GhError::Graphql(joined));
+        }
+        let pr = response
+            .data
+            .and_then(|data| data.repository)
+            .and_then(|repo| repo.pull_request);
+        Ok(pr.map(|pr| graphql::ci_failure_recheck(&pr.commits)))
     }
 
     /// Sibling of `fetch_single_pr` for Issue-typed notifications.
@@ -8094,6 +8144,53 @@ mod tests {
             .expect("graphql resource restored");
         assert_eq!(graphql.remaining, 4200);
         assert_eq!(graphql.limit, 5000);
+    }
+
+    /// End-to-end wire path for the auto-fix CI recheck (#1662): the
+    /// live shape that spawned false agents — two runs on one head,
+    /// the first cancelled by concurrency — must come back `Gone`.
+    #[tokio::test]
+    async fn ci_recheck_reads_the_rollup_per_workflow_run() {
+        const BODY: &str = r#"{"data":{"repository":{"pullRequest":{"commits":{"nodes":[
+            {"commit":{"statusCheckRollup":{"state":"FAILURE","contexts":{"nodes":[
+              {"__typename":"CheckRun","name":"typos","conclusion":"FAILURE",
+               "status":"COMPLETED","permalink":null,
+               "checkSuite":{"conclusion":"CANCELLED"}},
+              {"__typename":"CheckRun","name":"typos","conclusion":"SUCCESS",
+               "status":"COMPLETED","permalink":null,
+               "checkSuite":{"conclusion":"SUCCESS"}}
+            ]}}}}
+        ]}}}}}"#;
+        let base_uri = spawn_sequenced_response_server(vec![BODY]).await;
+        let client = make_client(&base_uri);
+
+        let verdict = client
+            .fetch_ci_failure_recheck("o", "r", 1649)
+            .await
+            .expect("recheck should succeed");
+
+        assert_eq!(
+            verdict,
+            Some(crate::graphql::CiFailureRecheck::Gone),
+            "a green PR behind a superseded run must not spend an agent session",
+        );
+    }
+
+    /// A PR that is no longer visible is a definitive answer, not a
+    /// transient one: there is nothing left to fix, so the recheck
+    /// reports `None` rather than erroring the dispatch.
+    #[tokio::test]
+    async fn ci_recheck_maps_a_not_visible_pr_to_none() {
+        const BODY: &str = r#"{"data":{"repository":null},
+            "errors":[{"type":"NOT_FOUND","message":"Could not resolve to a Repository"}]}"#;
+        let base_uri = spawn_sequenced_response_server(vec![BODY]).await;
+        let client = make_client(&base_uri);
+
+        let verdict = client
+            .fetch_ci_failure_recheck("o", "r", 1649)
+            .await
+            .expect("a not-visible PR is not an error");
+        assert_eq!(verdict, None);
     }
 
     #[tokio::test]

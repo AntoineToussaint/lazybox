@@ -1977,6 +1977,16 @@ pub(crate) async fn dispatch_action(
                     }
                 }
                 autofix::AttemptDecision::Proceed { attempt, max } => {
+                    if kind == AutoFixKind::CiFailure
+                        && !ci_failure_still_stands(gh, &repo, pr_number).await
+                    {
+                        tracing::info!(
+                            source = source_name,
+                            %session_key,
+                            "auto-fix: CI failure did not survive a per-run re-read — skipping"
+                        );
+                        return;
+                    }
                     match crate::spawn_handler::deliver_auto_fix_prompt(
                         config,
                         session_key.clone(),
@@ -2036,6 +2046,100 @@ pub(crate) async fn dispatch_action(
                 }
             }
         }
+    }
+}
+
+/// Re-read a queued CI failure per workflow run before it costs an
+/// agent session.
+///
+/// The sweep that queued the fix reads GitHub's aggregate
+/// `statusCheckRollup.state`, which folds in the jobs of workflow runs
+/// that concurrency already superseded — a push immediately followed by
+/// a base change leaves a cancelled run whose dead jobs keep a fully
+/// green PR rolling up FAILURE indefinitely (#1662). One small query
+/// per dispatch that reaches `Proceed`; note that a workspace whose
+/// agent never settles re-runs it each sweep, since `WaitingForDone`
+/// records no attempt.
+///
+/// **Fails open.** An unreadable answer — a GitHub-imposed rate limit,
+/// a network error — leaves auto-fix behaving exactly as it did before
+/// this check existed. Treating "couldn't verify" as "no failure" would
+/// switch the feature off silently and indefinitely on an install whose
+/// governor is under sustained pressure, which is strictly worse than
+/// the false spawn this is trying to prevent. Only a definitive answer
+/// stops the fix.
+async fn ci_failure_still_stands(gh: Option<&GhClient>, repo: &str, pr_number: u64) -> bool {
+    let Some(gh) = gh else {
+        return true;
+    };
+    let Some((owner, name)) = repo.split_once('/') else {
+        return true;
+    };
+    let outcome = gh.fetch_ci_failure_recheck(owner, name, pr_number).await;
+    if let Err(e) = &outcome {
+        tracing::warn!(
+            "auto-fix: CI recheck of {repo}#{pr_number} failed ({e}); \
+             proceeding on the queued failure"
+        );
+    }
+    proceed_after_recheck(&outcome)
+}
+
+/// Whether a recheck outcome lets the fix proceed. Split out from the
+/// fetch so the fail-open policy is testable without a GitHub client.
+///
+/// Only a *definitive* answer stops a fix: a verdict of
+/// [`CiFailureRecheck::Gone`], or a PR that is no longer visible
+/// (`Ok(None)` — deleted, transferred, scope revoked; nothing left to
+/// fix). An `Err` — GitHub-imposed rate limit, network failure — must
+/// NOT stop it: treating "couldn't verify" as "no failure" switches
+/// auto-fix off silently and indefinitely wherever the budget stays
+/// under pressure, which is worse than the false spawn this prevents.
+fn proceed_after_recheck(
+    outcome: &Result<Option<lazybox_gh::CiFailureRecheck>, lazybox_gh::GhError>,
+) -> bool {
+    match outcome {
+        Ok(Some(verdict)) => *verdict == lazybox_gh::CiFailureRecheck::Stands,
+        Ok(None) => false,
+        Err(_) => true,
+    }
+}
+
+#[cfg(test)]
+mod auto_fix_recheck_tests {
+    use super::proceed_after_recheck;
+    use lazybox_gh::{CiFailureRecheck, GhError};
+
+    #[test]
+    fn a_superseded_failure_stops_the_fix() {
+        assert!(!proceed_after_recheck(&Ok(Some(CiFailureRecheck::Gone))));
+    }
+
+    #[test]
+    fn a_live_failure_proceeds() {
+        assert!(proceed_after_recheck(&Ok(Some(CiFailureRecheck::Stands))));
+    }
+
+    #[test]
+    fn a_vanished_pr_stops_the_fix() {
+        assert!(!proceed_after_recheck(&Ok(None)));
+    }
+
+    /// Regression: an unreadable recheck must leave auto-fix behaving
+    /// exactly as it did before the check existed. Reading a rate-limit
+    /// or network error as "no failure" would disable the feature
+    /// silently for as long as the governor stays under pressure —
+    /// visible only as a log line.
+    #[test]
+    fn an_unreadable_recheck_proceeds_rather_than_disabling_auto_fix() {
+        assert!(proceed_after_recheck(&Err(GhError::RateLimited {
+            retry_after_secs: 60,
+            reason: "primary budget exhausted".into(),
+            self_throttle: false,
+        })));
+        assert!(proceed_after_recheck(&Err(GhError::Graphql(
+            "upstream timeout".into()
+        ))));
     }
 }
 

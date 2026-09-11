@@ -206,11 +206,16 @@ done"#
 
 /// The alt-screen fixtures may not issue `smcup` until the test has
 /// re-allowed the alternate screen on their window: tmux drops the request
-/// outright while the option is off, so a pane that gets there first never
-/// enters the alt screen at all. The fixture blocks on a gate file the test
-/// writes once `set-option` has returned — a wall-clock sleep loses that
-/// race whenever spawn plus set-option outruns it under load (#1664).
-const ALT_SCREEN_FIXTURE: &str = "while [ ! -f \"$ALT_GATE\" ]; do sleep 0.02; done; \
+/// outright while the option is off — and `spawn` itself re-pushes the
+/// global denial after `new-session` — so a pane that gets there first
+/// never enters the alt screen at all. The fixture blocks on a gate file
+/// the test writes once `set-option` has returned; a wall-clock sleep
+/// loses that race whenever spawn plus set-option outruns it under load
+/// (#1664). The wait is bounded so a test that panics before writing the
+/// gate still leaves a pane that exits on its own, taking the leaked tmux
+/// server with it, rather than one forking `sleep` forever.
+const ALT_SCREEN_FIXTURE: &str = "i=0; \
+     while [ ! -f \"$ALT_GATE\" ] && [ \"$i\" -lt 500 ]; do sleep 0.02; i=$((i+1)); done; \
      printf '\\033[?1049h'; echo on-alt; exec sleep 300";
 
 fn alt_screen_fixture_argv() -> Vec<String> {

@@ -3994,10 +3994,10 @@ impl<T: TerminalAdapter> Model<T> {
     }
 
     /// Mount the skills picker (`]]l`, issue #797): the skills available
-    /// to the focused agent, discovered from every [Agent
-    /// Skills](https://agentskills.io) root — `.claude/skills/` and
-    /// `.agents/skills/` in its worktree, plus the user-level roots.
-    /// Reuses the `SnippetPicker` component — rows carry the skill *name*
+    /// to the focused agent, discovered from the [Agent
+    /// Skills](https://agentskills.io) roots *that agent reads* — the
+    /// shared `.agents/skills/` plus its own, in its worktree and under
+    /// `$HOME`. Reuses the `SnippetPicker` component — rows carry the skill *name*
     /// as a [`ChoicePayload::Text`], grouped by scope (Repo/User) and
     /// previewed by their `description`. Picking injects an explicit "Use
     /// the `<skill>` skill." instruction through the same settle-gated
@@ -4027,10 +4027,18 @@ impl<T: TerminalAdapter> Model<T> {
         if matches!(self.modal_stack.last(), Some(Id::SkillPicker)) {
             return;
         }
-        if !self.terminals.terminal_is_agent(terminal_id) {
+        // The agent id scopes discovery: the roots are not shared between
+        // agents, so a Codex session must not be offered a `~/.claude`
+        // skill it cannot load (#1671). `terminal_agent_id` is `Some` for
+        // exactly the terminals `terminal_is_agent` accepts.
+        let Some(agent_id) = self
+            .terminals
+            .terminal_agent_id(terminal_id)
+            .map(str::to_string)
+        else {
             self.flash_info("skills apply to agent sessions — focus one first");
             return;
-        }
+        };
         // Discovery reads the *local* filesystem. Over `--connect` the
         // agent's worktree and the user skill roots live on the daemon host,
         // not here, so a scan would silently surface the wrong machine's
@@ -4040,7 +4048,7 @@ impl<T: TerminalAdapter> Model<T> {
             self.flash_info("skills discovery needs a local daemon — unavailable over --connect");
             return;
         }
-        let skills = lazybox_config::discover_skills(worktree.as_deref());
+        let skills = lazybox_config::discover_skills(worktree.as_deref(), Some(&agent_id));
         if skills.is_empty() {
             self.flash_info(
                 "no skills found — add SKILL.md folders under .claude/skills/ or .agents/skills/",

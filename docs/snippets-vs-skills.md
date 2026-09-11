@@ -9,10 +9,14 @@ which one you reach for.
 
 (Skills started as a Claude Code feature and became an open format in
 December 2025. All three agents lazybox spawns read the same `SKILL.md`
-— Claude Code, Codex, and Cursor — from their own roots, so `]]l`
-discovers every one of them: `<repo>/.claude/skills`,
-`<repo>/.agents/skills`, then `~/.claude/skills`, `~/.agents/skills`,
-`~/.codex/skills`, first root to claim a name winning it.)
+— Claude Code, Codex, and Cursor — but **not from the same roots**, and
+that distinction is load-bearing: `.agents/skills` is the standard's
+shared root, while `.claude/skills` and `~/.codex/skills` belong to one
+agent each. `]]l` therefore scans the roots *the focused agent reads* —
+`<repo>/.claude`, `<repo>/.agents`, then `~/.claude`, `~/.agents`,
+`~/.codex`, filtered by agent — first root to claim a name winning it.
+Listing a root its agent never reads would offer a skill that cannot
+load, and describe a folder with no bearing on the session.)
 
 **A skill is a trust surface, and lazybox vets nothing.** It loads as a
 system-prompt fragment carrying the agent's full permissions — inside a
@@ -22,7 +26,17 @@ therefore shows what it can *see* and nothing more: the skill's scope,
 its path on disk, whether the folder bundles a `scripts/` directory
 (a `⚠ runs code` tag — a directory-exists test, not a scan), and a
 standing `not vetted by lazybox` note. Read the `SKILL.md` before you
-invoke one. lazybox deliberately offers no install path: discovering
+invoke one.
+
+Two details keep that disclosure honest rather than merely present. The
+tag **leads** the row instead of trailing the description, because the
+row truncates at the pane edge and a skill's description is long by
+construction — a trailing tag is clipped away exactly when the row is
+crowded. And where two roots the agent reads claim the same name,
+lazybox picks a winner by *its* precedence while the agent resolves the
+name by its own: so the preview names every candidate folder, and the
+`⚠ runs code` tag is ORed across them. A name that might resolve to a
+scripts-bundling copy is never presented as instructions-only. lazybox deliberately offers no install path: discovering
 what is already on disk is a different job from being the channel that
 puts it there.
 

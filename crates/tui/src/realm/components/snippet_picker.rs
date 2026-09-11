@@ -317,22 +317,25 @@ impl SnippetPicker {
                             format!("]{:<9} ", r.key),
                             bg(Style::default().fg(theme.accent)),
                         ),
-                        Span::styled(r.description.clone(), bg(base)),
                     ];
+                    // What invoking the row can *do* leads the description,
+                    // never trails it (#1671). This line is truncated at the
+                    // pane edge, not wrapped, and a skill's description is
+                    // long by construction — it is the text the model matches
+                    // on — so a trailing tag is clipped away exactly when the
+                    // row is most crowded, losing the one signal that matters.
+                    if !r.tag.is_empty() {
+                        spans.push(Span::styled(
+                            format!("{}  ", r.tag),
+                            bg(Style::default().fg(theme.warn)),
+                        ));
+                    }
+                    spans.push(Span::styled(r.description.clone(), bg(base)));
                     // A stale fork / redundant copy gets a compact ⚠ marker in
                     // the list itself, so it's visible without the preview (#1312).
                     if r.attention {
                         spans.push(Span::styled(
                             "  ⚠".to_string(),
-                            bg(Style::default().fg(theme.warn)),
-                        ));
-                    }
-                    // What invoking the row can *do* rides the row itself, not
-                    // just the preview — a skill that bundles scripts is an
-                    // execution surface you should see before you pick it (#1671).
-                    if !r.tag.is_empty() {
-                        spans.push(Span::styled(
-                            format!("  {}", r.tag),
                             bg(Style::default().fg(theme.warn)),
                         ));
                     }
@@ -344,8 +347,8 @@ impl SnippetPicker {
     }
 
     /// Render the right preview pane: the highlighted snippet's title,
-    /// category + origin + tag, and full wrapped body — so the user sees
-    /// exactly what auto-submit will send.
+    /// category + origin + tag, any disclosure notice, and the full
+    /// wrapped body — so the user sees exactly what auto-submit will send.
     fn render_preview(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let Some(c) = self.cursor else {
             frame.render_widget(
@@ -407,6 +410,24 @@ impl SnippetPicker {
         }
         lines.push(Line::from(meta));
         lines.push(Line::raw(""));
+
+        // The disclosure is what the user must read before invoking, so it
+        // draws in body text, with its risk line in the warn color — not in
+        // the de-emphasized style the body preview uses (#1671).
+        for raw in r.notice.lines() {
+            let style = if raw.starts_with("bundles scripts/") {
+                Style::default().fg(theme.warn)
+            } else {
+                Style::default().fg(theme.text_strong)
+            };
+            lines.extend(wrap_one(
+                Line::from(Span::styled(raw.to_string(), style)),
+                area.width,
+            ));
+        }
+        if !r.notice.is_empty() {
+            lines.push(Line::raw(""));
+        }
 
         let body_style = Style::default().fg(theme.text_dim);
         for raw in r.body.lines() {
@@ -1191,13 +1212,22 @@ mod tests {
     /// tag on the row itself, not only in the preview — you see the
     /// execution surface while choosing, and the preview spells out the
     /// path and that lazybox vetted none of it.
+    ///
+    /// The descriptions here are the length real ones are: `description`
+    /// is the text the model matches on, so skills carry a sentence or
+    /// more. A short fixture would pass with the tag laid out *after* the
+    /// description and hide that the pane's truncation eats it.
     #[test]
     fn render_shows_the_skill_runs_code_tag_and_disclosure() {
         let skill = |name: &str, bundles_scripts: bool| lazybox_config::Skill {
             name: name.into(),
-            description: format!("{name} desc"),
+            description: format!(
+                "Review the current {name} diff for correctness bugs and reuse cleanups \
+                 at the given effort level",
+            ),
             scope: lazybox_config::SkillScope::Repo,
             folder: std::path::PathBuf::from("/w/.agents/skills").join(name),
+            also_at: Vec::new(),
             bundles_scripts,
         };
         let rows = vec![
@@ -1206,14 +1236,51 @@ mod tests {
         ];
         let mut picker = SnippetPicker::new(rows, String::new()).with_title("Skills");
         let out = render(&mut picker, 92, 20);
-        assert!(out.contains("⚠ runs code"), "row tag: {out}");
-        assert_eq!(
-            out.matches("⚠ runs code").count(),
-            2,
-            "the tag rides both the row and the highlighted row's preview meta: {out}",
+        let list = |line: &str| line.split('│').nth(1).unwrap_or_default().to_string();
+        let audit_row = out
+            .lines()
+            .map(list)
+            .find(|line| line.contains("]audit"))
+            .expect("the audit row renders");
+        assert!(
+            audit_row.contains("⚠ runs code"),
+            "the tag survives a realistic description in the list pane: {audit_row:?}",
+        );
+        let notes_row = out
+            .lines()
+            .map(list)
+            .find(|line| line.contains("]notes"))
+            .expect("the notes row renders");
+        assert!(
+            !notes_row.contains("runs code"),
+            "no bundled scripts, no tag: {notes_row:?}",
         );
         assert!(out.contains("/w/.agents/skills/audit"), "path: {out}");
         assert!(out.contains("not vetted by lazybox"), "disclosure: {out}");
+
+        // The disclosure must not draw in the body's de-emphasized style:
+        // a safety note rendered as filler is one nobody reads (#1671).
+        let theme = crate::theme::current();
+        let mut fg_of = |needle: &str| -> Color {
+            use tuirealm::ratatui::Terminal;
+            use tuirealm::ratatui::backend::TestBackend;
+            let mut term = Terminal::new(TestBackend::new(92, 20)).unwrap();
+            term.draw(|frame| picker.view(frame, Rect::new(0, 0, 92, 20)))
+                .unwrap();
+            let buf = term.backend().buffer().clone();
+            for y in 0..buf.area.height {
+                let row: String = (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<Vec<_>>()
+                    .join("");
+                if let Some(col) = row.find(needle) {
+                    return buf[(col as u16, y)].fg;
+                }
+            }
+            panic!("{needle:?} not rendered");
+        };
+        assert_eq!(fg_of("not vetted by lazybox"), theme.text_strong);
+        assert_eq!(fg_of("bundles scripts/"), theme.warn);
     }
 
     /// A library taller than the list viewport scrolls to keep the

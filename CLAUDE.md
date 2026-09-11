@@ -716,12 +716,22 @@ follow-up / new question), `Esc` returns to the reader.
 **TerminalStack**: all keys forward to the PTY. `]]` (configurable
 escape sequence) is a *non-timed* leader (#252) that opens a small
 command menu (which-key popup): `]]s` opens the snippet picker, `]]l`
-opens the skills picker (#797 — the focused agent's Claude Code skills
-discovered from `.claude/skills/` + `~/.claude/skills/`, previewed by
-their description and grouped by Repo/User scope; picking one injects an
-explicit "Use the `<skill>` skill." instruction through the same
-settle-gated path snippets use, so a model-selected capability gains a
-deterministic trigger + Recent), `]]r`
+opens the skills picker (#797 — the focused agent's skills, discovered
+per the open [Agent Skills](https://agentskills.io) standard rather than
+Claude Code's root alone (#1671). The roots are **per-agent**, since they
+are not shared: the standard's `.agents/skills` is read by all three,
+while `.claude/skills` and `~/.codex/skills` belong to one agent each, so
+discovery scans only what the focused agent reads — `<repo>/.claude`,
+`<repo>/.agents`, then `~/.claude`, `~/.agents`, `~/.codex`, filtered by
+agent, first root to claim a name winning it. Grouped by Repo/User scope
+and previewed by their description; picking one injects an explicit "Use
+the `<skill>` skill." instruction through the same settle-gated path
+snippets use, so a model-selected capability gains a deterministic
+trigger + Recent. The preview doubles as the review-before-invoke surface
+— path, every shadowing twin, a `⚠ runs code` tag leading the row, and a
+standing `not vetted by lazybox` line; discovery only, no install path.
+[`docs/snippets-vs-skills.md`](docs/snippets-vs-skills.md) is the source
+of truth for why), `]]r`
 recalls the last prompt (in-flight draft, else last submitted message)
 back into the agent composer without submitting it — both survive a
 restart (persisted per terminal in the store, #373), `]]h` opens the

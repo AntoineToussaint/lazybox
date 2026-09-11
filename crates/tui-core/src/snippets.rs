@@ -44,6 +44,25 @@ pub struct PickerRow {
     /// mere provenance.
     #[serde(default)]
     pub attention: bool,
+    /// Capability tag — what invoking this row can *do*, as opposed to
+    /// where it came from. Empty for snippets, which carry no execution
+    /// surface; the skills picker sets `"⚠ runs code"` on a skill that
+    /// bundles `scripts/` (#1671).
+    ///
+    /// Skipped on the wire and out of the desktop contract: only the
+    /// in-process TUI picker has a skills mode, so a serialized copy
+    /// would be dead surface every desktop client had to carry.
+    #[serde(skip)]
+    #[cfg_attr(feature = "desktop-contract", ts(skip))]
+    pub tag: String,
+    /// Disclosure shown above the body, one line per `\n` — what the
+    /// user must read *before* invoking, as opposed to the `body`
+    /// preview of what will be sent. Rendered legibly rather than in the
+    /// body's de-emphasized style, because a safety note drawn as filler
+    /// is a safety note nobody reads. TUI-local, like [`Self::tag`].
+    #[serde(skip)]
+    #[cfg_attr(feature = "desktop-contract", ts(skip))]
+    pub notice: String,
 }
 
 impl PickerRow {
@@ -59,6 +78,48 @@ impl PickerRow {
             origin: snippet.origin.label().to_string(),
             badge: String::new(),
             attention: false,
+            tag: String::new(),
+            notice: String::new(),
+        }
+    }
+
+    /// A discovered agent skill as a picker row (#797, #1671). The key is
+    /// the skill's invocation name and the category its scope, so repo
+    /// skills group above user ones.
+    ///
+    /// A skill has no body to preview — picking one sends "Use the
+    /// `<name>` skill." — so the pane's space goes to the `notice`
+    /// instead: every folder the agent could resolve this name to,
+    /// whether any of them bundles code, and that lazybox has vetted
+    /// none of it. See `docs/snippets-vs-skills.md` for why that is the
+    /// one control worth spending the space on.
+    pub fn for_skill(skill: lazybox_config::Skill) -> Self {
+        let mut notice = skill.folder.display().to_string();
+        for also in &skill.also_at {
+            notice.push_str(&format!("\nalso at {}", also.display()));
+        }
+        notice.push('\n');
+        notice.push_str(if skill.bundles_scripts {
+            "\nbundles scripts/ — invoking this can run code with the agent's permissions"
+        } else {
+            "\ninstructions only — no bundled scripts/"
+        });
+        notice.push_str("\nnot vetted by lazybox — read SKILL.md before invoking");
+        Self {
+            key: skill.name,
+            description: skill.description,
+            category: skill.scope.label().to_string(),
+            body: String::new(),
+            origin: String::new(),
+            // Skills aren't overrides of built-in snippets — no badge.
+            badge: String::new(),
+            attention: false,
+            tag: if skill.bundles_scripts {
+                "⚠ runs code".to_string()
+            } else {
+                String::new()
+            },
+            notice,
         }
     }
 
@@ -548,6 +609,51 @@ mod tests {
         assert_eq!(view.auto_submit.as_deref(), Some("rev"));
         assert_eq!(view.visible_count, 1);
         assert!(view.groups.iter().all(|g| g.category != RECENT_CAT));
+    }
+
+    /// #1671: a skill row's disclosure — path, execution surface, and the
+    /// standing "lazybox vets nothing" note — rides `notice`, not `body`:
+    /// picking a skill sends an invocation, so there is no body to
+    /// preview, and the notice renders legibly instead of as body filler.
+    #[test]
+    fn skill_row_discloses_path_scripts_and_that_nothing_is_vetted() {
+        let skill = lazybox_config::Skill {
+            name: "code-review".into(),
+            description: "Review a diff.".into(),
+            scope: lazybox_config::SkillScope::User,
+            folder: std::path::PathBuf::from("/home/u/.agents/skills/code-review"),
+            also_at: Vec::new(),
+            bundles_scripts: true,
+        };
+        let row = PickerRow::for_skill(skill.clone());
+        assert_eq!(row.key, "code-review");
+        assert_eq!(row.category, "User");
+        assert_eq!(row.tag, "⚠ runs code");
+        assert_eq!(row.body, "", "a skill has no payload to preview");
+        assert!(row.notice.contains("/home/u/.agents/skills/code-review"));
+        assert!(row.notice.contains("bundles scripts/"));
+        assert!(row.notice.contains("not vetted by lazybox"));
+
+        let prose = PickerRow::for_skill(lazybox_config::Skill {
+            bundles_scripts: false,
+            ..skill.clone()
+        });
+        assert_eq!(prose.tag, "", "no bundled scripts, no runs-code tag");
+        assert!(prose.notice.contains("instructions only"));
+        assert!(prose.notice.contains("not vetted by lazybox"));
+
+        // A name the agent could resolve to another root names every
+        // candidate — the disclosure must not describe one file while a
+        // different one loads.
+        let shadowed = PickerRow::for_skill(lazybox_config::Skill {
+            also_at: vec![std::path::PathBuf::from("/repo/.agents/skills/code-review")],
+            ..skill
+        });
+        assert!(
+            shadowed
+                .notice
+                .contains("also at /repo/.agents/skills/code-review")
+        );
     }
 
     #[test]

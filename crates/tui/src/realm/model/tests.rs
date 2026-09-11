@@ -6341,6 +6341,55 @@ snippets:
         assert_eq!(m.recent_skills, vec!["code-review".to_string()]);
     }
 
+    /// #1671: a repo that ships its skills under the open standard's
+    /// `.agents/skills` — as a Codex session reads them — opens the
+    /// picker rather than the "no skills found" nudge.
+    #[test]
+    fn mount_skill_picker_finds_agents_dir_skills() {
+        let worktree = std::env::temp_dir().join(format!(
+            "lazybox-skilltest-{}-agents-root",
+            std::process::id(),
+        ));
+        let skill_dir = worktree.join(".agents").join("skills").join("audit");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: audit\ndescription: Audit the diff.\n---\nbody\n",
+        )
+        .unwrap();
+        let mut m = model_with_agent_at_worktree(worktree);
+        m.mount_skill_picker(String::new());
+        assert!(
+            matches!(m.modal_stack.last(), Some(Id::SkillPicker)),
+            "a .agents/skills skill must open the picker, notice: {:?}",
+            m.status.notice,
+        );
+    }
+
+    /// #1671: the skill roots are per-agent. `.claude/skills` is Claude's
+    /// own, so a Codex session must not be offered a skill from it —
+    /// picking one would inject `Use the `x` skill.` into an agent that
+    /// cannot load it, and the preview would describe a folder with no
+    /// bearing on the session.
+    #[test]
+    fn mount_skill_picker_scopes_discovery_to_the_focused_agent() {
+        let worktree = tmp_worktree_with_skill("agent-scope");
+        let mut codex = model_with_named_agent_at_worktree(worktree.clone(), "codex");
+        codex.mount_skill_picker(String::new());
+        assert!(
+            !matches!(codex.modal_stack.last(), Some(Id::SkillPicker)),
+            "a .claude/skills skill is not Codex's to load",
+        );
+
+        let mut claude = model_with_named_agent_at_worktree(worktree, "claude");
+        claude.mount_skill_picker(String::new());
+        assert!(
+            matches!(claude.modal_stack.last(), Some(Id::SkillPicker)),
+            "the same skill opens for the agent whose root it is, notice: {:?}",
+            claude.status.notice,
+        );
+    }
+
     /// A temp worktree carrying one repo skill under `.claude/skills/`,
     /// plus a model whose focused agent terminal is rooted there — the
     /// fixture for the end-to-end `]]l` chord tests.
@@ -6360,6 +6409,13 @@ snippets:
     fn model_with_agent_at_worktree(
         worktree: std::path::PathBuf,
     ) -> Model<tuirealm::terminal::TestTerminalAdapter> {
+        model_with_named_agent_at_worktree(worktree, "claude")
+    }
+
+    fn model_with_named_agent_at_worktree(
+        worktree: std::path::PathBuf,
+        agent_id: &str,
+    ) -> Model<tuirealm::terminal::TestTerminalAdapter> {
         use lazybox_ipc::{Event as IpcEvent, TerminalId};
         let mut m = build_model();
         let ws_key = WorkspaceKey::new("github:o/r#1");
@@ -6368,7 +6424,7 @@ snippets:
         ws.add_session(lazybox_core::WorkspaceSession::new(
             ws_key,
             lazybox_core::SessionKind::Agent {
-                agent_id: "claude".into(),
+                agent_id: agent_id.into(),
             },
             worktree,
             chrono::Utc::now(),
@@ -6385,7 +6441,7 @@ snippets:
             model_label: None,
             terminal_id: TerminalId(1),
             session_key,
-            kind: lazybox_ipc::TerminalKind::Agent("claude".into()),
+            kind: lazybox_ipc::TerminalKind::Agent(agent_id.into()),
             no_permission: false,
             on_main: false,
             agent_state: None,

@@ -6,17 +6,18 @@
 //! files. This module owns two filesystem-facing halves of lazybox's
 //! skill support (see `docs/snippets-vs-skills.md`):
 //!
-//! - **Discovery** (#797): scan the two Claude Code skill roots so the
-//!   `]]` skills picker can surface them and let the user trigger one
-//!   *explicitly*, gaining the deterministic-invocation + preview +
+//! - **Discovery** (#797, #1671): scan the [Agent
+//!   Skills](https://agentskills.io) roots the focused agent reads so
+//!   the `]]` skills picker can surface them and let the user trigger
+//!   one *explicitly*, gaining the deterministic-invocation + preview +
 //!   Recent UX snippets enjoy.
 //! - **Scaffolding** (#799): write a `.claude/skills/<name>/SKILL.md`
 //!   folder from an "Ask Lazybox" request when the ask is genuinely
 //!   multi-step (or wants bundled scripts/reference files).
 //!
-//! Layout (Claude Code's `.claude/skills` convention): each skill is a
-//! folder holding a `SKILL.md` whose YAML frontmatter carries `name` and
-//! `description`.
+//! Layout: each skill is a folder holding a `SKILL.md` whose YAML
+//! frontmatter carries `name` and `description`, optionally beside a
+//! `scripts/` directory the agent may execute.
 
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -51,6 +52,54 @@ pub struct Skill {
     /// text the model matches on, and what the picker previews.
     pub description: String,
     pub scope: SkillScope,
+    /// The folder the winning root resolved this name to. Shown in the
+    /// picker so the user can go read the `SKILL.md` they are about to
+    /// invoke.
+    pub folder: PathBuf,
+    /// The same name's folders in the *other* roots this agent reads.
+    /// lazybox picks a winner by its own root order, but the agent
+    /// resolves the name itself and may not order roots the same way, so
+    /// a disclosure naming only [`Self::folder`] could describe a file
+    /// that never loads. These are the other candidates to review.
+    pub also_at: Vec<PathBuf>,
+    /// Whether a `scripts/` directory is bundled — a directory-exists
+    /// test, no claim about what the scripts do. A skill loads as a
+    /// system-prompt fragment carrying the agent's full permissions, so
+    /// this is the line between instructions and instructions that can
+    /// run things (#1671).
+    ///
+    /// ORed across [`Self::folder`] and every [`Self::also_at`] twin: a
+    /// name the agent might resolve to a scripts-bundling copy must
+    /// never be presented as instructions-only just because lazybox's
+    /// own precedence happened to pick the inert one.
+    pub bundles_scripts: bool,
+}
+
+/// Which agents read a given skill root. lazybox spawns three agents and
+/// they do not share every root: `.agents/` is the standard's shared
+/// path, `.claude/` and `.codex/` belong to one agent each. Listing a
+/// root its agent never reads means the picker offers a skill that
+/// cannot load, and attributes a path and a `runs code` verdict from a
+/// folder that has no bearing on the session (#1671).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootOwner {
+    /// The Agent Skills standard's shared root — every agent reads it.
+    Shared,
+    /// An agent-specific root, keyed by the agent id lazybox spawned.
+    Agent(&'static str),
+}
+
+impl RootOwner {
+    /// Whether an agent session reads this root. An unknown agent
+    /// (`None`) reads only the shared root — an agent lazybox cannot
+    /// name is not evidence that it reads Claude's or Codex's private
+    /// directory.
+    fn read_by(self, agent_id: Option<&str>) -> bool {
+        match self {
+            RootOwner::Shared => true,
+            RootOwner::Agent(owner) => agent_id == Some(owner),
+        }
+    }
 }
 
 /// The frontmatter fields we read; every other key is ignored.
@@ -60,37 +109,91 @@ struct SkillFrontmatter {
     description: Option<String>,
 }
 
-/// Discover the skills available to an agent rooted at `repo_root`,
-/// scanning `<repo_root>/.claude/skills/` and `~/.claude/skills/`.
+/// Discover the skills an `agent_id` session rooted at `repo_root` can
+/// actually load, per the [Agent Skills](https://agentskills.io)
+/// standard (#1671).
 ///
-/// Repo skills shadow user skills of the same name. The result is sorted
-/// by name so the picker's key-sorted-rows invariant holds.
-pub fn discover_skills(repo_root: Option<&Path>) -> Vec<Skill> {
-    let repo_dir = repo_root.map(|root| root.join(".claude").join("skills"));
-    discover_skills_in(repo_dir.as_deref(), user_skills_dir().as_deref())
-}
-
-/// `~/.claude/skills` from `$HOME` — the user-level skill root, which is
-/// the OS home (Claude Code's convention), not `LAZYBOX_HOME`.
-fn user_skills_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
+/// Scans the repo tier (`.claude/skills`, `.agents/skills`) then the
+/// user tier under `$HOME` (`.claude`, `.agents`, `.codex`), keeping
+/// only the roots that agent reads: `.agents/` is the standard's shared
+/// root, while `.claude/` and `.codex/` belong to one agent each. The
+/// first root to claim a name wins it, so a repo skill shadows a user
+/// skill and, inside a tier, the agent-specific root shadows the shared
+/// one — the losers stay reviewable in [`Skill::also_at`] rather than
+/// being dropped. Sorted by name, so the picker's key-sorted-rows
+/// invariant holds.
+pub fn discover_skills(repo_root: Option<&Path>, agent_id: Option<&str>) -> Vec<Skill> {
+    let home = std::env::var_os("HOME")
         .filter(|home| !home.is_empty())
-        .map(|home| PathBuf::from(home).join(".claude").join("skills"))
+        .map(PathBuf::from);
+    discover_skills_in(&skill_roots(repo_root, agent_id, home.as_deref()))
 }
 
-/// Core scan, taking the two skill directories directly so tests can
-/// drive it with temp dirs. Repo is scanned first and wins name ties.
-fn discover_skills_in(repo_dir: Option<&Path>, user_dir: Option<&Path>) -> Vec<Skill> {
+/// The ordered roots [`discover_skills`] scans, filtered by
+/// [`RootOwner::read_by`] to the ones `agent_id` reads. `~/.codex/skills`
+/// is Codex's historical root.
+///
+/// `home` is a parameter rather than read from `$HOME` here so the order
+/// and the ownership filter are testable without reaching into the
+/// machine running the test.
+fn skill_roots(
+    repo_root: Option<&Path>,
+    agent_id: Option<&str>,
+    home: Option<&Path>,
+) -> Vec<(PathBuf, SkillScope)> {
+    const TIERS: [(&str, SkillScope); 5] = [
+        (".claude", SkillScope::Repo),
+        (".agents", SkillScope::Repo),
+        (".claude", SkillScope::User),
+        (".agents", SkillScope::User),
+        (".codex", SkillScope::User),
+    ];
+    const OWNERS: [RootOwner; 5] = [
+        RootOwner::Agent("claude"),
+        RootOwner::Shared,
+        RootOwner::Agent("claude"),
+        RootOwner::Shared,
+        RootOwner::Agent("codex"),
+    ];
+
+    TIERS
+        .iter()
+        .zip(OWNERS)
+        .filter(|(_, owner)| owner.read_by(agent_id))
+        .filter_map(|((dir, scope), _)| {
+            let base = match scope {
+                SkillScope::Repo => repo_root?,
+                SkillScope::User => home?,
+            };
+            Some((base.join(dir).join("skills"), *scope))
+        })
+        .collect()
+}
+
+/// Core scan, taking the ordered skill roots directly so tests can drive
+/// it with temp dirs. The first root to carry a name wins it; the losers
+/// are folded into the winner's [`Skill::also_at`] and OR their
+/// `scripts/` surface into it rather than being dropped, so a shadowed
+/// twin can neither vanish from review nor soften the winner's tag.
+fn discover_skills_in(roots: &[(PathBuf, SkillScope)]) -> Vec<Skill> {
     let mut skills: Vec<Skill> = Vec::new();
-    if let Some(dir) = repo_dir {
-        scan_dir(dir, SkillScope::Repo, &mut skills);
-    }
-    if let Some(dir) = user_dir {
-        let mut user_skills = Vec::new();
-        scan_dir(dir, SkillScope::User, &mut user_skills);
-        for skill in user_skills {
-            if !skills.iter().any(|existing| existing.name == skill.name) {
-                skills.push(skill);
+    for (dir, scope) in roots {
+        let mut found = Vec::new();
+        scan_dir(dir, *scope, &mut found);
+        // `read_dir` order is filesystem-defined, so sort before the
+        // first-wins dedup — two folders can declare the same
+        // frontmatter `name`, and which one lists must not depend on it.
+        found.sort_by(|a, b| a.name.cmp(&b.name));
+        for skill in found {
+            match skills
+                .iter_mut()
+                .find(|existing| existing.name == skill.name)
+            {
+                Some(winner) => {
+                    winner.bundles_scripts |= skill.bundles_scripts;
+                    winner.also_at.push(skill.folder);
+                }
+                None => skills.push(skill),
             }
         }
     }
@@ -109,24 +212,23 @@ fn scan_dir(dir: &Path, scope: SkillScope, out: &mut Vec<Skill>) {
         if !folder.is_dir() {
             continue;
         }
-        let manifest = folder.join("SKILL.md");
-        if !manifest.is_file() {
+        if !folder.join("SKILL.md").is_file() {
             continue;
         }
         let folder_name = match folder.file_name().and_then(|name| name.to_str()) {
             Some(name) => name.to_string(),
             None => continue,
         };
-        out.push(read_skill(&manifest, folder_name, scope));
+        out.push(read_skill(folder, folder_name, scope));
     }
 }
 
-/// Build a [`Skill`] from one `SKILL.md`. The frontmatter `name` /
+/// Build a [`Skill`] from one skill folder. The frontmatter `name` /
 /// `description` win when present; a folder without parseable
 /// frontmatter still lists (folder name, empty description) rather than
 /// silently vanishing.
-fn read_skill(manifest: &Path, folder_name: String, scope: SkillScope) -> Skill {
-    let front = read_frontmatter(manifest);
+fn read_skill(folder: PathBuf, folder_name: String, scope: SkillScope) -> Skill {
+    let front = read_frontmatter(&folder.join("SKILL.md"));
     let (name, description) = match front {
         Some(front) => (
             front
@@ -139,9 +241,25 @@ fn read_skill(manifest: &Path, folder_name: String, scope: SkillScope) -> Skill 
     };
     Skill {
         name: name.trim().to_string(),
-        description: description.trim().to_string(),
+        description: one_line(&description),
         scope,
+        bundles_scripts: folder.join("scripts").is_dir(),
+        also_at: Vec::new(),
+        folder,
     }
+}
+
+/// Collapse every run of whitespace — newlines included — to one space.
+///
+/// A `description` is third-party YAML, and a literal block (`|`) keeps
+/// its newlines, so this is the system boundary where they have to go:
+/// downstream the description is a one-line label, and the renderers
+/// that draw it break on spaces and tabs only. An embedded `\n` reaches
+/// a terminal cell, where it fuses the words around it and can corrupt
+/// the frame. A folded block (`>`) already arrives space-joined; this
+/// makes every form agree with it.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Read and parse a `SKILL.md`'s leading frontmatter, stopping at the
@@ -288,6 +406,18 @@ mod discovery_tests {
         std::fs::write(dir.join("SKILL.md"), manifest).unwrap();
     }
 
+    /// The ordered-roots argument for a repo-only / repo+user scan, so the
+    /// existing cases read the way they did before roots became a list.
+    fn roots(dirs: &[(&Path, SkillScope)]) -> Vec<(PathBuf, SkillScope)> {
+        dirs.iter()
+            .map(|(dir, scope)| (dir.to_path_buf(), *scope))
+            .collect()
+    }
+
+    fn repo_only(dir: &Path) -> Vec<(PathBuf, SkillScope)> {
+        roots(&[(dir, SkillScope::Repo)])
+    }
+
     fn tmp_root(tag: &str) -> PathBuf {
         // A unique-enough dir without pulling in a temp-dir crate; the
         // pid + tag keeps parallel test cases from colliding.
@@ -306,7 +436,7 @@ mod discovery_tests {
             "code-review",
             "---\nname: code-review\ndescription: Review a diff for bugs.\n---\nBody prose here.\n",
         );
-        let skills = discover_skills_in(Some(&repo), None);
+        let skills = discover_skills_in(&repo_only(&repo));
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "code-review");
         assert_eq!(skills[0].description, "Review a diff for bugs.");
@@ -325,7 +455,7 @@ mod discovery_tests {
             "x".repeat(200_000),
         );
         write_skill(&repo, "writer", &body);
-        let skills = discover_skills_in(Some(&repo), None);
+        let skills = discover_skills_in(&repo_only(&repo));
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "writer");
         assert_eq!(skills[0].description, "header desc");
@@ -335,7 +465,7 @@ mod discovery_tests {
     fn falls_back_to_folder_name_without_frontmatter() {
         let repo = tmp_root("nofront");
         write_skill(&repo, "deploy", "no frontmatter here, just prose\n");
-        let skills = discover_skills_in(Some(&repo), None);
+        let skills = discover_skills_in(&repo_only(&repo));
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "deploy");
         assert_eq!(skills[0].description, "");
@@ -346,7 +476,7 @@ mod discovery_tests {
         let repo = tmp_root("nomanifest");
         std::fs::create_dir_all(repo.join("not-a-skill")).unwrap();
         write_skill(&repo, "real", "---\nname: real\ndescription: d\n---\n");
-        let skills = discover_skills_in(Some(&repo), None);
+        let skills = discover_skills_in(&repo_only(&repo));
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "real");
     }
@@ -370,7 +500,10 @@ mod discovery_tests {
             "notes",
             "---\nname: notes\ndescription: user only\n---\n",
         );
-        let skills = discover_skills_in(Some(&repo), Some(&user));
+        let skills = discover_skills_in(&roots(&[
+            (&repo, SkillScope::Repo),
+            (&user, SkillScope::User),
+        ]));
         // review (repo, wins), notes (user) — sorted by name.
         assert_eq!(skills.len(), 2);
         assert_eq!(skills[0].name, "notes");
@@ -390,19 +523,212 @@ mod discovery_tests {
                 &format!("---\nname: {folder}\ndescription: d\n---\n"),
             );
         }
-        let names: Vec<_> = discover_skills_in(Some(&repo), None)
+        let names: Vec<_> = discover_skills_in(&repo_only(&repo))
             .into_iter()
             .map(|skill| skill.name)
             .collect();
         assert_eq!(names, vec!["alpha", "mango", "zebra"]);
     }
 
+    /// #1671: the open standard's root. A repo that ships its skills
+    /// under `.agents/skills` is discovered at repo scope, through the
+    /// same root list the public entry point builds.
+    #[test]
+    fn agents_dir_skill_is_discovered_at_repo_scope() {
+        let repo = tmp_root("agents-root");
+        write_skill(
+            &repo.join(".agents").join("skills"),
+            "agents-only",
+            "---\nname: agents-only\ndescription: From .agents.\n---\n",
+        );
+        let home = tmp_root("agents-root-home");
+        let skills = discover_skills_in(&skill_roots(Some(&repo), Some("claude"), Some(&home)));
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "agents-only");
+        assert_eq!(skills[0].description, "From .agents.");
+        assert_eq!(skills[0].scope, SkillScope::Repo);
+    }
+
+    /// The roots are per-agent: `.agents/` is shared, but `.claude/` and
+    /// `.codex/` belong to one agent each. Offering a Claude session a
+    /// `~/.codex/skills` skill means offering one it cannot load.
+    #[test]
+    fn roots_are_filtered_to_the_ones_that_agent_reads() {
+        let repo = Path::new("/repo");
+        let home = Path::new("/home/u");
+        let dirs = |agent: Option<&str>| -> Vec<PathBuf> {
+            skill_roots(Some(repo), agent, Some(home))
+                .into_iter()
+                .map(|(dir, _)| dir)
+                .collect()
+        };
+
+        assert_eq!(
+            dirs(Some("claude")),
+            vec![
+                PathBuf::from("/repo/.claude/skills"),
+                PathBuf::from("/repo/.agents/skills"),
+                PathBuf::from("/home/u/.claude/skills"),
+                PathBuf::from("/home/u/.agents/skills"),
+            ],
+        );
+        assert_eq!(
+            dirs(Some("codex")),
+            vec![
+                PathBuf::from("/repo/.agents/skills"),
+                PathBuf::from("/home/u/.agents/skills"),
+                PathBuf::from("/home/u/.codex/skills"),
+            ],
+        );
+        // Cursor reads the standard's shared root and nothing private.
+        assert_eq!(
+            dirs(Some("cursor")),
+            vec![
+                PathBuf::from("/repo/.agents/skills"),
+                PathBuf::from("/home/u/.agents/skills"),
+            ],
+        );
+        // An agent lazybox can't name reads only the shared root — not
+        // evidence that it reads Claude's or Codex's private directory.
+        assert_eq!(dirs(None), dirs(Some("cursor")));
+    }
+
+    /// A missing repo root or home drops that tier rather than joining
+    /// onto nothing.
+    #[test]
+    fn absent_repo_root_or_home_drops_that_tier() {
+        let home = Path::new("/home/u");
+        assert_eq!(
+            skill_roots(None, Some("claude"), Some(home))
+                .into_iter()
+                .map(|(dir, _)| dir)
+                .collect::<Vec<_>>(),
+            vec![
+                PathBuf::from("/home/u/.claude/skills"),
+                PathBuf::from("/home/u/.agents/skills"),
+            ],
+        );
+        assert_eq!(
+            skill_roots(Some(Path::new("/repo")), Some("claude"), None)
+                .into_iter()
+                .map(|(dir, _)| dir)
+                .collect::<Vec<_>>(),
+            vec![
+                PathBuf::from("/repo/.claude/skills"),
+                PathBuf::from("/repo/.agents/skills"),
+            ],
+        );
+    }
+
+    /// lazybox picks one root, but the agent resolves the name itself and
+    /// may order roots differently. A shadowed twin therefore stays
+    /// reviewable in `also_at`, and its `scripts/` surface ORs into the
+    /// winner — the tag must never under-report the risk of a name.
+    #[test]
+    fn a_shadowed_twin_lends_its_scripts_surface_to_the_winner() {
+        let repo = tmp_root("shadow-risk");
+        let claude = repo.join(".claude").join("skills");
+        let agents = repo.join(".agents").join("skills");
+        write_skill(
+            &claude,
+            "deploy",
+            "---\nname: deploy\ndescription: inert copy\n---\n",
+        );
+        write_skill(
+            &agents,
+            "deploy",
+            "---\nname: deploy\ndescription: scripted copy\n---\n",
+        );
+        std::fs::create_dir_all(agents.join("deploy").join("scripts")).unwrap();
+
+        let skills = discover_skills_in(&roots(&[
+            (&claude, SkillScope::Repo),
+            (&agents, SkillScope::Repo),
+        ]));
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].description, "inert copy", "first root wins");
+        assert_eq!(skills[0].folder, claude.join("deploy"));
+        assert!(
+            skills[0].bundles_scripts,
+            "the shadowed twin bundles scripts, so the name does",
+        );
+        assert_eq!(skills[0].also_at, vec![agents.join("deploy")]);
+    }
+
+    /// A `description: |` literal block keeps its newlines. They must be
+    /// collapsed here, at the third-party boundary: downstream renderers
+    /// break on spaces and tabs only, so an embedded newline reaches a
+    /// terminal cell and fuses the words around it.
+    #[test]
+    fn a_multi_line_description_collapses_to_one_line() {
+        let repo = tmp_root("multiline-desc");
+        write_skill(
+            &repo,
+            "review",
+            "---\nname: review\ndescription: |\n  Line one.\n  Line two.\n---\n",
+        );
+        let skills = discover_skills_in(&repo_only(&repo));
+        assert_eq!(skills[0].description, "Line one. Line two.");
+    }
+
+    /// The same name in both repo roots is one row: the first root
+    /// scanned (`.claude/skills`) wins it.
+    #[test]
+    fn first_root_wins_within_a_tier() {
+        let repo = tmp_root("tier-shadow");
+        let claude = repo.join(".claude").join("skills");
+        let agents = repo.join(".agents").join("skills");
+        write_skill(
+            &claude,
+            "review",
+            "---\nname: review\ndescription: claude root\n---\n",
+        );
+        write_skill(
+            &agents,
+            "review",
+            "---\nname: review\ndescription: agents root\n---\n",
+        );
+        let skills = discover_skills_in(&roots(&[
+            (&claude, SkillScope::Repo),
+            (&agents, SkillScope::Repo),
+        ]));
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].description, "claude root");
+    }
+
+    /// A bundled `scripts/` directory is the picker's execution-surface
+    /// signal (#1671) — a directory-exists test, nothing more.
+    #[test]
+    fn bundled_scripts_are_flagged() {
+        let repo = tmp_root("scripts");
+        write_skill(&repo, "runs", "---\nname: runs\ndescription: d\n---\n");
+        write_skill(&repo, "prose", "---\nname: prose\ndescription: d\n---\n");
+        std::fs::create_dir_all(repo.join("runs").join("scripts")).unwrap();
+        let skills = discover_skills_in(&repo_only(&repo));
+        let by_name = |name: &str| {
+            skills
+                .iter()
+                .find(|skill| skill.name == name)
+                .unwrap()
+                .clone()
+        };
+        assert!(by_name("runs").bundles_scripts);
+        assert!(!by_name("prose").bundles_scripts);
+        assert_eq!(by_name("runs").folder, repo.join("runs"));
+    }
+
     #[test]
     fn missing_directories_yield_nothing() {
-        let skills = discover_skills_in(
-            Some(Path::new("/nonexistent/repo/.claude/skills")),
-            Some(Path::new("/nonexistent/user/.claude/skills")),
-        );
+        let skills = discover_skills_in(&roots(&[
+            (
+                Path::new("/nonexistent/repo/.claude/skills"),
+                SkillScope::Repo,
+            ),
+            (
+                Path::new("/nonexistent/user/.claude/skills"),
+                SkillScope::User,
+            ),
+        ]));
         assert!(skills.is_empty());
     }
 }

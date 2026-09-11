@@ -724,10 +724,16 @@ impl Compactor {
         // The response's accounting reads this back, so it judges the turn
         // under the mode the turn ran under (#1622).
         state.rewriting = rewrites;
-        Some(SessionPass {
-            tag,
-            may_rewrite: state.baseline_share.is_some(),
-        })
+        let may_rewrite = state.baseline_share.is_some();
+        // A rewrite is a wire fact, not a billing fact: the bytes leave
+        // elided when the request goes out, whether or not its response ever
+        // completes, and the kill switch judges the prompt cache against
+        // exactly that. Only the *saving* waits for the response (#1621) —
+        // deferring this with it would leave the switch treating the first
+        // rewritten turn's degraded share as a fresh baseline, which is the
+        // one reading that disarms it for the rest of the session.
+        state.rewrote |= rewrites && may_rewrite;
+        Some(SessionPass { tag, may_rewrite })
     }
 
     fn record(&self, session: &str, pending: Pending) -> Saving {
@@ -767,7 +773,6 @@ impl Compactor {
                 None => state.unpriced_bytes += pending.saved_bytes as u64,
             }
         }
-        state.rewrote |= pending.rewrote;
         Saving {
             blocks,
             saved_bytes: pending.saved_bytes as u64,
@@ -1984,7 +1989,7 @@ mod tests {
     fn backing_a_session_out_releases_the_identities_it_was_holding() {
         let (compactor, _notices, _savings) = compactor_with_notices();
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
-        compactor.observe_usage("ws", "claude", &usage(100, 900), true);
+        seed_baseline(&compactor, "ws", &body);
         turn(&compactor, "ws", &body);
         assert!(
             !compactor
@@ -2412,13 +2417,17 @@ mod tests {
 
         // The fleet stays in shadow: it plans and logs, and sends originals.
         assert_eq!(
-            compactor.rewrite("fleet", "claude", true, body.clone()).body,
+            compactor
+                .rewrite("fleet", "claude", true, body.clone())
+                .body,
             body,
             "every other session sends the originals",
         );
         compactor.observe_usage("fleet", "claude", &usage(100, 900), true);
         assert_eq!(
-            compactor.rewrite("fleet", "claude", true, body.clone()).body,
+            compactor
+                .rewrite("fleet", "claude", true, body.clone())
+                .body,
             body,
             "and stays in shadow on the turn after a baseline exists",
         );
@@ -2628,7 +2637,10 @@ mod tests {
         let body = Bytes::from(serde_json::to_vec(&anthropic_body(8)).expect("serialize"));
         seed_baseline(&compactor, "ws", &body);
         let done = compactor.rewrite("ws", "claude", true, body.clone());
-        assert!(done.body.len() < body.len(), "the rewritten body is smaller");
+        assert!(
+            done.body.len() < body.len(),
+            "the rewritten body is smaller"
+        );
         compactor.commit("ws", "claude", done.pending.expect("a plan to commit"));
 
         // Two degraded turns — the deliberate miss on the rewritten turn and

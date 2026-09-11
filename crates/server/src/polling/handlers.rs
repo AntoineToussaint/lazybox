@@ -694,6 +694,34 @@ fn classify_fresh_pr(fresh: &lazybox_core::Task, head: Option<String>) -> FreshM
     }
 }
 
+/// Publish only the prerequisite that GitHub confirmed. Reload under the
+/// workspace lock so a concurrent poll's CI, terminal state, or replacement
+/// PR is never overwritten with the pre-merge snapshot.
+async fn publish_merge_ready(config: &ServerConfig, attempted: &Workspace) {
+    let Some(original) = attempted.pr.as_ref() else {
+        return;
+    };
+    apply_and_commit(config, &attempted.key, |current| {
+        if let Some(pr) = current.pr.as_mut()
+            && pr.id == original.id
+            && pr.state == lazybox_core::TaskState::Draft
+        {
+            pr.state = lazybox_core::TaskState::Open;
+        }
+    })
+    .await;
+    config.poll.wake(true);
+}
+
+fn merge_failure_reason(error: &lazybox_core::ProviderError, marked_ready: bool) -> String {
+    let reason = humanize_mutation_failure("merge", error);
+    if marked_ready {
+        format!("Marked ready for review; merge failed: {reason}")
+    } else {
+        reason
+    }
+}
+
 async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey, force: bool) {
     let emit_err = |msg: &str| {
         let _ = config
@@ -842,6 +870,7 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey, force
     };
     let trailers = crate::pr_trailers::measure(config, &merge_ws, chrono::Utc::now()).await;
     let merge_options = lazybox_core::MergeOptions {
+        progress: Default::default(),
         expected_head_oid: expected_head.as_deref(),
         trailers: Some(trailers.clone()),
         trailer_policy: lazybox_config::Config::load()
@@ -850,8 +879,12 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey, force
             .github
             .pr_trailers,
     };
-    let merge_result = run_mutation_with_retry(&config.bus, "merge", || {
-        provider.merge(&merge_ws, &merge_options)
+    let merge_result = run_mutation_with_retry(&config.bus, "merge", || async {
+        let result = provider.merge(&merge_ws, &merge_options).await;
+        if merge_options.progress.was_marked_ready() {
+            publish_merge_ready(config, &merge_ws).await;
+        }
+        result
     })
     .await;
     if let Err(e) = merge_result {
@@ -873,17 +906,27 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey, force
         // `Conflicting` — and broadcast the corrected task BEFORE the
         // failure event — so the CONFLICT pill is accurate and the TUI's
         // resolve flow classifies the conflict prompt off fresh state.
-        if conflict
-            && let Some(mut pr) = merge_ws.pr.clone()
-            && !pr.mergeable.is_conflicting()
-        {
-            pr.mergeable = lazybox_core::Mergeable::Conflicting;
-            super::upsert(config, pr).await;
+        if conflict {
+            apply_and_commit(config, &workspace_key, |current| {
+                if let Some(pr) = current.pr.as_mut()
+                    && merge_ws
+                        .pr
+                        .as_ref()
+                        .is_some_and(|original| original.id == pr.id)
+                    && !matches!(
+                        pr.state,
+                        lazybox_core::TaskState::Merged | lazybox_core::TaskState::Closed
+                    )
+                {
+                    pr.mergeable = lazybox_core::Mergeable::Conflicting;
+                }
+            })
+            .await;
         }
         let _ = config.bus.send(Event::PrMergeFailed {
             workspace_key: workspace_key.clone(),
             pr_label: label,
-            reason: humanize_mutation_failure("merge", &e),
+            reason: merge_failure_reason(&e, merge_options.progress.was_marked_ready()),
             conflict,
         });
         return;
@@ -932,7 +975,13 @@ async fn merge_pr_task(config: &ServerConfig, workspace_key: WorkspaceKey, force
         return;
     }
     tracing::info!("merged PR for workspace {workspace_key}");
-    crate::pr_trailers::mark_reported(config, &workspace_key, &trailers).await;
+    crate::pr_trailers::mark_merge_reported(
+        config,
+        &workspace_key,
+        &trailers,
+        &merge_options.progress,
+    )
+    .await;
     if let Ok(lazybox_core::MergeOutcome::Merged(lazybox_core::TrailerOutcome::Dropped {
         reason,
     })) = merge_result
@@ -6579,6 +6628,59 @@ mod post_mutation_refresh_tests {
         }
       }
     }"#;
+
+    #[tokio::test]
+    async fn failed_merge_publishes_ready_without_overwriting_concurrent_changes() {
+        let config = ServerConfig::in_memory();
+        let mut task = open_pr_task();
+        task.state = TaskState::Draft;
+        let key = WorkspaceKey::new(lazybox_core::workspace_key_for(&task));
+        super::super::upsert(&config, task).await;
+        let attempted = load_workspace(&config, &key).unwrap();
+        apply_and_commit(&config, &key, |ws| {
+            ws.pr.as_mut().unwrap().title = "new title from poll".into();
+            ws.pr.as_mut().unwrap().ci = CiStatus::Failure;
+        })
+        .await;
+        let mut events = config.bus.subscribe();
+        publish_merge_ready(&config, &attempted).await;
+        let current = load_workspace(&config, &key).unwrap().pr.unwrap();
+        assert_eq!(current.state, TaskState::Open);
+        assert_eq!(current.title, "new title from poll");
+        assert_eq!(current.ci, CiStatus::Failure);
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event|
+            matches!(event, Event::WorkspaceUpserted(ws) if ws.pr.as_ref().is_some_and(|p| p.state == TaskState::Open))));
+        let error =
+            lazybox_core::ProviderError::permanent("github", "Required checks have not passed");
+        let reason = merge_failure_reason(&error, true);
+        assert!(reason.contains("Marked ready for review"));
+        assert!(reason.contains("Required checks"));
+        assert!(!merge_failure_reason(&error, false).contains("Marked ready"));
+
+        // Publishing old prerequisite progress must not resurrect a merged PR.
+        apply_and_commit(&config, &key, |ws| {
+            ws.pr.as_mut().unwrap().state = TaskState::Merged
+        })
+        .await;
+        publish_merge_ready(&config, &attempted).await;
+        assert_eq!(
+            load_workspace(&config, &key).unwrap().pr.unwrap().state,
+            TaskState::Merged
+        );
+
+        // Nor may it ready a replacement PR attached during the operation.
+        apply_and_commit(&config, &key, |ws| {
+            let pr = ws.pr.as_mut().unwrap();
+            pr.id.key = "o/r#999".into();
+            pr.state = TaskState::Draft;
+        })
+        .await;
+        publish_merge_ready(&config, &attempted).await;
+        assert_eq!(
+            load_workspace(&config, &key).unwrap().pr.unwrap().state,
+            TaskState::Draft
+        );
+    }
 
     #[tokio::test]
     async fn refresh_reflects_the_merged_state_onto_the_stored_row() {

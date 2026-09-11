@@ -381,8 +381,8 @@ pub struct BackgroundPlan {
 }
 
 impl BackgroundPlan {
-    pub fn admits_complete_graphql_unit(&self, manual: bool, required_points: u32) -> bool {
-        manual || (self.graphql_budget_current && self.graphql_points >= required_points)
+    pub fn admits_complete_graphql_unit(&self, required_points: u32) -> bool {
+        self.graphql_budget_current && self.graphql_points >= required_points
     }
 }
 
@@ -739,6 +739,38 @@ impl RateBudget {
             next_eligible_at,
             tick_interval: self.tick_interval,
         }
+    }
+
+    /// A requested reconcile may spend the available background window, not
+    /// just one tick's sustainable grant. Reserve and pacing still apply to
+    /// every page. Charge actual spending normally so subsequent ticks yield.
+    pub(crate) fn begin_full_refresh_tick(
+        &mut self,
+        interval: Duration,
+        wall_now: DateTime<Utc>,
+        mono_now: Instant,
+    ) -> BackgroundPlan {
+        let mut plan = self.begin_background_tick(interval, wall_now, mono_now);
+        for resource in ["graphql", "core"] {
+            let Some(state) = self
+                .resources
+                .get(resource)
+                .filter(|s| s.reset_at > wall_now)
+            else {
+                // Preserve bootstrap admission until the resource is known.
+                continue;
+            };
+            let allowance = state
+                .remaining
+                .saturating_sub(reserve_for(state.limit, self.background_share));
+            self.tick_allowance.insert(resource.into(), allowance);
+            if resource == "graphql" {
+                plan.graphql_points = allowance;
+            } else {
+                plan.rest_core_points = allowance;
+            }
+        }
+        plan
     }
 
     /// Compatibility helper for callers that only need the local/global
@@ -1685,6 +1717,94 @@ mod tests {
             Err(AcquireError::CircuitOpen { reason, .. })
                 if reason == "graphql primary budget exhausted"
         ));
+    }
+
+    #[test]
+    fn full_refresh_finishes_beyond_tick_grant_without_spending_reserve() {
+        let mut budget = RateBudget::new(100, 60.0);
+        let wall = Utc::now();
+        let mono = Instant::now();
+        let reset = wall + chrono::Duration::hours(1);
+        budget.observe_primary("graphql", 5000, 2400, 2600, reset, mono);
+        let ordinary = budget.begin_background_tick(Duration::from_secs(60), wall, mono);
+        assert!(ordinary.graphql_points < 40);
+        let refresh = budget.begin_full_refresh_tick(Duration::from_secs(60), wall, mono);
+        assert!(refresh.admits_complete_graphql_unit(40));
+        for page in 0..4 {
+            budget
+                .admit_at(
+                    ApiResource::Graphql,
+                    "PR search",
+                    RequestPriority::Recent,
+                    10,
+                    wall,
+                    mono,
+                )
+                .expect("every page of the admitted sweep fits");
+            budget.observe_primary(
+                "graphql",
+                5000,
+                2400 - (page + 1) * 10,
+                2600 + (page + 1) * 10,
+                reset,
+                mono,
+            );
+        }
+        assert_eq!(budget.tick_scheduled["graphql"], 40);
+        budget.observe_primary("graphql", 5000, 2250, 2750, reset, mono);
+        assert!(matches!(
+            budget.admit_at(
+                ApiResource::Graphql,
+                "PR search",
+                RequestPriority::Recent,
+                1,
+                wall,
+                mono
+            ),
+            Err(AcquireError::ReserveProtected { .. })
+        ));
+        budget
+            .admit_at(
+                ApiResource::Graphql,
+                "merge",
+                RequestPriority::Interactive,
+                1,
+                wall,
+                mono,
+            )
+            .expect("refresh preserves the action reserve");
+        let next = budget.begin_background_tick(Duration::from_secs(60), wall, mono);
+        assert!(!next.admits_complete_graphql_unit(40));
+    }
+
+    #[test]
+    fn full_refresh_bootstraps_but_never_admits_an_unknown_or_oversized_sweep() {
+        let mut budget = RateBudget::new(100, 60.0);
+        let wall = Utc::now();
+        let mono = Instant::now();
+        let plan = budget.begin_full_refresh_tick(Duration::from_secs(60), wall, mono);
+        assert!(!plan.admits_complete_graphql_unit(1));
+        budget
+            .admit_at(
+                ApiResource::Graphql,
+                "budget-bootstrap",
+                RequestPriority::Recent,
+                1,
+                wall,
+                mono,
+            )
+            .expect("manual refresh can learn the budget");
+        budget.observe_primary(
+            "graphql",
+            5000,
+            2260,
+            2740,
+            wall + chrono::Duration::hours(1),
+            mono,
+        );
+        let plan = budget.begin_full_refresh_tick(Duration::from_secs(60), wall, mono);
+        assert!(plan.admits_complete_graphql_unit(10));
+        assert!(!plan.admits_complete_graphql_unit(11));
     }
 
     #[test]

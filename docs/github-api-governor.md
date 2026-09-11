@@ -15,9 +15,11 @@ providers:
 ```
 
 Finite values are clamped to 5–90%. A manual `Shift-R` requests a full
-sweep while retaining scheduled admission limits: refreshing the inbox
-cannot spend the action reserve. Targeted interactive requests and
-mutations can use that reserve, including the last 100 emergency points,
+sweep with an allowance drawn from the remaining non-reserved window,
+rather than a single tick’s grant. The scheduler checks that allowance
+before starting; every page still respects pacing and the action reserve.
+Targeted interactive requests and mutations can use that reserve, including
+the last 100 emergency points,
 provided their forecast fits the remaining quota. Actual primary
 exhaustion still blocks requests until reset.
 

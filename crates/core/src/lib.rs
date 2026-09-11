@@ -66,8 +66,8 @@ pub use pricing::{ModelPrice, TokenCounts, cost_micros as pricing_cost_micros, p
 pub use project::{Project, ProjectKey, github_owner_repo_from_url};
 pub use provider::{
     DEFAULT_MAX_PAGES, FetchCoverage, FetchOutcome, FetchPage, FetchPageInfo, GITHUB_SOURCE,
-    LINEAR_SOURCE, MergeOptions, MergeOutcome, PaginationOutcome, PaginationStop, ProviderError,
-    TaskProvider, TrailerOutcome, is_already_in_merge_queue, paginate,
+    LINEAR_SOURCE, MergeOptions, MergeOutcome, MergeProgress, PaginationOutcome, PaginationStop,
+    ProviderError, TaskProvider, TrailerOutcome, is_already_in_merge_queue, paginate,
 };
 pub use scope::{MockScopeSource, Scope, ScopeKind, ScopeSource};
 pub use session_key::SessionKey;
